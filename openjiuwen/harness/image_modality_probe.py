@@ -11,6 +11,7 @@ import zlib
 from typing import Any, Iterable, List, Optional
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.call_scope import LlmObservationSuppression
 
 _IMAGE_INPUT_SCAN_MAX_DEPTH = 8
 _IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS = 5.0
@@ -239,31 +240,32 @@ async def _probe_and_cache(llm, key: tuple[str, str]) -> None:
 async def _invoke_probe(llm, *, extra_body: Optional[dict]):
     """Send the probe request, optionally carrying reasoning-off switches."""
     kwargs = {"extra_body": extra_body} if extra_body else {}
-    return await asyncio.wait_for(
-        llm.invoke(
-            [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
+    with LlmObservationSuppression():
+        return await asyncio.wait_for(
+            llm.invoke(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/png;base64,{DUMMY_IMAGE_B64}",
+                                },
                             },
-                        },
-                        {
-                            "type": "text",
-                            "text": "What color is this image? Reply with one word.",
-                        },
-                    ],
-                }
-            ],
-            max_tokens=_IMAGE_MODALITY_PROBE_MAX_TOKENS,
-            temperature=0,
-            **kwargs,
-        ),
-        timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
-    )
+                            {
+                                "type": "text",
+                                "text": "What color is this image? Reply with one word.",
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=_IMAGE_MODALITY_PROBE_MAX_TOKENS,
+                temperature=0,
+                **kwargs,
+            ),
+            timeout=_IMAGE_MODALITY_PROBE_TIMEOUT_SECONDS,
+        )
 
 
 async def _run_probe(llm) -> Optional[bool]:

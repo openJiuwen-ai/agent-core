@@ -999,6 +999,14 @@ class AbilityManager:
                     tool_call=single_tool_call,
                     tool_name=single_tool_call.name,
                     tool_args=single_tool_call.arguments,
+                    react_iteration=int(
+                        getattr(
+                            ctx.inputs,
+                            "react_iteration",
+                            ctx.extra.get("_react_iteration", 0),
+                        )
+                        or 0
+                    ),
                 ),
                 config=ctx.config,
                 session=session,
@@ -1328,6 +1336,10 @@ class AbilityManager:
                 # Do not swallow cancellation; let outer scopes (e.g. DeepAgent
                 # round cancellation) propagate correctly through anyio CancelScope.
                 logger.warning("[AbilityManager] Task cancellation caught, re-raising CancelledError")
+                raise
+            except ToolInterruptException:
+                # User-interaction interrupts are control flow. In particular,
+                # deferred tools can raise one from inside the tool_call wrapper.
                 raise
             except Exception as e:
                 error_msg = f"Tool execution error: {str(e)}"

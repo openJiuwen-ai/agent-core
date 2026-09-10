@@ -30,10 +30,15 @@ def _schema_free_search(lang: str) -> Dict[str, Any]:
 
 
 def _schema_paid_search(lang: str) -> Dict[str, Any]:
+    # Import lazily: web tool implementations also import this metadata package.
+    from openjiuwen.harness.tools.web._common import _configured_paid_search_providers
+
+    providers = ["auto", *_configured_paid_search_providers()]
+    choices = "|".join(providers)
     qd = {"cn": "付费搜索查询文本。", "en": "Paid search query text."}[lang]
     pd = {
-        "cn": "Provider: auto|bocha|perplexity|serper|jina。",
-        "en": "Provider: auto|bocha|perplexity|serper|jina.",
+        "cn": f"可用供应商：{choices}。优先使用 auto，仅在已配置供应商中选择。",
+        "en": f"Available providers: {choices}. Prefer auto; it selects only configured providers.",
     }[lang]
     md = {"cn": "最大 URL 数（1-20）。", "en": "Maximum number of URLs (1-20)."}[lang]
     td = {"cn": "请求超时时间（秒，30-300）。", "en": "Request timeout in seconds (30-300)."}[lang]
@@ -41,7 +46,7 @@ def _schema_paid_search(lang: str) -> Dict[str, Any]:
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": qd},
-            "provider": {"type": "string", "description": pd, "default": "auto"},
+            "provider": {"type": "string", "description": pd, "default": "auto", "enum": providers},
             "max_results": {"type": "integer", "description": md, "default": 8},
             "timeout_seconds": {
                 "type": "integer",
@@ -111,14 +116,15 @@ class PaidSearchMetadataProvider(ToolMetadataProvider):
         return "paid_search"
 
     def get_description(self, language: str = "cn") -> str:
+        choices = "|".join(_schema_paid_search(language)["properties"]["provider"]["enum"])
         return {
             "cn": (
                 "配置 API 时这是首选联网搜索工具；对搜索、最新、当前信息任务应先调用 paid_search，再考虑 free_search 兜底。"
-                "付费搜索，支持 provider=auto|bocha|perplexity|serper|jina。"
+                f"付费搜索，可用 provider={choices}；优先使用 auto，不要指定未列出的供应商。"
                 "当用户询问最新、当前、今年、实时、近期等信息时，query 必须使用系统提示中的当前年份或日期；"
             ),
             "en": (
-                "Paid search via Bocha/Perplexity/SERPER/JINA. Support provider=auto|bocha|perplexity|serper|jina. "
+                f"Paid search with provider={choices}. Prefer auto; do not select unlisted providers. "
                 "When available, this is the preferred web search tool; call it before free_search for search, latest, "
                 "current, or recent-information tasks. "
                 "For latest/current/this-year/recent information, the query must use the current year "

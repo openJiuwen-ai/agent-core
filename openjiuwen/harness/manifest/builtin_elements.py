@@ -17,6 +17,7 @@ at registration, auto-injecting ``language`` when the constructor accepts it).
 
 from __future__ import annotations
 
+from importlib.util import find_spec
 from typing import Any
 
 from openjiuwen.harness.manifest import (
@@ -77,6 +78,7 @@ WEB_FETCH = "core.web_fetch"
 WEB_PAID_SEARCH = "core.web_paid_search"
 VISION = "core.vision"
 AUDIO = "core.audio"
+OBSERVABILITY = "core.observability"
 
 
 def _build_skill_use_rail(params: dict[str, Any], context: Any) -> SkillUseRail:
@@ -347,6 +349,55 @@ def _build_audio_tool_group(params: dict[str, Any], context: Any) -> list[Any]:
     )
 
 
+def observability_dependency_installed() -> bool:
+    """Report whether the optional ``observability`` extra is importable.
+
+    ``opentelemetry`` ships only in the ``observability`` extra, so a default
+    install has no tracing stack at all. Every module of the observability
+    package imports it at module scope — including the "is observability on"
+    guard itself — so the dependency must be probed *before* the package is
+    touched; catching the failure inside it is not possible. Probing the SDK
+    covers the API too (the SDK depends on it) and matches what
+    ``setup.is_initialized`` needs.
+
+    Returns:
+        True when the tracing stack can be imported, False otherwise.
+    """
+    try:
+        return find_spec("opentelemetry.sdk") is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _build_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build the agent-tier observability rail when tracing is available and on.
+
+    Two gates, in order: the optional ``observability`` extra must be installed,
+    and observability must be initialized. Returns ``None`` for either, making
+    this a safe unconditional addition to any spec's ``rails`` list.
+
+    Args:
+        params: Spec params; the rail takes none.
+        context: Per-member build context; unused.
+
+    Returns:
+        An ``AgentObservabilityRail``, or None when tracing is off.
+    """
+    del params, context
+    if not observability_dependency_installed():
+        return None
+
+    from openjiuwen.harness.observability.rail import maybe_agent_observability_rail
+
+    return maybe_agent_observability_rail()
+
+
+harness_element(
+    kind=ElementKind.RAIL,
+    name=OBSERVABILITY,
+    description="Creates the agent-tier span (per iteration, or per single-round invoke).",
+    builder=_build_observability_rail,
+)
 harness_element(
     kind=ElementKind.RAIL,
     name=TASK_PLANNING,
@@ -477,4 +528,6 @@ __all__ = [
     "WEB_PAID_SEARCH",
     "VISION",
     "AUDIO",
+    "OBSERVABILITY",
+    "observability_dependency_installed",
 ]

@@ -122,6 +122,7 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     payload["cards"] = cards
     generation_id = str(payload.get("generation_id") or "g0")
     result_index = 0
+    classifications: Dict[str, set[tuple[str, str, bool]]] = {}
     for card in cards:
         if not isinstance(card, dict):
             continue
@@ -145,6 +146,33 @@ def normalize_card_probe_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
             card["result_index"] = result_index
         else:
             card["result_index"] = None
+        identity = _text(card.get("primary_link") or card.get("href") or card.get("title"), 500).lower()
+        if identity:
+            classifications.setdefault(identity, set()).add((region, kind, is_ad))
+    conflicts = [
+        {
+            "identity": identity[:240],
+            "classifications": [
+                {"region": region, "kind": kind, "is_ad": is_ad}
+                for region, kind, is_ad in sorted(values)
+            ],
+        }
+        for identity, values in classifications.items()
+        if len(values) > 1
+    ][:5]
+    diagnostics = payload.get("diagnostics")
+    diagnostics = dict(diagnostics) if isinstance(diagnostics, Mapping) else {}
+    diagnostics.update(
+        {
+            "observed_count": result_index,
+            "classification_conflict": bool(conflicts),
+        }
+    )
+    if conflicts:
+        diagnostics["classification_conflicts"] = conflicts
+        diagnostics["recommended_fallback"] = "one_precise_probe"
+    payload["observed_count"] = result_index
+    payload["diagnostics"] = diagnostics
     return payload
 
 

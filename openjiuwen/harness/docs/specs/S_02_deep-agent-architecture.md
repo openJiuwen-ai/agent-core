@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-08-31 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -68,6 +68,9 @@
 11. rail 生命周期面：`register_rail` / `unregister_rail` 是异步的并维护
     `_pending_rails` / `_registered_rails` / `_stale_rails` 三列表状态；`add_rail` 只排队
     （pending）。rail 优先级、事件路由见 `S_04`。
+12. `run_one_round` 收到 `InteractiveInput` 时直接恢复内层 ReAct 单轮，不向 task-loop
+    controller 重复提交任务；恢复调用仍须启用模型流式输出，使 token chunk、首 token 时间和
+    最终结果继续写入同一个 session 输出流。
 
 ## 接口契约
 
@@ -82,7 +85,7 @@ async def abort(self, session: Optional[Session] = None) -> None
 async def start(self, *, session: Optional[Session] = None) -> None
 async def stop(self) -> None
 async def prepare_interaction_task_loop(self, session: Session) -> None
-async def run_one_round(self, work: RoundWorkItem, task_id: str, session: Session) -> None
+async def run_one_round(self, work: RoundWorkItem, task_id: str, session: Session) -> RoundOutcome
 async def send_input(self, request: SendInputRequest) -> None
 def add_rail(self, rail: AgentRail) -> "DeepAgent"          # 排队，不初始化
 async def register_rail(self, rail: AgentRail) -> "DeepAgent"  # 挂载并 init

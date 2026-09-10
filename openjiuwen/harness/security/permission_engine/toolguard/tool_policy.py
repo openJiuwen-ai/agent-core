@@ -22,6 +22,15 @@ from openjiuwen.harness.security.permission_engine.toolguard.shell_ast import (
     ShellSubcommand,
     parse_shell_for_permission,
 )
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    _CATEGORY_SHELL,
+    _DEFAULT_SHELL_TOOLS,
+    is_shell_tool,
+    shell_tools_from_config,
+)
+
+# 兼容旧 import；新代码请用 shell_tools_from_config / is_shell_tool。
+_SHELL_TOOLS = _DEFAULT_SHELL_TOOLS
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +38,7 @@ _TIERED_PATH_MATCHER = PathMatcher()
 
 _STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
 
-# 规则内 tools 必须同类（与产品设计一致）
-_SHELL_TOOLS = frozenset({
-    "bash",
-    "powershell",
-    "core.powershell",
-    "mcp_exec_command",
-    "create_terminal",
-})
+# 规则内 tools 必须同类（与产品设计一致）。shell 名单见 tool_categories。
 _INTERPRETER_SINK_NAMES = frozenset({
     "bash", "sh", "zsh", "dash", "ash", "fish",
     "python", "python3", "pythonw", "py",
@@ -72,6 +74,7 @@ class _TieredInvocationContext:
     baseline_level: PermissionLevel | None
     baseline_rule: str | None
     defaults_cfg: dict[str, Any]
+    permission_config: Mapping[str, Any]
 
 
 def _parse_level(value: str) -> PermissionLevel:
@@ -85,8 +88,13 @@ def strictest(*levels: PermissionLevel) -> PermissionLevel:
     return min(levels, key=lambda p: _STRICT_ORDER[p])
 
 
-def _tool_category(tool_name: str) -> str | None:
-    if tool_name in _SHELL_TOOLS:
+def _tool_category(
+        tool_name: str,
+        permission_config: Mapping[str, Any] | None = None,
+) -> str | None:
+    if tool_name == _CATEGORY_SHELL or is_shell_tool(
+            tool_name, shell_tools_from_config(permission_config),
+    ):
         return "shell"
     if tool_name in _PATH_TOOLS:
         return "path"
@@ -95,16 +103,32 @@ def _tool_category(tool_name: str) -> str | None:
     return None
 
 
-def rule_tools_category_consistent(tools: list[str]) -> bool:
+def rule_tools_category_consistent(
+        tools: list[str],
+        permission_config: Mapping[str, Any] | None = None,
+) -> bool:
     cats: set[str] = set()
     for t in tools:
-        c = _tool_category(t)
+        c = _tool_category(t, permission_config)
         if c is None:
             return False
         cats.add(c)
         if len(cats) > 1:
             return False
     return bool(cats)
+
+
+def _rule_targets_tool(
+        tool_name: str,
+        r_tools: list[Any],
+        permission_config: Mapping[str, Any] | None,
+) -> bool:
+    r_tools_s = [str(x).strip() for x in r_tools if isinstance(x, str) and str(x).strip()]
+    if tool_name in r_tools_s:
+        return True
+    return _CATEGORY_SHELL in r_tools_s and is_shell_tool(
+        tool_name, shell_tools_from_config(permission_config),
+    )
 
 
 def _command_text(tool_args: dict[str, Any]) -> str:
@@ -191,6 +215,7 @@ def _collect_param_rule_hits(
         tool_name: str,
         tool_args: dict[str, Any],
         label_ns: str,
+        permission_config: Mapping[str, Any] | None = None,
 ) -> list[tuple[PermissionLevel, str]]:
     """参数级规则命中列表 (level, label)；``label_ns`` 为 ``builtin`` 或 ``rules``。"""
     hits: list[tuple[PermissionLevel, str]] = []
@@ -200,10 +225,12 @@ def _collect_param_rule_hits(
         r_tools = rule.get("tools") or []
         if isinstance(r_tools, str):
             r_tools = [r_tools]
-        if not isinstance(r_tools, list) or tool_name not in r_tools:
+        if not isinstance(r_tools, list) or not _rule_targets_tool(
+                tool_name, r_tools, permission_config,
+        ):
             continue
         r_tools_s = [str(x).strip() for x in r_tools if isinstance(x, str) and str(x).strip()]
-        if not rule_tools_category_consistent(r_tools_s):
+        if not rule_tools_category_consistent(r_tools_s, permission_config):
             logger.warning(
                 "[PermissionEngine] permission.tiered_policy.rule_skipped "
                 "id=%r reason=inconsistent_tool_category tools=%s",
@@ -212,7 +239,7 @@ def _collect_param_rule_hits(
             )
             continue
         # 路径策略只认 Pipeline B（file_guard）；A 线跳过 path 类 rules
-        if r_tools_s and _tool_category(r_tools_s[0]) == "path":
+        if r_tools_s and _tool_category(r_tools_s[0], permission_config) == "path":
             logger.debug(
                 "[PermissionEngine] permission.tiered_policy.rule_skipped "
                 "id=%r reason=path_rules_moved_to_file_guard",
@@ -222,7 +249,9 @@ def _collect_param_rule_hits(
         pattern = rule.get("pattern")
         if not isinstance(pattern, str) or not pattern.strip():
             continue
-        if not tiered_policy_rule_matches(tool_name, pattern, tool_args, r_tools_s):
+        if not tiered_policy_rule_matches(
+                tool_name, pattern, tool_args, r_tools_s, permission_config,
+        ):
             continue
         action = rule.get("action")
         if not (isinstance(action, str) and action.strip()):
@@ -243,6 +272,7 @@ def _collect_approval_override_hits(
         rules: list[dict[str, Any]],
         tool_name: str,
         tool_args: dict[str, Any],
+        permission_config: Mapping[str, Any] | None = None,
 ) -> list[str]:
     """用户审批后持久化的 allow override 命中列表。
 
@@ -267,10 +297,12 @@ def _collect_approval_override_hits(
         r_tools = rule.get("tools") or []
         if isinstance(r_tools, str):
             r_tools = [r_tools]
-        if not isinstance(r_tools, list) or tool_name not in r_tools:
+        if not isinstance(r_tools, list) or not _rule_targets_tool(
+                tool_name, r_tools, permission_config,
+        ):
             continue
         r_tools_s = [str(x).strip() for x in r_tools if isinstance(x, str) and str(x).strip()]
-        if not rule_tools_category_consistent(r_tools_s):
+        if not rule_tools_category_consistent(r_tools_s, permission_config):
             logger.warning(
                 "[PermissionEngine] permission.tiered_policy.override_skipped "
                 "id=%r reason=inconsistent_tool_category tools=%s",
@@ -278,7 +310,7 @@ def _collect_approval_override_hits(
                 r_tools_s,
             )
             continue
-        if r_tools_s and _tool_category(r_tools_s[0]) == "path":
+        if r_tools_s and _tool_category(r_tools_s[0], permission_config) == "path":
             logger.debug(
                 "[PermissionEngine] permission.tiered_policy.override_skipped "
                 "id=%r reason=path_overrides_moved_to_file_guard",
@@ -288,7 +320,9 @@ def _collect_approval_override_hits(
         pattern = rule.get("pattern")
         if not isinstance(pattern, str) or not pattern.strip():
             continue
-        if not tiered_policy_rule_matches(tool_name, pattern, tool_args, r_tools_s):
+        if not tiered_policy_rule_matches(
+                tool_name, pattern, tool_args, r_tools_s, permission_config,
+        ):
             continue
         rid = rule.get("id", "")
         label = f"approval_overrides[{rid}]" if rid else "approval_overrides[?]"
@@ -301,11 +335,12 @@ def tiered_policy_rule_matches(
         pattern: str,
         tool_args: dict[str, Any],
         rule_tools: list[str],
+        permission_config: Mapping[str, Any] | None = None,
 ) -> bool:
-    """单条 rule 是否对本次调用匹配（调用前已确认 tool_name in rule_tools）."""
+    """单条 rule 是否对本次调用匹配（调用前已确认 tool 命中 rule_tools / category）。"""
     if not rule_tools:
         return False
-    cat = _tool_category(rule_tools[0])
+    cat = _tool_category(rule_tools[0], permission_config)
     if cat == "shell":
         return _shell_pattern_matches(pattern, _command_text(tool_args))
     if cat == "path":
@@ -423,6 +458,7 @@ def _evaluate_single_invocation(
         tool_name,
         tool_args,
         "builtin",
+        ctx.permission_config,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in builtin_hits):
         return _finalize_hits(builtin_hits, "builtin")
@@ -432,11 +468,14 @@ def _evaluate_single_invocation(
         tool_name,
         tool_args,
         "rules",
+        ctx.permission_config,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in user_hits):
         return _finalize_hits(user_hits, "rules")
 
-    override_hits = _collect_approval_override_hits(ctx.approval_overrides, tool_name, tool_args)
+    override_hits = _collect_approval_override_hits(
+        ctx.approval_overrides, tool_name, tool_args, ctx.permission_config,
+    )
     if override_hits:
         contributing = sorted(set(override_hits))
         return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
@@ -473,6 +512,7 @@ def _evaluate_param_rules_only(
         tool_name,
         tool_args,
         "builtin",
+        ctx.permission_config,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in builtin_hits):
         return _finalize_hits(builtin_hits, "builtin")
@@ -482,6 +522,7 @@ def _evaluate_param_rules_only(
         tool_name,
         tool_args,
         "rules",
+        ctx.permission_config,
     )
     if any(lev == PermissionLevel.DENY for lev, _ in user_hits):
         return _finalize_hits(user_hits, "rules")
@@ -590,7 +631,7 @@ def evaluate_tiered_policy(
     )
 
     shell_parse: ShellAstParseResult | None = None
-    if _tool_category(tool_name) == "shell":
+    if _tool_category(tool_name, permission_config) == "shell":
         shell_parse = parse_shell_for_permission(canon_cmd)
     shell_floor, shell_floor_rule = _shell_ast_floor(
         shell_parse, unknown_structure=check_unknown,
@@ -602,18 +643,25 @@ def evaluate_tiered_policy(
         baseline_level=bl,
         baseline_rule=bl_rule,
         defaults_cfg=defaults_cfg,
+        permission_config=permission_config,
     )
 
-    override_hits = _collect_approval_override_hits(approval_overrides, tool_name, tool_args)
+    override_hits = _collect_approval_override_hits(
+        approval_overrides, tool_name, tool_args, permission_config,
+    )
     if not override_hits and canon_args is not tool_args:
         override_hits = _collect_approval_override_hits(
-            approval_overrides, tool_name, canon_args,
+            approval_overrides, tool_name, canon_args, permission_config,
         )
     if override_hits:
         contributing = sorted(set(override_hits))
         return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
 
-    if _tool_category(tool_name) == "shell" and shell_parse is not None and shell_parse.kind == "simple":
+    if (
+            _tool_category(tool_name, permission_config) == "shell"
+            and shell_parse is not None
+            and shell_parse.kind == "simple"
+    ):
         subcommand_results: list[tuple[str, PermissionLevel, str]] = []
         for subcommand in shell_parse.subcommands:
             if not subcommand.text:
@@ -652,7 +700,7 @@ def evaluate_tiered_policy(
                 )
         return _apply_shell_ast_floor(permission, matched_rule, shell_floor, shell_floor_rule)
 
-    eval_args = canon_args if _tool_category(tool_name) == "shell" else tool_args
+    eval_args = canon_args if _tool_category(tool_name, permission_config) == "shell" else tool_args
     result = _evaluate_single_invocation(
         tool_name,
         eval_args,

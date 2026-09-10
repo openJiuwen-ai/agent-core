@@ -72,7 +72,7 @@ topic_survey:
   include_paid_search: true
   free_search:
     duckduckgo: true
-    bing: true
+    bing: false
 
 experiment_design:
   max_iterations: 20

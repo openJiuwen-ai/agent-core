@@ -322,17 +322,19 @@ class ExternalCliAgentSpec(BaseModel):
     mcp_default_tools_approval_mode: Literal["auto", "prompt", "writes", "approve"] | None = None
     """Optional Codex approval policy for tools exposed by the injected MCP server.
 
-    ``None`` preserves the user's Codex configuration. Headless trusted-server
-    scenarios may opt into ``"approve"`` without changing approval behavior for
-    shell commands, other MCP servers, or non-Codex backends.
+    ``None`` uses ``"approve"`` for the injected team MCP server so its tools
+    remain available when Codex auto-review is unsupported by the active model
+    provider. Explicit values override that default without changing approval
+    behavior for shell commands, other MCP servers, or non-Codex backends.
     """
 
     codex_bypass_approvals_and_sandbox: bool = False
     """Run a Codex member with no approval prompts and no SDK sandbox.
 
-    This is an explicit high-risk opt-in for externally isolated, headless
-    environments. It is valid only for ``cli_agent="codex"`` and never becomes
-    the framework default.
+    Codex members enable this by default, matching the Claude member's
+    ``bypassPermissions`` behavior. Set it explicitly to ``False`` to restore
+    Codex approval prompts and its SDK sandbox. This option is valid only for
+    ``cli_agent="codex"``.
     """
 
     codex_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
@@ -348,6 +350,16 @@ class ExternalCliAgentSpec(BaseModel):
     Retries reuse the same thread and are attempted only after the stalled turn
     was interrupted successfully. Turns that emitted any notification are not
     replayed because they may already have produced external side effects.
+    """
+
+    claude_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Claude turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK message (assistant /
+    user tool results / system) refreshes the timer; a turn whose message
+    stream stalls past the ceiling is interrupted and finalized as a
+    ``network_timeout`` failure so the member settles back to READY instead
+    of hanging forever.
     """
 
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
@@ -378,6 +390,11 @@ class ExternalCliAgentSpec(BaseModel):
     @model_validator(mode="after")
     def _validate_backend_launch_override(self) -> "ExternalCliAgentSpec":
         """Keep SDK binary selection separate from adapter argv overrides."""
+        if (
+            self.cli_agent == "codex"
+            and "codex_bypass_approvals_and_sandbox" not in self.model_fields_set
+        ):
+            self.codex_bypass_approvals_and_sandbox = True
         if self.cli_agent == "codex" and self.command is not None:
             raise ValueError(
                 "Codex SDK config does not support command; use cli_path to select a custom executable",
@@ -398,6 +415,8 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
+            raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self

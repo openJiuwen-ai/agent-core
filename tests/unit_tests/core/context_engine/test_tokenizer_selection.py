@@ -19,6 +19,7 @@ from openjiuwen.core.context_engine import (
     TokenizerSpec,
     TiktokenModelCounter,
 )
+from openjiuwen.core.foundation.tool import ToolInfo
 
 
 def _write_tokenizer(path: Path) -> None:
@@ -240,7 +241,7 @@ def test_unknown_native_model_uses_tiktoken_fallback(monkeypatch) -> None:
     assert measurement.estimated is True
 
 
-def test_tiktoken_failure_uses_unicode_length(monkeypatch) -> None:
+def test_tiktoken_failure_uses_three_character_fallback(monkeypatch) -> None:
     monkeypatch.setattr(TokenizerSelector, "_tiktoken_available", staticmethod(lambda: False))
     counter = TokenizerSelector(provider="deepseek", model="deepseek-chat").select()
 
@@ -248,7 +249,24 @@ def test_tiktoken_failure_uses_unicode_length(monkeypatch) -> None:
     measurement = counter.measure("中文🙂")
     assert measurement.source == "string_length_fallback"
     assert measurement.tokenizer == "unicode_codepoints"
-    assert measurement.tokens == 3
+    assert measurement.tokens == 1
+
+
+def test_string_length_fallback_counts_tool_schema_at_three_chars_per_token() -> None:
+    counter = StringLengthCounter()
+    tool = ToolInfo(name="read_file", description="read", parameters={"type": "object"})
+    tool_json = json.dumps(
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "parameters": tool.parameters,
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    serialized = f"<|start|>functions.{tool.name}:0\n{tool_json}<|end|>"
+
+    assert counter.count_tools([tool]) == len(serialized) // 3 + 3
 
 
 def test_context_mode_falls_back_to_unicode_length_without_tiktoken(monkeypatch) -> None:

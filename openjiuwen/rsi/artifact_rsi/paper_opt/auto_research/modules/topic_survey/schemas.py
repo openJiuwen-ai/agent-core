@@ -48,7 +48,11 @@ class SurveySource(BaseModel):
     source_type: Literal["paper", "web_page"]
     local_path: str = Field(min_length=1)
     summary: str = Field(min_length=1)
-    key_findings: list[str] = Field(min_length=1)
+    # Not min_length=1: a source can be legitimate supporting/background
+    # context (a methodology reference, a tool's docs) with no standalone
+    # "finding" of its own -- requiring one just forces the model to
+    # fabricate something to pass validation.
+    key_findings: list[str] = Field(default_factory=list)
     limitations: list[str] = Field(default_factory=list)
 
     @field_validator("title", "url", "summary")
@@ -69,8 +73,12 @@ class TopicSurveyDraft(BaseModel):
     """Structured survey returned by the model after it saves every source."""
 
     short_summary: str = Field(min_length=1)
-    key_findings: list[str] = Field(min_length=1)
-    open_problems: list[str] = Field(min_length=1)
+    # Not min_length=1: some surveys are pure background/context gathering
+    # with no standalone finding or open problem to report -- forcing one
+    # just invites a fabricated placeholder. `sources` stays min_length=1;
+    # a survey with zero sources isn't a survey.
+    key_findings: list[str] = Field(default_factory=list)
+    open_problems: list[str] = Field(default_factory=list)
     sources: list[SurveySource] = Field(min_length=1)
 
     @field_validator("short_summary")

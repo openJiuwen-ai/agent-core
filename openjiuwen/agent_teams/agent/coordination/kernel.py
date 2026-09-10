@@ -177,18 +177,15 @@ class CoordinationKernel:
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
+                # A team row that is still there is a team to rejoin, whatever
+                # its roster looks like. "Every teammate is SHUTDOWN" used to be
+                # read here as an unfinished disband and answered with
+                # clean_team, but that state is also what a leader between two
+                # rounds of members looks like, so the inference destroyed live
+                # teams. Disbanding is an explicit act: the temporary leader's
+                # clean_team tool, or the operator's delete_agent_team.
                 team_row_present = True
-                non_leader_members = await infra.team_backend.list_member_roster()
-                if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
-                    team_logger.warning(
-                        "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
-                        member_name,
-                        infra.team_backend.team_name,
-                    )
-                    await infra.team_backend.clean_team()
-                    team_row_present = False
-                else:
-                    await host.recover_team()
+                await host.recover_team()
 
         if infra.workspace_manager and not infra.workspace_initialized:
             spec = blueprint.spec if blueprint else None
@@ -364,9 +361,9 @@ class CoordinationKernel:
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
         # so persistence-layer status (lives across restarts) stays decoupled
         # from kernel runtime teardown (volatile). External stop_coordination
-        # from leader path must not silently mark teammates SHUTDOWN — that
-        # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
-        # delete a team that should be recoverable.
+        # from leader path must not silently mark teammates SHUTDOWN — that is
+        # permanent departure, while stopping a team leaves it recoverable;
+        # ``STOPPED`` is the status that says so.
         self._lifecycle_state = "paused"
 
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:

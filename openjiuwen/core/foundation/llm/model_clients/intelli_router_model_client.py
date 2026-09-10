@@ -265,6 +265,7 @@ class IntelliRouterModelClient(BaseModelClient):
     ) -> AsyncIterator[AssistantMessageChunk]:
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
+        accumulated_for_parser = ""
 
         async for chunk in self._router.stream(
             messages=converted_messages,
@@ -276,7 +277,19 @@ class IntelliRouterModelClient(BaseModelClient):
             model=model_name,
             **kwargs
         ):
-            yield self._to_ow_chunk(chunk)
+            converted = self._to_ow_chunk(chunk)
+            if output_parser and converted.content:
+                accumulated_for_parser += str(converted.content)
+                try:
+                    parsed = await output_parser.parse(accumulated_for_parser)
+                    if parsed is not None:
+                        converted = converted.model_copy(
+                            update={"parser_content": parsed}
+                        )
+                        accumulated_for_parser = ""
+                except Exception as exc:
+                    logger.debug(f"stream parser attempt failed: {exc}")
+            yield converted
 
     async def generate_image(
         self,
@@ -364,12 +377,16 @@ class IntelliRouterModelClient(BaseModelClient):
         output_parser: Optional[BaseOutputParser] = None,
     ) -> AssistantMessage:
         """Convert intelli_router AssistantMessage -> openjiuwen AssistantMessage."""
-        content = msg.content or ""
+        provider_content = msg.content or ""
+        content = provider_content
+        parser_content = getattr(msg, "parser_content", None)
 
         # Apply output parser (openjiuwen's parser)
         if output_parser and content:
             try:
                 parsed = await output_parser.parse(content)
+                if parsed is not None:
+                    parser_content = parsed
                 if isinstance(parsed, str):
                     content = parsed
                 elif parsed is not None:
@@ -410,16 +427,39 @@ class IntelliRouterModelClient(BaseModelClient):
                 cache_status=cache_status if isinstance(cache_status, str) else None,
                 cache_source=cache_source if isinstance(cache_source, str) else None,
                 cache_authoritative=cache_authoritative if isinstance(cache_authoritative, bool) else False,
+                cache_creation_input_tokens=getattr(
+                    source_usage, "cache_creation_input_tokens", None
+                ),
                 reasoning_tokens=self._extract_reasoning_tokens(source_usage),
                 model_name=source_usage.model_name or "",
+                input_cost=float(getattr(source_usage, "input_cost", 0) or 0),
+                output_cost=float(getattr(source_usage, "output_cost", 0) or 0),
+                total_cost=float(getattr(source_usage, "total_cost", 0) or 0),
             )
 
         return AssistantMessage(
             content=content,
+            metadata=(
+                getattr(msg, "metadata", {})
+                if isinstance(getattr(msg, "metadata", {}), dict)
+                else {}
+            ),
             tool_calls=tool_calls,
             usage_metadata=usage_metadata,
             finish_reason=msg.finish_reason or "stop",
             reasoning_content=msg.reasoning_content,
+            parser_content=parser_content,
+            prompt_token_ids=getattr(msg, "prompt_token_ids", None),
+            completion_token_ids=getattr(msg, "completion_token_ids", None),
+            logprobs=getattr(msg, "logprobs", None),
+            response_id=str(getattr(msg, "response_id", "") or "") or None,
+            response_model=str(getattr(msg, "response_model", "") or "") or None,
+            provider_metadata=self._provider_metadata(msg),
+            provider_content=(
+                provider_content
+                if output_parser is not None and provider_content != content
+                else getattr(msg, "provider_content", None)
+            ),
         )
 
     @staticmethod
@@ -433,10 +473,41 @@ class IntelliRouterModelClient(BaseModelClient):
             ]
         return AssistantMessageChunk(
             content=chunk.content or "",
+            metadata=(
+                getattr(chunk, "metadata", {})
+                if isinstance(getattr(chunk, "metadata", {}), dict)
+                else {}
+            ),
             tool_calls=tool_calls,
             finish_reason=chunk.finish_reason or "null",
             reasoning_content=chunk.reasoning_content,
+            usage_metadata=getattr(chunk, "usage_metadata", None),
+            parser_content=getattr(chunk, "parser_content", None),
+            prompt_token_ids=getattr(chunk, "prompt_token_ids", None),
+            completion_token_ids=getattr(chunk, "completion_token_ids", None),
+            logprobs=getattr(chunk, "logprobs", None),
+            response_id=str(getattr(chunk, "response_id", "") or "") or None,
+            response_model=str(getattr(chunk, "response_model", "") or "") or None,
+            provider_metadata=IntelliRouterModelClient._provider_metadata(chunk),
+            provider_content=getattr(chunk, "provider_content", None),
         )
+
+    @staticmethod
+    def _provider_metadata(message: Any) -> dict[str, Any]:
+        source = getattr(message, "provider_metadata", None)
+        if not isinstance(source, dict):
+            source = getattr(message, "metadata", None)
+        if not isinstance(source, dict):
+            return {}
+        allowed = (
+            "system_fingerprint",
+            "service_tier",
+            "status",
+            "stop_reason",
+            "stop_sequence",
+            "incomplete_details",
+        )
+        return {key: source[key] for key in allowed if key in source}
 
     # ------------------------------------------------------------------
     # Internal: generation helpers

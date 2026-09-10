@@ -16,6 +16,10 @@ from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitor
 from openjiuwen.agent_teams.observability.span_context import finalize_trace, reset_all
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.demand import (
+    acquire_observability_demand,
+    release_observability_demand,
+)
 from openjiuwen.extensions.observability.setup import (
     force_flush_provider,
     get_config as get_shared_config,
@@ -70,6 +74,41 @@ def init_observability(
             raise
         finally:
             _initializing = False
+
+
+def _init_team_runtime(
+    config: ObservabilityConfig,
+    additional_span_processors: Sequence[SpanProcessor],
+) -> None:
+    """Initialize the Team runtime with the coordinator's shared processors."""
+    init_observability(config, additional_span_processors=additional_span_processors)
+
+
+def acquire_observability(config: ObservabilityConfig) -> bool:
+    """Initialize Team observability while holding its provider demand.
+
+    Use this instead of :func:`init_observability` in a process that may also
+    run single-agent observability: the demand bookkeeping is what keeps either
+    subsystem's shutdown from tearing down a provider the other still uses.
+
+    Args:
+        config: Observability configuration for the Team runtime. Ignored when
+            a provider already exists — OpenTelemetry keeps the first one.
+
+    Returns:
+        Whether a provider already existed, i.e. Team is reusing one owned by
+        another subsystem and its exporter settings were not applied.
+    """
+    return acquire_observability_demand(
+        "team",
+        observability_config=config,
+        initializer=_init_team_runtime,
+    )
+
+
+def release_observability() -> None:
+    """Release the Team provider demand, shutting down when it is the last."""
+    release_observability_demand("team", finalizer=shutdown_observability)
 
 
 def finalize_team_trace(team_name: str) -> None:

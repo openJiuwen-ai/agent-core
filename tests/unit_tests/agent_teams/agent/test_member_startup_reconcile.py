@@ -5,8 +5,9 @@
 
 Registration and startup are separate steps — ``spawn_teammate`` only writes a
 DB row — so a round that never walks the startup funnel can leave members
-parked at UNSTARTED while the board holds open work. This reconcile closes
-that window on the leader's round-idle edge, and it has to run *before* the
+parked at UNSTARTED while the board holds open work. The task-creation path
+closes that window as it happens; this reconcile is the backstop behind it,
+fired on the leader's round-idle edge, and it has to run *before* the
 completion poll that shares the same edge.
 """
 
@@ -25,22 +26,21 @@ LEADER = "leader"
 
 
 def _agent_with_board(non_terminal: int, started: list[str] | None = None) -> tuple[TeamAgent, list]:
-    """Build a leader TeamAgent over a stub backend, recording startup calls."""
+    """Build a leader TeamAgent over a stub backend, recording autostart calls."""
     calls: list = []
 
     async def count_tasks_terminality(team_name: str) -> tuple[int, int]:
         return 3, non_terminal
 
-    async def startup(on_created) -> list[str]:
-        calls.append("startup")
+    async def autostart_unstarted() -> list[str]:
+        calls.append("autostart")
         return list(started or [])
 
     agent = TeamAgent(AgentCard(name=LEADER))
     agent._configurator.team_backend = SimpleNamespace(
         team_name="t",
-        is_leader=True,
         db=SimpleNamespace(task=SimpleNamespace(count_tasks_terminality=count_tasks_terminality)),
-        startup=startup,
+        autostart_unstarted=autostart_unstarted,
     )
     return agent, calls
 
@@ -51,7 +51,7 @@ async def test_reconcile_starts_members_when_the_board_holds_work():
 
     await agent._reconcile_member_startup()
 
-    assert calls == ["startup"]
+    assert calls == ["autostart"]
 
 
 @pytest.mark.asyncio
@@ -90,15 +90,10 @@ async def test_reconcile_swallows_a_backend_failure():
     async def count_tasks_terminality(team_name: str) -> tuple[int, int]:
         raise RuntimeError("database is locked")
 
-    async def startup(on_created) -> list[str]:
-        raise RuntimeError("database is locked")
-
     agent = TeamAgent(AgentCard(name=LEADER))
     agent._configurator.team_backend = SimpleNamespace(
         team_name="t",
-        is_leader=True,
         db=SimpleNamespace(task=SimpleNamespace(count_tasks_terminality=count_tasks_terminality)),
-        startup=startup,
     )
 
     await agent._reconcile_member_startup()

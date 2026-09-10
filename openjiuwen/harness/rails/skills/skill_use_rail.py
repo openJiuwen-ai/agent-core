@@ -34,6 +34,19 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 # matter does not fit within this budget falls back to a full read.
 _FRONT_MATTER_PROBE_LINES = 64
 
+# Directory names the skill scan never descends into. This answers a different
+# question from ``skill_tool._TREE_SKIP_DIR_NAMES`` ("do not *show* this in the
+# directory tree") — here it is "do not go looking for skills in there" — so the
+# two sets are deliberately independent even though they currently agree.
+_SKILL_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        "output",
+        "temp",
+        "assets",
+        "node_modules",
+    }
+)
+
 
 class SkillUseRail(DeepAgentRail):
     """Rail that manages skill prompt injection and tool registration."""
@@ -159,43 +172,19 @@ class SkillUseRail(DeepAgentRail):
         discovered_keys: Set[str] = set()
         ordered_keys: List[str] = []
 
-        for root in roots:
-            if not root.exists():
-                logger.debug(
-                    "[SkillUseRail] skills_dir does not exist, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
-            if not root.is_dir():
-                logger.debug(
-                    "[SkillUseRail] skills_dir is not a directory, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
+        for item, update_at in self._discover_skill_dirs(roots):
+            key = str(item.resolve())
 
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
+            discovered_keys.add(key)
+            ordered_keys.append(key)
 
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
+            cached_skill = self._skill_cache.get(key)
+            cached_update_at = self._skill_update_at.get(key)
 
-                key = str(item.resolve())
-                update_at = skill_md_path.stat().st_mtime
-
-                discovered_keys.add(key)
-                ordered_keys.append(key)
-
-                cached_skill = self._skill_cache.get(key)
-                cached_update_at = self._skill_update_at.get(key)
-
-                if cached_skill is None or cached_update_at != update_at:
-                    skill = await self._load_skill(item, update_at)
-                    self._skill_cache[key] = skill
-                    self._skill_update_at[key] = update_at
+            if cached_skill is None or cached_update_at != update_at:
+                skill = await self._load_skill(item, update_at)
+                self._skill_cache[key] = skill
+                self._skill_update_at[key] = update_at
 
         stale_keys = [key for key in self._skill_cache.keys() if key not in discovered_keys]
         for key in stale_keys:
@@ -461,25 +450,11 @@ class SkillUseRail(DeepAgentRail):
 
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""
-        entries: List[Tuple[str, float]] = []
-
-        for root in self._normalize_skill_dirs(self.skills_dir):
-            if not root.exists():
-                continue
-            if not root.is_dir():
-                continue
-
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
-
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
-
-                entries.append((str(item.resolve()), skill_md_path.stat().st_mtime))
-
-        return tuple(entries)
+        roots = self._normalize_skill_dirs(self.skills_dir)
+        return tuple(
+            (str(item.resolve()), update_at)
+            for item, update_at in self._discover_skill_dirs(roots)
+        )
 
     def _build_skills_section(self, skills: Optional[List[Skill]] = None):
         """Build the stable system prompt section from session baseline skills."""
@@ -890,6 +865,88 @@ class SkillUseRail(DeepAgentRail):
         return normalized
 
     @classmethod
+    def _discover_skill_dirs(cls, roots: List[Path]) -> List[Tuple[Path, float]]:
+        """Find every skill directory under ``roots``, with its SKILL.md mtime.
+
+        A skill library is not necessarily flat: skills are commonly filed
+        under grouping directories (``skills/lark/lark-doc/SKILL.md``), and a
+        scan that only looked one level down found the group instead of the
+        skills and reported nothing.
+
+        So the walk descends — but **stops at the first ``SKILL.md`` it finds
+        on a branch**. A directory holding a ``SKILL.md`` is a skill, and what
+        it keeps inside is its own business: sub-skills there are private
+        detail its author discloses through the parent's own content (see
+        ``skill_tool``'s nested-skill listing), not top-level entries the
+        model sees before it has read the parent. The rule needs no special
+        case for "is this a group or a skill" — finding a ``SKILL.md`` answers
+        it.
+
+        Args:
+            roots: Normalized library roots, as returned by
+                ``_normalize_skill_dirs``.
+
+        Returns:
+            ``(skill_dir, skill_md_mtime)`` pairs, ordered by root and then by
+            directory name at each level, so callers get a stable sequence.
+        """
+        found: List[Tuple[Path, float]] = []
+        # Resolved paths already walked. Symlinked libraries are a normal way
+        # to share one skill across teams, so a cycle is reachable and would
+        # otherwise recurse forever.
+        visited: Set[str] = set()
+
+        def _walk(directory: Path) -> None:
+            try:
+                dir_key = str(directory.resolve())
+            except OSError:
+                dir_key = str(directory)
+            if dir_key in visited:
+                return
+            visited.add(dir_key)
+
+            try:
+                children = sorted(directory.iterdir(), key=lambda p: p.name)
+            except OSError as exc:
+                logger.debug("[SkillUseRail] cannot list %s: %s", directory, exc)
+                return
+
+            for child in children:
+                if not child.is_dir():
+                    continue
+                if child.name.startswith(".") or child.name in _SKILL_SCAN_SKIP_DIRS:
+                    continue
+
+                skill_md_path = child / "SKILL.md"
+                if skill_md_path.is_file():
+                    try:
+                        found.append((child, skill_md_path.stat().st_mtime))
+                    except OSError as exc:
+                        logger.debug("[SkillUseRail] cannot stat %s: %s", skill_md_path, exc)
+                    continue
+
+                _walk(child)
+
+        for root in roots:
+            if not root.exists():
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
+            if not root.is_dir():
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
+            _walk(root)
+
+        return found
+
+    @classmethod
     async def load_skills_from_dir(
         cls,
         skills_dir: Union[str, List[str]],
@@ -907,42 +964,18 @@ class SkillUseRail(DeepAgentRail):
             include_tools=False,
         )
 
-        for root in roots:
-            if not root.exists():
-                logger.debug(
-                    "[SkillUseRail] skills_dir does not exist, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
-            if not root.is_dir():
-                logger.debug(
-                    "[SkillUseRail] skills_dir is not a directory, "
-                    "skipping: %s",
-                    root,
+        for item, update_at in cls._discover_skill_dirs(roots):
+            skill = await loader._load_skill(item, update_at)
+
+            if skill.name in skill_map:
+                prev_dir = skill_map[skill.name].directory
+                logger.warning(
+                    f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
+                    f"keep='{prev_dir}', skip='{item}'."
                 )
                 continue
 
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
-
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
-
-                update_at = skill_md_path.stat().st_mtime
-                skill = await loader._load_skill(item, update_at)
-
-                if skill.name in skill_map:
-                    prev_dir = skill_map[skill.name].directory
-                    logger.warning(
-                        f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
-                        f"keep='{prev_dir}', skip='{item}'."
-                    )
-                    continue
-
-                skill_map[skill.name] = skill
+            skill_map[skill.name] = skill
 
         return list(skill_map.values())
 

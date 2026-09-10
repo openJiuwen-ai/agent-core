@@ -79,7 +79,7 @@ def normalize_grading_case(case: dict[str, Any]) -> dict[str, Any]:
         normalized["case_id"] = normalized["id"]
     raw_reference = case.get("reference", {})
     if not isinstance(raw_reference, dict):
-        raise ValueError("reference must be an object")
+        raise ValueError("reference must be an object")  # noqa: TRY004 - Preserve the grading validation API.
     aliases = {key: case[key] for key in ("reference_solution", "judge_rubrics") if key in case}
     for nested, top_level in (("solution", "reference_solution"), ("judge_rubrics", "judge_rubrics")):
         if nested not in raw_reference:

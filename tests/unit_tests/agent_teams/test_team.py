@@ -1602,3 +1602,127 @@ async def test_cleanup_member_workspace_links_releases_dynamic_real_dir(db, mess
         assert not real.exists(), "dynamic real dir released"
     finally:
         apaths.reset_openjiuwen_home()
+
+
+# ----------------------------------------------------------------------
+# autostart_unstarted — the shared auto-start funnel
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_starts_every_unstarted_member(db, message_bus):
+    """autostart_unstarted starts the whole UNSTARTED set via the injected callback."""
+    team_id = "autostart_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Autostart Team",
+        leader_member_name="leader1",
+    )
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card1 = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    card2 = AgentCard(name="Dev2", description="dev 2", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card1)
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card2)
+
+    started = await backend.autostart_unstarted()
+
+    assert sorted(started) == ["dev-1", "dev-2"]
+    assert sorted(call[0][0] for call in on_created.await_args_list) == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_is_idempotent(db, message_bus):
+    """A second call finds nothing UNSTARTED and spawns nobody twice."""
+    team_id = "autostart_idem_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Idem Team",
+        leader_member_name="leader1",
+    )
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    first = await backend.autostart_unstarted()
+    second = await backend.autostart_unstarted()
+
+    assert first == ["dev-1"]
+    assert second == []
+    on_created.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_noop_for_teammate(db, message_bus):
+    """A non-leader backend owns no roster and starts nobody."""
+    team_id = "autostart_teammate_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Teammate Team",
+        leader_member_name="leader1",
+    )
+    leader = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await leader.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    on_created = AsyncMock()
+    teammate = TeamBackend(
+        team_name=team_id,
+        member_name="dev-1",
+        db=db,
+        messager=message_bus,
+        is_leader=False,
+        on_member_started=on_created,
+    )
+
+    assert await teammate.autostart_unstarted() == []
+    on_created.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_noop_without_callback(db, message_bus):
+    """No spawn callback means no process to launch — an external backend."""
+    team_id = "autostart_nocb_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="No Callback Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    assert await backend.autostart_unstarted() == []
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value

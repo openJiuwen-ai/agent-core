@@ -114,6 +114,10 @@ class PaperDocument(BaseModel):
     bibliography: list[BibliographyEntry] = Field(default_factory=list)
     included_files: list[str] = Field(default_factory=list)
     token_estimate: int = Field(ge=0)
+    # Non-fatal issues ingest_latex noted while reading this paper (skipped
+    # includes, unresolved figures/bibliography, unclosed environments, ...)
+    # -- diagnostic only, nothing downstream gates on this.
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RubricDimensionScore(BaseModel):

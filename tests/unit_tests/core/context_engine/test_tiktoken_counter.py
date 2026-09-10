@@ -91,7 +91,7 @@ def test_unparseable_image_costs_flat_fallback_not_payload() -> None:
     )
     assert with_image - without_image == DEFAULT_IMAGE_PLACEHOLDER_TOKENS
     # Sanity anchor: the payload itself would count vastly larger under either
-    # the tiktoken or the len//4 fallback path.
+    # the tiktoken or the len//3 fallback path.
     assert with_image < counter.count(_FAKE_DATA_URL)
 
 

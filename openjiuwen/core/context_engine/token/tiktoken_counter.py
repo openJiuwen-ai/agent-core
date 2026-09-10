@@ -289,15 +289,20 @@ class TiktokenCounter(TokenCounter):
             try:
                 return len(self._enc.encode(text, disallowed_special=()))
             except UnicodeEncodeError:
-                logger.warning(f"Tiktoken encoding failed for text (len={len(text)}), using Unicode length fallback.")
+                logger.warning(
+                    f"Tiktoken encoding failed for text (len={len(text)}), "
+                    "using three-character Unicode length fallback."
+                )
                 self.measurement_source = "string_length_fallback"
                 self.measurement_tokenizer = "unicode_codepoints"
                 self.measurement_fallback_reason = "text_encoding_failed"
-                return len(text)
+                return len(text) // 3
         if not self._fallback_warning_printed:
             self._fallback_warning_printed = True
-            logger.warning("Tiktoken initialization failed, using Unicode string length fallback for token counting.")
-        return len(text)
+            logger.warning(
+                "Tiktoken initialization failed, using three-character Unicode length fallback for token counting."
+            )
+        return len(text) // 3
 
     def count_messages(self, messages: List[BaseMessage], *, model: str = "", **kwargs) -> int:
         if not messages:

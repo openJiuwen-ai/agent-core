@@ -39,12 +39,19 @@ from openjiuwen.core.foundation.llm.reasoning import (
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMApiMode,
     LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    _deepseek_reasoning_content,
+    apply_message_transforms,
+    model_requires_reasoning_content,
+)
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -995,6 +1002,8 @@ class OpenAIModelClient(BaseModelClient):
             self.model_client_config,
             params["messages"],
         )
+        if model_requires_reasoning_content(params.get("model")):
+            params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()
         kv_mode = self._kv_cache_mode()
@@ -1229,6 +1238,305 @@ class OpenAIModelClient(BaseModelClient):
         if closed:
             logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
+    def _uses_responses_api(self) -> bool:
+        """Whether this client talks to the OpenAI Responses endpoint (``/responses``)."""
+        api_mode = getattr(self.model_client_config, "api_mode", None)
+        value = api_mode.value if hasattr(api_mode, "value") else api_mode
+        return value == LLMApiMode.Responses.value
+
+    def _build_responses_request_body(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            **kwargs
+    ) -> dict[str, Any]:
+        """Build a Responses API request body from OpenAI client parameters."""
+        final_model = model or self.model_config.model_name
+        if not final_model:
+            raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
+
+        send_sampling_params = bool(kwargs.pop("send_sampling_params", False))
+        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", False))
+
+        final_temperature = (
+            (temperature if temperature is not None else self.model_config.temperature)
+            if send_sampling_params
+            else None
+        )
+        final_top_p = (
+            (top_p if top_p is not None else self.model_config.top_p)
+            if send_sampling_params
+            else None
+        )
+        configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
+        final_stop = stop if stop is not None else self.model_config.stop
+
+        reasoning = kwargs.pop("reasoning", None)
+        extra_body = kwargs.pop("extra_body", None)
+        tool_choice = kwargs.pop("tool_choice", "auto")
+        parallel_tool_calls = kwargs.pop("parallel_tool_calls", True)
+        include_reasoning = kwargs.pop("include_reasoning_encrypted_content", False)
+
+        request_extra = self.model_config.model_dump(
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude_none=True,
+        )
+        request_extra.update(kwargs)
+
+        return build_request_body(
+            model=final_model,
+            messages=messages,
+            tools=tools,
+            temperature=final_temperature,
+            top_p=final_top_p,
+            max_tokens=configured_max_tokens if send_max_output_tokens else None,
+            stop=final_stop,
+            reasoning=reasoning,
+            include_reasoning_encrypted_content=include_reasoning,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            extra_body={**request_extra, **(extra_body or {})} or None,
+        )
+
+    def _make_responses_transport(self, *, timeout: Optional[float]) -> OpenAIAccountResponsesTransport:
+        verify = (
+            SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
+            if self.model_client_config.verify_ssl
+            else False
+        )
+        return OpenAIAccountResponsesTransport(
+            base_url=self.model_client_config.api_base,
+            timeout_seconds=timeout if timeout is not None else self.model_client_config.timeout,
+            verify=verify,
+            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
+            max_retries=self.model_client_config.max_retries,
+        )
+
+    async def _parse_responses_content(self, content: str, output_parser: BaseOutputParser) -> Any:
+        try:
+            return await output_parser.parse(content)
+        except Exception as exc:
+            llm_logger.warning(
+                "OpenAI Responses output parser error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                exception=str(exc),
+            )
+            return None
+
+    async def _try_parse_responses_stream_content(self, content: str, output_parser: BaseOutputParser) -> Any:
+        try:
+            return await output_parser.parse(content)
+        except Exception:
+            return None
+
+    async def _invoke_responses_api(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            output_parser: Optional[BaseOutputParser],
+            timeout: Optional[float],
+            tracer_record_data,
+            request_custom_headers,
+            **kwargs,
+    ) -> AssistantMessage:
+        """Invoke the OpenAI Responses endpoint with an api_key bearer token."""
+        session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
+
+        body = self._build_responses_request_body(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            **kwargs,
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=body)
+
+        request_headers = self._build_request_headers(self._base_headers, request_custom_headers)
+        await trigger(
+            LLMCallEvents.LLM_INPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=False,
+        )
+
+        try:
+            response = await self._make_responses_transport(timeout=timeout).create_response(
+                body=body,
+                access_token=self._resolved_api_key(),
+                model_name=str(body.get("model") or ""),
+                session_id=session_id,
+                extra_headers=request_headers,
+            )
+        except Exception as exc:
+            await self._emit_responses_error(body, messages, tools, exc, is_stream=False)
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"Responses API invoke error: {_format_exception_detail(exc)}",
+            ) from exc
+
+        if output_parser and response.content:
+            response.parser_content = await self._parse_responses_content(response.content, output_parser)
+
+        if tracer_record_data:
+            await tracer_record_data(llm_response=response)
+
+        await trigger(
+            LLMCallEvents.LLM_OUTPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            response=response.content,
+            reasoning_content=response.reasoning_content,
+            usage=response.usage_metadata,
+            tool_calls=response.tool_calls,
+        )
+        return response
+
+    async def _stream_responses_api(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            output_parser: Optional[BaseOutputParser],
+            timeout: Optional[float],
+            tracer_record_data,
+            request_custom_headers,
+            **kwargs,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        """Stream from the OpenAI Responses endpoint with an api_key bearer token."""
+        session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
+
+        body = self._build_responses_request_body(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            **kwargs,
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=body)
+
+        request_headers = self._build_request_headers(self._base_headers, request_custom_headers)
+        await trigger(
+            LLMCallEvents.LLM_INPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=True,
+        )
+
+        final_message = None
+        accumulated_for_parser = ""
+        try:
+            async for chunk in self._make_responses_transport(timeout=timeout).stream_response(
+                body=body,
+                access_token=self._resolved_api_key(),
+                model_name=str(body.get("model") or ""),
+                session_id=session_id,
+                extra_headers=request_headers,
+            ):
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                    model_name=body.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                )
+                if output_parser and chunk.content:
+                    accumulated_for_parser += str(chunk.content)
+                    parser_content = await self._try_parse_responses_stream_content(
+                        accumulated_for_parser, output_parser
+                    )
+                    if parser_content is not None:
+                        chunk.parser_content = parser_content
+                        accumulated_for_parser = ""
+                final_message = final_message + chunk if final_message else chunk
+                yield chunk
+        except Exception as exc:
+            await self._emit_responses_error(body, messages, tools, exc, is_stream=True)
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"Responses API stream error: {_format_exception_detail(exc)}",
+            ) from exc
+
+        if tracer_record_data:
+            await tracer_record_data(llm_response=final_message)
+
+        await trigger(
+            LLMCallEvents.LLM_OUTPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            is_stream=True,
+            response=final_message.content if final_message else None,
+            reasoning_content=final_message.reasoning_content if final_message else None,
+            usage=final_message.usage_metadata if final_message else None,
+            tool_calls=final_message.tool_calls if final_message else None,
+        )
+
+    async def _emit_responses_error(
+            self,
+            body: dict[str, Any],
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            error: Exception,
+            *,
+            is_stream: bool,
+    ) -> None:
+        await trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            is_stream=is_stream,
+            error=error,
+        )
+        llm_logger.error(
+            "Responses API call error.",
+            event_type=LogEventType.LLM_CALL_ERROR,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            is_stream=is_stream,
+            exception=f"{type(error).__name__}: {error}",
+        )
+
     async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -1262,6 +1570,24 @@ class OpenAIModelClient(BaseModelClient):
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
+
+        # Responses API mode: go through the dedicated /responses transport
+        # instead of the chat-completions SDK path.
+        if self._uses_responses_api():
+            return await self._invoke_responses_api(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                tracer_record_data=tracer_record_data,
+                request_custom_headers=request_custom_headers,
+                **kwargs,
+            )
 
         # Build request parameters
         params = self._build_request_params(
@@ -1415,6 +1741,26 @@ class OpenAIModelClient(BaseModelClient):
         """
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
+
+        # Responses API mode: go through the dedicated /responses transport
+        # instead of the chat-completions SDK path.
+        if self._uses_responses_api():
+            async for chunk in self._stream_responses_api(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                tracer_record_data=tracer_record_data,
+                request_custom_headers=request_custom_headers,
+                **kwargs,
+            ):
+                yield chunk
+            return
 
         # Build request parameters
         params = self._build_request_params(
@@ -2053,6 +2399,7 @@ class OpenAIModelClient(BaseModelClient):
 
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
+                    metadata=parsed_chunk.metadata,
                     reasoning_content=parsed_chunk.reasoning_content,
                     tool_calls=parsed_chunk.tool_calls,
                     usage_metadata=parsed_chunk.usage_metadata,
@@ -2061,6 +2408,9 @@ class OpenAIModelClient(BaseModelClient):
                     prompt_token_ids=parsed_chunk.prompt_token_ids,
                     completion_token_ids=parsed_chunk.completion_token_ids,
                     logprobs=parsed_chunk.logprobs,
+                    response_id=parsed_chunk.response_id,
+                    response_model=parsed_chunk.response_model,
+                    provider_metadata=parsed_chunk.provider_metadata,
                 )
 
                 yield chunk_with_parser
@@ -2139,6 +2489,7 @@ class OpenAIModelClient(BaseModelClient):
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
                 **self._cache_usage_metadata(response.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(response.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2204,6 +2555,9 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(response),
         )
 
     @staticmethod
@@ -2219,6 +2573,16 @@ class OpenAIModelClient(BaseModelClient):
         if hasattr(logprobs_obj, '__dict__'):
             return vars(logprobs_obj)
         return logprobs_obj
+
+    @staticmethod
+    def _response_provider_metadata(response: Any) -> dict[str, Any]:
+        """Return a small non-sensitive whitelist from an OpenAI response."""
+        metadata: dict[str, Any] = {}
+        for key in ("system_fingerprint", "service_tier"):
+            value = getattr(response, key, None)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                metadata[key] = value
+        return metadata
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
@@ -2242,6 +2606,7 @@ class OpenAIModelClient(BaseModelClient):
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
                 **self._cache_usage_metadata(chunk.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(chunk.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2261,6 +2626,9 @@ class OpenAIModelClient(BaseModelClient):
                     usage_metadata=usage_metadata,
                     finish_reason="null",
                     prompt_token_ids=prompt_token_ids,
+                    response_id=str(getattr(chunk, "id", "") or "") or None,
+                    response_model=str(getattr(chunk, "model", "") or "") or None,
+                    provider_metadata=self._response_provider_metadata(chunk),
                 )
             return None
 
@@ -2316,4 +2684,7 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(chunk, "id", "") or "") or None,
+            response_model=str(getattr(chunk, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(chunk),
         )

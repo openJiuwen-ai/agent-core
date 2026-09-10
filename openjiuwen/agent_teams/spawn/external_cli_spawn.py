@@ -33,6 +33,30 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
 
+_JIUWEN_EXTERNAL_PROVIDER = "jiuwen"
+
+
+def _external_cli_provider_name(client_config: Any) -> str:
+    """Resolve the CLI-side provider identity for a model client config.
+
+    Codex-style CLI runtimes gate server-side behaviors (remote compaction,
+    request-body compression) on the provider *name* matching their official
+    endpoint ("OpenAI"). A pool entry's ``client_provider`` is only the wire
+    protocol label — mostly "OpenAI" for OpenAI-compatible gateways — so
+    passing it through verbatim makes every external gateway look official and
+    breaks the gated protocols against endpoints that do not implement them.
+
+    Every explicitly configured external endpoint is exposed to the CLI under
+    the stable ``jiuwen`` provider identity. The raw ``client_provider``
+    survives only when no api_base is configured, which is the official-endpoint
+    case where the name remains accurate.
+    """
+    api_base = str(getattr(client_config, "api_base", "") or "").strip()
+    if api_base:
+        return _JIUWEN_EXTERNAL_PROVIDER
+    return str(getattr(client_config, "client_provider", "") or "").strip()
+
+
 def _team_model_config_to_external(
     member_model: Any,
 ) -> Optional[ExternalCliModelConfig]:
@@ -41,7 +65,7 @@ def _team_model_config_to_external(
     request_config = getattr(member_model, "model_request_config", None)
     if client_config is None:
         return None
-    provider = str(getattr(client_config, "client_provider", "") or "")
+    provider = _external_cli_provider_name(client_config)
     model = ""
     if request_config is not None:
         model = str(getattr(request_config, "model_name", "") or getattr(request_config, "model", "") or "")
@@ -115,11 +139,12 @@ def _build_team_context_tracker(
     """Build the tracker feeding team state into this CLI member's messages.
 
     An external CLI has no rail, so the runtime folds the tracker's output into
-    the next message it sends. Unlike an in-process member, an external CLI has
-    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
-    ``mount_into_workspace`` is ever called), so the agent-relative mount string
-    would be a path the member cannot reach. We therefore expose only the
-    shared workspace's absolute path — the member writes there directly.
+    the next message it sends. Unlike an in-process member, an external CLI
+    never has the team workspace mounted into its cwd (``setup_agent``
+    short-circuits before ``mount_into_workspace`` is ever called), so any
+    agent-relative mount string would be a path the member cannot reach. We
+    therefore expose only the shared workspace's absolute path — the member
+    writes there directly.
 
     Args:
         team_backend: The external member's own TeamBackend.
@@ -142,8 +167,8 @@ def _build_team_context_tracker(
         role=ctx.role,
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
-        team_workspace_mount=None,
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
     )
@@ -182,6 +207,13 @@ def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
     if build_context is None:
         return None
     return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _build_context_team_outputs_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "team_outputs_dir", None))
 
 
 def _resolve_external_paths(
@@ -323,6 +355,7 @@ async def external_cli_spawn(
             codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
+            claude_turn_idle_timeout_s=cli_cfg.claude_turn_idle_timeout_s,
             external_model_config=external_model_config,
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,

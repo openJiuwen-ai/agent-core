@@ -380,6 +380,17 @@ class CliRuntimeBase(ABC):
         team_logger.debug("[{}] pause is a no-op for a CLI-backed runtime", self._member_name)
         return None
 
+    async def resume(self, *, query: Any | None = None) -> None:
+        """Resume the CLI surface; a cold-resume query becomes a new input.
+
+        CLI runtimes do not preserve a paused in-flight turn, so a warm resume
+        is a no-op.  The lifecycle layer may provide a cold-resume query after
+        rebuilding the runtime; deliver that query through the normal queue.
+        """
+
+        if query is not None and self._phase is not HarnessState.TERMINATED:
+            await self.send(query, immediate=False)
+
     async def subscribe(
         self,
         *,

@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
+    Iterator,
     Optional,
 )
 
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
@@ -708,6 +711,37 @@ class TeamAgent(BaseAgent):
     # BaseAgent abstract methods: invoke / stream
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _observability_execution_scope(self, session: Any) -> Iterator[None]:
+        """Bind the concrete Team member identity for trajectory attribution.
+
+        Every span opened while a member round runs carries the member's
+        ``openjiuwen.execution.subject.*`` block, so the trajectory viewer can
+        group the member's model / tool records into one lane (the leader gets
+        ``team_leader``, teammates ``team_member``).
+        """
+        from openjiuwen.harness.execution_subject import execution_subject_scope
+
+        session_getter = getattr(session, "get_session_id", None)
+        session_id = str(session_getter() if callable(session_getter) else (self.session_id or ""))
+        with execution_subject_scope(self.observability_execution_subject(session_id)):
+            yield
+
+    def observability_execution_subject(self, session_id: str = "") -> "ExecutionSubject":
+        """Return the stable trajectory owner identity for this Team member."""
+        from openjiuwen.harness.execution_subject import ExecutionSubject
+
+        team_name = str(self.team_name or "")
+        member_name = str(self.member_name or self.card.name or self.card.id)
+        display_name = str(getattr(self.runtime_context, "display_name", "") or member_name)
+        return ExecutionSubject(
+            subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+            display_name=display_name,
+            kind="team_leader" if self.role == TeamRole.LEADER else "team_member",
+            parent_subject_id="",
+            session_id=session_id,
+        )
+
     async def invoke(self, inputs, session=None):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
@@ -717,33 +751,34 @@ class TeamAgent(BaseAgent):
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
-        await self._coordination.start(session)
-        try:
-            if routed_payloads is not None:
-                await self._dispatch_initial_leader_route(routed_payloads)
-            else:
-                # Only drive a first round when there is an actual message.
-                # Spawn / recover / resume with no input must not fabricate a
-                # round; the mailbox poll below delivers only real pending
-                # messages (no-op when the inbox is empty).
-                if raw_query:
-                    await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_initial_mailbox_poll()
-                await self._coordination.enqueue_initial_task_poll()
-            last_result = None
-            while True:
-                chunk = await self._stream_controller.stream_queue.get()
-                if chunk is None:
-                    break
-                # Team markers (team.idle / team.completed / ...) carry no
-                # agent content; a non-streaming caller wants the last thing
-                # the agent actually produced, not the framework's bookkeeping.
-                if is_team_event_marker(chunk):
-                    continue
-                last_result = chunk
-            return last_result
-        finally:
-            await self._coordination.finalize_round()
+        with self._observability_execution_scope(session):
+            await self._coordination.start(session)
+            try:
+                if routed_payloads is not None:
+                    await self._dispatch_initial_leader_route(routed_payloads)
+                else:
+                    # Only drive a first round when there is an actual message.
+                    # Spawn / recover / resume with no input must not fabricate a
+                    # round; the mailbox poll below delivers only real pending
+                    # messages (no-op when the inbox is empty).
+                    if raw_query:
+                        await self._coordination.enqueue_user_input(inputs)
+                    await self._coordination.enqueue_initial_mailbox_poll()
+                    await self._coordination.enqueue_initial_task_poll()
+                last_result = None
+                while True:
+                    chunk = await self._stream_controller.stream_queue.get()
+                    if chunk is None:
+                        break
+                    # Team markers (team.idle / team.completed / ...) carry no
+                    # agent content; a non-streaming caller wants the last thing
+                    # the agent actually produced, not the framework's bookkeeping.
+                    if is_team_event_marker(chunk):
+                        continue
+                    last_result = chunk
+                return last_result
+            finally:
+                await self._coordination.finalize_round()
 
     async def broadcast(self, content: str) -> "DeliverResult":
         """Broadcast a user-side announcement; returns the delivery result."""
@@ -779,26 +814,27 @@ class TeamAgent(BaseAgent):
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
 
-        await self._coordination.start(session)
-        try:
-            if routed_payloads is not None:
-                await self._dispatch_initial_leader_route(routed_payloads)
-            else:
-                # Only drive a first round when there is an actual message.
-                # Spawn / recover / resume with no input must not fabricate a
-                # round; the mailbox poll below delivers only real pending
-                # messages (no-op when the inbox is empty).
-                if raw_query:
-                    await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_initial_mailbox_poll()
-                await self._coordination.enqueue_initial_task_poll()
-            while True:
-                chunk = await self._stream_controller.stream_queue.get()
-                if chunk is None:
-                    break
-                yield chunk
-        finally:
-            await self._coordination.finalize_round()
+        with self._observability_execution_scope(session):
+            await self._coordination.start(session)
+            try:
+                if routed_payloads is not None:
+                    await self._dispatch_initial_leader_route(routed_payloads)
+                else:
+                    # Only drive a first round when there is an actual message.
+                    # Spawn / recover / resume with no input must not fabricate a
+                    # round; the mailbox poll below delivers only real pending
+                    # messages (no-op when the inbox is empty).
+                    if raw_query:
+                        await self._coordination.enqueue_user_input(inputs)
+                    await self._coordination.enqueue_initial_mailbox_poll()
+                    await self._coordination.enqueue_initial_task_poll()
+                while True:
+                    chunk = await self._stream_controller.stream_queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+            finally:
+                await self._coordination.finalize_round()
 
     async def interact(self, message: str) -> None:
         await self._coordination.enqueue_user_input(message)
@@ -1072,27 +1108,41 @@ class TeamAgent(BaseAgent):
     async def _reconcile_member_startup(self) -> None:
         """Start members the board has work for but nobody ever launched.
 
-        Runs on the leader's round-idle edge: whatever the round intended is
-        now fully expressed, so a roster still parked at UNSTARTED while the
-        board holds open work is a gap the code closes rather than one the
-        model has to notice. Registration and startup are deliberately
-        separate (``spawn_teammate`` only writes a DB row), which leaves
-        exactly this window open when nothing on the round happened to walk
-        the startup funnel.
+        The backstop behind the task-creation path's own auto-start, running
+        on the leader's round-idle edge: whatever this round intended is now
+        fully expressed, so a roster still parked at UNSTARTED while the board
+        holds open work is a gap the code closes rather than one the model has
+        to notice. Registration and startup are deliberately separate
+        (``spawn_teammate`` only writes a DB row), which leaves exactly this
+        window open when nothing on the round happened to walk the startup
+        funnel.
 
         Leader-only: nobody else owns a roster. The board is probed first
         because a team with no open task has nothing to be started *for* —
         a leader may well register members ahead of the work. That probe is
-        one aggregate COUNT, and ``auto_start_all`` is a no-op once the
+        one aggregate COUNT, and ``autostart_unstarted`` is a no-op once the
         UNSTARTED set is empty, so a settled team pays almost nothing per
         round. Best-effort throughout: this runs on a teardown-adjacent edge,
         and a failure here must not stop the completion poll behind it.
         """
         if self.role != TeamRole.LEADER:
             return
-        if await self.is_task_board_settled():
+        backend = self.team_backend
+        if backend is None:
             return
-        started = await self.auto_start_all()
+        try:
+            _, non_terminal = await backend.db.task.count_tasks_terminality(backend.team_name)
+            if non_terminal == 0:
+                return
+            started = await backend.autostart_unstarted()
+        except Exception as e:
+            team_logger.error(
+                "[{}] round-idle member startup reconcile failed: {}",
+                self._member_name() or "?",
+                e,
+                exc_info=True,
+            )
+            return
         if started:
             team_logger.info(
                 "[{}] round-idle reconcile started members: {}",

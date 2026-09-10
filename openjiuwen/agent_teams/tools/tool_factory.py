@@ -102,7 +102,6 @@ def create_team_tools(
     dispatch_mode: str = "autonomous",
     lifecycle: str = "temporary",
     team_mode: str = "default",
-    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     exclude_tools: set[str] | None = None,
     lang: str = "cn",
@@ -147,7 +146,6 @@ def create_team_tools(
         team_mode: Team operating mode — "default" / "predefined" / "hybrid".
             Selects the workflow variant disclosed in the ``build_team``
             result; it does not change any tool's shape.
-        on_teammate_created: Callback invoked when a teammate is created.
         model_config_allocator: Callback that returns the next
             ``Allocation`` for teammate allocation. Receives an
             optional ``model_name`` hint forwarded from the spawn site;
@@ -232,12 +230,7 @@ def create_team_tools(
         "verify_task": VerifyTaskTool(task_mgr, t, desc_key=_VERIFY_TASK_DESC_KEY[dispatch_mode]),
         "member_complete_task": MemberCompleteTaskTool(task_mgr, t, desc_key=_MEMBER_COMPLETE_DESC_KEY[dispatch_mode]),
         # Messaging
-        "send_message": send_message_cls(
-            msg_mgr,
-            t,
-            team=agent_team,
-            on_teammate_created=on_teammate_created,
-        ),
+        "send_message": send_message_cls(msg_mgr, t, team=agent_team),
         # Swarmflow orchestration (leader-only, gated by swarmflow_model_resolver).
         "swarmflow": SwarmflowTool(
             parent_agent=parent_agent,

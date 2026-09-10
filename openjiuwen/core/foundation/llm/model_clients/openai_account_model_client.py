@@ -113,6 +113,8 @@ class OpenAIAccountModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
         session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
 
         body = self._build_openai_account_request_body(
             messages=messages,
@@ -188,6 +190,8 @@ class OpenAIAccountModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
         session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
 
         body = self._build_openai_account_request_body(
             messages=messages,

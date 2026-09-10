@@ -15,6 +15,10 @@ from typing import Any
 
 import yaml
 
+from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import (
+    package_builtin_rules_enabled,
+)
+
 logger = logging.getLogger(__name__)
 
 _NET_URLS_CACHE: tuple[str, float, dict[str, str]] | None = None
@@ -108,6 +112,8 @@ def merge_package_net_urls(
 ) -> dict[str, Any]:
     """Merge package net_urls into ``net_guard.urls`` when enabled."""
     cfg = deepcopy(permissions) if isinstance(permissions, dict) else {}
+    if not package_builtin_rules_enabled(cfg):
+        return cfg
     ng = cfg.get("net_guard")
     ng_enabled = isinstance(ng, dict) and bool(ng.get("enabled"))
     should_inject = inject if inject is not None else ng_enabled

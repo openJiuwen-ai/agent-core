@@ -44,6 +44,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.foundation.llm import ToolCall, UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.context_engine import ContextEngineConfig
+from openjiuwen.core.single_agent.rail.base import AgentCallbackEvent
 
 from tests.unit_tests.fixtures.mock_llm import (
     MockLLMModel,
@@ -519,6 +520,23 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         agent.configure(self.config)
         agent.ability_manager.add(self._create_add_tool_card())
         agent.context_engine = mock_context_engine
+        model_iterations = []
+        tool_iterations = []
+
+        async def capture_model_iteration(ctx):
+            model_iterations.append(ctx.inputs.react_iteration)
+
+        async def capture_tool_iteration(ctx):
+            tool_iterations.append(ctx.inputs.react_iteration)
+
+        await agent.register_callback(
+            AgentCallbackEvent.BEFORE_MODEL_CALL,
+            capture_model_iteration,
+        )
+        await agent.register_callback(
+            AgentCallbackEvent.BEFORE_TOOL_CALL,
+            capture_tool_iteration,
+        )
 
         with patch.object(agent, "_get_llm", return_value=mock_llm):
             result = await agent.invoke(
@@ -530,6 +548,8 @@ class TestNewReActAgentInvoke(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['result_type'], 'answer')
         self.assertIn('3', result['output'])
         self.assertEqual(mock_llm.call_count, 2)
+        self.assertEqual(model_iterations, [1, 2])
+        self.assertEqual(tool_iterations, [1])
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
     @pytest.mark.asyncio

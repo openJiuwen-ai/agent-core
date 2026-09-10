@@ -12,6 +12,7 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_capabiliti
     ADVANCED_CODE_BROWSER_TOOL_NAMES,
     CORE_BROWSER_TOOL_NAMES,
     DEVTOOLS_BROWSER_TOOL_NAMES,
+    EXTENDED_INTERACTION_BROWSER_TOOL_NAMES,
     NETWORK_BROWSER_TOOL_NAMES,
     PDF_BROWSER_TOOL_NAMES,
     UNSAFE_DEV_BROWSER_TOOL_NAMES,
@@ -27,13 +28,21 @@ def test_core_only_selection_exposes_exactly_core_tools() -> None:
     assert resolved.selected_names == ("core",)
     assert resolved.rejected_names == ()
     assert resolved.allowed_tool_names == CORE_BROWSER_TOOL_NAMES
-    assert len(CORE_BROWSER_TOOL_NAMES) == 18
+    assert len(CORE_BROWSER_TOOL_NAMES) == 14
     assert "browser_wait_for" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_run_code" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_run_code_unsafe" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_console_messages" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_network_requests" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_resize" not in CORE_BROWSER_TOOL_NAMES
+    assert "browser_take_screenshot" not in CORE_BROWSER_TOOL_NAMES
+
+
+def test_extended_interaction_adds_uncommon_mutating_tools() -> None:
+    resolved = resolve_browser_capabilities(["extended_interaction"])
+
+    assert resolved.selected_names == ("core", "extended_interaction")
+    assert resolved.allowed_tool_names == CORE_BROWSER_TOOL_NAMES + EXTENDED_INTERACTION_BROWSER_TOOL_NAMES
 
 
 def test_diagnostic_tools_are_available_through_existing_optional_categories() -> None:

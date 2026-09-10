@@ -54,7 +54,7 @@ def test_shared_message_counter_falls_back_to_character_estimate(caplog):
         "TestProcessor",
     )
 
-    assert result == 3
+    assert result == 4
     assert "[TestProcessor] token_counter failed" in caplog.text
 
 
@@ -65,12 +65,12 @@ def test_usage_aware_uses_last_assistant_usage_plus_tail_len_estimate():
     messages = [
         UserMessage(content="earlier"),
         AssistantMessage(content="ok", usage_metadata=UsageMetadata(total_tokens=5000)),
-        UserMessage(content="x" * 40),  # tail: 40 // 4 = 10
+        UserMessage(content="x" * 40),  # tail: 40 // 3 = 13
     ]
 
     result = count_messages_tokens(messages, token_counter, "TestProcessor", usage_aware=True)
 
-    assert result == 5010
+    assert result == 5013
     token_counter.count_messages.assert_not_called()
 
 
@@ -157,7 +157,7 @@ def test_context_window_with_valid_usage_does_not_double_count_tools():
 
     result = compressor._count_context_window_tokens(window, context)
 
-    assert result == 5010
+    assert result == 5013
     token_counter.count_messages.assert_not_called()
     token_counter.count_tools.assert_not_called()
 

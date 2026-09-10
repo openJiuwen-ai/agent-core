@@ -28,8 +28,14 @@ def _trajectory() -> Trajectory:
                                     "endTimeUnixNano": "2",
                                     "attributes": attributes_from_map(
                                         {
-                                            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                                            f"{semconv.GEN_AI_COMPLETION}.0.content": "Use the lookup tool.",
+                                            semconv.GEN_AI_OUTPUT_MESSAGES: [
+                                                {
+                                                    "role": "assistant",
+                                                    "parts": [
+                                                        {"type": "text", "content": "Use the lookup tool."}
+                                                    ],
+                                                }
+                                            ],
                                             semconv.GEN_AI_TOOL_CALLS: [
                                                 {"id": "call-1", "name": "lookup", "arguments": {"q": "x"}}
                                             ],

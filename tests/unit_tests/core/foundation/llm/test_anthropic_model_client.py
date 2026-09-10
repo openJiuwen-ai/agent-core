@@ -8,7 +8,7 @@ normalization, and usage extraction. Network/SDK paths (invoke/stream)
 are covered separately and require the optional ``anthropic`` SDK.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,6 +16,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
+    AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -31,6 +32,7 @@ from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import 
     _convert_tool_schemas,
     _last_input_is_transient,
     _mark_cache_control,
+    _supports_mid_conversation_system,
 )
 
 
@@ -97,6 +99,133 @@ class TestConvertMessageSchemas:
         ])
         assert system_blocks is None
         assert len(messages) == 1
+
+    def test_mid_conversation_system_stays_in_place_when_supported(self):
+        """Hoisting it would rewrite the prefix ahead of the whole history."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == ["user", "system"]
+        assert messages[1]["content"] == "DELTA"
+
+    def test_mid_conversation_system_is_hoisted_when_unsupported(self):
+        """Models without the capability answer 400, so keep the old shape."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=False,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "DELTA"},
+        ]
+        assert [message["role"] for message in messages] == ["user"]
+
+    def test_mid_conversation_system_after_a_tool_result_stays_in_place(self):
+        """Tool results become a user turn, which is a position the API allows."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "do it"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "t1", "type": "function",
+                     "function": {"name": "bash", "arguments": "{}"}},
+                ]},
+                {"role": "tool", "tool_call_id": "t1", "content": "ok"},
+                {"role": "system", "content": "DELTA"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+            "system",
+        ]
+
+    def test_a_system_turn_followed_by_a_user_turn_is_hoisted(self):
+        """The API needs it last or before an assistant turn; this is neither."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "sure"},
+                {"role": "system", "content": "DELTA"},
+                {"role": "user", "content": "again"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "DELTA"},
+        ]
+        assert [message["role"] for message in messages] == [
+            "user",
+            "assistant",
+            "user",
+        ]
+
+    def test_adjacent_system_turns_both_fall_back(self):
+        """Neither may assume the other gets moved away, so both are hoisted."""
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "FIXED"},
+                {"role": "user", "content": "hi"},
+                {"role": "system", "content": "D1"},
+                {"role": "system", "content": "D2"},
+            ],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [
+            {"type": "text", "text": "FIXED"},
+            {"type": "text", "text": "D1"},
+            {"type": "text", "text": "D2"},
+        ]
+        assert [message["role"] for message in messages] == ["user"]
+
+    def test_a_leading_system_turn_is_never_left_in_messages(self):
+        """``messages[0]`` can never be a system turn, capability or not."""
+        system_blocks, messages = _convert_message_schemas(
+            [{"role": "system", "content": "FIXED"}, {"role": "user", "content": "hi"}],
+            allow_mid_conversation_system=True,
+        )
+        assert system_blocks == [{"type": "text", "text": "FIXED"}]
+        assert [message["role"] for message in messages] == ["user"]
+
+
+class TestMidConversationSystemSupport:
+    @pytest.mark.parametrize("model", [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "anthropic/claude-opus-5",
+        "us.anthropic.claude-opus-4-8-v1:0",
+        "claude-fable-5",
+        "claude-mythos-5",
+    ])
+    def test_supported_models(self, model):
+        assert _supports_mid_conversation_system(model) is True
+
+    @pytest.mark.parametrize("model", [
+        "claude-sonnet-5",
+        "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-haiku-4-5",
+        "deepseek-v4-flash",
+        "",
+        None,
+    ])
+    def test_unsupported_models_keep_the_hoisting_behavior(self, model):
+        assert _supports_mid_conversation_system(model) is False
 
     def test_consecutive_tool_results_merged_into_one_user(self):
         _, messages = _convert_message_schemas([
@@ -455,6 +584,20 @@ class TestApplyMessagesCacheBreakpoint:
         _apply_messages_cache_breakpoint(messages, exclude_tail=False)
         assert messages[0]["content"] == "plain string"
 
+    def test_a_system_tail_anchors_on_the_message_before_it(self):
+        # A mid-conversation system turn is plain text with no block to mark;
+        # walking back keeps the breakpoint instead of dropping it.
+        messages = [self._msg("a"), {"role": "system", "content": "DELTA"}]
+        _apply_messages_cache_breakpoint(messages, exclude_tail=False)
+        assert _is_5m_ephemeral(messages[0]["content"][0]["cache_control"])
+        assert messages[1]["content"] == "DELTA"
+
+    def test_only_unmarkable_messages_noop(self):
+        # Nothing to anchor on; must not raise or wrap around to the end.
+        messages = [{"role": "system", "content": "DELTA"}]
+        _apply_messages_cache_breakpoint(messages, exclude_tail=False)
+        assert messages[0]["content"] == "DELTA"
+
 
 # ---------------------------------------------------------------------------
 # C. _normalize_base_url
@@ -509,6 +652,59 @@ def _make_client() -> AnthropicModelClient:
     return AnthropicModelClient(request_config, client_config)
 
 
+@pytest.mark.asyncio
+async def test_stream_output_parser_keeps_raw_deltas_and_emits_parser_fact() -> None:
+    class _ResponseStream:
+        def __init__(self):
+            self._events = iter((object(), object()))
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._events)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class _StreamContext:
+        async def __aenter__(self):
+            return _ResponseStream()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    fake_client = MagicMock()
+    fake_client.messages.stream.return_value = _StreamContext()
+    fake_client.close = AsyncMock()
+    client = _make_client()
+    client._create_async_anthropic_client = MagicMock(return_value=fake_client)
+    client._use_shared_client = MagicMock(return_value=False)
+    client._event_to_chunk = MagicMock(side_effect=[
+        AssistantMessageChunk(content='{"value":'),
+        AssistantMessageChunk(content="1}", finish_reason="stop"),
+    ])
+
+    class _Parser:
+        async def parse(self, content):
+            if content == '{"value":1}':
+                return {"value": 1}
+            raise ValueError("incomplete")
+
+    chunks = [
+        chunk
+        async for chunk in client.stream(
+            [{"role": "user", "content": "parse"}],
+            output_parser=_Parser(),
+        )
+    ]
+
+    assert [chunk.content for chunk in chunks] == ['{"value":', "1}"]
+    assert chunks[0].parser_content is None
+    assert chunks[1].parser_content == {"value": 1}
+    fake_client.close.assert_awaited_once()
+
+
 class TestUsageFromAnthropic:
     def test_input_tokens_sums_uncached_read_and_write(self):
         usage = MagicMock()
@@ -526,6 +722,7 @@ class TestUsageFromAnthropic:
         assert meta.total_tokens == 200
         assert meta.cache_tokens == 30  # cache_read only
         assert meta.cache_miss_tokens == 120  # uncached + cache_write overlap
+        assert meta.cache_creation_input_tokens == 20
         assert meta.model_name == "claude-opus-4"
 
     def test_zero_cache_fields_handled(self):
@@ -537,6 +734,7 @@ class TestUsageFromAnthropic:
         meta = _make_client()._usage_from_anthropic(usage)
         assert meta.input_tokens == 10
         assert meta.cache_tokens == 0
+        assert meta.cache_creation_input_tokens is None
 
     def test_none_usage_returns_none(self):
         assert _make_client()._usage_from_anthropic(None) is None
@@ -587,11 +785,17 @@ class TestResponseReasoning:
         ]
         response.usage = None
         response.stop_reason = "tool_use"
+        response.stop_sequence = None
+        response.id = "msg-1"
+        response.model = "claude-returned"
 
         message = await _make_client()._parse_response(response)
 
         assert message.reasoning_content == "plan"
         assert message.tool_calls and message.tool_calls[0].id == "t1"
+        assert message.response_id == "msg-1"
+        assert message.response_model == "claude-returned"
+        assert message.provider_metadata == {"stop_reason": "tool_use"}
         assert message.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [
             {"type": "thinking", "thinking": "plan", "signature": "sig"},
             {"type": "tool_use", "id": "t1", "name": "lookup", "input": {"x": 1}},
@@ -676,31 +880,43 @@ class TestSamplingParams:
 
     def test_temperature_wins_when_both_set(self):
         params = self._params(_make_client(), temperature=0.6, top_p=0.8)
-        assert params["temperature"] == 0.6
+        extra = params.get("extra_body") or {}
+        assert extra.get("temperature") == 0.6
+        assert "temperature" not in params
         assert "top_p" not in params
+        assert "top_p" not in extra
 
     def test_config_defaults_do_not_override_anthropic_sampling(self):
         # Common config defaults are OpenAI-oriented. Omitting both lets the
         # Anthropic model choose its protocol default and avoids Claude 4.7+ 400s.
         params = self._params(_make_client())
+        extra = params.get("extra_body") or {}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_top_p_forwarded_when_temperature_absent(self):
         # temperature can only be absent if the config itself has no default.
         client = _make_client()
         client.model_config.temperature = None
         params = self._params(client, top_p=0.8)
-        assert params["top_p"] == 0.8
+        extra = params.get("extra_body") or {}
+        assert extra.get("top_p") == 0.8
+        assert "top_p" not in params
         assert "temperature" not in params
+        assert "temperature" not in extra
 
     def test_default_top_p_dropped_when_temperature_absent(self):
         # top_p=1.0 is the default (no nucleus truncation); skip it entirely.
         client = _make_client()
         client.model_config.temperature = None
         params = self._params(client, top_p=1.0)
+        extra = params.get("extra_body") or {}
         assert "top_p" not in params
         assert "temperature" not in params
+        assert "top_p" not in extra
+        assert "temperature" not in extra
 
     def test_anthropic_native_reasoning_controls_are_forwarded(self):
         client = _make_client()
@@ -710,10 +926,13 @@ class TestSamplingParams:
             output_config={"effort": "high"},
         )
         params = self._params(client, model="claude-opus-4-6")
+        extra = params.get("extra_body") or {}
         assert params["thinking"] == {"type": "adaptive"}
         assert params["output_config"] == {"effort": "high"}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_compatible_endpoint_reasoning_effort_is_forwarded(self):
         client = _make_client()
@@ -735,6 +954,27 @@ class TestSamplingParams:
             "reasoning_effort": "high",
         }
 
+    def test_sampling_merges_into_existing_extra_body(self):
+        client = _make_client()
+        client.model_config.temperature = None
+        client.model_config = ModelRequestConfig(
+            model="glm-5",
+            extra_body={"vendor_flag": True},
+        )
+        params = self._params(client, model="glm-5", temperature=0.4)
+        extra = params["extra_body"]
+        assert extra["vendor_flag"] is True
+        assert extra["temperature"] == 0.4
+        assert "temperature" not in params
+
+    def test_top_k_goes_to_extra_body(self):
+        client = _make_client()
+        client.model_config.temperature = None
+        params = self._params(client, top_k=5)
+        extra = params.get("extra_body") or {}
+        assert extra.get("top_k") == 5
+        assert "top_k" not in params
+
     def test_current_claude_model_drops_explicit_custom_sampling(self):
         params = self._params(
             _make_client(),
@@ -742,8 +982,11 @@ class TestSamplingParams:
             temperature=0.6,
             top_p=0.8,
         )
+        extra = params.get("extra_body") or {}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_base_message_metadata_survives_common_conversion(self):
         client = _make_client()

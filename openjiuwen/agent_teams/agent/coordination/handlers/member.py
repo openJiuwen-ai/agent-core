@@ -30,7 +30,7 @@ from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.coordination.dispatcher import DispatcherHost, PollController
-    from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+    from openjiuwen.agent_teams.external.member_runtime import TeamContextAwareRuntime
 
 
 class MemberHandler(BaseCoordinationHandler):
@@ -81,7 +81,6 @@ class MemberHandler(BaseCoordinationHandler):
         poll_ctrl: "PollController",
     ) -> None:
         super().__init__(host, blueprint, infra, poll_ctrl)
-        self._team_clean_requested = False
 
     async def on_member_event(self, event: EventMessage) -> None:
         """Handle MEMBER_* lifecycle events.
@@ -162,12 +161,12 @@ class MemberHandler(BaseCoordinationHandler):
                 exc,
             )
 
-    def _external_runtime(self) -> "CliRuntimeBase | None":
-        """Return the external CLI runtime when this member uses one."""
+    def _external_runtime(self) -> "TeamContextAwareRuntime | None":
+        """Return a runtime that can publish pending external team context."""
         runtime = getattr(self._round, "harness", None)
-        from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+        from openjiuwen.agent_teams.external.member_runtime import TeamContextAwareRuntime
 
-        if isinstance(runtime, CliRuntimeBase):
+        if isinstance(runtime, TeamContextAwareRuntime):
             return runtime
         return None
 
@@ -191,7 +190,6 @@ class MemberHandler(BaseCoordinationHandler):
                 old_status=old_status,
                 new_status=new_status,
             )
-            await self._maybe_clean_team_after_shutdown(new_status)
         elif event_type == TeamEvent.MEMBER_EXECUTION_CHANGED:
             text = t(
                 "dispatcher.member_execution_changed",
@@ -235,49 +233,3 @@ class MemberHandler(BaseCoordinationHandler):
         if status is None:
             return
         await self._lifecycle.observe_member_status(target_id, status)
-
-    async def _maybe_clean_team_after_shutdown(self, new_status: str | None) -> None:
-        """Clean the team once every non-leader member has shut down.
-
-        Temporary teams normally rely on the leader calling ``clean_team``
-        after ``shutdown_member``. In practice, natural-language "disband
-        team" requests can stop after shutting members down, and persistent
-        teams do not expose ``clean_team`` as a leader tool. This leader-side
-        guard keeps the final cleanup deterministic while still requiring
-        every teammate to reach the terminal SHUTDOWN state first.
-        """
-        if self._team_clean_requested:
-            return
-        if new_status != MemberStatus.SHUTDOWN.value:
-            return
-
-        team_backend = self._infra.team_backend
-        if team_backend is None:
-            return
-
-        try:
-            members = await team_backend.list_members()
-        except Exception as e:
-            team_logger.warning("Failed to list members before team clean: {}", e)
-            return
-
-        leader_name = self._blueprint.member_name
-        teammates = [member for member in members if getattr(member, "member_name", None) != leader_name]
-        if not teammates:
-            return
-        if any(getattr(member, "status", None) != MemberStatus.SHUTDOWN.value for member in teammates):
-            return
-
-        self._team_clean_requested = True
-        team_logger.info(
-            "All non-leader members for team {} are SHUTDOWN; invoking clean_team",
-            getattr(team_backend, "team_name", "?"),
-        )
-        try:
-            cleaned = await team_backend.clean_team()
-        except Exception as e:
-            self._team_clean_requested = False
-            team_logger.warning("Team clean after member shutdown failed: {}", e)
-            return
-        if not cleaned:
-            self._team_clean_requested = False

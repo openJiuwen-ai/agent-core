@@ -5,7 +5,10 @@ import json
 
 from openjiuwen.agent_evolving.agent_rl.schemas import trajectory_to_rollouts
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -14,10 +17,10 @@ def test_trajectory_to_rollouts_converts_assistant_message_response():
         "e1",
         {
             f"{semconv.GEN_AI_REQUEST_MODEL}": "test-model",
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hi",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "hello",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hi"}],
+                [{"role": "assistant", "content": "hello"}],
+            ),
         },
     )
     rollouts = trajectory_to_rollouts(traj)
@@ -35,8 +38,7 @@ def test_trajectory_to_rollouts_keeps_dict_response():
         "e2",
         {
             f"{semconv.GEN_AI_REQUEST_MODEL}": "m",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "ok",
+            **write_llm_exchange([], [{"role": "assistant", "content": "ok"}]),
         },
     )
     rollouts = trajectory_to_rollouts(traj)
@@ -68,12 +70,13 @@ def test_trajectory_to_rollouts_projects_otlp_token_tools_and_meta_fields():
         "e3",
         {
             f"{semconv.GEN_AI_REQUEST_MODEL}": "test-model",
-            f"{semconv.GEN_AI_PROMPT}.0.role": "system",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "be concise",
-            f"{semconv.GEN_AI_PROMPT}.1.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.1.content": "hi",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "calling lookup",
+            **write_llm_exchange(
+                [
+                    {"role": "system", "content": "be concise"},
+                    {"role": "user", "content": "hi"},
+                ],
+                [{"role": "assistant", "content": "calling lookup"}],
+            ),
             semconv.GEN_AI_TOOL_CALLS: json.dumps(response["tool_calls"]),
             semconv.GEN_AI_TOOL_DEFINITIONS: json.dumps(tools),
             "evolution.rl.prompt_token_ids": [101, 102, 103],

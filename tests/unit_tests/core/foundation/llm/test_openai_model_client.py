@@ -1,17 +1,21 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
+    AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
+    UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, LLMApiMode
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
@@ -28,6 +32,11 @@ def _make_client() -> OpenAIModelClient:
     )
     request_config = ModelRequestConfig(model="MiniMax-M3")
     return OpenAIModelClient(request_config, client_config)
+
+
+class _UpperParser:
+    async def parse(self, content: str) -> str:
+        return content.upper()
 
 
 class _Obj:
@@ -91,6 +100,53 @@ def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
             }
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_parser_preserves_response_facts_through_usage_terminal() -> None:
+    client = _make_client()
+    parsed_chunks = [
+        AssistantMessageChunk(
+            content="answer",
+            metadata={"source": "provider"},
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+        AssistantMessageChunk(
+            content="",
+            usage_metadata=UsageMetadata(input_tokens=2, output_tokens=1, total_tokens=3),
+            finish_reason="stop",
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+    ]
+    client._parse_stream_chunk = MagicMock(side_effect=parsed_chunks)
+
+    class _Parser:
+        async def parse(self, content):
+            return {"parsed": content}
+
+    async def _raw_stream():
+        yield object()
+        yield object()
+
+    actual = [
+        chunk
+        async for chunk in client._astream_with_parser(_raw_stream(), _Parser())
+    ]
+
+    assert actual[0].metadata == {"source": "provider"}
+    assert actual[0].parser_content == {"parsed": "answer"}
+    assert actual[0].response_id == "resp-actual"
+    assert actual[0].response_model == "model-actual"
+    assert actual[0].provider_metadata == {"service_tier": "priority"}
+    assert actual[1].usage_metadata.total_tokens == 3
+    assert actual[1].finish_reason == "stop"
+    assert actual[1].response_id == "resp-actual"
+    assert actual[1].response_model == "model-actual"
+    assert actual[1].provider_metadata == {"service_tier": "priority"}
 
 
 class TestApplyModelSpecificParams:
@@ -381,31 +437,61 @@ class TestDisabledThinkingIntent:
         assert sdk_client.chat.completions.create.call_count == 1
 
 
-def test_deepseek_endpoint_profile_adds_reasoning_content_to_assistant_messages():
+def _build_messages_params(model: str, messages: list, *, endpoint_profile: str | None = "vllm") -> dict:
     client_config = ModelClientConfig(
         client_provider="OpenAI",
-        endpoint_profile="deepseek",
+        endpoint_profile=endpoint_profile,
         api_key="sk-test-key",
-        api_base="https://api.deepseek.com/v1",
+        api_base="https://example.invalid/v1",
         verify_ssl=False,
     )
-    client = OpenAIModelClient(ModelRequestConfig(model="deepseek-chat"), client_config)
-
-    params = client._build_request_params(
-        messages=[
-            {"role": "user", "content": "hello"},
-            {"role": "assistant", "content": "hi"},
-        ],
+    client = OpenAIModelClient(ModelRequestConfig(model=model), client_config)
+    return client._build_request_params(
+        messages=messages,
         tools=None,
         temperature=None,
         top_p=None,
-        model=None,
+        model=model,
         stop=None,
         max_tokens=None,
         stream=False,
     )
 
+
+def test_deepseek_model_name_adds_empty_reasoning_content_without_profile():
+    params = _build_messages_params(
+        "DeepSeek-V4-Pro",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+
     assert params["messages"][1]["reasoning_content"] == ""
+
+
+def test_non_deepseek_model_does_not_add_reasoning_content():
+    params = _build_messages_params(
+        "GLM-5.2",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+
+    assert "reasoning_content" not in params["messages"][1]
+
+
+def test_deepseek_model_keeps_existing_reasoning_content():
+    params = _build_messages_params(
+        "deepseek-v4-pro",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "reasoning_content": "real thinking"},
+        ],
+    )
+
+    assert params["messages"][1]["reasoning_content"] == "real thinking"
 
 
 def test_openai_none_auth_uses_placeholder_sdk_key():
@@ -620,3 +706,210 @@ class TestExtractReasoningContent:
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_parse_response_preserves_additive_provider_facts():
+    response = _Obj(
+        id="resp-1",
+        model="returned-model",
+        system_fingerprint="fp-1",
+        service_tier="default",
+        prompt_token_ids=[1, 2],
+        usage=_Obj(
+            prompt_tokens=3,
+            completion_tokens=2,
+            total_tokens=5,
+            input_tokens_details=_Obj(
+                cached_tokens=1,
+                cache_creation_tokens=1,
+            ),
+        ),
+        choices=[
+            _Obj(
+                message=_Obj(content="answer"),
+                finish_reason="stop",
+                token_ids=[3, 4],
+                logprobs=None,
+            )
+        ],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.response_id == "resp-1"
+    assert message.response_model == "returned-model"
+    assert message.provider_metadata == {
+        "system_fingerprint": "fp-1",
+        "service_tier": "default",
+    }
+    assert message.prompt_token_ids == [1, 2]
+    assert message.completion_token_ids == [3, 4]
+    assert message.usage_metadata.cache_tokens == 1
+    assert message.usage_metadata.cache_creation_input_tokens == 1
+
+
+class TestOpenAIResponsesApiKeyMode:
+    """OpenAIModelClient with api_mode=responses talks to /responses."""
+
+    @staticmethod
+    def _make_responses_client() -> OpenAIModelClient:
+        client_config = ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test-key",
+            api_base="https://api.openai.com/v1",
+            api_mode=LLMApiMode.Responses,
+            timeout=60.0,
+            verify_ssl=False,
+        )
+        request_config = ModelRequestConfig(model="gpt-5.4-mini", temperature=0.2, top_p=0.1)
+        return OpenAIModelClient(request_config, client_config)
+
+    @staticmethod
+    def _responses_stream_body() -> bytes:
+        return (
+            "event: response.output_text.delta\n"
+            'data: {"delta":"ok"}\n\n'
+            "event: response.completed\n"
+            'data: {"response":{"id":"resp-1","model":"gpt-returned","status":"completed",'
+            '"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3,'
+            '"input_tokens_details":{"cache_creation_tokens":1}}}}\n\n'
+        ).encode()
+
+    def test_uses_responses_api_detects_api_mode(self):
+        assert self._make_responses_client()._uses_responses_api() is True
+        assert _make_client()._uses_responses_api() is False
+
+    @pytest.mark.asyncio
+    async def test_invoke_routes_to_responses_endpoint_with_api_key(self):
+        import httpx
+
+        seen_request = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_request["headers"] = request.headers
+            seen_request["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            response = await client.invoke("hello", session_id="session-1", custom_headers={"X-Request": "v"})
+
+        assert seen_request["headers"]["Authorization"] == "Bearer sk-test-key"
+        assert seen_request["headers"]["X-Request"] == "v"
+        assert seen_request["body"]["model"] == "gpt-5.4-mini"
+        assert seen_request["body"]["stream"] is True
+        assert response.content == "ok"
+        assert response.response_id == "resp-1"
+        assert response.usage_metadata.total_tokens == 3
+        assert response.usage_metadata.cache_creation_input_tokens == 1
+
+    @pytest.mark.asyncio
+    async def test_invoke_does_not_send_sampling_params_by_default(self):
+        import httpx
+
+        seen_body = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_body.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                content=(
+                    "event: response.output_text.delta\n"
+                    'data: {"delta":"ok"}\n\n'
+                    "event: response.completed\n"
+                    'data: {"response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                ).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            await client.invoke("hello", temperature=0.3, top_p=0.9)
+
+        assert "temperature" not in seen_body
+        assert "top_p" not in seen_body
+
+    @pytest.mark.asyncio
+    async def test_stream_routes_to_responses_endpoint_with_api_key(self):
+        import httpx
+
+        seen_request = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_request["headers"] = request.headers
+            seen_request["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        assert seen_request["headers"]["Authorization"] == "Bearer sk-test-key"
+        assert seen_request["body"]["model"] == "gpt-5.4-mini"
+        assert seen_request["body"]["stream"] is True
+        assert "".join(chunk.content for chunk in chunks) == "ok"
+        assert chunks[-1].usage_metadata.total_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_stream_routes_to_responses_endpoint_with_output_parser(self):
+        import httpx
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=(
+                    "event: response.output_text.delta\n"
+                    'data: {"delta":"ok"}\n\n'
+                    "event: response.completed\n"
+                    'data: {"response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                ).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            chunks = [chunk async for chunk in client.stream("hello", output_parser=_UpperParser())]
+
+        assert "".join(chunk.content for chunk in chunks) == "ok"
+        assert any(chunk.parser_content == "OK" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_invoke_wraps_responses_transport_error(self):
+        import httpx
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            with pytest.raises(BaseError):
+                await client.invoke("hello")

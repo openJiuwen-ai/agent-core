@@ -458,7 +458,7 @@ class TeamWorkerBackend(AgentBackend):
         ``agent_configurator`` already registers for team cleanup — so the
         worker workspace is removed with the team and needs no per-worker
         cleanup registration. Also mounts the team shared workspace into the
-        worker's tree (``.team/{team_name}/``).
+        worker's tree as an opt-in ``.team/{team_name}/`` symlink.
 
         The workspace is always the worker's own directory. With
         ``agent(options={"isolation": "worktree"})`` only the *cwd* moves into
@@ -487,8 +487,10 @@ class TeamWorkerBackend(AgentBackend):
                 stable_base=True,
             )
 
-        # Mount team workspace into worker workspace so it can access shared
-        # files via .team/{team_name}/ — mirrors agent_configurator.
+        # Mount team workspace into worker workspace as an opt-in .team/
+        # symlink — mirrors agent_configurator. Shared deliverables are
+        # addressed by absolute path under the outputs directory; this
+        # symlink is convenience navigation, not the access path.
         from openjiuwen.agent_teams.rails.team_context import get_workspace_manager
 
         workspace_manager = get_workspace_manager(self._build_context)

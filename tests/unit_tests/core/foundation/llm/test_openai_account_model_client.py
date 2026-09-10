@@ -177,7 +177,10 @@ async def test_openai_account_invoke_uses_auth_and_responses_transport():
                 "event: response.output_text.delta\n"
                 'data: {"delta":"ok"}\n\n'
                 "event: response.completed\n"
-                'data: {"response":{"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}\n\n'
+                'data: {"response":{"id":"resp-1","model":"gpt-returned",'
+                '"status":"completed","service_tier":"default",'
+                '"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3,'
+                '"input_tokens_details":{"cache_creation_tokens":1}}}}\n\n'
             ),
             headers={"content-type": "text/event-stream"},
         )
@@ -202,6 +205,13 @@ async def test_openai_account_invoke_uses_auth_and_responses_transport():
     assert response.content == "ok"
     assert response.parser_content == "OK"
     assert response.usage_metadata.total_tokens == 3
+    assert response.usage_metadata.cache_creation_input_tokens == 1
+    assert response.response_id == "resp-1"
+    assert response.response_model == "gpt-returned"
+    assert response.provider_metadata == {
+        "status": "completed",
+        "service_tier": "default",
+    }
     assert seen_request["headers"]["Authorization"] == "Bearer access-token"
     assert seen_request["headers"]["session_id"] == "session-1"
     assert seen_request["headers"]["X-Config"] == "config-value"

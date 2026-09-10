@@ -28,56 +28,25 @@ raises.
 
 from __future__ import annotations
 
-import base64
-import binascii
-import json
 import os
 import threading
 import time
-from typing import Any, Sequence
+from typing import Sequence
 
-from google.protobuf import json_format
-from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
 from opentelemetry.sdk.trace import ReadableSpan
 from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.extensions.observability.otlp_codec import encode_span_to_otlp_json
 
 # Cleanup runs at most every N export cycles to keep latency low.
 _CLEANUP_INTERVAL = 64
 _SECONDS_PER_DAY = 86400
-# OTLP JSON requires traceId/spanId/parentSpanId as hex strings, but
-# google.protobuf.json_format renders protobuf bytes as base64.
-_HEX_ID_KEYS = frozenset({"traceId", "spanId", "parentSpanId"})
-
-
-def _b64_to_hex(value: str) -> str:
-    """Convert a base64-encoded id (MessageToDict output) to lower hex."""
-    try:
-        return binascii.hexlify(base64.b64decode(value)).decode()
-    except Exception:
-        return value
-
-
-def _fix_hex_ids(node: Any) -> Any:
-    """Recursively rewrite id fields from base64 to hex in an OTLP JSON dict."""
-    if isinstance(node, dict):
-        for key, val in list(node.items()):
-            if key in _HEX_ID_KEYS and isinstance(val, str):
-                node[key] = _b64_to_hex(val)
-            else:
-                _fix_hex_ids(val)
-    elif isinstance(node, list):
-        for item in node:
-            _fix_hex_ids(item)
 
 
 def _encode_span_line(span: ReadableSpan) -> str:
     """Encode a single ended span as one OTLP JSON line (hex ids, no indent)."""
-    req = encode_spans([span])
-    otlp_dict = json_format.MessageToDict(req)
-    _fix_hex_ids(otlp_dict)
-    return json.dumps(otlp_dict, ensure_ascii=False)
+    return encode_span_to_otlp_json(span).decode("utf-8")
 
 
 class TraceFileExporter(SpanExporter):

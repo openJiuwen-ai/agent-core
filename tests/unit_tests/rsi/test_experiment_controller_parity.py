@@ -36,31 +36,45 @@ def test_partial_score_remains_an_optimization_target(tmp_path: Path, passed: bo
 
 
 @pytest.mark.asyncio
-async def test_analyzer_uses_thresholded_judge_result_after_controller_selection(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("method,partial_score,partial_passed,expected", [
+    ("llm_as_judge", 0.8, True, []),
+    ("llm_as_judge", 0.799, False, ["partial"]),
+    ("llm_as_judge", 0.965, False, ["partial"]),
+    ("swebench_official", 0.8, True, ["partial"]),
+])
+async def test_analyzer_agrees_with_controller_pass_decision(
+    tmp_path: Path, monkeypatch, method: str, partial_score: float, partial_passed: bool, expected: list[str],
+) -> None:
     from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
     from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import DiagnosisAgentStrategy
     from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
+    from openjiuwen.rsi.harness_rsi.single_harness.iterative import _nonpassing_case_ids
 
     cases = tmp_path / "cases"
-    for case_id, score in (("partial", 0.6), ("complete", 0.8)):
+    case_refs = []
+    for case_id, score, passed in (("partial", partial_score, partial_passed), ("complete", 1.0, True)):
         directory = cases / case_id
         directory.mkdir(parents=True)
         (directory / "result.json").write_text(
             json.dumps(
                 {
                     "case_id": case_id,
-                    "score": float(score >= 0.8),
-                    "status": "passed" if score >= 0.8 else "failed",
-                    "evaluation": {
-                        "passed": score >= 0.8, "method": "llm_as_judge",
-                        "metadata": {"parsed": {"overall_score": score}},
-                    },
+                    "score": score,
+                    "status": "passed" if passed else "failed",
+                    "evaluation": {"passed": passed, "method": method},
                 }
             ),
             encoding="utf-8",
         )
+        case_refs.append({
+            "case_id": case_id,
+            "score": score,
+            "status": "passed" if passed else "failed",
+            "metadata": {"evaluation_method": method, "evaluation_passed": passed},
+        })
     eval_ref = tmp_path / "eval_ref.yaml"
-    _write_yaml(eval_ref, {})
+    _write_yaml(eval_ref, {"cases": case_refs})
+    assert _nonpassing_case_ids(str(eval_ref)) == set(expected)
     strategy = DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused-in-this-test"))
     observed = []
 
@@ -79,7 +93,7 @@ async def test_analyzer_uses_thresholded_judge_result_after_controller_selection
             output_dir=str(tmp_path / "analysis"),
         )
     )
-    assert observed == ["partial"]
+    assert observed == expected
 
 
 @pytest.mark.parametrize("continue_locally,last_accepted", [(False, True), (True, True), (True, False)])

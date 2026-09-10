@@ -203,6 +203,10 @@ class TaskCompletionRail(DeepAgentRail):
             agent, "prompt_attachment_manager", None
         )
         if self._goal_manager is None:
+            inherited = getattr(agent, "goal_manager", None)
+            if inherited is not None:
+                self.set_goal_manager(inherited)
+        if self._goal_manager is None:
             return
 
         from openjiuwen.harness.tools.goal import (
@@ -731,14 +735,38 @@ class TaskCompletionRail(DeepAgentRail):
         return True
 
     @staticmethod
+    def _coerce_run_kind(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if hasattr(value, "value"):
+            value = value.value
+        text = str(value).strip()
+        return text or None
+
+    @staticmethod
     def _get_run_kind(ctx: AgentCallbackContext) -> Optional[str]:
+        """Resolve run_kind from the current callback inputs.
+
+        ``before_model_call`` replaces ``ctx.inputs`` with ``ModelCallInputs``,
+        which has no ``run_kind``. The inner ReAct invoke still stamps
+        ``ctx.extra["run_kind"]`` from the task-loop dict, so extra is the
+        fallback. Only an explicit ``goal`` value injects protocol; any other
+        resolved kind (or none) keeps non-goal sessions clear.
+        """
         inputs = ctx.inputs
-        run_kind = getattr(inputs, "run_kind", None)
-        if run_kind is not None:
-            return str(run_kind.value) if hasattr(run_kind, "value") else str(run_kind)
+        kind = TaskCompletionRail._coerce_run_kind(
+            getattr(inputs, "run_kind", None)
+        )
+        if kind is not None:
+            return kind
         metadata = getattr(inputs, "metadata", None)
         if isinstance(metadata, dict):
-            return metadata.get("run_kind")
+            kind = TaskCompletionRail._coerce_run_kind(metadata.get("run_kind"))
+            if kind is not None:
+                return kind
+        extra = getattr(ctx, "extra", None)
+        if isinstance(extra, dict):
+            return TaskCompletionRail._coerce_run_kind(extra.get("run_kind"))
         return None
 
     @staticmethod

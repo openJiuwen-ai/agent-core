@@ -8,7 +8,7 @@ import re
 import threading
 from collections import OrderedDict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -21,7 +21,6 @@ from openjiuwen.symphony.retrieval.search.runtime.lexical import LexicalDocument
 
 from .config import DiscoverySettings
 from .models import SkillInventory, SkillRecord, inventory_from_records, sanitize_model_text
-
 
 SkillRecordsProvider = Callable[[], Iterable[SkillRecord]]
 VisibleSkillNames = set[str] | frozenset[str] | Callable[[], set[str] | frozenset[str] | None] | None
@@ -46,6 +45,11 @@ class SkillIndexSnapshot:
     nodes: tuple[dict[str, Any], ...]
     record_hashes: tuple[tuple[str, str], ...]
     fingerprint: str
+    taxonomy_fingerprint: str = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        payload = json.dumps(self.nodes, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        object.__setattr__(self, "taxonomy_fingerprint", hashlib.sha256(payload.encode("utf-8")).hexdigest())
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -156,6 +160,7 @@ class SkillDirectoryView:
         self.record_path_by_id: dict[str, str] = {}
         self.record_id_by_meta_path: dict[str, str] = {}
         self._children: dict[str, tuple[DirectoryEntry, ...]] = {}
+        self._skill_counts: dict[str, int] = {}
         self._index_paths()
 
     @staticmethod
@@ -172,6 +177,10 @@ class SkillDirectoryView:
         if normalized not in self.node_by_path:
             raise ValueError(f"No such Skill directory: {normalized}")
         return self._children.get(normalized, ())
+
+    def skill_count(self, path: str) -> int:
+        """Count visible Skills in this category and all its descendants."""
+        return self._skill_counts[self.normalize_path(path)]
 
     def entries(
         self,
@@ -228,6 +237,21 @@ class SkillDirectoryView:
         if worker_id is None:
             raise ValueError(f"No such Skill metadata path: {normalized}")
         return self.record_by_id[worker_id]
+
+    def category_text(self, worker_id: str) -> str:
+        """Return ordered category names and descriptions for one Skill."""
+
+        path = str(PurePosixPath(self.record_path_by_id[worker_id]).parent)
+        levels: list[tuple[str, str]] = []
+        while path not in {"", ".", "/"}:
+            node = self.node_by_path.get(path)
+            if node is not None:
+                levels.append((node.label, _searchable_category_description(node.description)))
+            path = str(PurePosixPath(path).parent)
+        parts = []
+        for level in reversed(levels):
+            parts.extend(part for part in level if part)
+        return "\n".join(parts)
 
     def _scoped_entries(
         self,
@@ -357,8 +381,10 @@ class SkillDirectoryView:
                     )
                 )
             self._children[path] = tuple(entries)
+            self._skill_counts[path] = sum(entry.kind == "skill" for entry in entries)
             for child, child_path in child_nodes:
                 visit(child, child_path)
+                self._skill_counts[path] += self._skill_counts[child_path]
 
         visit(self.root, "/")
 
@@ -438,8 +464,9 @@ class SkillFS:
             for record in self._artifact.items
         }
 
-    def prompt_snapshot(self) -> SkillPromptSnapshot:
-        self._refresh()
+    def prompt_snapshot(self, *, refresh: bool = True) -> SkillPromptSnapshot:
+        if refresh:
+            self._refresh()
         documents = tuple(sorted(self._artifact.items, key=lambda item: (item.worker_id.casefold(), item.worker_id)))
         rendered = "\n".join(f"- {item.worker_id}: {' '.join(item.description.split())}" for item in documents)
         estimated = _estimate_tokens(rendered)
@@ -457,10 +484,7 @@ class SkillFS:
         branches: tuple[SkillPromptBranch, ...] = ()
         omitted = 0
         if not small and self._artifact.layout == "tree":
-            directory_rows = tuple(entry for entry in self._view.children("/") if entry.kind == "dir")
-            shown = directory_rows[: self._settings.max_list_entries]
-            branches = tuple(SkillPromptBranch(entry.path, entry.label, entry.description) for entry in shown)
-            omitted = max(0, len(directory_rows) - len(shown))
+            branches, omitted = self._prompt_branches()
         return SkillPromptSnapshot(
             mode=mode,
             total_count=len(documents),
@@ -473,6 +497,30 @@ class SkillFS:
             branches=branches,
             omitted_branch_count=omitted,
         )
+
+    def _prompt_branches(self) -> tuple[tuple[SkillPromptBranch, ...], int]:
+        directories = tuple(entry for entry in self._view.children("/") if entry.kind == "dir")
+        limit = self._settings.max_list_entries
+        frontier = tuple(SkillPromptBranch(entry.path, entry.label, entry.description) for entry in directories[:limit])
+        omitted = max(0, len(directories) - len(frontier))
+        if omitted:
+            return frontier, omitted
+        while True:
+            expanded = []
+            for branch in frontier:
+                children = self._view.children(branch.path)
+                # Expose a deeper complete navigation menu, never hide direct Skills or a sibling branch.
+                if children and all(entry.kind == "dir" for entry in children):
+                    expanded.extend(
+                        SkillPromptBranch(entry.path, f"{branch.label} > {entry.label}", entry.description)
+                        for entry in children
+                    )
+                else:
+                    expanded.append(branch)
+            next_frontier = tuple(expanded)
+            if next_frontier == frontier or len(next_frontier) > limit:
+                return frontier, 0
+            frontier = next_frontier
 
     def read_body(self, record: SkillRecord) -> str:
         key = (record.worker_id, record.content_hash)
@@ -501,12 +549,11 @@ class SkillFS:
         *,
         case_insensitive: bool,
         fixed_strings: bool,
+        term_mode: bool = False,
     ) -> tuple[str, ...]:
         """Search one live scope using corpus statistics cached by inventory hash."""
 
-        cache_key = (
-            self._artifact.inventory.fingerprint + "\0" + "\0".join(item.worker_id for item in self._artifact.items)
-        )
+        cache_key = self._artifact.fingerprint
         if self._lexical_index is None or cache_key != self._lexical_cache_key:
             with _LEXICAL_CACHE_LOCK:
                 self._lexical_index = _LEXICAL_CACHE.get(cache_key)
@@ -518,6 +565,8 @@ class SkillFS:
                                 item.name,
                                 item.description,
                                 self.read_body(item),
+                                item.aliases,
+                                self._view.category_text(item.worker_id),
                             )
                             for item in self._artifact.items
                         )
@@ -528,13 +577,32 @@ class SkillFS:
                 else:
                     _LEXICAL_CACHE.move_to_end(cache_key)
             self._lexical_cache_key = cache_key
-        hits = self._lexical_index.search(
-            query,
-            keys=(record.worker_id for record in records),
-            case_insensitive=case_insensitive,
-            fixed_strings=fixed_strings,
+        keys = tuple(record.worker_id for record in records)
+        hits = (
+            self._lexical_index.search_terms(query, keys=keys)
+            if term_mode
+            else self._lexical_index.search(
+                query,
+                keys=keys,
+                case_insensitive=case_insensitive,
+                fixed_strings=fixed_strings,
+            )
         )
         return tuple(hit.key for hit in hits)
+
+    def content_match_snippet(self, record: SkillRecord, queries: tuple[str, ...]) -> str:
+        """Return bounded evidence hidden by the compact result row."""
+
+        if self._lexical_index is None:
+            return ""
+        return self._lexical_index.match_snippet(record.worker_id, queries)
+
+    def missing_content_terms(self, query: str) -> tuple[str, ...]:
+        """Return natural query terms absent from the current content index."""
+
+        if self._lexical_index is None:
+            return ()
+        return self._lexical_index.missing_terms(query)
 
     def _refresh(self) -> None:
         inventory = inventory_from_records(self._records_provider())
@@ -554,6 +622,7 @@ class SkillFS:
             "inventory": inventory.fingerprint,
             "visible": [item.worker_id for item in items],
             "index": snapshot.fingerprint if snapshot is not None else "",
+            "taxonomy": snapshot.taxonomy_fingerprint if snapshot is not None else "",
             "state": index_state,
         }
         fingerprint = hashlib.sha256(
@@ -574,8 +643,6 @@ class SkillFS:
         selected = [
             item for item in items if item.worker_id.casefold() in preferred or item.name.casefold() in preferred
         ]
-        selected_ids = {item.worker_id for item in selected}
-        selected.extend(item for item in items if item.worker_id not in selected_ids)
         return tuple(selected[: self._settings.max_list_entries])
 
 
@@ -743,7 +810,10 @@ def _build_live_tree(
         overlay = RetrieverNode(
             node_id=_OVERLAY_NODE_ID,
             label=_OVERLAY_SEGMENT,
-            description="Skills installed after the pinned taxonomy was built.",
+            description=(
+                f"{len(overlay_items)} of {len(items)} Skills are not in the other categories. "
+                "Search here or omit category to search all Skills, including these."
+            ),
             items=tuple(sorted(overlay_items, key=lambda item: (item.item_id.casefold(), item.item_id))),
         )
         root = RetrieverNode(
@@ -754,6 +824,16 @@ def _build_live_tree(
             items=root.items,
         )
     return root, catalog
+
+
+def _searchable_category_description(value: str) -> str:
+    lines = []
+    for raw_line in str(value or "").splitlines():
+        line = raw_line.strip()
+        if not line or line.casefold().startswith(("covers ", "representative ", "don't select when:")):
+            continue
+        lines.append(line)
+    return " ".join(lines)
 
 
 def _validate_taxonomy_nodes(nodes: tuple[dict[str, Any], ...], *, expected_worker_ids: set[str]) -> None:

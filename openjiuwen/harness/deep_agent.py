@@ -214,6 +214,7 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
         "skill_tool",
         "memory_search",
         "memory_get",
+        "free_search",
         "paid_search",
         "fetch_webpage",
         "write_memory",
@@ -593,7 +594,8 @@ class DeepAgent(BaseAgent):
         """Sync tool cards in the shared AbilityManager during hot-reconfigure.
 
         Tools are matched by id: a card whose id already exists in the
-        AbilityManager is left untouched.  Cards with a new id replace any
+        AbilityManager is left untouched, except paid-search cards whose
+        configured-provider metadata has changed. Cards with a new id replace any
         existing entry with the same name, or are added fresh.  Tools present
         in the AbilityManager but absent from config.tools are removed.
         MCP server registrations and other ability types are not affected.
@@ -620,7 +622,8 @@ class DeepAgent(BaseAgent):
         for name, card in new_by_name.items():
             existing = self.ability_manager.get(name)
             existing_tool = existing if isinstance(existing, ToolCard) else None
-            if existing_tool is not None and existing_tool.id == card.id:
+            same_card = existing_tool is not None and existing_tool.id == card.id
+            if same_card and (name != "paid_search" or existing_tool == card):
                 self._ensure_builtin_tool_resource(card, config)
                 continue  # Same id - no update needed.
             if existing_tool is not None:
@@ -1296,6 +1299,7 @@ class DeepAgent(BaseAgent):
         for rail_inst in initialized_rails:
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
+                self._bind_live_goal_manager(rail_inst)
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
@@ -1442,13 +1446,22 @@ class DeepAgent(BaseAgent):
                 language=self._deep_config.language
             )
 
+        subagent_rails = None
+        if spec.rails is not None:
+            subagent_rails = []
+            for rail in spec.rails:
+                fork_for_agent = getattr(rail, "fork_for_agent", None)
+                subagent_rails.append(
+                    fork_for_agent() if callable(fork_for_agent) else rail
+                )
+
         create_kwargs = {
             "model": spec.model or self._deep_config.model,
             "card": spec.agent_card,
             "system_prompt": spec.system_prompt,
             "tools": spec.tools,
             "mcps": spec.mcps,
-            "rails": spec.rails,
+            "rails": subagent_rails,
             "enable_task_loop": spec.enable_task_loop,
             "max_iterations": (
                 spec.max_iterations
@@ -1877,10 +1890,24 @@ class DeepAgent(BaseAgent):
 
         return removed
 
+    def _bind_live_goal_manager(self, rail: TaskCompletionRail) -> None:
+        """Copy ``DeepAgent.goal_manager`` onto a rail created after ``start()``.
+
+        ``start()`` is the only place that constructs ``GoalManager``. Hot
+        reconfigure queues a fresh ``TaskCompletionRail`` with
+        ``_goal_manager is None``, so the next ``init()`` would skip goal
+        tools and protocol injection unless this binding runs first.
+        """
+        manager = self.goal_manager
+        if manager is None:
+            return
+        rail.set_goal_manager(manager)
+
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
         if isinstance(rail, TaskCompletionRail):
             self._task_completion_rail = rail
+            self._bind_live_goal_manager(rail)
         if isinstance(rail, DeepAgentRail):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
@@ -2206,9 +2233,22 @@ class DeepAgent(BaseAgent):
         self._registered_rails.append(rail)
 
     async def _run_single_round_invoke(
-        self, ctx: AgentCallbackContext, session: Optional[Session]
+        self,
+        ctx: AgentCallbackContext,
+        session: Optional[Session],
+        *,
+        streaming: bool = False,
     ) -> Dict[str, Any]:
-        """Invoke inner ReActAgent exactly once."""
+        """Invoke inner ReActAgent exactly once.
+
+        Args:
+            ctx: Callback context carrying the normalized invocation inputs.
+            session: Session shared with the long-lived interaction.
+            streaming: Whether model chunks should be written to the session stream.
+
+        Returns:
+            The completed ReAct invocation result.
+        """
         modified = ctx.inputs
         if not isinstance(modified, InvokeInputs):
             raise build_error(
@@ -2222,10 +2262,14 @@ class DeepAgent(BaseAgent):
                 error_msg="DeepAgent not configured. Call configure() first.",
             )
 
-        return await self._react_agent.invoke(
-            self._to_effective_inputs(modified),
-            session,
-        )
+        effective_inputs = self._to_effective_inputs(modified)
+        if streaming:
+            return await self._react_agent.invoke(
+                effective_inputs,
+                session,
+                _streaming=True,
+            )
+        return await self._react_agent.invoke(effective_inputs, session)
 
     async def _setup_task_loop(
         self,
@@ -3218,7 +3262,11 @@ class DeepAgent(BaseAgent):
             ):
                 await self._sync_expert_role_attachment(invoke_inputs, session)
                 if is_resume_input:
-                    result = await self._run_single_round_invoke(ctx, session)
+                    result = await self._run_single_round_invoke(
+                        ctx,
+                        session,
+                        streaming=True,
+                    )
                 else:
                     await controller.submit_round(
                         session,
@@ -3391,8 +3439,8 @@ class DeepAgent(BaseAgent):
             )
 
             rail = self._task_completion_rail
-            if rail is not None and hasattr(rail, "set_goal_manager"):
-                rail.set_goal_manager(self.goal_manager)
+            if isinstance(rail, TaskCompletionRail):
+                self._bind_live_goal_manager(rail)
                 try:
                     init_rail(rail, self)
                 except Exception:

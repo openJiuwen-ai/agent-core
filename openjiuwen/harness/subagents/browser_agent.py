@@ -26,9 +26,6 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_cont
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_processor import (
     BrowserWorkingContextProcessorConfig,
 )
-from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context_rail import (
-    BrowserWorkingContextRail,
-)
 from openjiuwen.harness.tools.browser_move.offload_recall import BrowserOffloadRecallTool
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import (
     BrowserInstanceConfig,
@@ -73,125 +70,49 @@ _BROWSER_PARENT_MODEL_MARKER = "_browser_agent_parent_model"
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "You are a browser automation agent responsible for executing web tasks directly. "
-    "Plan and decide at this agent level, then use Playwright browser tools and approved runtime "
-    "helper tools to navigate, click, type, select, inspect, and extract information. "
-    "Keep actions targeted and avoid unnecessary page snapshots. "
-    "Every model call includes one runtime-maintained <browser_working_context> immediately before the "
-    "latest complete <browser_state> observation. The working context is authoritative for phase status, "
-    "field coverage, blockers, structured evidence, recent semantic action deltas, and the runtime directive. "
-    "A fresh browser capture occurs initially and after a recognized state-invalidating browser action; "
-    "otherwise the cached observation is reused. When the runtime directive requires replanning or a recent "
-    "action reports no semantic progress, do not repeat it; use a materially different strategy or finish "
-    "with the available evidence. "
-    "Before acting, classify the task as a simple lookup or a complex workflow and keep a compact "
-    "phase plan. For a simple lookup, prefer a direct search-results URL when the search engine and "
-    "query are known, unless operating the search form is itself the requested outcome. "
-    "For a complex form, group deterministic field, date, filter, and submit operations into "
-    "browser_batch_interact and end the batch with wait_for_selector, wait_for_text, or "
-    "wait_for_load_state. For dynamic pages, use wait_for_url, wait_for_first_card_title, "
-    "wait_for_sort_state, wait_for_result_count, wait_for_dom_text_change, or wait_for_stable "
-    "with a short polling interval and an explicit total timeout. Interpret requests to wait until "
-    "fully loaded or pause appropriately as condition stability, not a fixed three-second sleep. "
-    "Prefer observable condition waits over sleep, wait_after_ms, or fixed wait_after_each_ms delays. "
-    "Before broad page snapshots, full-body scans, or generic DOM scraping, choose the smallest "
-    "compact probe that matches the task. "
-    "Use browser_probe_interactives for buttons, links, inputs, forms, navigation controls, "
-    "login controls, pagination controls, menus, and other visible interactive elements. "
-    "When using browser_probe_interactives only for page-level controls, prefer max_items around "
-    "20-30 unless the task explicitly requires a larger inventory. "
-    "On product pages, marketplace pages, search-result pages, catalog pages, article-list pages, "
-    "or any page with repeated visible cards/listings, call browser_probe_cards before broad "
-    "extraction. "
-    "Use browser_probe_cards to identify compact repeated structures such as product cards, result "
-    "cards, book cards, article cards, listing rows, title/price/rating/review/availability fields, "
-    "primary links, visible controls, generation-scoped target IDs, and recurring structure "
-    "signatures. "
-    "For product/listing/item-data tasks, prefer browser_probe_cards first; call "
-    "browser_probe_interactives only if you also need page-level navigation, filters, forms, or "
-    "controls outside the cards. "
-    "Treat page_id/generation_id/url/title/interactives/cards/field_coverage/blockers as the single "
-    "compact PageState contract. Pass PageState generation_id and probe target_id directly to "
-    "browser_batch_interact; never translate target IDs into guessed CSS. Explicit selectors are "
-    "reserved for validated read-only extraction and condition waits. "
-    "When a card exposes primary_link or href, navigate directly to that URL instead of clicking "
-    "its selector_hint. "
-    "When several fields are needed from the same page, extract them together in one "
-    "browser_batch_interact call with named extract_text/extract_value steps, or consume one "
-    "browser_probe_cards result that already contains all fields. "
-    "Use browser_snapshot only when compact probes are insufficient, when accessibility structure "
-    "is needed, or when exact element references are required by a Playwright MCP action. "
-    "When an older browser result is replaced by a <persisted-output> marker and its preview is "
-    "insufficient, use browser_recall_offload with the marker handle. Recalled refs/selectors are "
-    "stale after navigation and are evidence only; never use them for interaction. "
-    "Use browser_evaluate for a small, exact target or computation. If an explicit advanced_code "
-    "or unsafe_dev capability makes a browser_run_code tool visible, use that tool only when the "
-    "compact probes, evaluate, snapshot, and deterministic actions are insufficient. Never use a "
-    "run-code tool to dump the entire document body. "
-    "Use browser_custom_action only for deterministic helper actions that are awkward to express with "
-    "the primitive browser tools. "
-    "Do not assume a nested browser worker or browser_run_task wrapper exists. "
-    "Treat each navigation, form, filtering, and extraction phase as a unit. If the runtime detects three "
-    "consecutive no-progress states or two semantic state revisits, re-plan instead of trying more selector variants. "
-    "The global turn budget is intentionally generous, but do not spend it on one-action phases or "
-    "duplicate verification. One direct page value or one structured probe/evaluate result that "
-    "contains every requested field is sufficient evidence. Stop immediately when all requested "
-    "fields are evidenced; do not confirm the same fact with snapshot, probe, and evaluate again. "
-    "Avoid redundant actions, preserve session continuity, and only claim completion when the "
-    "requested browser outcome is actually evidenced."
+    "Choose the strategy at this agent level and use the available Playwright and runtime tools; "
+    "the runtime validates targets and outcomes but does not replace your task judgment.\n"
+    "Every model call includes one runtime-maintained <browser_working_context> followed by the latest "
+    "<browser_state>. Requirements, evidence, blockers, status, and runtime directive are authoritative. "
+    "A fresh browser capture occurs initially and after a recognized page mutation; otherwise the cached "
+    "observation is reused. When the runtime directive requires replanning, change the strategy materially.\n"
+    "For a simple lookup, prefer a direct search-results URL when the engine and query are known. Use "
+    "browser_probe_interactives for page controls and browser_probe_cards for repeated results or products. "
+    "Use the compact PageState target_id with its generation_id directly; never reconstruct guessed CSS from "
+    "a target ID. When a card has primary_link or href, navigate directly to that URL.\n"
+    "Use browser_batch_interact when two or more deterministic actions or same-page field extractions are already "
+    "known. Use a primitive for one uncertain action. Prefer observable condition waits over fixed sleep. Use "
+    "browser_snapshot only when compact probes are insufficient, and browser_evaluate only for a small exact "
+    "target or computation. If an older result has a <persisted-output> marker, recall it only when its preview "
+    "does not contain the needed evidence; recalled targets are not executable after navigation.\n"
+    "Record requested values under the canonical requirement fields and use unknown for an inspected missing "
+    "value. One trustworthy page value or structured result is enough; do not verify the same fact with multiple "
+    "tools. Stop immediately when the requested outcome is evidenced. The runtime determines final status, so "
+    "return a concise natural-language result rather than another progress object.\n"
+    "If an optional capability makes a browser_run_code tool visible, use it only when deterministic tools are "
+    "insufficient, and never dump the full document. Preserve session continuity and report a concrete blocker "
+    "when the available browser state or tools cannot complete the task."
 )
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
-    "你是浏览器自动化代理，负责直接执行网页任务。"
-    "请在当前代理层面规划和决策，并使用 Playwright 浏览器工具以及已批准的运行时辅助工具"
-    "完成导航、点击、输入、选择、检查和信息提取。"
-    "操作应保持目标明确，避免不必要的页面快照。"
-    "每次模型调用都会在最新完整的 <browser_state> 观察之前注入一份由 runtime 维护的 "
-    "<browser_working_context>。其中的阶段状态、字段覆盖率、阻断项、结构化证据、最近动作语义变化和 "
-    "runtime 指令均为权威信息。系统仅在初始调用和已识别的浏览器状态变更操作完成后重新捕获页面；"
-    "其他调用复用缓存观察。当 runtime 要求重新规划或最近动作没有语义进展时，不得重复该操作；"
-    "应改用实质不同的策略，或基于现有证据结束任务。"
-    "执行前先将任务判断为简单查询或复杂流程，并维护紧凑的阶段计划。"
-    "简单查询在已知搜索引擎和关键词时，优先直接构造搜索结果 URL；"
-    "只有当操作搜索表单本身就是任务目标时才逐项操作搜索框。"
-    "复杂表单应将确定的字段、日期、筛选和提交操作合并到 browser_batch_interact，"
-    "并在 batch 末尾使用 wait_for_selector、wait_for_text 或 wait_for_load_state。"
-    "优先等待可观察条件，不要使用 sleep、wait_after_ms 或固定 wait_after_each_ms。"
-    "在使用大范围页面快照、全页面扫描或通用 DOM 抓取前，优先选择与任务匹配的最小紧凑探测工具。"
-    "需要按钮、链接、输入框、表单、导航控件、登录控件、分页控件、菜单或其他可见交互元素时，"
-    "优先使用 browser_probe_interactives；如果只是查找页面级控件，max_items 通常保持在 20-30 左右，"
-    "除非任务明确需要更大的元素清单。"
-    "在商品页、市场页、搜索结果页、目录页、文章列表页，或任何包含重复可见卡片/列表项的页面上，"
-    "应先调用 browser_probe_cards，再进行大范围提取。"
-    "使用 browser_probe_cards 识别商品卡片、结果卡片、图书卡片、文章卡片、列表行、"
-    "标题/价格/评分/评论数/库存字段、主链接、可见控件、generation-scoped target_id 和重复结构特征。"
-    "对于商品、列表或条目数据任务，优先使用 browser_probe_cards；只有在还需要卡片外的页面级导航、"
-    "筛选器、表单或控件时，再调用 browser_probe_interactives。"
-    "将 page_id/generation_id/url/title/interactives/cards/field_coverage/blockers 作为唯一的紧凑 "
-    "PageState 契约。调用 browser_batch_interact 时直接传当前 PageState 的 generation_id，"
-    "以及 probe 返回的 target_id；禁止把 target_id 重新拼成猜测的 CSS。显式 selector 仅限经过"
-    "验证的只读提取和条件等待。"
-    "卡片包含 primary_link 或 href 时，应直接导航该 URL，不要点击其 selector_hint。"
-    "同一页面需要多个字段时，应在一次 browser_batch_interact 中使用带字段名的 "
-    "extract_text/extract_value 统一提取，或直接使用一次已包含全部字段的 "
-    "browser_probe_cards 结果。"
-    "动态页面应使用 wait_for_url、wait_for_first_card_title、wait_for_sort_state、"
-    "wait_for_result_count、wait_for_dom_text_change 或 wait_for_stable，并设置总 timeout。"
-    "“等待完全加载”或“适当停顿”表示等待条件稳定，不表示固定 sleep 3 秒。"
-    "仅在紧凑探测不足、需要无障碍结构，或 Playwright MCP 操作需要精确元素引用时使用 browser_snapshot。"
-    "旧浏览器结果被替换为 <persisted-output> 且预览不足时，使用标记中的 handle 调用 "
-    "browser_recall_offload。页面导航后，恢复结果里的 ref/selector 已过期，只能作为证据，禁止用于交互。"
-    "小范围精确目标或计算优先使用 browser_evaluate。只有显式 advanced_code 或 unsafe_dev 能力让 "
-    "browser_run_code 工具可见，且紧凑探测、evaluate、snapshot 和确定性操作都不足时，才使用该工具。"
-    "禁止使用任何 run-code 工具转储整个 document body。"
-    "browser_custom_action 只用于基础浏览器工具难以表达的确定性辅助动作。"
-    "不要假设存在嵌套 browser worker 或 browser_run_task 包装器。"
-    "将导航、表单、筛选和提取分别作为完整阶段执行。"
-    "runtime 检测到连续三次无进展状态或两次语义状态回访时，必须重新规划，不要继续尝试更多 selector 变体。"
-    "全局轮次预算有意设置得较大，但不得把预算消耗在单动作阶段或重复验证上。"
-    "一个直接页面值，或一次已包含全部所需字段的结构化 probe/evaluate 结果，就是充分证据。"
-    "所需字段全部有证据后立即结束；禁止再用 snapshot、probe 和 evaluate 重复确认同一事实。"
-    "避免重复动作，保持会话连续性；只有当网页上的具体证据证明任务已完成时，才声明完成。"
-    "请如实、简洁地汇报结果。"
+    "你是浏览器自动化代理，负责直接完成网页任务。请在当前代理层决定策略并使用可见的 Playwright "
+    "和 runtime 工具；runtime 负责验证目标和结果，但不代替你的任务判断。\n"
+    "每次模型调用都会依次提供 runtime 维护的 <browser_working_context> 和最新 <browser_state>。"
+    "其中的请求字段、证据、阻断项、状态和 runtime 指令是权威信息。系统仅在初始调用和已识别的"
+    "页面变更后重新观察；runtime 要求重新规划时，应实质改变策略。\n"
+    "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
+    "browser_probe_interactives，重复结果或商品使用 browser_probe_cards。直接使用 PageState 返回的 "
+    "target_id 和 generation_id，禁止把 target_id 改写成猜测的 CSS。卡片包含 primary_link 或 href "
+    "时直接导航该 URL。\n"
+    "只有两个及以上确定动作或同页多字段提取时使用 browser_batch_interact；单个不确定动作使用基础工具。"
+    "优先等待可观察条件，不使用固定 sleep。紧凑 Probe 不足时再使用 browser_snapshot；"
+    "browser_evaluate 仅用于小范围精确目标或计算。旧结果出现 <persisted-output> 且预览不足时才恢复；"
+    "导航后恢复内容中的目标不可继续操作。\n"
+    "按 browser_working_context 中的规范字段记录证据；字段已检查但缺失时使用 unknown。"
+    "一个可信页面值或结构化结果已经足够，不要用多个工具重复验证同一事实。请求结果有证据后立即结束。"
+    "最终状态由 runtime 决定，只返回简洁自然语言结果，不再维护第二份进度对象。\n"
+    "只有可选能力明确暴露 browser_run_code 时才使用，并且仅限确定性工具不足的情况；禁止转储完整页面。"
+    "保持浏览器会话连续；现有页面或工具确实无法完成时，报告具体 blocker。"
 )
 
 DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT: Dict[str, str] = {
@@ -432,10 +353,10 @@ def create_browser_agent(
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     working_context_config = BrowserWorkingContextProcessorConfig(
         language=resolved_language,
+        runtime_projection_only=True,
     )
     injected_rails: List[AgentRail] = [
         BrowserRuntimeRail(browser_backend),
-        BrowserWorkingContextRail(working_context_config),
     ]
     injected_tools.append(BrowserOffloadRecallTool(workspace, language=resolved_language))
 
@@ -451,13 +372,25 @@ def create_browser_agent(
         "browser_probe_interactives",
         "browser_probe_cards",
         "browser_snapshot",
+        "browser_find",
         "browser_evaluate",
     ]
+    browser_tool_result_window_processor = (
+        "ToolResultWindowProcessor",
+        ToolResultWindowProcessorConfig(
+            tool_names=browser_windowed_tool_names,
+            keep_last_k=1,
+            trim_size=1000,
+            min_offload_chars=4096,
+            small_result_trim_size=800,
+        ),
+    )
     caller_context_rails = [rail for rail in (rails or []) if isinstance(rail, ContextProcessorRail)]
     if caller_context_rails:
         for context_rail in caller_context_rails:
             context_rail.add_processors(
                 [
+                    browser_tool_result_window_processor,
                     browser_state_processor,
                     browser_working_context_processor,
                 ]
@@ -466,16 +399,7 @@ def create_browser_agent(
         injected_rails.append(
             ContextProcessorRail(
                 processors=[
-                    (
-                        "ToolResultWindowProcessor",
-                        ToolResultWindowProcessorConfig(
-                            tool_names=browser_windowed_tool_names,
-                            keep_last_k=1,
-                            trim_size=1000,
-                            min_offload_chars=4096,
-                            small_result_trim_size=800,
-                        ),
-                    ),
+                    browser_tool_result_window_processor,
                     browser_state_processor,
                     browser_working_context_processor,
                 ],

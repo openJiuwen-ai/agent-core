@@ -14,6 +14,7 @@ from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.kv_cache.kv_cache_hooks import affinity_enabled
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.subagent_runtime.activity import ActivityProjector
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.errors import (
@@ -118,6 +119,8 @@ class SubagentSessionManager:
             envs[KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV] = parent_session_id
 
         card = subagent.card
+        parent_subject = current_execution_subject()
+        parent_subject_id = parent_subject.subject_id if parent_subject is not None else "main"
 
         def session_factory() -> Any:
             return create_agent_session(
@@ -179,6 +182,7 @@ class SubagentSessionManager:
             display_name=display_name,
             role=role,
             parent_session_id=parent_session_id,
+            parent_subject_id=parent_subject_id,
             agent=subagent,
             session_factory=session_factory,
             running_semaphore=self._running_semaphore,

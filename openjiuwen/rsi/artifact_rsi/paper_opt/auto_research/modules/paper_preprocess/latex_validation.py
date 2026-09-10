@@ -1,4 +1,17 @@
-"""Standalone validation and structural parsing of a local LaTeX paper folder."""
+"""Best-effort ingestion and structural parsing of a local LaTeX paper folder.
+
+The only two fatal preconditions are: the folder doesn't exist, or it has no
+main.tex entry point. Everything else -- preamble shape, title/abstract
+presence, section-naming conventions, figure/bibliography completeness -- is
+collected as non-fatal `warnings` on the returned document instead of
+rejecting it outright. The only real consumer of this document
+(extractor.py's evidence extraction) already degrades gracefully on missing
+title/abstract/sections, so gating ingestion on those was rejecting papers
+this pipeline could otherwise still read and summarize just fine (different
+conference templates, non-English section headings, biblatex instead of
+BibTeX, `\\graphicspath`-relative figures, etc.) for no benefit to that
+consumer.
+"""
 
 from __future__ import annotations
 
@@ -44,17 +57,20 @@ def _tex_reference(raw: str, parent: Path, root: Path) -> Path | None:
     return candidate if _inside(candidate, root) else None
 
 
-def _expand(path: Path, root: Path, errors: list[str], stack: set[Path], files: list[Path]) -> str:
+def _expand(path: Path, root: Path, warnings: list[str], stack: set[Path], files: list[Path]) -> str:
+    """Recursively inline \\input/\\include. Never fatal: a cyclic, escaping,
+    or missing include is skipped (and noted in `warnings`) so the rest of
+    the document still gets read."""
     resolved = path.resolve()
     if resolved in stack:
-        errors.append(f"cyclic LaTeX include detected: {path.relative_to(root)}")
+        warnings.append(f"cyclic LaTeX include skipped: {path.relative_to(root)}")
         return ""
     stack.add(resolved)
     files.append(resolved)
     try:
         text = _strip_comments(path.read_text(encoding="utf-8", errors="replace"))
     except OSError as exc:
-        errors.append(f"cannot read {path.relative_to(root)}: {exc}")
+        warnings.append(f"cannot read {path.relative_to(root)}: {exc}")
         stack.remove(resolved)
         return ""
 
@@ -62,12 +78,12 @@ def _expand(path: Path, root: Path, errors: list[str], stack: set[Path], files: 
         raw = match.group(1).strip()
         child = _tex_reference(raw, path.parent, root)
         if child is None:
-            errors.append(f"LaTeX include escapes paper directory: {raw}")
+            warnings.append(f"LaTeX include escapes paper directory, skipped: {raw}")
             return ""
         if not child.is_file():
-            errors.append(f"missing LaTeX include: {raw}")
+            warnings.append(f"missing LaTeX include, skipped: {raw}")
             return ""
-        return "\n" + _expand(child, root, errors, stack, files) + "\n"
+        return "\n" + _expand(child, root, warnings, stack, files) + "\n"
 
     expanded = _INPUT_RE.sub(replace, text)
     stack.remove(resolved)
@@ -85,7 +101,11 @@ def _sections(text: str) -> list[PaperSection]:
     return output
 
 
-def _local_assets(files: list[Path], root: Path, errors: list[str]) -> tuple[list[Path], list[Path], set[str]]:
+def _local_assets(files: list[Path], root: Path, warnings: list[str]) -> tuple[list[Path], list[Path], set[str]]:
+    """Best-effort discovery of local figures/bibliographies/citations.
+    Unresolved references are noted in `warnings`, not fatal -- this pipeline
+    only reads these paths for text extraction, so an unresolved figure or an
+    incomplete bibliography doesn't block anything."""
     figures: list[Path] = []
     bibliographies: list[Path] = []
     citations: set[str] = set()
@@ -99,7 +119,7 @@ def _local_assets(files: list[Path], root: Path, errors: list[str]) -> tuple[lis
             candidates = [base] if base.suffix else [base.with_suffix(ext) for ext in _FIGURE_EXTENSIONS]
             existing = next((item for item in candidates if _inside(item, root) and item.is_file()), None)
             if existing is None:
-                errors.append(f"missing or unsafe figure referenced by \\includegraphics: {raw.strip()}")
+                warnings.append(f"could not resolve figure referenced by \\includegraphics: {raw.strip()}")
             elif existing not in figures:
                 figures.append(existing)
         for group in _BIB_RE.findall(text):
@@ -108,9 +128,9 @@ def _local_assets(files: list[Path], root: Path, errors: list[str]) -> tuple[lis
                 if candidate.suffix.lower() != ".bib":
                     candidate = candidate.with_suffix(".bib")
                 if not _inside(candidate, root):
-                    errors.append(f"bibliography escapes paper directory: {raw.strip()}")
+                    warnings.append(f"bibliography escapes paper directory, skipped: {raw.strip()}")
                 elif not candidate.is_file():
-                    errors.append(f"missing bibliography: {raw.strip()}")
+                    warnings.append(f"missing bibliography: {raw.strip()}")
                 elif candidate not in bibliographies:
                     bibliographies.append(candidate)
         for group in _CITE_RE.findall(text):
@@ -129,9 +149,13 @@ def _bib_keys(paths: list[Path]) -> set[str]:
 
 
 def validate_latex_paper(paper_dir: str | Path) -> LatexPaperDocument:
-    """Validate a self-contained paper and return a readable, expanded document.
+    """Read a local paper folder and return whatever text/structure it has.
 
-    This public function is deliberately independent from paper evidence extraction.
+    Raises `LatexValidationError` only when there's nothing to read at all
+    (missing directory or missing main.tex). Everything else -- preamble,
+    title, abstract, section-naming conventions, figures, bibliography -- is
+    collected into `warnings` instead of blocking ingestion; see the module
+    docstring for why.
     """
     root = Path(paper_dir).resolve()
     if not root.is_dir():
@@ -140,42 +164,37 @@ def validate_latex_paper(paper_dir: str | Path) -> LatexPaperDocument:
     if not main.is_file():
         raise LatexValidationError([f"missing required main.tex in {root}"])
 
-    errors: list[str] = []
+    warnings: list[str] = []
     files: list[Path] = []
-    expanded = _expand(main, root, errors, set(), files)
+    expanded = _expand(main, root, warnings, set(), files)
     if not re.search(r"\\documentclass(?:\s*\[[^]]*\])?\s*\{[^}]+\}", expanded):
-        errors.append("main.tex is missing \\documentclass")
+        warnings.append("main.tex is missing \\documentclass")
     if "\\begin{document}" not in expanded:
-        errors.append("main.tex is missing \\begin{document}")
+        warnings.append("main.tex is missing \\begin{document}")
     if "\\end{document}" not in expanded:
-        errors.append("main.tex is missing \\end{document}")
+        warnings.append("main.tex is missing \\end{document}")
     title_match, abstract_match = _TITLE_RE.search(expanded), _ABSTRACT_RE.search(expanded)
     title = _clean_tex(title_match.group(1)) if title_match else ""
     abstract = _clean_tex(abstract_match.group(1)) if abstract_match else ""
     sections = _sections(expanded)
     if not title:
-        errors.append("paper is missing a non-empty \\title{...}")
+        warnings.append("paper has no non-empty \\title{...}")
     if not abstract:
-        errors.append("paper is missing a non-empty abstract environment")
+        warnings.append("paper has no non-empty abstract environment")
     if not sections:
-        errors.append("paper has no non-empty \\section{...} body")
-    headings = [section.title.lower() for section in sections]
-    if not any(any(word in title for word in ("experiment", "result", "evaluation")) for title in headings):
-        errors.append("paper needs an experiment, evaluation, or results section")
-    if not any(any(word in title for word in ("conclusion", "discussion")) for title in headings):
-        errors.append("paper needs a conclusion or discussion section")
+        warnings.append("paper has no non-empty \\section{...} body")
 
-    figures, bibliographies, citations = _local_assets(files, root, errors)
+    figures, bibliographies, citations = _local_assets(files, root, warnings)
     if citations and not bibliographies:
-        errors.append("paper contains citations but no local \\bibliography{...} file")
+        warnings.append("paper contains citations but no local \\bibliography{...} file")
     if citations and bibliographies:
         missing = sorted(citations - _bib_keys(bibliographies))
         if missing:
-            errors.append("citation keys absent from bibliography: " + ", ".join(missing))
-    if errors:
-        raise LatexValidationError(errors)
+            warnings.append("citation keys absent from bibliography: " + ", ".join(missing))
+
     return LatexPaperDocument(
         paper_dir=str(root), main_tex_path=str(main), expanded_tex=expanded, title=title,
         abstract=abstract, sections=sections, bibliography_paths=[str(item) for item in bibliographies],
         figure_paths=[str(item) for item in figures], source_files=[str(item) for item in dict.fromkeys(files)],
+        warnings=warnings,
     )

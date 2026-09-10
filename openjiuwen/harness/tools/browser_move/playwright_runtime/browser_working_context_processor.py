@@ -20,6 +20,7 @@ from .browser_working_context import (
 
 _BROWSER_WORKING_CONTEXT_MESSAGE_NAME = "browser_working_context"
 _BROWSER_WORKING_CONTEXT_METADATA_KEY = "browser_working_context"
+_BROWSER_WORKING_CONTEXT_MESSAGE_ID = "openjiuwen:browser-working-context"
 
 
 class BrowserWorkingContextProcessorConfig(BrowserWorkingContextConfig):
@@ -52,7 +53,7 @@ class BrowserWorkingContextProcessor(ContextProcessor):
         del kwargs
         store = BrowserWorkingContextStore(self.config)
         session = context.get_session_ref() if context is not None else None
-        if context is not None:
+        if context is not None and not self.config.runtime_projection_only:
             store.commit_pending_from_messages(session, context.get_messages())
 
         prompt_text = store.render_and_consume_one_step(session)
@@ -63,7 +64,10 @@ class BrowserWorkingContextProcessor(ContextProcessor):
         ]
         working_context_message = UserMessage(
             name=_BROWSER_WORKING_CONTEXT_MESSAGE_NAME,
-            metadata={_BROWSER_WORKING_CONTEXT_METADATA_KEY: True},
+            metadata={
+                _BROWSER_WORKING_CONTEXT_METADATA_KEY: True,
+                "context_message_id": _BROWSER_WORKING_CONTEXT_MESSAGE_ID,
+            },
             content=prompt_text,
         )
         insert_at = len(retained_messages)
