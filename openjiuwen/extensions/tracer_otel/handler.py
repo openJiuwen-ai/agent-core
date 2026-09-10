@@ -541,8 +541,70 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._layer_root_spans: dict[str, OtelSpanState] = {}
         # Mapping 3: node_id → host-component OtelSpanState
         self._component_spans: dict[str, OtelSpanState] = {}
+        # Cached OTel context from the first root span creation.
+        # Ensures all spans within the same execution share one OTel trace.
+        self._cached_root_ctx: otel_context.Context | None = None
+        self._cached_session_id: str | None = None
+        # The trace_id that was active when _cached_root_ctx was created.
+        # Used by set_trace_id to distinguish QA resume (same trace_id)
+        # from a new conversation round (different trace_id).
+        self._cached_trace_id: str | None = None
 
     # --- helper: resolve parent context for a new span ---
+
+    def set_session_id(self, session_id: str | None) -> None:
+        """Override to clear cached trace context when session changes."""
+        if session_id and session_id != self._cached_session_id:
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cached_session_id = session_id
+        super().set_session_id(session_id)
+
+    def set_trace_id(self, trace_id: str) -> None:
+        """Override to clear cached trace context when trace_id changes.
+
+        Each conversation round creates a new Tracer with a new trace_id.
+        When the incoming trace_id differs from the one used to build the
+        cached OTel context, it means a *new conversation round* has started
+        (the workflow_runner reuses the first execution's trace_id for QA
+        resume, so the cache is preserved in that case).
+        """
+        session_logger.debug(
+            "otel: set_trace_id called: old=%s, new=%s, cached_trace_id=%s, cached_ctx=%s",
+            self._trace_id, trace_id, self._cached_trace_id, self._cached_root_ctx is not None
+        )
+        if trace_id and trace_id != self._trace_id:
+            # New conversation round: clear cached context and stale spans
+            session_logger.debug("otel: NEW ROUND - clearing cache (cached_trace_id=%s != new_trace_id=%s)", self._cached_trace_id, trace_id)
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cleanup_stale_spans()
+        super().set_trace_id(trace_id)
+
+    def _cleanup_stale_spans(self) -> None:
+        """End and remove spans from a previous conversation round.
+
+        Called when a new round starts for the same workflow. Without cleanup,
+        the new root span would inherit the old round's OTel trace_id.
+        """
+        for state in list(self._layer_root_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+                if state.context_token is not None:
+                    otel_context.detach(state.context_token)
+            except Exception as exc:
+                session_logger.warning("otel workflow handler: cleanup layer root span failed: %s", exc)
+        for state in list(self._component_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+                if state.context_token is not None:
+                    otel_context.detach(state.context_token)
+            except Exception as exc:
+                session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
+        self._layer_root_spans.clear()
+        self._component_spans.clear()
 
     def _resolve_parent_context(
         self,
@@ -554,8 +616,21 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         if parent_node_id == "" and is_workflow_root:
             # Check if there is already a root workflow
             existing_root = self._layer_root_spans.get("")
+            session_logger.debug(
+                "otel: _resolve_parent_context: trace_id=%s, cached_trace_id=%s, "
+                "cached_ctx=%s, layer_root_spans=%s, existing_root=%s",
+                self._trace_id, self._cached_trace_id,
+                self._cached_root_ctx is not None,
+                list(self._layer_root_spans.keys()),
+                existing_root is not None,
+            )
             if existing_root is None:
-                # This is the true root workflow - no parent
+                # This is the first root span for this execution
+                # But we might have a cached context from a previous execution
+                if self._cached_root_ctx is not None:
+                    session_logger.debug("otel: REUSING cached context for trace_id=%s", self._trace_id)
+                    return self._cached_root_ctx
+                session_logger.debug("otel: NO CACHED CONTEXT, creating new trace for trace_id=%s", self._trace_id)
                 return None
             # Isolate different workflows: clean stale context from another workflow
             current_workflow_id = metadata.get("workflow_id") if metadata else None
@@ -703,6 +778,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 if is_workflow_root:
                     self._layer_root_spans[parent_node_id] = state
                     self._layer_root_spans[invoke_id] = state
+                    # Cache OTel context for subsequent root spans
+                    self._cached_root_ctx = trace.set_span_in_context(otel_span)
+                    self._cached_trace_id = self._trace_id
                 else:
                     self._component_spans[invoke_id] = state
                 return
@@ -744,6 +822,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # Children's parent_node_id will be "" for root workflow,
                 # and the node_id of the host component for sub-workflows.
                 self._layer_root_spans[invoke_id] = state
+                # Cache OTel context for subsequent root spans
+                self._cached_root_ctx = trace.set_span_in_context(otel_span)
+                self._cached_trace_id = self._trace_id
             else:
                 self._component_spans[invoke_id] = state
         except Exception as exc:
@@ -766,10 +847,18 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             state.span.set_status(Status(StatusCode.OK))
             state.span.end()
 
-            # Clean up component mappings only (preserve _layer_root_spans for multi-round)
-            for key, val in list(self._component_spans.items()):
-                if val.invoke_id == invoke_id:
-                    self._component_spans.pop(key, None)
+            # Remove from layer/component mappings so the handler can
+            # distinguish completed spans from interrupted ones.
+            # On QA interrupt the QA node and downstream nodes never reach
+            # on_call_done, so their entries persist — that is the signal
+            # the workflow_runner uses to detect resume vs. new round.
+            self._layer_root_spans.pop(invoke_id, None)
+            self._component_spans.pop(invoke_id, None)
+            # Also remove the parent_node_id → root mapping (keyed by "")
+            root_state = self._layer_root_spans.get("")
+            if root_state is state:
+                self._layer_root_spans.pop("", None)
+
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_call_done failed: %s", exc)
 
