@@ -283,3 +283,33 @@ async def test_retry_notice_carries_structured_flag():
     assert len(written) == 1
     assert written[0].payload["retry_notice"] is True
     assert "模型调用异常" in written[0].payload["error"]
+
+
+@pytest.mark.asyncio
+async def test_retry_notice_carries_attempt_fields():
+    """重试通知带 attempt/max_attempts 结构化进度字段：前端按成员路由时
+    显示「重试中 N/M」（旧版前端按文案正则兜底，字段缺失不崩）。"""
+    rail = LLMRetryRail(max_retries=2)
+    ctx = _make_ctx()
+    ctx.request_retry = MagicMock()
+    written = []
+
+    async def _write(item):
+        written.append(item)
+
+    session = MagicMock()
+    session.write_stream = _write
+    try:
+        ctx.session = session
+    except (AttributeError, TypeError):
+        pytest.skip("AgentCallbackContext 不支持 session 赋值")
+    ctx.exception = build_error(
+        StatusCode.MODEL_CALL_FAILED,
+        error_msg="[181001] model call failed, reason: boom",
+    )
+
+    await rail.on_model_exception(ctx)
+
+    assert len(written) == 1
+    assert written[0].payload["attempt"] == 1
+    assert written[0].payload["max_attempts"] == 2

@@ -30,6 +30,7 @@ from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     MemberCanceledEvent,
+    MemberStatusChangedEvent,
     MemberShutdownEvent,
     MemberSpawnedEvent,
     TeamCleanedEvent,
@@ -115,6 +116,7 @@ class TeamBackend:
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
+        member_reviver: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -284,6 +286,7 @@ class TeamBackend:
             member_name,
             self.db,
             messager,
+            member_reviver=member_reviver,
         )
 
         # Filesystem paths to remove when the team is cleaned.
@@ -450,6 +453,50 @@ class TeamBackend:
             team_logger.error("Failed to publish member spawned event for {}: {}", member_name, e)
 
         team_logger.info("Member {} started", member_name)
+
+    async def set_member_status(
+        self,
+        member_name: str,
+        new_status: MemberStatus,
+    ) -> bool:
+        """Persist a member status change AND publish MemberStatusChangedEvent.
+
+        Same semantics as ``TeamMemberHandle.update_status`` (read old → DAO write
+        with transition validation → publish on success), for call sites that hold
+        only the backend: spawn retry exhaustion (ERROR), session-switch
+        normalization (ERROR), kernel pause/stop marking (PAUSED/STOPPED). Those
+        used to write the DAO directly, so no status_changed event was emitted and
+        frontends only learned about ERROR/PAUSED at the next snapshot poll.
+        Event publish failure is logged but does not affect the write result.
+        """
+        old = await self.db.member.get_member_status(self.team_name, member_name)
+        if old is None:
+            return False
+        if old == new_status.value:
+            return True
+        success = await self.db.member.update_member_status(
+            member_name, self.team_name, new_status.value
+        )
+        if not success:
+            return False
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberStatusChangedEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                        old_status=old,
+                        new_status=new_status.value,
+                    )
+                ),
+            )
+        except Exception as e:
+            team_logger.error(
+                "Failed to publish member status changed event for {}: {}",
+                member_name, e,
+            )
+        return True
 
     async def startup(
         self,

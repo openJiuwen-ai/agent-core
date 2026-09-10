@@ -6,6 +6,7 @@
 This module provides messaging functionality for team members and team leader.
 """
 
+import asyncio
 import uuid
 from typing import (
     List,
@@ -13,6 +14,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
@@ -43,6 +45,7 @@ class TeamMessageManager:
         member_name: str,
         db: TeamDatabase,
         messager: Messager,
+        member_reviver=None,
     ):
         """Initialize team messaging manager
 
@@ -51,11 +54,16 @@ class TeamMessageManager:
             member_name: Current member identifier
             db: Team database instance
             messager: Messager instance for event publishing
+            member_reviver: Optional async callback ``(member_name) -> None``
+                that respawns an ERROR (process-dead) member. Wired only on the
+                leader's backend; enables spawn-on-dispatch so work assigned to
+                a dead member is not silently queued forever.
         """
         self.team_name = team_name
         self.member_name = member_name
         self.db = db
         self.messager = messager
+        self._member_reviver = member_reviver
 
     async def send_message(
         self,
@@ -114,7 +122,31 @@ class TeamMessageManager:
             team_logger.error(f"Failed to publish message event for {message_id}: {e}")
 
         team_logger.debug(f"Message sent from {sender} to {to_member_name}: {message_id}")
+        self._schedule_member_revive([to_member_name])
         return message_id
+
+    def _schedule_member_revive(self, recipients) -> None:
+        """发配按需拉起（spawn-on-dispatch）：收件人是 ERROR（进程级失败、
+        无消费者）时后台触发拉起。消息行已持久化，成员复活后的 initial
+        mailbox/task sweep 会消费——发送方不阻塞。重启所有权由 reviver 内部
+        CAS（ERROR→RESTARTING）裁决，与 recover_team/健康检查路径互斥。
+        broadcast 不挂：广播语义不含"点名派活"。"""
+        if self._member_reviver is None:
+            return
+        for to in set(recipients):
+            try:
+                asyncio.ensure_future(self._revive_if_error(to))
+            except Exception as e:
+                team_logger.error("Failed to schedule member revive for {}: {}", to, e)
+
+    async def _revive_if_error(self, member_name: str) -> None:
+        try:
+            status = await self.db.member.get_member_status(self.team_name, member_name)
+            if status != MemberStatus.ERROR.value:
+                return
+            await self._member_reviver(member_name)
+        except Exception as e:
+            team_logger.error("Member revive hook failed for {}: {}", member_name, e)
 
     async def broadcast_message(
         self,
@@ -222,6 +254,7 @@ class TeamMessageManager:
                 team_logger.error(f"Failed to publish message event for {message_id}: {e}")
 
         team_logger.debug(f"Multicast sent from {sender} to {len(pairs)} members")
+        self._schedule_member_revive([to for _, to in pairs])
         return [message_id for message_id, _ in pairs]
 
     async def get_messages(
