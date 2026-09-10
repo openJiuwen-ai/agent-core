@@ -7,9 +7,8 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Mapping
 from typing import Any, Optional
-
-from ..message_utils import extract_last_user_instruction
 
 logger = logging.getLogger("online_rl.gateway")
 
@@ -56,25 +55,17 @@ class JudgeDispatcher:
         finalized = dict(sample)
         session_id = str(finalized.get("session_id") or "")
         turn_num = int(finalized.get("turn_num") or finalized.get("step_index") or 0)
-        response_text = str(
-            finalized.get("trajectory", {}).get("response_text")
-            or finalized.get("response_text")
-            or ""
-        )
-        messages = finalized.get("request", {}).get("messages")
-        instruction_text = extract_last_user_instruction(messages) if isinstance(messages, list) else ""
-        if not instruction_text:
-            instruction_text = feedback
-
         if self._judge_scorer is not None:
             try:
-                judge = await self._judge_scorer.score(
-                    response_text=response_text,
-                    instruction_text=instruction_text,
-                    followup_user_feedback=feedback,
-                    session_id=session_id,
-                    turn_num=turn_num,
-                )
+                request = finalized.get("request")
+                if not isinstance(request, Mapping):
+                    request = {"messages": []}
+                response = finalized.get("response")
+                if not isinstance(response, Mapping):
+                    response_text = str(finalized.get("trajectory", {}).get("response_text") or "")
+                    response = {"choices": [{"message": {"role": "assistant", "content": response_text}}]}
+                score = await self._judge_scorer.score(request, response, feedback)
+                judge = {"score": float(score), "source": "judge"}
             except Exception as exc:
                 logger.warning("[JudgeDispatcher] judge failed session=%s turn=%d err=%s", session_id, turn_num, exc)
                 judge = {"score": 0.0, "votes": ["fail"], "details": {}, "error": str(exc)}

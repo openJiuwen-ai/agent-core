@@ -45,18 +45,16 @@
 
 | CLASS / FUNCTION | DESCRIPTION |
 |------------------|-------------|
-| [GatewayConfig](./online/gateway.md) | Online-RL Gateway runtime config dataclass. |
-| [build_app_from_config](./online/gateway.md) | Production entry that assembles a FastAPI app from a `GatewayConfig`. |
-| [build_gateway_app](./online/gateway.md) | FastAPI assembly registering routes (`/health`, `/v1/gateway/stats`, `/v1/gateway/upload/batch`, `/v1/chat/completions`, catch-all proxy). |
-| [InferenceNotifier](./online/inference.md) | vLLM LoRA hot-loading notifier. |
+| `RLServiceConfig` | Static loopback RL Service configuration. |
+| `build_rl_service_app` | RL Service HTTP assembly for Tasks, captures, trajectories, and Training Runs. |
+| `TaskRegistry` | Redis-backed owner of Task, turn, capture, and reward state. |
+| `CapturePipeline` | Complete OpenAI request/response validation and rewarded trajectory publication. |
 | [JudgeScorer](./online/judge.md) | High-level async LLM-as-a-Judge scoring client. |
-| [evaluate_judge_scores](./online/judge.md) | Core scoring entry; multi-vote averaging normalized to `[-1, 1]`. |
-| [LauncherPaths](./online/launcher.md) | Path-layout dataclass for the online RL loop orchestration. |
-| [run_online_rl_loop](./online/launcher.md) | Top-level orchestration entry that spawns and supervises all service processes. |
+| [evaluate_judge_scores](./online/judge.md) | Core scoring entry; multi-vote averaging normalized to `[0, 1]`. |
 | [RLOnlineRail](./online/rail.md) | Online RL trajectory collection rail hooking into the agent lifecycle. |
 | [TrajectoryUploader](./online/rail.md) | Async uploader of rail-v1 batches to the gateway. |
-| [OnlineTrainingScheduler](./online/scheduler.md) | Background-thread scheduler polling Redis and triggering PPO training batches. |
-| [PPOTrainingExecutor](./online/scheduler.md) | Ray/verl PPO runner lifecycle and batch executor. |
+| `TrainingRunner` | Explicit fixed-batch PPO, LoRA activation, cancellation, and recovery lifecycle. |
+| `PPOTrainingExecutor` | Ray/verl PPO adapter used by an explicit Training Run. |
 
 **Functions**:
 

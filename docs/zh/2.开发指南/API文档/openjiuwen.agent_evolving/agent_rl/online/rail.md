@@ -304,9 +304,7 @@ def build_rl_online_rail_from_env() -> Optional[RLOnlineRail]
 
 ## 被使用情况
 
-- [\_\_init\_\_.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/__init__.py)：通过 `__getattr__` 懒导出 `RLOnlineRail`（规范外部导入路径为 `openjiuwen.agent_evolving.agent_rl.RLOnlineRail`），并列入 `__all__`。
-- [workspace.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/launcher/workspace.py) 与 [services.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/launcher/services.py)：为生成的 JiuwenClaw 进程设置 `USE_RL_ONLINE_RAIL=1`、`TRAJECTORY_GATEWAY_URL`、`RL_ONLINE_TENANT_ID` 等环境变量（不直接导入 rail 类）。
-- [server.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/app/server.py)：注册 `POST /v1/gateway/upload/batch` 端点，接收上传；由 [rail_ingest.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/rail_ingest.py) 中的 `RailBatchIngestor` 消费。
-- [test_rl_online_rail.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_rl_online_rail.py)：导入并构造 `RLOnlineRail`。
-- [test_online_gateway_e2e.py](file:///Users/dongdong/Desktop/project/agent-core/tests/system_tests/agent_evolving/agent_rl/online/test_online_gateway_e2e.py)：通过 `importlib` 动态导入 `RLOnlineRail` 与 `TrajectoryUploader`。
-- [test_gateway_support.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_gateway_support.py)：导入 `OnlineTrajectoryConverter` 并测试 `convert` / `to_dict`。
+- `openjiuwen.agent_evolving.agent_rl.__init__` 懒导出 `RLOnlineRail`，作为规范外部导入路径。
+- AIGW 持有公开 `POST /v1/gateway/upload/batch` 入口，并将批次代理到运行中的 RL Service。
+- Agent 生命周期属于外部应用；应用按需直接配置 `RLOnlineRail`，RL Service 不拉起 Agent。
+- `test_rl_online_rail.py` 覆盖 `RLOnlineRail`、`TrajectoryUploader` 与 `OnlineTrajectoryConverter`。

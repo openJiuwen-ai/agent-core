@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import json
+import math
 import re
+from numbers import Real
 from typing import Any, Optional
 
 JUDGE_PROMPT_TEMPLATE = """你是一个专业的 AI Agent 质量评估器。请对以下 Agent 对话轮次打分。
@@ -61,8 +63,7 @@ def parse_judge_scores(content: str, *, raise_on_error: bool = True) -> Optional
 
     for candidate in candidates:
         parsed = _load_json_object(candidate, decoder)
-        if isinstance(parsed, dict):
-            _ensure_overall(parsed)
+        if isinstance(parsed, dict) and _ensure_overall(parsed):
             return parsed
 
     if raise_on_error:
@@ -71,8 +72,8 @@ def parse_judge_scores(content: str, *, raise_on_error: bool = True) -> Optional
 
 
 def normalize_overall_score(overall: float) -> float:
-    """Map raw 0-10 judge score to [-1, 1]."""
-    return (float(overall) - 5.0) / 5.0
+    """Map raw 0-10 judge score to the RL reward range ``[0, 1]``."""
+    return max(0.0, min(1.0, float(overall) / 10.0))
 
 
 def _load_json_object(content: str, decoder: json.JSONDecoder) -> Optional[dict[str, Any]]:
@@ -86,7 +87,8 @@ def _load_json_object(content: str, decoder: json.JSONDecoder) -> Optional[dict[
 def _extract_first_json_object(content: str, decoder: json.JSONDecoder) -> Optional[dict[str, Any]]:
     for match in re.finditer(r"\{", content):
         try:
-            parsed, _ = decoder.raw_decode(content[match.start():])
+            start = match.start()
+            parsed, _ = decoder.raw_decode(content[start:])
         except json.JSONDecodeError:
             continue
         if isinstance(parsed, dict):
@@ -94,17 +96,18 @@ def _extract_first_json_object(content: str, decoder: json.JSONDecoder) -> Optio
     return None
 
 
-def _ensure_overall(scores: dict[str, Any]) -> None:
-    if "overall" in scores:
-        return
+def _ensure_overall(scores: dict[str, Any]) -> bool:
+    overall = scores.get("overall")
+    if not isinstance(overall, bool) and isinstance(overall, Real) and math.isfinite(overall):
+        return True
     values: list[float] = []
     for aliases in _DIMENSION_ALIASES:
         for key in aliases:
             value = scores.get(key)
-            if isinstance(value, (int, float)):
+            if not isinstance(value, bool) and isinstance(value, Real) and math.isfinite(value):
                 values.append(float(value))
                 break
     if values:
         scores["overall"] = sum(values) / len(values)
-    else:
-        scores["overall"] = 5.0
+        return True
+    return False
