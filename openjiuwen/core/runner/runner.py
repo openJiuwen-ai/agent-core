@@ -411,7 +411,6 @@ class _RunnerImpl(_TeamRunnerMixin):
                         *,
                         session: Optional[str | AgentSession] = None,
                         context: ModelContext = None,
-                        envs: Optional[dict[str, Any]] = None,
                         ):
         """
         Execute a single agent with given inputs.
@@ -441,8 +440,7 @@ class _RunnerImpl(_TeamRunnerMixin):
                                   *,
                                   session: Optional[str | AgentSession] = None,
                                   context: ModelContext = None,
-                                  stream_modes: list[BaseStreamMode] = None,
-                                  envs: Optional[dict[str, Any]] = None):
+                                  stream_modes: list[BaseStreamMode] = None):
         """
            Execute a single agent with streaming output support.
 
@@ -545,7 +543,6 @@ class _RunnerImpl(_TeamRunnerMixin):
         *,
         session: Optional[str | AgentSession] = None,
         context: ModelContext = None,
-        envs: Optional[dict[str, Any]] = None,
         spawn_config: Optional[SpawnConfig] = None,
     ) -> SpawnedProcessHandle:
         """
@@ -592,7 +589,6 @@ class _RunnerImpl(_TeamRunnerMixin):
         session: Optional[str | AgentSession] = None,
         context: ModelContext = None,
         stream_modes: list[BaseStreamMode] = None,
-        envs: Optional[dict[str, Any]] = None,
         spawn_config: Optional[SpawnConfig] = None,
     ) -> AsyncIterator[tuple[SpawnedProcessHandle, Any]]:
         """
@@ -764,8 +760,7 @@ class Runner(_TeamRunnerClassMixin):
         inputs: Any,
         *,
             session: Optional[str | WorkflowSession | AgentSession] = None,
-        context: Optional[ModelContext] = None,
-        envs: Optional[dict[str, Any]] = None
+        context: Optional[ModelContext] = None
     ) -> Any:
         """
         Execute a workflow with given inputs.
@@ -781,8 +776,7 @@ class Runner(_TeamRunnerClassMixin):
             workflow=workflow,
             inputs=inputs,
             session=session,
-            context=context,
-            envs=envs
+            context=context
         )
     
     @classmethod
@@ -793,8 +787,7 @@ class Runner(_TeamRunnerClassMixin):
         *,
             session: Optional[str | WorkflowSession | AgentSession] = None,
         context: Optional[ModelContext] = None,
-        stream_modes: Optional[list[BaseStreamMode]] = None,
-        envs: Optional[dict[str, Any]] = None
+        stream_modes: Optional[list[BaseStreamMode]] = None
     ) -> AsyncIterator[Any]:
         """
         Execute a workflow with streaming output support.
@@ -813,7 +806,6 @@ class Runner(_TeamRunnerClassMixin):
             session=session,
             context=context,
             stream_modes=stream_modes,
-            envs=envs
         ):
             yield chunk
     
@@ -825,7 +817,6 @@ class Runner(_TeamRunnerClassMixin):
         *,
             session: Optional[str | AgentSession] = None,
         context: Optional[ModelContext] = None,
-        envs: Optional[dict[str, Any]] = None,
     ) -> Any:
         """
         Execute a single agent with given inputs.
@@ -842,7 +833,6 @@ class Runner(_TeamRunnerClassMixin):
             inputs=inputs,
             session=session,
             context=context,
-            envs=envs
         )
     
     @classmethod
@@ -853,8 +843,7 @@ class Runner(_TeamRunnerClassMixin):
         *,
             session: Optional[str | AgentSession] = None,
         context: Optional[ModelContext] = None,
-        stream_modes: Optional[list[BaseStreamMode]] = None,
-        envs: Optional[dict[str, Any]] = None
+        stream_modes: Optional[list[BaseStreamMode]] = None
     ) -> AsyncIterator[Any]:
         """
         Execute a single agent with streaming output support.
@@ -872,8 +861,7 @@ class Runner(_TeamRunnerClassMixin):
             inputs=inputs,
             session=session,
             context=context,
-            stream_modes=stream_modes,
-            envs=envs
+            stream_modes=stream_modes
         ):
             yield chunk
 
@@ -885,7 +873,6 @@ class Runner(_TeamRunnerClassMixin):
         *,
         session: Optional[str | AgentSession] = None,
         context: Optional[ModelContext] = None,
-        envs: Optional[dict[str, Any]] = None,
         spawn_config: Optional[SpawnConfig] = None,
     ) -> SpawnedProcessHandle:
         """
@@ -907,7 +894,6 @@ class Runner(_TeamRunnerClassMixin):
             inputs=inputs,
             session=session,
             context=context,
-            envs=envs,
             spawn_config=spawn_config,
         )
 
@@ -920,7 +906,6 @@ class Runner(_TeamRunnerClassMixin):
         session: Optional[str | AgentSession] = None,
         context: Optional[ModelContext] = None,
         stream_modes: Optional[list[BaseStreamMode]] = None,
-        envs: Optional[dict[str, Any]] = None,
         spawn_config: Optional[SpawnConfig] = None,
     ) -> AsyncIterator[tuple[SpawnedProcessHandle, Any]]:
         """
@@ -944,7 +929,6 @@ class Runner(_TeamRunnerClassMixin):
             session=session,
             context=context,
             stream_modes=stream_modes,
-            envs=envs,
             spawn_config=spawn_config,
         ):
             yield handle, message
