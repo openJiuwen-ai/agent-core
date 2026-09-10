@@ -7,9 +7,10 @@ so :class:`TTSERail` can gate induce and the blame -> retire -> synthesize pass.
 
 Default production detector is :class:`SignalBasedSuccessDetector`:
   0. external ``ttse_score`` (if present) -> success/partial/fail (benchmark bypass)
-  1. tool_calls < detect_min_tool_calls -> skip
-  2. execution_failure signal -> partial (induce, no blame); short-circuits user_intent
-  3. user_intent feedback (only when no execution_failure) -> partial
+  1. execution_failure signal -> partial (induce, no blame); short-circuits user_intent
+  2. user_intent feedback (only when no execution_failure) -> partial
+  3. tool_calls (prefer snapshot ``ttse_invoke_tool_calls``, else messages)
+     < detect_min_tool_calls -> skip (Judge not run)
   4. extract write/edit output_paths (if any; logged only); always proceed to Judge
   5. one Judge LLM on query + final_reply -> success|partial|fail
 
@@ -262,9 +263,13 @@ class SignalBasedSuccessDetector(SuccessDetector):
     """Default TTSE detector: external score bypass, failure/feedback fast-path, reply Judge.
 
     * External ``ttse_score`` (snapshot/ctx) wins first for benchmarks.
-    * ``execution_failure`` (deterministic tool-output rules) -> ``partial``.
+    * ``execution_failure`` (deterministic tool-output rules) -> ``partial``
+      (runs before the tool-call gate).
     * Else ``user_intent`` feedback (skill-agnostic) -> ``partial``; skipped when
       ``execution_failure`` already matched.
+    * Tool-call gate uses snapshot ``ttse_invoke_tool_calls`` when present
+      (per-invoke), else ``count_tool_calls(messages)``; below min -> ``skip``
+      (Judge not run).
     * Extract write/edit ``output_path`` list (logged; not fed to Judge).
     * One Judge LLM on query + final_reply.
     """
@@ -312,24 +317,6 @@ class SignalBasedSuccessDetector(SuccessDetector):
             return _outcome_from_explicit_score(score, self._config.success_threshold)
 
         msgs: List[Any] = list(messages or [])
-        n_calls = count_tool_calls(msgs)
-        logger.info(
-            "[TTSERail] detect tool_calls=%s min=%s gate=%s",
-            n_calls,
-            self._config.detect_min_tool_calls,
-            "pass" if n_calls >= self._config.detect_min_tool_calls else "fail",
-        )
-        if n_calls < self._config.detect_min_tool_calls:
-            logger.info(
-                "[TTSERail] detect branch=skip_tool_calls tool_calls=%s min=%s",
-                n_calls,
-                self._config.detect_min_tool_calls,
-            )
-            return SuccessOutcome(
-                "skip",
-                0.0,
-                f"gate:tool_calls={n_calls}<{self._config.detect_min_tool_calls}",
-            )
 
         logger.info("[TTSERail] detect checking execution_failure signals")
         if _has_execution_failure(trajectory, msgs, signal_detector=self._signal_detector):
@@ -346,6 +333,37 @@ class SignalBasedSuccessDetector(SuccessDetector):
         ):
             logger.info("[TTSERail] detect branch=partial_user_intent")
             return SuccessOutcome("partial", 0.5, "signal:user_intent")
+
+        invoke_n = None
+        if snapshot is not None:
+            raw_n = snapshot.get("ttse_invoke_tool_calls")
+            if isinstance(raw_n, int):
+                invoke_n = raw_n
+        if invoke_n is not None:
+            n_calls = invoke_n
+            gate_source = "invoke"
+        else:
+            n_calls = count_tool_calls(msgs)
+            gate_source = "messages"
+        logger.info(
+            "[TTSERail] detect tool_calls=%s min=%s gate=%s source=%s",
+            n_calls,
+            self._config.detect_min_tool_calls,
+            "pass" if n_calls >= self._config.detect_min_tool_calls else "fail",
+            gate_source,
+        )
+        if n_calls < self._config.detect_min_tool_calls:
+            logger.info(
+                "[TTSERail] detect branch=skip_tool_calls tool_calls=%s min=%s source=%s",
+                n_calls,
+                self._config.detect_min_tool_calls,
+                gate_source,
+            )
+            return SuccessOutcome(
+                "skip",
+                0.0,
+                f"gate:tool_calls={n_calls}<{self._config.detect_min_tool_calls}",
+            )
 
         paths = extract_output_paths(msgs, max_paths=self._config.detect_max_output_paths)
         query = _task_query(ctx, snapshot, msgs)

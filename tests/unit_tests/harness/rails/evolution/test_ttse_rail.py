@@ -20,6 +20,13 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import 
     GENERATE_RECORDS_LLM_POLICY,
 )
 from openjiuwen.agent_evolving.signal import detect_tool_error_signals
+from openjiuwen.agent_evolving.trajectory import (
+    ToolCallDetail,
+    TrajectoryBuilder,
+    TrajectoryStep,
+    trajectory_from_steps,
+)
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
@@ -614,11 +621,152 @@ def test_detect_judge_prompt_is_reply_only():
 async def test_signal_detector_gate_skips_below_min_tool_calls(tmp_path):
     llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
-    det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector([]),
+    )
     out = await det.detect(None, _n_tool_messages(4), snapshot={"ttse_task_query": "q"})
     assert out.outcome == "skip"
     assert out.reason.startswith("gate:")
     assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_gate_uses_per_invoke_tool_calls_over_messages(tmp_path):
+    """Session-cumulative messages must not pass the gate when this invoke is short."""
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector([]),
+    )
+    out = await det.detect(
+        None,
+        _n_tool_messages(10),
+        snapshot={"ttse_task_query": "q", "ttse_invoke_tool_calls": 2},
+    )
+    assert out.outcome == "skip"
+    assert out.reason.startswith("gate:")
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_execution_failure_beats_tool_gate(tmp_path):
+    """Signals run before the tool gate: few tools + failure still -> partial."""
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector(["execution_failure"]),
+    )
+    out = await det.detect(
+        None,
+        _n_tool_messages(2),
+        snapshot={"ttse_task_query": "q", "ttse_invoke_tool_calls": 2},
+    )
+    assert out.outcome == "partial"
+    assert out.reason == "signal:execution_failure"
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_user_intent_beats_tool_gate(tmp_path):
+    """Signals run before the tool gate: few tools + user_intent still -> partial."""
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    fake = _FakeSignalDetector([], user_intent_signals=[SimpleNamespace(signal_type="user_intent")])
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=fake,
+    )
+    out = await det.detect(
+        None,
+        _n_tool_messages(1),
+        snapshot={"ttse_task_query": "q", "ttse_invoke_tool_calls": 1},
+    )
+    assert out.outcome == "partial"
+    assert out.reason == "signal:user_intent"
+    assert fake.user_intent_calls == 1
+    assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_signal_detector_gate_passes_when_invoke_tool_calls_meet_min(tmp_path):
+    llm = ScriptedLLM(lambda p: '{"outcome":"success","delivery":"answer","goals":[],"reason":"ok"}')
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector(["execution_failure"]),
+    )
+    # Messages alone would be below min; invoke count must win.
+    out = await det.detect(
+        None,
+        _n_tool_messages(2),
+        snapshot={"ttse_task_query": "q", "ttse_invoke_tool_calls": 5},
+    )
+    assert out.outcome == "partial"
+    assert out.reason == "signal:execution_failure"
+    assert llm.calls == []
+
+
+def _tool_step(name: str = "bash") -> TrajectoryStep:
+    return TrajectoryStep(
+        kind="tool",
+        detail=ToolCallDetail(tool_name=name, call_args={}, call_result="ok"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_ttse_invoke_tool_calls_is_per_invoke(tmp_path):
+    llm = ScriptedLLM(lambda p: "NONE")
+    rail = _make_rail(tmp_path, llm)
+    builder = TrajectoryBuilder(session_id="s1", source="online")
+    for _ in range(4):
+        builder.record_step(_tool_step())
+    rail._builder = builder
+    rail._invoke_step_start = len(builder.steps)
+    for _ in range(2):
+        builder.record_step(_tool_step())
+
+    traj = trajectory_from_steps(
+        execution_id="e1",
+        session_id="s1",
+        steps=list(builder.steps),
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query="round-2", conversation_id="s1"),
+    )
+    snap = await rail._snapshot_for_evolution(traj, ctx)
+    assert snap is not None
+    assert snap["ttse_invoke_tool_calls"] == 2
+    assert snap["ttse_task_query"] == "round-2"
+
+
+@pytest.mark.asyncio
+async def test_on_before_invoke_marks_step_start(tmp_path):
+    llm = ScriptedLLM(lambda p: "NONE")
+    rail = _make_rail(tmp_path, llm)
+    builder = TrajectoryBuilder(session_id="s1", source="online")
+    builder.record_step(_tool_step())
+    builder.record_step(_tool_step())
+    rail._builder = builder
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query="next", conversation_id="s1"),
+    )
+    await rail._on_before_invoke(ctx)
+    assert rail._invoke_step_start == 2
 
 
 @pytest.mark.asyncio
@@ -675,7 +823,11 @@ async def test_signal_detector_script_artifact_alone_does_not_fast_path(tmp_path
 @pytest.mark.asyncio
 async def test_signal_detector_artifact_paths_also_judged(tmp_path):
     llm = ScriptedLLM(
-        lambda p: '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+        lambda p: (
+            '{"is_feedback": false}'
+            if "is_feedback" in p or "反馈" in p or "feedback" in p.lower()
+            else '{"goals":[],"delivery":"answer","outcome":"success","reason":"ok"}'
+        )
     )
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
@@ -685,17 +837,23 @@ async def test_signal_detector_artifact_paths_also_judged(tmp_path):
         snapshot={"ttse_task_query": "make a ppt"},
     )
     assert out.outcome == "success"
-    assert len(llm.calls) == 1
-    assert "make a ppt" in llm.calls[0]
-    assert "Here is the answer." in llm.calls[0]
-    assert "Claimed artifact output paths" not in llm.calls[0]
-    assert "deck.pptx" not in llm.calls[0]
+    # skillless user_intent LLM + reply judge
+    assert len(llm.calls) == 2
+    judge_prompt = llm.calls[1]
+    assert "make a ppt" in judge_prompt
+    assert "Here is the answer." in judge_prompt
+    assert "Claimed artifact output paths" not in judge_prompt
+    assert "deck.pptx" not in judge_prompt
 
 
 @pytest.mark.asyncio
 async def test_signal_detector_reply_judge_once(tmp_path):
     llm = ScriptedLLM(
-        lambda p: '{"goals":["answer"],"delivery":"answer","outcome":"success","reason":"complete"}'
+        lambda p: (
+            '{"is_feedback": false}'
+            if "is_feedback" in p or "反馈" in p or "feedback" in p.lower()
+            else '{"goals":["answer"],"delivery":"answer","outcome":"success","reason":"complete"}'
+        )
     )
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
     det = SignalBasedSuccessDetector(llm=llm, model="m", config=cfg)
@@ -705,10 +863,12 @@ async def test_signal_detector_reply_judge_once(tmp_path):
         snapshot={"ttse_task_query": "what is 2+2?"},
     )
     assert out.outcome == "success"
-    assert len(llm.calls) == 1
-    assert "what is 2+2?" in llm.calls[0]
-    assert "Here is the answer." in llm.calls[0]
-    assert "OBSERVATION" not in llm.calls[0]
+    # skillless user_intent LLM + one reply judge
+    assert len(llm.calls) == 2
+    judge_prompt = llm.calls[1]
+    assert "what is 2+2?" in judge_prompt
+    assert "Here is the answer." in judge_prompt
+    assert "OBSERVATION" not in judge_prompt
 
 
 @pytest.mark.asyncio
@@ -822,7 +982,7 @@ async def test_signal_detector_mock_user_intent_empty_continues_to_judge(tmp_pat
 
 @pytest.mark.asyncio
 async def test_signal_detector_real_skillless_feedback_partial(tmp_path):
-    """End-to-end skillless path: correction pattern + no injected detector."""
+    """End-to-end skillless path: LLM feedback judgment + no injected detector."""
     llm = ScriptedLLM(
         lambda p: (
             '{"is_feedback": true, "excerpt": "你做错了"}'
@@ -843,7 +1003,13 @@ async def test_signal_detector_real_skillless_feedback_partial(tmp_path):
 async def test_rail_skip_does_not_induce(tmp_path):
     llm = ScriptedLLM(lambda p: "[FACT] should not induce")
     cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), detect_min_tool_calls=5)
-    rail = TTSERail(llm=llm, model="m", ttse_config=cfg)  # default SignalBasedSuccessDetector
+    det = SignalBasedSuccessDetector(
+        llm=llm,
+        model="m",
+        config=cfg,
+        signal_detector=_FakeSignalDetector([]),
+    )
+    rail = TTSERail(llm=llm, model="m", ttse_config=cfg, success_detector=det)
     snap = {
         "messages": _n_tool_messages(2),
         "ttse_capabilities": "- grep",

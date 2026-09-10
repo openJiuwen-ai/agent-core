@@ -61,7 +61,8 @@ class TTSEConfig:
             flatten. When set, each task's excerpt is capped before the batch
             induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
-        detect_min_tool_calls: Min tool calls before reply-delivery detect runs.
+        detect_min_tool_calls: Min tool calls in the current invoke before
+            reply-delivery detect runs (not session-cumulative).
         detect_max_output_paths: Cap on extracted write paths fed to the Judge.
         detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
         detect_llm_policy: Short policy for the one-shot reply-delivery Judge.

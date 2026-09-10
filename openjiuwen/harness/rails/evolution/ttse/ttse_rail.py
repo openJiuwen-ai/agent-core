@@ -95,6 +95,9 @@ class TTSERail(EvolutionRail):
         # Auto-dream: count non-follow-up task iterations between silent runs.
         self._dream_non_followup_count: int = 0
         self._dream_task: Optional[asyncio.Task] = None
+        # Index into the session-cumulative builder at the start of this invoke;
+        # used so detect_min_tool_calls gates on this round only.
+        self._invoke_step_start: int = 0
         super().__init__(**kwargs)
 
     def init(self, agent) -> None:
@@ -142,6 +145,13 @@ class TTSERail(EvolutionRail):
     # (async mode runs run_evolution in a background task with ctx=None).
     # ------------------------------------------------------------------
 
+    async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Mark the builder step index at the start of this invoke."""
+        if self._builder is not None:
+            self._invoke_step_start = len(self._builder.steps)
+        else:
+            self._invoke_step_start = 0
+
     async def _snapshot_for_evolution(self, trajectory, ctx: AgentCallbackContext):
         snapshot = await super()._snapshot_for_evolution(trajectory, ctx)
         if snapshot is None:
@@ -152,6 +162,13 @@ class TTSERail(EvolutionRail):
         except Exception as exc:  # noqa: BLE001 - never block snapshot capture
             logger.warning("[TTSERail] capability enumeration failed: %s", exc)
         snapshot["ttse_task_query"] = self._extract_query(ctx)
+        # Count tools recorded since this invoke started (builder window, not
+        # OTLP step indices) so the detect gate is per-invoke, not session-wide.
+        if self._builder is not None:
+            invoke_steps = self._builder.steps[self._invoke_step_start :]
+            snapshot["ttse_invoke_tool_calls"] = sum(1 for s in invoke_steps if s.kind == "tool")
+        else:
+            snapshot["ttse_invoke_tool_calls"] = 0
         return snapshot
 
     # ------------------------------------------------------------------

@@ -599,20 +599,24 @@ class TestConversationSignalDetector:
 
     @staticmethod
     @pytest.mark.asyncio
-    async def test_detect_user_intent_skillless_skips_without_correction_pattern() -> None:
+    async def test_detect_user_intent_skillless_calls_llm_without_correction_pattern() -> None:
         messages = [
             {"role": "user", "content": "写个脚本"},
             {"role": "assistant", "content": "写好了"},
-            {"role": "user", "content": "再加个注释吧"},
+            {"role": "user", "content": "不要叫我boss了，叫我master"},
         ]
         llm = MagicMock()
-        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": true, "excerpt": "x"}'})
+        llm.invoke = AsyncMock(
+            return_value={"content": '{"is_feedback": true, "excerpt": "叫我master"}'}
+        )
         detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
 
         signals = await detector.detect_user_intent(messages)
 
-        assert signals == []
-        llm.invoke.assert_not_called()
+        assert len(signals) == 1
+        assert signals[0].skill_name is None
+        assert signals[0].excerpt == "叫我master"
+        llm.invoke.assert_awaited_once()
 
     @staticmethod
     @pytest.mark.asyncio

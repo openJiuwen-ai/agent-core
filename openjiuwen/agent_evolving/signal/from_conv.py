@@ -475,8 +475,8 @@ def detect_tool_error_signals(messages: List[dict]) -> List[EvolutionSignal]:
         tool_calls = _get_field(msg, "tool_calls", []) or []
         if role == "assistant" and tool_calls:
             for tool_call in tool_calls:
-                tc_id = str(_tool_call_field(tool_call, "id") or "")
-                tc_name = str(_tool_call_field(tool_call, "name") or "")
+                tc_id = str(get_tool_call_id(tool_call) or "")
+                tc_name = str(tool_call_name(tool_call) or "")
                 if tc_id and tc_name:
                     tool_call_id_to_name[tc_id] = tc_name
             continue
@@ -610,8 +610,8 @@ class ConversationSignalDetector:
         Judgment is based on the **last** user message. Recent user/assistant turns
         (role-labeled, up to 9 Q&A) are provided as context only.
 
-        When no skills are available, a skill-agnostic path still detects feedback
-        (with a correction-pattern pre-gate before the LLM).
+        When no skills are available, a skill-agnostic path still uses LLM judgment.
+        Correction-pattern matching is only a fallback when LLM is unavailable or fails.
 
         Args:
             messages: Normalized message list for this round.
@@ -703,15 +703,15 @@ class ConversationSignalDetector:
     ) -> List[EvolutionSignal]:
         """Detect corrective feedback without skill attribution (TTSE / skill-agnostic).
 
-        Correction-pattern pre-gate: skip LLM when the last user message does not
-        match known correction cues. On LLM failure, fall back to the same pattern.
+        Always invoke LLM when bound. Correction-pattern matching is only used as
+        fallback when LLM is unavailable or the call/parse fails.
         """
         text = str(last_user_message or "").strip()
-        if not text or not _CORRECTION_PATTERN.search(text):
+        if not text:
             return []
 
         if self._llm is None or not self._model:
-            return [self._make_user_feedback_signal(text, None, user_message=text)]
+            return self._skillless_pattern_fallback(text)
 
         prompt_template = (
             _USER_FEEDBACK_SKILLESS_PROMPT_CN
@@ -735,95 +735,26 @@ class ConversationSignalDetector:
                 "[ConversationSignalDetector] skillless user feedback detection failed: %s",
                 exc,
             )
-            return [self._make_user_feedback_signal(text, None, user_message=text)]
+            return self._skillless_pattern_fallback(text)
 
         parsed = _parse_llm_feedback_response(raw)
-        if parsed is None:
-            return [self._make_user_feedback_signal(text, None, user_message=text)]
-        if not isinstance(parsed, dict):
-            return [self._make_user_feedback_signal(text, None, user_message=text)]
+        if parsed is None or not isinstance(parsed, dict):
+            return self._skillless_pattern_fallback(text)
         if not parsed.get("is_feedback", False):
             return []
         excerpt = str(parsed.get("excerpt") or text).strip() or text
         return [self._make_user_feedback_signal(excerpt, None, user_message=text)]
 
+    def _skillless_pattern_fallback(self, text: str) -> List[EvolutionSignal]:
+        """Emit unattributed feedback only when correction cues match."""
+        if not text or not _CORRECTION_PATTERN.search(text):
+            return []
+        return [self._make_user_feedback_signal(text, None, user_message=text)]
+
     @staticmethod
     def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
-        """Convert trajectory steps (via ``trajectory_steps``) to message list format.
-
-        The message format matches what SignalDetector.detect() expects:
-        - LLM steps: messages from LLMCallDetail, including tool_calls
-        - Tool steps: tool result from ToolCallDetail.call_result
-
-        Args:
-            trajectory: Trajectory object to convert.
-
-        Returns:
-            List of message dicts compatible with signal detection logic.
-        """
-        messages: List[dict] = []
-        tool_call_id_to_name: Dict[str, str] = {}
-
-        for step in trajectory_steps(trajectory):
-            if step.kind == "llm" and isinstance(step.detail, LLMCallDetail):
-                for msg in step.detail.messages:
-                    messages.append(msg)
-                    tool_calls = _get_field(msg, "tool_calls", [])
-                    if tool_calls:
-                        for tc in tool_calls:
-                            tc_id = _tool_call_field(tc, "id")
-                            tc_name = _tool_call_field(tc, "name")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
-
-                # Include the model response (assistant tool_calls live here, not only in inputs).
-                response = step.detail.response
-                resp_msg: Optional[dict] = None
-                if isinstance(response, dict):
-                    resp_msg = response
-                elif response is not None:
-                    resp_msg = {
-                        "role": str(getattr(response, "role", "") or "assistant"),
-                        "content": str(getattr(response, "content", "") or ""),
-                    }
-                    tool_calls = getattr(response, "tool_calls", None)
-                    if tool_calls:
-                        resp_msg["tool_calls"] = tool_calls
-                if resp_msg:
-                    has_payload = any(
-                        resp_msg.get(key) for key in ("role", "content", "tool_calls")
-                    )
-                    if has_payload:
-                        messages.append(resp_msg)
-                        for tc in resp_msg.get("tool_calls") or []:
-                            tc_id = _tool_call_field(tc, "id")
-                            tc_name = _tool_call_field(tc, "name")
-                            if tc_id and tc_name:
-                                tool_call_id_to_name[tc_id] = tc_name
-
-            elif step.kind == "tool" and isinstance(step.detail, ToolCallDetail):
-                tool_name = step.detail.tool_name
-                tool_call_id = step.detail.tool_call_id or step.meta.get("tool_call_id", "")
-
-                if not tool_name and tool_call_id:
-                    tool_name = tool_call_id_to_name.get(tool_call_id, "")
-
-                result_content = ""
-                if step.detail.call_result is not None:
-                    result_content = str(step.detail.call_result)
-
-                tool_msg = {
-                    "role": "tool",
-                    "content": result_content,
-                }
-                if tool_call_id:
-                    tool_msg["tool_call_id"] = tool_call_id
-                if tool_name:
-                    tool_msg["name"] = tool_name
-
-                messages.append(tool_msg)
-
-        return messages
+        """Convert trajectory to message list (compat wrapper for TTSE / callers)."""
+        return trajectory_to_messages(trajectory)
 
     def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
