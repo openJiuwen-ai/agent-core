@@ -917,7 +917,7 @@ async def test_read_file_tool_office_docs_bypass_plain_text_size_limit(
     assert result.success is True
     assert result.data["content"] == "     1\tparsed office content"
     assert calls == [file_path]
-    assert file_path not in _FILE_READ_REGISTRY
+    assert file_path in _FILE_READ_REGISTRY
 
 
 def test_read_file_tool_capability_flags_keep_backward_compatibility():

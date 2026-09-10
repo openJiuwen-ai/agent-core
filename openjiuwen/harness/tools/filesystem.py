@@ -69,6 +69,355 @@ _OFFICE_DOC_EXTENSIONS: frozenset = frozenset({
 })
 
 
+def _is_office_doc_path(file_path: str) -> bool:
+    _, ext = os.path.splitext(file_path.lower())
+    return ext in _OFFICE_DOC_EXTENSIONS
+
+
+_OFFICE_WRITE_EXTENSIONS: frozenset = frozenset({".docx", ".doc", ".xlsx", ".pptx"})
+
+# Word COM is unstable in-process (Quit/Close often raise RPC errors that can
+# abort the host under faulthandler). Isolate all .doc I/O in a short-lived
+# child process so the agent runtime stays up.
+_WORD_COM_WORKER = r"""
+import os
+import sys
+
+def _close(doc):
+    try:
+        doc.Close(SaveChanges=0)
+    except Exception:
+        pass
+
+def main():
+    op = sys.argv[1]
+    path = sys.argv[2]
+    import pythoncom
+    import win32com.client
+    pythoncom.CoInitialize()
+    word = None
+    try:
+        word = win32com.client.DispatchEx("Word.Application")
+        word.Visible = False
+        try:
+            word.DisplayAlerts = 0
+            word.AutomationSecurity = 3
+        except Exception:
+            pass
+        if op == "read":
+            doc = word.Documents.Open(
+                FileName=path,
+                ConfirmConversions=False,
+                ReadOnly=True,
+                AddToRecentFiles=False,
+            )
+            try:
+                raw = doc.Content.Text or ""
+            finally:
+                _close(doc)
+            sys.stdout.buffer.write(raw.encode("utf-8"))
+            return
+        if op == "write":
+            body = sys.stdin.buffer.read().decode("utf-8")
+            body = body.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\r")
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            if os.path.exists(path):
+                doc = word.Documents.Open(
+                    FileName=path,
+                    ConfirmConversions=False,
+                    ReadOnly=False,
+                    AddToRecentFiles=False,
+                )
+                try:
+                    doc.Content.Delete()
+                    doc.Content.Text = body
+                    # Force legacy .doc (OLE) even if Word upgraded the open file.
+                    doc.SaveAs(path, FileFormat=0)
+                finally:
+                    _close(doc)
+            else:
+                doc = word.Documents.Add()
+                try:
+                    doc.Content.Text = body
+                    doc.SaveAs(path, FileFormat=0)
+                finally:
+                    _close(doc)
+            return
+        raise SystemExit(f"unknown op: {op}")
+    finally:
+        if word is not None:
+            try:
+                word.Quit(SaveChanges=0)
+            except Exception:
+                pass
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+def _office_write_unsupported_error(file_path: str, tool_name: str) -> str:
+    ext = os.path.splitext(file_path.lower())[1] or ".xls"
+    return (
+        f"Cannot modify legacy Office documents ({ext}) with {tool_name}. "
+        "Convert to .xlsx / .pptx first, then retry."
+    )
+
+
+def _normalize_word_com_text(raw: str) -> str:
+    """Normalize Word COM Content.Text (\\r paragraph marks) to read_file shape."""
+    text = (raw or "").replace("\r\n", "\n").replace("\r", "\n")
+    parts: list[str] = []
+    for line in text.split("\n"):
+        stripped = line.strip()
+        if stripped:
+            parts.append(stripped)
+    return "\n\n".join(parts)
+
+
+def _invoke_word_com_worker(operation: str, file_path: str, content: Optional[str] = None) -> str:
+    """Run Word COM .doc read/write in an isolated child process."""
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "Reading/writing legacy .doc files requires Microsoft Word on Windows."
+        )
+    try:
+        import pythoncom  # noqa: F401
+        import win32com.client  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "Reading/writing .doc files requires pywin32 (win32com). "
+            "Install with: pip install pywin32"
+        ) from exc
+
+    import subprocess
+
+    abs_path = os.path.abspath(file_path)
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    stdin_data = None if operation != "write" else (content or "").encode("utf-8")
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _WORD_COM_WORKER, operation, abs_path],
+            input=stdin_data,
+            capture_output=True,
+            timeout=120,
+            creationflags=creationflags,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"Timed out while using Microsoft Word to {operation} '{os.path.basename(abs_path)}'."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(f"Failed to start Word COM worker: {exc}") from exc
+
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise RuntimeError(
+            err or f"Word COM worker failed while trying to {operation} "
+            f"'{os.path.basename(abs_path)}' (exit {proc.returncode}). "
+            "Ensure Microsoft Word is installed and can open .doc files."
+        )
+    if operation == "read":
+        return (proc.stdout or b"").decode("utf-8", errors="replace")
+    return ""
+
+
+def _read_doc_via_word(file_path: str) -> str:
+    return _normalize_word_com_text(_invoke_word_com_worker("read", file_path))
+
+
+def _write_doc_via_word(file_path: str, content: str) -> None:
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    _invoke_word_com_worker("write", file_path, content=text)
+
+
+def _read_docx_text(file_path: str) -> str:
+    """Extract text and tables from a .docx file as Markdown."""
+    from docx import Document
+
+    doc = Document(file_path)
+    parts: list[str] = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if not text:
+            continue
+        style_name = para.style.name if para.style else ""
+        if style_name == "Title":
+            parts.append(f"# {text}")
+        elif style_name.startswith("Heading"):
+            try:
+                level = int(style_name.split()[-1])
+            except (ValueError, IndexError):
+                level = 1
+            parts.append(f"{'#' * (level + 1)} {text}")
+        else:
+            parts.append(text)
+
+    for table in doc.tables:
+        if not table.rows:
+            continue
+        table_lines = []
+        header_cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
+        table_lines.append("| " + " | ".join(header_cells) + " |")
+        table_lines.append("| " + " | ".join("---" for _ in header_cells) + " |")
+        for row in table.rows[1:]:
+            cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+            table_lines.append("| " + " | ".join(cells) + " |")
+        parts.append("\n".join(table_lines))
+
+    return "\n\n".join(parts)
+
+
+def _read_xlsx_text(file_path: str) -> str:
+    """Extract data from an .xlsx file as Markdown tables."""
+    from openpyxl import load_workbook
+
+    parts: list[str] = []
+
+    wb = load_workbook(file_path, read_only=True, data_only=True)
+    try:
+        for ws in wb.worksheets:
+            table_lines = [f"## {ws.title}"]
+            first_row = True
+            for row in ws.iter_rows(values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if not any(cells):
+                    continue
+                escaped = [c.replace("|", "\\|") for c in cells]
+                table_lines.append("| " + " | ".join(escaped) + " |")
+                if first_row:
+                    table_lines.append("| " + " | ".join("---" for _ in cells) + " |")
+                    first_row = False
+            parts.append("\n".join(table_lines))
+    finally:
+        wb.close()
+
+    return "\n\n".join(parts)
+
+
+def _read_pptx_text(file_path: str) -> str:
+    """Extract text from a .pptx file as Markdown."""
+    from pptx import Presentation
+
+    prs = Presentation(file_path)
+    parts: list[str] = []
+
+    for i, slide in enumerate(prs.slides, 1):
+        parts.append(f"## Slide {i}\n")
+        for shape in slide.shapes:
+            if shape.has_text_frame:
+                for para in shape.text_frame.paragraphs:
+                    text = para.text.strip()
+                    if text:
+                        parts.append(text)
+            if shape.has_table:
+                table = shape.table
+                if table.rows:
+                    header = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
+                    parts.append("| " + " | ".join(header) + " |")
+                    parts.append("| " + " | ".join("---" for _ in header) + " |")
+                    for row in table.rows[1:]:
+                        cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
+                        parts.append("| " + " | ".join(cells) + " |")
+        parts.append("")
+
+    return "\n".join(parts)
+
+
+def _read_office_plain_text(file_path: str) -> str:
+    """Extract Office text in the same shape used by read_file (without cat -n)."""
+    _, ext = os.path.splitext(file_path.lower())
+    if ext == ".docx":
+        return _read_docx_text(file_path)
+    if ext == ".doc":
+        return _read_doc_via_word(file_path)
+    if ext in {".xlsx", ".xls"}:
+        return _read_xlsx_text(file_path)
+    if ext in {".pptx", ".ppt"}:
+        return _read_pptx_text(file_path)
+    raise ValueError(f"Unsupported Office extension: {ext}")
+
+
+def _write_office_document(file_path: str, content: str) -> None:
+    """Write text content into an Office container (full overwrite)."""
+    _, ext = os.path.splitext(file_path.lower())
+    text = content.replace("\r\n", "\n").replace("\r", "\n")
+    parent = os.path.dirname(file_path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    if ext == ".docx":
+        from docx import Document
+
+        doc = Document()
+        if text == "":
+            doc.save(file_path)
+            return
+        for line in text.split("\n"):
+            doc.add_paragraph(line)
+        doc.save(file_path)
+        return
+
+    if ext == ".doc":
+        _write_doc_via_word(file_path, text)
+        return
+
+    if ext == ".xlsx":
+        from openpyxl import Workbook
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        if text == "":
+            wb.save(file_path)
+            return
+        for row_idx, line in enumerate(text.split("\n"), 1):
+            ws.cell(row=row_idx, column=1, value=line)
+        wb.save(file_path)
+        return
+
+    if ext == ".pptx":
+        from pptx import Presentation
+        from pptx.util import Inches, Pt
+
+        prs = Presentation()
+        layout = prs.slide_layouts[6] if len(prs.slide_layouts) > 6 else prs.slide_layouts[0]
+        slide = prs.slides.add_slide(layout)
+        left = top = Inches(0.5)
+        width = Inches(9)
+        height = Inches(6.5)
+        box = slide.shapes.add_textbox(left, top, width, height)
+        tf = box.text_frame
+        tf.word_wrap = True
+        lines = text.split("\n") if text else [""]
+        tf.text = lines[0]
+        for line in lines[1:]:
+            p = tf.add_paragraph()
+            p.text = line
+            p.font.size = Pt(18)
+        prs.save(file_path)
+        return
+
+    raise ValueError(_office_write_unsupported_error(file_path, "write_file"))
+
+
+async def _read_office_plain_text_async(file_path: str) -> str:
+    return await asyncio.to_thread(_read_office_plain_text, file_path)
+
+
+async def _write_office_document_async(file_path: str, content: str) -> None:
+    await asyncio.to_thread(_write_office_document, file_path, content)
+
+
+
+
 @dataclass
 class _FileReadState:
     """State recorded when a file is read; used by EditFileTool for pre-read validation."""
@@ -528,10 +877,11 @@ class ReadFileTool(Tool):
         return len(text.splitlines()) if text else 0
 
     def _is_text_read_for_edit(self, file_path: str) -> bool:
+        # Office docs are included: read_file extracts text, and write_file /
+        # edit_file rewrite via dedicated Office writers (not raw UTF-8).
         return (
             not self._is_image(file_path)
             and not self._is_pdf(file_path)
-            and not self._is_office_doc(file_path)
             and not file_path.lower().endswith(".ipynb")
         )
 
@@ -544,6 +894,9 @@ class ReadFileTool(Tool):
     async def _read_raw_text_for_edit_state(self, file_path: str) -> Optional[_RawTextState]:
         """Read raw text content for EditFileTool stale-write checks."""
         try:
+            if self._is_office_doc(file_path):
+                normalized = (await _read_office_plain_text_async(file_path)).replace("\r\n", "\n")
+                return _RawTextState(content=normalized, line_count=self._raw_line_count(normalized))
             res = await self.operation.fs().read_file(file_path)
             if res.code != StatusCode.SUCCESS.code:
                 return None
@@ -608,7 +961,7 @@ class ReadFileTool(Tool):
             read_ranges = _merge_range(read_ranges, (start_line, end_line))
 
         is_logically_complete = (
-            total_lines > 0 and _ranges_cover(read_ranges, 1, total_lines)
+            total_lines == 0 or _ranges_cover(read_ranges, 1, total_lines)
         )
 
         # Full-file content snapshot for stale re-check: only keep it once the
@@ -698,11 +1051,13 @@ class ReadFileTool(Tool):
         try:
             if ext == ".docx":
                 content = await asyncio.to_thread(self._read_docx, file_path)
+            elif ext == ".doc":
+                content = await asyncio.to_thread(self._read_doc, file_path)
             elif ext == ".xlsx":
                 content = await asyncio.to_thread(self._read_xlsx, file_path)
             elif ext == ".pptx":
                 content = await asyncio.to_thread(self._read_pptx, file_path)
-            elif ext in (".doc", ".xls", ".ppt"):
+            elif ext in (".xls", ".ppt"):
                 raise RuntimeError(
                     f"Legacy Office format '{ext}' is not supported. "
                     f"Please convert to the modern format ({ext}x) and try again."
@@ -735,98 +1090,21 @@ class ReadFileTool(Tool):
         return self._cat_n(content)
 
     @staticmethod
+    def _read_doc(file_path: str) -> str:
+        """Extract text from a legacy .doc file via Microsoft Word COM."""
+        return _read_doc_via_word(file_path)
+
+    @staticmethod
     def _read_docx(file_path: str) -> str:
-        """Extract text and tables from a .docx file as Markdown."""
-        from docx import Document
-
-        doc = Document(file_path)
-        parts: list[str] = []
-
-        for para in doc.paragraphs:
-            text = para.text.strip()
-            if not text:
-                continue
-            style_name = para.style.name if para.style else ""
-            if style_name == "Title":
-                parts.append(f"# {text}")
-            elif style_name.startswith("Heading"):
-                try:
-                    level = int(style_name.split()[-1])
-                except (ValueError, IndexError):
-                    level = 1
-                parts.append(f"{'#' * (level + 1)} {text}")
-            else:
-                parts.append(text)
-
-        for table in doc.tables:
-            if not table.rows:
-                continue
-            table_lines = []
-            header_cells = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
-            table_lines.append("| " + " | ".join(header_cells) + " |")
-            table_lines.append("| " + " | ".join("---" for _ in header_cells) + " |")
-            for row in table.rows[1:]:
-                cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
-                table_lines.append("| " + " | ".join(cells) + " |")
-            parts.append("\n".join(table_lines))
-
-        return "\n\n".join(parts)
+        return _read_docx_text(file_path)
 
     @staticmethod
     def _read_xlsx(file_path: str) -> str:
-        """Extract data from an .xlsx file as Markdown tables."""
-        from openpyxl import load_workbook
-
-        parts: list[str] = []
-
-        wb = load_workbook(file_path, read_only=True, data_only=True)
-        try:
-            for ws in wb.worksheets:
-                table_lines = [f"## {ws.title}"]
-                first_row = True
-                for row in ws.iter_rows(values_only=True):
-                    cells = [str(c) if c is not None else "" for c in row]
-                    if not any(cells):
-                        continue
-                    escaped = [c.replace("|", "\\|") for c in cells]
-                    table_lines.append("| " + " | ".join(escaped) + " |")
-                    if first_row:
-                        table_lines.append("| " + " | ".join("---" for _ in cells) + " |")
-                        first_row = False
-                parts.append("\n".join(table_lines))
-        finally:
-            wb.close()
-
-        return "\n\n".join(parts)
+        return _read_xlsx_text(file_path)
 
     @staticmethod
     def _read_pptx(file_path: str) -> str:
-        """Extract text from a .pptx file as Markdown."""
-        from pptx import Presentation
-
-        prs = Presentation(file_path)
-        parts: list[str] = []
-
-        for i, slide in enumerate(prs.slides, 1):
-            parts.append(f"## Slide {i}\n")
-            for shape in slide.shapes:
-                if shape.has_text_frame:
-                    for para in shape.text_frame.paragraphs:
-                        text = para.text.strip()
-                        if text:
-                            parts.append(text)
-                if shape.has_table:
-                    table = shape.table
-                    if table.rows:
-                        header = [cell.text.replace("|", "\\|").strip() for cell in table.rows[0].cells]
-                        parts.append("| " + " | ".join(header) + " |")
-                        parts.append("| " + " | ".join("---" for _ in header) + " |")
-                        for row in table.rows[1:]:
-                            cells = [cell.text.replace("|", "\\|").strip() for cell in row.cells]
-                            parts.append("| " + " | ".join(cells) + " |")
-            parts.append("")
-
-        return "\n".join(parts)
+        return _read_pptx_text(file_path)
 
     async def _read_notebook(self, file_path: str) -> str:
         res = await self.operation.fs().read_file(file_path)
@@ -1132,11 +1410,12 @@ class ReadFileTool(Tool):
         except OSError:
             pass
 
-        if (
+        needs_size_check = (
             self._is_plain_text_candidate(file_path)
+            and not self._is_office_doc(file_path)
             and not user_supplied_limit
-            and size_bytes > self.MAX_SIZE_BYTES
-        ):
+        )
+        if needs_size_check and size_bytes > self.MAX_SIZE_BYTES:
             return ToolOutput(
                 success=False,
                 error=(
@@ -1285,6 +1564,15 @@ class WriteFileTool(Tool):
         except ValueError as exc:
             return ToolOutput(success=False, error=str(exc))
 
+        is_office = _is_office_doc_path(path)
+        if is_office:
+            _, office_ext = os.path.splitext(path.lower())
+            if office_ext not in _OFFICE_WRITE_EXTENSIONS:
+                return ToolOutput(
+                    success=False,
+                    error=_office_write_unsupported_error(path, "write_file"),
+                )
+
         is_unc = _is_unc_path(path)
 
         encoding = "utf-8"
@@ -1319,9 +1607,8 @@ class WriteFileTool(Tool):
                     ranges = read_state.read_ranges if read_state else None
                     is_logically_complete = (
                         read_state is not None
-                        and read_state.total_lines > 0
                         and ranges is not None
-                        and _ranges_cover(ranges, 1, read_state.total_lines)
+                        and (read_state.total_lines == 0 or _ranges_cover(ranges, 1, read_state.total_lines))
                     )
                     if read_state is None or not is_logically_complete:
                         if read_state is None:
@@ -1345,7 +1632,14 @@ class WriteFileTool(Tool):
                             )
                         return ToolOutput(success=False, error=msg)
 
-                    old_content, encoding = await self._read_existing_text(path)
+                    if is_office:
+                        try:
+                            old_content = await _read_office_plain_text_async(path)
+                        except Exception as exc:
+                            return ToolOutput(success=False, error=str(exc))
+                        encoding = "utf-8"
+                    else:
+                        old_content, encoding = await self._read_existing_text(path)
                     old_content_lf = old_content.replace("\r\n", "\n")
 
                     if read_state.mtime_ns != stat.st_mtime_ns or read_state.size_bytes != stat.st_size:
@@ -1364,24 +1658,42 @@ class WriteFileTool(Tool):
             except OSError as exc:
                 return ToolOutput(success=False, error=str(exc))
 
-        res = await self.operation.fs().write_file(
-            path,
-            content,
-            prepend_newline=False,
-            create_if_not_exist=True,
-            encoding=encoding,
-        )
-        if res.code != StatusCode.SUCCESS.code:
-            return ToolOutput(success=False, error=res.message)
+        if is_office:
+            try:
+                await _write_office_document_async(path, content)
+            except Exception as exc:
+                return ToolOutput(success=False, error=str(exc))
+        else:
+            res = await self.operation.fs().write_file(
+                path,
+                content,
+                prepend_newline=False,
+                create_if_not_exist=True,
+                encoding=encoding,
+            )
+            if res.code != StatusCode.SUCCESS.code:
+                return ToolOutput(success=False, error=res.message)
 
         if not is_unc:
             try:
                 stat_after = os.stat(path)
+                written_text = content.replace("\r\n", "\n")
+                if is_office:
+                    try:
+                        written_text = (await _read_office_plain_text_async(path)).replace("\r\n", "\n")
+                    except Exception as exc:
+                        logger.warning(
+                            "[WriteFileTool] Failed to read back Office document %s for registry: %s",
+                            path, exc,
+                        )
+                line_count = len(written_text.splitlines()) if written_text else 0
                 _FILE_READ_REGISTRY[path] = _FileReadState(
                     mtime_ns=stat_after.st_mtime_ns,
                     size_bytes=stat_after.st_size,
                     is_partial=False,
-                    content=content.replace("\r\n", "\n"),
+                    content=written_text,
+                    total_lines=line_count,
+                    read_ranges=[(1, line_count)] if line_count > 0 else [],
                 )
             except OSError:
                 _FILE_READ_REGISTRY.pop(path, None)
@@ -1649,6 +1961,15 @@ class EditFileTool(Tool):
                 error="Cannot edit .ipynb files with this tool. Use NotebookEdit instead.",
             )
 
+        is_office = _is_office_doc_path(file_path)
+        if is_office:
+            _, office_ext = os.path.splitext(file_path.lower())
+            if office_ext not in _OFFICE_WRITE_EXTENSIONS:
+                return ToolOutput(
+                    success=False,
+                    error=_office_write_unsupported_error(file_path, "edit_file"),
+                )
+
         # Reject no-op edits.
         if old_str == new_str:
             return ToolOutput(
@@ -1674,27 +1995,48 @@ class EditFileTool(Tool):
         if old_str == "":
             if file_exists and not is_unc:
                 try:
-                    existing_content, _ = await self._read_existing_text(file_path)
-                except OSError as exc:
+                    if is_office:
+                        existing_content = await _read_office_plain_text_async(file_path)
+                    else:
+                        existing_content, _ = await self._read_existing_text(file_path)
+                except Exception as exc:
                     return ToolOutput(success=False, error=str(exc))
                 if existing_content.strip() != "":
                     return ToolOutput(
                         success=False,
                         error="Cannot create new file - file already exists.",
                     )
-            write_res = await self.operation.fs().write_file(
-                file_path, new_str, prepend_newline=False, create_if_not_exist=True
-            )
-            if write_res.code != StatusCode.SUCCESS.code:
-                return ToolOutput(success=False, error=f"Create failed: {write_res.message}")
+            if is_office:
+                try:
+                    await _write_office_document_async(file_path, new_str)
+                except Exception as exc:
+                    return ToolOutput(success=False, error=f"Create failed: {exc}")
+            else:
+                write_res = await self.operation.fs().write_file(
+                    file_path, new_str, prepend_newline=False, create_if_not_exist=True
+                )
+                if write_res.code != StatusCode.SUCCESS.code:
+                    return ToolOutput(success=False, error=f"Create failed: {write_res.message}")
             # Register the new file as read so subsequent edits don't require a re-read.
             try:
                 _st = os.stat(file_path)
+                registered = new_str.replace("\r\n", "\n")
+                if is_office:
+                    try:
+                        registered = (await _read_office_plain_text_async(file_path)).replace("\r\n", "\n")
+                    except Exception as exc:
+                        logger.warning(
+                            "[EditFileTool] Failed to read back Office document %s for registry: %s",
+                            file_path, exc,
+                        )
+                line_count = len(registered.splitlines()) if registered else 0
                 _FILE_READ_REGISTRY[file_path] = _FileReadState(
                     mtime_ns=_st.st_mtime_ns,
                     size_bytes=_st.st_size,
                     is_partial=False,
-                    content=new_str.replace("\r\n", "\n"),
+                    content=registered,
+                    total_lines=line_count,
+                    read_ranges=[(1, line_count)] if line_count > 0 else [],
                 )
             except OSError:
                 pass
@@ -1758,10 +2100,13 @@ class EditFileTool(Tool):
             content_unchanged = False
             if read_state.content is not None:
                 try:
-                    compare_content, _ = await self._read_existing_text(file_path)
+                    if is_office:
+                        compare_content = await _read_office_plain_text_async(file_path)
+                    else:
+                        compare_content, _ = await self._read_existing_text(file_path)
                     compare_content = compare_content.replace("\r\n", "\n")
                     content_unchanged = compare_content == read_state.content
-                except OSError:
+                except Exception:
                     content_unchanged = False
 
             if not content_unchanged:
@@ -1774,13 +2119,17 @@ class EditFileTool(Tool):
                     ),
                 )
 
-        # ---- Read raw bytes to detect EOL style ----------------------------------
+        # ---- Read content (Office: extracted text; text: raw + EOL) --------------
         try:
-            content, raw = await self._read_existing_text(file_path)
-        except OSError as exc:
+            if is_office:
+                content = await _read_office_plain_text_async(file_path)
+                raw = b""
+                eol = "\n"
+            else:
+                content, raw = await self._read_existing_text(file_path)
+                eol = self._detect_eol(raw)
+        except Exception as exc:
             return ToolOutput(success=False, error=str(exc))
-
-        eol = self._detect_eol(raw)
 
         # Normalise to LF internally for matching and replacement.
         content_lf = content.replace("\r\n", "\n")
@@ -1825,27 +2174,45 @@ class EditFileTool(Tool):
             new_content_lf = content_lf.replace(match_str, new_str_clean, 1)
             replaced = 1
 
-        # Restore original EOL style.
+        # Restore original EOL style for plain text; Office writers use LF.
         new_content = new_content_lf.replace("\n", eol) if eol == "\r\n" else new_content_lf
 
         # ---- Write back ----------------------------------------------------------
-        write_res = await self.operation.fs().write_file(
-            file_path,
-            new_content,
-            prepend_newline=False,
-            options={"expected_content_sha256": hashlib.sha256(raw).hexdigest()},
-        )
-        if write_res.code != StatusCode.SUCCESS.code:
-            return ToolOutput(success=False, error=f"Write failed: {write_res.message}")
+        if is_office:
+            try:
+                await _write_office_document_async(file_path, new_content_lf)
+            except Exception as exc:
+                return ToolOutput(success=False, error=f"Write failed: {exc}")
+        else:
+            write_res = await self.operation.fs().write_file(
+                file_path,
+                new_content,
+                prepend_newline=False,
+                options={"expected_content_sha256": hashlib.sha256(raw).hexdigest()},
+            )
+            if write_res.code != StatusCode.SUCCESS.code:
+                return ToolOutput(success=False, error=f"Write failed: {write_res.message}")
 
         # Update registry so the next edit doesn't require a re-read.
         try:
             _st2 = os.stat(file_path)
+            registered = new_content_lf
+            if is_office:
+                try:
+                    registered = (await _read_office_plain_text_async(file_path)).replace("\r\n", "\n")
+                except Exception as exc:
+                    logger.warning(
+                        "[EditFileTool] Failed to read back Office document %s for registry: %s",
+                        file_path, exc,
+                    )
+            line_count = len(registered.splitlines()) if registered else 0
             _FILE_READ_REGISTRY[file_path] = _FileReadState(
                 mtime_ns=_st2.st_mtime_ns,
                 size_bytes=_st2.st_size,
                 is_partial=False,
-                content=new_content_lf,
+                content=registered,
+                total_lines=line_count,
+                read_ranges=[(1, line_count)] if line_count > 0 else [],
             )
         except OSError:
             _FILE_READ_REGISTRY.pop(file_path, None)

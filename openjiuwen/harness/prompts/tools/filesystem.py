@@ -20,11 +20,11 @@ _LEGACY_READ_FILE_DESCRIPTION: Dict[str, str] = {
 READ_FILE_DESCRIPTION: Dict[str, str] = {
     "cn": (
         "增强版文件读取工具。支持文本、图片、PDF、Jupyter Notebook，"
-        "以及 Office 文档（.docx/.xlsx/.pptx）。"
+        "以及 Office 文档（.docx/.doc/.xlsx/.pptx；.doc 需 Windows + Microsoft Word）。"
     ),
     "en": (
         "Enhanced file reader for text, images, PDFs, Jupyter notebooks, "
-        "and Office documents (.docx/.xlsx/.pptx)."
+        "and Office documents (.docx/.doc/.xlsx/.pptx; .doc requires Windows + Microsoft Word)."
     ),
 }
 
@@ -36,7 +36,10 @@ WRITE_FILE_DESCRIPTION: Dict[str, str] = {
         "2. 后续调用：使用 edit_file 分多次追加剩余内容\n\n"
         "⚠️ 对于有先后顺序的分批写入，必须串行执行：等待前一次写入完成后再发起下一次写入。\n"
         "⚠️ 每个分片必须是语法完整的（尤其是JS或者python等脚本类文件）：确保括号、引号、字符串正确闭合。\n"
-        "⚠️ 如果某次写入失败，不要继续写入后续分片，先检查并修复失败原因。"
+        "⚠️ 如果某次写入失败，不要继续写入后续分片，先检查并修复失败原因。\n"
+        "⚠️ 支持写入 .docx/.doc/.xlsx/.pptx：按文本内容重建文档（全文覆盖）。"
+        ".doc 需 Windows + Microsoft Word。"
+        "已存在文件须先 read_file；不要用 bash/Word COM 绕行。"
     ),
     "en": (
         "Write file contents. Overwrites existing files only after a full read_file call.\n\n"
@@ -46,7 +49,10 @@ WRITE_FILE_DESCRIPTION: Dict[str, str] = {
         "⚠️ For sequential batch writing, operations must be executed serially: "
         " wait for the previous write to complete before initiating the next one.\n"
         "⚠️ Each chunk must be syntactically complete: ensure brackets, quotes, strings are properly closed.\n"
-        "⚠️ If a write fails, do not continue writing subsequent chunks; check and fix the failure first."
+        "⚠️ If a write fails, do not continue writing subsequent chunks; check and fix the failure first.\n"
+        "⚠️ Office documents (.docx/.doc/.xlsx/.pptx) are supported: content is written by rebuilding "
+        "the document from text (full overwrite). .doc requires Windows + Microsoft Word. "
+        "Existing files still require read_file first; do not bypass via bash/Word COM."
     ),
 }
 
@@ -67,6 +73,7 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "- 格式化处理：自动去除 new_string 行尾空白（.md/.mdx 文件除外）；保留文件原有行尾风格（LF/CRLF）\n"
         "- 外部修改检测：写入前通过时间戳 + 文件大小双重校验，若文件被外部修改则拒绝写入\n\n"
         "拒绝条件：文件超过 1 GiB / old_string 与 new_string 相同 / .ipynb 文件 / "
+        "旧版 .xls/.ppt / "
         "文件不存在且 old_string 非空 / 文件已存在且 old_string 为空"
     ),
     "en": (
@@ -83,6 +90,7 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "preserves original EOL style (LF/CRLF)\n"
         "- External modification detection: rejects writes when mtime + size have changed since last read\n\n"
         "Rejected when: file > 1 GiB / old_string == new_string / .ipynb file / "
+        "legacy .xls/.ppt / "
         "file missing with non-empty old_string / file exists with empty old_string"
     ),
 }

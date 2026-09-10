@@ -317,7 +317,10 @@ class TeamContextTracker:
             kind=kind,
             body=body,
             note_kind=ROSTER_NOTE_KIND,
-            note_text=t("team_context.roster_announcement_note"),
+            # Explicit lang: the process-global language is mutated by
+            # unrelated code (ExternalClient.connect) and must not leak into
+            # this member's rendering.
+            note_text=t("team_context.roster_announcement_note", lang=self._language),
         )
 
     # ------------------------------------------------------------------
