@@ -380,7 +380,7 @@ class OtelCallbackHandler:
     def _get_parent_context_for_llm_tool() -> Any:
         """Resolve parent context for LLM/tool span creation.
 
-        Returns None when no valid parent span exists 鈥?callers must
+        Returns None when no valid parent span exists —callers must
         skip span creation in that case rather than attaching to the
         root context, which would produce orphan spans outside the
         active trace.
@@ -430,7 +430,7 @@ class OtelCallbackHandler:
                     root_span.context.span_id,
                 )
 
-        logger.debug("otel: no valid parent span for LLM/tool 鈥?skipping span creation")
+        logger.debug("otel: no valid parent span for LLM/tool —skipping span creation")
         return None
 
     # ------------------------------------------------------------------
@@ -545,10 +545,10 @@ class OtelCallbackHandler:
             span = get_current_llm_span()
             state = getattr(span, OTEL_LLM_STATE_ATTR, None) if span else None
             if state is None:
-                logger.debug("otel: on_llm_output 鈥?no open LLM span to enrich")
+                logger.debug("otel: on_llm_output —no open LLM span to enrich")
                 return
             if not state.span.is_recording():
-                logger.debug("otel: on_llm_output 鈥?span already ended")
+                logger.debug("otel: on_llm_output —span already ended")
                 return
             usage_from_trigger = kwargs.get("usage")
             if usage_from_trigger is not None:
@@ -869,7 +869,7 @@ class OtelCallbackHandler:
         """Handle AGENT_INVOKE_OUTPUT callback.
 
         DO NOT close agent span here! (managed by Rail)
-        Sets root span output from the FINAL invoke result 鈥?this is the
+        Sets root span output from the FINAL invoke result —this is the
         overall agent output, distinct from per-iteration results written by
         AgentObservabilityRail.after_task_iteration.
         """
@@ -916,7 +916,7 @@ class OtelCallbackHandler:
         messages = kwargs.get("messages") or []
         model_name = str(kwargs.get("model") or self._derive_model_name(kwargs) or "").strip()
         # Identity of the request this span stands for. Everything that
-        # arrives later 鈥?chunks, usage, completion, errors 鈥?is matched back
+        # arrives later —chunks, usage, completion, errors —is matched back
         # to the span through it, so it must be read here, while the opening
         # callback still runs inside the caller's LLM call scope.
         call_id = get_current_llm_call_id()
@@ -972,12 +972,12 @@ class OtelCallbackHandler:
         #   - Context compression (current < prev): emit ALL messages.
         #   - Subsequent call: emit only new (delta) messages.
         #
-        # System messages are ALWAYS emitted regardless of delta 鈥?they form
+        # System messages are ALWAYS emitted regardless of delta —they form
         # the stable instruction baseline that every span needs.
         #
         # Cross-iteration: the count is stored on the root span (not the
         # iteration span) keyed by agent_id, because each iteration opens and
-        # closes its own agent span 鈥?a count stored there is lost before the
+        # closes its own agent span —a count stored there is lost before the
         # next iteration's first LLM call, which would then re-emit the full
         # prompt. Each agent keeps its own chain
         # (gen_ai.request.prev_message_count.<agent_id>); OTel span
@@ -1193,7 +1193,7 @@ class OtelCallbackHandler:
             output_json = json.dumps(response_obj, ensure_ascii=False, default=str)
             state.span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redact_completion(output_json, self._config))
         finally:
-            # Always end the main llm.call span 鈥?even if attribute setting
+            # Always end the main llm.call span —even if attribute setting
             # above threw, the span must not become an orphan.
             if state.span.is_recording():
                 self._stamp_llm_semantic_identity(state)
@@ -1218,7 +1218,7 @@ class OtelCallbackHandler:
                 )
                 # Without chunks there is nothing to measure: a non-streaming
                 # call returns reasoning and answer together. Anchor the span at
-                # the start of its llm.call 鈥?where the reasoning happened 鈥?
+                # the start of its llm.call —where the reasoning happened —
                 # instead of letting it default to finalize time, which parks a
                 # zero-length span at the *end* of the call, after the answer it
                 # preceded.
@@ -1257,7 +1257,7 @@ class OtelCallbackHandler:
                 self._copy_correlation_attributes(state.span, reasoning_span)
                 # Mirror reasoning_tokens onto the reasoning span (also on the
                 # parent llm.call span via _record_usage_attrs). Read straight
-                # from the usage object 鈥?never compute it.
+                # from the usage object —never compute it.
                 rt = getattr(usage, "reasoning_tokens", 0) or 0
                 if rt:
                     reasoning_span.set_attribute(GEN_AI_USAGE_REASONING_TOKENS, int(rt))
@@ -1297,7 +1297,7 @@ class OtelCallbackHandler:
         Cached prompt tokens and reasoning tokens are *subsets* of the prompt
         and completion counts the provider reports, not additional tokens. A
         backend that treats every ``gen_ai.usage.*`` key as its own additive
-        category 鈥?Langfuse does, summing them per observation and per trace 鈥?
+        category —Langfuse does, summing them per observation and per trace —
         then counts the cached prefix twice, which on a long agent run (where
         most of each prompt is a cache hit) inflates the trace total by more
         than half.
@@ -1843,7 +1843,7 @@ class OtelCallbackHandler:
         """Serialize the tool call's arguments for the tool span input.
 
         ``ToolCallEvents.TOOL_CALL_STARTED`` carries ``inputs=(args, kwargs)``
-        鈥?a 2-element tuple of positional and keyword arguments from the
+        —a 2-element tuple of positional and keyword arguments from the
         tool invocation. Preserve the original structure; Session objects
         are rendered as ``"session:<id>"`` so they remain readable.
         """
@@ -2050,7 +2050,7 @@ class OtelCallbackHandler:
             agent_span = get_current_agent_span()
             if agent_span is None:
                 logger.debug(
-                    "callback_handler: _stamp_parent_member_name 鈥?"
+                    "callback_handler: _stamp_parent_member_name —"
                     "no agent span in context; span={} will not carry agentteam.member.name",
                     span.name,
                 )

@@ -150,7 +150,7 @@ class ActiveSpanTracker(SpanProcessor):
         Args:
             call_id: Id of the LLM request, from the call scope in effect when
                 the span was opened. Empty when the caller reached the callback
-                framework without going through ``Model`` 鈥?nothing is indexed
+                framework without going through ``Model`` —nothing is indexed
                 then and lookups fall back to parent matching.
             span: The freshly opened ``llm.call`` span.
         """
@@ -189,7 +189,7 @@ class ActiveSpanTracker(SpanProcessor):
             try:
                 logger.warning(
                     "ORPHAN LLM span in cascade-close: span_id={:016x} "
-                    "parent_span_id={:016x} 鈥?close callback did not fire",
+                    "parent_span_id={:016x} —close callback did not fire",
                     span.context.span_id,
                     parent_span_id,
                 )
@@ -223,7 +223,7 @@ class ActiveSpanTracker(SpanProcessor):
 
         Resolution is by request identity first: the LLM call scope in effect
         names the request whose callback is firing, and the span it opened is
-        indexed under that id.  That is what keeps concurrent requests apart 鈥?
+        indexed under that id.  That is what keeps concurrent requests apart —
         a member's streaming call, another member's call, and a detached
         background request such as the image-modality probe each resolve to
         their own span no matter which task the callback runs in.
@@ -289,7 +289,7 @@ class ActiveSpanTracker(SpanProcessor):
         if len(exact) > 1:
             logger.warning(
                 "ActiveSpanTracker: {} open llm.call spans share parent_span_id={:016x} "
-                "and the callback carries no LLM call id 鈥?skipping rather than "
+                "and the callback carries no LLM call id —skipping rather than "
                 "guessing which one it belongs to",
                 len(exact),
                 parent_id,
@@ -303,7 +303,7 @@ class ActiveSpanTracker(SpanProcessor):
         self.flush_all_spans()
 
     def force_flush(self, timeout_millis: int = 30000) -> bool:
-        # Do NOT call flush_all_spans here 鈥?force_flush is called by
+        # Do NOT call flush_all_spans here —force_flush is called by
         # TracerProvider after a caller has closed its child spans. Closing
         # spans here would steal them from the operation that owns the trace.
         return True
@@ -318,7 +318,7 @@ class ActiveSpanTracker(SpanProcessor):
         """Close all active spans for a specific trace.
 
         Spans that carry ``otel_llm_state`` are leaked LLM spans whose normal
-        close callback never fired 鈥?logged at error level.  Other spans
+        close callback never fired —logged at error level.  Other spans
         (tool / task / event) reaching this path are also unexpected and
         logged as errors.
 
@@ -351,7 +351,7 @@ class ActiveSpanTracker(SpanProcessor):
                     _log_orphan_llm_span(span, state)
                 else:
                     logger.warning(
-                        "ORPHAN non-LLM span at flush: name={} span_id={:016x} 鈥?span was never properly closed",
+                        "ORPHAN non-LLM span at flush: name={} span_id={:016x} —span was never properly closed",
                         span.name if hasattr(span, "name") else "<no-name>",
                         span.context.span_id if hasattr(span, "context") and span.context else 0,
                     )
@@ -395,7 +395,7 @@ class ActiveSpanTracker(SpanProcessor):
                         _log_orphan_llm_span(span, state)
                     else:
                         logger.warning(
-                            "ORPHAN non-LLM span at flush: name={} span_id={:016x} 鈥?span was never properly closed",
+                            "ORPHAN non-LLM span at flush: name={} span_id={:016x} —span was never properly closed",
                             span.name if hasattr(span, "name") else "<no-name>",
                             span.context.span_id if hasattr(span, "context") and span.context else 0,
                         )
@@ -802,7 +802,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     A span with ``otel_llm_state`` reaching ``flush_spans_for_trace`` or
     ``flush_all_spans`` means it was opened normally but its close
     callback (on_llm_output / on_llm_invoke_output) never fired AND
-    cascade-close missed it.  This is a real bug 鈥?log at error level
+    cascade-close missed it.  This is a real bug —log at error level
     so the root cause can be investigated.
 
     Unlike the old ``_finalize_llm_span_from_state``, this does NOT set a
@@ -811,7 +811,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     """
     logger.warning(
         "ORPHAN LLM span at flush: span_id={:016x} streaming={} "
-        "recording={} first_chunk_ns={} 鈥?span was opened but never "
+        "recording={} first_chunk_ns={} —span was opened but never "
         "properly closed; its normal close callback did not fire",
         span.context.span_id if hasattr(span, "context") and span.context else 0,
         getattr(state, "is_streaming", None),
@@ -823,7 +823,7 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
 def cascade_close_children() -> int:
     """End all open child llm/tool spans on the current context.
 
-    The single source of truth for cascade-close 鈥?called from
+    The single source of truth for cascade-close —called from
     ``AgentSpanScope.close`` (rail) and ``close_current_agent_span`` below.
     Spans reaching this path had their normal close callback fail to fire.
     They retain UNSET status, receive an explicit forced-close marker, and
@@ -844,7 +844,7 @@ def cascade_close_children() -> int:
             belongs_to_current_agent = agent_span_id is None or parent_span_id == agent_span_id
             if ts.is_recording() and belongs_to_current_agent:
                 logger.warning(
-                    "ORPHAN tool span in cascade-close: name={} span_id={:016x} 鈥?"
+                    "ORPHAN tool span in cascade-close: name={} span_id={:016x} —"
                     "on_tool_call_finished/on_tool_call_error did not fire",
                     ts.name if hasattr(ts, "name") else "<no-name>",
                     ts.context.span_id if hasattr(ts, "context") and ts.context else 0,
@@ -927,7 +927,7 @@ def get_current_tool_span() -> Span | None:
     under that tool span rather than beside it.
 
     Tool spans are keyed by name with no cross-key ordering, so the innermost
-    one is the latest-started still-recording span 鈥?tool calls are sequential
+    one is the latest-started still-recording span —tool calls are sequential
     within an agent loop, which makes start time an unambiguous order.
 
     Returns:
@@ -1003,12 +1003,12 @@ def flush_child_spans(*, trace_id: int | None = None) -> int:
     closed; unrelated traces are never touched.
 
     When *trace_id* is ``None``, the call site must be operating while the
-    trace's root span is still resolvable 鈥?its ContextVar binding, or the
+    trace's root span is still resolvable —its ContextVar binding, or the
     ambient registration (e.g. ``cascade_close_children`` during an
     agent-span close).  In that case the trace_id is discovered from it.
 
     The previous ``flush_all_spans`` fallback (when the root ContextVar
-    was ``None``) has been **removed** 鈥?it could steal spans belonging to
+    was ``None``) has been **removed** —it could steal spans belonging to
     other still-running traces.
     """
     tracker = get_active_span_tracker()
@@ -1041,7 +1041,7 @@ def flush_child_spans(*, trace_id: int | None = None) -> int:
             return closed
         else:
             logger.warning(
-                "flush_child_spans: cannot determine trace_id 鈥?no root span in "
+                "flush_child_spans: cannot determine trace_id —no root span in "
                 "ContextVar and no explicit trace_id provided; skipping flush"
             )
             return 0
