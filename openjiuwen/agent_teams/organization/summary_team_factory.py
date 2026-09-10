@@ -36,17 +36,19 @@ from openjiuwen.agent_teams.organization.summary import (
 
 #: Build-and-start a Team from a Summary Team preset. Host provides the Team
 #: runtime activation that produces a unique ``team_id``/``leader_id`` pair.
+#: Receives ``(spec, organization_id, root_task_id, summary_task_id,
+#: owner_team_id, session_id)``.
 SummaryTeamBuilder = Callable[
-    [SummaryTeamSpec, str, str, str, str],
+    [SummaryTeamSpec, str, str, str, str, str],
     Awaitable[LaunchedSummaryTeam],
 ]
 
 #: Re-attach or recreate the Team that backs an interrupted SummaryExecution.
 #: Receives ``(spec, execution_id, organization_id, root_task_id,
-#: summary_task_id, session_id)`` and returns the running Team.  When omitted,
-#: recovery delegates to the builder so a fresh Team is launched.
+#: summary_task_id, owner_team_id, session_id)`` and returns the running Team.
+#: When omitted, recovery delegates to the builder so a fresh Team is launched.
 SummaryTeamRecoverer = Callable[
-    [SummaryTeamSpec, str, str, str, str, str],
+    [SummaryTeamSpec, str, str, str, str, str, str],
     Awaitable[LaunchedSummaryTeam],
 ]
 
@@ -94,6 +96,7 @@ class DefaultSummaryTeamFactory:
         organization_id: str,
         root_task_id: str,
         summary_task_id: str,
+        owner_team_id: str,
         session_id: str,
     ) -> LaunchedSummaryTeam:
         """Build and start a task-specific Summary Team via the host builder."""
@@ -103,6 +106,7 @@ class DefaultSummaryTeamFactory:
             organization_id,
             root_task_id,
             summary_task_id,
+            owner_team_id,
             session_id,
         )
 
@@ -113,6 +117,7 @@ class DefaultSummaryTeamFactory:
         organization_id: str,
         root_task_id: str,
         summary_task_id: str,
+        owner_team_id: str,
         session_id: str,
     ) -> LaunchedSummaryTeam:
         """Re-attach or recreate the Team backing an interrupted execution (§8).
@@ -129,6 +134,7 @@ class DefaultSummaryTeamFactory:
                 organization_id,
                 root_task_id,
                 summary_task_id,
+                owner_team_id,
                 session_id,
             )
         return await self._summary_team_builder(
@@ -136,6 +142,7 @@ class DefaultSummaryTeamFactory:
             organization_id,
             root_task_id,
             summary_task_id,
+            owner_team_id,
             session_id,
         )
 

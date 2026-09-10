@@ -74,9 +74,16 @@ class SummaryTeamFactory(Protocol):
         organization_id: str,
         root_task_id: str,
         summary_task_id: str,
+        owner_team_id: str,
         session_id: str,
     ) -> LaunchedSummaryTeam:
-        """Create and start a Summary Team; raise on failure."""
+        """Create and start a Summary Team; raise on failure.
+
+        ``owner_team_id`` is the team that owns the root task.  A summary team
+        shares the organization's storage, so hosts use this to pick whose
+        TeamDatabase to attach to (rather than guessing among the session's
+        teams).
+        """
 
     async def recover(
         self,
@@ -85,6 +92,7 @@ class SummaryTeamFactory(Protocol):
         organization_id: str,
         root_task_id: str,
         summary_task_id: str,
+        owner_team_id: str,
         session_id: str,
     ) -> LaunchedSummaryTeam:
         """Re-attach or recreate a Summary Team for an interrupted execution (§8).
@@ -92,7 +100,8 @@ class SummaryTeamFactory(Protocol):
         Called after a process restart for a SummaryExecution that never bound a
         ``summary_team_id``.  The host decides whether the previously started Team
         still exists (reuse its id) or must be launched fresh; it must return the
-        team that should now back the execution.
+        team that should now back the execution.  ``owner_team_id`` carries the
+        same meaning as in :meth:`provision`.
         """
 
     async def release(

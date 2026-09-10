@@ -812,6 +812,7 @@ class OrganizationRuntimeManager:
                         organization_id=manager.organization_id,
                         root_task_id=root_task_id,
                         summary_task_id=execution.summary_task_id,
+                        owner_team_id=from_team_id,
                         session_id=session_id,
                     )
                 except Exception as exc:  # noqa: BLE001
@@ -1233,6 +1234,7 @@ class OrganizationRuntimeManager:
                 organization_id=manager.organization_id,
                 root_task_id=root_task_id,
                 summary_task_id=event.summary_task_id,
+                owner_team_id=from_team_id,
                 session_id=session_id,
             )
         except Exception as exc:  # noqa: BLE001

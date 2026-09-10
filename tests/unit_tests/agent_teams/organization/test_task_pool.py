@@ -124,7 +124,7 @@ class FakeSummaryFactory:
     def default_spec(self):
         return SummaryTeamSpec()
 
-    async def provision(self, *, organization_id, root_task_id, summary_task_id, session_id):
+    async def provision(self, *, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
         if self.fail:
             raise RuntimeError("no team capacity")
         self.provision_calls.append(
@@ -132,6 +132,7 @@ class FakeSummaryFactory:
                 "organization_id": organization_id,
                 "root_task_id": root_task_id,
                 "summary_task_id": summary_task_id,
+                "owner_team_id": owner_team_id,
                 "session_id": session_id,
             }
         )
@@ -143,7 +144,7 @@ class FakeSummaryFactory:
             spec=SummaryTeamSpec(),
         )
 
-    async def recover(self, *, execution_id, organization_id, root_task_id, summary_task_id, session_id):
+    async def recover(self, *, execution_id, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
         if self.recover_fail:
             raise RuntimeError("no team to recover")
         self.recover_calls.append(
@@ -152,6 +153,7 @@ class FakeSummaryFactory:
                 "organization_id": organization_id,
                 "root_task_id": root_task_id,
                 "summary_task_id": summary_task_id,
+                "owner_team_id": owner_team_id,
                 "session_id": session_id,
             }
         )
@@ -3161,12 +3163,14 @@ async def test_summary_task_created_provisions_and_delegates_dynamic_team(active
         OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
     )
 
-    # Dynamic Summary Team was provisioned with the correct root/summary ids and session.
+    # Dynamic Summary Team was provisioned with the correct root/summary ids,
+    # the owning team, and session.
     assert factory.provision_calls == [
         {
             "organization_id": org_id,
             "root_task_id": summary_id,
             "summary_task_id": summary_id,
+            "owner_team_id": "team-a",
             "session_id": session_id,
         }
     ]
@@ -3563,6 +3567,8 @@ async def test_resume_summary_executions_reprovisions_unbound_execution(active_o
     assert recover_call["execution_id"] == execution.execution_id
     assert recover_call["organization_id"] == org_id
     assert recover_call["summary_task_id"] == summary_id
+    # The owner team is threaded through so the host can borrow its storage.
+    assert recover_call["owner_team_id"] == "team-a"
     assert recover_call["session_id"] == session_id
 
     recovered = (await manager.list_summary_executions(summary_task_id=summary_id))[0]

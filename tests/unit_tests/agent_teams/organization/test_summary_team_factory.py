@@ -31,8 +31,8 @@ def test_default_summary_team_factory_returns_preset_spec():
 async def test_default_summary_team_factory_provision_forwards_context():
     calls = []
 
-    async def builder(spec, organization_id, root_task_id, summary_task_id, session_id):
-        calls.append((spec, organization_id, root_task_id, summary_task_id, session_id))
+    async def builder(spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
+        calls.append((spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id))
         return LaunchedSummaryTeam(
             team_id="summary-1",
             leader_id="summary-leader-1",
@@ -49,6 +49,7 @@ async def test_default_summary_team_factory_provision_forwards_context():
         organization_id="org-1",
         root_task_id="root-1",
         summary_task_id="summary-1",
+        owner_team_id="team-owner",
         session_id="session-1",
     )
 
@@ -57,11 +58,12 @@ async def test_default_summary_team_factory_provision_forwards_context():
     assert launched.root_task_id == "root-1"
     assert launched.summary_task_id == "summary-1"
     assert len(calls) == 1
-    spec, organization_id, root_task_id, summary_task_id, session_id = calls[0]
+    spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id = calls[0]
     assert isinstance(spec, SummaryTeamSpec)
     assert organization_id == "org-1"
     assert root_task_id == "root-1"
     assert summary_task_id == "summary-1"
+    assert owner_team_id == "team-owner"
     assert session_id == "session-1"
 
 
@@ -90,8 +92,8 @@ async def test_default_summary_team_factory_release_stops_team():
 async def test_default_summary_team_factory_recover_forwards_when_recoverer_supplied():
     calls = []
 
-    async def recoverer(spec, execution_id, organization_id, root_task_id, summary_task_id, session_id):
-        calls.append((spec, execution_id, organization_id, root_task_id, summary_task_id, session_id))
+    async def recoverer(spec, execution_id, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
+        calls.append((spec, execution_id, organization_id, root_task_id, summary_task_id, owner_team_id, session_id))
         return LaunchedSummaryTeam(
             team_id="summary-rec",
             leader_id="summary-leader-rec",
@@ -110,17 +112,19 @@ async def test_default_summary_team_factory_recover_forwards_when_recoverer_supp
         organization_id="org-1",
         root_task_id="root-1",
         summary_task_id="summary-1",
+        owner_team_id="team-owner",
         session_id="session-1",
     )
 
     assert launched.team_id == "summary-rec"
     assert len(calls) == 1
-    spec, execution_id, organization_id, root_task_id, summary_task_id, session_id = calls[0]
+    spec, execution_id, organization_id, root_task_id, summary_task_id, owner_team_id, session_id = calls[0]
     assert isinstance(spec, SummaryTeamSpec)
     assert execution_id == "exec-1"
     assert organization_id == "org-1"
     assert root_task_id == "root-1"
     assert summary_task_id == "summary-1"
+    assert owner_team_id == "team-owner"
     assert session_id == "session-1"
 
 
@@ -128,8 +132,8 @@ async def test_default_summary_team_factory_recover_forwards_when_recoverer_supp
 async def test_default_summary_team_factory_recover_falls_back_to_builder():
     calls = []
 
-    async def builder(spec, organization_id, root_task_id, summary_task_id, session_id):
-        calls.append((spec, organization_id, root_task_id, summary_task_id, session_id))
+    async def builder(spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
+        calls.append((spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id))
         return LaunchedSummaryTeam(
             team_id="summary-fallback",
             leader_id="summary-leader-fallback",
@@ -148,14 +152,17 @@ async def test_default_summary_team_factory_recover_falls_back_to_builder():
         organization_id="org-1",
         root_task_id="root-1",
         summary_task_id="summary-1",
+        owner_team_id="team-owner",
         session_id="session-1",
     )
 
     assert launched.team_id == "summary-fallback"
     assert len(calls) == 1
-    spec, organization_id, root_task_id, summary_task_id, session_id = calls[0]
+    spec, organization_id, root_task_id, summary_task_id, owner_team_id, session_id = calls[0]
     assert isinstance(spec, SummaryTeamSpec)
     assert organization_id == "org-1"
     assert root_task_id == "root-1"
     assert summary_task_id == "summary-1"
+    # The fallback launch carries the owner through to the builder.
+    assert owner_team_id == "team-owner"
     assert session_id == "session-1"
