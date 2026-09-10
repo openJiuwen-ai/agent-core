@@ -180,7 +180,7 @@ async def _prepare(
 async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot() -> None:
     model_a = SimpleNamespace(invoke=AsyncMock())
     model_b = SimpleNamespace(invoke=AsyncMock())
-    identity = CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",))
+    identity = CapabilityIdentity("skill:a", "skill", "a")
     provider = SimpleNamespace(snapshot_capabilities=lambda: [identity])
     graph_snapshot = {
         "static_revision": "static-start",
@@ -1394,8 +1394,8 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
         messages=(),
         execution_fragments=(fragment_a, fragment_b),
         capability_snapshot=(
-            CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",)),
-            CapabilityIdentity("tool:b", "tool", "b", "v1", "sha256:b", ("in",), ("out",)),
+            CapabilityIdentity("skill:a", "skill", "a"),
+            CapabilityIdentity("tool:b", "tool", "b"),
         ),
         query="q",
         outcome="success",
@@ -1414,7 +1414,7 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
     execution_graph = callback.await_args.args[1]
     assert execution_graph["graph"]["edges"]
     assert execution_graph["graph_snapshot"]["static_revision"] == "static-start"
-    assert execution_graph["graph"]["nodes"]["skill:a"]["metadata"]["output_ports"] == ["out"]
+    assert execution_graph["graph"]["nodes"]["skill:a"] == {"label": "skill"}
     assert callback.await_args.kwargs == {"session_id": "unknown", "capture_mode": "agent"}
 
 
@@ -2211,7 +2211,7 @@ async def test_interrupt_lifecycle_matrix_preserves_complete_input(
     roots = {"value": _root(1)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
     initial_model = SimpleNamespace(invoke=AsyncMock())
-    identity = CapabilityIdentity("skill:alpha", "skill", "alpha", "v1", "sha256:a", ("in",), ("out",))
+    identity = CapabilityIdentity("skill:alpha", "skill", "alpha")
     snapshot = _graph_snapshot()
     received = []
     callback = AsyncMock()
@@ -2530,7 +2530,7 @@ async def test_team_member_spans_and_repeated_completion_do_not_duplicate_submis
 
 def test_prepared_input_preserves_legacy_positional_constructor() -> None:
     trajectory = _trajectory()
-    identity = CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",))
+    identity = CapabilityIdentity("skill:a", "skill", "a")
     # Historical positional order includes inherited skill_name before the
     # original Symphony fields, with capability_snapshot in position seven.
     prepared = SymphonyGraphEvolutionInput(

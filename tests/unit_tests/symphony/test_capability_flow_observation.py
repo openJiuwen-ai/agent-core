@@ -40,37 +40,15 @@ def _execution_graph(*, outcome: str = "success", include_snapshot: bool = True)
             "type": "execution_graph",
             "directed": True,
             "nodes": {
-                "skill:a": {
-                    "label": "skill",
-                    "metadata": {
-                        "capability_type": "skill",
-                        "version": "v1",
-                        "content_hash": "sha256:a",
-                        "input_ports": ["query"],
-                        "output_ports": ["text"],
-                    },
-                },
-                "skill:b": {
-                    "label": "skill",
-                    "metadata": {
-                        "capability_type": "skill",
-                        "version": "v1",
-                        "content_hash": "sha256:b",
-                        "input_ports": ["text"],
-                        "output_ports": ["summary"],
-                    },
-                },
+                "skill:a": {"label": "skill"},
+                "skill:b": {"label": "skill"},
             },
             "edges": [
                 {
                     "source": "skill:a",
                     "target": "skill:b",
                     "relation": "can_feed",
-                    "metadata": {
-                        "success": True,
-                        "port_mappings": [{"source_output": "text", "target_input": "text"}],
-                        "evidence_refs": ["trace-1#span=1", "trace-1#span=2"],
-                    },
+                    "metadata": {"success": True},
                 }
             ],
         },
@@ -156,7 +134,36 @@ async def test_runtime_builds_canonical_graph_observation() -> None:
     assert value.trace.capture_mode == "team"
     assert value.task.task_cluster_id is None
     assert value.graph_snapshot.static_revision == "static-1"
-    assert set(value.capabilities) == {"skill:a", "skill:b"}
+    assert set(value.execution_graph.nodes) == {"skill:a", "skill:b"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_does_not_invent_failure_domain() -> None:
+    captured = []
+
+    def submit(value):
+        captured.append(value)
+        return ObservationReceipt(
+            evidence_id="execution-1",
+            graph_scope_id="workspace:test",
+            sequence=1,
+            status="audit_only",
+        )
+
+    execution_graph = _execution_graph(outcome="failed")
+    execution_graph["graph"]["edges"][0]["metadata"] = {"success": False}
+    runtime = _runtime(SimpleNamespace(submit_observation=submit), None)
+
+    await runtime.submit_evolution(
+        _planned_graph(),
+        execution_graph,
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    metadata = captured[0].execution_graph.edges[0].metadata
+    assert metadata.success is False
+    assert metadata.failure_domain is None
 
 
 @pytest.mark.asyncio

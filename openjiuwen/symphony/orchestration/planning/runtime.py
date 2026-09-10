@@ -6,8 +6,8 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from openjiuwen.symphony.observation.identity import POINT_EDGE_IDENTITY_SCHEMA
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifacts
-from openjiuwen.symphony.observation.identity import normalize_port_mappings, static_edge_port_mappings
 from openjiuwen.symphony.orchestration.planning.utils import CAN_FEED, eligible_can_feed_edges, skill_id
 
 
@@ -52,9 +52,7 @@ class RuntimeEdgeResolver:
             if status == "active_static" or (not status and not bool(stats.get("runtime_only"))):
                 static_stats_by_relation[key].append(stats)
             elif status == "active_runtime_only" or (not status and _legacy_runtime_only_eligible(stats)):
-                identity = str(stats.get("edge_identity") or "") or repr(
-                    (key, tuple(sorted(_mapping_keys(stats.get("port_mappings") or ()))))
-                )
+                identity = str(stats.get("edge_identity") or "") or repr(key)
                 runtime_only_by_identity[identity].append(stats)
 
         static_edges_by_relation: dict[tuple[str, str, str], list[Mapping[str, Any]]] = defaultdict(list)
@@ -98,7 +96,6 @@ class RuntimeEdgeResolver:
             runtime = _combine_stats(stats)
             attempt_count = max(runtime["attempt_count"], runtime["success_count"])
             confidence = (runtime["success_count"] + 1) / (attempt_count + 2)
-            port_mappings = _combined_port_mappings(stats)
             resolved.append(
                 {
                     "type": CAN_FEED,
@@ -108,7 +105,7 @@ class RuntimeEdgeResolver:
                     "method": "runtime_observed",
                     "evidence": {
                         "reasons": ["Repeated strongly verified execution evidence"],
-                        "supporting_fields": {"port_mappings": port_mappings},
+                        "supporting_fields": {},
                     },
                     "runtime_only": True,
                     "runtime_weight": runtime["runtime_weight"],
@@ -133,6 +130,8 @@ class RuntimeEdgeResolver:
         )
 
     def _is_relevant(self, stats: Mapping[str, Any]) -> bool:
+        if stats.get("identity_schema") != POINT_EDGE_IDENTITY_SCHEMA:
+            return False
         clusters = {str(value) for value in stats.get("task_cluster_ids") or [] if str(value)}
         cluster_matches = bool(self.task_cluster_id and self.task_cluster_id in clusters)
         endpoints = {
@@ -170,18 +169,7 @@ def _legacy_runtime_only_eligible(stats: Mapping[str, Any]) -> bool:
 
 
 def _stats_match_static_edge(stats: Mapping[str, Any], edge: Mapping[str, Any]) -> bool:
-    if _relation_key(stats) != _relation_key(edge):
-        return False
-    observed = _mapping_keys(stats.get("port_mappings") or ())
-    static = _mapping_keys(static_edge_port_mappings(edge))
-    return bool(observed) and observed <= static
-
-
-def _mapping_keys(values: Any) -> set[tuple[str, str]]:
-    return {
-        (mapping["source_output"], mapping["target_input"])
-        for mapping in normalize_port_mappings(item for item in values if isinstance(item, Mapping))
-    }
+    return _relation_key(stats) == _relation_key(edge)
 
 
 def _combine_stats(values: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -212,14 +200,3 @@ def _bounded_runtime_weight(stats: Mapping[str, Any]) -> float:
     except (TypeError, ValueError):
         value = 1.0
     return max(0.0, min(2.0, value))
-
-
-def _combined_port_mappings(values: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    mappings: dict[tuple[tuple[str, str], ...], dict[str, Any]] = {}
-    for item in values:
-        for mapping in item.get("port_mappings") or []:
-            if not isinstance(mapping, Mapping):
-                continue
-            normalized = {str(key): str(value) for key, value in mapping.items() if str(value)}
-            mappings[tuple(sorted(normalized.items()))] = normalized
-    return [mappings[key] for key in sorted(mappings)]

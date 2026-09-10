@@ -38,7 +38,6 @@ from openjiuwen.symphony.models import (
 )
 from openjiuwen.symphony.observation import (
     GRAPH_EVOLUTION_INPUT_SCHEMA,
-    CapabilityEvidence,
     EvidenceStrength,
     EvolutionEdgeMetadata,
     EvolutionGraph,
@@ -49,7 +48,6 @@ from openjiuwen.symphony.observation import (
     GraphSnapshot,
     GraphSnapshotRef,
     ObservationReceipt,
-    PortMapping,
     TaskEvidence,
     TaskOutcome,
     TaskOutcomeLabel,
@@ -108,7 +106,6 @@ __all__ = [
     "CapabilityInput",
     "CapabilityOutput",
     "CapabilityProvider",
-    "CapabilityEvidence",
     "EvidenceStrength",
     "EvaluationCase",
     "EvaluationContext",
@@ -148,7 +145,6 @@ __all__ = [
     "ObservationReceipt",
     "ParameterSpec",
     "PrepareArtifactHook",
-    "PortMapping",
     "QualityConfidence",
     "QualityResult",
     "ScanDiagnostic",

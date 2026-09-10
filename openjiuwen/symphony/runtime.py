@@ -14,7 +14,6 @@ from openjiuwen.symphony.flow.engine import SymphonyFlowEngine
 from openjiuwen.symphony.flow.models import CombinationCandidate
 from openjiuwen.symphony.graph_engine import SymphonyGraphEngine
 from openjiuwen.symphony.observation import (
-    CapabilityEvidence,
     EvidenceStrength,
     EvolutionGraph,
     FailureDomain,
@@ -134,11 +133,10 @@ class SymphonyRuntime:
         snapshot = _snapshot_from_plan(planned_graph) or _snapshot_from_execution(execution_graph)
         if snapshot is None:
             raise ValueError("invoke-start graph snapshot is required")
-        outcome = _task_outcome(execution_graph, evidence_id)
-        capabilities = _capability_evidence(graph)
+        outcome = _task_outcome(execution_graph)
         planned_value = planned_graph.get("graph") if isinstance(planned_graph, dict) else None
         planned_model = EvolutionGraph.model_validate(deepcopy(planned_value)) if planned_value is not None else None
-        execution_model = EvolutionGraph.model_validate(_observation_graph(graph))
+        execution_model = EvolutionGraph.model_validate(deepcopy(graph))
         return GraphEvolutionInput(
             evidence_id=evidence_id,
             graph_scope_id=self.graph_scope_id,
@@ -156,7 +154,6 @@ class SymphonyRuntime:
                 task_cluster_id=None,
                 outcome=outcome,
             ),
-            capabilities=capabilities,
             planned_graph=planned_model,
             execution_graph=execution_model,
         )
@@ -220,45 +217,22 @@ def _snapshot_from_execution(execution_graph: dict[str, Any]) -> GraphSnapshotRe
         return None
 
 
-def _capability_evidence(graph: dict[str, Any]) -> dict[str, CapabilityEvidence]:
-    output: dict[str, CapabilityEvidence] = {}
-    nodes = graph.get("nodes")
-    if not isinstance(nodes, dict):
-        return output
-    for node_id, node in nodes.items():
-        if not isinstance(node, dict):
-            continue
-        metadata = node.get("metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        output[str(node_id)] = CapabilityEvidence(
-            type=str(metadata.get("capability_type") or node.get("label") or "skill"),
-            version=str(metadata.get("version") or "") or None,
-            content_hash=str(metadata.get("content_hash") or "unknown"),
-        )
-    return output
-
-
-def _task_outcome(execution_graph: dict[str, Any], evidence_id: str) -> TaskOutcome:
+def _task_outcome(execution_graph: dict[str, Any]) -> TaskOutcome:
     outcome = str(execution_graph.get("outcome") or "").lower()
-    evidence_refs = (evidence_id,)
     if outcome == "success":
         return TaskOutcome(
             label=TaskOutcomeLabel.VERIFIED_SUCCESS,
             evidence_strength=EvidenceStrength.STRONG,
-            evidence_refs=evidence_refs,
         )
     if outcome == "failed":
         return TaskOutcome(
             label=TaskOutcomeLabel.VERIFIED_FAILURE,
             evidence_strength=EvidenceStrength.STRONG,
             failure_domain=FailureDomain.UNKNOWN,
-            evidence_refs=evidence_refs,
         )
     return TaskOutcome(
         label=TaskOutcomeLabel.PARTIAL,
         evidence_strength=EvidenceStrength.WEAK,
-        evidence_refs=evidence_refs,
     )
 
 
@@ -285,17 +259,4 @@ def _successful_execution_graph(value: dict[str, Any]) -> dict[str, Any] | None:
     projected["graph"]["nodes"] = {
         node_id: deepcopy(node) for node_id, node in graph["nodes"].items() if str(node_id) in endpoint_ids
     }
-    return projected
-
-
-def _observation_graph(graph: dict[str, Any]) -> dict[str, Any]:
-    """Project Rail metadata into the public observation edge contract."""
-
-    projected = deepcopy(graph)
-    for edge in projected.get("edges") or ():
-        if not isinstance(edge, dict) or not isinstance(edge.get("metadata"), dict):
-            continue
-        metadata = edge["metadata"]
-        if metadata.get("success") is False and not metadata.get("failure_domain"):
-            metadata["failure_domain"] = FailureDomain.UNKNOWN.value
     return projected

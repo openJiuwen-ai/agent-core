@@ -95,9 +95,6 @@ def normalize_execution_graph(
         reason = str(metadata.get("reason") or "").strip()
         if reason:
             edge["metadata"]["reason"] = reason
-        refs = metadata.get("evidence_refs")
-        if isinstance(refs, list) and refs:
-            edge["metadata"]["evidence_refs"] = [str(ref) for ref in refs if str(ref).strip()]
         if not source or not target:
             continue
         if source in nodes and target in nodes:

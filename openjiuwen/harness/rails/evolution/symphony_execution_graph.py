@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Pure SDD-0006 execution-graph and paired-submission contracts.
+"""Pure minimal point-edge execution-graph contracts.
 
 This module deliberately does not read a planned graph while deciding observed
 execution edges.  Capability identities must come from an invoke-start snapshot
@@ -44,7 +44,7 @@ _MAX_JSON_DEPTH = 128
 
 @dataclass(frozen=True)
 class CapabilityIdentity:
-    """One immutable capability identity captured at invoke start.
+    """One immutable capability alias captured at invoke start.
 
     Runtime validation intentionally happens in the pure graph builder so a
     malformed provider record drops affected observations instead of raising in
@@ -54,15 +54,11 @@ class CapabilityIdentity:
     capability_id: str
     capability_type: CapabilityType
     capability_name: str
-    version: str
-    content_hash: str
-    input_ports: tuple[str, ...]
-    output_ports: tuple[str, ...]
 
 
 @runtime_checkable
 class CapabilitySnapshotProvider(Protocol):
-    """Synchronously freeze identities from one active artifact version."""
+    """Synchronously freeze capability aliases visible to one invocation."""
 
     def snapshot_capabilities(self) -> Sequence[CapabilityIdentity]:
         """Return the immutable identities visible at invoke start."""
@@ -143,25 +139,10 @@ def build_symphony_execution_graph(
         endpoint_identities[source_identity.capability_id] = source_identity
         endpoint_identities[target_identity.capability_id] = target_identity
 
-    edges.sort(
-        key=lambda edge: (
-            edge["source"],
-            edge["target"],
-            edge["metadata"]["candidate_id"],
-            edge["metadata"]["source_fragment_id"],
-            edge["metadata"]["target_fragment_id"],
-        )
-    )
+    edges = _deduplicate_edges(edges)
     nodes = {
         capability_id: {
             "label": identity.capability_type,
-            "metadata": {
-                "capability_type": identity.capability_type,
-                "version": identity.version,
-                "content_hash": identity.content_hash,
-                "input_ports": list(identity.input_ports),
-                "output_ports": list(identity.output_ports),
-            },
         }
         for capability_id, identity in sorted(endpoint_identities.items())
     }
@@ -413,37 +394,33 @@ def _validated_observation(
     anchor_refs = {f"{fragment.trace_id}#span={fragment.anchor_span_id}" for fragment in (source, target)}
     if not anchor_refs.issubset(decision_refs):
         return None
-    failure_reason = _nonempty_text(decision.reason)
-    if decision.status == "failure" and failure_reason is None:
+    if decision.status == "failure" and _nonempty_text(decision.reason) is None:
         return None
 
     source_identity = identity_index.resolve(source)
     target_identity = identity_index.resolve(target)
     if source_identity is None or target_identity is None:
         return None
-    port_mapping = _unique_port_mapping(source_identity, target_identity)
-    if port_mapping is None:
-        return None
-
-    metadata: dict[str, Any] = {
-        "success": decision.status == "success",
-        "evidence_refs": list(decision_refs),
-        "evidence_method": decision.evidence_method,
-        "evidence_strength": decision.evidence_strength,
-        "candidate_id": candidate.candidate_id,
-        "source_fragment_id": source.fragment_id,
-        "target_fragment_id": target.fragment_id,
-        "port_mappings": [port_mapping],
-    }
-    if decision.status == "failure":
-        metadata["reason"] = failure_reason
     edge = {
         "source": source_identity.capability_id,
         "target": target_identity.capability_id,
         "relation": "can_feed",
-        "metadata": metadata,
+        "metadata": {"success": decision.status == "success"},
     }
     return edge, source_identity, target_identity
+
+
+def _deduplicate_edges(edges: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = {
+        (
+            str(edge["source"]),
+            str(edge["target"]),
+            str(edge["relation"]),
+            bool(edge["metadata"]["success"]),
+        ): edge
+        for edge in edges
+    }
+    return [unique[key] for key in sorted(unique)]
 
 
 def _valid_fragment(fragment: Any, trace_ids: frozenset[str]) -> bool:
@@ -477,16 +454,6 @@ def _valid_identity(
         and capability_type in _CAPABILITY_TYPES
         and _valid_identity_text(capability_id)
         and _valid_identity_text(capability_name)
-        and _valid_identity_text(identity.version)
-        and _valid_identity_text(identity.content_hash)
-        and _valid_ports(identity.input_ports)
-        and _valid_ports(identity.output_ports)
-    )
-
-
-def _valid_ports(ports: Any) -> bool:
-    return (
-        isinstance(ports, tuple) and all(_valid_identity_text(port) for port in ports) and len(set(ports)) == len(ports)
     )
 
 
@@ -500,20 +467,6 @@ def _valid_identity_text(value: Any) -> bool:
     except UnicodeError:
         return False
     return True
-
-
-def _unique_port_mapping(
-    source: CapabilityIdentity,
-    target: CapabilityIdentity,
-) -> dict[str, str] | None:
-    if not _valid_ports(source.output_ports) or not _valid_ports(target.input_ports):
-        return None
-    if len(source.output_ports) != 1 or len(target.input_ports) != 1:
-        return None
-    return {
-        "source_output": source.output_ports[0],
-        "target_input": target.input_ports[0],
-    }
 
 
 def _raw_identity_text(identity: Any, field_name: str) -> str | None:
@@ -779,9 +732,7 @@ def _validate_execution_envelope(envelope: Any) -> None:
     if "graph_snapshot" in envelope and _normalized_graph_snapshot(envelope["graph_snapshot"]) is None:
         raise ValueError("execution_graph.graph_snapshot is invalid")
     trace_ids = envelope.get("trace_ids")
-    if trace_ids is None:
-        valid_trace_ids = frozenset({trace_id})
-    else:
+    if trace_ids is not None:
         if (
             not isinstance(trace_ids, list)
             or len(trace_ids) < 2
@@ -790,23 +741,23 @@ def _validate_execution_envelope(envelope: Any) -> None:
             or any(_validated_trace_id(item) is None for item in trace_ids)
         ):
             raise ValueError("execution_graph.trace_ids is invalid")
-        valid_trace_ids = frozenset(trace_ids)
 
     graph = envelope.get("graph")
     nodes, edges = _validate_graph_shell(graph, "execution_graph")
     _validate_graph_nodes(nodes, execution=True)
-    candidate_ids: set[str] = set()
-    occurrence_pairs: set[tuple[str, str]] = set()
+    edge_identities: set[tuple[str, str, str, bool]] = set()
     for edge in edges:
         metadata = _validate_graph_edge(edge, nodes)
-        _validate_execution_edge_metadata(metadata, valid_trace_ids)
-        candidate_id = metadata["candidate_id"]
-        occurrence_pair = (metadata["source_fragment_id"], metadata["target_fragment_id"])
-        if candidate_id in candidate_ids or occurrence_pair in occurrence_pairs:
+        _validate_execution_edge_metadata(metadata)
+        edge_identity = (
+            edge["source"],
+            edge["target"],
+            edge["relation"],
+            metadata["success"],
+        )
+        if edge_identity in edge_identities:
             raise ValueError("duplicate execution edge identity")
-        candidate_ids.add(candidate_id)
-        occurrence_pairs.add(occurrence_pair)
-        _validate_port_mapping_endpoints(edge, metadata, nodes)
+        edge_identities.add(edge_identity)
 
     graph_without_id = dict(graph)
     graph_without_id.pop("id", None)
@@ -858,21 +809,8 @@ def _validate_graph_nodes(nodes: Mapping[str, Any], *, execution: bool) -> None:
             continue
         if node.get("label") not in _CAPABILITY_TYPES:
             raise ValueError("execution node label must be a capability type")
-        metadata = node.get("metadata")
-        if not isinstance(metadata, Mapping):
-            raise ValueError("execution node metadata is required")
-        if metadata.get("capability_type") != node.get("label"):
-            raise ValueError("execution node capability_type must match its label")
-        if _nonempty_text(metadata.get("version")) is None or _nonempty_text(metadata.get("content_hash")) is None:
-            raise ValueError("execution node version and content_hash are required")
-        for port_field in ("input_ports", "output_ports"):
-            ports = metadata.get(port_field)
-            if (
-                not isinstance(ports, list)
-                or any(not isinstance(port, str) or not port or port != port.strip() for port in ports)
-                or len(set(ports)) != len(ports)
-            ):
-                raise ValueError(f"execution node {port_field} are invalid")
+        if set(node) != {"label"}:
+            raise ValueError("execution nodes may only contain label")
 
 
 def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -892,59 +830,15 @@ def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, An
     return metadata
 
 
-def _validate_execution_edge_metadata(metadata: Mapping[str, Any], trace_ids: frozenset[str]) -> None:
+def _validate_execution_edge_metadata(metadata: Mapping[str, Any]) -> None:
+    if set(metadata) - {"success", "failure_domain"}:
+        raise ValueError("execution edge metadata contains unsupported fields")
     success = metadata.get("success")
     if not isinstance(success, bool):
         raise ValueError("execution edge success must be boolean")
-    refs = metadata.get("evidence_refs")
-    if not isinstance(refs, list) or len(set(refs)) < 2:
-        raise ValueError("execution edge requires two distinct evidence refs")
-    for ref in refs:
-        if not isinstance(ref, str):
-            raise ValueError("execution edge evidence refs must be strings")
-        match = _EVIDENCE_REF_RE.fullmatch(ref)
-        if match is None or match.group("trace") not in trace_ids or _validated_trace_id(match.group("trace")) is None:
-            raise ValueError("execution edge evidence ref is invalid")
-    method = metadata.get("evidence_method")
-    strength = metadata.get("evidence_strength")
-    if (method, strength) not in _METHOD_STRENGTH:
-        raise ValueError("execution edge evidence method and strength are invalid")
-    for field_name in ("candidate_id", "source_fragment_id", "target_fragment_id"):
-        if _nonempty_text(metadata.get(field_name)) is None:
-            raise ValueError(f"execution edge {field_name} is required")
-    port_mappings = metadata.get("port_mappings")
-    if not isinstance(port_mappings, list) or not port_mappings:
-        raise ValueError("execution edge port_mappings are required")
-    for mapping in port_mappings:
-        if not isinstance(mapping, Mapping) or set(mapping) != {"source_output", "target_input"}:
-            raise ValueError("execution edge port mapping is invalid")
-        if _nonempty_text(mapping.get("source_output")) is None:
-            raise ValueError("execution edge port mapping is invalid")
-        if _nonempty_text(mapping.get("target_input")) is None:
-            raise ValueError("execution edge port mapping is invalid")
-    if success:
-        if "reason" in metadata:
-            raise ValueError("successful execution edge must omit reason")
-    elif _nonempty_text(metadata.get("reason")) is None:
-        raise ValueError("failed execution edge requires reason")
-
-
-def _validate_port_mapping_endpoints(
-    edge: Mapping[str, Any],
-    metadata: Mapping[str, Any],
-    nodes: Mapping[str, Any],
-) -> None:
-    source_metadata = nodes[edge["source"]]["metadata"]
-    target_metadata = nodes[edge["target"]]["metadata"]
-    mapping = metadata["port_mappings"][0]
-    if len(metadata["port_mappings"]) != 1:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if len(source_metadata["output_ports"]) != 1 or len(target_metadata["input_ports"]) != 1:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if mapping["source_output"] not in source_metadata["output_ports"]:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if mapping["target_input"] not in target_metadata["input_ports"]:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
+    failure_domain = metadata.get("failure_domain")
+    if failure_domain is not None and (success or _nonempty_text(failure_domain) is None):
+        raise ValueError("execution edge failure_domain is invalid")
 
 
 def _canonical_json(value: Any) -> str:

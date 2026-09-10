@@ -15,9 +15,9 @@ from filelock import FileLock
 from openjiuwen.symphony.observation.contracts import GraphSnapshot
 from openjiuwen.symphony.observation.identity import stable_hash
 
-EVIDENCE_SCHEMA = "symphony.graph-evidence.v1"
-OBSERVATION_SCHEMA = "symphony.graph-observation.v1"
-MERGED_SCHEMA = "symphony.graph-merged.v1"
+EVIDENCE_SCHEMA = "symphony.graph-evidence.v2"
+OBSERVATION_SCHEMA = "symphony.graph-observation.v2"
+MERGED_SCHEMA = "symphony.graph-merged.v2"
 
 
 @dataclass(frozen=True)
