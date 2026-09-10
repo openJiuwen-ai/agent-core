@@ -96,6 +96,15 @@ class SingleHarnessExecutionBackend:
         repr=False,
     )
 
+    @property
+    def trajectory_span_processor(self) -> TrajectorySpanProcessor:
+        """Return the context-isolated processor shared by case runners."""
+        return self._trajectory_span_processor
+
+    def reuse_trajectory_processor(self, source: SingleHarnessExecutionBackend) -> None:
+        """Share context-isolated tracing without registering another processor."""
+        self._trajectory_span_processor = source.trajectory_span_processor
+
     async def execute(
         self,
         *,

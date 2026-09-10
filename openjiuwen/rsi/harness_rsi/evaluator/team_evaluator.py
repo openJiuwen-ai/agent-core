@@ -77,7 +77,7 @@ class TeamEvaluator:
                 and isinstance(existing.backend, SingleHarnessExecutionBackend)):
             # The processor already isolates subscriptions by async context.
             # Reuse its registration instead of accumulating one per case.
-            backend._trajectory_span_processor = existing.backend._trajectory_span_processor
+            backend.reuse_trajectory_processor(existing.backend)
         return CaseRunner(
             backend=backend,
             judger=build_judger(self.config),

@@ -4013,18 +4013,21 @@ def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, 
         return False
     if set(gate.get("target_case_ids", [])) != {str(case.get("case_id", "")) for case in cases}:
         return False  # No mixed-Harness evidence for the remaining active cases.
-    if any(gate.get(key) for key in (
+    blocking_evidence_keys = (
         "failed_machine_evidence", "missing_expected_skill_invocations", "missing_expected_tool_invocations",
         "regressed_target_case_ids", "regressed_non_target_case_ids",
-    )):
+    )
+    if any(gate.get(key) for key in blocking_evidence_keys):
         return False
     deltas = gate.get("verifier_deltas_by_case", {})
     if not deltas or not any(delta.get("partial_progress") for delta in deltas.values()):
         return False
-    if any(delta.get(key) for delta in deltas.values() for key in (
+    regression_keys = (
         "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass", "regressed_atomic_checks",
-    )):
-        return False
+    )
+    for delta in deltas.values():
+        if any(delta.get(key) for key in regression_keys):
+            return False
     eval_ref = str(gate.get("candidate_eval_ref_path", ""))
     return bool(
         eval_ref and _eval_ref_complete(Path(eval_ref))

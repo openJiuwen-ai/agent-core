@@ -53,8 +53,11 @@ def test_candidate_runtime_evidence_survives_journal_and_case_filter(tmp_path, s
     assert feedback["by_case"]["review_case"][0]["candidate_behavior"] == behavior
 
 
-@pytest.mark.parametrize("blocker", [None, "regressed_atomic_checks", "missing_expected_skill_invocations",
-                                    "failed_machine_evidence", "missing_evaluation", "different_cases"])
+@pytest.mark.parametrize("blocker", [
+    None, "regressed_atomic_checks", "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass",
+    "missing_expected_skill_invocations", "missing_expected_tool_invocations", "failed_machine_evidence",
+    "regressed_target_case_ids", "regressed_non_target_case_ids", "missing_evaluation", "different_cases",
+])
 def test_local_continuation_requires_scoped_nonregressing_evidence(tmp_path, blocker):
     ref = tmp_path / "eval.yaml"
     result = tmp_path / "result.json"
@@ -66,7 +69,7 @@ def test_local_continuation_requires_scoped_nonregressing_evidence(tmp_path, blo
         "target_case_ids": ["one"], "candidate_eval_ref_path": str(ref),
         "verifier_deltas_by_case": {"one": {"partial_progress": True}},
     }
-    if blocker == "regressed_atomic_checks":
+    if blocker in {"regressed_atomic_checks", "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass"}:
         gate["verifier_deltas_by_case"]["one"][blocker] = ["previous_pass"]
     elif blocker == "missing_evaluation":
         gate["candidate_eval_ref_path"] = ""

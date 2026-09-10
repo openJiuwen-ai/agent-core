@@ -212,7 +212,8 @@ def test_native_runners_are_independent_without_repeated_processor_registration(
     second = evaluator._make_case_runner()
     assert first.backend is not second.backend
     assert first.judger is not second.judger
-    assert first.backend._trajectory_span_processor is second.backend._trajectory_span_processor
+    assert first.backend.trajectory_span_processor is second.backend.trajectory_span_processor
+    assert first.backend.trajectory_span_processor is evaluator.case_runner.backend.trajectory_span_processor
 
 
 @pytest.mark.asyncio
