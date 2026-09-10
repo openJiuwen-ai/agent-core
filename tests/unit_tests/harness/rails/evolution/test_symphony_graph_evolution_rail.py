@@ -30,6 +30,7 @@ from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    build_model_edge_decisions,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import SymphonyExecutionFragment
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import CapabilityIdentity
@@ -1576,11 +1577,148 @@ async def test_candidate_probe_is_bounded_and_truncation_is_reported(
 
 
 def test_summary_redacts_binary_and_bounds_values() -> None:
-    value = {"base64_blob": "A" * 1000, "normal": "B" * 1000, "raw": b"secret"}
+    value = {
+        "base64_blob": "A" * 1000,
+        "normal": "normal value " * 100,
+        "password": "secret",
+        "raw": b"secret",
+    }
     compact = rail_module._compact_trace_value(value)
     assert compact["base64_blob"] == "<redacted>"
+    assert compact["password"] == "<redacted>"
     assert compact["raw"] == "<redacted>"
-    assert len(compact["normal"].encode()) <= 2048
+    assert len(compact["normal"].encode()) <= 256
+    assert "...<truncated>..." in compact["normal"]
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "aws_access_key_id",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "secret_key",
+        "private_key",
+        "credential",
+        "authorization",
+        "auth",
+        "token",
+        "password",
+        "passphrase",
+        "cookie",
+        "session",
+    ],
+)
+def test_summary_redacts_normalized_sensitive_keys(key: str) -> None:
+    compact = rail_module._compact_trace_value({key: "private-value", "author": "keep-author"})
+
+    assert compact[key] == "<redacted>"
+    assert compact["author"] == "keep-author"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "preserved"),
+    [
+        ("Authorization: Bearer fake-secret-bearer", "fake-secret-bearer", "Authorization:"),
+        ("Authorization=Basic fake-basic-value", "fake-basic-value", "Authorization="),
+        ("Authorization: ApiKey fake-auth-secret", "fake-auth-secret", "Authorization:"),
+        (
+            "Authorization: ApiKey fake-auth-secret --header=X-Test:ok",
+            "fake-auth-secret",
+            "<redacted> --header=X-Test:ok",
+        ),
+        ("Authorization=fake-raw-secret", "fake-raw-secret", "Authorization="),
+        (
+            "curl --header=Authorization:Bearer_fake-secret --url https://example.test",
+            "Bearer_fake-secret",
+            "--header=Authorization:<redacted> --url https://example.test",
+        ),
+        (
+            "curl -H 'Authorization: Custom fake-quoted-secret' https://example.test",
+            "fake-quoted-secret",
+            "-H 'Authorization: <redacted>' https://example.test",
+        ),
+        (
+            'curl -H Authorization:"Custom fake-value-secret" https://example.test',
+            "fake-value-secret",
+            'Authorization:"<redacted>" https://example.test',
+        ),
+        ("OPENAI_API_KEY=fake-api-value run --token fake-cli-token", "fake-api-value", "run --token"),
+        ("run --password=fake-cli-password --mode safe", "fake-cli-password", "--mode safe"),
+        ("https://user:fake-url-pass@example.test/path?token=fake-query&x=1", "fake-url-pass", "example.test"),
+        ("postgresql://user:fake-db-pass@db.test/app?password=fake-db-query", "fake-db-pass", "db.test/app"),
+        ("connection failed: password=fake-error-pass; retry=true", "fake-error-pass", "retry=true"),
+        (
+            "-----BEGIN PRIVATE KEY-----\nfake-pem-private-material\n-----END PRIVATE KEY-----",
+            "fake-pem-private-material",
+            "-----BEGIN PRIVATE KEY-----",
+        ),
+    ],
+)
+def test_summary_redacts_credentials_inside_free_text(text: str, secret: str, preserved: str) -> None:
+    compact = rail_module._compact_trace_value(text)
+
+    assert isinstance(compact, str)
+    assert secret not in compact
+    assert preserved in compact
+    assert "<redacted>" in compact
+
+
+def test_summary_redacts_all_secrets_in_mixed_command_and_url() -> None:
+    text = (
+        "TOKEN=fake-env-token run --api-key 'fake-cli-key' "
+        "https://user:fake-userinfo@host.test/path?api_key=fake-query-key"
+    )
+
+    compact = rail_module._compact_trace_value(text, max_bytes=512)
+
+    assert isinstance(compact, str)
+    assert "fake-env-token" not in compact
+    assert "fake-cli-key" not in compact
+    assert "fake-userinfo" not in compact
+    assert "fake-query-key" not in compact
+    assert "run" in compact and "host.test/path" in compact
+
+
+@pytest.mark.parametrize(
+    ("text", "forbidden", "preserved"),
+    [
+        (
+            'curl -H Authorization:Digest realm="fake-realm", nonce="fake-nonce", response="fake-response" --next ok',
+            ("realm", "nonce", "response", "fake-realm", "fake-nonce", "fake-response"),
+            "<redacted> --next ok",
+        ),
+        (
+            "Authorization: AWS4-HMAC-SHA256 Credential=fake-credential, "
+            "SignedHeaders=content-type;host;x-amz-date, "
+            "Signature=fake-signature https://service.example.test",
+            (
+                "Credential",
+                "SignedHeaders",
+                "x-amz-date",
+                "Signature",
+                "fake-credential",
+                "fake-signature",
+            ),
+            "<redacted> https://service.example.test",
+        ),
+        (
+            "Authorization: Custom fake-command-secret; echo ok",
+            ("fake-command-secret",),
+            "<redacted>; echo ok",
+        ),
+    ],
+)
+def test_summary_redacts_multi_parameter_authorization_until_clear_boundary(
+    text: str,
+    forbidden: tuple[str, ...],
+    preserved: str,
+) -> None:
+    compact = rail_module._compact_trace_value(text, max_bytes=512)
+
+    assert isinstance(compact, str)
+    assert all(token not in compact for token in forbidden)
+    assert preserved in compact
 
 
 def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
@@ -1639,6 +1777,368 @@ def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
     assert "weather-consumed-18-31C" in summary.input
     assert "target-15" in summary.output
     assert "target-8" not in f"{summary.fragment}{summary.input}{summary.output}"
+
+
+def test_edge_summary_omits_framework_ids_and_read_bodies() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, input_value: object, output_value: object) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: input_value,
+                    semconv.GEN_AI_TOOL_OUTPUT: output_value,
+                    semconv.GEN_AI_TOOL_CALL_ID: "private-call-id",
+                }
+            ),
+        }
+
+    spans = [
+        tool_span(
+            1,
+            "skill_tool",
+            [[], {"skill_name": "alpha", "relative_file_path": "SKILL.md"}],
+            {"success": True, "skill_content": "private-skill-body"},
+        ),
+        tool_span(
+            2,
+            "read_file",
+            [[{"file_path": "/skills/alpha/scripts/run.py"}], {}],
+            {"success": True, "content": "private-source-body"},
+        ),
+        tool_span(
+            3,
+            "execute",
+            {
+                "tool_call_id": "nested-call-id",
+                "payload": {
+                    "session_id": "private-session",
+                    "api-key": "private-api-key",
+                    "business": "keep-business-input",
+                },
+            },
+            {
+                "success": True,
+                "data": {
+                    "artifact": "keep-business-output",
+                    "request_id": "private-request",
+                    "apikey": "private-api-key-2",
+                },
+            },
+        ),
+    ]
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment(
+        "source",
+        "skill",
+        "alpha",
+        trace_id,
+        f"{1:016x}",
+        "branch",
+        tuple(f"{i:016x}" for i in (1, 2, 3)),
+        0,
+    )
+    target = SymphonyExecutionFragment("target", "skill", "beta", trace_id, f"{2:016x}", "branch", (f"{2:016x}",), 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    serialized = f"{summary.fragment}\n{summary.input}\n{summary.output}"
+
+    assert "private-call-id" not in serialized
+    assert "private-skill-body" not in serialized
+    assert "private-source-body" not in serialized
+    assert "nested-call-id" not in serialized
+    assert "private-session" not in serialized
+    assert "private-request" not in serialized
+    assert "private-api-key" not in serialized
+    assert "alpha" in serialized
+    assert "/skills/alpha/scripts/run.py" in serialized
+    assert "keep-business-input" in serialized
+    assert "keep-business-output" in serialized
+    assert "<redacted>" in serialized
+    assert all(len(line.encode()) <= 512 for line in serialized.splitlines() if line)
+
+
+def test_edge_summary_errors_stay_within_ten_standard_events() -> None:
+    trace_id = "1" * 32
+    spans = []
+    span_ids = []
+    for span_id in range(1, 13):
+        span_ids.append(f"{span_id:016x}")
+        spans.append(
+            {
+                "traceId": trace_id,
+                "spanId": f"{span_id:016x}",
+                "name": "tool.execute",
+                "startTimeUnixNano": str(span_id),
+                "endTimeUnixNano": str(span_id + 1),
+                "status": {"code": "STATUS_CODE_ERROR", "message": f"failed-{span_id}"},
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: "execute",
+                        semconv.GEN_AI_TOOL_INPUT: {"value": span_id},
+                    }
+                ),
+            }
+        )
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    fragment = SymphonyExecutionFragment(
+        "fragment", "skill", "alpha", trace_id, span_ids[0], "branch", tuple(span_ids), 0
+    )
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        fragment,
+        SymphonyExecutionFragment("target", "skill", "beta", trace_id, span_ids[-1], "branch", (span_ids[-1],), 0),
+        (f"{trace_id}#span={span_ids[0]}", f"{trace_id}#span={span_ids[-1]}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    serialized_events = f"{summary.fragment}\n{summary.input}\n{summary.output}"
+    events = [json.loads(line) for line in serialized_events.splitlines() if line]
+
+    assert len(events) == 10
+    assert all(set(event).issubset({"tool", "ok", "input", "output", "error"}) for event in events)
+    assert all(isinstance(event["tool"], str) and isinstance(event["ok"], bool) for event in events)
+    assert all(event["ok"] is False and "error" in event for event in events)
+    assert summary.error == ""
+
+
+def test_edge_summary_uses_standard_synthetic_event_for_span_error() -> None:
+    trace_id = "1" * 32
+    span_id = f"{1:016x}"
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": span_id,
+                                    "name": "llm.call",
+                                    "startTimeUnixNano": "1",
+                                    "endTimeUnixNano": "2",
+                                    "status": {"code": "STATUS_CODE_ERROR", "message": "failed"},
+                                    "attributes": [],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    fragment = SymphonyExecutionFragment("source", "skill", "alpha", trace_id, span_id, "branch", (span_id,), 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        fragment,
+        SymphonyExecutionFragment("target", "skill", "beta", trace_id, "2", "branch", ("2",), 0),
+        (f"{trace_id}#span={span_id}", f"{trace_id}#span=2"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    event = json.loads(summary.fragment)
+
+    assert event == {
+        "error": {"message": "failed", "status": "STATUS_CODE_ERROR"},
+        "ok": False,
+        "tool": "span",
+    }
+
+
+@pytest.mark.parametrize(
+    ("wrapped_input", "expected_input"),
+    [
+        ([[1, 2], {}], [1, 2]),
+        ([[1, 2], {"mode": "safe"}], {"args": [1, 2], "kwargs": {"mode": "safe"}}),
+        (
+            [[{"command": "runner scripts/build.py"}], {"session_id": "framework-session"}],
+            {"command": "runner scripts/build.py"},
+        ),
+    ],
+)
+def test_summary_tool_event_removes_argument_and_result_wrappers(
+    wrapped_input: object,
+    expected_input: object,
+) -> None:
+    serialized = rail_module._summary_tool_event(
+        {
+            "name": "execute",
+            "input": wrapped_input,
+            "output": {
+                "success": False,
+                "data": {"value": 1},
+                "error": "failed",
+                "include_extracted_content_only_once": False,
+                "extracted_content": None,
+                "long_term_memory": None,
+            },
+        },
+        None,
+    )
+
+    assert serialized is not None
+    event = json.loads(serialized)
+    assert event == {
+        "error": "failed",
+        "input": expected_input,
+        "ok": False,
+        "output": {"value": 1},
+        "tool": "execute",
+    }
+    assert "success" not in event["output"]
+    assert "data" not in event["output"]
+    assert "error" not in event["output"]
+
+
+@pytest.mark.asyncio
+async def test_edge_summary_preserves_diverse_middle_tool_and_tail_command() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, input_value: object, output_value: object) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: json.dumps(input_value),
+                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps(output_value),
+                }
+            ),
+        }
+
+    target_specs: list[tuple[str, object, object]] = [
+        ("skill_tool", {"skill_name": "beta", "relative_file_path": "SKILL.md"}, {"success": True}),
+        ("bash", {"command": "cd /skills/beta && echo prepare"}, {"success": True, "data": "ready"}),
+    ]
+    target_specs.extend(
+        ("read_file", {"file_path": f"/tmp/input-{index}.txt"}, {"success": True}) for index in range(15)
+    )
+    target_specs.extend(("fetch", {"url": f"https://example.test/{index}"}, {"success": True}) for index in range(13))
+    target_specs.extend(
+        ("edit_file", {"path": "/tmp/result.txt", "patch": str(index)}, {"success": True}) for index in range(13)
+    )
+    target_specs.append(
+        ("write_file", {"file_path": "/tmp/result.json", "content": "unique-business-mutation"}, {"success": True})
+    )
+    target_specs.extend(
+        ("fetch", {"url": f"https://example.test/tail-{index}"}, {"success": True}) for index in range(13)
+    )
+    target_specs.extend(
+        ("edit_file", {"path": "/tmp/result.txt", "patch": f"tail-{index}"}, {"success": True}) for index in range(15)
+    )
+    target_specs.append(
+        (
+            "bash",
+            [
+                [
+                    {
+                        "command": "cd /skills/beta && python scripts/build.py --input /tmp/result.json "
+                        + "--description "
+                        + "x" * 900
+                    }
+                ],
+                {"session_id": "framework-session"},
+            ],
+            {
+                "success": True,
+                "data": {"artifact": "/tmp/final.txt", "detail": "y" * 900},
+                "include_extracted_content_only_once": False,
+                "extracted_content": "transport-only",
+                "long_term_memory": None,
+            },
+        )
+    )
+    source_span = tool_span(1, "produce", {"value": "source"}, {"success": True, "data": "source-output"})
+    target_spans = [tool_span(index, *spec) for index, spec in enumerate(target_specs, start=10)]
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": [source_span, *target_spans]}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment("source", "skill", "alpha", trace_id, f"{1:016x}", "branch", (f"{1:016x}",), 0)
+    target_ids = tuple(f"{index:016x}" for index in range(10, 10 + len(target_specs)))
+    target = SymphonyExecutionFragment("target", "skill", "beta", trace_id, target_ids[0], "branch", target_ids, 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+    summaries = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))
+    llm = SimpleNamespace(
+        invoke=AsyncMock(return_value=json.dumps({"status": "success", "reason": "target consumed source output"}))
+    )
+
+    await rail_module.evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="Combine alpha and beta outputs",
+        candidates=(candidate,),
+        decisions=build_model_edge_decisions((candidate,)),
+        summaries=summaries,
+    )
+
+    assert llm.invoke.await_count == 1
+    messages = llm.invoke.await_args.args[0]
+    payload = json.loads(messages[1]["content"])
+    events = payload["target"]["events"]
+    serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    assert len(events) <= 10
+    assert events[0]["tool"] == "skill_tool"
+    assert events[-1]["tool"] == "bash"
+    assert any(event["tool"] == "write_file" for event in events)
+    assert "scripts/build.py" in serialized
+    assert "unique-business-mutation" in serialized
+    assert "include_extracted_content_only_once" not in serialized
+    assert "transport-only" not in serialized
+    assert "framework-session" not in serialized
+    assert "SKILL.md" not in serialized
+    assert "#span=" not in serialized
+    assert len(serialized.encode()) <= 12 * 1024
 
 
 @pytest.mark.asyncio

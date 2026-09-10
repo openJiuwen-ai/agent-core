@@ -74,9 +74,74 @@ _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
 _SUMMARY_EDGE_EVENT_COUNT = 5
-_SUMMARY_EVENT_MAX_BYTES = 3 * 1024
-_SUMMARY_VALUE_MAX_BYTES = 2 * 1024
+_SUMMARY_MAX_EVENTS = _SUMMARY_EDGE_EVENT_COUNT * 2
+_SUMMARY_EVENT_MAX_BYTES = 512
+_SUMMARY_VALUE_MAX_BYTES = 256
 _OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
+_SUMMARY_REDACTED_KEY_TOKENS = (
+    "accesskey",
+    "apikey",
+    "authorization",
+    "base64",
+    "binary",
+    "bytes",
+    "cookie",
+    "credential",
+    "password",
+    "passphrase",
+    "privatekey",
+    "secret",
+    "token",
+)
+_SUMMARY_IDENTITY_KEYS = frozenset(
+    {
+        "candidateid",
+        "fragmentid",
+        "id",
+        "invocationid",
+        "messageid",
+        "requestid",
+        "sessionid",
+        "spanid",
+        "toolcallid",
+        "traceid",
+    }
+)
+_SUMMARY_ARGUMENT_FRAMEWORK_KEYS = _SUMMARY_IDENTITY_KEYS | {"session"}
+_SUMMARY_OUTPUT_TRANSPORT_KEYS = frozenset(
+    {
+        "extractedcontent",
+        "includeextractedcontentonlyonce",
+        "longtermmemory",
+    }
+)
+_SUMMARY_PEM_PRIVATE_KEY = re.compile(
+    r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----).*?(-----END [A-Z0-9 ]*PRIVATE KEY-----)",
+    re.DOTALL,
+)
+_SUMMARY_QUOTED_AUTH_HEADER = re.compile(
+    r"(?i)(?P<quote>['\"])(?P<prefix>authorization\s*[:=]\s*)(?P<value>.*?)(?P=quote)"
+)
+_SUMMARY_QUOTED_AUTH_VALUE = re.compile(
+    r"(?i)(?P<prefix>(?:['\"]authorization['\"]|\bauthorization)\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
+)
+_SUMMARY_AUTH_START = re.compile(r"(?i)\bauthorization\s*[:=]\s*")
+_SUMMARY_URL_ARGUMENT = re.compile(r"(?i)[a-z][a-z0-9+.-]*://")
+_SUMMARY_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/@:]+:)([^\s/@]+)(@)")
+_SUMMARY_SECRET_ASSIGNMENT = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>(?<![A-Za-z0-9_])['\"]?"
+    r"[A-Za-z0-9_]*(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|token|password|passphrase)"
+    r"['\"]?\s*[:=]\s*)"
+    r"(?:(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|(?P<plain>[^\s,;&]+))"
+)
+_SUMMARY_SECRET_CLI = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>--[a-z0-9-]*(?:api-key|access-key|secret-key|private-key|token|password|passphrase)"
+    r"(?:\s*=\s*|\s+))"
+    r"(?:(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|(?P<plain>[^\s,;&]+))"
+)
 
 CaptureMode: TypeAlias = Literal["agent", "team"]
 GraphSnapshotProvider: TypeAlias = Callable[[], Mapping[str, Any]]
@@ -1298,37 +1363,28 @@ def _build_edge_summaries(
 
     def endpoint(fragment: SymphonyExecutionFragment) -> SymphonyEdgeEndpointSummary:
         events: list[str] = []
-        errors: list[str] = []
         for span_id in fragment.span_ids:
             span = span_map.get((fragment.trace_id, span_id))
             if span is None:
                 continue
             error = read_span_error(span)
-            if error:
-                errors.append(_truncate_trace_text(str(error), 256))
             call = read_tool_call(span)
             if isinstance(call, Mapping) and call:
-                safe = {
-                    key: _compact_trace_value(call[key])
-                    for key in ("name", "id", "input", "output", "error")
-                    if key in call
-                }
-                if safe:
-                    events.append(
-                        _truncate_trace_text(
-                            json.dumps(safe, ensure_ascii=False, sort_keys=True),
-                            _SUMMARY_EVENT_MAX_BYTES,
-                        )
-                    )
-        head = events[:_SUMMARY_EDGE_EVENT_COUNT]
-        tail = events[max(_SUMMARY_EDGE_EVENT_COUNT, len(events) - _SUMMARY_EDGE_EVENT_COUNT) :]
-        error_text = errors[-1] if errors else ""
+                event = _summary_tool_event(call, error)
+                if event is not None:
+                    events.append(event)
+                elif error:
+                    events.append(_synthetic_error_event(error))
+            elif error:
+                events.append(_synthetic_error_event(error))
+        selected_indexes = _select_summary_event_indexes(events)
+        selected = [events[index] for index in selected_indexes]
+        head = selected[:_SUMMARY_EDGE_EVENT_COUNT]
+        tail = selected[_SUMMARY_EDGE_EVENT_COUNT:]
         return SymphonyEdgeEndpointSummary(
             fragment=head[0] if head else "",
-            capability=f"{fragment.capability_type}:{fragment.capability_name or ''}",
             input="\n".join(head[1:]),
             output="\n".join(tail),
-            error=error_text,
         )
 
     return {
@@ -1340,29 +1396,329 @@ def _build_edge_summaries(
     }
 
 
+def _select_summary_event_indexes(events: Sequence[str]) -> list[int]:
+    """Keep endpoint boundaries while using scarce slots for tool diversity."""
+
+    event_count = len(events)
+    if event_count <= _SUMMARY_MAX_EVENTS:
+        return list(range(event_count))
+
+    boundary_indexes = {
+        *range(_SUMMARY_EDGE_EVENT_COUNT),
+        *range(event_count - _SUMMARY_EDGE_EVENT_COUNT, event_count),
+    }
+    selected = set(boundary_indexes)
+    indexes_by_tool: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        try:
+            tool = json.loads(event).get("tool")
+        except (AttributeError, TypeError, ValueError):
+            tool = None
+        indexes_by_tool.setdefault(tool if isinstance(tool, str) else "", []).append(index)
+
+    tool_by_index = {index: tool for tool, indexes in indexes_by_tool.items() for index in indexes}
+    covered_tools = {tool_by_index[index] for index in selected}
+    # A one-off event carries information that repeated reads/edits cannot
+    # replace. Keep the normal head/tail sample intact unless it contains a
+    # duplicate tool kind that can safely yield its slot.
+    tool_groups = sorted(
+        indexes_by_tool.items(),
+        key=lambda item: (
+            len(item[1]),
+            item[1][0],
+        ),
+    )
+    for tool, indexes in tool_groups:
+        if tool in covered_tools:
+            continue
+        selected_counts: dict[str, int] = {}
+        for index in selected:
+            selected_tool = tool_by_index[index]
+            selected_counts[selected_tool] = selected_counts.get(selected_tool, 0) + 1
+        replaceable = [
+            index
+            for index in selected
+            if index not in {0, event_count - 1} and selected_counts[tool_by_index[index]] > 1
+        ]
+        if not replaceable:
+            break
+        replaced = max(replaceable, key=lambda index: (selected_counts[tool_by_index[index]], index))
+        selected.remove(replaced)
+        representative = next((index for index in indexes if index not in boundary_indexes), indexes[0])
+        selected.add(representative)
+        covered_tools.add(tool)
+    return sorted(selected)
+
+
 def _truncate_trace_text(value: str, max_bytes: int) -> str:
     return value.encode("utf-8", errors="replace")[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _compact_trace_value(value: Any) -> Any:
+def _truncate_trace_text_head_tail(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return value
+    marker = "...<truncated>..."
+    marker_bytes = marker.encode()
+    available = max(0, max_bytes - len(marker_bytes))
+    head_bytes = available // 2
+    tail_bytes = available - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore") if tail_bytes else ""
+    return f"{head}{marker}{tail}"
+
+
+def _compact_trace_value(value: Any, *, max_bytes: int = _SUMMARY_VALUE_MAX_BYTES) -> Any:
     if isinstance(value, Mapping):
-        return {
-            str(key): "<redacted>"
-            if any(token in str(key).lower() for token in ("base64", "binary", "bytes"))
-            else _compact_trace_value(item)
-            for key, item in list(value.items())[:12]
-        }
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            normalized_key = _normalized_summary_key(key_text)
+            if normalized_key in _SUMMARY_IDENTITY_KEYS:
+                continue
+            if _is_sensitive_summary_key(normalized_key):
+                compact[key_text] = "<redacted>"
+            else:
+                compact[key_text] = _compact_trace_value(item, max_bytes=max_bytes)
+            if len(compact) == 12:
+                break
+        return _unwrap_summary_mapping(compact)
     if isinstance(value, (list, tuple)):
-        return [_compact_trace_value(item) for item in value[:12]]
+        return [_compact_trace_value(item, max_bytes=max_bytes) for item in value[:12]]
     if isinstance(value, bytes):
         return "<redacted>"
     if isinstance(value, str):
+        value = _redact_summary_text(value)
         if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value[:128]):
             return "<redacted>"
-        return _truncate_trace_text(value, _SUMMARY_VALUE_MAX_BYTES)
+        return _truncate_trace_text_head_tail(value, max_bytes)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _truncate_trace_text(str(value), _SUMMARY_VALUE_MAX_BYTES)
+    return _truncate_trace_text_head_tail(str(value), max_bytes)
+
+
+def _summary_tool_event(call: Mapping[str, Any], span_error: Any) -> str | None:
+    tool_name = _truncate_trace_text(str(call.get("name") or "").rsplit(".", 1)[-1], 64)
+    if not tool_name:
+        return None
+    input_value = _unwrap_summary_payload(call.get("input"))
+    output_value, explicit_success, output_error = _summary_output_parts(call.get("output"))
+    event: dict[str, Any] = {
+        "tool": tool_name,
+        "ok": not bool(span_error or call.get("error") or output_error) and explicit_success is not False,
+    }
+    canonical_name = tool_name.lower().replace("-", "_")
+    if canonical_name == "skill_tool":
+        skill_name = _summary_named_value(input_value, ("skill_name",))
+        if skill_name:
+            event["input"] = {"skill_name": skill_name}
+    elif canonical_name == "read_file":
+        path = _summary_named_value(input_value, ("file_path", "path", "relative_file_path"))
+        if path:
+            event["input"] = {"path": path}
+    else:
+        if input_value not in (None, "", [], {}):
+            event["input"] = input_value
+        if output_value not in (None, "", [], {}):
+            event["output"] = output_value
+    error = span_error or call.get("error") or output_error
+    if error:
+        event["error"] = error
+    return _bounded_summary_event(event)
+
+
+def _synthetic_error_event(error: Any) -> str:
+    return _bounded_summary_event({"tool": "span", "ok": False, "error": error})
+
+
+def _unwrap_summary_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return value
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and isinstance(value[0], (list, tuple))
+        and isinstance(value[1], Mapping)
+    ):
+        args, kwargs = value
+        business_kwargs = {
+            key: item
+            for key, item in kwargs.items()
+            if _normalized_summary_key(str(key)) not in _SUMMARY_ARGUMENT_FRAMEWORK_KEYS
+        }
+        if business_kwargs:
+            if not args:
+                return business_kwargs
+            return {"args": list(args), "kwargs": business_kwargs}
+        if len(args) == 1:
+            return args[0]
+        return list(args)
+    return value
+
+
+def _summary_output_parts(value: Any) -> tuple[Any, bool | None, Any]:
+    """Separate transport status from a tool's business output."""
+
+    decoded = _unwrap_summary_payload(value)
+    if not isinstance(decoded, Mapping):
+        return decoded, None, None
+    success = decoded.get("success") if isinstance(decoded.get("success"), bool) else None
+    error = decoded.get("error")
+    business = {
+        key: item
+        for key, item in decoded.items()
+        if key not in {"success", "error"} and _normalized_summary_key(str(key)) not in _SUMMARY_OUTPUT_TRANSPORT_KEYS
+    }
+    wrapper_values = [(name, business[name]) for name in ("data", "result") if name in business]
+    if len(wrapper_values) == 1 and set(business) == {wrapper_values[0][0]}:
+        business_value: Any = wrapper_values[0][1]
+    else:
+        business_value = business
+    return business_value, success, error
+
+
+def _normalized_summary_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def _redact_summary_text(value: str) -> str:
+    redacted = _SUMMARY_PEM_PRIVATE_KEY.sub(r"\1\n<redacted>\n\2", value)
+    redacted = _SUMMARY_QUOTED_AUTH_HEADER.sub(_redact_quoted_auth_match, redacted)
+    redacted = _SUMMARY_QUOTED_AUTH_VALUE.sub(_redact_quoted_auth_value_match, redacted)
+    redacted = _redact_unquoted_auth_headers(redacted)
+    redacted = _SUMMARY_URL_USERINFO.sub(r"\1<redacted>\3", redacted)
+    redacted = _SUMMARY_SECRET_ASSIGNMENT.sub(_redact_assignment_match, redacted)
+    return _SUMMARY_SECRET_CLI.sub(_redact_assignment_match, redacted)
+
+
+def _redact_assignment_match(match: re.Match[str]) -> str:
+    quote = match.group("quote") or ""
+    return f"{match.group('prefix')}{quote}<redacted>{quote}"
+
+
+def _redact_quoted_auth_match(match: re.Match[str]) -> str:
+    quote = match.group("quote")
+    return f"{quote}{match.group('prefix')}<redacted>{quote}"
+
+
+def _redact_quoted_auth_value_match(match: re.Match[str]) -> str:
+    quote = match.group("quote")
+    return f"{match.group('prefix')}{quote}<redacted>{quote}"
+
+
+def _redact_unquoted_auth_headers(value: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    while match := _SUMMARY_AUTH_START.search(value, cursor):
+        parts.append(value[cursor : match.end()])
+        start = match.end()
+        already_redacted_end = _redacted_auth_value_end(value, start)
+        if already_redacted_end is not None:
+            parts.append(value[start:already_redacted_end])
+            cursor = already_redacted_end
+            continue
+        end = _unquoted_auth_value_end(value, start)
+        parts.append("<redacted>")
+        cursor = end
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
+def _redacted_auth_value_end(value: str, start: int) -> int | None:
+    marker = "<redacted>"
+    if value.startswith(marker, start):
+        return start + len(marker)
+    if start < len(value) and value[start] in {"'", '"'}:
+        quote = value[start]
+        quoted_marker = f"{quote}{marker}{quote}"
+        if value.startswith(quoted_marker, start):
+            return start + len(quoted_marker)
+    return None
+
+
+def _unquoted_auth_value_end(value: str, start: int) -> int:
+    index = start
+    while index < len(value):
+        if value[index] in {"\r", "\n"} or value.startswith(("&&", "||"), index):
+            return index
+        if value[index] == ";" and (index + 1 == len(value) or value[index + 1].isspace()):
+            return index
+        if value[index].isspace():
+            next_index = index
+            while next_index < len(value) and value[next_index].isspace():
+                next_index += 1
+            remainder = value[next_index:]
+            if (
+                re.match(r"-H(?:\s|=|$)", remainder) is not None
+                or re.match(r"--[A-Za-z0-9]", remainder) is not None
+                or _SUMMARY_URL_ARGUMENT.match(remainder) is not None
+            ):
+                return index
+        index += 1
+    return len(value)
+
+
+def _is_sensitive_summary_key(normalized_key: str) -> bool:
+    return normalized_key in {"auth", "session"} or any(
+        token in normalized_key for token in _SUMMARY_REDACTED_KEY_TOKENS
+    )
+
+
+def _unwrap_summary_mapping(value: Mapping[str, Any]) -> Any:
+    """Drop transport-only success/data/result envelopes recursively."""
+
+    compact = dict(value)
+    if isinstance(compact.get("success"), bool):
+        compact.pop("success")
+    wrapper_values = [(name, compact.get(name)) for name in ("data", "result") if name in compact]
+    other_keys = set(compact).difference({"data", "result", "error"})
+    if len(wrapper_values) == 1 and not other_keys:
+        return wrapper_values[0][1]
+    return compact
+
+
+def _summary_named_value(value: Any, names: Sequence[str]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    for name in names:
+        item = value.get(name)
+        if isinstance(item, str) and item.strip():
+            return _truncate_trace_text_head_tail(item.strip(), 256)
+    return ""
+
+
+def _bounded_summary_event(event: Mapping[str, Any]) -> str:
+    bounded = dict(event)
+    # Input gets the largest share because it contains the invoked command or
+    # arguments. Output/error shrink independently instead of forcing a second
+    # whole-event truncation that could erase the command's useful prefix.
+    budgets = (
+        (320, 96, 96),
+        (288, 80, 80),
+        (256, 64, 64),
+        (224, 48, 64),
+        (192, 32, 48),
+        (160, 0, 48),
+        (128, 0, 32),
+        (96, 0, 24),
+    )
+    for input_bytes, output_bytes, error_bytes in budgets:
+        candidate = {key: value for key, value in bounded.items() if key not in {"input", "output", "error"}}
+        for key, max_bytes in (("input", input_bytes), ("output", output_bytes), ("error", error_bytes)):
+            if key in bounded and max_bytes:
+                candidate[key] = _compact_trace_value(bounded[key], max_bytes=max_bytes)
+        serialized = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if len(serialized.encode("utf-8")) <= _SUMMARY_EVENT_MAX_BYTES:
+            return serialized
+    return json.dumps(
+        {"ok": bool(event.get("ok")), "tool": event.get("tool", "")},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphEvolutionRail):

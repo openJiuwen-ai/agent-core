@@ -1276,22 +1276,12 @@ async def test_native_cross_trace_candidates_through_model_and_graph(status: str
 
     async def judge(messages, **kwargs):
         del kwargs
-        payload = json.loads(messages[1]["content"])["candidates"][0]
-        assert set(payload["evidence_refs"]) == set(native_refs)
+        payload = json.loads(messages[1]["content"])
+        assert set(payload) == {"task", "source", "target"}
+        assert "evidence_refs" not in json.dumps(payload)
         if status == "invalid":
             return "invalid JSON"
-        return json.dumps(
-            {
-                "decisions": [
-                    {
-                        "candidate_id": payload["candidate_id"],
-                        "status": status,
-                        "reason": "consumer used the producer artifact",
-                        "evidence_refs": payload["evidence_refs"],
-                    }
-                ]
-            }
-        )
+        return json.dumps({"status": status, "reason": "consumer used the producer artifact"})
 
     model = SimpleNamespace(invoke=AsyncMock(side_effect=judge))
     decisions = await evaluate_symphony_edge_candidates(
