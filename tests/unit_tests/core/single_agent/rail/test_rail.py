@@ -46,6 +46,26 @@ from tests.unit_tests.fixtures.mock_llm import (
 # Test Rails
 # ============================================================
 
+class TestModelCallInputs:
+    """Trace metadata must remain optional for existing Rail callers."""
+
+    def test_existing_positional_arguments_remain_compatible(self):
+        messages = ["message"]
+        inputs = ModelCallInputs(messages, None, None, "response")
+        assert inputs.messages is messages
+        assert inputs.response == "response"
+        assert inputs.context_usage_report is None
+        assert inputs.context_usage_request_id is None
+        assert inputs.context_usage_sequence is None
+        assert inputs.react_iteration == 0
+
+    def test_attribution_is_not_shared_between_calls(self):
+        first = ModelCallInputs()
+        second = ModelCallInputs()
+        first.context_usage_attribution["session_id"] = "first"
+        assert second.context_usage_attribution == {}
+
+
 class LogRail(AgentRail):
     """Rail that logs core invoke/model/tool events."""
 

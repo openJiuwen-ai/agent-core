@@ -1,5 +1,5 @@
 # -*- coding: UTF-8 -*-
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 # Core classes
 from openjiuwen.core.foundation.llm.model import Model, init_model
@@ -11,6 +11,11 @@ from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig, Mod
 from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo, ModelConfig
 # Messages
 from openjiuwen.core.foundation.llm.schema.message import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     BaseMessage,
     AssistantMessage,
     UserMessage,
@@ -61,6 +66,14 @@ _MESSAGE_CLASSES = [
     "UsageMetadata",
 ]
 
+_MESSAGE_METADATA_CONSTANTS = [
+    "OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER",
+    "OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL",
+    "OPENJIUWEN_MESSAGE_ORIGIN_METADATA",
+    "OPENJIUWEN_MESSAGE_PROVENANCE_METADATA",
+    "OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA",
+]
+
 # Streaming message classes
 _MESSAGE_CHUNK_CLASSES = [
     "AssistantMessageChunk",
@@ -88,6 +101,7 @@ __all__ = (
     _CORE_CLASSES
     + _CONFIG_CLASSES
     + _MESSAGE_CLASSES
+    + _MESSAGE_METADATA_CONSTANTS
     + _MESSAGE_CHUNK_CLASSES
     + _TOOL_CLASSES
     + _PREBUILT_MODEL_CLIENTS

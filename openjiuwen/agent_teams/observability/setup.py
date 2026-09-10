@@ -19,6 +19,10 @@ from openjiuwen.agent_teams.observability.span_context import finalize_trace, re
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.extensions.observability.span_context import pop_current_llm_span
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.demand import (
+    acquire_observability_demand,
+    release_observability_demand,
+)
 from openjiuwen.extensions.observability.setup import (
     force_flush_provider,
     get_config as get_shared_config,
@@ -81,6 +85,28 @@ def init_observability(
             raise
         finally:
             _initializing = False
+
+
+def _init_team_runtime(
+    config: ObservabilityConfig,
+    additional_span_processors: Sequence[SpanProcessor],
+) -> None:
+    """Initialize Team observability through the shared runtime."""
+    init_observability(config, additional_span_processors=additional_span_processors)
+
+
+def acquire_observability(config: ObservabilityConfig) -> bool:
+    """Hold Team demand so another subsystem cannot tear down the provider."""
+    return acquire_observability_demand(
+        "team",
+        observability_config=config,
+        initializer=_init_team_runtime,
+    )
+
+
+def release_observability() -> None:
+    """Release Team demand and shut down only when it is the last consumer."""
+    release_observability_demand("team", finalizer=shutdown_observability)
 
 
 def finalize_team_trace(team_name: str) -> None:

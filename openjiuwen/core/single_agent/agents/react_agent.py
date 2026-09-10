@@ -41,6 +41,9 @@ from openjiuwen.core.context_engine import (
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     Model,
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
     ToolMessage,
     UserMessage,
     SystemMessage
@@ -809,7 +812,13 @@ class ReActAgent(BaseAgent):
             return
         body = "\n".join(parts)
         await context.add_messages(
-            UserMessage(content=f"{prefix}{body}"),
+            UserMessage(
+                content=f"{prefix}{body}",
+                metadata={
+                    OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+                },
+            ),
             system_messages=ctx.extra.get("_active_system_messages") or [],
             tools=ctx.extra.get("_active_tools") or [],
         )
@@ -859,6 +868,7 @@ class ReActAgent(BaseAgent):
             messages=self._build_preview_messages(context),
             tools=list(tools) if tools else None,
             model_context=context,
+            react_iteration=int(ctx.extra.get("_react_iteration", 0) or 0),
         )
 
         ai_message = await self._railed_model_call(ctx)
@@ -2172,6 +2182,7 @@ class ReActAgent(BaseAgent):
                     _truncation_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        ctx.extra["_react_iteration"] = iteration + 1
 
                         # Honor force_finish requests set at iteration boundary
                         # (e.g. by rails on AFTER_REACT_ITERATION). This lets a

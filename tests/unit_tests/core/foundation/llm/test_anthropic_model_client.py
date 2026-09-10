@@ -415,6 +415,11 @@ class TestUsageFromAnthropic:
         assert meta.output_tokens == 50
         assert meta.total_tokens == 200
         assert meta.cache_tokens == 30  # cache_read only
+        assert meta.cache_read_tokens == 30
+        assert meta.cache_miss_tokens == 100
+        assert meta.cache_write_tokens == 20
+        assert meta.cache_creation_input_tokens == 20
+        assert meta.cache_authoritative is True
         assert meta.model_name == "claude-opus-4"
 
     def test_zero_cache_fields_handled(self):
@@ -426,6 +431,7 @@ class TestUsageFromAnthropic:
         meta = _make_client()._usage_from_anthropic(usage)
         assert meta.input_tokens == 10
         assert meta.cache_tokens == 0
+        assert meta.cache_creation_input_tokens is None
 
     def test_none_usage_returns_none(self):
         assert _make_client()._usage_from_anthropic(None) is None

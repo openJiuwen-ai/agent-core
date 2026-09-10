@@ -779,12 +779,24 @@ class AnthropicModelClient(BaseModelClient):
             "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
         )
 
+        provider_metadata = {
+            key: value
+            for key, value in (
+                ("stop_reason", getattr(response, "stop_reason", None)),
+                ("stop_sequence", getattr(response, "stop_sequence", None)),
+            )
+            if isinstance(value, (str, int, float, bool)) and value != ""
+        }
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason=finish_reason,
             parser_content=parser_content,
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=provider_metadata,
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
@@ -799,9 +811,11 @@ class AnthropicModelClient(BaseModelClient):
         u = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage.__dict__)
         uncached = int(u.get("input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_write = int(u.get("cache_creation_input_tokens") or 0)
+        cache_write_raw = u.get("cache_creation_input_tokens")
+        cache_write = int(cache_write_raw or 0)
         output = int(u.get("output_tokens") or 0)
         total_input = uncached + cache_read + cache_write
+        cache_miss = max(uncached, 0)
 
         # Best-effort cost extraction: Anthropic doesn't return $; rely on OJ's
         # base helper (which knows OpenRouter-style ``cost`` fields). If neither
@@ -814,6 +828,13 @@ class AnthropicModelClient(BaseModelClient):
             output_tokens=output,
             total_tokens=total_input + output,
             cache_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_miss_tokens=cache_miss,
+            cache_write_tokens=cache_write,
+            cache_status="observed",
+            cache_source="provider_usage",
+            cache_authoritative=True,
+            cache_creation_input_tokens=(cache_write if cache_write_raw is not None else None),
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
@@ -847,6 +868,8 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason="null",
+                response_id=str(getattr(msg, "id", "") or "") or None,
+                response_model=str(getattr(msg, "model", "") or "") or None,
             )
 
         if etype == "content_block_start":
@@ -919,6 +942,9 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
+                provider_metadata=(
+                    {"stop_reason": str(stop_reason)} if stop_reason else {}
+                ),
             )
 
         if etype == "message_stop":

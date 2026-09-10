@@ -1049,6 +1049,14 @@ class AbilityManager:
                     tool_call=single_tool_call,
                     tool_name=single_tool_call.name,
                     tool_args=single_tool_call.arguments,
+                    react_iteration=int(
+                        getattr(
+                            ctx.inputs,
+                            "react_iteration",
+                            ctx.extra.get("_react_iteration", 0),
+                        )
+                        or 0
+                    ),
                 ),
                 config=ctx.config,
                 session=session,

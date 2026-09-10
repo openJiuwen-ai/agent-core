@@ -110,7 +110,89 @@ class BaseInterruptRail(AgentRail):
 
         decision = await self.resolve_interrupt(ctx, tool_call, user_input, auto_confirm_config)
 
+        if tool_name == "ask_user":
+            self._record_ask_user_event(ctx, tool_call, user_input, decision)
+
         self._apply_decision(ctx, tool_call, tool_name, decision)
+
+    @staticmethod
+    def _record_ask_user_event(
+            ctx: AgentCallbackContext,
+            tool_call: ToolCall | None,
+            user_input: UserInput | None,
+            decision: InterruptDecision,
+    ) -> None:
+        requested = isinstance(decision, InterruptResult) and user_input is None
+        resolved = isinstance(decision, RejectResult) and user_input is not None
+        if not requested and not resolved:
+            return
+        try:
+            import json
+            from openjiuwen.extensions.observability.span_context import (
+                get_current_agent_span,
+                get_root_span,
+            )
+            from openjiuwen.extensions.observability.trajectory_events import (
+                record_native_trajectory_log_event,
+            )
+
+            parent_span = get_current_agent_span()
+            if parent_span is None:
+                session_id = ""
+                if ctx.session is not None:
+                    session_id = str(ctx.session.get_session_id() or "")
+                parent_span = get_root_span(session_id=session_id) if session_id else get_root_span()
+            if parent_span is None or not parent_span.is_recording():
+                return
+            tool_call_id = "" if tool_call is None else str(tool_call.id or "")
+            arguments: object = {}
+            if tool_call is not None:
+                arguments = tool_call.arguments
+                if isinstance(arguments, str):
+                    try:
+                        arguments = json.loads(arguments)
+                    except (TypeError, ValueError):
+                        pass
+            payload: dict[str, object] = {
+                "interaction_id": tool_call_id,
+                "tool_call_id": tool_call_id,
+                "tool_name": "ask_user",
+            }
+            if requested:
+                card = ctx.agent.ability_manager.get("ask_user")
+                parameters = getattr(card, "input_params", {})
+                if isinstance(parameters, type) and issubclass(parameters, BaseModel):
+                    parameters = parameters.model_json_schema()
+                payload.update({
+                    "arguments": arguments,
+                    "schema": {
+                        "name": "ask_user",
+                        "description": str(getattr(card, "description", "")),
+                        "parameters": parameters,
+                    },
+                    "status": "pending",
+                })
+                event_kind = "ask_user.requested"
+            else:
+                model_answers = getattr(user_input, "answers", None)
+                answers = model_answers if isinstance(model_answers, dict) else (
+                    user_input.model_dump() if isinstance(user_input, BaseModel) else user_input
+                )
+                payload.update({
+                    "answers": answers,
+                    "outcome": "answered",
+                    "result": decision.tool_result,
+                    "status": "completed",
+                })
+                event_kind = "ask_user.resolved"
+            record_native_trajectory_log_event(
+                parent_span=parent_span,
+                event_kind=event_kind,
+                payload=payload,
+            )
+        except Exception as e:
+            # Trajectory bookkeeping must never break the interrupt path.
+            logger.debug("failed to record ask_user trajectory event: {}", e)
 
     async def resolve_interrupt(
             self,

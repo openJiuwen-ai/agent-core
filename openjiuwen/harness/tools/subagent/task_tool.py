@@ -17,6 +17,11 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    current_execution_subject,
+    execution_subject_scope,
+)
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
@@ -248,52 +253,69 @@ class TaskTool(Tool):
 
         succeeded = False
         interrupted = False
-        try:
-            if pending_subagent is None:
-                affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
-            if affinity_enabled:
-                kv_cache_hooks.prefetch_sticky_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
+        parent_subject = current_execution_subject()
+        parent_subject_id = parent_subject.subject_id if parent_subject else "main"
+        subject = ExecutionSubject(
+            subject_id=f"subagent:{uuid.uuid4().hex}",
+            display_name=str(
+                getattr(getattr(subagent, "card", None), "name", None)
+                or subagent_type
+            ),
+            kind="subagent",
+            parent_subject_id=parent_subject_id,
+            session_id=sub_session_id,
+        )
+        with execution_subject_scope(subject):
+            try:
+                if pending_subagent is None:
+                    affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+                if affinity_enabled:
+                    kv_cache_hooks.prefetch_sticky_subagent(
+                        self.parent_agent,
+                        subagent_type=str(subagent_type),
+                        sub_session_id=sub_session_id,
+                        parent_session_id=parent_session_id,
+                    )
+                query = inputs.get("query")
+                if query is None:
+                    query = task_description
+                subagent_inputs = {
+                    "query": query,
+                    "conversation_id": sub_session_id,
+                }
+                if affinity_enabled:
+                    subagent_inputs["parent_session_id"] = parent_session_id
+                result = await subagent.invoke(subagent_inputs)
+                succeeded = True
+                if (
+                    isinstance(result, dict)
+                    and result.get("result_type") == "interrupt"
+                    and "interrupt_ids" in result
+                ):
+                    interrupted = True
+                    self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
+                    return result
+                output = result.get("output", "")
+                return ToolOutput(
+                    success=True,
+                    data={"output": output, "agent_id": subagent.card.id},
+                    error=None,
                 )
-            query = inputs.get("query")
-            if query is None:
-                query = task_description
-            subagent_inputs = {
-                "query": query,
-                "conversation_id": sub_session_id,
-            }
-            if affinity_enabled:
-                subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
-            succeeded = True
-            if (
-                isinstance(result, dict)
-                and result.get("result_type") == "interrupt"
-                and "interrupt_ids" in result
-            ):
-                interrupted = True
-                self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
-                return result
-            output = result.get("output", "")
-            return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
-        except Exception as e:
-            logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
-            raise build_error(
-                StatusCode.TOOL_TASK_TOOL_INVOKED,
-                reason=f"Subagent {subagent_type} execution failed: {e}",
-            ) from e
-        finally:
-            if affinity_enabled:
-                await kv_cache_hooks.finish_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
-                    succeeded=succeeded,
-                )
+            except Exception as e:
+                logger.error(f"[TaskTool] Subagent: {subagent_type} execution failed, error={e}")
+                raise build_error(
+                    StatusCode.TOOL_TASK_TOOL_INVOKED,
+                    reason=f"Subagent {subagent_type} execution failed: {e}",
+                ) from e
+            finally:
+                if affinity_enabled:
+                    await kv_cache_hooks.finish_subagent(
+                        self.parent_agent,
+                        subagent_type=str(subagent_type),
+                        sub_session_id=sub_session_id,
+                        parent_session_id=parent_session_id,
+                        succeeded=succeeded,
+                    )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

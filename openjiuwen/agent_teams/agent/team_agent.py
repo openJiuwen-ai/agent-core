@@ -8,10 +8,12 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import Awaitable, Callable
+from contextlib import contextmanager
 from typing import (
     TYPE_CHECKING,
     Any,
     Dict,
+    Iterator,
     Optional,
 )
 
@@ -674,6 +676,37 @@ class TeamAgent(BaseAgent):
     # BaseAgent abstract methods: invoke / stream
     # ------------------------------------------------------------------
 
+    @contextmanager
+    def _observability_execution_scope(self, session: Any) -> Iterator[None]:
+        """Bind the concrete Team member identity for trajectory attribution.
+
+        Every span opened while a member round runs carries the member's
+        ``openjiuwen.execution.subject.*`` block, so the trajectory viewer can
+        group the member's model / tool records into one lane (the leader gets
+        ``team_leader``, teammates ``team_member``).
+        """
+        from openjiuwen.harness.execution_subject import execution_subject_scope
+
+        session_getter = getattr(session, "get_session_id", None)
+        session_id = str(session_getter() if callable(session_getter) else (self.session_id or ""))
+        with execution_subject_scope(self.observability_execution_subject(session_id)):
+            yield
+
+    def observability_execution_subject(self, session_id: str = "") -> "ExecutionSubject":
+        """Return the stable trajectory owner identity for this Team member."""
+        from openjiuwen.harness.execution_subject import ExecutionSubject
+
+        team_name = str(self.team_name or "")
+        member_name = str(self.member_name or self.card.name or self.card.id)
+        display_name = str(getattr(self.runtime_context, "display_name", "") or member_name)
+        return ExecutionSubject(
+            subject_id=f"team-member:{session_id}:{team_name}:{member_name}",
+            display_name=display_name,
+            kind="team_leader" if self.role == TeamRole.LEADER else "team_member",
+            parent_subject_id="",
+            session_id=session_id,
+        )
+
     async def invoke(self, inputs, session=None):
         team_logger.info("[{}] invoke start, role={}", self._member_name() or "?", self.role.value)
         self._stream_controller.stream_queue = asyncio.Queue()
@@ -683,28 +716,29 @@ class TeamAgent(BaseAgent):
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
-        await self._coordination.start(session)
-        try:
-            if routed_payloads is not None:
-                await self._dispatch_initial_leader_route(routed_payloads)
-            else:
-                # Only drive a first round when there is an actual message.
-                # Spawn / recover / resume with no input must not fabricate a
-                # round; the mailbox poll below delivers only real pending
-                # messages (no-op when the inbox is empty).
-                if raw_query:
-                    await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_initial_mailbox_poll()
-                await self._coordination.enqueue_initial_task_poll()
-            last_result = None
-            while True:
-                chunk = await self._stream_controller.stream_queue.get()
-                if chunk is None:
-                    break
-                last_result = chunk
-            return last_result
-        finally:
-            await self._coordination.finalize_round()
+        with self._observability_execution_scope(session):
+            await self._coordination.start(session)
+            try:
+                if routed_payloads is not None:
+                    await self._dispatch_initial_leader_route(routed_payloads)
+                else:
+                    # Only drive a first round when there is an actual message.
+                    # Spawn / recover / resume with no input must not fabricate a
+                    # round; the mailbox poll below delivers only real pending
+                    # messages (no-op when the inbox is empty).
+                    if raw_query:
+                        await self._coordination.enqueue_user_input(inputs)
+                    await self._coordination.enqueue_initial_mailbox_poll()
+                    await self._coordination.enqueue_initial_task_poll()
+                last_result = None
+                while True:
+                    chunk = await self._stream_controller.stream_queue.get()
+                    if chunk is None:
+                        break
+                    last_result = chunk
+                return last_result
+            finally:
+                await self._coordination.finalize_round()
 
     async def broadcast(self, content: str) -> "DeliverResult":
         """Broadcast a user-side announcement; returns the delivery result."""
@@ -740,26 +774,27 @@ class TeamAgent(BaseAgent):
         self._state.pending_user_query = raw_query
         routed_payloads = self._initial_leader_route_payloads(raw_query)
 
-        await self._coordination.start(session)
-        try:
-            if routed_payloads is not None:
-                await self._dispatch_initial_leader_route(routed_payloads)
-            else:
-                # Only drive a first round when there is an actual message.
-                # Spawn / recover / resume with no input must not fabricate a
-                # round; the mailbox poll below delivers only real pending
-                # messages (no-op when the inbox is empty).
-                if raw_query:
-                    await self._coordination.enqueue_user_input(inputs)
-                await self._coordination.enqueue_initial_mailbox_poll()
-                await self._coordination.enqueue_initial_task_poll()
-            while True:
-                chunk = await self._stream_controller.stream_queue.get()
-                if chunk is None:
-                    break
-                yield chunk
-        finally:
-            await self._coordination.finalize_round()
+        with self._observability_execution_scope(session):
+            await self._coordination.start(session)
+            try:
+                if routed_payloads is not None:
+                    await self._dispatch_initial_leader_route(routed_payloads)
+                else:
+                    # Only drive a first round when there is an actual message.
+                    # Spawn / recover / resume with no input must not fabricate a
+                    # round; the mailbox poll below delivers only real pending
+                    # messages (no-op when the inbox is empty).
+                    if raw_query:
+                        await self._coordination.enqueue_user_input(inputs)
+                    await self._coordination.enqueue_initial_mailbox_poll()
+                    await self._coordination.enqueue_initial_task_poll()
+                while True:
+                    chunk = await self._stream_controller.stream_queue.get()
+                    if chunk is None:
+                        break
+                    yield chunk
+            finally:
+                await self._coordination.finalize_round()
 
     async def interact(self, message: str) -> None:
         await self._coordination.enqueue_user_input(message)
