@@ -213,6 +213,7 @@ def _branch_identities(
 ) -> dict[tuple[str, str], tuple[str, str]]:
     """Return the native agent/task/root branch for each span."""
 
+    orphan_step_branches = _orphan_step_branches(by_identity)
     result: dict[tuple[str, str], tuple[str, str]] = {}
     for identity in by_identity:
         current = identity
@@ -229,9 +230,27 @@ def _branch_identities(
             parent = parents.get(current)
             if parent is None:
                 root = current
-                result[identity] = task_candidate or root
+                result[identity] = task_candidate or orphan_step_branches.get(root, root)
                 break
             current = parent
+    return result
+
+
+def _orphan_step_branches(
+    by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> dict[tuple[str, str], tuple[str, str]]:
+    """Group step wrappers while their shared invoke parent is not captured."""
+
+    grouped: dict[tuple[str, str], list[tuple[str, str]]] = defaultdict(list)
+    for identity, span in by_identity.items():
+        parent_span_id = str(span.get("parentSpanId") or "").strip()
+        parent = (identity[0], parent_span_id)
+        if _is_step_wrapper(span) and parent_span_id and parent not in by_identity:
+            grouped[parent].append(identity)
+    result: dict[tuple[str, str], tuple[str, str]] = {}
+    for identities in grouped.values():
+        branch = min(identities, key=lambda identity: span_sort_key(by_identity[identity]))
+        result.update((identity, branch) for identity in identities)
     return result
 
 

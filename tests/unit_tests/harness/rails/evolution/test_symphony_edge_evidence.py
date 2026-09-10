@@ -188,13 +188,15 @@ def test_planned_skills_across_main_agent_steps_share_the_agent_branch() -> None
             attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
         ),
         _skill(3, "weather", parent_span_id=2),
+        _tool(4, "bash", parent_span_id=2, tool_output={"content": "weather result"}),
         _span(
             "agent.main.react_iteration.2",
-            4,
+            5,
             parent_span_id=1,
             attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
         ),
-        _skill(5, "travel-guide-generator", parent_span_id=4),
+        _skill(6, "travel-guide-generator", parent_span_id=5),
+        _tool(7, "bash", parent_span_id=5, tool_input={"weather": "weather result"}),
     )
     continuity = ((0, trajectory),)
 
@@ -210,6 +212,76 @@ def test_planned_skills_across_main_agent_steps_share_the_agent_branch() -> None
     assert [_names(candidate) for candidate in candidates] == [
         ("weather", "travel-guide-generator"),
     ]
+    assert f"{4:016x}" in candidates[0].source_fragment.span_ids
+    assert f"{7:016x}" in candidates[0].target_fragment.span_ids
+
+
+def test_planned_skills_share_missing_invoke_parent_across_step_wrappers() -> None:
+    trajectory = _trajectory(
+        _span(
+            "agent.main.react_iteration.1",
+            2,
+            parent_span_id=1,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(3, "weather", parent_span_id=2),
+        _tool(4, "bash", parent_span_id=2, tool_output={"content": "weather result"}),
+        _span(
+            "agent.main.react_iteration.2",
+            5,
+            parent_span_id=1,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(6, "travel-guide-generator", parent_span_id=5),
+        _tool(7, "bash", parent_span_id=5, tool_input={"weather": "weather result"}),
+    )
+    continuity = ((0, trajectory),)
+
+    candidates = build_symphony_edge_candidates(
+        project_symphony_execution_fragments(continuity),
+        continuity,
+        planned_graph=_planned_graph(
+            ("weather", "travel-guide-generator"),
+            names=("weather", "travel-guide-generator"),
+        ),
+    )
+
+    assert [_names(candidate) for candidate in candidates] == [
+        ("weather", "travel-guide-generator"),
+    ]
+    assert f"{4:016x}" in candidates[0].source_fragment.span_ids
+    assert f"{7:016x}" in candidates[0].target_fragment.span_ids
+
+
+def test_step_wrappers_with_different_missing_parents_remain_separate_branches() -> None:
+    trajectory = _trajectory(
+        _span(
+            "agent.main.react_iteration.1",
+            2,
+            parent_span_id=1,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(3, "weather", parent_span_id=2),
+        _span(
+            "agent.main.react_iteration.2",
+            4,
+            parent_span_id=9,
+            attributes={semconv.OJ_TRAJECTORY_RECORD_KIND: "step"},
+        ),
+        _skill(5, "travel-guide-generator", parent_span_id=4),
+    )
+    continuity = ((0, trajectory),)
+
+    candidates = build_symphony_edge_candidates(
+        project_symphony_execution_fragments(continuity),
+        continuity,
+        planned_graph=_planned_graph(
+            ("weather", "travel-guide-generator"),
+            names=("weather", "travel-guide-generator"),
+        ),
+    )
+
+    assert candidates == ()
 
 
 def test_planned_graph_does_not_add_unplanned_or_proximity_pairs() -> None:
