@@ -252,7 +252,7 @@ def _extract_bash_command(arguments: Any) -> str | None:
         if command is None and isinstance(payload.get("text"), str):
             try:
                 inner = json.loads(payload["text"])
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 inner = None
             command = inner.get("command") if isinstance(inner, dict) else payload.get("text")
         if not isinstance(command, str):
@@ -263,7 +263,7 @@ def _extract_bash_command(arguments: Any) -> str | None:
         if len(command) > _TRIED_COMMAND_CHARS:
             command = command[: _TRIED_COMMAND_CHARS - 1] + "…"
         return command
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
 
 
@@ -284,7 +284,7 @@ def _parse_failed_bash_commands(trace_path: Path, *, limit: int = _TRIED_COMMAND
                     continue
                 try:
                     event = json.loads(line)
-                except (json.JSONDecodeError, ValueError):
+                except ValueError:
                     continue
                 if event.get("tool_name") != "bash":
                     continue
