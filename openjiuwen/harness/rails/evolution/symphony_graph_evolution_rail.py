@@ -15,7 +15,7 @@ import ast
 import json
 import re
 import threading
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -75,8 +75,11 @@ _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
 _SUMMARY_EDGE_EVENT_COUNT = 5
 _SUMMARY_MAX_EVENTS = _SUMMARY_EDGE_EVENT_COUNT * 2
-_SUMMARY_EVENT_MAX_BYTES = 512
-_SUMMARY_VALUE_MAX_BYTES = 256
+_SUMMARY_EVENT_MAX_BYTES = 1024
+_SUMMARY_VALUE_MAX_BYTES = 512
+_SUMMARY_MAX_KEYS = 12
+_SUMMARY_MAX_BRANCHES = 6
+_SUMMARY_MAX_BRANCH_VALUES = 2
 _OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
 _SUMMARY_REDACTED_KEY_TOKENS = (
     "accesskey",
@@ -1664,12 +1667,57 @@ def _structured_truncated_summary(value: str) -> Mapping[str, Any] | None:
     except ValueError:
         return None
     recovered = _unwrap_partial_summary_payload(recovered)
-    branches = _partial_summary_branches(recovered)
+    return _structured_json_value_summary(
+        recovered,
+        partial=True,
+        max_bytes=_SUMMARY_VALUE_MAX_BYTES,
+    )
+
+
+def _structured_complete_summary(value: str, *, max_bytes: int) -> Mapping[str, Any] | None:
+    prefix = value.lstrip()
+    if not prefix.startswith(("{", "[")):
+        return None
+    try:
+        recovered = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    recovered = _unwrap_partial_summary_payload(recovered)
+    return _structured_json_value_summary(recovered, partial=False, max_bytes=max_bytes)
+
+
+def _structured_json_value_summary(
+    value: Any,
+    *,
+    partial: bool,
+    max_bytes: int,
+) -> Mapping[str, Any] | None:
+    branches = _partial_summary_branches(value)
     if not branches:
         return None
-    keys = [_truncate_trace_text(path.rsplit(".", 1)[-1], 32) for path, _ in branches[:8]]
-    samples = _fair_partial_summary_samples(branches, max_samples=6)
-    return {"truncated": True, "keys": keys, "samples": samples}
+    keys = [_truncate_trace_text(branch, 48) for branch, _ in branches[:_SUMMARY_MAX_KEYS]]
+    sample_branches = sorted(
+        enumerate(branches),
+        key=lambda item: (len(item[1][1]) <= 1, item[0]),
+    )
+    ordered_branches = [branch for _, branch in sample_branches]
+    for branch_values in (_SUMMARY_MAX_BRANCH_VALUES, 1):
+        for branch_count in range(_SUMMARY_MAX_BRANCHES, 0, -1):
+            for value_bytes in (512, 256, 128, 96, 64, 48):
+                summary = {
+                    "structured": True,
+                    "partial": partial,
+                    "keys": keys,
+                    "samples": _fair_partial_summary_samples(
+                        ordered_branches,
+                        max_branches=branch_count,
+                        max_branch_values=branch_values,
+                        value_bytes=value_bytes,
+                    ),
+                }
+                if len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= max_bytes:
+                    return summary
+    return None
 
 
 def _unwrap_partial_summary_payload(value: Any) -> Any:
@@ -1689,35 +1737,31 @@ def _unwrap_partial_summary_payload(value: Any) -> Any:
 
 
 def _partial_summary_branches(value: Any) -> list[tuple[str, list[tuple[str, Any]]]]:
-    if not isinstance(value, Mapping):
+    items: Iterable[tuple[Any, Any]]
+    if isinstance(value, Mapping):
+        items = value.items()
+    elif isinstance(value, (list, tuple)):
+        items = ((str(index), item) for index, item in enumerate(value))
+    else:
         return []
     branches: list[tuple[str, list[tuple[str, Any]]]] = []
-    for key, item in value.items():
+    for key, item in items:
         key_text = _truncate_trace_text(str(key), 48)
         normalized_key = _normalized_summary_key(key_text)
         if normalized_key in _SUMMARY_IDENTITY_KEYS:
             continue
         if _is_sensitive_summary_key(normalized_key):
-            branches.append((key_text, [(key_text, "<redacted>")]))
+            branches.append((key_text, [("$", "<redacted>")]))
             continue
         expanded = _parse_nested_partial_json(item)
-        if isinstance(expanded, Mapping):
-            for nested_key, nested_item in expanded.items():
-                nested_key_text = _truncate_trace_text(str(nested_key), 48)
-                path = f"{key_text}.{nested_key_text}"
-                normalized_nested_key = _normalized_summary_key(nested_key_text)
-                if normalized_nested_key in _SUMMARY_IDENTITY_KEYS:
-                    continue
-                if _is_sensitive_summary_key(normalized_nested_key):
-                    leaves = [(path, "<redacted>")]
-                else:
-                    leaves = _partial_scalar_leaves(nested_item, path)
-                if leaves:
-                    branches.append((path, leaves))
-        else:
-            leaves = _partial_scalar_leaves(expanded, key_text)
-            if leaves:
-                branches.append((key_text, leaves))
+        if isinstance(item, (str, _PartialJSONString)) and isinstance(expanded, (Mapping, list, tuple)):
+            nested_branches = _partial_summary_branches(expanded)
+            if nested_branches:
+                branches.extend(nested_branches)
+                continue
+        leaves = _partial_scalar_leaves(expanded, "")
+        if leaves:
+            branches.append((key_text, leaves))
     return branches
 
 
@@ -1749,7 +1793,7 @@ def _partial_scalar_leaves(value: Any, path: str, *, depth: int = 0) -> list[tup
         for key, item in value.items():
             key_text = str(key)
             normalized_key = _normalized_summary_key(key_text)
-            child_path = f"{path}.{_truncate_trace_text(key_text, 48)}"
+            child_path = _join_summary_path(path, _truncate_trace_text(key_text, 48))
             if _is_sensitive_summary_key(normalized_key):
                 leaves.append((child_path, "<redacted>"))
             elif normalized_key not in _SUMMARY_IDENTITY_KEYS:
@@ -1760,37 +1804,48 @@ def _partial_scalar_leaves(value: Any, path: str, *, depth: int = 0) -> list[tup
     if isinstance(value, (list, tuple)):
         leaves = []
         for index, item in enumerate(value[:8]):
-            leaves.extend(_partial_scalar_leaves(item, f"{path}.{index}", depth=depth + 1))
+            leaves.extend(_partial_scalar_leaves(item, _join_summary_path(path, str(index)), depth=depth + 1))
             if len(leaves) >= 8:
                 break
         return leaves[:8]
     if value is None:
         return []
-    return [(path, value)]
+    return [(path or "$", value)]
+
+
+def _join_summary_path(parent: str, child: str) -> str:
+    return f"{parent}.{child}" if parent else child
 
 
 def _fair_partial_summary_samples(
     branches: Sequence[tuple[str, Sequence[tuple[str, Any]]]],
     *,
-    max_samples: int,
-) -> list[list[Any]]:
-    samples: list[list[Any]] = []
-    round_index = 0
-    while len(samples) < max_samples:
-        added = False
-        for _, branch_samples in branches:
-            if round_index >= len(branch_samples):
-                continue
-            path, value = branch_samples[round_index]
-            compact = _compact_trace_value(value, max_bytes=40)
-            samples.append([_truncate_trace_text(path, 64), compact])
-            added = True
-            if len(samples) == max_samples:
-                break
-        if not added:
-            break
-        round_index += 1
+    max_branches: int,
+    max_branch_values: int,
+    value_bytes: int,
+) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for branch, branch_samples in branches[:max_branches]:
+        values = [
+            [_truncate_trace_text(path, 64), _compact_summary_scalar(value, max_bytes=value_bytes)]
+            for path, value in branch_samples[:max_branch_values]
+        ]
+        if values:
+            samples.append({"branch": _truncate_trace_text(branch, 48), "values": values})
     return samples
+
+
+def _compact_summary_scalar(value: Any, *, max_bytes: int) -> Any:
+    if isinstance(value, bytes):
+        return "<redacted>"
+    if isinstance(value, str):
+        value = _redact_summary_text(value)
+        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value):
+            return "<redacted>"
+        return _truncate_trace_text_head_tail(value, max_bytes)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _truncate_trace_text_head_tail(str(value), max_bytes)
 
 
 def _compact_trace_value(value: Any, *, max_bytes: int = _SUMMARY_VALUE_MAX_BYTES) -> Any:
@@ -1813,8 +1868,11 @@ def _compact_trace_value(value: Any, *, max_bytes: int = _SUMMARY_VALUE_MAX_BYTE
     if isinstance(value, bytes):
         return "<redacted>"
     if isinstance(value, str):
+        complete_summary = _structured_complete_summary(value, max_bytes=max_bytes)
+        if complete_summary is not None and len(value.encode("utf-8", errors="replace")) > max_bytes:
+            return complete_summary
         value = _redact_summary_text(value)
-        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value[:128]):
+        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value):
             return "<redacted>"
         return _truncate_trace_text_head_tail(value, max_bytes)
     if value is None or isinstance(value, (bool, int, float)):
@@ -2021,17 +2079,19 @@ def _bounded_summary_event(event: Mapping[str, Any]) -> str:
     # arguments. Output/error shrink independently instead of forcing a second
     # whole-event truncation that could erase the command's useful prefix.
     budgets: tuple[tuple[int, int, int], ...] = (
-        (320, 96, 96),
-        (288, 80, 80),
-        (256, 64, 64),
-        (224, 48, 64),
-        (192, 32, 48),
-        (160, 0, 48),
-        (128, 0, 32),
-        (96, 0, 24),
+        (952, 160, 96),
+        (704, 160, 96),
+        (640, 144, 80),
+        (576, 128, 80),
+        (512, 112, 64),
+        (448, 96, 64),
+        (384, 80, 48),
+        (320, 64, 48),
+        (256, 48, 32),
+        (192, 32, 24),
     )
     if "input" in bounded and not set(bounded).intersection({"output", "error"}):
-        budgets = ((440, 0, 0), *budgets)
+        budgets = ((952, 0, 0), *budgets)
     for input_bytes, output_bytes, error_bytes in budgets:
         candidate = {key: value for key, value in bounded.items() if key not in {"input", "output", "error"}}
         for key, max_bytes in (("input", input_bytes), ("output", output_bytes), ("error", error_bytes)):
