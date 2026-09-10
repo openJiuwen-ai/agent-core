@@ -1591,6 +1591,129 @@ def test_summary_redacts_binary_and_bounds_values() -> None:
     assert "...<truncated>..." in compact["normal"]
 
 
+def test_summary_recovers_representative_branches_from_truncated_nested_json() -> None:
+    content = json.dumps(
+        {
+            "schema_version": "1.0",
+            "meta": {"title": "北京一日游", "description": "x" * 200},
+            "preferences": {"budget": "comfortable"},
+            "sources": [{"title": "天气来源", "source_ids": ["weather-wttr"]}],
+            "weather": {"date": "2026-09-11", "temperature": {"low_c": 18, "high_c": 31}},
+            "tail": {"notes": "y" * 1000},
+        },
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/guide.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+    truncated = f"{wrapped[: wrapped.index('tail')]}...<truncated 2048 chars>"
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": truncated, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    event = json.loads(event_text)
+    serialized = json.dumps(event, ensure_ascii=False)
+    assert event["input"]["truncated"] is True
+    assert "weather" in event["input"]["keys"]
+    assert "content.weather.date" in serialized
+    assert "2026-09-11" in serialized
+    assert "private-session" not in serialized
+    assert len(event_text.encode()) <= 512
+
+
+def test_summary_recovers_complete_nested_json_when_envelope_tail_is_truncated() -> None:
+    content = json.dumps(
+        {"alpha": {"value": 1}, "middle": {"value": "保留内容"}, "omega": {"value": 3}},
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/result.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+    truncated = f"{wrapped[:-8]}...<truncated 8 chars>"
+
+    summary = rail_module._structured_truncated_summary(truncated)
+
+    assert summary is not None
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert "content.middle.value" in serialized
+    assert "保留内容" in serialized
+    assert "private-session" not in serialized
+
+
+def test_summary_keeps_utf8_valid_when_unicode_escape_is_truncated() -> None:
+    content = json.dumps({"emoji": "😀"}, ensure_ascii=True)
+    wrapped = json.dumps([[{"content": content}], {}])
+    cut = wrapped.index("ud83d") + len("ud83d")
+    truncated = f"{wrapped[:cut]}...<truncated 8 chars>"
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": truncated, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    assert len(event_text.encode("utf-8")) <= 512
+    assert "\\ud83d" not in event_text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{"content":"bad\\q...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":xyz...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":trueX...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":01...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":1.e...<truncated 4 chars>',
+        '{"content":"unterminated ordinary text}',
+        "plain text...<truncated 20 chars>",
+    ],
+)
+def test_summary_does_not_recover_nonstandard_or_invalid_json(value: str) -> None:
+    assert rail_module._structured_truncated_summary(value) is None
+    assert rail_module._unwrap_summary_payload(value) == value
+
+
+@pytest.mark.parametrize("partial_scalar", ["tru", "fals", "nul", "-", "1.", "1e", "1e+"])
+def test_summary_accepts_only_scalar_prefixes_that_can_be_completed(partial_scalar: str) -> None:
+    value = f'{{"safe":{{"value":"keep"}},"pending":{partial_scalar}...<truncated 4 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    assert "keep" in json.dumps(summary)
+
+
+@pytest.mark.parametrize("partial_number", ["1", "12.3", "1e2"])
+def test_summary_does_not_treat_number_at_truncation_boundary_as_complete(
+    partial_number: str,
+) -> None:
+    value = f'{{"safe":{{"value":"keep"}},"pending":{partial_number}...<truncated 4 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    serialized = json.dumps(summary)
+    assert "keep" in serialized
+    assert "pending" not in serialized
+
+
+def test_summary_redacts_sensitive_values_recovered_from_truncated_json() -> None:
+    value = '{"business":{"value":"keep"},"credentials":{"api_key":"private-key"...<truncated 9 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert "keep" in serialized
+    assert "private-key" not in serialized
+    assert "<redacted>" in serialized
+
+
 @pytest.mark.parametrize(
     "key",
     [

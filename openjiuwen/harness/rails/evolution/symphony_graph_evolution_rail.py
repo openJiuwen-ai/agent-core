@@ -1468,6 +1468,331 @@ def _truncate_trace_text_head_tail(value: str, max_bytes: int) -> str:
     return f"{head}{marker}{tail}"
 
 
+@dataclass(frozen=True)
+class _PartialJSONString:
+    """A decoded string prefix whose closing quote was observability-truncated."""
+
+    value: str
+
+
+class _PartialJSONParser:
+    """Recover only values that are fully present in a truncated JSON prefix."""
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+        self._index = 0
+
+    def parse(self) -> Any:
+        value, _ = self._parse_value(0)
+        self._skip_whitespace()
+        if self._index != len(self._value):
+            raise ValueError("invalid JSON prefix")
+        return value
+
+    def _parse_value(self, depth: int) -> tuple[Any, bool]:
+        if depth > 32:
+            raise ValueError("JSON prefix is too deeply nested")
+        self._skip_whitespace()
+        if self._index == len(self._value):
+            return None, False
+        token = self._value[self._index]
+        if token == "{":
+            return self._parse_object(depth + 1)
+        if token == "[":
+            return self._parse_array(depth + 1)
+        if token == '"':
+            return self._parse_string()
+        return self._parse_scalar()
+
+    def _parse_object(self, depth: int) -> tuple[dict[str, Any], bool]:
+        self._index += 1
+        result: dict[str, Any] = {}
+        self._skip_whitespace()
+        if self._consume("}"):
+            return result, True
+        while self._index < len(self._value):
+            key, key_complete = self._parse_string()
+            if not key_complete:
+                return result, False
+            self._skip_whitespace()
+            if not self._consume(":"):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON object prefix")
+            item, item_complete = self._parse_value(depth)
+            if item is not None:
+                result[str(key)] = item
+            if not item_complete:
+                return result, False
+            self._skip_whitespace()
+            if self._consume("}"):
+                return result, True
+            if not self._consume(","):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON object prefix")
+            self._skip_whitespace()
+        return result, False
+
+    def _parse_array(self, depth: int) -> tuple[list[Any], bool]:
+        self._index += 1
+        result: list[Any] = []
+        self._skip_whitespace()
+        if self._consume("]"):
+            return result, True
+        while self._index < len(self._value):
+            item, item_complete = self._parse_value(depth)
+            if item is not None:
+                result.append(item)
+            if not item_complete:
+                return result, False
+            self._skip_whitespace()
+            if self._consume("]"):
+                return result, True
+            if not self._consume(","):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON array prefix")
+            self._skip_whitespace()
+        return result, False
+
+    def _parse_string(self) -> tuple[str | _PartialJSONString, bool]:
+        if not self._consume('"'):
+            raise ValueError("invalid JSON string prefix")
+        result: list[str] = []
+        while self._index < len(self._value):
+            token = self._value[self._index]
+            self._index += 1
+            if token == '"':
+                return "".join(result), True
+            if token == "\\":
+                escaped, complete = self._parse_escape()
+                if not complete:
+                    return _PartialJSONString("".join(result)), False
+                result.append(escaped)
+            elif ord(token) < 0x20:
+                raise ValueError("invalid control character in JSON string")
+            else:
+                result.append(token)
+        return _PartialJSONString("".join(result)), False
+
+    def _parse_escape(self) -> tuple[str, bool]:
+        if self._index == len(self._value):
+            return "", False
+        token = self._value[self._index]
+        self._index += 1
+        escapes = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+        if token in escapes:
+            return escapes[token], True
+        if token != "u":
+            raise ValueError("invalid JSON escape")
+        digits = self._value[self._index : self._index + 4]
+        if len(digits) < 4:
+            self._index = len(self._value)
+            return "", False
+        if re.fullmatch(r"[0-9a-fA-F]{4}", digits) is None:
+            raise ValueError("invalid JSON unicode escape")
+        self._index += 4
+        codepoint = int(digits, 16)
+        if 0xD800 <= codepoint <= 0xDBFF:
+            return self._parse_low_surrogate(codepoint), True
+        if 0xDC00 <= codepoint <= 0xDFFF:
+            return "\N{REPLACEMENT CHARACTER}", True
+        return chr(codepoint), True
+
+    def _parse_low_surrogate(self, high: int) -> str:
+        if not self._value.startswith("\\u", self._index):
+            return "\N{REPLACEMENT CHARACTER}"
+        digits = self._value[self._index + 2 : self._index + 6]
+        if len(digits) != 4 or re.fullmatch(r"[0-9a-fA-F]{4}", digits) is None:
+            return "\N{REPLACEMENT CHARACTER}"
+        low = int(digits, 16)
+        if not 0xDC00 <= low <= 0xDFFF:
+            return "\N{REPLACEMENT CHARACTER}"
+        self._index += 6
+        return chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+
+    def _parse_scalar(self) -> tuple[Any, bool]:
+        start = self._index
+        while self._index < len(self._value) and self._value[self._index] not in ",]} \t\r\n":
+            self._index += 1
+        token = self._value[start : self._index]
+        try:
+            value = json.loads(token)
+        except (TypeError, ValueError) as exc:
+            if self._index == len(self._value) and _is_possible_partial_json_scalar(token):
+                return None, False
+            raise ValueError("invalid JSON scalar prefix") from exc
+        if self._index == len(self._value) and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return None, False
+        return value, True
+
+    def _skip_whitespace(self) -> None:
+        while self._index < len(self._value) and self._value[self._index] in " \t\r\n":
+            self._index += 1
+
+    def _consume(self, token: str) -> bool:
+        if self._value.startswith(token, self._index):
+            self._index += len(token)
+            return True
+        return False
+
+
+def _is_possible_partial_json_scalar(value: str) -> bool:
+    if value in {"t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul", "-"}:
+        return True
+    integer = r"-?(?:0|[1-9]\d*)"
+    return (
+        re.fullmatch(rf"{integer}\.", value) is not None
+        or re.fullmatch(
+            rf"{integer}(?:\.\d+)?[eE][+-]?",
+            value,
+        )
+        is not None
+    )
+
+
+def _structured_truncated_summary(value: str) -> Mapping[str, Any] | None:
+    match = _OBSERVABILITY_TRUNCATED_SUFFIX.search(value)
+    if match is None:
+        return None
+    prefix = value[: match.start()].rstrip()
+    if not prefix.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        recovered = _PartialJSONParser(prefix).parse()
+    except ValueError:
+        return None
+    recovered = _unwrap_partial_summary_payload(recovered)
+    branches = _partial_summary_branches(recovered)
+    if not branches:
+        return None
+    keys = [_truncate_trace_text(path.rsplit(".", 1)[-1], 32) for path, _ in branches[:8]]
+    samples = _fair_partial_summary_samples(branches, max_samples=6)
+    return {"truncated": True, "keys": keys, "samples": samples}
+
+
+def _unwrap_partial_summary_payload(value: Any) -> Any:
+    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], list) and isinstance(value[1], Mapping):
+        args, kwargs = value
+        business_kwargs = {
+            key: item
+            for key, item in kwargs.items()
+            if _normalized_summary_key(str(key)) not in _SUMMARY_ARGUMENT_FRAMEWORK_KEYS
+        }
+        if business_kwargs:
+            return {"args": args, "kwargs": business_kwargs}
+        value = args
+    while isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    return value
+
+
+def _partial_summary_branches(value: Any) -> list[tuple[str, list[tuple[str, Any]]]]:
+    if not isinstance(value, Mapping):
+        return []
+    branches: list[tuple[str, list[tuple[str, Any]]]] = []
+    for key, item in value.items():
+        key_text = _truncate_trace_text(str(key), 48)
+        normalized_key = _normalized_summary_key(key_text)
+        if normalized_key in _SUMMARY_IDENTITY_KEYS:
+            continue
+        if _is_sensitive_summary_key(normalized_key):
+            branches.append((key_text, [(key_text, "<redacted>")]))
+            continue
+        expanded = _parse_nested_partial_json(item)
+        if isinstance(expanded, Mapping):
+            for nested_key, nested_item in expanded.items():
+                nested_key_text = _truncate_trace_text(str(nested_key), 48)
+                path = f"{key_text}.{nested_key_text}"
+                normalized_nested_key = _normalized_summary_key(nested_key_text)
+                if normalized_nested_key in _SUMMARY_IDENTITY_KEYS:
+                    continue
+                if _is_sensitive_summary_key(normalized_nested_key):
+                    leaves = [(path, "<redacted>")]
+                else:
+                    leaves = _partial_scalar_leaves(nested_item, path)
+                if leaves:
+                    branches.append((path, leaves))
+        else:
+            leaves = _partial_scalar_leaves(expanded, key_text)
+            if leaves:
+                branches.append((key_text, leaves))
+    return branches
+
+
+def _parse_nested_partial_json(value: Any) -> Any:
+    if isinstance(value, _PartialJSONString):
+        prefix = value.value.lstrip()
+    elif isinstance(value, str):
+        prefix = value.lstrip()
+    else:
+        return value
+    if not prefix.startswith(("{", "[")):
+        return value.value if isinstance(value, _PartialJSONString) else value
+    try:
+        return json.loads(prefix)
+    except (TypeError, ValueError):
+        try:
+            return _PartialJSONParser(prefix).parse()
+        except ValueError:
+            return value.value if isinstance(value, _PartialJSONString) else value
+
+
+def _partial_scalar_leaves(value: Any, path: str, *, depth: int = 0) -> list[tuple[str, Any]]:
+    if depth > 8:
+        return []
+    if isinstance(value, _PartialJSONString):
+        return [(path, value.value)] if value.value else []
+    if isinstance(value, Mapping):
+        leaves: list[tuple[str, Any]] = []
+        for key, item in value.items():
+            key_text = str(key)
+            normalized_key = _normalized_summary_key(key_text)
+            child_path = f"{path}.{_truncate_trace_text(key_text, 48)}"
+            if _is_sensitive_summary_key(normalized_key):
+                leaves.append((child_path, "<redacted>"))
+            elif normalized_key not in _SUMMARY_IDENTITY_KEYS:
+                leaves.extend(_partial_scalar_leaves(item, child_path, depth=depth + 1))
+            if len(leaves) >= 8:
+                break
+        return leaves[:8]
+    if isinstance(value, (list, tuple)):
+        leaves = []
+        for index, item in enumerate(value[:8]):
+            leaves.extend(_partial_scalar_leaves(item, f"{path}.{index}", depth=depth + 1))
+            if len(leaves) >= 8:
+                break
+        return leaves[:8]
+    if value is None:
+        return []
+    return [(path, value)]
+
+
+def _fair_partial_summary_samples(
+    branches: Sequence[tuple[str, Sequence[tuple[str, Any]]]],
+    *,
+    max_samples: int,
+) -> list[list[Any]]:
+    samples: list[list[Any]] = []
+    round_index = 0
+    while len(samples) < max_samples:
+        added = False
+        for _, branch_samples in branches:
+            if round_index >= len(branch_samples):
+                continue
+            path, value = branch_samples[round_index]
+            compact = _compact_trace_value(value, max_bytes=40)
+            samples.append([_truncate_trace_text(path, 64), compact])
+            added = True
+            if len(samples) == max_samples:
+                break
+        if not added:
+            break
+        round_index += 1
+    return samples
+
+
 def _compact_trace_value(value: Any, *, max_bytes: int = _SUMMARY_VALUE_MAX_BYTES) -> Any:
     if isinstance(value, Mapping):
         compact: dict[str, Any] = {}
@@ -1536,7 +1861,7 @@ def _unwrap_summary_payload(value: Any) -> Any:
         try:
             value = json.loads(value)
         except (TypeError, ValueError):
-            return value
+            return _structured_truncated_summary(value) or value
     if (
         isinstance(value, (list, tuple))
         and len(value) == 2
@@ -1695,7 +2020,7 @@ def _bounded_summary_event(event: Mapping[str, Any]) -> str:
     # Input gets the largest share because it contains the invoked command or
     # arguments. Output/error shrink independently instead of forcing a second
     # whole-event truncation that could erase the command's useful prefix.
-    budgets = (
+    budgets: tuple[tuple[int, int, int], ...] = (
         (320, 96, 96),
         (288, 80, 80),
         (256, 64, 64),
@@ -1705,6 +2030,8 @@ def _bounded_summary_event(event: Mapping[str, Any]) -> str:
         (128, 0, 32),
         (96, 0, 24),
     )
+    if "input" in bounded and not set(bounded).intersection({"output", "error"}):
+        budgets = ((440, 0, 0), *budgets)
     for input_bytes, output_bytes, error_bytes in budgets:
         candidate = {key: value for key, value in bounded.items() if key not in {"input", "output", "error"}}
         for key, max_bytes in (("input", input_bytes), ("output", output_bytes), ("error", error_bytes)):
