@@ -38,7 +38,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
         if not (config.judge_model_config_ref or config.model_config_ref):
             raise ValueError("llm_as_judge requires judge_model_config_ref or model_config_ref")
         finite_number(config.judge_success_score, minimum=0, maximum=1, name="judge_success_score")
-        for name in ("judge_agent_max_iterations", "judge_agent_max_tokens", "judge_timeout_sec"):
+        for name in ("judge_agent_max_iterations", "judge_timeout_sec"):
             value = getattr(config, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")

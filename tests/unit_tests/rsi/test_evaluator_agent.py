@@ -73,7 +73,9 @@ def test_explicit_factory_and_config_roundtrip():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("score,passed", [(0.0, False), (0.6, False), (0.799, False), (0.8, True), (0.965, True), (1.0, True)])
+@pytest.mark.parametrize(
+    "score,passed", [(0.0, False), (0.6, False), (0.799, False), (0.8, True), (0.965, True), (1.0, True)],
+)
 async def test_configured_threshold_reaches_case_reference(tmp_path, monkeypatch, score, passed):
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", AsyncMock(return_value=json.dumps(_output((score, score)))))
     runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config(judge_success_score=0.8)))
@@ -133,7 +135,6 @@ async def test_node_score_averages_binary_cases_not_raw_judge_scores(tmp_path, m
         {"judge_success_score": float("nan")},
         {"judge_success_score": 1.1},
         {"judge_agent_max_iterations": 0},
-        {"judge_agent_max_tokens": -1},
         {"judge_timeout_sec": 0},
         {"judge_max_retries": True},
         {"judge_max_retries": 10},

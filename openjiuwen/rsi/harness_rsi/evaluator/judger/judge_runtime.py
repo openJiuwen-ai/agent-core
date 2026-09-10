@@ -94,7 +94,7 @@ def build_judge_agent(config: EvaluatorConfig, workspace: Path, log_path: Path) 
     loaded = load_model_config_ref(ref)
     data = without_inner_sdk_retries(loaded.get("model", loaded))
     request = dict(data.get("model_request_config") or {})
-    request.update(temperature=0.0, max_tokens=config.judge_agent_max_tokens)
+    request.update(temperature=0.0)
     data["model_request_config"] = request
     return create_deep_agent(
         model=TeamModelConfig.model_validate(data).build(),

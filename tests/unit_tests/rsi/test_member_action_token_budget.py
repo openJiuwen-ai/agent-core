@@ -108,7 +108,7 @@ async def test_artifact_generation_preserves_wire_model_options(
     assert len(requests) == 1
     body = requests[0]
     assert body["model"] == model_name
-    assert body["max_tokens"] == 16384
+    assert body["max_tokens"] == 100000
     for key, value in extra_body.items():
         assert body[key] == value
     for key in {"thinking", "enable_thinking"} - extra_body.keys():

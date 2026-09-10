@@ -56,7 +56,6 @@ class EvaluatorConfig:
     evaluation_method: str = "script-based"
     judge_model_config_ref: str = ""
     judge_agent_max_iterations: int = 8
-    judge_agent_max_tokens: int = 8192
     judge_timeout_sec: int = 300
     judge_max_retries: int = 2
     judge_success_score: float = 0.8
@@ -77,7 +76,6 @@ class EvaluatorConfig:
             evaluation_method=str(data.get("evaluation_method", "script-based")),
             judge_model_config_ref=str(data.get("judge_model_config_ref", "")),
             judge_agent_max_iterations=_int_value(data.get("judge_agent_max_iterations"), default=8),
-            judge_agent_max_tokens=_int_value(data.get("judge_agent_max_tokens"), default=8192),
             judge_timeout_sec=_int_value(data.get("judge_timeout_sec"), default=300),
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
@@ -110,7 +108,6 @@ class EvaluationResultAnalyzerConfig:
     diagnosis_agent_max_retries: int = DEFAULT_MODEL_CALL_MAX_RETRIES
     diagnosis_agent_max_concurrency: int = 5
     diagnosis_agent_max_iterations: int = 20
-    diagnosis_agent_max_tokens: int = 16384
     causal_investigation_required: bool = True
     max_issues: int = 20
     evidence_limit_per_issue: int = 5
@@ -132,10 +129,6 @@ class EvaluationResultAnalyzerConfig:
             diagnosis_agent_max_iterations=_int_value(
                 data.get("diagnosis_agent_max_iterations"),
                 default=20,
-            ),
-            diagnosis_agent_max_tokens=_int_value(
-                data.get("diagnosis_agent_max_tokens"),
-                default=16384,
             ),
             causal_investigation_required=_bool_value(
                 data.get("causal_investigation_required"),

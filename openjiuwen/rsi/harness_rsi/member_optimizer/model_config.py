@@ -14,6 +14,21 @@ from typing import Any
 import yaml
 
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
+RSI_MAX_OUTPUT_TOKENS = 100000
+
+
+def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
+    """Apply the shared Harness RSI output limit without changing the source config."""
+    data = deepcopy(config_data)
+    model_data = data.get("model", data)
+    if isinstance(model_data, dict):
+        request = model_data.get("model_request_config")
+        if request is None:
+            request = {}
+            model_data["model_request_config"] = request
+        if isinstance(request, dict):
+            request["max_tokens"] = RSI_MAX_OUTPUT_TOKENS
+    return data
 
 
 def load_model_config_ref(model_config_ref: str) -> dict[str, Any]:
@@ -28,7 +43,7 @@ def load_model_config_ref(model_config_ref: str) -> dict[str, Any]:
             data = json.load(file)
     if not isinstance(data, dict):
         raise ValueError(f"model_config_ref must decode to a mapping: {path}")
-    return _expand_env_vars(data)
+    return with_rsi_output_budget(_expand_env_vars(data))
 
 
 def build_deep_agent_from_model_config(config_data: dict[str, Any]) -> Any:
@@ -38,6 +53,7 @@ def build_deep_agent_from_model_config(config_data: dict[str, Any]) -> Any:
     from openjiuwen.harness.schema.config import DeepAgentConfig
     from openjiuwen.harness.workspace.workspace import Workspace
 
+    config_data = with_rsi_output_budget(config_data)
     model = None
     if "model" in config_data:
         model = TeamModelConfig.model_validate(without_inner_sdk_retries(config_data["model"])).build()

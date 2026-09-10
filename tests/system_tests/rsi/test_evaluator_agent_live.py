@@ -32,7 +32,6 @@ def _judge():
             evaluation_method="llm_as_judge",
             judge_model_config_ref=MODEL_CONFIG,
             judge_agent_max_iterations=6,
-            judge_agent_max_tokens=4096,
             judge_timeout_sec=180,
             judge_max_retries=0,
         )
@@ -142,7 +141,6 @@ async def test_uploaded_weighted_rubric_to_analyzer(tmp_path):
         evaluation_method="llm_as_judge",
         judge_model_config_ref=MODEL_CONFIG,
         judge_agent_max_iterations=8,
-        judge_agent_max_tokens=8192,
         judge_timeout_sec=240,
         judge_max_retries=0,
     )
