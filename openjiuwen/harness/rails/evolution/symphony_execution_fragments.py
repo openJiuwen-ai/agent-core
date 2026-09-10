@@ -281,7 +281,7 @@ def _skill_fragments(
             for position, (anchor, skill_name) in enumerate(anchors)
             if not position or anchors[position - 1][1] != skill_name
         ]
-        owned_span_ids = _explicit_skill_execution_span_ids(
+        owned_span_ids, script_span_owners = _explicit_skill_execution_span_ids(
             effective_anchors,
             branch,
             by_identity,
@@ -294,6 +294,8 @@ def _skill_fragments(
                     anchor,
                     branch,
                     explicit_span_ids,
+                    script_span_owners,
+                    effective_anchors,
                     by_identity,
                     topology,
                 )
@@ -311,6 +313,13 @@ def _skill_fragments(
                     anchor,
                     branch,
                     next_boundary,
+                    by_identity,
+                    topology,
+                )
+                span_ids = _exclude_foreign_script_spans(
+                    span_ids,
+                    anchor,
+                    script_span_owners,
                     by_identity,
                     topology,
                 )
@@ -332,7 +341,10 @@ def _explicit_skill_execution_span_ids(
     branch: tuple[str, str],
     by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
     branches: Mapping[tuple[str, str], tuple[str, str]],
-) -> dict[tuple[str, str], set[tuple[str, str]]]:
+) -> tuple[
+    dict[tuple[str, str], set[tuple[str, str]]],
+    dict[tuple[str, str], tuple[str, str] | None],
+]:
     """Assign explicit ``<skill>/scripts/`` references to their latest read.
 
     Skill reads are often batched before any command runs.  The historical
@@ -344,41 +356,83 @@ def _explicit_skill_execution_span_ids(
     """
 
     result: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+    owners: dict[tuple[str, str], tuple[str, str] | None] = {}
+    skill_names = tuple(dict.fromkeys(skill_name for _, skill_name in anchors))
     for identity, span in by_identity.items():
         if branches[identity] != branch or span_category(span) != "tool":
             continue
-        for anchor, skill_name in anchors:
-            if span_sort_key(span) < span_sort_key(by_identity[anchor]):
-                continue
-            if not _tool_references_skill_script(span, skill_name):
-                continue
-            eligible_anchors: list[tuple[str, str]] = []
-            for candidate_anchor, candidate_name in anchors:
-                if candidate_name != skill_name:
-                    continue
-                if span_sort_key(by_identity[candidate_anchor]) > span_sort_key(span):
-                    continue
-                eligible_anchors.append(candidate_anchor)
-            latest_anchor = max(
-                eligible_anchors,
-                key=lambda candidate_anchor: span_sort_key(by_identity[candidate_anchor]),
-            )
-            result[latest_anchor].add(identity)
-    return result
+        referenced = [name for name in skill_names if _tool_references_skill_script(span, name)]
+        if not referenced:
+            continue
+        if len(referenced) != 1:
+            owners[identity] = None
+            continue
+        skill_name = referenced[0]
+        eligible_anchors = [
+            candidate_anchor
+            for candidate_anchor, candidate_name in anchors
+            if candidate_name == skill_name and span_sort_key(by_identity[candidate_anchor]) <= span_sort_key(span)
+        ]
+        if not eligible_anchors:
+            owners[identity] = None
+            continue
+        latest_anchor = max(
+            eligible_anchors,
+            key=lambda candidate_anchor: span_sort_key(by_identity[candidate_anchor]),
+        )
+        owners[identity] = latest_anchor
+        result[latest_anchor].add(identity)
+    return result, owners
 
 
 def _skill_execution_span_window(
     anchor: tuple[str, str],
     branch: tuple[str, str],
     execution_spans: set[tuple[str, str]],
+    script_span_owners: Mapping[tuple[str, str], tuple[str, str] | None],
+    anchors: Sequence[tuple[tuple[str, str], str]],
     by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
     topology: _SpanTopology,
 ) -> tuple[str, ...]:
-    """Keep a Skill read and only its explicitly attributed execution spans."""
+    """Keep the Skill's local interval while excluding other owned work."""
 
-    selected = _descendants_before_boundary({anchor, *execution_spans}, None, by_identity, topology.children)
+    first_order = span_sort_key(by_identity[anchor])
+    last_order = max(span_sort_key(by_identity[identity]) for identity in execution_spans)
+    selected = {
+        identity
+        for identity, span in by_identity.items()
+        if topology.branches.get(identity) == branch and first_order <= span_sort_key(span) <= last_order
+    }
+    excluded_roots = {
+        candidate_anchor
+        for candidate_anchor, _ in anchors
+        if candidate_anchor != anchor and candidate_anchor in selected
+    }
+    excluded_roots.update(
+        identity for identity, owner in script_span_owners.items() if identity in selected and owner != anchor
+    )
+    excluded = _descendants_before_boundary(excluded_roots, None, by_identity, topology.children)
+    selected.difference_update(excluded)
+    selected.add(anchor)
     selected.add(branch)
     selected = {identity for identity in selected if topology.branches.get(identity) == branch}
+    return _ordered_span_ids(selected, by_identity)
+
+
+def _exclude_foreign_script_spans(
+    span_ids: Sequence[str],
+    anchor: tuple[str, str],
+    owners: Mapping[tuple[str, str], tuple[str, str] | None],
+    by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
+    topology: _SpanTopology,
+) -> tuple[str, ...]:
+    """Remove explicitly foreign or ambiguous script work from a fallback."""
+
+    trace_id = anchor[0]
+    selected = {(trace_id, span_id) for span_id in span_ids if (trace_id, span_id) in by_identity}
+    excluded_roots = {identity for identity, owner in owners.items() if identity in selected and owner != anchor}
+    excluded = _descendants_before_boundary(excluded_roots, None, by_identity, topology.children)
+    selected.difference_update(excluded)
     return _ordered_span_ids(selected, by_identity)
 
 
@@ -386,8 +440,82 @@ def _tool_references_skill_script(span: Mapping[str, Any], skill_name: str) -> b
     tool_call = read_tool_call(span)
     if _canonical_tool_name(tool_call.get("name")) == _SKILL_TOOL_NAME:
         return False
-    pattern = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(skill_name)}/scripts(?:/|\\b)")
-    return any(pattern.search(value) is not None for value in _trace_text_values(tool_call.get("input")))
+    absolute = re.compile(rf"(?<![A-Za-z0-9_.-]){re.escape(skill_name)}/scripts(?:/|\\b)")
+    return any(
+        absolute.search(value) is not None or _references_relative_skill_script(value, skill_name)
+        for value in _trace_text_values(tool_call.get("input"))
+    )
+
+
+def _references_relative_skill_script(value: str, skill_name: str) -> bool:
+    """Recognize relative scripts under the active shell ``cd`` scope."""
+
+    active_directories: set[str] = set()
+    relative_script = re.compile(r"(?<![A-Za-z0-9_./-])scripts(?:/|\b)")
+    for operator, command in _shell_command_segments(value):
+        directory = _shell_cd_directory(command)
+        if directory is not None:
+            if operator == "||":
+                active_directories.add(directory)
+            else:
+                active_directories = {directory}
+            continue
+        if relative_script.search(command) is None:
+            continue
+        if any(path.replace("\\", "/").rstrip("/").rsplit("/", 1)[-1] == skill_name for path in active_directories):
+            return True
+    return False
+
+
+def _shell_command_segments(value: str) -> tuple[tuple[str | None, str], ...]:
+    """Split only unquoted ``&&``, ``||``, and ``;`` command boundaries."""
+
+    result: list[tuple[str | None, str]] = []
+    start = 0
+    operator: str | None = None
+    quote: str | None = None
+    escaped = False
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if escaped:
+            escaped = False
+            index += 1
+            continue
+        if char == "\\" and quote != "'":
+            escaped = True
+            index += 1
+            continue
+        if quote is not None:
+            if char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        boundary = next((item for item in ("&&", "||", ";") if value.startswith(item, index)), None)
+        if boundary is None:
+            index += 1
+            continue
+        command = value[start:index].strip()
+        if command:
+            result.append((operator, command))
+        operator = boundary
+        index += len(boundary)
+        start = index
+    command = value[start:].strip()
+    if command:
+        result.append((operator, command))
+    return tuple(result)
+
+
+def _shell_cd_directory(command: str) -> str | None:
+    match = re.fullmatch(r"cd(?:\s+--)?\s+(?:\"([^\"]+)\"|'([^']+)'|([^\s]+))", command.strip())
+    if match is None:
+        return None
+    return next((group for group in match.groups() if group is not None), None)
 
 
 def _trace_text_values(value: Any) -> Sequence[str]:
