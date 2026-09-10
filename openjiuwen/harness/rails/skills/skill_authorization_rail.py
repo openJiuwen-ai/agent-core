@@ -1090,7 +1090,10 @@ class SkillAuthorizationRail(BaseInterruptRail):
         if grant is None:
             return None
         reusable = (
-            grant.status == GrantStatus.APPROVED_INACTIVE
+            grant.status in {
+                GrantStatus.ACTIVE,
+                GrantStatus.APPROVED_INACTIVE,
+            }
             and grant.decision == GrantDecision.SESSION
             and manifest.trust == SkillTrustLevel.BUILTIN
         )
