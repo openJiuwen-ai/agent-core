@@ -30,6 +30,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     paper_output_path,
     paper_refs_bib_path,
     paper_sections_dir,
+    paper_tex_path,
     paper_workspace_dir,
     project_root,
     resolve_project_reference,
@@ -850,10 +851,30 @@ class ReportingAgent:
         figure_paths = [*figure_paths, *extra_figure_paths]
 
         final_pdf = paper_output_path(run_id)
+        final_tex = paper_tex_path(run_id)
+        # A missing PDF is only acceptable when the *environment* can't
+        # produce one at all (no latexmk/pdflatex on PATH or LATEX_BIN_DIR)
+        # and ts-latex still got far enough to assemble a real main.tex --
+        # a genuine unresolved compile error with the toolchain present must
+        # keep failing, since a retry can plausibly fix that but can never
+        # fix a missing binary. Reuse the runtime _run_async already
+        # resolved (via preflight_latex_runtime/discover_latex_runtime)
+        # instead of probing PATH a second time; same None-guard as
+        # _build_paper_agent's own fallback, for latex_preflight=False.
+        if self._latex_runtime is None:
+            latex_bin_dir = self._pw_config.get("latex_bin_dir") or os.environ.get("LATEX_BIN_DIR")
+            self._latex_runtime = discover_latex_runtime(latex_bin_dir)
+        toolchain_missing = not self._latex_runtime.available
+        tex_only = not final_pdf.is_file() and toolchain_missing and final_tex.is_file()
         if not final_pdf.is_file():
-            notes.append("no compiled PDF found at end of session — ts-latex did not report success")
+            notes.append(
+                "no LaTeX toolchain found in this environment (latexmk/pdflatex not on PATH) "
+                "— shipping main.tex as the final artifact instead of a compiled PDF"
+                if tex_only
+                else "no compiled PDF found at end of session — ts-latex did not report success"
+            )
 
-        if hallucinated or not final_pdf.is_file():
+        if hallucinated or (not final_pdf.is_file() and not tex_only):
             return ReportingOutput(
                 status="failed",
                 paper_pdf_path=None,
@@ -863,9 +884,10 @@ class ReportingAgent:
                 notes="; ".join(notes),
             )
 
+        artifact_path = final_pdf if final_pdf.is_file() else final_tex
         return ReportingOutput(
             status="compiled",
-            paper_pdf_path=str(final_pdf),
+            paper_pdf_path=str(artifact_path),
             sections_dir=str(sections_dir),
             refs_bib_path=str(refs_bib_path),
             figure_paths=figure_paths,

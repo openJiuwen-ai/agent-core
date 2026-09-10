@@ -69,6 +69,10 @@ class ReportingInput(BaseModel):
 
 class ReportingOutput(BaseModel):
     status: Literal["compiled", "failed"]
+    # Usually a compiled main.pdf. If this environment has no LaTeX
+    # toolchain (see agent.py::_verify_and_build_output's tex-only
+    # fallback), this points at main.tex instead -- still status="compiled",
+    # since a complete, uncompiled draft is the best this run can produce.
     paper_pdf_path: str | None = None
     sections_dir: str
     refs_bib_path: str

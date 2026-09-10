@@ -19,8 +19,19 @@ latexmk/pdflatex, and prints JSON.
 
 If `"success": true`, you are done.
 
-If not, read `error_lines` (the compiler's own `! <error>` messages) and
-`log_tail`. Make the smallest safe fix in the specific section `.tex`
+If `log_tail` says `no LaTeX toolchain found (latexmk/pdflatex not on
+PATH)`, stop immediately — do not retry the compile script, and do not
+try to locate, install, or hardcode a path to a LaTeX distribution
+anywhere (not in this script, not in an env var, not by editing your
+own tools). That is an environment limitation, not something a section
+edit or a shell command can fix, and a previous run once "fixed" this by
+baking one developer's local install path into tracked source — do not
+repeat that. Report that `main.tex` is assembled and ready but this
+environment could not compile it; the host accepts the `.tex` itself as
+the final artifact in that case.
+
+Otherwise, read `error_lines` (the compiler's own `! <error>` messages)
+and `log_tail`. Make the smallest safe fix in the specific section `.tex`
 file the error points to: unescaped special characters, unclosed
 environments, malformed table/figure syntax, an undefined command. Do
 not rewrite prose, remove citations, or change numbers — fix only what's
