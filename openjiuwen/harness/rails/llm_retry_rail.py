@@ -110,6 +110,12 @@ class LLMRetryRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Install a per-model-call stream chunk inspector."""
+        # 重试额度按「单次模型调用」计算：只有新一轮模型调用（retry_attempt==0）才重置，
+        # 重试 attempt 不重置，避免无限重试。
+        if not getattr(ctx, "retry_attempt", 0):
+            self.repeat_retry_count = 0
+            self.stream_timeout_retry_count = 0
+            self.model_call_failed_retry_count = 0
         ctx.extra[_LLM_RETRY_STATE_KEY] = {
             "reasoning_content": "",
             "content": "",

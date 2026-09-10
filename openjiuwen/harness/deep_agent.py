@@ -2919,11 +2919,13 @@ class DeepAgent(BaseAgent):
             self.save_state(session)
             self.clear_state(session)
             return RoundOutcome(next_work=next_work)
-        except Exception:
+        except Exception as exc:
             logger.exception("[DeepAgent] interaction round execution failed")
+            # 保留原始异常文本（如 [181001] model call failed ... 408 Request Timeout），
+            # 否则上层只能透传通用文案，前端与排障都拿不到真实失败原因。
             return RoundOutcome(
                 error_code="round_execution_error",
-                error_message="interaction round execution failed",
+                error_message=str(exc) or "interaction round execution failed",
             )
         finally:
             self._invoke_active = False
