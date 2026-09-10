@@ -54,6 +54,9 @@ def _output(scores=(1.0, 0.0)):
 
 
 def test_explicit_factory_and_config_roundtrip():
+    assert EvaluatorConfig().judge_timeout_sec == 900
+    assert EvaluatorConfig.from_dict({}).judge_timeout_sec == 900
+    assert EvaluatorConfig.from_dict({"judge_timeout_sec": 600}).judge_timeout_sec == 600
     assert EvaluatorConfig().judge_success_score == 0.8
     assert EvaluatorConfig.from_dict({}).judge_success_score == 0.8
     config = EvaluatorConfig.from_dict(
