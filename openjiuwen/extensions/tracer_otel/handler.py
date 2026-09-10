@@ -620,7 +620,8 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # Check if there is already a root workflow
             existing_root = self._layer_root_spans.get("")
             session_logger.debug(
-                "otel: _resolve_parent_context: trace_id=%s, cached_trace_id=%s, cached_ctx=%s, layer_root_spans=%s, existing_root=%s",
+                "otel: _resolve_parent_context: trace_id=%s, cached_trace_id=%s, "
+                "cached_ctx=%s, layer_root_spans=%s, existing_root=%s",
                 self._trace_id, self._cached_trace_id,
                 self._cached_root_ctx is not None,
                 list(self._layer_root_spans.keys()),
