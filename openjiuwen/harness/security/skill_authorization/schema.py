@@ -310,7 +310,12 @@ def compute_skill_md_hash(content: str | bytes) -> str:
 
 
 def is_skill_authorization_enabled(permissions_config: Any) -> bool:
-    """读取动态授权开关；显式环境变量优先，未设置时回退现有配置。"""
+    """读取动态授权开关；显式权限配置优先，环境变量仅作旧版回退。"""
+    if isinstance(permissions_config, dict):
+        section = permissions_config.get("skill_authorization")
+        if isinstance(section, dict) and "enabled" in section:
+            return bool(section.get("enabled"))
+
     raw_override = os.getenv(SKILL_AUTHORIZATION_ENABLED_ENV)
     if raw_override is not None and raw_override.strip():
         normalized = raw_override.strip().lower()
@@ -324,12 +329,7 @@ def is_skill_authorization_enabled(permissions_config: Any) -> bool:
             raw_override,
         )
         return False
-    if not isinstance(permissions_config, dict):
-        return False
-    section = permissions_config.get("skill_authorization")
-    if not isinstance(section, dict):
-        return False
-    return bool(section.get("enabled"))
+    return False
 
 
 #: Skill 审批卡的用户响应 schema(user -> backend;三动作协议,前后端同版本冻结)。

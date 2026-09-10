@@ -123,6 +123,25 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         """
         return TOOL_NAME_ALIASES.get(tool_name, tool_name)
 
+    def _get_permissions_snapshot(self, ctx: AgentCallbackContext) -> dict[str, Any] | None:
+        """Return the permissions snapshot for this tool call.
+
+        Product adapters may override this hook to compose request-scoped policy
+        overlays. Persistence continues to read the host's unmodified baseline.
+        """
+        if self._host.get_permissions_snapshot is None:
+            return None
+        snapshot = self._host.get_permissions_snapshot()
+        return snapshot if isinstance(snapshot, dict) else None
+
+    def _refresh_permissions_for_tool_call(self, ctx: AgentCallbackContext) -> None:
+        """Refresh the engine policy used by the current tool call."""
+        snapshot = self._get_permissions_snapshot(ctx)
+        if snapshot is not None:
+            self.update_config(snapshot)
+            return
+        self._engine.update_config(self._static_config)
+
     def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
         """Generate a conservative session auto-confirm key for the tool call."""
         if tool_call is None:
@@ -406,19 +425,13 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             )
             # 与磁盘上的 permissions 对齐：若仅写盘未先/未后刷新内存，此处用旧 _static_config
             # 会抹掉 approval_overrides 等；应提供 get_permissions_snapshot 或在落盘后已 update_config。
-            fresh: dict | None = None
-            if self._host.get_permissions_snapshot is not None:
-                try:
-                    snap = self._host.get_permissions_snapshot()
-                    fresh = snap if isinstance(snap, dict) else None
-                except Exception:
-                    logger.debug(
-                        "[PermissionEngine] permission.rail.snapshot_failed",
-                        exc_info=True,
-                    )
-            if isinstance(fresh, dict):
-                self.update_config(fresh)
-            else:
+            try:
+                self._refresh_permissions_for_tool_call(ctx)
+            except Exception:
+                logger.debug(
+                    "[PermissionEngine] permission.rail.snapshot_failed",
+                    exc_info=True,
+                )
                 self._engine.update_config(self._static_config)
             try:
                 result = await self._engine.check_permission(
