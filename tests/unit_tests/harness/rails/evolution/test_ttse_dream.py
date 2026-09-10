@@ -524,10 +524,17 @@ async def test_after_task_iteration_schedules_dream(tmp_path):
         called["n"] += 1
 
     rail.run_dream = fake_run_dream  # type: ignore[method-assign]
-    ctx = SimpleNamespace(inputs=SimpleNamespace(is_follow_up=False), extra={}, agent=None)
-    await rail._on_after_task_iteration(ctx)
+    # Go through EvolutionRail.after_task_iteration so the (ctx, trajectory)
+    # extension-point signature is exercised (not only the private hook).
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(is_follow_up=False),
+        extra={},
+        agent=None,
+        session=None,
+    )
+    await rail.after_task_iteration(ctx)
     assert called["n"] == 0
-    await rail._on_after_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
     # scheduled as create_task — yield to loop
     await asyncio.sleep(0)
     assert called["n"] == 1

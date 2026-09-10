@@ -523,8 +523,13 @@ class TTSERail(EvolutionRail):
     # Auto-dream (silent bank hygiene)
     # ------------------------------------------------------------------
 
-    async def _on_after_task_iteration(self, ctx: AgentCallbackContext) -> None:
+    async def _on_after_task_iteration(
+        self,
+        ctx: AgentCallbackContext,
+        trajectory: Trajectory | None,
+    ) -> None:
         """Count non-follow-up iterations and schedule a silent dream run."""
+        del trajectory  # Dream scheduling is iteration-count based, not traj-based.
         if not self._ttse_config.dream_enabled:
             return
         if self._dream_iteration_blocked(ctx):
