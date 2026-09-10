@@ -49,6 +49,7 @@ from openjiuwen.harness.security.permission_engine.netguard.net_urls import (
 )
 from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import (
     inline_package_command_rules,
+    package_builtin_rules_enabled,
 )
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     evaluate_tiered_policy,
@@ -108,24 +109,29 @@ def prepare_permissions_for_engine(
     """Fill package policy when the host still passes raw Global YAML.
 
     New swarm compose already inlines ``layer: builtin`` rules/paths; skip those.
+    Host may set ``package_builtin_rules: false`` to skip the package floor.
     ``evaluate_tiered_policy`` does not load YAML — only this ingest path does.
     """
     cfg: dict[str, Any] = cast(dict[str, Any], config or {})
     if not isinstance(cfg, dict):
         cfg = {}
 
+    if not package_builtin_rules_enabled(cfg):
+        logger.info("[PermissionEngine] permission.builtin_rules.skip_package_builtin_rules")
+        return _fill_legacy_host_rule_actions(cfg)
+
     if not _has_builtin_layer(cfg.get("rules")):
-        logger.info("[PermissionEngine] permission.package_policy.legacy_host.inline_command_rules")
+        logger.info("[PermissionEngine] permission.builtin_rules.legacy_host.inline_command_rules")
         cfg = inline_package_command_rules(cfg)
 
     fg = cfg.get("file_guard")
     if isinstance(fg, dict) and fg.get("enabled") and not _has_builtin_layer(fg.get("paths")):
-        logger.info("[PermissionEngine] permission.package_policy.legacy_host.merge_sensitive_paths")
+        logger.info("[PermissionEngine] permission.builtin_rules.legacy_host.merge_sensitive_paths")
         cfg = merge_package_sensitive_paths(cfg)
 
     ng = cfg.get("net_guard")
     if isinstance(ng, dict) and ng.get("enabled") and not _has_package_net_urls(ng.get("urls")):
-        logger.info("[PermissionEngine] permission.package_policy.legacy_host.merge_net_urls")
+        logger.info("[PermissionEngine] permission.builtin_rules.legacy_host.merge_net_urls")
         cfg = merge_package_net_urls(cfg)
     cfg = _fill_legacy_host_rule_actions(cfg)
     return cfg

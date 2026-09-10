@@ -22,6 +22,10 @@ from typing import Any, Literal
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
 from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers import contains_path
+from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
+    is_shell_tool,
+    shell_tools_from_config,
+)
 from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     _PATH_TOOLS,
     _iter_path_strings,
@@ -493,10 +497,11 @@ def extract_paths_legacy(
     tool_name: str,
     tool_args: Mapping[str, Any],
     workspace: Path,
+    permission_config: Mapping[str, Any] | None = None,
 ) -> list[Path]:
     """develop 抽取：仅路径字符串，无 R/W/X（供 Legacy 投影锁定现网行为）。"""
     paths: list[Path] = []
-    if tool_name in ("mcp_exec_command", "bash", "powershell", "core.powershell", "create_terminal"):
+    if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve()
@@ -521,10 +526,13 @@ def extract_paths_legacy(
     return paths
 
 
-def _tool_default_action(tool_name: str) -> FileGuardAction:
+def _tool_default_action(
+    tool_name: str,
+    permission_config: Mapping[str, Any] | None = None,
+) -> FileGuardAction:
     if tool_name in _WRITE_PATH_TOOLS:
         return "write"
-    if tool_name in ("mcp_exec_command", "bash", "powershell", "core.powershell", "create_terminal"):
+    if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         # Legacy 不区分 exec；路径访问按 read 轴（与 ExternalDirectory 无轴一致，用同 defaults）
         return "read"
     return "read"
@@ -568,8 +576,13 @@ def _level_for_action(rule: FileGuardPathRule, action: FileGuardAction) -> Permi
 class FileGuardChecker:
     """路径防护判定器（Legacy / Native 共用入口）。"""
 
-    def __init__(self, effective: EffectiveFileGuardConfig):
+    def __init__(
+        self,
+        effective: EffectiveFileGuardConfig,
+        permission_config: Mapping[str, Any] | None = None,
+    ):
         self._effective = effective
+        self._permission_config = permission_config
 
     @property
     def enabled(self) -> bool:
@@ -596,11 +609,15 @@ class FileGuardChecker:
         if self._effective.mode == "native":
             from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
 
-            raw = extract_accesses_native(tool_name, dict(tool_args), workspace)
+            raw = extract_accesses_native(
+                tool_name, dict(tool_args), workspace, self._permission_config,
+            )
             accesses = [(p, act) for p, act, _src in raw]
         else:
-            paths = extract_paths_legacy(tool_name, dict(tool_args), workspace)
-            action = _tool_default_action(tool_name)
+            paths = extract_paths_legacy(
+                tool_name, dict(tool_args), workspace, self._permission_config,
+            )
+            action = _tool_default_action(tool_name, self._permission_config)
             accesses = [(p, action) for p in paths]
 
         if not accesses:
@@ -662,11 +679,15 @@ class FileGuardChecker:
         if self._effective.mode == "native":
             from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
 
-            raw = extract_accesses_native(tool_name, dict(tool_args), workspace)
+            raw = extract_accesses_native(
+                tool_name, dict(tool_args), workspace, self._permission_config,
+            )
             accesses = [(p, act) for p, act, _src in raw]
         else:
-            paths = extract_paths_legacy(tool_name, dict(tool_args), workspace)
-            action = _tool_default_action(tool_name)
+            paths = extract_paths_legacy(
+                tool_name, dict(tool_args), workspace, self._permission_config,
+            )
+            action = _tool_default_action(tool_name, self._permission_config)
             accesses = [(p, action) for p in paths]
 
         out: list[tuple[str, FileGuardAction]] = []
@@ -744,7 +765,7 @@ def build_file_guard_checker(
     )
     if not effective.enabled:
         return None
-    return FileGuardChecker(effective)
+    return FileGuardChecker(effective, permission_config=perms)
 
 
 _PATH_CLASS_TOOLS = frozenset({
