@@ -138,6 +138,8 @@ class TTSERail(EvolutionRail):
                 self._ttse_store,
                 max_chars=int(getattr(self._ttse_config, "consult_max_chars", 8000) or 8000),
                 max_rules=int(getattr(self._ttse_config, "consult_max_rules", 40) or 40),
+                default_top_k=int(getattr(self._ttse_config, "consult_top_k", 8) or 8),
+                rrf_k=int(getattr(self._ttse_config, "consult_rrf_k", 60) or 60),
             )
             self._register_runtime_tools(agent, tools)
             self._consult_tools = tools

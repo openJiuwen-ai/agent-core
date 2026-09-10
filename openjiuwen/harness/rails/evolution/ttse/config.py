@@ -33,7 +33,9 @@ class TTSEConfig:
             similarity (semantic). When ``None``, dedup falls back to substring
             matching. FACT/TIP are disclosed via ``ttse_consult``, not dumped
             into the system prompt.
-            Callers typically construct
+            The same provider is reused by ``ttse_consult`` for BM25+embedding
+            hybrid recall when ``query`` is set; missing/failed embedding
+            degrades to BM25. Callers typically construct
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
             and assign it here; do not put raw url/key strings on TTSEConfig.
@@ -61,6 +63,8 @@ class TTSEConfig:
             flatten. When set, each task's excerpt is capped before the batch
             induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
+        consult_top_k: Default per-track hit count when the tool omits ``top_k``.
+        consult_rrf_k: RRF constant for BM25+embedding fusion (KB hybrid uses 60).
         detect_min_tool_calls: Min tool calls in the current invoke before
             reply-delivery detect runs (not session-cumulative).
         detect_max_output_paths: Cap on extracted write paths fed to the Judge.
@@ -94,6 +98,8 @@ class TTSEConfig:
     batch_traj_budget: Optional[int] = None
     consult_max_chars: int = 8000
     consult_max_rules: int = 40
+    consult_top_k: int = 8
+    consult_rrf_k: int = 60
     detect_min_tool_calls: int = 5
     detect_max_output_paths: int = 20
     detect_final_reply_chars: int = 1500

@@ -50,7 +50,8 @@ def configure_ttse_evolution(
         llm: LLM client for induction / blame / synthesize.
         model: Model name for the TTSE LLM calls.
         ttse_config: Bank / retrieval / dedup knobs. Defaults to ``TTSEConfig()``.
-        embedding: Optional embedding provider for top-K retrieval + semantic dedup.
+        embedding: Optional embedding provider for semantic dedup, Auto-dream
+            clustering, and ``ttse_consult`` hybrid recall.
         success_detector: Optional success signal gating the blame/synthesize pass.
         **rail_kwargs: Forwarded to :class:`EvolutionRail` (trajectory_store,
             evolution_trigger, async_evolution, ...).

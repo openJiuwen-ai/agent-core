@@ -1163,6 +1163,7 @@ async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
     section = builder.get_section(SectionName.TTSE_FACTS_TIPS)
     text = section.content["cn"]
     assert "ttse_consult(category=" in text
+    assert "query=" in text
     assert "无参" in text
     assert text.strip() == DISK_CATALOG_GUIDANCE_CN.strip()
     assert "PresentBench grades slides.md" not in text

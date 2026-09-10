@@ -43,7 +43,9 @@ def render_catalog_markdown(counts: Dict[str, int], *, categories: Iterable[Dict
         "# TTSE catalog",
         "",
         "Business-scenario categories with learned FACT/TIP counts.",
-        "Call ttse_consult(category=<id>) to open a class; comma-separated ids (max 3) open related classes.",
+        "Call ttse_consult(category=<id>, query=<experience-style query>) to retrieve "
+        "FACT/TIP in a class; comma-separated ids (max 3) share one query. "
+        "category alone dumps the class.",
         "",
     ]
     any_row = False
