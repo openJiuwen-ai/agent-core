@@ -38,15 +38,21 @@ class ContextAssembleRail(DeepAgentRail):
 
     In ``before_model_call``, builds and injects workspace/context/tools sections
     into the system prompt builder.
+
+    ``include_tools_section`` controls whether ``#可用工具`` prose is assembled.
+    Products that already expose tools another way (function-calling schema,
+    a navigation section) can set this to False. Default True keeps CLI and
+    other callers unchanged.
     """
 
     priority = 85
 
-    def __init__(self):
+    def __init__(self, include_tools_section: bool = True):
         super().__init__()
         self.system_prompt_builder = None
         self.attachment_manager = None
         self._ability_manager = None
+        self.include_tools_section = include_tools_section
 
     def init(self, agent) -> None:
         """Capture references to system_prompt_builder and ability_manager."""
@@ -112,7 +118,10 @@ class ContextAssembleRail(DeepAgentRail):
             workspace,
             lang,
         )
-        tools_section = build_tools_section(self._ability_manager, lang)
+        if self.include_tools_section:
+            tools_section = build_tools_section(self._ability_manager, lang)
+        else:
+            tools_section = None
         context_sections = await build_context_file_sections(
             self.sys_operation,
             workspace,

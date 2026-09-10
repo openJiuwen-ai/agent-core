@@ -807,3 +807,22 @@ async def test_before_model_call_with_english_language(tmp_path: Path):
     assert ws is not None
     assert builder.has_section("workspace")
     assert "# Workspace" in ws.render("en")
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_skips_tools_section_when_disabled(tmp_path: Path):
+    """include_tools_section=False skips the #可用工具 system prompt section."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    agent.ability_manager.add(
+        ToolCard(id="t1", name="alpha", description="alpha tool")
+    )
+    await agent.ensure_initialized()
+
+    ctx = _make_model_call_context(agent)
+    rail = ContextAssembleRail(include_tools_section=False)
+    await agent.register_rail(rail)
+    await rail.before_model_call(ctx)
+
+    assert not agent.system_prompt_builder.has_section("tools")
