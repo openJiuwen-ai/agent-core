@@ -28,7 +28,7 @@ from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
 from openjiuwen.symphony.interfaces.llm import SymphonyLLM, SymphonyMessages
 
 _MAX_CONCURRENT_CANDIDATE_CALLS = 8
-_MAX_RESPONSE_TOKENS = 256
+_MAX_RESPONSE_TOKENS = 1024
 _MAX_RESPONSE_BYTES = 16 * 1024
 _MAX_REASON_BYTES = 512
 _MAX_SUMMARY_FIELD_BYTES = 3 * 1024
@@ -247,10 +247,12 @@ async def _invoke_and_parse_request(
     messages: SymphonyMessages,
 ) -> SymphonyEdgeDecision | None:
     try:
-        response = await llm.invoke(
+        invoke = cast(Any, llm.invoke)
+        response = await invoke(
             messages,
             temperature=0,
             max_tokens=_MAX_RESPONSE_TOKENS,
+            reasoning={"mode": "disabled"},
         )
     except Exception:
         return None
