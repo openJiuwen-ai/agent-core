@@ -6,9 +6,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+from openjiuwen.core.common.logging import team_logger
 
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
@@ -99,7 +100,7 @@ _PARENT_RESUME_TERMINAL_STATUSES = frozenset(
     }
 )
 
-logger = logging.getLogger(__name__)
+logger = team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
@@ -789,6 +790,8 @@ class OrganizationRuntimeManager:
         """
         summary_factory = self._ensure_summary_factory() or self._summary_team_factory
         for execution in await manager.task_pool.list_summary_executions():
+            # Terminal executions are done; a FAILED one is left for the root
+            # leader to repair or terminate rather than being retried here.
             if execution.status in {
                 OrgSummaryExecutionStatus.COMPLETED,
                 OrgSummaryExecutionStatus.FAILED,
@@ -797,15 +800,33 @@ class OrganizationRuntimeManager:
                 continue
             summary_task = await manager.task_pool.get_task(execution.summary_task_id)
             if summary_task is None:
+                logger.debug(
+                    "summary resume: task %s is gone; skipping execution %s",
+                    execution.summary_task_id,
+                    execution.execution_id,
+                )
                 continue
             if summary_task.status is OrgTaskStatus.COMPLETED:
                 continue
             summary_team_id = execution.summary_team_id
             if not summary_team_id:
+                # The team was never bound: provisioning was interrupted, so the
+                # team must be re-created through the factory (§8).
                 if summary_factory is None:
+                    logger.debug(
+                        "summary resume: no factory; cannot recover execution %s",
+                        execution.execution_id,
+                    )
                     continue
                 root_task_id = str(summary_task.root_task_id or execution.root_task_id)
                 from_team_id = summary_task.created_by.team_id or (await self._owner_team_id(manager))
+                logger.info(
+                    "summary resume: re-provisioning execution %s (task=%s root=%s owner=%s)",
+                    execution.execution_id,
+                    execution.summary_task_id,
+                    root_task_id,
+                    from_team_id,
+                )
                 try:
                     launched = await summary_factory.recover(
                         execution_id=execution.execution_id,
@@ -816,6 +837,13 @@ class OrganizationRuntimeManager:
                         session_id=session_id,
                     )
                 except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "summary resume: recover failed for execution %s (task=%s): %s",
+                        execution.execution_id,
+                        execution.summary_task_id,
+                        exc,
+                        exc_info=True,
+                    )
                     await self._fail_summary_provision(
                         manager=manager,
                         execution=execution,
@@ -834,9 +862,23 @@ class OrganizationRuntimeManager:
                     root_task_id=root_task_id,
                     summary_task_id=execution.summary_task_id,
                 )
+            # Both paths converge here: a bound team (reused) or one just
+            # re-provisioned.  Wake it only when every source is ready, so a
+            # dropped "sources ready" notification is rebuilt without waking the
+            # team prematurely.
             evaluation = await manager.task_pool.evaluate_summary_sources(summary_task_id=execution.summary_task_id)
             if not evaluation.get("ready"):
+                logger.debug(
+                    "summary resume: sources not ready for task %s; leaving team %s idle",
+                    execution.summary_task_id,
+                    summary_team_id,
+                )
                 continue
+            logger.info(
+                "summary resume: sources ready; waking team %s for task %s",
+                summary_team_id,
+                execution.summary_task_id,
+            )
             self._schedule_summary_turn(
                 manager=manager,
                 session_id=session_id,
@@ -1117,6 +1159,13 @@ class OrganizationRuntimeManager:
         async def _on_org_event(message: Any) -> None:
             summary_factory = self._ensure_summary_factory() or self._summary_team_factory
             if summary_factory is None:
+                # Summary lifecycle events are only meaningful with a host
+                # factory installed; without one they are dropped here (the
+                # Summary Task row itself still exists in the pool).
+                logger.debug(
+                    "org event %s dropped: no summary team factory installed",
+                    getattr(message, "event_type", None),
+                )
                 return
             event = message.get_payload()
             if isinstance(event, OrgSummaryTaskCreatedEvent):
@@ -1222,9 +1271,23 @@ class OrganizationRuntimeManager:
         """Provision a dynamic Summary Team and delegate the Summary Task to it (§4.4.1)."""
         task = await manager.task_pool.get_task(event.summary_task_id)
         if task is None:
+            # The Summary Task row vanished (or never landed) — nothing to back.
+            logger.warning(
+                "summary task created event ignored: task %s not found",
+                event.summary_task_id,
+            )
             return
         root_task_id = str(task.root_task_id or event.summary_task_id)
+        # The owner team is both the delegation source and the storage donor: the
+        # Summary Team must attach to the same TeamDatabase to see source tasks.
         from_team_id = task.created_by.team_id or (await self._owner_team_id(manager))
+        logger.debug(
+            "provisioning summary team for task %s (root=%s owner=%s session=%s)",
+            event.summary_task_id,
+            root_task_id,
+            from_team_id,
+            session_id,
+        )
         execution = await manager.task_pool.create_summary_execution(
             root_task_id=root_task_id,
             summary_task_id=event.summary_task_id,
@@ -1238,6 +1301,15 @@ class OrganizationRuntimeManager:
                 session_id=session_id,
             )
         except Exception as exc:  # noqa: BLE001
+            # Provision failure is a first-class outcome: fail the execution and
+            # the task, then wake the root leader to repair or terminate (§4.4.3).
+            logger.error(
+                "summary team provision failed for task %s (execution=%s): %s",
+                event.summary_task_id,
+                execution.execution_id,
+                exc,
+                exc_info=True,
+            )
             await self._fail_summary_provision(
                 manager=manager,
                 execution=execution,
@@ -1247,6 +1319,12 @@ class OrganizationRuntimeManager:
                 failure_reason=str(exc),
             )
             return
+        logger.info(
+            "summary team provisioned: task=%s team=%s leader=%s",
+            event.summary_task_id,
+            launched.team_id,
+            launched.leader_id,
+        )
         await self._complete_summary_provision(
             manager=manager,
             execution=execution,
@@ -1290,11 +1368,25 @@ class OrganizationRuntimeManager:
                 from_team_id=from_team_id,
                 to_team_id=launched.team_id,
             )
+        else:
+            # §8 recovery re-enters here after delegation already succeeded.
+            logger.debug(
+                "summary task %s already delegated to %s; skipping delegate",
+                summary_task_id,
+                launched.team_id,
+            )
         # Land the dynamic team id on the root task's aggregation too, so
         # org_view_tasks on the root shows summary_team_id instead of None (§4.4.1).
         await manager.task_pool.bind_root_summary_team(
             root_task_id=root_task_id,
             summary_team_id=launched.team_id,
+        )
+        logger.info(
+            "summary provision bound: task=%s team=%s execution=%s root=%s",
+            summary_task_id,
+            launched.team_id,
+            execution.execution_id,
+            root_task_id,
         )
         await manager.task_pool.publish_event(
             OrgSummaryProvisionedEvent(
@@ -1317,6 +1409,12 @@ class OrganizationRuntimeManager:
         failure_reason: str,
     ) -> None:
         """Mark the execution FAILED, fail the Summary Task, wake the root leader (§4.4.3 / §8)."""
+        logger.warning(
+            "summary provision failed: task=%s execution=%s reason=%s",
+            summary_task_id,
+            execution.execution_id,
+            failure_reason,
+        )
         await manager.task_pool.update_summary_execution(
             execution_id=execution.execution_id,
             status=OrgSummaryExecutionStatus.FAILED,
@@ -1486,8 +1584,21 @@ class OrganizationRuntimeManager:
     async def _release_summary_execution(self, *, manager: Any, execution: Any, session_id: str) -> None:
         summary_factory = self._ensure_summary_factory() or self._summary_team_factory
         if summary_factory is None:
+            # No host factory: nothing can stop the team, so leave the execution
+            # as-is for a later scan rather than marking it RELEASED.
+            logger.debug(
+                "no summary factory; skipping release of execution %s",
+                execution.execution_id,
+            )
             return
         if execution.summary_team_id:
+            # Pass the team id (not the execution id): they are unrelated
+            # (summary-exec-* vs org-summary-*), so the wrong one stops nothing.
+            logger.debug(
+                "releasing summary team %s (execution=%s)",
+                execution.summary_team_id,
+                execution.execution_id,
+            )
             try:
                 await summary_factory.release(
                     execution_id=execution.execution_id,
