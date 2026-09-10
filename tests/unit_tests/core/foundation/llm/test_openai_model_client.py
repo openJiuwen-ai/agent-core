@@ -458,6 +458,43 @@ def _build_messages_params(model: str, messages: list, *, endpoint_profile: str 
     )
 
 
+def test_unset_sampling_params_are_omitted_from_chat_request():
+    params = _build_messages_params(
+        "gpt-4o-mini",
+        [{"role": "user", "content": "hello"}],
+    )
+
+    assert "temperature" not in params
+    assert "top_p" not in params
+
+
+def test_configured_sampling_params_are_forwarded_on_chat_request():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.invalid/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(
+        ModelRequestConfig(model="gpt-4o-mini", temperature=0.2, top_p=0.8),
+        client_config,
+    )
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+    assert params["temperature"] == 0.2
+    assert params["top_p"] == 0.8
+
+
 def test_deepseek_model_name_adds_empty_reasoning_content_without_profile():
     params = _build_messages_params(
         "DeepSeek-V4-Pro",

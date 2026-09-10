@@ -264,8 +264,8 @@ class QueryRewriter:
             ),
             model_config=ModelRequestConfig(
                 model=self.model_config.model_info.model_name,
-                temperature=0.0,
-                top_p=float(getattr(self.model_config.model_info, "top_p", 0.95)),
+                temperature=self.model_config.model_info.temperature,
+                top_p=self.model_config.model_info.top_p,
             ),
         )
         self._json_output_parser = JsonOutputParser()
