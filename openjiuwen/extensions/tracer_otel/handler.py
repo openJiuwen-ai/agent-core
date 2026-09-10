@@ -544,6 +544,31 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
     # --- helper: resolve parent context for a new span ---
 
+    def _cleanup_stale_spans(self) -> None:
+        """End and remove spans from a previous conversation round.
+
+        Called when a new round starts for the same workflow. Without cleanup,
+        the new root span would inherit the old round's OTel trace_id.
+        """
+        for state in list(self._layer_root_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+                if state.context_token is not None:
+                    otel_context.detach(state.context_token)
+            except Exception:
+                pass
+        for state in list(self._component_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+                if state.context_token is not None:
+                    otel_context.detach(state.context_token)
+            except Exception:
+                pass
+        self._layer_root_spans.clear()
+        self._component_spans.clear()
+
     def _resolve_parent_context(
         self,
         parent_node_id: str,
@@ -564,13 +589,11 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 self._component_spans.clear()
                 return None
             else:
-                # This is a sub-workflow triggered in a new conversation round
-                # Find the last component span as parent
-                if self._component_spans:
-                    last_comp = list(self._component_spans.values())[-1]
-                    return _get_parent_context(last_comp)
-                # Fallback to the existing root
-                return _get_parent_context(existing_root)
+                # Same workflow_id, no parent_node_id: new conversation round.
+                # Clean up stale spans from the previous round so the new root
+                # inherits from the middleware's current OTel context.
+                self._cleanup_stale_spans()
+                return None
         if parent_node_id == "" and not is_workflow_root:
             # Component in root workflow → parent = root workflow root
             return _get_parent_context(self._layer_root_spans.get(""))
@@ -766,10 +789,13 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             state.span.set_status(Status(StatusCode.OK))
             state.span.end()
 
-            # Clean up component mappings only (preserve _layer_root_spans for multi-round)
+            # Clean up span mappings
             for key, val in list(self._component_spans.items()):
                 if val.invoke_id == invoke_id:
                     self._component_spans.pop(key, None)
+            for key, val in list(self._layer_root_spans.items()):
+                if val.invoke_id == invoke_id:
+                    self._layer_root_spans.pop(key, None)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_call_done failed: %s", exc)
 

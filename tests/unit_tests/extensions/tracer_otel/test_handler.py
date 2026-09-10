@@ -1116,8 +1116,12 @@ class TestMultiRoundConversationTraceContinuity:
         _EXPORTER.clear()
         self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
 
-    async def test_second_round_picks_up_first_round_context(self):
-        """Second round should use first round's component span as parent."""
+    async def test_second_round_starts_fresh_trace(self):
+        """Second round should start fresh, NOT inheriting first round's context.
+
+        Each conversation round gets its own trace_id from the middleware's
+        OTel context. The handler cleans up stale spans between rounds.
+        """
         # Round 1: root workflow with a component
         await self.handler.on_call_start(
             invoke_id="round1_root",
@@ -1133,7 +1137,6 @@ class TestMultiRoundConversationTraceContinuity:
             parent_node_id="",
         )
         await self.handler.on_call_done(invoke_id="round1_comp", outputs={})
-        # End round1_root so its span is exported (preserved in _layer_root_spans)
         await self.handler.on_call_done(invoke_id="round1_root", outputs={})
 
         # Round 2: same workflow_id, new conversation round
@@ -1142,8 +1145,7 @@ class TestMultiRoundConversationTraceContinuity:
             metadata={"workflow_id": "wf1", "workflow_name": "Round 2"},
         )
 
-        # After round2 on_call_start, _layer_root_spans[""] is updated to round2_root
-        # Key assertion: _layer_root_spans was NOT cleared (multi-round preservation)
+        # _layer_root_spans should be updated to round2_root
         assert "" in self.handler._layer_root_spans
         assert self.handler._layer_root_spans[""].invoke_id == "round2_root"
 
@@ -1152,9 +1154,9 @@ class TestMultiRoundConversationTraceContinuity:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 3
 
-        # Verify round2_root has a parent from round1 (trace continuity)
+        # Verify round2_root has NO parent (starts fresh trace)
         round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
         assert len(round2_spans) == 1
-        assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
+        assert round2_spans[0].parent is None, "round2_root should NOT inherit round1 context"
 
 
