@@ -61,3 +61,9 @@ coordination 状态机。
 - 保持测试不启动真实 DSH subprocess，不依赖网络或凭据；使用 fake SDK/session 验证 lifecycle、顺序、
   backpressure 与敏感信息清洗。
 - 公共协议形状的变更不在本目录完成；先修改 `openjiuwen/harness_protocol` spec 和版本，再适配本实现。
+
+## Portable skills
+
+config.skills 在启动前复制到项目 .dsh/skills；skill_conflict 默认 skip，可选 replace。
+sdk profile 原生扫描此位置；sdk-minimal 有 portable skills 时由临时 overlay 插入 skill、
+skill-filesystem、tool-skill 插件，initialize 等待它们就绪。源数据和冲突处理复用上层 skills.py。

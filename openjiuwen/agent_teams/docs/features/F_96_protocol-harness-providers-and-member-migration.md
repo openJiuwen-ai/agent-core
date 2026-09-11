@@ -107,7 +107,7 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
 `harness_providers.create_harness(manifest, provider=..., config=..., language=...)` 接受
 `AgentTemplateSpec` 或 `manifest.json` 包路径。`native` 把整份 template 热加载到 DeepAgent；
 `claudecode` / `codex` / `dsh` 只取 `model`（端点 → provider 配置），manifest 携带 `tools` /
-`rails` / `subagents` / `skills` 时直接 `ValueError`——这些是 DeepAgent 框架扩展项，不能静默丢弃。
+`rails` / `subagents` 时直接 `ValueError`——这些是 DeepAgent 框架扩展项，不能静默丢弃。
 `build_harness_context` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP 变
 `mcp_servers`；native 由 harness 自行加载 template，context 只带额外 prompt。
 
@@ -164,3 +164,6 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
 - Codex e2e 依赖本机 CLI 支持已配置默认模型；可用 `CODEX_E2E_MODEL` 指定其它模型。
 - fallback 回退重连失败后的恢复已由 F_98 补齐：后续输入先尝试一次原端点重连，成功后发送新输入，
   失败则返回结构化错误。没有后台无限重试或失败输入重放。
+
+Portable skills 后续由 F_101 补齐：三方不再拒绝 manifest.skills，改为启动前完整复制到项目扫描目录，
+skip 默认保留同名已有技能，replace 完整替换；tools/rails/subagents 仍是原生框架扩展。

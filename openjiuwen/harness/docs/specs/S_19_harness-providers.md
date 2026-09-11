@@ -65,7 +65,7 @@
 9. **manifest 是 DeepAgent-first**：`create_harness` 对 `native` 传整份 template
    （`NativeHarnessProvider.create({"deep_agent", "agent_template", "session_id", "language",
    "event_buffer_capacity"})`）；对 `claudecode` / `codex` / `dsh` 只把 `model` 端点映射进 provider
-   配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` / `skills` 非空时
+   配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` 非空时
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
    只放 `extra_system_prompt`。
 
@@ -133,3 +133,21 @@ base_instructions。空宿主提示词不覆盖现有字段。
 DSH append 注册独立末尾 section，不改变 prefix/suffix，宿主文本按字面量处理；replace 通过
 assembly hook 仅替换 prefix 文本，保留其它 sections（新 prefix 仍遵循原生模板语法）。
 显式 system_prompt_env_var 和 append 冲突时校验失败。见 team F_100。
+
+## Portable skills
+
+三方 provider 接受 manifest.skills；每个 SkillSpec.dir 可指向单个含 SKILL.md 的 bundle 或包含多个
+bundle 的 library。包路径按现有 manifest loader 解析为绝对路径，内存配置也建议传绝对源路径。
+同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（默认）或 replace。
+
+start 在 SDK 启动前复制完整目录到 cwd/.claude/skills（claudecode）、cwd/.agents/skills（codex）、
+cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
+名称取 SKILL.md front matter.name，缺省取目录名；同名按不区分大小写比较，同时识别已有目录里的
+声明名。enabled_skills 非空时筛选声明名；mode 仍被解析校验，但原生 CLI 决定加载/调用方式，
+不仿造 DeepAgent 的 auto_list 工具。skip 保留已有目录全部内容，replace 完整替换（清除旧文件），
+多源重名按声明顺序处理。临时完整副本切换失败会恢复原目录。复制结果跨 stop 保留。
+
+复制保留普通文件、子目录、隐藏资源和可执行位；内部链接物化成文件，越界/循环链接拒绝。
+Claude 指定 portable skills 时显式启用 SDK skills=all，并保留 user/project/local settings 来源；
+DSH sdk-minimal 自动挂载原生 skill/skill-filesystem/tool-skill 插件。SSH/custom Claude transport
+不自动上传本地技能，显式报错而非复制到错误主机。见 team F_101。

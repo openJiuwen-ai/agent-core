@@ -13,6 +13,7 @@ harness_providers/
 ├── stream.py       # BoundedEventBuffer + BufferedEventCursor (single-consumer, BLOCK backpressure)
 ├── io_adapter.py   # HarnessIOAdapter: protocol <-> DeepAgent OutputSchema / InteractiveInput contract
 ├── factory.py      # create_harness(manifest, provider=...) / build_harness_context(...) / resolve_provider
+├── skills.py       # Portable bundle copying to CLI project discovery roots; skip/replace conflicts
 ├── inputs.py       # harness_input_text: HarnessInput -> prompt text
 ├── jsonsafe.py     # to_json_safe: vendor objects -> protocol JSON values
 ├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
@@ -90,8 +91,11 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
 9. **The manifest is DeepAgent-first.** `create_harness` hot-loads the full
    `AgentTemplateSpec` for `native`; third-party providers only take the model
    endpoint and, through `build_harness_context`, the rendered prompt sections
-   and MCP servers. Manifests carrying `tools` / `rails` / `subagents` / `skills`
-   are rejected for third-party providers instead of being silently dropped.
+   and MCP servers. Portable `skills` are copied before SDK startup into the
+   CLI project discovery directory: .claude/skills, .agents/skills, .dsh/skills.
+   `skill_conflict` defaults to skip; replace stages a complete bundle before
+   renaming the existing directory. Never remove copied skills at stop.
+   Manifests carrying `tools` / `rails` / `subagents` are still rejected.
 
 ## Change requirements
 

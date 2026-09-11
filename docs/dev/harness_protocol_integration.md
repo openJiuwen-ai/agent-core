@@ -919,8 +919,8 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
   宿主 `send(InteractiveInput)` 才应答 provider。
 - `harness_providers.create_harness(manifest, provider=..., config=..., language=...)`：从 AgentTemplate
   manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` / `native_v2` 加载整份
-  template，三方 provider 只取模型端点，manifest 里的 `tools` / `rails` / `subagents` / `skills` 会被
-  拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
+  template；三方 provider 接收模型端点和 portable skills，manifest 里的 `tools` / `rails` /
+  `subagents` 仍会被拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
   变成 `mcp_servers`。
 - team 侧 `ExternalHarnessMemberRuntime` 组合 IO adapter；`build_cli_runtime` 的 claude / codex 分支
   已切到这两个 provider（`ExternalCliAgentSpec` 字段不变）。
@@ -933,3 +933,21 @@ Codex 的 `system_prompt_mode="append"` 通过 config/read 读取当前 cwd 的�
 保留后追加宿主提示词；`"replace"`（默认）直接设置 developer_instructions。两种模式均不设置
 base_instructions。DSH 同名配置默认 replace，仅替换 prefix；append 追加独立 section。
 团队 Claude/Codex 成员也可在 ExternalCliAgentSpec.system_prompt_mode 中指定该策略。
+
+### Portable skills
+
+三方 harness 支持把 manifest.skills 声明的完整 bundle 复制到项目扫描目录。源目录可包含单个
+SKILL.md 或多个 skill 子目录，保留 scripts/assets 等所有资源；不只拼接 SKILL.md 文本。
+
+```python
+harness = create_harness(
+    "/path/to/expert/manifest.json",
+    provider="codex",  # also claudecode / dsh
+    config={"cwd": "/path/to/project", "skill_conflict": "skip"},
+)
+```
+
+复制发生在 start；cwd 以启动 context 优先。目标依次为 .agents/skills、.claude/skills、.dsh/skills。
+同名默认 skip，replace 会整体替换已有 skill；stop 不删除已复制的文件。名称按 front matter.name
+（缺省目录名）匹配，支持已有目录名与声明名不同的情况。enabled_skills 非空时筛选待复制技能。
+团队本地 Claude/Codex 成员也可在 ExternalCliAgentSpec 中填写 skills 和 skill_conflict。
