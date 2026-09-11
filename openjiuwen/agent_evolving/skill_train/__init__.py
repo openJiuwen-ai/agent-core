@@ -4,6 +4,15 @@
 
 from openjiuwen.agent_evolving.skill_train.config import SkillTrainConfig
 from openjiuwen.agent_evolving.skill_train.registry import get_env_adapter
+from openjiuwen.agent_evolving.skill_train.sleep import (
+    AdoptResult,
+    CycleOutcome,
+    SleepConfig,
+    adopt_all_staged_skills,
+    adopt_staged_skill,
+    adopt_staged_skill_async,
+    run_sleep_cycle,
+)
 from openjiuwen.agent_evolving.skill_train.trainer import SkillReflACTTrainer, SkillTrainResult
 
 __all__ = [
@@ -11,4 +20,11 @@ __all__ = [
     "SkillReflACTTrainer",
     "SkillTrainResult",
     "get_env_adapter",
+    "SleepConfig",
+    "CycleOutcome",
+    "AdoptResult",
+    "run_sleep_cycle",
+    "adopt_staged_skill",
+    "adopt_staged_skill_async",
+    "adopt_all_staged_skills",
 ]
