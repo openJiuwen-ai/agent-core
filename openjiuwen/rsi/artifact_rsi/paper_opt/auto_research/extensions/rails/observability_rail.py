@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import threading
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timedelta, timezone
+
+_CST = timezone(timedelta(hours=8))
 from pathlib import Path
 from typing import Any
 
@@ -252,7 +254,7 @@ class ObservabilityRail(DeepAgentRail):
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+    return datetime.now(_CST).isoformat()
 
 
 def _trace_path() -> Path | None:
