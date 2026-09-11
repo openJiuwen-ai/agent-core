@@ -67,6 +67,17 @@ class RedisTrajectoryStore:
         self._r = redis
         self._fetch_script = self._r.register_script(_LUA_FETCH_AND_MARK)
 
+    @staticmethod
+    def training_run_keyspace(user_id: str) -> tuple[str, str, str, str]:
+        """Return Redis keys used by the durable Training Run transaction."""
+
+        return (
+            trajectory_index_key(user_id, "pending"),
+            trajectory_index_key(user_id, "training"),
+            trajectory_index_key(user_id, "trained"),
+            _KEY_PREFIX,
+        )
+
     async def save_sample(self, sample: dict[str, Any], *, user_id: str = "online") -> None:
         sample_id = str(sample.get("sample_id") or "").strip()
         if not sample_id:
