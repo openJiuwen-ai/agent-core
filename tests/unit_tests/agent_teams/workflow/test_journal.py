@@ -18,19 +18,19 @@ from pathlib import Path
 from openjiuwen.agent_teams.workflow.engine.journal import Journal, key_str
 
 
-def _rec(path: list, sig: str = "s", result=None) -> dict:
+def _rec(path: list, sig: str = "s", result=None, run_id: str | None = None) -> dict:
     """Build a journal record whose ``key`` is the serialised structural path."""
     ks = key_str(path)
-    return {"key": ks, "sig": sig, "kind": "dict", "result": result or {"v": ks}}
+    return {"key": ks, "sig": sig, "run_id": run_id, "kind": "dict", "result": result or {"v": ks}}
 
 
 def _keys_in_file(path: Path) -> list[str]:
     return [json.loads(line)["key"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-async def _use_all(j: Journal, paths: list) -> None:
+async def _use_all(j: Journal, paths: list, run_id: str | None = None) -> None:
     for p in paths:
-        r = _rec(p)
+        r = _rec(p, run_id=run_id)
         await j.use(r["key"], r)
 
 
@@ -333,4 +333,73 @@ def test_seal_record_written_on_terminal():
     assert rec is not None
     assert rec["terminal_status"] == "completed"
     assert rec["final_spent"] == 2000
+
+
+def test_load_compacts_sealed_run_records_from_wal(tmp_path):
+    """Load drops WAL call records of sealed runs; unsealed ones survive."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]], run_id="run-A")  # run-A computes one call
+        await j.write_run_record("run-A", "seal", {"terminal_status": "completed"})
+        # run-B paused mid-run: its records must survive compaction
+        await _use_all(j, [[["call", 1]]], run_id="run-B")
+        await j.write_run_record("run-B", "pause", {"pause_reason": "paused"})
+        # No save/finalize — everything lives in the WAL only.
+
+    asyncio.run(_build())
+    lines_before = len(wal.read_text(encoding="utf-8").splitlines())
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    lines_after = len(wal.read_text(encoding="utf-8").splitlines())
+    # run-A's call record dropped; everything else (seal, pause, run-B call) kept.
+    assert lines_after == lines_before - 1
+    assert loaded.find_run_record("run-A", "seal") is not None
+    assert loaded.find_run_record("run-B", "pause") is not None
+    # Sealed call records are already unusable as hits (run_id mismatch), so
+    # dropping them from prior changes nothing observable for a fresh run.
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-new") is None
+    # Unsealed call record still recovers for run-B's cold resume.
+    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-B") is not None
+
+
+def test_load_compaction_keeps_wal_without_seals(tmp_path):
+    """No seal records in prior → WAL is left byte-identical (no rewrite)."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]])
+        await j.write_run_record("run-A", "pause", {"pause_reason": "paused"})
+
+    asyncio.run(_build())
+    before = wal.read_text(encoding="utf-8")
+    asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    assert wal.read_text(encoding="utf-8") == before
+
+
+def test_load_compaction_tolerates_torn_line_and_empty_result(tmp_path):
+    """A torn line survives compaction; dropping every call record empties the WAL cleanly."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]], run_id="run-A")
+        await j.write_run_record("run-A", "seal", {"terminal_status": "stopped"})
+
+    asyncio.run(_build())
+    with open(wal, "a", encoding="utf-8") as f:
+        f.write('{"key": "torn')  # simulate crash mid-append
+    before_lines = [l for l in wal.read_text(encoding="utf-8").splitlines() if l]
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    text = wal.read_text(encoding="utf-8")
+    # The call record is dropped; the seal record and the torn line remain.
+    assert [l for l in text.splitlines() if l] == [before_lines[1], before_lines[-1]]
+    # Seal record still findable after the rewrite.
+    assert loaded.find_run_record("run-A", "seal") is not None
 
