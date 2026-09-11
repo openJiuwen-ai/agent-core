@@ -138,6 +138,24 @@ class Tracer:
                 TracerHandlerName.TRACER_WORKFLOW.value: wf_handler
             }
 
+    def update_trace_id(self, trace_id: str) -> None:
+        """Update trace_id for the current tracer session.
+
+        Called when a workflow session is reused for a new conversation round
+        to ensure handler trace_ids stay in sync with the new request.
+        """
+        if not trace_id or trace_id == self._trace_id:
+            return
+        self._trace_id = trace_id
+        for handler in self._agent_handlers.values():
+            handler.set_trace_id(trace_id)
+        for handler in self._workflow_handlers.values():
+            if isinstance(handler, dict):
+                for h in handler.values():
+                    h.set_trace_id(trace_id)
+            else:
+                handler.set_trace_id(trace_id)
+
     def register_workflow_span_manager(self, parent_node_id: str):
         span_manager = SpanManager(self._trace_id, parent_node_id=parent_node_id, session_id=self._session_id)
         self.tracer_workflow_span_manager_dict[parent_node_id] = span_manager
