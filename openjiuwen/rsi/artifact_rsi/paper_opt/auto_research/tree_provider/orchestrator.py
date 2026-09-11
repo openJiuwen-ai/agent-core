@@ -221,13 +221,36 @@ def _friendly_pruned_reason(
         if marker in context:
             return "实验验证效果不佳，已剪枝。"
 
-    paper_markers = ("reporting", "latex", "paper", "report", "pdf", "tex")
+    # Do not use a bare "paper" marker: it matches task_mode names
+    # (modify_paper / create_new_paper) and mislabels constructor failures
+    # as a content-quality prune.
+    paper_markers = ("reporting", "latex", "paper_generation", "report", "pdf", "tex")
     if phase == "paper_generation":
         return "论文内容质量未达到要求，已剪枝。"
     for marker in paper_markers:
-        if marker in context:
+        if _contains_token(context, marker):
             return "论文内容质量未达到要求，已剪枝。"
     return "当前方案效果未达到要求，已剪枝。"
+
+
+def _contains_token(text: str, marker: str) -> bool:
+    """True when ``marker`` is its own token, not a substring of a longer word.
+
+    Bare ``"paper"`` / ``"tex"`` substring matches hit ``modify_paper`` and
+    ``previous_context`` and were mislabeling constructor failures as a
+    content-quality prune.
+    """
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            return False
+        before = text[idx - 1] if idx else ""
+        after_idx = idx + len(marker)
+        after = text[after_idx] if after_idx < len(text) else ""
+        if not before.isalpha() and not after.isalpha():
+            return True
+        start = idx + 1
 
 
 def _artifact_ref_for_node(node_id: str, run_id: str) -> ArtifactRef | None:
