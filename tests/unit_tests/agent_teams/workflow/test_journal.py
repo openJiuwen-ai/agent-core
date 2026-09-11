@@ -12,10 +12,11 @@ of ``workflow/engine/journal.py``. The journal's I/O methods (``load`` / ``use``
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
-from openjiuwen.agent_teams.workflow.engine.journal import Journal, key_str
+from openjiuwen.agent_teams.workflow.engine.journal import Journal, call_signature, key_str
 
 
 def _rec(path: list, sig: str = "s", result=None, run_id: str | None = None) -> dict:
@@ -271,6 +272,42 @@ def test_get_cached_run_id_optional_backcompat():
     # Caller passes no run_id (or None) → sig-only match, back-compat path.
     assert j.get_cached(rec["key"], "s") is rec
     assert j.get_cached(rec["key"], "s", None) is rec
+
+
+# ---------------------------------------------------------------------------
+# call_signature isolation folding
+# ---------------------------------------------------------------------------
+
+def test_call_signature_byte_stable_without_isolation():
+    """No isolation → the exact legacy byte sequence (existing caches stay valid).
+
+    The reference is the pre-change formula spelled out inline — a three-key
+    identity dict (phase/model default to None) over the same parts — so any
+    accidental re-key of the legacy path fails loudly here.
+    """
+    legacy = hashlib.sha256(
+        "\x00".join(
+            [
+                "task A",
+                json.dumps(
+                    {"label": "A", "model": None, "phase": None},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                json.dumps(None, sort_keys=True, ensure_ascii=False),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    assert call_signature("task A", {"label": "A"}, None) == legacy
+
+
+def test_call_signature_folds_isolation_when_set():
+    """isolation='worktree' re-keys the call; different isolation values differ too."""
+    plain = call_signature("task A", {"label": "A"}, None)
+    iso = call_signature("task A", {"label": "A", "isolation": "worktree"}, None)
+    assert iso != plain
+    # Explicit None is the same as absent (option bag strips None before opts).
+    assert call_signature("task A", {"label": "A", "isolation": None}, None) == plain
 
 
 # ---------------------------------------------------------------------------

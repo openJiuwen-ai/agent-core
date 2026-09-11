@@ -40,6 +40,7 @@ class _GatedBackend(AgentBackend):
 
     def __init__(self) -> None:
         self.executed: list[str] = []
+        self.call_keys: list[tuple[str, str | None]] = []
         self._gates: dict[str, asyncio.Event] = {}
         self.started: dict[str, asyncio.Event] = {}
 
@@ -50,9 +51,12 @@ class _GatedBackend(AgentBackend):
         self.started[label] = asyncio.Event()
         return ev
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         label = opts.get("label") or "?"
         self.executed.append(label)
+        self.call_keys.append((label, call_key))
         started = self.started.get(label)
         if started is not None:
             started.set()
@@ -162,3 +166,146 @@ def test_resume_cache_hit_prefix(tmp_path):
     result = asyncio.run(_resume())
     assert backend2.executed == ["B", "C"]  # A not re-run
     assert result == ["A-done", "B-done", "C-done"]
+
+
+def test_backend_receives_stable_call_key_across_resume(tmp_path):
+    """The call-path key a backend sees is deterministic across a resume replay.
+
+    The worker member name (hence the worktree slug) derives from this key, so
+    A (replayed as a cache hit in run 2) and B (rerun live) must map to the
+    same keys they had in run 1 — a per-backend counter cannot do that, since
+    hit calls never reach the backend and the counter restarts at zero.
+    """
+    script = _write(tmp_path, "abc.py", _ABC_SCRIPT)
+    journal_path = str(tmp_path / "j.jsonl")
+
+    backend1 = _GatedBackend()
+    b_gate = backend1.gate("B")
+    ev = AbortSignal()
+
+    async def _first() -> None:
+        task = asyncio.create_task(
+            run_workflow(script, backend=backend1, journal_path=journal_path, abort_event=ev)
+        )
+        await backend1.started["B"].wait()
+        ev.set()
+        b_gate.set()
+        with pytest.raises(WorkflowAborted):
+            await task
+
+    asyncio.run(_first())
+
+    backend2 = _GatedBackend()
+
+    async def _resume():
+        return await run_workflow(
+            script, backend=backend2, journal_path=journal_path, resume=journal_path
+        )
+
+    asyncio.run(_resume())
+    # Backend 1 ran A (key 0) then B (key 1). Backend 2 replays A as a hit
+    # (never reaches the backend) and reruns B live — B must still arrive with
+    # the SAME call key it had in run 1, not a re-counted one.
+    run1_keys = dict(backend1.call_keys)
+    run2_keys = dict(backend2.call_keys)
+    assert run1_keys["B"] is not None
+    assert run2_keys["B"] == run1_keys["B"]
+
+
+_ISO_SCRIPT = '''
+from swarmflow import agent
+
+META = {"name": "iso", "description": "two agents, the first switchable", "phases": []}
+
+async def run(args):
+    a = await agent("task A", label="A"@OPTIONS_A@)
+    b = await agent("task B", label="B")
+    return [a, b]
+'''
+
+
+def test_resume_hits_untouched_call_and_reruns_edited_isolation(tmp_path):
+    """Editing a call's isolation re-keys it; untouched siblings still hit.
+
+    Run 1 pauses during B, so A's record is durable. The edited script adds
+    ``isolation='worktree'`` to A only (same prompt/label). On relaunch A must
+    MISS (its signature changed) and rerun live — the worktree the caller now
+    asked for actually gets created — while B is unchanged and behaves as
+    before. Without isolation in the signature the edited call would silently
+    resume-hit the old record and skip the worktree (SDD-0005 §4.3 gap).
+    """
+    journal_path = str(tmp_path / "j.jsonl")
+
+    plain = _write(tmp_path, "iso.py", _ISO_SCRIPT.replace("@OPTIONS_A@", ""))
+    backend1 = _GatedBackend()
+    b_gate = backend1.gate("B")
+    ev = AbortSignal()
+
+    async def _first() -> None:
+        task = asyncio.create_task(
+            run_workflow(plain, backend=backend1, journal_path=journal_path, abort_event=ev)
+        )
+        await backend1.started["B"].wait()
+        ev.set()
+        b_gate.set()
+        with pytest.raises(WorkflowAborted):
+            await task
+
+    asyncio.run(_first())
+    assert backend1.executed == ["A", "B"]
+
+    edited = _write(
+        tmp_path,
+        "iso_edited.py",
+        _ISO_SCRIPT.replace("@OPTIONS_A@", ', options={"isolation": "worktree"}'),
+    )
+    backend2 = _GatedBackend()
+
+    async def _relaunch():
+        return await run_workflow(
+            edited, backend=backend2, journal_path=journal_path, resume=journal_path
+        )
+
+    result = asyncio.run(_relaunch())
+    # A's signature changed (isolation folded in) → miss → rerun live.
+    # Without the fix A would be a silent cache hit and "A" would not appear.
+    assert "A" in backend2.executed
+    assert result == ["A-done", "B-done"]
+
+
+def test_resume_still_hits_when_isolation_untouched(tmp_path):
+    """The isolation-aware signature is byte-stable when isolation is absent.
+
+    Journals written before this change must keep hitting: omitting isolation
+    yields the exact legacy identity dict, so this guards against accidentally
+    re-keying every existing cache.
+    """
+    journal_path = str(tmp_path / "j.jsonl")
+
+    plain = _write(tmp_path, "iso.py", _ISO_SCRIPT.replace("@OPTIONS_A@", ""))
+    backend1 = _GatedBackend()
+    b_gate = backend1.gate("B")
+    ev = AbortSignal()
+
+    async def _first() -> None:
+        task = asyncio.create_task(
+            run_workflow(plain, backend=backend1, journal_path=journal_path, abort_event=ev)
+        )
+        await backend1.started["B"].wait()
+        ev.set()
+        b_gate.set()
+        with pytest.raises(WorkflowAborted):
+            await task
+
+    asyncio.run(_first())
+
+    backend2 = _GatedBackend()
+
+    async def _relaunch():
+        return await run_workflow(
+            plain, backend=backend2, journal_path=journal_path, resume=journal_path
+        )
+
+    asyncio.run(_relaunch())
+    # Same script, same keys/sigs → A is a hit and never reaches the backend.
+    assert backend2.executed == ["B"]

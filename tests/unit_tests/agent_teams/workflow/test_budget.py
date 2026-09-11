@@ -120,7 +120,9 @@ class _FixedCostBackend(AgentBackend):
         self._cost = cost
         self.calls = 0
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         self.calls += 1
         self.budget.add(self._cost)
         return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
@@ -135,7 +137,9 @@ class _DualLedgerBackend(_FixedCostBackend):
     ``AgentBackend.bind_workflow_budget`` documents as the real backends' job.
     """
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
         self.calls += 1
         self.budget.add(self._cost)
         if self.workflow_budget is not None:

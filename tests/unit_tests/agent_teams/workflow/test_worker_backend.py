@@ -13,6 +13,7 @@ A separate test exercises the real ``_execute_worker`` spec-derivation path with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -187,7 +188,7 @@ async def run(args):
     seen: list[dict] = []
 
     class _Backend(AgentBackend):
-        async def run(self, prompt, opts, schema_json):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
             seen.append(dict(opts))
             return AgentResult(text="ok")
 
@@ -519,6 +520,30 @@ def test_long_run_id_slug_is_not_truncated_in_member_names():
     name = backend._next_member_name({"label": "w"})
     assert name.startswith("wf-" + "a" * 48 + "-")
     assert len(name) > 50
+
+
+def test_member_name_is_stable_across_backend_instances_with_same_call_key():
+    """Same call key + run id → same member name, regardless of instance.
+
+    A resume builds a fresh TeamWorkerBackend whose counter restarts at zero;
+    hashing the engine's call-path key instead keeps the name (and thus the
+    worktree slug) identical so the create fast-recovery can find the
+    paused run's kept worktree.
+    """
+    run_id = "wf_abc123def456"
+    backend_a = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    backend_b = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    name_a = backend_a._next_member_name({"label": "compute"}, "call-0")
+    name_b = backend_b._next_member_name({"label": "compute"}, "call-0")
+    assert name_a == name_b
+    assert name_a == "wf-abc123def456-compute-" + hashlib.sha256(b"call-0").hexdigest()[:12]
+
+    # Different call sites in the same run stay distinct.
+    name_other = backend_a._next_member_name({"label": "compute"}, "par-0-1")
+    assert name_other != name_a
+
+    # Without a call key the legacy counter path still works (direct callers).
+    assert backend_a._next_member_name({"label": "compute"}) == "wf-abc123def456-compute-0"
 
 
 def test_execute_worker_surfaces_task_loop_model_error():
