@@ -13,9 +13,9 @@ import pytest
 
 from openjiuwen.agent_teams.harness import TeamHarness
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
     KVCacheIdentity,
@@ -25,6 +25,7 @@ from openjiuwen.core.foundation.kv_cache import (
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 
 
 def _stub_native(*, model: Any = None) -> MagicMock:
@@ -205,25 +206,28 @@ async def test_run_once_uses_registered_kvc_session_hooks(
         member_name="worker",
     )
 
-    configured = kv_cache_hooks.configure_harness_session_hooks(
+    configured = kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
         harness,
         product_session_id="product-session",
         evict_on_finish=True,
-        reason="test-worker-finish",
-        owner_id="worker",
     )
 
     assert configured is enabled
-    assert await harness.run_once("hello") == {"output": "ok"}
+    team_session = create_agent_team_session(
+        session_id="worker-session",
+        team_id="team-a",
+        kv_cache_runtime=KVCacheRuntime(binding_provider=lambda: model),
+    )
+    assert await harness.run_once("hello", team_session=team_session) == {"output": "ok"}
 
     session = native.run_once.await_args.kwargs["session"]
     assert session.get_cache_identity() == KVCacheIdentity(
-        cache_id=session.get_session_id(),
+        cache_id="team:worker-session:team:team-a:member:worker",
         parent_cache_id=(
             "product-session" if enabled else session.get_session_id()
         ),
     )
     assert model.evict_kvc.await_count == expected_calls
     if enabled:
-        assert model.evict_kvc.await_args.kwargs["session_id"] == session.get_session_id()
+        assert model.evict_kvc.await_args.kwargs["session_id"] == session.get_cache_identity().cache_id
         assert model.evict_kvc.await_args.kwargs["parent_session_id"] == "product-session"

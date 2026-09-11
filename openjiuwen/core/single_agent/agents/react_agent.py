@@ -46,11 +46,11 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
-    KVCacheAffinityConfig,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -363,12 +363,10 @@ class ReActAgentConfig(BaseModel):
     def configure_kv_cache_affinity(
             self,
             *,
-            enable_kv_cache_release: bool = False,
             enable_kv_cache_affinity: bool = False,
     ) -> 'ReActAgentConfig':
-        """Configure provider-side KV-cache release or Ascend affinity."""
+        """Configure the unified Ascend KV-cache affinity protocol."""
         self.kv_cache_affinity_config = KVCacheAffinityConfig(
-            enable_kv_cache_release=enable_kv_cache_release,
             enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
@@ -537,7 +535,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -1073,7 +1071,6 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
-            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:

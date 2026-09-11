@@ -17,7 +17,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.core.session.agent import Session
-from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
     prepare_subagent_task_resources,
@@ -81,7 +81,7 @@ class TaskTool(Tool):
     @staticmethod
     def _build_sub_session_id(parent_session_id: str, subagent_type: str) -> str:
         normalized_type = str(subagent_type or "").strip()
-        if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
+        if kv_cache_subagent_lifecycle.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
@@ -137,11 +137,27 @@ class TaskTool(Tool):
                     reason="'browser_capabilities' must be a list of strings",
                 )
 
-        parent_session_id = parent_session.get_session_id()
-        sub_session_id = self._build_sub_session_id(parent_session_id, str(subagent_type))
+        runtime_parent_session_id = parent_session.get_session_id()
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self.parent_agent)
+        parent_cache_id = runtime_parent_session_id
+        if affinity_enabled:
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
+                parent_session
+            )
+        sub_session_id = self._build_sub_session_id(
+            runtime_parent_session_id,
+            str(subagent_type),
+        )
+        if affinity_enabled:
+            sub_session_id = kv_cache_subagent_lifecycle.scope_sub_session_id(
+                sub_session_id,
+                runtime_parent_session_id=runtime_parent_session_id,
+                parent_cache_id=parent_cache_id,
+            )
         logger.info(
             f"[TaskTool] Creating subagent: {subagent_type}, "
-            f"parent_session={parent_session_id}, sub_session={sub_session_id}"
+            f"runtime_parent_session={runtime_parent_session_id}, "
+            f"cache_parent_session={parent_cache_id}, sub_session={sub_session_id}"
         )
 
         try:
@@ -171,16 +187,15 @@ class TaskTool(Tool):
             logger.info(invoke_log, sub_session_id, subagent_type, query_summary)
 
         succeeded = False
-        affinity_enabled = False
+        child_session = None
         try:
             await prepare_subagent_task_resources(subagent)
-            affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
             if affinity_enabled:
-                kv_cache_hooks.prefetch_sticky_subagent(
-                    self.parent_agent,
-                    subagent_type=str(subagent_type),
+                child_session = kv_cache_subagent_lifecycle.create_subagent_session(
+                    parent_session,
                     sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
+                    parent_cache_id=parent_cache_id,
+                    card=subagent.card,
                 )
             # Invoke subagent with isolated session_id
             subagent_inputs = {
@@ -188,8 +203,15 @@ class TaskTool(Tool):
                 "conversation_id": sub_session_id,
             }
             if affinity_enabled:
-                subagent_inputs["parent_session_id"] = parent_session_id
-            result = await subagent.invoke(subagent_inputs)
+                subagent_inputs["parent_session_id"] = parent_cache_id
+                await child_session.pre_run(inputs=subagent_inputs)
+                await kv_cache_subagent_lifecycle.prepare_subagent(
+                    child_session,
+                    subagent_type=str(subagent_type),
+                )
+                result = await subagent.invoke(subagent_inputs, session=child_session)
+            else:
+                result = await subagent.invoke(subagent_inputs)
             succeeded = True
             output = result.get("output", "")
             return ToolOutput(success=True, data={"output": output, "agent_id": subagent.card.id}, error=None)
@@ -201,14 +223,13 @@ class TaskTool(Tool):
             ) from e
         finally:
             await cleanup_subagent_task_resources(subagent)
-            if affinity_enabled:
-                await kv_cache_hooks.finish_subagent(
-                    self.parent_agent,
+            if child_session is not None:
+                await kv_cache_subagent_lifecycle.finish_subagent(
+                    child_session,
                     subagent_type=str(subagent_type),
-                    sub_session_id=sub_session_id,
-                    parent_session_id=parent_session_id,
                     succeeded=succeeded,
                 )
+                await child_session.post_run()
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
