@@ -6,7 +6,7 @@
 |---|---|
 | 日期 | 2026-09-11 |
 | 范围 | `workflow/engine/journal.py`（`call_signature` 折入 isolation）、`workflow/engine/backends/{base,mock}.py`（`run` 增 `call_key`）、`workflow/engine/primitives.py`（`_call_backend` 传 journal key）、`workflow/backends/team_worker_backend.py`（`_next_member_name` 哈希后缀）、`tools/locales/descs/{cn,en}/workflow/swarmflow.md`（复用语义，见 F_39 修订）、测试 `test_pause_resume.py` / `test_journal.py` / `test_worker_backend.py` |
-| 测试基线 | `tests/unit_tests/agent_teams/workflow/` 全量通过（290 passed）；真实 LLM ST 双场景 19/19（含本特性新增场景，本地不提交） |
+| 测试基线 | `tests/unit_tests/agent_teams/workflow/` 全量通过（290 passed）；真实 LLM ST 三场景 38/38（WAL compaction 16 + worktree 同 run 复用 13 + isolation 签名 8，本地不提交） |
 | Refs | #—（关联 issue「缓存命中特性优化：wal 导致 journal 膨胀、worktree 命中」；WAL compaction / 孤儿对账见 F_40 / F_39 修订） |
 
 ## 背景
