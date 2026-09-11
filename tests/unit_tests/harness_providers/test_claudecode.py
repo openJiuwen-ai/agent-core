@@ -470,3 +470,74 @@ async def test_declined_fallback_ratification_restores_the_native_endpoint(monke
         isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
     )
     await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_native_reconnect_recovers_on_later_input(monkeypatch):
+    sdk, state = _install_fake_sdk(monkeypatch)
+    from openjiuwen.harness_providers.claudecode import harness as module
+    original = _FakeClient.connect
+    attempts = 0
+
+    async def connect(client):
+        nonlocal attempts
+        attempts += 1
+        if attempts in {3, 4}:
+            raise sdk.CLIConnectionError("native unavailable")
+        await original(client)
+
+    monkeypatch.setattr(_FakeClient, "connect", connect)
+
+    class Decline:
+        async def handle(self, request):
+            return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+        async def cancel(self, request_id, *, reason):
+            pass
+
+    harness = module.ClaudeCodeHarness(ClaudeCodeHarnessConfig(
+        inherit_process_env=False, model=ClaudeModelConfig(model="native"),
+        fallback_model=ClaudeModelConfig(model="fallback"),
+    ))
+    state.scripts = [[_result(sdk, is_error=True, subtype="error", api_error_status=401)], [_result(sdk, result="recovered")]]
+    await harness.start(_context(interactions=Decline(), host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    try:
+        for expected in [TurnEventKind.FAILED, TurnEventKind.FAILED, TurnEventKind.FINISHED]:
+            receipt = await harness.send(HarnessInput(content="hello"))
+            terminal = _terminal(await _turn(harness, receipt.turn_id))
+            assert terminal.kind is expected
+        assert terminal.result.final_output == "recovered"
+        assert attempts == 5
+        assert state.clients[-1].options.model == "native"
+        assert state.clients[-1].options.resume == state.clients[0].options.session_id
+        assert not harness.fallback_activated
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_client_that_reconnects_after_stop(monkeypatch):
+    sdk, state = _install_fake_sdk(monkeypatch)
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    await harness._close_session()
+    original = harness._connect
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def connect(context, *, model, resume, session_id):
+        entered.set()
+        await release.wait()
+        return await original(context, model=model, resume=resume, session_id=session_id)
+
+    monkeypatch.setattr(harness, "_connect", connect)
+    receipt = await harness.send(HarnessInput(content="new input"))
+    consumer = asyncio.create_task(_turn(harness, receipt.turn_id))
+    await asyncio.wait_for(entered.wait(), 2)
+    stopping = asyncio.create_task(harness.stop())
+    while not harness.active_turn.stop_requested:
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(stopping, 2)
+    assert _terminal(await consumer).kind is TurnEventKind.ABORTED
+    assert all(client.disconnected for client in state.clients)
+    assert not any(client.queries for client in state.clients)

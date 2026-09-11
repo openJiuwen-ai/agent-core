@@ -593,3 +593,64 @@ async def test_declined_fallback_ratification_restores_the_native_thread(monkeyp
         isinstance(event.event, ProviderEvent) and event.event.event_type == "auth_fallback_activated" for event in events
     )
     await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_native_reconnect_recovers_on_later_input(monkeypatch):
+    sdk, state = _install_fake_sdk(monkeypatch)
+    original = CodexHarness._connect
+    attempts = 0
+
+    async def connect(harness, context, *, model, resume_thread_id):
+        nonlocal attempts
+        if resume_thread_id is not None:
+            attempts += 1
+            if attempts in {2, 3}:
+                raise RuntimeError("native unavailable")
+        return await original(harness, context, model=model, resume_thread_id=resume_thread_id)
+
+    monkeypatch.setattr(CodexHarness, "_connect", connect)
+    state.scripts = [[_auth_failure("turn-hi")], [_turn_completed("turn-hi", _Status.completed)]]
+    harness = CodexHarness(_fallback_config())
+    await harness.start(_context(interactions=_RatificationHandler(InteractionResponseStatus.DECLINED), host_capabilities=frozenset({HostCapability.PROVIDER_INTERACTION})))
+    try:
+        for expected in [TurnEventKind.FAILED, TurnEventKind.FAILED, TurnEventKind.FINISHED]:
+            receipt = await harness.send(HarnessInput(content="hi"))
+            terminal = _terminal(await _turn(harness, receipt.turn_id))
+            assert terminal.kind is expected
+        assert attempts == 4
+        assert harness.provider_session_id == "thread-1"
+        assert state.thread_calls[-1][1]["model"] == "native-model"
+        assert not harness.fallback_activated
+        assert all(c.closed for c in state.clients[:-1])
+    finally:
+        await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_stop_closes_client_that_reconnects_after_stop(monkeypatch):
+    sdk, state = _install_fake_sdk(monkeypatch)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    await harness._close_session()
+    original = harness._connect
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def connect(context, *, model, resume_thread_id):
+        entered.set()
+        await release.wait()
+        await original(context, model=model, resume_thread_id=resume_thread_id)
+
+    monkeypatch.setattr(harness, "_connect", connect)
+    receipt = await harness.send(HarnessInput(content="new input"))
+    consumer = asyncio.create_task(_turn(harness, receipt.turn_id))
+    await asyncio.wait_for(entered.wait(), 2)
+    stopping = asyncio.create_task(harness.stop())
+    while not harness.active_turn.stop_requested:
+        await asyncio.sleep(0)
+    release.set()
+    await asyncio.wait_for(stopping, 2)
+    assert _terminal(await consumer).kind is TurnEventKind.ABORTED
+    assert all(client.closed for client in state.clients)
+    assert not state.handles

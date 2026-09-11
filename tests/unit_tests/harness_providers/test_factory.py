@@ -126,3 +126,31 @@ def test_create_harness_loads_a_manifest_package(tmp_path: Path) -> None:
     context = build_harness_context(package, provider="dsh", host_session_id="host-1", language="en")
     assert "I am packaged." in context.system_prompt
     assert context.agent_name == "packaged_expert"
+
+
+def test_native_v2_factory_uses_native_harness_template_construction():
+    from openjiuwen.agent_teams.harness import NativeHarnessProtocolAdapter
+    from openjiuwen.harness_protocol import HarnessProvider, HarnessCapability
+
+    manifest = _manifest(with_tools=True)
+    provider = resolve_provider("native_v2")
+    assert isinstance(provider, HarnessProvider)
+    assert provider.card.name == "native_v2"
+    assert provider.card.supports(HarnessCapability.CHECKPOINT)
+    harness = create_harness(manifest, provider="native_v2", language="en",
+                             config={"deep_agent": {"max_iterations": 9}, "event_buffer_capacity": 32})
+    assert isinstance(harness, NativeHarnessProtocolAdapter)
+    assert harness.native_harness is None
+    assert harness._spec.card == manifest.agent_card
+    assert harness._spec.model == manifest.model
+    assert harness._spec.agent_template_spec == manifest.model_dump(mode="json")
+    assert harness._spec.language == "en"
+    assert harness._spec.max_iterations == 9
+    assert harness.event_buffer_config.capacity == 32
+    context = build_harness_context(manifest, provider="native_v2", host_session_id="session", extra_system_prompt="extra")
+    assert context.system_prompt == "extra"
+    assert not context.mcp_servers
+    with pytest.raises(ValueError, match="unknown native_v2"):
+        provider.create({"unknown": True})
+    with pytest.raises(ValueError, match="positive integer"):
+        provider.create({"event_buffer_capacity": 0})

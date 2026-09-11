@@ -17,7 +17,7 @@ from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 from openjiuwen.harness_protocol import (
     AbortMode, HarnessContext, HarnessInput, HarnessProtocol, HarnessState,
     HarnessStateError, TurnEventKind, TurnLifecycleEvent, ResumePolicy,
-    UnsupportedHarnessCapabilityError,
+    UnsupportedHarnessCapabilityError, HarnessProtocolError, HarnessCheckpoint,
 )
 from tests.unit_tests.agent_teams.harness.fixtures import (
     make_spec, start_harness, wait_invoke_running, wait_tool_running,
@@ -122,9 +122,9 @@ def test_manifest_path_reuses_template_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_cold_protocol_resume_is_explicitly_unsupported():
+async def test_cold_protocol_resume_requires_checkpoint():
     adapter = create_native_harness_protocol(AgentTemplateSpec(agent_card=AgentCard(id="a", name="a")))
-    with pytest.raises(UnsupportedHarnessCapabilityError):
+    with pytest.raises(HarnessProtocolError):
         await adapter.start(HarnessContext(system_prompt="", agent_name="a", agent_id="a", host_session_id="s", resume_policy=ResumePolicy.REQUIRE_RESUME))
     with pytest.raises(HarnessStateError):
         await adapter.resume(query=HarnessInput(content="restore"))
@@ -224,3 +224,158 @@ async def test_pause_during_tool_execution_preserves_tool_completion(adapter):
     assert adapter.state is HarnessState.PAUSED
     await adapter.abort()
     assert kinds(await asyncio.wait_for(consumer, 3))[-1] is TurnEventKind.ABORTED
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_roundtrip_restores_context_and_paused_turn(adapter, monkeypatch):
+    from dataclasses import replace
+    from openjiuwen.core.foundation.llm import AssistantMessage, UserMessage
+    from openjiuwen.harness_providers.jsonsafe import to_json_safe
+    from tests.unit_tests.agent_teams.harness.fixtures import MockContextEngine
+
+    async def save_contexts(engine, session):
+        context = engine.get_context(session.get_session_id())
+        return {"default_context_id": {"messages": context.get_messages(), "offload_messages": {}}}
+
+    monkeypatch.setattr(MockContextEngine, "save_contexts", save_contexts, raising=False)
+    fake = await start_harness(adapter.native_harness, sleep_seconds=5)
+    context = adapter.context
+    receipt = await adapter.send(HarnessInput(content="original task"))
+    consumer = asyncio.create_task(collect(adapter, receipt.turn_id))
+    await wait_invoke_running(fake)
+    await adapter.pause()
+    # Actual context codec must retain concrete roles and assistant metadata.
+    saved_context = fake.context_engine.get_context(adapter.provider_session_id)
+    saved_context.set_messages([UserMessage(content="original task"), AssistantMessage(content="retained boundary")])
+    queued = await adapter.send(HarnessInput(content="later"))
+    checkpoint = await adapter.export_checkpoint()
+    wire = json.loads(json.dumps(to_json_safe(checkpoint)))
+    checkpoint = HarnessCheckpoint(**wire)
+    await adapter.stop()
+    await consumer
+    # Construct a distinct NativeHarness/context engine from the JSON envelope.
+    rebuilt = create_native_harness_protocol(AgentTemplateSpec(agent_card=AgentCard(id="protocol-native", name="protocol-native")))
+    await rebuilt.start(replace(context, resume_policy=ResumePolicy.REQUIRE_RESUME, checkpoint=checkpoint))
+    try:
+        restored = rebuilt._agent_session.get_state("context")["default_context_id"]["messages"]
+        assert isinstance(restored[1], AssistantMessage)
+        assert [m.content for m in restored] == ["original task", "retained boundary"]
+        real_context = await rebuilt.native_harness.react_agent.context_engine.create_context(session=rebuilt._agent_session)
+        assert [m.content for m in real_context.get_messages(with_history=True)] == ["original task", "retained boundary"]
+        resumed_fake = await start_harness(rebuilt.native_harness, answer_output="done")
+        # FakeReact does not implement ReActAgent._init_context; emulate that
+        # normal lazy context read from the reconstructed session.
+        resumed_fake.context_engine.get_context(rebuilt.provider_session_id).set_messages(restored)
+        with pytest.raises(HarnessStateError):
+            await rebuilt.send(HarnessInput(content="must resume first"))
+        await rebuilt.resume()
+        events = await asyncio.wait_for(collect(rebuilt, receipt.turn_id), 4)
+        assert kinds(events) == [TurnEventKind.STARTED, TurnEventKind.PAUSED, TurnEventKind.RESUMED, TurnEventKind.FINISHED]
+        assert resumed_fake.invocations[0]["_resume_continuation"] is True
+        assert resumed_fake.invocations[0]["query"] == "original task"
+        messages = resumed_fake.context_engine.get_context(rebuilt.provider_session_id).get_messages()
+        assert [m.content for m in messages].count("original task") == 1
+        assert (await asyncio.wait_for(collect(rebuilt, queued.turn_id), 4))[-1].event.kind is TurnEventKind.FINISHED
+        assert (await rebuilt.export_checkpoint()).sequence > checkpoint.sequence
+    finally:
+        await rebuilt.stop()
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_rejects_running_state_and_foreign_scope(adapter, monkeypatch):
+    from dataclasses import replace
+    from tests.unit_tests.agent_teams.harness.fixtures import MockContextEngine
+
+    async def save_contexts(engine, session):
+        return {}
+    monkeypatch.setattr(MockContextEngine, "save_contexts", save_contexts, raising=False)
+    fake = await start_harness(adapter.native_harness, sleep_seconds=5)
+    receipt = await adapter.send(HarnessInput(content="task"))
+    consumer = asyncio.create_task(collect(adapter, receipt.turn_id))
+    await wait_invoke_running(fake)
+    with pytest.raises(HarnessStateError):
+        await adapter.export_checkpoint()
+    await adapter.pause()
+    checkpoint = await adapter.export_checkpoint()
+    restored = create_native_harness_protocol(AgentTemplateSpec(agent_card=AgentCard(id="protocol-native", name="protocol-native")))
+    for invalid in [replace(checkpoint, provider="other"), replace(checkpoint, schema_version="unknown"), replace(checkpoint, agent_id="other")]:
+        with pytest.raises(HarnessProtocolError):
+            await restored.start(replace(adapter.context, checkpoint=invalid, resume_policy=ResumePolicy.REQUIRE_RESUME))
+    await adapter.stop()
+    await consumer
+
+
+@pytest.mark.asyncio
+async def test_idle_checkpoint_uses_real_context_codec_and_sink(adapter):
+    from dataclasses import replace
+    from openjiuwen.core.foundation.llm import UserMessage, AssistantMessage, ToolMessage, ToolCall
+    from openjiuwen.harness_protocol import CheckpointSaveReceipt, CheckpointReason
+
+    saved = []
+    class Sink:
+        async def save(self, checkpoint, *, reason, expected_storage_revision=None):
+            saved.append((checkpoint, reason, expected_storage_revision))
+            return CheckpointSaveReceipt(checkpoint_id=checkpoint.checkpoint_id, sequence=checkpoint.sequence, storage_revision=str(checkpoint.sequence))
+
+    adapter._context = replace(adapter.context, checkpoint_sink=Sink())
+    native = adapter.native_harness
+    context = await native.react_agent.context_engine.create_context(session=adapter._agent_session)
+    context.set_messages([
+        UserMessage(content="keep this"),
+        AssistantMessage(content="", tool_calls=[ToolCall(id="call-1", name="read", arguments='{"path":"x"}', type="function")]),
+        ToolMessage(content="result", tool_call_id="call-1"),
+    ])
+    native.loop_coordinator.increment_iteration()
+    checkpoint = await adapter.export_checkpoint()
+    assert saved[0][1] is CheckpointReason.TURN_COMPLETED
+    assert checkpoint.data["deepagent"]["stop_condition_state"]["iteration"] == 1
+    again = await adapter.export_checkpoint()
+    assert saved[-1][2] == str(checkpoint.sequence)
+    assert again.sequence > checkpoint.sequence
+    original_context = adapter.context
+    await adapter.stop()
+    rebuilt = create_native_harness_protocol(AgentTemplateSpec(agent_card=AgentCard(id="protocol-native", name="protocol-native")))
+    await rebuilt.start(replace(original_context, checkpoint=again, resume_policy=ResumePolicy.REQUIRE_RESUME))
+    try:
+        restored = await rebuilt.native_harness.react_agent.context_engine.create_context(session=rebuilt._agent_session)
+        messages = restored.get_messages(with_history=True)
+        assert isinstance(messages[1], AssistantMessage)
+        assert messages[1].tool_calls[0].id == "call-1"
+        assert isinstance(messages[2], ToolMessage)
+        assert messages[2].tool_call_id == "call-1"
+        assert rebuilt.native_harness.loop_coordinator.get_state()["iteration"] == 1
+        assert rebuilt.state is HarnessState.IDLE
+    finally:
+        await rebuilt.stop()
+
+
+@pytest.mark.asyncio
+async def test_new_policy_ignores_checkpoint_and_query_mismatch_is_rejected(adapter, monkeypatch):
+    from dataclasses import replace
+    from tests.unit_tests.agent_teams.harness.fixtures import MockContextEngine
+
+    async def save_contexts(engine, session):
+        return {"default_context_id": {"messages": engine.get_context(session.get_session_id()).get_messages()}}
+    monkeypatch.setattr(MockContextEngine, "save_contexts", save_contexts, raising=False)
+    fake = await start_harness(adapter.native_harness, sleep_seconds=5)
+    context = adapter.context
+    receipt = await adapter.send(HarnessInput(content="saved query"))
+    consumer = asyncio.create_task(collect(adapter, receipt.turn_id))
+    await wait_invoke_running(fake)
+    await adapter.pause()
+    checkpoint = await adapter.export_checkpoint()
+    await adapter.stop()
+    await consumer
+    for policy in [ResumePolicy.REQUIRE_RESUME, ResumePolicy.NEW]:
+        rebuilt = create_native_harness_protocol(AgentTemplateSpec(agent_card=AgentCard(id="protocol-native", name="protocol-native")))
+        await rebuilt.start(replace(context, checkpoint=checkpoint, resume_policy=policy))
+        try:
+            if policy is ResumePolicy.REQUIRE_RESUME:
+                with pytest.raises(HarnessStateError, match="does not match"):
+                    await rebuilt.resume(query=HarnessInput(content="another query"))
+                assert rebuilt._cold_restore is not None
+            else:
+                assert rebuilt._cold_restore is None
+                assert not rebuilt._agent_session.get_state("context")
+        finally:
+            await rebuilt.stop()
