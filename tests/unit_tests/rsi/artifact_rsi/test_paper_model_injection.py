@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import set_project_root
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.manager import ManagerRuntime
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
     CodeImplementationAgent,
@@ -225,6 +226,65 @@ async def test_orchestrator_instruction_only_stays_create_new_paper(tmp_path):
     assert seed.initial_prompt == ""
     assert seed.research_paths == []
     assert seed.previous_context is None
+
+
+@pytest.mark.asyncio
+async def test_instruction_only_round_two_inherits_parent_as_modify_paper(tmp_path, monkeypatch):
+    from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+        paper_workspace_dir,
+    )
+
+    set_project_root(tmp_path)
+    try:
+        parent_run_id = "instruction-only-r1"
+        paper_dir = paper_workspace_dir(parent_run_id)
+        paper_dir.mkdir(parents=True)
+        _write_baseline_paper(paper_dir)
+
+        captured = {}
+
+        class Runtime:
+            def __init__(self, config, **kwargs):
+                del config, kwargs
+
+            async def arun(self, **kwargs):
+                captured.update(kwargs)
+                return "done"
+
+        monkeypatch.setattr(module, "ManagerRuntime", Runtime)
+        monkeypatch.setattr(module, "load_project_dotenv", lambda: None)
+
+        orchestrator = module.PaperTreeOrchestrator(
+            task_id="instruction-only",
+            run_dir=str(tmp_path / "task"),
+            max_iterations=1,
+            optimization_instruction="Write a paper about retrieval.",
+            artifact_path=None,
+        )
+        seed = module.build_node_seed(
+            task_id="instruction-only",
+            round_index=2,
+            optimization_instruction="Write a paper about retrieval.",
+            retry_reason=None,
+            parent_run_id=parent_run_id,
+            initial_research_paths=orchestrator.initial_research_paths,
+            initial_prompt=orchestrator.initial_prompt,
+            previous_context=orchestrator.previous_context,
+            task_mode="create_new_paper",
+        )
+        assert seed.task_mode == "modify_paper"
+        assert seed.initial_prompt.startswith("TASK MODE: modify_paper")
+        assert "Improving Tool Calls" in seed.initial_prompt
+        assert seed.previous_context is not None
+        assert seed.previous_context.title == "Improving Tool Calls"
+        assert "experiments/instruction-only-r1/paper" in seed.research_paths
+        assert await orchestrator._run_manager(seed) == "done"
+        assert captured["task_mode"] == "modify_paper"
+        assert captured["initial_prompt"] == seed.initial_prompt
+        assert captured["research_paths"] == seed.research_paths
+        assert captured["previous_context"] is seed.previous_context
+    finally:
+        set_project_root(None)
 
 
 @pytest.mark.asyncio

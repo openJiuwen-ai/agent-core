@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import paper_workspace_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
+    paper_workspace_dir,
+    to_project_relative,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess import (
     LatexValidationError,
     PaperPreprocessAgent,
@@ -92,17 +95,28 @@ def build_node_seed(
     run_id = build_node_run_id(task_id, round_index)
     prior = build_prior_paper_output(parent_run_id)
     prior_prompt = None if prior is None else prior.initial_prompt
+    research_paths = list(initial_research_paths or [])
 
     constraints: list[str] = []
     if retry_reason:
         constraints.append(f"Previous attempt's issue to address: {retry_reason}")
 
-    if prior_prompt:
-        objective = prior_prompt
+    if prior is not None:
+        # A compiled parent paper is a modify_paper baseline, even when the
+        # task itself was instruction-only create_new_paper on round 1.
+        task_mode = "modify_paper"
+        previous_context = prior.research_context
+        parent_paper = paper_workspace_dir(parent_run_id)
+        try:
+            parent_rel = to_project_relative(parent_paper)
+        except ValueError:
+            parent_rel = None
+        if parent_rel and parent_rel not in research_paths:
+            research_paths.insert(0, parent_rel)
+        objective = prior_prompt or (optimization_instruction or "")
         if optimization_instruction:
             constraints.append(f"Additional instruction: {optimization_instruction}")
         topic = "Improve the existing paper from the current best node."
-        previous_context = prior.research_context if prior is not None else previous_context
     else:
         objective = optimization_instruction or ""
         topic = optimization_instruction or "Improve the paper from the current best node."
@@ -112,7 +126,7 @@ def build_node_seed(
         topic=topic,
         objective=objective,
         constraints=constraints,
-        research_paths=list(initial_research_paths or []),
+        research_paths=research_paths,
         task_mode=task_mode,
         initial_prompt=prior_prompt or initial_prompt,
         previous_context=previous_context,
