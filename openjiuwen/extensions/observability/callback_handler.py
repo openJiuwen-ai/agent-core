@@ -864,6 +864,11 @@ class OtelCallbackHandler:
         Sets root span output from the FINAL invoke result — this is the
         overall agent output, distinct from per-iteration results written by
         AgentObservabilityRail.after_task_iteration.
+
+        The attribute is recorded but not published. Streaming routes here on
+        every chunk, and publishing each time rewrote the whole root span to
+        restate an answer the stream frames already carry increment by
+        increment. The span keeps the value and states it once, when it ends.
         """
         try:
             result = kwargs.get("result")
@@ -876,7 +881,6 @@ class OtelCallbackHandler:
                         OJ_SPAN_OUTPUT,
                         redact_completion(str(result), self._config),
                     )
-                    publish_span_snapshot(root_span, "output")
         except Exception as exc:
             logger.exception("otel: on_agent_invoke_output failed: {}", exc)
         return kwargs.get("result")

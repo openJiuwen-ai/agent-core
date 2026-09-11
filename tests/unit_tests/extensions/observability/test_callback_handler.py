@@ -1437,6 +1437,64 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
     ]
 
 
+@pytest.mark.asyncio
+async def test_streamed_agent_output_is_recorded_without_republishing_the_root(
+    monkeypatch,
+) -> None:
+    """A streamed answer updates the root span's attribute, nothing more.
+
+    Streaming routes every chunk through the invoke-output callback, so
+    publishing there rewrote the whole root span once per chunk -- measured at
+    23,414 publishes over one 840-second turn, to restate a 744-character
+    answer the stream frames already carry increment by increment. The span
+    holds the value and states it once, when it ends.
+    """
+    processor = SpanRecordProcessor()
+    consumer = _LiveRecordConsumer()
+    processor.register_consumer(consumer)
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("root-output-test")
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+    reset_state()
+    root = tracer.start_span(
+        "agent.root",
+        attributes={
+            OJ_TRACE_ROOT: True,
+            "gen_ai.conversation.id": "root-output-session",
+        },
+    )
+    set_root_span(root, session_id="root-output-session")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="root-output-test"),
+        tracer=tracer,
+    )
+    session = SimpleNamespace(get_session_id=lambda: "root-output-session")
+
+    try:
+        for answer in ("par", "partial", "partial answer"):
+            await handler.on_agent_stream_output(result=answer, session=session)
+        assert root.attributes[OJ_SPAN_OUTPUT] == "partial answer"
+        # Only the snapshot the processor states when the span opens: three
+        # chunks add nothing to it.
+        assert [record.update_kind for record in consumer.snapshots] == ["started"]
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="root-output-session", expected_span=root)
+        reset_state()
+        provider.shutdown()
+
+    # The answer reaches a reader once, on the record the ended span states.
+    final = next(record for record in consumer.records if record.span_id == f"{root.context.span_id:016x}")
+    final_span = json.loads(final.raw_json)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    output = next(
+        attribute["value"]["stringValue"]
+        for attribute in final_span["attributes"]
+        if attribute["key"] == OJ_SPAN_OUTPUT
+    )
+    assert output == "partial answer"
+
 
 @pytest.mark.asyncio
 async def test_long_stream_keeps_every_frame_and_a_bounded_span(monkeypatch) -> None:
