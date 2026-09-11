@@ -48,6 +48,13 @@ from openjiuwen.harness.personal_context.path_safety import (
 from openjiuwen.harness.personal_context.path_safety import (
     semantic_context_segment_is_safe as _semantic_context_segment_is_safe,
 )
+from openjiuwen.harness.personal_context.source_link_book import (
+    collect_source_link_book,
+    register_source_links,
+    resolve_source_links,
+    source_link_preview,
+)
+from openjiuwen.harness.personal_context.source_markdown import markdown_reference_text
 from openjiuwen.harness.personal_context.source_metadata import (
     read_source_metadata,
     source_id_for_locator,
@@ -1218,7 +1225,7 @@ def _normalize_markdown(content: str) -> str:
 def _deterministic_briefing_preview(content: str) -> dict[str, object]:
     """Extract a bounded outline and first meaningful paragraph without a model."""
 
-    normalized = _normalize_markdown(content)
+    normalized = _normalize_markdown(source_link_preview(content))
     lines = normalized.splitlines()
     headings: list[dict[str, object]] = []
     paragraph: list[str] = []
@@ -5202,7 +5209,7 @@ async def _rules_update_target_directory(
     source_id: str,
     embed_texts: _SemanticEmbedder | None,
 ) -> Path | None:
-    old_text = page.read_text(encoding="utf-8")
+    old_text = await asyncio.to_thread(page.read_text, encoding="utf-8")
     original_body = re.split(r"(?m)^## 正文\s*$", old_text, maxsplit=1)[-1]
     new_body = str(document.get("markdown", ""))
     if _balanced_clean_text(original_body) == _balanced_clean_text(new_body):
@@ -6031,26 +6038,8 @@ def _markdown_link_target(relative: str) -> str:
 
 
 def _markdown_reference_text(markdown: str) -> str:
-    """Return Markdown text outside fenced and inline code."""
-
-    lines: list[str] = []
-    fence_character: str | None = None
-    fence_length = 0
-    for line in markdown.splitlines():
-        if fence_character is not None:
-            closing = re.match(r"^ {0,3}(`{3,}|~{3,})[ \t]*$", line)
-            if closing is not None and closing.group(1)[0] == fence_character and len(closing.group(1)) >= fence_length:
-                fence_character = None
-                fence_length = 0
-            continue
-        opening = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        if opening is not None:
-            marker = opening.group(1)
-            fence_character = marker[0]
-            fence_length = len(marker)
-            continue
-        lines.append(re.sub(r"`+[^`\r\n]*`+", "", line))
-    return "\n".join(lines)
+    """Return Markdown prose outside literal code examples."""
+    return markdown_reference_text(markdown)
 
 
 def _markdown_destination(raw_target: str) -> str | None:
@@ -6470,6 +6459,8 @@ class ContextPipelineService:
         self._consumer_task: asyncio.Task[None] | None = None
         self._accepting = False
         self._active_completion: asyncio.Future[None] | None = None
+        self._active_event_task: asyncio.Task[None] | None = None
+        self._active_run_key: tuple[str, str] | None = None
         self._run_states: dict[tuple[str, str], dict[str, object]] = {}
         self._publish_lock = asyncio.Lock()
         self._embedding: APIEmbedding | None = None
@@ -6573,25 +6564,64 @@ class ContextPipelineService:
             finally:
                 self._consumer_task = None
                 self._active_completion = None
+                self._active_event_task = None
+                self._active_run_key = None
 
     def is_running(self) -> bool:
         """Return whether the unique consumer task is alive."""
         return self._consumer_task is not None and not self._consumer_task.done()
 
+    def replace_configuration(self, config: PersonalContextConfig) -> None:
+        """Replace the immutable runtime snapshot after a validated hot update."""
+
+        self._config = config
+
+    async def cancel_run(self, service_id: str, run_id: str) -> None:
+        """Cancel only the active event for one run without stopping the consumer."""
+
+        key = (
+            _safe_segment(service_id, name="service_id"),
+            _safe_segment(run_id, name="run_id"),
+        )
+        task = self._active_event_task
+        if task is None or task.done() or self._active_run_key != key:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
     async def _consume(self) -> None:
         while True:
             item = await self._input_queue.get()
             self._active_completion = _queue_item_completion(item)
+            event_task: asyncio.Task[None] | None = None
             try:
-                await self._process_queue_item(item)
+                if isinstance(item, tuple) and len(item) == 5 and isinstance(item[1], str) and isinstance(item[2], str):
+                    self._active_run_key = (
+                        _safe_segment(item[1], name="service_id"),
+                        _safe_segment(item[2], name="run_id"),
+                    )
+                event_task = asyncio.create_task(
+                    self._process_queue_item(item),
+                    name="personal-context-context-pipeline-event",
+                )
+                self._active_event_task = event_task
+                await event_task
             except asyncio.CancelledError:
                 self._fail_active(_pipeline_error("context pipeline event cancelled"))
-                raise
+                if asyncio.current_task() is not None and asyncio.current_task().cancelling():
+                    if event_task is not None and not event_task.done():
+                        event_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await event_task
+                    raise
             except BaseError as error:
                 self._fail_active(error)
             except Exception:
                 self._fail_active(_pipeline_error())
             finally:
+                self._active_event_task = None
+                self._active_run_key = None
                 self._active_completion = None
                 self._input_queue.task_done()
 
@@ -6615,6 +6645,10 @@ class ContextPipelineService:
             if payload is not None:
                 raise _pipeline_error("finish event payload must be None")
             await self._finish_run_event(safe_service, safe_run)
+        elif tag == "retain":
+            if payload is not None:
+                raise _pipeline_error("retain event payload must be None")
+            await self._finish_run_event(safe_service, safe_run, retaining=True)
         elif tag == "abort":
             if payload is not None:
                 raise _pipeline_error("abort event payload must be None")
@@ -6718,7 +6752,13 @@ class ContextPipelineService:
             await self._cleanup_run_state(key)
             raise _pipeline_error("batch processing failed") from exc
 
-    async def _finish_run_event(self, service_id: str, run_id: str) -> None:
+    async def _finish_run_event(
+        self,
+        service_id: str,
+        run_id: str,
+        *,
+        retaining: bool = False,
+    ) -> None:
         """Compile and publish all persisted batches from one run exactly once."""
 
         key = (service_id, run_id)
@@ -6780,6 +6820,7 @@ class ContextPipelineService:
                 provider=provider,
                 source_ids_by_logical_id=logical_sources,
                 run_time=run_time,
+                retaining=retaining,
             )
             actual_profile = filesystem_profile
             processed["actual_profile"] = actual_profile
@@ -6922,6 +6963,7 @@ class ContextPipelineService:
                 "actual_profile": str(document.get("actual_profile", processed.get("actual_profile", "deterministic"))),
                 "raw_snapshot_path": raw_path,
                 "source_record_path": record_root_value,
+                "source_links": document.get("source_links", {}),
             }
             _atomic_write(
                 entry_root / "record.json",
@@ -7022,6 +7064,7 @@ class ContextPipelineService:
                         "metadata": dict(metadata_value) if isinstance(metadata_value, Mapping) else {},
                         "raw_snapshot": raw_snapshot,
                         "actual_profile": str(record.get("actual_profile", "deterministic")),
+                        "source_links": record.get("source_links", {}),
                     }
                     if not document["logical_id"] or not document["revision_id"] or not document["original_ref"]:
                         raise _pipeline_error("processed record identifiers are invalid")
@@ -7059,6 +7102,7 @@ class ContextPipelineService:
             "deleted_ids": deleted_ids,
             "actual_profile": "deterministic",
             "changed_source_ids": set(cast(set[str], state.get("changed_source_ids", set()))),
+            "source_link_book": collect_source_link_book(documents),
         }
 
     @staticmethod
@@ -7316,7 +7360,7 @@ class ContextPipelineService:
         documents: list[dict[str, object]] = []
         blocks: list[dict[str, object]] = []
         for item in batch.items:
-            markdown = _normalize_markdown(item.content or "")
+            markdown, source_links = register_source_links(_normalize_markdown(item.content or ""), item.original_ref)
             document: dict[str, object] = {
                 "logical_id": item.logical_id,
                 "revision_id": item.revision_id,
@@ -7326,6 +7370,7 @@ class ContextPipelineService:
                 "metadata": dict(item.metadata),
                 "raw_snapshot": item.raw_snapshot,
                 "actual_profile": "deterministic",
+                "source_links": source_links,
             }
             documents.append(document)
             for order, block_text in enumerate(_split_blocks(markdown)):
@@ -7342,6 +7387,7 @@ class ContextPipelineService:
             "blocks": blocks,
             "deleted_ids": [],
             "actual_profile": "deterministic",
+            "source_link_book": collect_source_link_book(documents),
         }
 
     async def _filesystem_with_fallback(
@@ -7356,8 +7402,9 @@ class ContextPipelineService:
         provider: str | None = None,
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
+        retaining: bool = False,
     ) -> str:
-        requested = self._config.strategy_profile
+        requested = "rules" if retaining else self._config.strategy_profile
         if self._embedding is not None:
             self._embedding_fallback_active = False
         effective_service_id = service_id or "local"
@@ -7413,7 +7460,7 @@ class ContextPipelineService:
                 source_ids_by_logical_id=effective_source_ids,
                 deleted_source_ids=effective_deleted_source_ids,
                 run_time=effective_run_time,
-                embed_texts=self._embed_semantic_texts if self._embedding is not None else None,
+                embed_texts=(self._embed_semantic_texts if self._embedding is not None and not retaining else None),
                 fallback_references=tuple(alias_targets or ()),
                 max_pages_per_directory=self._config.max_pages_per_directory,
                 max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
@@ -7438,7 +7485,9 @@ class ContextPipelineService:
             return baseline, changed
 
         if requested == "rules" or self._config.model_client is None or self._config.model_request is None:
-            await prepare_rules_candidate(preserve_existing_paths=requested == "agent")
+            await prepare_rules_candidate(
+                preserve_existing_paths=retaining or requested == "agent",
+            )
             log_agent_fallback("rules")
             return "rules"
         profiles = [
@@ -7648,7 +7697,13 @@ class ContextPipelineService:
                             "attempt. Every "
                             "ordinary Context page you create or materially edit must contain exactly one "
                             "top-level # heading outside fenced code blocks. Reuse or replace an existing source "
-                            "heading instead of keeping it and adding another one. All relative "
+                            "heading instead of keeping it and adding another one. Source navigation is "
+                            "registered as pcs-source-link destinations in processed documents. Preserve their "
+                            "exact identifiers when retaining a source link; publication will resolve them. "
+                            "Never invent identifiers or turn local links read from raw sources into Context "
+                            "navigation. "
+                            "Use supplied source references for provenance; create a Context link only to "
+                            "an actual Context page. All relative "
                             "links between Context pages must be relative to the Markdown file that contains the "
                             "link; for pages in the same directory use other-page.md rather than repeating the "
                             "directory prefix. From context/A/description.md, a sibling directory B is linked as "
@@ -8133,6 +8188,12 @@ class ContextPipelineService:
                 max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
                 capacity_exempt=capacity_exempt,
                 navigation_changed_paths=navigation_changed_paths,
+            )
+            resolve_source_links(
+                candidate_context,
+                final_context_root=self._context_root,
+                source_root=self._source_meta_root,
+                book=cast(Mapping[str, Mapping[str, str]], processed.get("source_link_book", {})),
             )
             _validate_candidate(
                 candidate_context,

@@ -741,6 +741,64 @@ class PersonalContext:
             elif safe_id not in self._fetch_running:
                 self._fetch_states[safe_id] = "STOPPED"
 
+    async def _append_fetch_service_config(
+        self,
+        service: PersonalContextFetchServiceConfig,
+    ) -> None:
+        """Append one validated service without restarting unrelated runtime work."""
+
+        if not isinstance(service, PersonalContextFetchServiceConfig):
+            raise _state_error("service must be PersonalContextFetchServiceConfig")
+        safe_id = _safe_service_id(service.service_id)
+        history = await asyncio.to_thread(self._read_run_history, safe_id)
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if any(item.service_id == safe_id for item in config.fetch_services):
+                raise _state_error("fetch service already exists")
+            updated = config.model_copy(
+                update={"fetch_services": (*config.fetch_services, service)},
+            )
+            self._config = updated
+            self._fetch_states[safe_id] = "STOPPED"
+            self._fetch_errors.pop(safe_id, None)
+            self._fetch_run_progress[safe_id] = _fetch_run_status(
+                safe_id,
+                run_state="idle",
+            )
+            self._fetch_run_history[safe_id] = history
+            pipeline = self._pipeline_service
+            if pipeline is not None:
+                pipeline.replace_configuration(updated)
+            should_start = updated.collection_enabled and self._state == "RUNNING" and service.enabled
+        if should_start:
+            await self.start_fetch_service(safe_id)
+
+    async def _remove_fetch_service_config(self, service_id: str) -> None:
+        """Roll back a newly appended service without restarting the runtime."""
+
+        safe_id = _safe_service_id(service_id)
+        if safe_id in self._fetch_tasks or safe_id in self._manual_fetch_tasks:
+            await self.stop_fetch_service(safe_id)
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            services = tuple(item for item in config.fetch_services if item.service_id != safe_id)
+            if len(services) == len(config.fetch_services):
+                return
+            updated = config.model_copy(update={"fetch_services": services})
+            self._config = updated
+            self._fetch_states.pop(safe_id, None)
+            self._fetch_errors.pop(safe_id, None)
+            self._fetch_run_progress.pop(safe_id, None)
+            self._fetch_run_history.pop(safe_id, None)
+            self._fetch_run_identity.pop(safe_id, None)
+            pipeline = self._pipeline_service
+            if pipeline is not None:
+                pipeline.replace_configuration(updated)
+
     async def run_fetch(
         self,
         *,
@@ -827,6 +885,8 @@ class PersonalContext:
         """Stop only the active round for one service and retain completed batches."""
 
         safe_id = _safe_service_id(service_id)
+        first_stop_request = False
+        run_id: str | None = None
         async with self._fetch_lock:
             if self._config is None or safe_id not in {item.service_id for item in self._config.fetch_services}:
                 raise _state_error("unknown fetch service")
@@ -848,8 +908,15 @@ class PersonalContext:
             )
             self._fetch_states[safe_id] = "STOPPING"
             if not stop_event.is_set():
+                first_stop_request = True
                 stop_event.set()
                 task.cancel()
+            identity = self._fetch_run_identity.get(safe_id)
+            if identity is not None and isinstance(identity.get("run_id"), str):
+                run_id = cast(str, identity["run_id"])
+
+        if first_stop_request and run_id is not None:
+            await self._cancel_pipeline_run(safe_id, run_id)
 
         task_error: BaseException | None = None
         try:
@@ -1493,14 +1560,10 @@ class PersonalContext:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await provider.abort_run(run_id=run_id)
 
-        async def finish_and_commit(
+        async def commit_provider_and_cursor(
             cursor: dict[str, object] | None,
             candidates: tuple[dict[str, object], ...],
-            *,
-            has_pipeline_work: bool,
         ) -> None:
-            if has_pipeline_work:
-                await self._finish_pipeline_run(service_id, run_id)
             committed_cursor = record_completed_candidates(cursor, candidates)
             await provider.commit_run(run_id=run_id)
             self._write_cursor(service_id, committed_cursor)
@@ -1508,13 +1571,11 @@ class PersonalContext:
         async def wait_for_commit_point(
             cursor: dict[str, object] | None,
             candidates: tuple[dict[str, object], ...],
-            *,
-            has_pipeline_work: bool,
         ) -> bool:
-            """Finish publication and cursor commit despite caller cancellation."""
+            """Commit provider and cursor despite caller cancellation."""
 
             commit_task = asyncio.create_task(
-                finish_and_commit(cursor, candidates, has_pipeline_work=has_pipeline_work),
+                commit_provider_and_cursor(cursor, candidates),
                 name=f"personal-context-fetch-commit-{service_id}",
             )
             cancellation_seen = False
@@ -1577,10 +1638,11 @@ class PersonalContext:
                 raise _fetch_error("provider produced no batch")
             if item_count != total_items:
                 raise _fetch_error("provider did not yield every prepared candidate")
+            if pipeline_work_enqueued.is_set():
+                await self._finish_pipeline_run(service_id, run_id)
             cancelled_at_commit = await wait_for_commit_point(
                 last_cursor,
                 prepared_candidates,
-                has_pipeline_work=pipeline_work_enqueued.is_set(),
             )
             commit_completed = True
             if cancelled_at_commit:
@@ -1631,10 +1693,10 @@ class PersonalContext:
                                     completed_batch,
                                     enqueued=pipeline_work_enqueued,
                                 )
+                        await self._retain_pipeline_run(service_id, run_id)
                     await wait_for_commit_point(
                         last_cursor,
                         prepared_candidates[:completed_candidate_count],
-                        has_pipeline_work=pipeline_work_enqueued.is_set(),
                     )
                 self._fetch_run_progress[service_id] = _fetch_run_status(
                     service_id,
@@ -1705,6 +1767,14 @@ class PersonalContext:
 
     async def _finish_pipeline_run(self, service_id: str, run_id: str) -> None:
         await self._submit_pipeline_event("finish", service_id, run_id, None)
+
+    async def _retain_pipeline_run(self, service_id: str, run_id: str) -> None:
+        await self._submit_pipeline_event("retain", service_id, run_id, None)
+
+    async def _cancel_pipeline_run(self, service_id: str, run_id: str) -> None:
+        pipeline = self._pipeline_service
+        if pipeline is not None:
+            await pipeline.cancel_run(service_id, run_id)
 
     async def _abort_pipeline_run(self, service_id: str, run_id: str) -> None:
         await self._submit_pipeline_event("abort", service_id, run_id, None)
