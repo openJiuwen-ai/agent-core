@@ -830,17 +830,16 @@ Turn 边界。whole-agent idle 时若没有任何 native `turn/end`，该外部 
 
 ### 12.2 DSH 首版限制
 
-`DshHarness.card.capabilities` 为空。当前不支持：
+`DshHarness.card.capabilities` 为 `{MCP_TOOLS}`。stdio/HTTP MCP 通过启动时的临时 Cordis overlay
+装配，运行中热更新和 IN_PROCESS 不支持。system prompt 由原生 assembly hook/section 承接：
+`system_prompt_mode="replace"` 仅替换 prefix，`"append"` 保留原生指令并追加独立 section。
+若显式指定 system_prompt_env_var，则由 custom composition 消费该变量（不可与 append 同用）。
+自动 overlay 需要标准 profile launcher，不支持 launch_args_override。
 
-- STEER、graceful/force abort、pause/resume；
-- checkpoint export/restore 或跨 runtime 的持久恢复；
-- 将 `HarnessContext.mcp_servers` 动态安装进 DSH；
-- 在 bundled Cordis 配置中自动注入 system prompt。
-
-`system_prompt_env_var="DSH_SYSTEM_PROMPT"` 只把 system prompt 放入 runtime env。custom Cordis
-composition 必须显式消费该变量（例如从 `process.env.DSH_SYSTEM_PROMPT` 取得 persona）；没有这个
-消费配置时 prompt 不会生效。DSH 可在 custom Cordis 中静态装配 MCP，但这不等于协议的动态 MCP
-capability。
+SDK/runtime 已更新至 0.1.5rc1，initialize 会等待 Loader（含 MCP 初次发现）就绪。SDK wire 仍只有
+initialize、session/prompt、shutdown，因此 steer、abort、pause/resume、ask-user 没有可接入的控制面。
+跨 runtime 用旧 session ID 发 prompt 实测返回 `session already exists`；仅同一 live runtime 的
+多轮会话可用，不声明 CHECKPOINT/PERSISTENT_SESSION。详见 team F_99。
 
 公开的 protocol event buffer 使用正容量和 BLOCK 策略，能把 adapter 侧 backpressure 传回
 notification callback。不过 DSH SDK 内部的 subscription queue 当前仍是无界队列；adapter 无法把
@@ -911,7 +910,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 | `native_v2` | `agent_teams.harness.NativeHarnessProtocolAdapter` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION |
 | `claudecode` | `claudecode.ClaudeCodeHarness`（claude-agent-sdk） | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
 | `codex` | `codex.CodexHarness`（openai-codex） | `codex` | 同上 |
-| `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | 空 |
+| `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | MCP_TOOLS |
 
 - `harness_providers.io_adapter.HarnessIOAdapter`：把任意 `HarnessProtocol` 投影成 DeepAgent 风格
   输入输出——输入接受用户文本与 `InteractiveInput`（回答 ask-user 中断），输出为
@@ -929,3 +928,8 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 仍未完成：Python entry point provider discovery；把 `dsh` / `native` 接入 `ExternalCliAgentSpec`
 声明式 spawn。端到端契约测试见 `tests/system_tests/harness_providers/`（对本机 CLI 运行，缺 CLI
 或 SDK 时自动跳过）。
+
+Codex 的 `system_prompt_mode="append"` 通过 config/read 读取当前 cwd 的生效 developer instructions，
+保留后追加宿主提示词；`"replace"`（默认）直接设置 developer_instructions。两种模式均不设置
+base_instructions。DSH 同名配置默认 replace，仅替换 prefix；append 追加独立 section。
+团队 Claude/Codex 成员也可在 ExternalCliAgentSpec.system_prompt_mode 中指定该策略。

@@ -45,7 +45,7 @@ adapter 会在接受输入时立即返回外部 `message_id`/`turn_id`。如果�
 
 ## 能力矩阵
 
-`DshHarness.card.capabilities` 当前为空。
+`DshHarness.card.capabilities` 当前为 `{MCP_TOOLS}`。
 
 | 行为 | 首版支持 | 说明 |
 |---|---|---|
@@ -55,15 +55,16 @@ adapter 会在接受输入时立即返回外部 `message_id`/`turn_id`。如果�
 | abort | 否 | graceful/force abort 均不声明 |
 | pause/resume | 否 | 不声明 warm/cold resume |
 | checkpoint | 否 | `export_checkpoint()` 返回 `None`；拒绝 checkpoint/REQUIRE_RESUME |
-| 动态 MCP | 否 | `HarnessContext.mcp_servers` 非空时启动失败 |
-| system prompt | 有条件 | 需要 custom Cordis composition 读取配置的环境变量 |
+| MCP 启动装配 | 是 | STDIO/HTTP 通过临时 overlay 挂载原生 mcp-client，不支持 IN_PROCESS 或运行中热更新 |
+| system prompt | 是 | 标准 profile 启动时配置原生 system-prompt；保留显式环境变量模式 |
 
-DSH 可在 custom Cordis composition 中静态装配 MCP，但这不是协议层动态 MCP 支持。不要仅凭 DSH
-session id 声明 persistent session/checkpoint capability。
+DSH SDK server 0.1.5rc1 仍只提供 initialize、session/prompt、shutdown。跨 runtime 复用 session ID
+实际返回 `session already exists`（server 只调用 agents.create，没有 resume 路径）。因此不声明
+persistent session/checkpoint，也不把 shutdown/restart 当作 turn abort 或暂停恢复。
 
 `ExternalHarnessMemberRuntime(..., stop_on_unsupported_force_abort=True)` 可在 AgentTeam 请求
 hard-cancel 时停止整个 Harness cycle。这只是 MemberRuntime 兼容策略，不是 DSH turn force-abort，
-也不改变空 capabilities；默认 `False` 会严格拒绝不支持的请求。
+也不增加 FORCE_ABORT capability；默认 `False` 会严格拒绝不支持的请求。
 
 公开 protocol event buffer 是有界 BLOCK 队列，但 DSH SDK 内部 subscription queue 当前仍无界。
 因此本 adapter 只能保证自身公开事件缓冲有界，无法消除上游 SDK 在慢消费者场景中的潜在积压。
@@ -82,9 +83,9 @@ lazy import `deepseek_harness`（发布包名是 `deepseek-harness-sdk`，import
 uv pip install 'openjiuwen[dsh]'
 ```
 
-该 SDK 迄今只发布过预发布版本，因此 extra 的下限写成 `>=0.1.2a3`——PEP 440 要求约束里出现
+该 SDK 迄今只发布过预发布版本，因此 extra 的下限写成 `>=0.1.5rc1`——PEP 440 要求约束里出现
 预发布标识，resolver 才会考虑预发布。它会连带装上同版本的 `deepseek-harness-runtime-bin`
-平台 wheel（覆盖 macOS arm64 / linux x86_64 / linux aarch64 / win amd64）。
+平台 wheel（覆盖 macOS arm64 / x86_64 / linux x86_64 / linux aarch64 / win amd64）。
 
 在 DSH 源码 checkout 中开发时改用可编辑安装：
 
@@ -97,15 +98,27 @@ uv pip install -e /path/to/deepseek-harness/python/sdk
 
 ## System prompt
 
-DSH Python SDK 没有原生 system-prompt 参数。要传入
-`HarnessContext.system_prompt`，必须同时配置：
+DSH Python SDK 没有独立 system-prompt 参数。适配器把 `HarnessContext.system_prompt` 通过
+临时 Cordis plugin 支持 `system_prompt_mode`：
 
-1. `DshHarnessConfig.system_prompt_env_var`；
-2. 一个显式读取该环境变量的 custom Cordis composition。
+- `replace`（默认）：在原生 assembly hook 只替换 `deployment:persona-prefix` 的文本，保留 suffix、
+  identity 及其它 sections。新文本遵循 DSH 的 `{{variable}}` 模板语法。
+- `append`：注册独立的 `openjiuwen:host-instructions` section，排在原生 sections 之后，不覆盖 prefix
+  或 suffix；通过单次变量替换承载文本，宿主内容中的 `{{...}}` 保持字面量。
 
-例如 `system_prompt_env_var="DSH_SYSTEM_PROMPT"` 只负责把值放进 runtime env；如果 Cordis 配置没有
-读取 `process.env.DSH_SYSTEM_PROMPT`，prompt 不会生效。bundled 默认 composition 不应被假定会消费
-这个变量。
+不能通过修改 overlay 的整个 system-prompt.config 对象实现 prefix-only 替换：Cordis 会替换整个配置。
+`append` 与显式 `system_prompt_env_var` 不可同时设置，避免由两条路径重复或含混注入。
+
+同一 overlay 将 `HarnessContext.mcp_servers` 转为 DSH `mcp-client` 配置。stdio 的 argv/env/cwd 和
+HTTP 的 url/headers 均保留；server name 必须唯一且匹配 `[A-Za-z0-9_-]{1,32}`。
+SDK initialize 等待 Loader 全部就绪，MCP 首次连接失败时启动失败，不能悄悄少挂工具。
+
+用户 prompt 和 MCP 凭据仅经子进程环境 JSON 传入；临时 patch 文件只包含固定代码表达式和生成的
+环境变量名，不将用户字符串拼成可执行表达式。临时目录权限隔离，stop/启动失败均清理；不改用户
+home 的模型或 profile 配置。`launch_args_override` 绕过标准 --patch 启动入口，因此不支持自动 overlay。
+
+显式设置 `system_prompt_env_var` 时保留原有 custom Cordis 模式：宿主自己的 composition 负责读取
+该变量，适配器不再覆盖 personaPrefix。
 
 完整程序化示例见
-[`docs/dev/harness_protocol_integration.md`](../../../../docs/dev/harness_protocol_integration.md)。
+[`docs/dev/harness_protocol_integration.md`](../../../docs/dev/harness_protocol_integration.md)。

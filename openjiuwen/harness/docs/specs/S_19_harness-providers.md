@@ -29,7 +29,7 @@
    | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
-   | `dsh` | `deepseek-harness` | （空） | （空） |
+   | `dsh` | `deepseek-harness` | MCP_TOOLS | MCP_SERVERS |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
 3. **SDK 惰性加载**：config / provider / 包 import 不导入 vendor SDK；缺 SDK 在 `start` 抛
@@ -121,3 +121,15 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 `native_v2` 实现在 `agent_teams/harness/protocol_adapter.py`，统一工厂只在显式选择时惰性加载。
 它复用 NativeHarness 的 manifest snapshot 装配和边界停止，支持父上下文/任务状态 checkpoint 冷恢复。
 `native` 的 DeepAgent 实现不变。详情见 team F_97/F_98。
+
+## 系统提示词模式
+
+Codex 和 DSH provider config 新增 `system_prompt_mode: append | replace`，默认 replace 保持兼容。
+Codex append 读取 app-server config/read 的生效 developer_instructions，并优先采用显式
+thread_config.developer_instructions，再追加宿主提示词；每次连接重新从原始配置构造，避免 resume
+或 fallback 重复追加。读取失败则启动失败，不静默降级为替换。replace 直接设置字段；均不修改
+base_instructions。空宿主提示词不覆盖现有字段。
+
+DSH append 注册独立末尾 section，不改变 prefix/suffix，宿主文本按字面量处理；replace 通过
+assembly hook 仅替换 prefix 文本，保留其它 sections（新 prefix 仍遵循原生模板语法）。
+显式 system_prompt_env_var 和 append 冲突时校验失败。见 team F_100。

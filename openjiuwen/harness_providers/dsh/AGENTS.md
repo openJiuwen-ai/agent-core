@@ -8,6 +8,7 @@ DSH SDK 当前源码优先于历史文档；不要根据其它厂商能力推断
 - `config.py`：provider-owned、可验证且不触发 SDK import 的配置。
 - `provider.py`：实现 provider factory，只构造未启动 Harness。
 - `harness.py`：session lifecycle、输入队列、外部 Turn ownership、notification bridge。
+- `composition.py`：临时原生 system-prompt / MCP overlay，用户值仅经环境 JSON 传入。
 - `mapping.py`：DSH notification/RunResult 到公共事件和 `TurnResult` 的纯映射与累积。
 
 lifecycle 状态机、输入队列、有界事件流由上层 `harness_providers/base.py`（`SerializedTurnHarness`）
@@ -34,12 +35,15 @@ coordination 状态机。
    DSH SDK 内部仍无界的 subscription queue，文档和测试不得声称端到端全部有界。
    BLOCK 也会约束 `stop()`：唯一 continuous consumer 必须在 stop 前启动并读取到 EOF。不得通过提前
    close、内部丢弃或隐藏的无界 replay queue 伪造无 consumer 的无阻塞停机。
-5. Card capability 必须对应可验证 SDK 行为。首版 capabilities 为空：不支持 steer、abort、
-   pause/resume、checkpoint/restore 或动态 MCP。
-6. `HarnessContext.mcp_servers` 非空必须明确失败。Cordis 中静态装配 MCP 不等价于动态 MCP
-   capability。
-7. system prompt 只能在 `system_prompt_env_var` 与消费该变量的 custom Cordis composition 同时存在
-   时传递；不要宣称 bundled 默认配置会消费任意环境变量。
+5. Card capability 必须对应可验证 SDK 行为。当前声明 MCP_TOOLS；stdio/HTTP server 在 start 经
+   原生 MCP plugin 挂载，不支持 IN_PROCESS/运行中热更新。首连接失败必须阻止启动。
+6. 0.1.5rc1 SDK server 只提供 initialize/session-prompt/shutdown。跨 runtime 相同 session ID 会报
+   already exists，不能仅凭持久化文件存在声明 CHECKPOINT/PERSISTENT_SESSION。steer/abort/
+   pause/resume/ask-user 仍未对 SDK 暴露，不用 stop/restart 模拟。
+7. system_prompt_mode=replace 默认通过 assembly hook 仅替换原生 prefix section；append
+   注册独立宿主 section，原生 prefix/suffix 保留。不能替换整个 system-prompt.config 对象。显式
+   system_prompt_env_var 模式仍要求 custom composition 消费。overlay 只写固定表达式，用户 prompt、
+   MCP env/headers 放在子进程环境 JSON 中；stop/启动失败清理临时目录，禁止修改用户 home 配置。
 8. `deepseek_harness` 必须在 `start()` 内 lazy import。config/provider/public package import 不得要求
    optional SDK 已安装，也不得在构造期启动进程或绑定 event loop。
 9. SDK config/client、API key、context env、stderr 和原始异常正文不得进入 event、result、checkpoint
@@ -47,7 +51,7 @@ coordination 状态机。
 10. 未识别的 JSON-safe DSH notification 作为 namespaced `ProviderEvent` 保留；不要为追求公共形状而
     静默丢弃 provider 信息。
 11. `stop_on_unsupported_force_abort=True` 属于通用 MemberRuntime 的整 cycle stop 兼容策略，不是
-    DSH FORCE_ABORT capability；默认严格模式与 Card 的空 capabilities 必须保持一致。
+    DSH FORCE_ABORT capability；默认严格模式必须保持一致。
 
 ## 变更要求
 
