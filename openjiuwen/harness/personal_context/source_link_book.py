@@ -46,7 +46,7 @@ def _locator_key(locator: str) -> str:
     if parsed.scheme.casefold() == "file":
         path = unquote(parsed.path)
         if parsed.netloc:
-            path = "//" + parsed.netloc + path
+            path = posixpath.join("//", parsed.netloc, path.lstrip("/"))
         if re.match(r"^/[A-Za-z]:/", path):
             path = path[1:]
         return _locator_key(path)
@@ -135,6 +135,44 @@ def _registered_targets(source_root: Path) -> dict[str, Path | None]:
     return targets
 
 
+def _resolve_page_source_links(
+    text: str,
+    *,
+    page_parent: Path,
+    targets: Mapping[str, Path | None],
+    book: Mapping[str, Mapping[str, str]],
+) -> str:
+    def replace(match: re.Match[str]) -> str:
+        record = book.get(match.group(2))
+        if record is None:
+            raise _error("candidate contains an unregistered source link")
+        target = targets.get(record["resolved_target"])
+        label = _text(record["label"] or record["original_target"])
+        if target is not None:
+            relative = os.path.relpath(target, page_parent)
+            relative = relative.replace("\\", "/")
+            fragment = urlsplit(record["original_target"]).fragment
+            suffix = f"（原文锚点：{_text(fragment)}）" if fragment else ""
+            return f"[{label}](<{relative}>){suffix}"
+        original = record["original_target"]
+        try:
+            parsed = urlsplit(original)
+            if parsed.scheme.casefold() in {"http", "https"} and parsed.hostname:
+                destination = quote(original, safe=":/?#[]@!$&'*,;=%+-._~")
+                return f"[{label}](<{destination}>)"
+        except ValueError:
+            pass
+        return f"{_text(record['label'])}（原文链接：{_text(original)}）"
+
+    def rewrite(prose: str) -> str:
+        rewritten = _LINK.sub(replace, prose)
+        if _TOKEN_PREFIX in rewritten:
+            raise _error("candidate contains a malformed or unregistered source link")
+        return rewritten
+
+    return rewrite_markdown_prose(text, rewrite)
+
+
 def resolve_source_links(
     context_root: Path,
     *,
@@ -147,36 +185,13 @@ def resolve_source_links(
     replacements: dict[Path, str] = {}
     for page in context_root.rglob("*.md"):
         text = page.read_text(encoding="utf-8")
-
-        def replace(match: re.Match[str]) -> str:
-            record = book.get(match.group(2))
-            if record is None:
-                raise _error("candidate contains an unregistered source link")
-            target = targets.get(record["resolved_target"])
-            label = _text(record["label"] or record["original_target"])
-            if target is not None:
-                relative = os.path.relpath(target, (final_context_root / page.relative_to(context_root)).parent)
-                relative = relative.replace("\\", "/")
-                fragment = urlsplit(record["original_target"]).fragment
-                suffix = f"（原文锚点：{_text(fragment)}）" if fragment else ""
-                return f"[{label}](<{relative}>){suffix}"
-            original = record["original_target"]
-            try:
-                parsed = urlsplit(original)
-                if parsed.scheme.casefold() in {"http", "https"} and parsed.hostname:
-                    destination = quote(original, safe=":/?#[]@!$&'*,;=%+-._~")
-                    return f"[{label}](<{destination}>)"
-            except ValueError:
-                pass
-            return f"{_text(record['label'])}（原文链接：{_text(original)}）"
-
-        def rewrite(prose: str) -> str:
-            rewritten = _LINK.sub(replace, prose)
-            if _TOKEN_PREFIX in rewritten:
-                raise _error("candidate contains a malformed or unregistered source link")
-            return rewritten
-
-        result = rewrite_markdown_prose(text, rewrite)
+        page_parent = (final_context_root / page.relative_to(context_root)).parent
+        result = _resolve_page_source_links(
+            text,
+            page_parent=page_parent,
+            targets=targets,
+            book=book,
+        )
         if result != text:
             replacements[page] = result
     for page, text in replacements.items():

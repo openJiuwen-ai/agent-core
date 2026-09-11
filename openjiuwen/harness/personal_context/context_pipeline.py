@@ -6596,11 +6596,14 @@ class ContextPipelineService:
             self._active_completion = _queue_item_completion(item)
             event_task: asyncio.Task[None] | None = None
             try:
-                if isinstance(item, tuple) and len(item) == 5 and isinstance(item[1], str) and isinstance(item[2], str):
-                    self._active_run_key = (
-                        _safe_segment(item[1], name="service_id"),
-                        _safe_segment(item[2], name="run_id"),
-                    )
+                if isinstance(item, tuple) and len(item) == 5:
+                    service_id = item[1]
+                    run_id = item[2]
+                    if isinstance(service_id, str) and isinstance(run_id, str):
+                        self._active_run_key = (
+                            _safe_segment(service_id, name="service_id"),
+                            _safe_segment(run_id, name="run_id"),
+                        )
                 event_task = asyncio.create_task(
                     self._process_queue_item(item),
                     name="personal-context-context-pipeline-event",

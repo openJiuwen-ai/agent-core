@@ -44,12 +44,16 @@ def _link_text(label: str, target: str) -> str:
     return f"{_literal(label)}（原文链接：{_literal(target)}）"
 
 
+def _substring(text: str, start: int, stop: int | None) -> str:
+    return text[start:stop]
+
+
 def _code_end(text: str, start: int) -> int:
     run = re.match(r"`+", text[start:])
     if run is None:
         return start
     length = len(run.group())
-    closing = re.search(rf"(?<!`)`{{{length}}}(?!`)", text[start + length :])
+    closing = re.search(rf"(?<!`)`{{{length}}}(?!`)", _substring(text, start + length, None))
     return start + length + closing.end() if closing else start
 
 
@@ -61,12 +65,17 @@ def _balanced_end(text: str, start: int, opening: str, closing: str) -> int:
         if character == "\\":
             index += 2
             continue
-        if opening == "(" and (character == "<" or (character in "\"'" and text[index - 1].isspace())):
-            delimiter = ">" if character == "<" else character
-            end = text.find(delimiter, index + 1)
-            if end != -1:
-                index = end + 1
-                continue
+        if opening == "(":
+            delimiter: str | None = None
+            if character == "<":
+                delimiter = ">"
+            elif character in "\"'" and text[index - 1].isspace():
+                delimiter = character
+            if delimiter is not None:
+                end = text.find(delimiter, index + 1)
+                if end != -1:
+                    index = end + 1
+                    continue
         if character == opening:
             depth += 1
         elif character == closing:
@@ -80,7 +89,7 @@ def _balanced_end(text: str, start: int, opening: str, closing: str) -> int:
 def _destination(raw: str) -> str:
     value = raw.strip()
     if value.startswith("<") and ">" in value:
-        return value[1 : value.index(">")]
+        return _substring(value, 1, value.index(">"))
     # An optional title is separated from the destination by whitespace.
     return re.split(r'\s+(?=["\'])', value, maxsplit=1)[0].strip()
 
@@ -92,19 +101,19 @@ def _rewrite_link(
     label_end = _balanced_end(text, bracket, "[", "]")
     if label_end == bracket:
         return text[start], start + 1
-    label = text[bracket + 1 : label_end - 1]
+    label = _substring(text, bracket + 1, label_end - 1)
     end = label_end
     target = definitions.get(_label_key(label))
     if text.startswith("(", end):
         destination_end = _balanced_end(text, end, "(", ")")
         if destination_end == end:
             return text[start], start + 1
-        target = _destination(text[end + 1 : destination_end - 1])
+        target = _destination(_substring(text, end + 1, destination_end - 1))
         end = destination_end
     elif text.startswith("[", end):
         reference_end = _balanced_end(text, end, "[", "]")
         if reference_end != end:
-            reference = text[end + 1 : reference_end - 1] or label
+            reference = _substring(text, end + 1, reference_end - 1) or label
             target = definitions.get(_label_key(reference))
             end = reference_end
     if target is None:
@@ -114,7 +123,9 @@ def _rewrite_link(
     if _web_target(target):
         # A web link can contain an image whose destination is still local.
         rewritten_label = _rewrite_inline(label, definitions, render_link)
-        return text[start : bracket + 1] + rewritten_label + text[label_end - 1 : end], end
+        prefix = _substring(text, start, bracket + 1)
+        suffix = _substring(text, label_end - 1, end)
+        return prefix + rewritten_label + suffix, end
     return _link_text(label, target), end
 
 
@@ -125,7 +136,7 @@ def _rewrite_inline(
     index = 0
     while index < len(text):
         if text[index] == "\\":
-            result.append(text[index : index + 2])
+            result.append(_substring(text, index, index + 2))
             index += 2
             continue
         if text[index] == "`":
