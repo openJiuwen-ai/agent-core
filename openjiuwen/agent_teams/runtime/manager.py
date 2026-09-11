@@ -63,7 +63,6 @@ from openjiuwen.agent_teams.runtime.pool import (
     RuntimeState,
     TeamRuntimePool,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.tools.database import DatabaseConfig
 from openjiuwen.agent_teams.worktree.session_cleanup import remove_session_worktrees
@@ -280,8 +279,13 @@ class TeamRuntimeManager:
                 current_status is not None and current_status in TeamRuntimeManager._MEMBER_FINALIZED_STATUSES
             )
 
-            async def _evict_member() -> None:
-                await kv_cache_hooks.evict_member(agent, reason="member-shutdown")
+            async def _release_member_kvc() -> None:
+                harness = getattr(getattr(agent, "resources", None), "harness", None)
+                current_session = getattr(harness, "current_session", None)
+                session = current_session() if callable(current_session) else None
+                release_kvc = getattr(session, "release_kvc", None)
+                if callable(release_kvc):
+                    await release_kvc()
 
             if already_finalized:
                 # External party (leader stop/pause, shutdown_self) already
@@ -291,11 +295,8 @@ class TeamRuntimeManager:
                     member_name,
                     current_status.value if current_status is not None else None,
                 )
-                if (
-                    current_status is MemberStatus.SHUTDOWN
-                    and await kv_cache_hooks.has_manageable_member_binding(agent)
-                ):
-                    await agent.stop_coordination(on_quiesced=_evict_member)
+                if current_status is MemberStatus.SHUTDOWN:
+                    await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 else:
                     await agent.stop_coordination()
                 return
@@ -304,10 +305,7 @@ class TeamRuntimeManager:
                     "finalize_member: shutting down team member {} on request",
                     member_name,
                 )
-                if await kv_cache_hooks.has_manageable_member_binding(agent):
-                    await agent.stop_coordination(on_quiesced=_evict_member)
-                else:
-                    await agent.stop_coordination()
+                await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
                 return
@@ -316,7 +314,6 @@ class TeamRuntimeManager:
                 member_name,
             )
             await agent.pause_coordination()
-            await kv_cache_hooks.mark_ready_resident(agent)
             if member is not None:
                 await member.update_status(MemberStatus.READY)
         except Exception as exc:

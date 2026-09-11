@@ -1,30 +1,17 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Provider-facing identity, lineage, and range metadata for KV-cache management."""
+"""Provider-facing identity, lineage, and range metadata for KVC management."""
 
-from dataclasses import dataclass
 from typing import Any, Sequence, TypeVar
+
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
 
 
 T = TypeVar("T")
 
 KV_CACHE_AFFINITY_SESSION_ID_ENV = "kv_cache_affinity_session_id"
 KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV = "kv_cache_affinity_parent_session_id"
-# Internal marker for a request-scoped tail message that should be evicted
-# after inference. BaseModelClient does not serialize BaseMessage.metadata.
-KV_CACHE_EPHEMERAL_TAIL_METADATA = (
-    "_openjiuwen_kv_cache_ephemeral_tail"
-)
-
-
-@dataclass(frozen=True, slots=True)
-class KVCacheIdentity:
-    """Provider-facing KV cache lineage identity."""
-
-    cache_id: str
-    parent_cache_id: str
-
 
 _CONTEXT_COMPRESSOR_CACHE_SUFFIXES = {
     "RoundLevelCompressor": "round-level",
@@ -44,9 +31,7 @@ def context_compressor_cache_identity(
     try:
         suffix = _CONTEXT_COMPRESSOR_CACHE_SUFFIXES[compressor_type]
     except KeyError as exc:
-        raise ValueError(
-            f"unsupported context compressor type: {compressor_type}"
-        ) from exc
+        raise ValueError(f"unsupported context compressor type: {compressor_type}") from exc
     return KVCacheIdentity(
         cache_id=f"{normalized_owner}:compressor:{suffix}",
         parent_cache_id=normalized_owner,
@@ -84,24 +69,18 @@ def resolve_session_lineage(session: Any) -> tuple[str | None, str | None]:
     if callable(get_cache_identity):
         identity = get_cache_identity()
         cache_id = _normalize_identity(getattr(identity, "cache_id", None))
-        parent_cache_id = _normalize_identity(
-            getattr(identity, "parent_cache_id", None)
-        )
+        parent_cache_id = _normalize_identity(getattr(identity, "parent_cache_id", None))
         if cache_id:
             return cache_id, parent_cache_id or cache_id
     cache_session_id = None
     if hasattr(session, "get_env"):
-        cache_session_id = _normalize_identity(
-            session.get_env(KV_CACHE_AFFINITY_SESSION_ID_ENV)
-        )
+        cache_session_id = _normalize_identity(session.get_env(KV_CACHE_AFFINITY_SESSION_ID_ENV))
     parent_session_id = None
     get_parent_session_id = getattr(session, "get_parent_session_id", None)
     if callable(get_parent_session_id):
         parent_session_id = _normalize_identity(get_parent_session_id())
     if not parent_session_id and hasattr(session, "get_env"):
-        parent_session_id = _normalize_identity(
-            session.get_env(KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV)
-        )
+        parent_session_id = _normalize_identity(session.get_env(KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV))
     resolved_session_id = cache_session_id or session_id
     return resolved_session_id, parent_session_id or resolved_session_id
 
