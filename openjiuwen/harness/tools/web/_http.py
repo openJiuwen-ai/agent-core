@@ -28,7 +28,7 @@ _READ_CHUNK_SIZE = 64 * 1024
 _CONNECT_TIMEOUT_CAP = 10
 
 
-def _make_connector() -> aiohttp.TCPConnector:
+def make_connector() -> aiohttp.TCPConnector:
     """Build a TCP connector honoring the SSL-verify configuration.
 
     ``ssl=True`` uses aiohttp's default verification (equivalent to requests
@@ -46,7 +46,7 @@ async def new_session() -> AsyncIterator[aiohttp.ClientSession]:
     ``trust_env=True`` makes aiohttp honor ``HTTP(S)_PROXY``/``NO_PROXY`` when
     no explicit ``FREE_SEARCH_PROXY_URL`` is set, matching requests' default.
     """
-    async with aiohttp.ClientSession(trust_env=True, connector=_make_connector()) as session:
+    async with aiohttp.ClientSession(trust_env=True, connector=make_connector()) as session:
         yield session
 
 
@@ -172,7 +172,7 @@ async def request(
     except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError):
         if explicit_proxy:
             raise
-        async with aiohttp.ClientSession(trust_env=False, connector=_make_connector()) as fallback:
+        async with aiohttp.ClientSession(trust_env=False, connector=make_connector()) as fallback:
             return await _do_request(
                 fallback,
                 method_up,

@@ -280,6 +280,7 @@ tests/system_tests/config_llm_local.yaml
 /memory/
 /messages/
 /skills/
+/sub_agents/
 /todo/
 
 # context_evolver unit test store, written next to the test
@@ -287,3 +288,8 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 /.codex/
 /.agents/
+
+# TLS key material for the A2UI app server -- self-signed dev cert, private
+# key must never be committed. The .crt is regenerable/public but there's no
+# reason to track it either; both live in certs/ as deploy-time artifacts.
+openjiuwen/harness/a2ui/certs/
