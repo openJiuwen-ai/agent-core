@@ -166,6 +166,15 @@ class PrefixCompactProcessor(ContextProcessor):
         context_max = self._resolve_context_max(context, kwargs)
         absolute_threshold = self._resolve_trigger_token_limit(context_max)
         if total_tokens < absolute_threshold:
+            logger.debug(
+                "[%s not-triggered] reason=below_threshold total_tokens=%s threshold=%s "
+                "context_max=%s trigger_context_ratio=%s",
+                self.processor_type(),
+                total_tokens,
+                absolute_threshold,
+                context_max,
+                getattr(self.config, "trigger_context_ratio", None),
+            )
             self._write_context_debug(
                 context,
                 "threshold_check",
@@ -180,6 +189,14 @@ class PrefixCompactProcessor(ContextProcessor):
 
         span = self._build_span(context_window.context_messages)
         if not span.has_target:
+            logger.debug(
+                "[%s not-triggered] reason=no_compressible_span total_tokens=%s threshold=%s "
+                "context_max=%s",
+                self.processor_type(),
+                total_tokens,
+                absolute_threshold,
+                context_max,
+            )
             self._write_context_debug(
                 context,
                 "threshold_check",
@@ -215,11 +232,19 @@ class PrefixCompactProcessor(ContextProcessor):
             return False
 
         logger.info(
-            "[%s triggered] context tokens %s reached threshold %s of max %s",
+            "[%s triggered] context tokens %s reached threshold %s of max %s "
+            "trigger_context_ratio=%s min_target_context_ratio=%s "
+            "target_tokens=%s min_target_tokens=%s "
+            "keep_recent_messages=%s",
             self.processor_type(),
             total_tokens,
             absolute_threshold,
             context_max,
+            getattr(self.config, "trigger_context_ratio", None),
+            getattr(self.config, "min_target_context_ratio", None),
+            target_tokens,
+            min_target_tokens,
+            getattr(self.config, "keep_recent_messages", None),
         )
         self._write_context_debug(
             context,
@@ -247,6 +272,11 @@ class PrefixCompactProcessor(ContextProcessor):
         original_messages = list(context_window.context_messages)
         span = self._build_span(original_messages)
         if not span.has_target:
+            logger.info(
+                "[%s not-compressed] reason=no_compressible_span messages=%s",
+                self.processor_type(),
+                len(original_messages),
+            )
             return None, context_window
         self._write_context_debug(
             context,
@@ -265,12 +295,22 @@ class PrefixCompactProcessor(ContextProcessor):
             prompt=prompt,
         )
         if invoke_result is None:
+            logger.info(
+                "[%s not-compressed] reason=invoke_no_result",
+                self.processor_type(),
+            )
             return None, context_window
         response, span, request = invoke_result
         self._record_compression_usage(response)
 
-        summary = self._extract_state_snapshot_or_raw(response.content or "")
+        raw_content = response.content or ""
+        summary = self._extract_state_snapshot_or_raw(raw_content)
         if not summary:
+            logger.info(
+                "[%s not-compressed] reason=empty_summary raw_content_chars=%s",
+                self.processor_type(),
+                len(raw_content),
+            )
             return None, context_window
 
         archive = await self._archive_compressed_messages(
@@ -279,7 +319,9 @@ class PrefixCompactProcessor(ContextProcessor):
             span=span,
         )
         memory_message = UserMessage(
-            content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)
+            content=self._wrap_memory_block(
+                summary, memory_id=archive.memory_id if archive is not None else None
+            )
         )
         new_messages = self._build_compacted_messages(
             context=context,
@@ -700,7 +742,17 @@ class PrefixCompactProcessor(ContextProcessor):
     ) -> bool:
         original_tokens = self._count_messages_tokens(original_messages, context)
         new_tokens = self._count_messages_tokens(new_messages, context)
-        return original_tokens <= 0 or new_tokens < original_tokens
+        if not (original_tokens <= 0 or new_tokens < original_tokens):
+            logger.info(
+                "[%s not-compressed] reason=no_token_benefit original_tokens=%s "
+                "new_tokens=%s saved=%s",
+                self.processor_type(),
+                original_tokens,
+                new_tokens,
+                original_tokens - new_tokens,
+            )
+            return False
+        return True
 
     def _count_context_window_tokens(self, context_window: ContextWindow, context: ModelContext) -> int:
         messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])

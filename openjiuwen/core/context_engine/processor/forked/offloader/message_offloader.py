@@ -9,6 +9,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from openjiuwen.core.common.logging import context_engine_logger as logger
+from openjiuwen.core.common.logging import logger as common_logger
 from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.processor.forked.base import ContextEvent, ContextProcessor
@@ -86,6 +87,20 @@ class MessageSummaryOffloader(ContextProcessor):
             content_tokens = self._count_messages_tokens(context, [message])
             if content_tokens > threshold_tokens:
                 triggered = True
+                common_logger.debug(
+                    "[%s add-path triggered] content_tokens=%s threshold_tokens=%s "
+                    "context_max=%s add_message_threshold_ratio=%s message_index=%s "
+                    "content_chars=%s tool_name=%s tool_call_id=%s",
+                    self.processor_type(),
+                    content_tokens,
+                    threshold_tokens,
+                    self._context_max(context),
+                    self._add_message_threshold_ratio(),
+                    index,
+                    len(message.content),
+                    getattr(message, "name", None) or "<unknown>",
+                    getattr(message, "tool_call_id", ""),
+                )
                 self._write_debug_log(
                     context,
                     event="add_message_triggered_offload",
@@ -98,6 +113,14 @@ class MessageSummaryOffloader(ContextProcessor):
                     original_content=message.content,
                 )
             else:
+                common_logger.debug(
+                    "[%s add-path not-triggered] content_tokens=%s threshold_tokens=%s "
+                    "reason=message_below_threshold tool_name=%s",
+                    self.processor_type(),
+                    content_tokens,
+                    threshold_tokens,
+                    getattr(message, "name", None) or "<unknown>",
+                )
                 self._write_debug_log(
                     context,
                     event="threshold_check",
@@ -140,6 +163,12 @@ class MessageSummaryOffloader(ContextProcessor):
 
         if event.messages_to_modify:
             return event, processed
+        common_logger.info(
+            "[%s add-path noop] messages_added=%s processed=0 "
+            "reason=no_message_modified",
+            self.processor_type(),
+            len(messages_to_add),
+        )
         return None, processed
 
     async def _process_added_message(
@@ -151,9 +180,26 @@ class MessageSummaryOffloader(ContextProcessor):
         max_chars: int,
         **kwargs: Any,
     ) -> BaseMessage:
+        message_tokens = self._count_messages_tokens(context, [message])
         if not self._is_processable_tool_message(message, context_messages):
+            common_logger.info(
+                "[%s add-path not-compressed] reason=protected_or_not_processable "
+                "tool_name=%s tool_call_id=%s content_tokens=%s",
+                self.processor_type(),
+                getattr(message, "name", None) or "<unknown>",
+                getattr(message, "tool_call_id", ""),
+                message_tokens,
+            )
             return message
-        if self._count_messages_tokens(context, [message]) <= threshold_tokens:
+        if message_tokens <= threshold_tokens:
+            common_logger.info(
+                "[%s add-path skipped] reason=message_below_threshold "
+                "content_tokens=%s threshold_tokens=%s tool_name=%s",
+                self.processor_type(),
+                message_tokens,
+                threshold_tokens,
+                getattr(message, "name", None) or "<unknown>",
+            )
             return message
 
         if self._should_try_rule_compression():
@@ -202,6 +248,13 @@ class MessageSummaryOffloader(ContextProcessor):
                 original_message=message,
                 **kwargs,
             )
+        common_logger.info(
+            "[%s add-path not-compressed] reason=rule_no_benefit_no_fallback "
+            "tool_name=%s content_tokens=%s",
+            self.processor_type(),
+            getattr(message, "name", None) or "<unknown>",
+            message_tokens,
+        )
         return message
 
     async def _finalize_rule_compressed_message(
@@ -250,12 +303,56 @@ class MessageSummaryOffloader(ContextProcessor):
         previous_access = context.last_context_window_access_at()
         context.set_last_context_window_access_at(now)
         if self.config.ttl_seconds <= 0:
+            common_logger.debug(
+                "[%s ttl-path not-triggered] reason=ttl_disabled ttl_seconds=%s",
+                self.processor_type(),
+                self.config.ttl_seconds,
+            )
             return False
         if previous_access is None:
+            common_logger.debug(
+                "[%s ttl-path not-triggered] reason=no_previous_access ttl_seconds=%s",
+                self.processor_type(),
+                self.config.ttl_seconds,
+            )
             return False
-        if now - previous_access < self.config.ttl_seconds:
+        elapsed = now - previous_access
+        if elapsed < self.config.ttl_seconds:
+            common_logger.debug(
+                "[%s ttl-path not-triggered] reason=idle_not_expired elapsed=%.1fs "
+                "ttl_seconds=%s",
+                self.processor_type(),
+                elapsed,
+                self.config.ttl_seconds,
+            )
             return False
-        return self._context_occupancy_tokens(context) >= self._ttl_occupancy_token_threshold(context)
+        occupancy_tokens = self._context_occupancy_tokens(context)
+        occupancy_threshold = self._ttl_occupancy_token_threshold(context)
+        triggered = occupancy_tokens >= occupancy_threshold
+        if not triggered:
+            common_logger.debug(
+                "[%s ttl-path not-triggered] reason=occupancy_below_threshold "
+                "occupancy_tokens=%s occupancy_threshold=%s "
+                "ttl_context_occupancy_ratio=%s",
+                self.processor_type(),
+                occupancy_tokens,
+                occupancy_threshold,
+                self._ttl_context_occupancy_ratio(),
+            )
+            return False
+        common_logger.debug(
+            "[%s ttl-path triggered] elapsed=%.1fs ttl_seconds=%s "
+            "occupancy_tokens=%s occupancy_threshold=%s "
+            "ttl_context_occupancy_ratio=%s ttl_message_threshold_ratio=%s",
+            self.processor_type(),
+            elapsed,
+            self.config.ttl_seconds,
+            occupancy_tokens,
+            occupancy_threshold,
+            self._ttl_context_occupancy_ratio(),
+            self._ttl_message_threshold_ratio(),
+        )
+        return True
 
     async def on_get_context_window(
         self,
@@ -269,10 +366,22 @@ class MessageSummaryOffloader(ContextProcessor):
         ttl_message_threshold_tokens = self._ttl_message_token_threshold(context)
         ttl_max_chars = self._ttl_message_max_chars(context)
 
+        skipped_below_threshold = 0
         for index, message in enumerate(processed):
             if not self._is_processable_tool_message(message, processed):
                 continue
-            if self._count_messages_tokens(context, [message]) <= ttl_message_threshold_tokens:
+            message_tokens = self._count_messages_tokens(context, [message])
+            if message_tokens <= ttl_message_threshold_tokens:
+                skipped_below_threshold += 1
+                common_logger.info(
+                    "[%s ttl-path skipped] reason=message_below_threshold "
+                    "message_index=%s tokens=%s threshold=%s tool_name=%s",
+                    self.processor_type(),
+                    index,
+                    message_tokens,
+                    ttl_message_threshold_tokens,
+                    getattr(message, "name", None) or "<unknown>",
+                )
                 continue
             replacement = await self._process_ttl_message(
                 message,
@@ -290,6 +399,15 @@ class MessageSummaryOffloader(ContextProcessor):
             context.set_messages(processed)
             self._replace_window_messages(context_window, processed)
             return event, context_window
+        common_logger.info(
+            "[%s ttl-path noop] total_messages=%s processed=0 "
+            "skipped_below_threshold=%s ttl_message_threshold_tokens=%s "
+            "reason=no_message_above_threshold",
+            self.processor_type(),
+            len(processed),
+            skipped_below_threshold,
+            ttl_message_threshold_tokens,
+        )
         return None, context_window
 
     async def _process_ttl_message(
