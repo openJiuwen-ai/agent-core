@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, AsyncIterator, cast
 
+from openjiuwen.agent_teams.harness.checkpoint import NativeCheckpoint, SavedInput, encode_contexts
 from openjiuwen.agent_teams.harness.native_harness import NativeHarness
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
@@ -18,10 +19,21 @@ from openjiuwen.harness.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.harness.schema.extension_spec import AgentTemplateSpec
 from openjiuwen.harness_protocol import (
     AbortMode,
+    CheckpointReason,
+    ContentBlock,
+    DeliveryMode,
+    HarnessCheckpoint,
+    MessageRole,
+    ResumePolicy,
+    TurnMessage,
+    SendReceipt,
+    UnsupportedHarnessCapabilityError,
+    json_value_to_builtin,
     HarnessCapability,
     HarnessCard,
     HarnessContext,
     HarnessInput,
+    JsonObject,
     HarnessProtocolError,
     HarnessState,
     HarnessStateError,
@@ -31,7 +43,9 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
 )
-from openjiuwen.harness_providers.base import PendingTurn
+from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, logger
+from openjiuwen.harness.schema.state import DeepAgentState
+from openjiuwen.harness_providers.jsonsafe import to_json_safe
 from openjiuwen.harness_providers.factory import load_manifest
 from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.native.harness import (
@@ -54,15 +68,17 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
     """
 
     card = HarnessCard(
-        name="native-harness",
-        implementation_version="0.1.0",
+        name="native_v2",
+        implementation_version="0.2.0",
         capabilities=frozenset({
             HarnessCapability.STEER,
             HarnessCapability.FORCE_ABORT,
             HarnessCapability.GRACEFUL_ABORT,
             HarnessCapability.PAUSE_RESUME,
+            HarnessCapability.CHECKPOINT,
+            HarnessCapability.PERSISTENT_SESSION,
         }),
-        optional_host_capabilities=frozenset({HostCapability.USER_INPUT}),
+        optional_host_capabilities=frozenset({HostCapability.USER_INPUT, HostCapability.CHECKPOINT_SINK}),
     )
 
     def __init__(
@@ -79,6 +95,10 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
             build_context: Runtime dependencies passed to NativeHarness unchanged.
             event_buffer_capacity: Capacity of the protocol observation buffer.
         """
+        self._cold_restore: NativeCheckpoint | None = None
+        self._cold_turn: NativeCheckpoint | None = None
+        self._current_output_state: _TurnState | None = None
+        self._checkpoint_lock = asyncio.Lock()
         self._spec = agent_spec.model_copy(deep=True)
         self._build_context = build_context
         self._dispatched = asyncio.Event()
@@ -99,11 +119,59 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         """Return the native instance for this start/stop cycle."""
         return cast(NativeHarness | None, self._agent)
 
+    def _checkpoint_cwd(self, context: HarnessContext) -> str:
+        workspace = self._spec.workspace
+        root = context.cwd or self._spec.cwd or (workspace.root_path if workspace else ".")
+        return str(Path(root).expanduser().resolve())
+
+    def _validate_context(self, context: HarnessContext) -> None:
+        SerializedTurnHarness._validate_context(self, context)
+        if context.mcp_servers:
+            raise UnsupportedHarnessCapabilityError("declare native MCP servers in the manifest")
+        if context.resume_policy is ResumePolicy.REQUIRE_RESUME and context.checkpoint is None:
+            raise HarnessProtocolError("NativeHarness requires a checkpoint to resume")
+        checkpoint = context.checkpoint
+        if checkpoint is not None and context.resume_policy is not ResumePolicy.NEW:
+            if checkpoint.schema_version != "1":
+                raise HarnessProtocolError("unsupported native checkpoint version")
+            if checkpoint.provider != self.card.name or checkpoint.agent_id != context.agent_id or checkpoint.host_session_id != context.host_session_id:
+                raise HarnessProtocolError("native checkpoint scope does not match the context")
+            try:
+                snapshot = NativeCheckpoint.model_validate(json_value_to_builtin(checkpoint.data))
+                snapshot.decode_contexts()
+                if snapshot.session_id != f"{context.host_session_id}:{context.agent_id}":
+                    raise ValueError("native session id changed")
+                if snapshot.paused_input is None and snapshot.queued:
+                    raise ValueError("idle snapshot must not contain queued turns")
+                self._restore_output_state(_TurnState("validate"), snapshot.output_state)
+                DeepAgentState.from_session_dict(snapshot.deepagent)
+                if snapshot.paused_input is not None and snapshot.paused_query is None:
+                    raise ValueError("paused checkpoint requires its original query")
+                ids = [item.turn_id for item in snapshot.queued]
+                if snapshot.paused_input is not None:
+                    ids.append(snapshot.paused_input.turn_id)
+                if len(set(ids)) != len(ids):
+                    raise ValueError("duplicate checkpoint turn ids")
+                expected_card = self._spec.card
+                if expected_card is not None and snapshot.card_id != expected_card.id:
+                    raise ValueError("native agent card changed")
+                if snapshot.cwd != self._checkpoint_cwd(context):
+                    raise ValueError("native working directory changed")
+            except (ValueError, TypeError, KeyError) as exc:
+                raise HarnessProtocolError("invalid native checkpoint") from exc
+
     async def _open_session(self, context: HarnessContext) -> str:
         self._dispatched.clear()
         self._dispatched_turn_id = None
         self._paused_observed.clear()
         self._resumed_observed.clear()
+        self._cold_restore = None
+        self._cold_turn = None
+        self._current_output_state = None
+        restored = None
+        if context.checkpoint is not None and context.resume_policy is not ResumePolicy.NEW:
+            data = self._restored_checkpoint_data(context)
+            restored = NativeCheckpoint.model_validate(json_value_to_builtin(data))
         agent = self._build_native(context)
         # Assign resources before awaits so failed starts are rolled back.
         self._agent = agent
@@ -114,11 +182,24 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         session = create_agent_session(session_id=session_id, card=agent.card)
         self._agent_session = session
         await session.pre_run(inputs={})
+        session.update_state({"context": None, "deepagent": None})
+        if restored is not None:
+            session.update_state({"context": restored.decode_contexts()})
+            agent.save_state(session, DeepAgentState.from_session_dict(restored.deepagent))
+            self._latest_checkpoint = context.checkpoint
+            if restored.paused_input is not None:
+                self._cold_restore = restored
         await agent.subscribe(on_state=self._on_native_state, on_round=self._on_native_round)
         # NativeHarness.start owns _prepare, including manifest loading.
         await agent.start(session=session)
+        if restored is not None:
+            agent.loop_coordinator.load_state(restored.deepagent.get("stop_condition_state"))
         self._native_outputs = agent.outputs()
         return session_id
+
+    async def _close_session(self) -> None:
+        async with self._checkpoint_lock:
+            await super()._close_session()
 
     async def _on_native_state(self, *, new: HarnessState) -> None:
         if self.active_turn is not None:
@@ -137,10 +218,19 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
 
     async def _run_round(self, agent: NativeHarness, turn: PendingTurn, state: _TurnState, query: Any) -> None:
         self._dispatched.clear()
+        self._current_output_state = state
         try:
             if turn.abort_requested:
                 return
-            await agent.send(query)
+            cold = self._cold_turn
+            if cold is not None and cold.paused_input.turn_id == turn.turn_id:
+                self._cold_turn = None
+                self._restore_output_state(state, cold.output_state)
+                await self._transition(HarnessState.PAUSED)
+                await self._emit(TurnLifecycleEvent(kind=TurnEventKind.PAUSED), turn=turn)
+                await agent.resume(query=cold.paused_query)
+            else:
+                await agent.send(query)
             self._dispatched_turn_id = turn.turn_id
             self._dispatched.set()
             outputs = self._native_outputs
@@ -163,6 +253,10 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
                     self._resumed_observed.clear()
                     await self._transition(HarnessState.PAUSED)
                     await self._emit(TurnLifecycleEvent(kind=TurnEventKind.PAUSED), turn=turn)
+                    try:
+                        await self.export_checkpoint()
+                    except Exception:
+                        logger.exception("[native-harness] checkpoint capture failed at pause")
                     self._paused_observed.set()
                 elif phase == HarnessState.RUNNING.value:
                     was_paused = self.state is HarnessState.PAUSED
@@ -172,6 +266,11 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
                         await self._emit(TurnLifecycleEvent(kind=TurnEventKind.RESUMED), turn=turn)
                         self._resumed_observed.set()
                 elif phase == HarnessState.IDLE.value:
+                    if not self._pending and not turn.stop_requested:
+                        try:
+                            await self._capture_checkpoint(paused=False)
+                        except Exception:
+                            logger.exception("[native-harness] checkpoint capture failed at turn end")
                     return
             if not turn.abort_requested:
                 raise HarnessProtocolError("NativeHarness output closed before reaching IDLE")
@@ -208,7 +307,8 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         agent = await self._ready_native(turn)
-        await agent.abort(immediate=mode is AbortMode.FORCE)
+        async with self._checkpoint_lock:
+            await agent.abort(immediate=mode is AbortMode.FORCE)
 
     async def pause(self) -> None:
         """Wait for NativeHarness to park at an inner iteration boundary."""
@@ -221,15 +321,93 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         if agent.state is HarnessState.PAUSED:
             await self._paused_observed.wait()
 
+    async def send(self, content: HarnessInput, *, mode: DeliveryMode = DeliveryMode.AUTO) -> SendReceipt:
+        if self._cold_restore is not None:
+            raise HarnessStateError("resume the restored paused turn before sending new input")
+        return await super().send(content, mode=mode)
+
     async def resume(self, *, query: HarnessInput | None = None) -> None:
-        """Continue the paused protocol Turn without adding a user input."""
+        """Resume warm state or a paused Turn restored from a checkpoint."""
         self._require_accepting()
+        async with self._command_lock:
+            restored = self._cold_restore
+            if restored is not None:
+                if query is not None and harness_input_text(query) != restored.paused_query:
+                    raise HarnessStateError("resume query does not match the checkpoint")
+                self._cold_restore = None
+                self._cold_turn = restored
+                self._pending.extend([restored.paused_input.restore(), *(item.restore() for item in restored.queued)])
+                self._supervisor_task = asyncio.create_task(self._supervise_turns(), name="native_protocol_cold_resume")
+                self._supervisor_task.add_done_callback(self._clear_supervisor_task)
+                return
         if query is not None:
-            raise HarnessStateError("cold resume requires a restored session; protocol checkpoints are unsupported")
+            raise HarnessStateError("cold resume requires a paused checkpoint")
         agent = self.native_harness
         if agent is not None and agent.state is HarnessState.PAUSED:
-            await agent.resume()
+            async with self._checkpoint_lock:
+                await agent.resume()
             await self._resumed_observed.wait()
+
+    async def export_checkpoint(self) -> HarnessCheckpoint | None:
+        """Capture a paused/idle boundary; never snapshot executing tools."""
+        if self._cold_restore is not None or not self._cycle_started:
+            return self._latest_checkpoint
+        agent = self.native_harness
+        if agent is None:
+            return self._latest_checkpoint
+        if self.state not in {HarnessState.IDLE, HarnessState.PAUSED} or (self.state is HarnessState.IDLE and self._pending):
+            raise HarnessStateError("pause the native turn before exporting its checkpoint")
+        return await self._capture_checkpoint(paused=self.state is HarnessState.PAUSED)
+
+    async def _capture_checkpoint(self, *, paused: bool) -> HarnessCheckpoint:
+        async with self._checkpoint_lock:
+            agent = self.native_harness
+            session = self._agent_session
+            if agent is None or session is None:
+                raise HarnessStateError("native session is unavailable")
+            if agent.state not in {HarnessState.IDLE, HarnessState.PAUSED}:
+                raise HarnessStateError("native session left the checkpoint boundary")
+            if any(record.status == "running" for record in agent.async_tool_runtime.registry.values()):
+                raise HarnessStateError("wait for native background tools before checkpointing")
+            contexts = await agent.react_agent.context_engine.save_contexts(session)
+            state = agent.load_state(session)
+            deepagent = state.to_session_dict()
+            deepagent["stop_condition_state"] = agent.loop_coordinator.get_state()
+            if self._current_output_state is not None and self._current_output_state.pending_interrupts:
+                raise HarnessStateError("resolve pending user interactions before checkpointing")
+            active = self.active_turn if paused else None
+            if paused and (active is None or agent.paused_query is None):
+                raise HarnessStateError("paused native turn has no resumable query")
+            snapshot = NativeCheckpoint(
+                session_id=session.get_session_id(), card_id=agent.card.id,
+                cwd=self._checkpoint_cwd(self.context),
+                contexts=encode_contexts(contexts or {}), deepagent=deepagent,
+                paused_input=SavedInput.capture(active) if active is not None else None,
+                paused_query=agent.paused_query if paused else None,
+                queued=[SavedInput.capture(item) for item in self._pending] if paused else [],
+                output_state=self._save_output_state() if paused else {},
+            )
+            return await self._publish_checkpoint(snapshot.model_dump(mode="json"),
+                reason=CheckpointReason.STATE_CHANGED if paused else CheckpointReason.TURN_COMPLETED)
+
+    def _save_output_state(self) -> dict[str, Any]:
+        state = self._current_output_state
+        if state is None:
+            return {}
+        return {name: to_json_safe(getattr(state, name)) for name in (
+            "answer_parts", "reasoning_parts", "final_output", "result_type", "tool_blocks", "tool_messages",
+        )}
+
+    @staticmethod
+    def _restore_output_state(state: _TurnState, values: dict[str, Any]) -> None:
+        state.answer_parts = list(values.get("answer_parts", []))
+        state.reasoning_parts = list(values.get("reasoning_parts", []))
+        state.final_output = values.get("final_output")
+        state.result_type = values.get("result_type")
+        state.tool_blocks = [ContentBlock(**item) for item in values.get("tool_blocks", [])]
+        state.tool_messages = [TurnMessage(message_id=item["message_id"], role=MessageRole(item["role"]),
+            content=tuple(ContentBlock(**block) for block in item["content"]), data=item["data"])
+            for item in values.get("tool_messages", [])]
 
 
 def create_native_harness_protocol(
@@ -261,4 +439,36 @@ def create_native_harness_protocol(
     )
 
 
-__all__ = ["NativeHarnessProtocolAdapter", "create_native_harness_protocol"]
+class NativeV2HarnessProvider:
+    """Build the NativeHarness adapter through the common provider factory."""
+
+    @property
+    def card(self) -> HarnessCard:
+        return NativeHarnessProtocolAdapter.card
+
+    @staticmethod
+    def create(config: JsonObject) -> NativeHarnessProtocolAdapter:
+        values = json_value_to_builtin(config)
+        if not isinstance(values, dict):
+            raise TypeError("native_v2 configuration must be an object")
+        unknown = set(values) - {"deep_agent", "agent_template", "language", "event_buffer_capacity"}
+        if unknown:
+            raise ValueError(f"unknown native_v2 configuration fields: {', '.join(sorted(unknown))}")
+        spec = DeepAgentSpec.model_validate(values.get("deep_agent") or {})
+        language = values.get("language")
+        if language is not None:
+            spec = DeepAgentSpec.model_validate({**spec.model_dump(), "language": language})
+        capacity = values.get("event_buffer_capacity", 1024)
+        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+            raise ValueError("event_buffer_capacity must be a positive integer")
+        template = values.get("agent_template")
+        if template is None:
+            return NativeHarnessProtocolAdapter(spec, event_buffer_capacity=capacity)
+        return create_native_harness_protocol(
+            AgentTemplateSpec.model_validate(template),
+            agent_spec=spec,
+            event_buffer_capacity=capacity,
+        )
+
+
+__all__ = ["NativeHarnessProtocolAdapter", "NativeV2HarnessProvider", "create_native_harness_protocol"]

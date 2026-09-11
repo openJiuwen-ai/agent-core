@@ -31,8 +31,8 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
 )
 
-HarnessProviderName = Literal["native", "claudecode", "codex", "dsh"]
-PROVIDER_NAMES: tuple[HarnessProviderName, ...] = ("native", "claudecode", "codex", "dsh")
+HarnessProviderName = Literal["native", "native_v2", "claudecode", "codex", "dsh"]
+PROVIDER_NAMES: tuple[HarnessProviderName, ...] = ("native", "native_v2", "claudecode", "codex", "dsh")
 # Manifest sections only the in-process DeepAgent can materialize.
 _DEEP_AGENT_ONLY_SECTIONS = ("tools", "rails", "subagents", "skills")
 
@@ -44,6 +44,10 @@ def resolve_provider(provider: str) -> HarnessProvider:
         from openjiuwen.harness_providers.native import NativeHarnessProvider
 
         return NativeHarnessProvider()
+    if provider == "native_v2":
+        from openjiuwen.agent_teams.harness.protocol_adapter import NativeV2HarnessProvider
+
+        return NativeV2HarnessProvider()
     if provider == "claudecode":
         from openjiuwen.harness_providers.claudecode import ClaudeCodeHarnessProvider
 
@@ -113,7 +117,7 @@ def manifest_provider_config(
     """
 
     values: dict[str, Any] = dict(config or {})
-    if provider == "native":
+    if provider in {"native", "native_v2"}:
         values.setdefault("agent_template", manifest.model_dump(mode="json"))
         if language is not None:
             values.setdefault("language", language)
@@ -162,7 +166,7 @@ def create_harness(
 
     Args:
         manifest: An ``AgentTemplateSpec`` or a path to its package.
-        provider: One of ``native`` / ``claudecode`` / ``codex`` / ``dsh``.
+        provider: One of ``native`` / ``native_v2`` / ``claudecode`` / ``codex`` / ``dsh``.
         config: Provider-specific overrides merged over the manifest-derived
             configuration (see :func:`manifest_provider_config`).
         language: Language used to render manifest prompt sections.
@@ -200,7 +204,7 @@ def build_harness_context(
 ) -> HarnessContext:
     """Build the start context carrying the manifest's prompt and MCP servers.
 
-    For ``native`` the template itself is loaded by the harness, so only
+    For ``native`` / ``native_v2`` the template itself is loaded by the harness, so only
     ``extra_system_prompt`` reaches the context; for third-party providers
     the persona prompt sections are rendered into ``system_prompt`` and the
     manifest MCP servers become ``mcp_servers``.
@@ -210,7 +214,7 @@ def build_harness_context(
     card = template.agent_card
     prompt_parts: list[str] = []
     mcp_servers: tuple[McpServerConfig, ...] = ()
-    if provider != "native":
+    if provider not in {"native", "native_v2"}:
         rendered = render_agent_template_system_prompt(template, language=language)
         if rendered:
             prompt_parts.append(rendered)

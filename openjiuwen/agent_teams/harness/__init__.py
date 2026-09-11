@@ -15,6 +15,7 @@ __all__ = [
     "HarnessState",
     "NativeHarness",
     "NativeHarnessProtocolAdapter",
+    "NativeV2HarnessProvider",
     "create_native_harness_protocol",
     "TeamHarness",
 ]
@@ -22,7 +23,7 @@ __all__ = [
 
 def __getattr__(name: str) -> Any:
     """Load the optional public-protocol adapter without import cycles."""
-    if name in {"NativeHarnessProtocolAdapter", "create_native_harness_protocol"}:
+    if name in {"NativeHarnessProtocolAdapter", "NativeV2HarnessProvider", "create_native_harness_protocol"}:
         from openjiuwen.agent_teams.harness import protocol_adapter
 
         return getattr(protocol_adapter, name)

@@ -260,6 +260,21 @@ class CodexHarness(SerializedTurnHarness):
         timing = TurnTiming()
         text = harness_input_text(turn.content)
         accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
+        # A failed rollback leaves no usable client. Retry only when a new
+        # accepted input arrives; never replay a failed turn in the background.
+        if self._client is None and not turn.abort_requested:
+            try:
+                await self._connect(self._context, model=self._active_model, resume_thread_id=self._thread_id)
+            except Exception as exc:
+                self._pending_steers.clear()
+                if turn.abort_requested:
+                    return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
+                error = exc.error if isinstance(exc, ProviderStartupError) else classify_codex_exception(exc)
+                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        if turn.abort_requested:
+            self._pending_steers.clear()
+            await self._close_session()
+            return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
         for _attempt in range(2):
             idle_retries = 0
             try:

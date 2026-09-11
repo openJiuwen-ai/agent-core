@@ -239,6 +239,19 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         timing = TurnTiming()
         accumulator = ClaudeTurnAccumulator(turn_id=turn.turn_id, sdk=self._sdk)
         text = harness_input_text(turn.content)
+        # A failed rollback leaves no usable client. Retry only when a new
+        # accepted input arrives; never replay a failed turn in the background.
+        if self._client is None and not turn.abort_requested:
+            try:
+                self._client = await self._connect(self._context, model=self._active_model, resume=self._claude_session_id, session_id=None)
+            except Exception as exc:
+                if turn.abort_requested:
+                    return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
+                error = exc.error if isinstance(exc, ProviderStartupError) else classify_claude_exception(exc, phase="startup")
+                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+        if turn.abort_requested:
+            await self._close_session()
+            return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
         for _attempt in range(2):
             client = self._client
             if client is None:
