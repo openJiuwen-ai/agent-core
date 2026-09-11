@@ -13,8 +13,12 @@ from typing import Any, Protocol
 from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
 from openjiuwen.core.common.logging import logger
+from openjiuwen.extensions.observability.content_addressing import (
+    AddressedSequence,
+    sequence_reference,
+)
 from openjiuwen.extensions.observability.otlp_codec import (
-    encode_span_to_otlp_json,
+    encode_span_with_addressed_sequences,
     snapshot_readable_span,
 )
 from openjiuwen.extensions.observability.semconv import (
@@ -47,23 +51,52 @@ class _LazyOtlpPayload:
     copy taken by ``snapshot_readable_span`` for a still-recording one.
     """
 
-    __slots__ = ("_encoded", "_lock", "_span")
+    __slots__ = ("_encoded", "_lock", "_sequences", "_span")
 
     def __init__(self, span: ReadableSpan) -> None:
         self._span = span
         self._encoded: bytes | None = None
+        self._sequences: tuple[AddressedSequence, ...] = ()
         self._lock = threading.Lock()
+
+    def _encode_once(self) -> None:
+        if self._encoded is not None:
+            return
+        with self._lock:
+            if self._encoded is None:
+                encoded, sequences = encode_span_with_addressed_sequences(self._span)
+                self._sequences = sequences
+                self._encoded = encoded
 
     @property
     def raw_json(self) -> bytes:
-        """Return the OTLP JSON bytes, encoding them once on first access."""
-        encoded = self._encoded
-        if encoded is not None:
-            return encoded
-        with self._lock:
-            if self._encoded is None:
-                self._encoded = encode_span_to_otlp_json(self._span)
-            return self._encoded
+        """Return the OTLP JSON bytes, encoding them once on first access.
+
+        The restated GenAI attributes carry references rather than their own
+        content; :attr:`sequences` states what they refer to.
+        """
+        self._encode_once()
+        assert self._encoded is not None
+        return self._encoded
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the sequences this payload references, encoding if needed."""
+        self._encode_once()
+        return self._sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return what the payload measures once its references are rebuilt.
+
+        A reader is budgeted by what it receives, and it receives the rebuilt
+        span. Measuring the reference-carrying bytes instead would let a page
+        promise four megabytes and deliver far more.
+        """
+        self._encode_once()
+        assert self._encoded is not None
+        referenced = sum(len(sequence_reference(s.seq_hash, s.depth)) for s in self._sequences)
+        return len(self._encoded) - referenced + sum(s.logical_bytes for s in self._sequences)
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,8 +127,18 @@ class OtlpSpanRecord:
 
     @property
     def raw_json(self) -> bytes:
-        """Return the complete single-span OTLP request bytes."""
+        """Return the single-span OTLP request bytes, carrying references."""
         return self.payload.raw_json
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the content-addressed sequences this record references."""
+        return self.payload.sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return the size of this record once its references are rebuilt."""
+        return self.payload.logical_size_bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,8 +169,18 @@ class OtlpSpanSnapshotRecord:
 
     @property
     def raw_json(self) -> bytes:
-        """Return the OTLP-shaped bytes of this recording-span snapshot."""
+        """Return the OTLP-shaped bytes, carrying sequence references."""
         return self.payload.raw_json
+
+    @property
+    def sequences(self) -> tuple[AddressedSequence, ...]:
+        """Return the content-addressed sequences this snapshot references."""
+        return self.payload.sequences
+
+    @property
+    def logical_size_bytes(self) -> int:
+        """Return the size of this snapshot once its references are rebuilt."""
+        return self.payload.logical_size_bytes
 
 
 @dataclass(frozen=True, slots=True)

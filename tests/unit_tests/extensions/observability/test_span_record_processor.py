@@ -133,11 +133,15 @@ def test_no_consumer_skips_encoding(monkeypatch) -> None:
 
     processor = SpanRecordProcessor()
 
-    def fail_encoding(span) -> bytes:
+    def fail_encoding(span):
         del span
         raise AssertionError("encoder should not be called")
 
-    monkeypatch.setattr(processor_module, "encode_span_to_otlp_json", fail_encoding)
+    monkeypatch.setattr(
+        processor_module,
+        "encode_span_with_addressed_sequences",
+        fail_encoding,
+    )
     processor.on_end(_finished_child_span())
 
 
@@ -233,13 +237,17 @@ def test_delivery_defers_encoding_until_the_payload_is_read(monkeypatch) -> None
     import openjiuwen.extensions.observability.span_record_processor as processor_module
 
     encode_calls: list[ReadableSpan] = []
-    original_encoder = processor_module.encode_span_to_otlp_json
+    original_encoder = processor_module.encode_span_with_addressed_sequences
 
-    def counting_encoder(span: ReadableSpan) -> bytes:
+    def counting_encoder(span: ReadableSpan):
         encode_calls.append(span)
         return original_encoder(span)
 
-    monkeypatch.setattr(processor_module, "encode_span_to_otlp_json", counting_encoder)
+    monkeypatch.setattr(
+        processor_module,
+        "encode_span_with_addressed_sequences",
+        counting_encoder,
+    )
     processor = SpanRecordProcessor()
     consumer = _Consumer()
     processor.register_consumer(consumer)

@@ -14,6 +14,19 @@ from google.protobuf import json_format
 from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
 from opentelemetry.sdk.trace import ReadableSpan
 
+from openjiuwen.extensions.observability.content_addressing import (
+    AddressedSequence,
+    addressable_attributes,
+    build_sequence,
+    sequence_reference,
+)
+from openjiuwen.extensions.observability.gen_ai_semconv import (
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_DEFINITIONS,
+)
+
 
 _HEX_ID_KEYS = frozenset({"traceId", "spanId", "parentSpanId"})
 
@@ -54,6 +67,54 @@ def encode_span_to_otlp_json(span: ReadableSpan) -> bytes:
     existing JSONL exporter and consumable by the trajectory data plane.
     """
     return _encode_readable_span(span)
+
+
+# The attributes a conversation restates on every call. Each is a sequence:
+# an array is its own, and a scalar is a sequence of one, so the storage path
+# never branches on which shape an attribute happens to carry.
+ADDRESSED_ATTRIBUTE_KEYS = frozenset({
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_DEFINITIONS,
+})
+
+
+def encode_span_with_addressed_sequences(
+    span: ReadableSpan,
+) -> tuple[bytes, tuple[AddressedSequence, ...]]:
+    """Encode one span with its restated attributes replaced by references.
+
+    The exporter path keeps receiving the complete span; this is the storage
+    path, which has no obligation to repeat what it already holds. The encode
+    already builds a decoded document, so addressing costs one pass over its
+    attributes rather than a second parse downstream.
+
+    Args:
+        span: The frozen span to encode.
+
+    Returns:
+        The OTLP JSON carrying references, and every sequence it referenced.
+        A reader needs those sequences to rebuild the span.
+    """
+    request = encode_spans([span])
+    payload = json_format.MessageToDict(request, use_integers_for_enums=True)
+    _fix_hex_ids(payload)
+    sequences: list[AddressedSequence] = []
+    for attribute in addressable_attributes(payload, ADDRESSED_ATTRIBUTE_KEYS):
+        value = attribute.get("value")
+        if not isinstance(value, dict):
+            continue
+        stated = value.get("stringValue")
+        if not isinstance(stated, str):
+            continue
+        sequence = build_sequence(str(attribute.get("key") or ""), stated)
+        if sequence is None:
+            continue
+        sequences.append(sequence)
+        value["stringValue"] = sequence_reference(sequence.seq_hash, sequence.depth)
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return encoded, tuple(sequences)
 
 
 def snapshot_readable_span(span: Any) -> ReadableSpan:
