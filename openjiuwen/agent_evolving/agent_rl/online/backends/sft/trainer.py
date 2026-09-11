@@ -34,6 +34,9 @@ from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sft_data_formatter i
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.supervisor_client import SupervisorClient
 from openjiuwen.agent_evolving.agent_rl.online.core.training_process import ManagedTrainingProcess
 from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRAPublishRequest
+from openjiuwen.agent_evolving.agent_rl.online.training_runner import TrainingArtifact
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 
 logger = logging.getLogger("online_rl.scheduler")
 
@@ -64,6 +67,7 @@ class SFTTrainingExecutor:
         self.dry_run = bool(dry_run)
         self._process_runner = ManagedTrainingProcess("sft")
         self._stop_requested = False
+        self._active_training_run_id: str | None = None
         self._supervisor = (
             SupervisorClient(
                 supervisor_url,
@@ -94,6 +98,14 @@ class SFTTrainingExecutor:
 
         self._stop_requested = True
         return self._process_runner.request_stop()
+
+    async def cancel(self, training_run_id: str) -> bool:
+        """Request stop for the SFT run currently owned by TrainingRunner."""
+
+        if training_run_id != self._active_training_run_id:
+            return False
+        self.request_stop()
+        return True
 
     async def build_samples_from_raw(
         self,
@@ -164,8 +176,26 @@ class SFTTrainingExecutor:
             )
         except subprocess.CalledProcessError as exc:
             if not self._stop_requested:
-                raise RuntimeError("SFT trainer stopped before producing a publishable LoRA") from exc
-            logger.warning("SFT trainer stopped after request; trying to export the latest checkpoint")
+                # Ascend NPU only: verl's sft_trainer completes training and saves a full
+                # valid checkpoint, then crashes during teardown / distributed cleanup with
+                # a glibc heap corruption ("corrupted size vs. prev_size", SIGABRT -6) on
+                # torch_npu + CANN. This is an environment-level bug, NOT a training
+                # failure. On Ascend, if a valid checkpoint exists, downgrade to warning and
+                # continue to export the LoRA (mirrors the verified handling in old/).
+                # On GPU/CUDA this teardown bug does not occur, so any trainer failure
+                # there is a real failure and must be raised as before.
+                if self._is_ascend_env() and self._latest_sft_checkpoint_dir(output_dir) is not None:
+                    checkpoint_dir = self._latest_sft_checkpoint_dir(output_dir)
+                    logger.warning(
+                        "SFT trainer exited with code %s after successful training; "
+                        "continuing with latest checkpoint %s (known Ascend NPU teardown bug)",
+                        exc.returncode,
+                        checkpoint_dir,
+                    )
+                else:
+                    raise RuntimeError("SFT trainer stopped before producing a publishable LoRA") from exc
+            else:
+                logger.warning("SFT trainer stopped after request; trying to export the latest checkpoint")
 
         publish_dir = self._export_sft_lora_adapter(output_dir=output_dir, run_dir=run_dir)
 
@@ -177,6 +207,42 @@ class SFTTrainingExecutor:
                 logger.warning("Failed to notify vLLM for SFT LoRA hot-load (non-fatal)")
         shutil.rmtree(str(run_dir / "checkpoint_tmp"), ignore_errors=True)
         return published_path
+
+    async def train(self, **kwargs: Any) -> TrainingArtifact:
+        """Adapt SFT batch execution to the durable Training Run lifecycle."""
+
+        if self.lora_repo is None:
+            raise build_error(
+                StatusCode.AGENT_RL_PPO_EXECUTION_ERROR,
+                error_msg="online SFT requires a LoRA repository",
+            )
+        model_id = str(kwargs["model_id"])
+        training_run_id = str(kwargs["training_run_id"])
+        self._active_training_run_id = training_run_id
+        try:
+            versions_before = len(self.lora_repo.list_versions(model_id))
+            path = await self.train_batch(
+                user_id=model_id,
+                samples=kwargs["samples"],
+                training_count=versions_before + 1,
+                tmp_root=str(kwargs.get("tmp_root") or "/tmp/agent_rl_online"),
+            )
+            if self.dry_run:
+                raise build_error(
+                    StatusCode.AGENT_RL_PPO_EXECUTION_ERROR,
+                    error_msg="SFT_DRY_RUN only writes training artifacts and cannot activate a LoRA",
+                )
+            latest = self.lora_repo.get_latest(model_id)
+            if latest is None or path is None:
+                raise build_error(
+                    StatusCode.AGENT_RL_PPO_EXECUTION_ERROR,
+                    error_msg="SFT completed without a published LoRA artifact",
+                )
+            return TrainingArtifact(lora_name=f"{model_id}:{latest.version}", lora_path=path)
+        finally:
+            if self._active_training_run_id == training_run_id:
+                self._active_training_run_id = None
+                self._stop_requested = False
 
     @staticmethod
     def _verl_config_group_exists(*parts: str) -> bool:
@@ -317,6 +383,10 @@ class SFTTrainingExecutor:
                 "pad_mode": "no_padding",
                 "max_length": max_length,
                 "truncation": os.getenv("SFT_VERL_TRUNCATION", "left"),
+                "rebase_left_truncated_position_ids": self._env_bool(
+                    "SFT_VERL_REBASE_LEFT_TRUNCATED_POSITION_IDS",
+                    False,
+                ),
                 "use_shm": False,
                 "apply_chat_template_kwargs": {},
                 "num_workers": self._env_int("SFT_VERL_NUM_WORKERS", 4),
@@ -478,6 +548,14 @@ class SFTTrainingExecutor:
     @staticmethod
     def _visible_devices_env_name() -> str:
         return os.getenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "CUDA_VISIBLE_DEVICES").strip() or "CUDA_VISIBLE_DEVICES"
+
+    @staticmethod
+    def _is_ascend_env() -> bool:
+        """Detect the Ascend NPU runtime via explicit knobs (no torch_npu import needed)."""
+        device = os.getenv("SFT_VERL_DEVICE") or os.getenv("VERL_DEVICE") or ""
+        if device.strip().lower() in {"ascend", "npu"}:
+            return True
+        return os.getenv("ONLINE_RL_VISIBLE_DEVICES_ENV", "").strip() == "ASCEND_RT_VISIBLE_DEVICES"
 
     @staticmethod
     def _slug(value: str) -> str:

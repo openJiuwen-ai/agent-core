@@ -71,6 +71,11 @@ class QwenMultiTurnSFTDataset(Dataset):
         self.enable_thinking_key = self._config.get("enable_thinking_key", "enable_thinking")
         self.enable_thinking_default = self._config.get("enable_thinking_default", None)
         self.apply_chat_template_kwargs = self._config.get("apply_chat_template_kwargs", {})
+        self.rebase_left_truncated_position_ids = self._config.get(
+            "rebase_left_truncated_position_ids",
+            os.getenv("SFT_VERL_REBASE_LEFT_TRUNCATED_POSITION_IDS", "").strip().lower()
+            in {"1", "true", "yes", "on"},
+        )
         if self.pad_mode not in _PAD_MODES:
             raise ValueError(f"Expect pad_mode to be 'right' or 'no_padding'. Got {self.pad_mode}")
         if self.truncation not in _TRUNCATION_MODES:
@@ -241,6 +246,7 @@ class QwenMultiTurnSFTDataset(Dataset):
         right_pad_error_truncates: bool = False,
     ) -> dict[str, torch.Tensor]:
         sequence_length = input_ids.shape[0]
+        was_left_truncated = sequence_length > self.max_length and self.truncation == "left"
         if self.pad_mode == DatasetPadMode.RIGHT:
             if sequence_length < self.max_length:
                 pad_len = self.max_length - sequence_length
@@ -259,6 +265,8 @@ class QwenMultiTurnSFTDataset(Dataset):
                     loss_mask,
                     position_ids,
                 )
+                if self.rebase_left_truncated_position_ids and was_left_truncated:
+                    position_ids = torch.arange(position_ids.shape[-1], dtype=position_ids.dtype)
             return {
                 "input_ids": input_ids,
                 "attention_mask": attention_mask,
@@ -276,6 +284,8 @@ class QwenMultiTurnSFTDataset(Dataset):
                     loss_mask,
                     position_ids,
                 )
+                if self.rebase_left_truncated_position_ids and was_left_truncated:
+                    position_ids = torch.arange(position_ids.shape[-1], dtype=position_ids.dtype)
             return {"input_ids": input_ids, "position_ids": position_ids, "loss_mask": loss_mask}
 
         raise ValueError(f"Unknown pad mode {self.pad_mode}")

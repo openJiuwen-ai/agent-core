@@ -100,6 +100,31 @@ def test_hmac_and_control_errors_use_public_contract(online_rl_system: OnlineRLS
     assert invalid.json()["error"]["code"] == "invalid_reward_mode"
 
 
+def test_legacy_sft_sample_upload_is_forwarded_to_the_sft_store(online_rl_system: OnlineRLSystem) -> None:
+    system = online_rl_system
+    assert system.start_service().json()["status"] == "running"
+
+    uploaded = system.upload_batch(
+        {
+            "protocol_version": "sft-sample-v1",
+            "sample_id": "legacy-sft-sample-1",
+            "user_id": "legacy-sft-user",
+            "session_id": "legacy-sft-session",
+            "messages": [{"role": "user", "content": "collect this sample"}],
+            "assistant_message": {"role": "assistant", "content": "collected"},
+        }
+    )
+
+    assert uploaded.status_code == 200, uploaded.text
+    assert uploaded.json()["result"] == {
+        "accepted": 1,
+        "rejected": 0,
+        "duplicate": 0,
+        "items": [{"status": "pending", "protocol_version": "sft-sample-v1"}],
+        "protocol_version": "sft-sample-v1",
+    }
+
+
 def test_delayed_feedback_across_openai_and_anthropic_streams(
     online_rl_system: OnlineRLSystem,
 ) -> None:
