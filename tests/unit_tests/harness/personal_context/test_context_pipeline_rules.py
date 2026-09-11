@@ -903,6 +903,64 @@ async def test_invalid_tagged_events_fail_only_their_completion_and_consumer_con
 
 
 @pytest.mark.asyncio
+async def test_cancel_run_interrupts_matching_finish_and_keeps_consumer_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    original_filesystem = service._filesystem_with_fallback
+    finish_started = asyncio.Event()
+    finish_cancelled = asyncio.Event()
+    release_finish = asyncio.Event()
+    calls = 0
+
+    async def block_first_finish(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            finish_started.set()
+            try:
+                await release_finish.wait()
+            except asyncio.CancelledError:
+                finish_cancelled.set()
+                raise
+        return await original_filesystem(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_filesystem_with_fallback", block_first_finish)
+    await service.start()
+    completion = asyncio.get_running_loop().create_future()
+    try:
+        await _put_event(queue, "batch", "local", "run-blocked", _batch(_item()))
+        await queue.put(("finish", "local", "run-blocked", None, completion))
+        await asyncio.wait_for(finish_started.wait(), timeout=1)
+
+        await asyncio.wait_for(service.cancel_run("local", "run-blocked"), timeout=1)
+
+        with pytest.raises(BaseError):
+            await completion
+        assert finish_cancelled.is_set()
+        assert service.is_running()
+
+        retained_batch = _batch(_item())
+        await _put_event(queue, "batch", "local", "run-blocked", retained_batch)
+        await _put_event(queue, "retain", "local", "run-blocked", None)
+
+        await _submit_run(
+            queue,
+            "local",
+            "run-next",
+            _batch(_item("notes/two", original_ref="file:///notes/two")),
+        )
+        assert service.is_running()
+    finally:
+        release_finish.set()
+        if not completion.done():
+            completion.cancel()
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_workspace_symlink_is_rejected_before_publication(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"

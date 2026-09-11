@@ -22,7 +22,7 @@ from openjiuwen.harness.personal_context.context_pipeline import (
     _validate_agent_pages,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
-from openjiuwen.harness.personal_context.source_metadata import upsert_source_metadata
+from openjiuwen.harness.personal_context.source_metadata import source_id_for_locator, upsert_source_metadata
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 
@@ -230,6 +230,49 @@ async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp
 
 
 @pytest.mark.asyncio
+async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent"),
+        input_queue=asyncio.Queue(),
+    )
+    context_root = tmp_path / "workspace" / "context"
+    existing = context_root / "topics" / "existing.md"
+    existing.parent.mkdir(parents=True)
+    existing.write_text("# Existing\n\nRetained content.\n", encoding="utf-8")
+    (existing.parent / "description.md").write_text(
+        "# Topics\n\n- [Existing](existing.md)\n",
+        encoding="utf-8",
+    )
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    async def unexpected_agent(**_kwargs: object) -> str:
+        raise AssertionError("retention must not invoke the Agent profile")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", unexpected_agent)
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": [], "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(0),
+        retaining=True,
+    )
+
+    assert result == "rules"
+    assert (sandbox / "context" / "topics" / "existing.md").read_text(encoding="utf-8") == (
+        "# Existing\n\nRetained content.\n"
+    )
+
+
+@pytest.mark.asyncio
 async def test_agent_fallback_does_not_migrate_invalid_legacy_root_page(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -357,6 +400,14 @@ async def test_processing_is_deterministic_for_every_total_profile(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "source_content",
+    [
+        "First paragraph.",
+        "Docs [Guide](../en/guide.md) and [Home](../../README.md).",
+        "Code example:\n\n    [example](../example.md)\n",
+    ],
+)
+@pytest.mark.parametrize(
     ("total_profile", "expected_filesystem_model_calls", "expected_agent_calls"),
     [
         ("rules", 0, 0),
@@ -370,12 +421,22 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     total_profile: str,
     expected_filesystem_model_calls: int,
     expected_agent_calls: int,
+    source_content: str,
 ) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
     service = ContextPipelineService(home=tmp_path, config=_config(total_profile), input_queue=queue)
     agent_prompts: list[str] = []
     published_profiles: list[str] = []
     original_publish = service._publish_processed
+    linked_source_id = None
+    if "[Guide]" in source_content:
+        linked_source_id = upsert_source_metadata(
+            tmp_path / "workspace" / "source-meta",
+            _batch(original_ref="file:///en/guide.md").items[0],
+            provider="local_files",
+            service_id="previous-run",
+            observed_at="2026-09-10T00:00:00Z",
+        )
 
     async def agent_spy(*, messages: list[object], sandbox_path: Path, **kwargs: object) -> str:
         del kwargs
@@ -383,6 +444,11 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
         agent_prompts.append(prompt)
         _assert_new_wiki_prompt(prompt)
         _write_filesystem_agent_candidate(sandbox_path)
+        if "[Guide]" in source_content:
+            processed_input = next((sandbox_path / "inputs" / "processed").rglob("context-document.md"))
+            page = sandbox_path / "context" / "topics" / "agent.md"
+            with page.open("a", encoding="utf-8") as handle:
+                handle.write("\n" + processed_input.read_text(encoding="utf-8").split("\n\n", 1)[1])
         return "done"
 
     filesystem_output = json.dumps(
@@ -407,6 +473,9 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     async def publish_spy(**kwargs: object) -> None:
         processed = kwargs["processed"]
         assert isinstance(processed, dict)
+        if "[Guide]" in source_content:
+            assert "原文链接" in str(processed["documents"])
+            assert "[Guide](../en/guide.md)" not in str(processed["documents"])
         published_profiles.append(str(processed["actual_profile"]))
         await original_publish(**kwargs)  # type: ignore[arg-type]
 
@@ -415,7 +484,7 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     monkeypatch.setattr(service, "_publish_processed", publish_spy)
 
     await service.start()
-    await _submit_run(queue, _batch())
+    await _submit_run(queue, _batch(content=source_content))
     await service.stop(timeout_seconds=1)
 
     model_prompts = [
@@ -445,6 +514,7 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     assert len(agent_prompts) == expected_agent_calls
     assert published_profiles == [total_profile]
     assert all("existing context/description.md" in prompt for prompt in agent_prompts)
+    assert all("Source navigation is registered as pcs-source-link destinations" in prompt for prompt in agent_prompts)
     assert all("This is a small run: use the bounded document_previews" in prompt for prompt in agent_prompts)
     assert all("read every bounded source_preview" not in prompt for prompt in agent_prompts)
     assert all(
@@ -455,6 +525,9 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
     published_markdown = "\n".join(path.read_text(encoding="utf-8") for path in context_root.rglob("*.md"))
     assert "[[ref:" not in published_markdown
     assert "../source-meta/src_" in published_markdown
+    assert "pcs-source-link:" not in published_markdown
+    if linked_source_id is not None:
+        assert linked_source_id in published_markdown
     context_pipeline._validate_reference_graph(
         context_root,
         final_context_root=context_root,
@@ -2419,10 +2492,16 @@ def test_agent_managed_source_marker_can_move_with_page_and_updated_links(tmp_pa
     new_directory.mkdir()
     new_page = new_directory / "来源页.md"
     old_page.replace(new_page)
+    source_link = _source_link(
+        page_relative="新主题/来源页.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+    )
     new_page.write_text(
         "# 来源页\n\n"
         f"<!-- personal-context-managed-source: {source_id} -->\n\n"
-        f"{_source_link(page_relative='新主题/来源页.md', final_context_root=final_context_root, source_root=source_root, source_id=source_id)}\n\n"
+        f"{source_link}\n\n"
         "[关联页](../旧主题/关联页.md)\n",
         encoding="utf-8",
     )
@@ -6741,3 +6820,39 @@ def test_reference_graph_rejects_malformed_short_reference_inside_code(
         )
 
     assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+
+
+@pytest.mark.asyncio
+async def test_source_link_target_registered_in_later_batch_is_resolved(tmp_path: Path) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    service = ContextPipelineService(home=tmp_path, config=_config("rules"), input_queue=queue)
+    first = _batch(content="See [later](../later.md).", original_ref="file:///docs/zh/a.md")
+    second = FetchBatch(
+        batch_id="later-batch",
+        items=[
+            RawChangeItem(
+                logical_id="later",
+                revision_id="r1",
+                operation="upsert",
+                title="Later",
+                content="Later document",
+                original_ref="file:///docs/later.md",
+                metadata={},
+            )
+        ],
+    )
+    await service.start()
+    try:
+        for tag, payload in (("batch", first), ("batch", second), ("finish", None)):
+            completion = asyncio.get_running_loop().create_future()
+            await queue.put((tag, "local", "book-run", payload, completion))
+            await completion
+    finally:
+        await service.stop(timeout_seconds=1)
+    target_id = source_id_for_locator("file:///docs/later.md")
+    pages = list((tmp_path / "workspace" / "context").rglob("*.md"))
+    assert any(
+        "[later](<" in page.read_text(encoding="utf-8") and target_id in page.read_text(encoding="utf-8")
+        for page in pages
+    )
+    assert all("pcs-source-link:" not in page.read_text(encoding="utf-8") for page in pages)

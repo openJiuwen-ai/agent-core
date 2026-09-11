@@ -83,6 +83,7 @@ def _manual_config(
 class _RunningPipeline:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
+        self.configurations: list[PersonalContextConfig] = []
 
     def is_running(self) -> bool:
         return self.running
@@ -90,6 +91,12 @@ class _RunningPipeline:
     async def stop(self, *, timeout_seconds: float) -> None:
         del timeout_seconds
         self.running = False
+
+    async def cancel_run(self, service_id: str, run_id: str) -> None:
+        del service_id, run_id
+
+    def replace_configuration(self, config: PersonalContextConfig) -> None:
+        self.configurations.append(config)
 
 
 class _EmptyPreparedProvider(ContextFetchService):
@@ -156,6 +163,45 @@ async def _finish_manual_tasks(personal_context: PersonalContext, service_ids: t
         await asyncio.wait_for(provider.started.wait(), timeout=1.0)
         provider.release.set()
     await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_append_fetch_service_updates_live_config_without_restarting_existing_runtime(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path),
+    )
+    pipeline = personal_context._pipeline_service
+    assert isinstance(pipeline, _RunningPipeline)
+    new_service = _manual_config(
+        tmp_path,
+        services={"bookmarks": True},
+    ).fetch_services[0]
+    started: list[str] = []
+
+    async def start_fetch_service(service_id: str) -> None:
+        started.append(service_id)
+
+    personal_context.start_fetch_service = start_fetch_service  # type: ignore[method-assign]
+
+    await personal_context._append_fetch_service_config(new_service)
+
+    assert personal_context._config is not None
+    assert [service.service_id for service in personal_context._config.fetch_services] == [
+        "notes",
+        "bookmarks",
+    ]
+    assert started == ["bookmarks"]
+    assert pipeline.configurations[-1] is personal_context._config
+    assert personal_context._fetch_run_progress["bookmarks"]["run_state"] == "idle"
+
+    await personal_context._remove_fetch_service_config("bookmarks")
+
+    assert [service.service_id for service in personal_context._config.fetch_services] == ["notes"]
+    assert pipeline.configurations[-1] is personal_context._config
+    assert "bookmarks" not in personal_context._fetch_run_progress
 
 
 def _gitcode_runtime_service() -> PersonalContextFetchServiceConfig:
@@ -1416,7 +1462,9 @@ async def test_scheduler_remains_alive_after_fetch_state_becomes_failed(
     try:
         await asyncio.wait_for(attempted.wait(), timeout=1.0)
         async with asyncio.timeout(1.0):
-            while (await personal_context.snapshot()).fetch_service_states["notes"] != "FAILED":
+            while (  # noqa: ASYNC110 - the public snapshot transition is the behavior under test.
+                await personal_context.snapshot()
+            ).fetch_service_states["notes"] != "FAILED":
                 await asyncio.sleep(0)
 
         assert not scheduler.done()
@@ -1618,7 +1666,7 @@ async def test_cancelled_during_pipeline_batch_aborts_in_order(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_cancelled_during_pipeline_finish_completes_atomic_commit(tmp_path: Path) -> None:
+async def test_cancelled_during_pipeline_finish_aborts_before_commit(tmp_path: Path) -> None:
     personal_context, provider = await _two_batch_run(tmp_path)
     abort_order = _record_abort_order(personal_context, provider)
     task = asyncio.create_task(personal_context._run_fetch_once("notes", provider))
@@ -1634,20 +1682,13 @@ async def test_cancelled_during_pipeline_finish_completes_atomic_commit(tmp_path
     finish_event, finish_completion = await _next_pipeline_event(personal_context)
     assert finish_event[:4] == ("finish", "notes", run_id, None)
     task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done()
-    assert not finish_completion.done()
-
-    finish_completion.set_result(None)
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    assert abort_order == []
-    assert provider.commit_calls == [run_id]
-    cursor = personal_context._read_cursor("notes")
-    assert cursor is not None
-    assert cursor["n"] == 2
-    assert len(cursor["_selection"]["completed"]) == 2
+    assert finish_completion.cancelled()
+    assert abort_order == ["pipeline", "provider"]
+    assert provider.commit_calls == []
+    assert personal_context._read_cursor("notes") == {"n": 0}
 
 
 @pytest.mark.asyncio
@@ -2210,14 +2251,14 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
         if batch.batch_id == "partial-1" and batch_calls[batch.batch_id] == 2:
             replayed.set()
 
-    async def finish(_service_id: str, _run_id: str) -> None:
-        calls.append(("finish", "run"))
+    async def retain(_service_id: str, _run_id: str) -> None:
+        calls.append(("retain", "run"))
 
     async def rollback(_service_id: str, _run_id: str) -> None:
         calls.append(("rollback", "run"))
 
     personal_context._submit_batch = submit  # type: ignore[method-assign]
-    personal_context._finish_pipeline_run = finish  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[attr-defined,method-assign]
     personal_context._rollback_pipeline_run = rollback  # type: ignore[method-assign]
 
     await personal_context.run_fetch(service_id="notes")
@@ -2231,7 +2272,7 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
         ("batch", "partial-2"),
         ("rollback", "run"),
         ("batch", "partial-1"),
-        ("finish", "run"),
+        ("retain", "run"),
     ]
     assert len(provider.commit_calls) == 1
     assert provider.abort_calls == []
@@ -2397,7 +2438,7 @@ async def test_stop_fetch_run_isolated_to_one_run_all_service(
 
 
 @pytest.mark.asyncio
-async def test_stop_fetch_run_during_finish_waits_for_atomic_commit(
+async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2406,8 +2447,10 @@ async def test_stop_fetch_run_during_finish_waits_for_atomic_commit(
     personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
     finish_entered = asyncio.Event()
     finish_release = asyncio.Event()
+    finish_cancelled = asyncio.Event()
     finish_calls = 0
-    abort_calls = 0
+    cancel_calls = 0
+    retain_calls = 0
 
     async def submit(
         _service_id: str,
@@ -2423,31 +2466,44 @@ async def test_stop_fetch_run_during_finish_waits_for_atomic_commit(
         nonlocal finish_calls
         finish_calls += 1
         finish_entered.set()
-        await finish_release.wait()
+        try:
+            await finish_release.wait()
+        except asyncio.CancelledError:
+            finish_cancelled.set()
+            raise
 
-    async def abort(_service_id: str, _run_id: str) -> None:
-        nonlocal abort_calls
-        abort_calls += 1
+    async def cancel(_service_id: str, _run_id: str) -> None:
+        nonlocal cancel_calls
+        cancel_calls += 1
+
+    async def retain(_service_id: str, _run_id: str) -> None:
+        nonlocal retain_calls
+        retain_calls += 1
+
+    async def rollback(_service_id: str, _run_id: str) -> None:
+        return None
 
     personal_context._submit_batch = submit  # type: ignore[method-assign]
     personal_context._finish_pipeline_run = finish  # type: ignore[method-assign]
-    personal_context._abort_pipeline_run = abort  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = cancel  # type: ignore[attr-defined,method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[attr-defined,method-assign]
+    personal_context._rollback_pipeline_run = rollback  # type: ignore[method-assign]
 
     await personal_context.run_fetch(service_id="notes")
     await asyncio.wait_for(finish_entered.wait(), timeout=1.0)
     stop_task = asyncio.create_task(personal_context.stop_fetch_run("notes"))
     try:
-        async with asyncio.timeout(1.0):
-            while (await personal_context.snapshot()).fetch_run_progress["notes"]["run_state"] != "stopping":
-                await asyncio.sleep(0)
-        assert not stop_task.done()
+        await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.5)
     finally:
         finish_release.set()
-    await asyncio.wait_for(stop_task, timeout=1.0)
+        if not stop_task.done():
+            await asyncio.wait_for(stop_task, timeout=1.0)
 
     provider = _PartialStopProvider.instances["notes"]
     assert finish_calls == 1
-    assert abort_calls == 0
+    assert cancel_calls == 1
+    assert retain_calls == 1
+    assert finish_cancelled.is_set()
     assert len(provider.commit_calls) == 1
     assert provider.abort_calls == []
     cursor = personal_context._read_cursor("notes")
