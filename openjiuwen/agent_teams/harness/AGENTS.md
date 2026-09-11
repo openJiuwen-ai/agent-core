@@ -127,5 +127,8 @@ manifest 复用 `load_manifest` 和 `DeepAgentSpec.agent_template_spec`，装配
 
 输出映射复用 `DeepAgentHarness`；原生状态与 round 回调经 session FIFO 控制标记和输出同步。
 只有 native IDLE 终结外部 Turn；PAUSED/RESUMED 属于同一 Turn。保留 graceful/force abort、warm
-pause/resume；不宣称 protocol checkpoint 或冷恢复。根级 `provider="native"` 仍对应 DeepAgent。
+pause/resume。`checkpoint.py` 使用 JSON 信封和现有 VCS context codec 保存暂停/IDLE 边界，
+恢复后 start 保持 IDLE、resume 延续原 Turn 和 queued receipt；不序列化活跃后台执行。
+统一工厂 `provider="native_v2"` 惰性加载本目录的 `NativeV2HarnessProvider`，复用同一 manifest
+装配逻辑，card/checkpoint provider 均为 native_v2。`provider="native"` 仍对应 DeepAgent。
 见 [F_97](../docs/features/F_97_native-harness-protocol-adapter.md)。

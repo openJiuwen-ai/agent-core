@@ -17,7 +17,9 @@
 不复制模板工具、rail、subagent、MCP、skill 的解析与装配规则。
 
 根级 `create_harness(..., provider="native")` 仍返回裸 DeepAgent 的适配器。
-`TeamHarness` 与 team spawn 原调用链保持原状；新入口是显式选择 NativeHarness 扩展能力的程序化 API。
+`TeamHarness` 与 team spawn 原调用链保持原状。统一入口
+`create_harness(manifest, provider="native_v2")` 经 NativeV2HarnessProvider 复用本工厂；
+card 和 checkpoint provider 名均为 `native_v2`，独立构造入口仍可用于传入 BuildContext。
 
 ## 协议边界
 
@@ -29,7 +31,7 @@
 - pause 到达 PAUSED 后发布 PAUSED；resume 发布同一 Turn 的 RESUMED。有限 `turn_events()` 跨暂停保持打开。
 - GRACEFUL_ABORT / FORCE_ABORT 分别转发 `abort(immediate=False/True)`，边界停止与回滚仍由原生实现负责。
 - 适配器独占 native 输入和输出通道，调用方不得同时直接驱动 `native_harness.send()` 或消费其 outputs。
-- 未声明 CHECKPOINT；协议 checkpoint 恢复与 `resume(query=...)` 冷恢复显式拒绝，warm resume 支持。
+- CHECKPOINT/PERSISTENT_SESSION 和跨实例冷恢复由 [F_98](F_98_native-checkpoint-and-endpoint-recovery.md) 补齐；warm resume 保持原行为。
 
 ## 验证
 

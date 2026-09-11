@@ -903,11 +903,12 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
 
 ## 15. 内置实现、IO adapter 与 manifest 工厂
 
-`openjiuwen.harness_providers` 提供四个内置实现与两层宿主胶水：
+`openjiuwen.harness_providers` 提供五个内置实现与两层宿主胶水：
 
 | provider 名 | 实现 | card 名 | capabilities |
 |---|---|---|---|
 | `native` | `native.DeepAgentHarness`（进程内 DeepAgent 交互循环） | `deepagent` | STEER, FORCE_ABORT |
+| `native_v2` | `agent_teams.harness.NativeHarnessProtocolAdapter` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION |
 | `claudecode` | `claudecode.ClaudeCodeHarness`（claude-agent-sdk） | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS |
 | `codex` | `codex.CodexHarness`（openai-codex） | `codex` | 同上 |
 | `dsh` | `dsh.DshHarness`（deepseek-harness） | `deepseek-harness` | 空 |
@@ -918,7 +919,7 @@ stop 仍无条件完成，需要引入 durable event journal/sink，而不能丢
   adapter 自身即 `HarnessInteractionHandler`，`UserInputRequest` 变成 `__interaction__` chunk，直到
   宿主 `send(InteractiveInput)` 才应答 provider。
 - `harness_providers.create_harness(manifest, provider=..., config=..., language=...)`：从 AgentTemplate
-  manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` 热加载整份
+  manifest（`AgentTemplateSpec` 或 `manifest.json` 包路径）建未启动 harness；`native` / `native_v2` 加载整份
   template，三方 provider 只取模型端点，manifest 里的 `tools` / `rails` / `subagents` / `skills` 会被
   拒绝。`build_harness_context(...)` 把 persona prompt sections 渲染成 `system_prompt`、manifest MCP
   变成 `mcp_servers`。

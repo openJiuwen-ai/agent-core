@@ -162,5 +162,5 @@ provider-private `notification_observer`）、认证 fallback 持久化（`bind_
   `_answers_from_response` 需要跟进。`isSecret` 题目当前与普通题同路投影，宿主侧未做遮蔽。
 - `dsh` / `native` 尚未接入 `ExternalCliAgentSpec` 声明式 spawn；provider entry point discovery 未做。
 - Codex e2e 依赖本机 CLI 支持已配置默认模型；可用 `CODEX_E2E_MODEL` 指定其它模型。
-- fallback 被宿主拒绝后若重连原生端点也失败，harness 只记录告警并让 Turn 以 `auth_required` 失败，
-  下一次 `send` 会因无 client 再次报错；未做自动重试。
+- fallback 回退重连失败后的恢复已由 F_98 补齐：后续输入先尝试一次原端点重连，成功后发送新输入，
+  失败则返回结构化错误。没有后台无限重试或失败输入重放。

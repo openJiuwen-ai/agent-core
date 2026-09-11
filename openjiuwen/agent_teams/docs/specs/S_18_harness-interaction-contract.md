@@ -206,5 +206,12 @@ finally:
 ```
 
 外部 Turn 包含原生内部 round/续跑；protocol follow-up 保留独立 Turn，暂停不终结 Turn，
-恢复不添加用户消息。能力为 STEER、GRACEFUL_ABORT、FORCE_ABORT、PAUSE_RESUME；后者为 warm
-resume，未提供 protocol checkpoint 持久恢复。BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
+恢复不添加用户消息。能力为 STEER、GRACEFUL_ABORT、FORCE_ABORT、PAUSE_RESUME、CHECKPOINT、
+PERSISTENT_SESSION。checkpoint schema=1 保存父上下文/DeepAgent 状态、暂停 query、Turn/message ID
+及 queued receipt；仅在暂停/IDLE 安全边界导出。恢复时校验 scope/card/cwd，start 保持 IDLE，
+resume() 调用原生 cold resume；不能直接 send 覆盖尚未恢复的暂停 Turn。详见 F_98。
+BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
+
+统一工厂也支持 `create_harness(manifest, provider="native_v2", config={"deep_agent": {...}})`，
+相应 context 使用 `build_harness_context(manifest, provider="native_v2", ...)`。该路径通过
+`NativeV2HarnessProvider` 转发到本构造入口，manifest 的 persona/MCP/rails 仍由原生装配处理。

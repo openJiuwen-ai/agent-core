@@ -11,7 +11,7 @@
 
 ## 范围 / 边界
 
-本规约定义 `openjiuwen.harness_protocol` 的内置实现包：共享的串行 Turn 骨架、四个 provider 的能力
+本规约定义 `openjiuwen.harness_protocol` 的内置实现包：共享的串行 Turn 骨架、五个 provider 的能力
 声明、DeepAgent 风格 IO adapter，以及从 AgentTemplate manifest 创建 harness 的工厂。协议契约本身
 以 `openjiuwen/harness_protocol/SPEC.md` 为准；团队成员接线见 agent_teams `S_27`。
 
@@ -26,6 +26,7 @@
    | provider | card | capabilities | optional host capabilities |
    |---|---|---|---|
    | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
+   | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
    | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
    | `dsh` | `deepseek-harness` | （空） | （空） |
@@ -78,7 +79,7 @@ def build_harness_context(manifest, *, provider, host_session_id, agent_id=None,
                           host_capabilities=frozenset(), resume_policy=ResumePolicy.NEW,
                           checkpoint=None, checkpoint_sink=None, interactions=None, metadata=None) -> HarnessContext
 def resolve_provider(provider: str) -> HarnessProvider
-PROVIDER_NAMES == ("native", "claudecode", "codex", "dsh")
+PROVIDER_NAMES == ("native", "native_v2", "claudecode", "codex", "dsh")
 
 class HarnessIOAdapter:
     def __init__(self, harness, *, event_observer=None, auto_approve_tools=True,
@@ -116,3 +117,7 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
   （`start` / `attach_output` / `send_input` / `cancel_round` / `stop`）驱动。
 - `S_12` / `S_13`：manifest（`AgentTemplateSpec`、`load_agent_template_package`）是工厂输入。
 - agent_teams `S_27`：团队成员如何组合本包的 adapter 与 provider。
+
+`native_v2` 实现在 `agent_teams/harness/protocol_adapter.py`，统一工厂只在显式选择时惰性加载。
+它复用 NativeHarness 的 manifest snapshot 装配和边界停止，支持父上下文/任务状态 checkpoint 冷恢复。
+`native` 的 DeepAgent 实现不变。详情见 team F_97/F_98。

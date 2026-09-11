@@ -21,8 +21,10 @@ harness_providers/
 └── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
 ```
 
-Provider names accepted by the factory: `native`, `claudecode`, `codex`, `dsh`.
-The provider card names are `deepagent`, `claude-code`, `codex`, `deepseek-harness`.
+Provider names accepted by the factory: `native`, `native_v2`, `claudecode`, `codex`, `dsh`.
+The provider card names are `deepagent`, `native_v2`, `claude-code`, `codex`, `deepseek-harness`.
+`native_v2` is resolved lazily to `agent_teams.harness.protocol_adapter.NativeV2HarnessProvider`;
+its implementation stays in the team package and reuses NativeHarness manifest construction.
 
 Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, feature
 `openjiuwen/harness/docs/features/F_03_harness-providers-and-manifest-factory.md`, team wiring
@@ -78,7 +80,10 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `ProviderInteractionRequest(request_type="auth_fallback")`. A host without
    `PROVIDER_INTERACTION` implicitly agrees; a host that declines makes the
    harness reconnect the native endpoint (same session / thread) and fail the
-   turn with the original `auth_required` error. `HarnessIOAdapter` only
+   turn with the original `auth_required` error. If reconnecting the original
+   endpoint fails, the next accepted input attempts one reconnect before
+   dispatch. Keep the same session/thread; never replay the failed input or
+   silently use the declined fallback. `HarnessIOAdapter` only
    declares `PROVIDER_INTERACTION` when a `provider_interaction_handler` is
    bound; `agent_teams.external.member_runtime` binds one that answers
    `auth_fallback` from the team DB promotion.
