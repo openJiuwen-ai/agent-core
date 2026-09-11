@@ -37,6 +37,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness_protocol import HarnessContext, McpServerConfig, McpTransport
+from openjiuwen.harness_providers.skills import SkillSource
 from openjiuwen.harness_providers.claudecode import ClaudeCodeHarness, ClaudeCodeHarnessConfig, ClaudeModelConfig
 from openjiuwen.harness_providers.claudecode.options import strip_parent_claude_env
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexModelConfig
@@ -201,6 +202,8 @@ async def build_cli_runtime(
     promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     system_prompt: str | None = None,
     system_prompt_mode: str | None = None,
+    skills: tuple[SkillSource, ...] = (),
+    skill_conflict: str = "skip",
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
     resume_external_backend: bool = False,
@@ -250,6 +253,8 @@ async def build_cli_runtime(
         fallback_external_model_config: Optional endpoint used only after an
             explicit native authentication failure.
         promote_fallback_model: Callback persisting the fallback as active.
+        skills: Skill bundles copied into the local CLI project before startup.
+        skill_conflict: Skip or replace an existing project skill with the same name.
         system_prompt_mode: Claude/Codex append or replace policy; None uses the provider default.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
@@ -314,6 +319,8 @@ async def build_cli_runtime(
             promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
             system_prompt_mode=system_prompt_mode,
+            skills=skills,
+            skill_conflict=skill_conflict,
             extra_env=extra_env,
             ssh_transport=ssh_transport,
             resume_external_backend=resume_external_backend,
@@ -364,6 +371,8 @@ async def build_cli_runtime(
             promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
             system_prompt_mode=system_prompt_mode,
+            skills=skills,
+            skill_conflict=skill_conflict,
             extra_env=extra_env,
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
@@ -515,6 +524,8 @@ def _build_claude_member_runtime(
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
     system_prompt: str | None,
     system_prompt_mode: str | None,
+    skills: tuple[SkillSource, ...],
+    skill_conflict: str,
     extra_env: dict[str, str] | None,
     ssh_transport: SshTransportConfig | None,
     resume_external_backend: bool,
@@ -542,6 +553,8 @@ def _build_claude_member_runtime(
     if external_model_config is None and fallback_external_model_config is not None:
         fallback_model = _claude_model(fallback_external_model_config)
     config = ClaudeCodeHarnessConfig(
+        skills=skills,
+        skill_conflict=skill_conflict,
         system_prompt_mode=system_prompt_mode or "append",
         cwd=cwd,
         add_dirs=add_dirs,
@@ -636,6 +649,8 @@ async def _build_codex_member_runtime(
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
     system_prompt: str | None,
     system_prompt_mode: str | None,
+    skills: tuple[SkillSource, ...],
+    skill_conflict: str,
     extra_env: dict[str, str] | None,
     resume_external_backend: bool,
     member_agent_id: str,
@@ -677,6 +692,8 @@ async def _build_codex_member_runtime(
     if external_model_config is None and fallback_external_model_config is not None:
         fallback_model = _codex_model(fallback_external_model_config)
     config_kwargs: dict[str, Any] = {
+        "skills": skills,
+        "skill_conflict": skill_conflict,
         "system_prompt_mode": system_prompt_mode or "replace",
         "cwd": cwd,
         "env": env,

@@ -27,6 +27,7 @@ from openjiuwen.harness_protocol import (
     UnsupportedHarnessCapabilityError,
     json_value_to_builtin,
 )
+from openjiuwen.harness_providers.skills import install_skills
 from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, TurnTiming, logger
 from openjiuwen.harness_providers.dsh.composition import mcp_configs, write_overlay
 from openjiuwen.harness_providers.dsh.config import DshHarnessConfig
@@ -69,11 +70,13 @@ class DshHarness(SerializedTurnHarness):
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None:
             raise UnsupportedHarnessCapabilityError("the DSH SDK server cannot restore protocol checkpoints")
         mcp_configs(context)
-        if self._config.launch_args_override is not None and (context.mcp_servers or (context.system_prompt and self._config.system_prompt_env_var is None)):
+        if self._config.launch_args_override is not None and ((self._config.skills and self._config.profile == "sdk-minimal") or context.mcp_servers or (context.system_prompt and self._config.system_prompt_env_var is None)):
             raise UnsupportedHarnessCapabilityError("DSH host overlays require the standard profile launcher")
 
     async def _open_session(self, context: HarnessContext) -> str | None:
         """Start a fresh DSH subprocess/session cycle."""
+        await asyncio.to_thread(install_skills, self._config.skills, provider="dsh",
+                                cwd=context.cwd or self._config.cwd, conflict=self._config.skill_conflict)
 
         # Resolve the optional dependency and pure SDK options before opening
         # an observable protocol cycle.  A missing SDK must not leave a
@@ -83,7 +86,8 @@ class DshHarness(SerializedTurnHarness):
         session_id = f"dsh-{uuid.uuid4().hex}"
         overlay_context = replace(context, cwd=context.cwd or self._config.cwd)
         overlay = write_overlay(overlay_context, include_prompt=self._config.system_prompt_env_var is None,
-                                prompt_mode=self._config.system_prompt_mode)
+                                prompt_mode=self._config.system_prompt_mode,
+                                enable_skill_plugins=bool(self._config.skills) and self._config.profile == "sdk-minimal")
         if overlay is not None:
             self._overlay, path, env = overlay
             options["env"].update(env)

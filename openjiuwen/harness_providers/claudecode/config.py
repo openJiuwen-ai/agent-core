@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
 
 _PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "dontAsk", "auto")
 
@@ -55,6 +56,8 @@ class ClaudeCodeHarnessConfig:
     session and agent name so persistent sessions survive restarts.
     """
 
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
     cwd: str | None = None
     add_dirs: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
@@ -71,6 +74,7 @@ class ClaudeCodeHarnessConfig:
     event_buffer_capacity: int = 1024
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
         for name in ("cwd", "cli_path", "session_id", "settings"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, str):

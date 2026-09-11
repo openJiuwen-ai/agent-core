@@ -35,14 +35,14 @@ def mcp_configs(context: HarnessContext) -> list[dict[str, Any]]:
 
 
 def write_overlay(context: HarnessContext, *, include_prompt: bool,
-                  prompt_mode: str = "replace") -> tuple[tempfile.TemporaryDirectory, str, dict[str, str]] | None:
+                  prompt_mode: str = "replace", enable_skill_plugins: bool = False) -> tuple[tempfile.TemporaryDirectory, str, dict[str, str]] | None:
     """Keep user data in the child environment and register native plugins.
 
     Append mode contributes an independent section and a single interpolation
     variable: user text is not recursively parsed as DSH template syntax.
     """
     configs = mcp_configs(context)
-    if not configs and not (include_prompt and context.system_prompt):
+    if not configs and not (include_prompt and context.system_prompt) and not enable_skill_plugins:
         return None
     variable = f"OPENJIUWEN_DSH_HOST_{uuid.uuid4().hex.upper()}"
     directory = tempfile.TemporaryDirectory(prefix="openjiuwen-dsh-")
@@ -78,6 +78,9 @@ def write_overlay(context: HarnessContext, *, include_prompt: bool,
             )
             plugin.chmod(0o600)
             inserts.append(f'    - id: openjiuwen-host-prompt\n      name: {json.dumps(str(plugin))}\n')
+        if enable_skill_plugins:
+            for plugin_id, package in [("skill", "skill"), ("skill-filesystem", "skill-filesystem"), ("tool-skill", "tool-skill")]:
+                inserts.append(f'    - id: {plugin_id}\n      name: "@deepseek-ai/dsh-{package}"\n')
         for index in range(len(configs)):
             inserts.append(f'    - id: openjiuwen-mcp-{index}\n      name: "@deepseek-ai/dsh-mcp-client"\n      config: !!js "JSON.parse(process.env.{variable}).mcps[{index}]"\n')
         if inserts:

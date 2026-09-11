@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +32,8 @@ class DshHarnessConfig:
     max_tokens: int | None = None
     # Replace only the native prefix, or append an independent host section.
     system_prompt_mode: Literal["append", "replace"] = "replace"
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
     cwd: str | None = None
     runtime_cwd: str | None = None
     dsh_bin: str | None = None
@@ -48,6 +51,7 @@ class DshHarnessConfig:
     event_buffer_capacity: int = 1024
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
         if self.system_prompt_mode == "append" and self.system_prompt_env_var is not None:
             raise ValueError("append mode cannot use system_prompt_env_var")
         if self.system_prompt_mode not in ("append", "replace"):

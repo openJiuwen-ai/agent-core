@@ -132,6 +132,8 @@ def build_claude_options(
     if endpoint_settings is not None:
         settings = endpoint_settings
     return sdk.ClaudeAgentOptions(
+        skills="all" if config.skills else None,
+        setting_sources=["user", "project", "local"] if config.skills else None,
         add_dirs=list(config.add_dirs),
         cli_path=config.cli_path,
         cwd=cwd,

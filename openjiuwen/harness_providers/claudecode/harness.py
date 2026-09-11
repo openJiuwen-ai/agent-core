@@ -31,6 +31,7 @@ from openjiuwen.harness_protocol import (
     UserInputRequest,
     json_value_to_builtin,
 )
+from openjiuwen.harness_providers.skills import install_skills
 from openjiuwen.harness_providers.base import (
     PendingTurn,
     ProviderStartupError,
@@ -149,6 +150,10 @@ class ClaudeCodeHarness(SerializedTurnHarness):
     # ------------------------------------------------------------------
 
     async def _open_session(self, context: HarnessContext) -> str | None:
+        if self._config.skills and self._transport_factory is not None:
+            raise HarnessProtocolError("skill copying requires a local Claude transport")
+        await asyncio.to_thread(install_skills, self._config.skills, provider="claudecode",
+                                cwd=context.cwd or self._config.cwd, conflict=self._config.skill_conflict)
         sdk = load_claude_sdk()
         self._sdk = sdk
         restored = self._restored_checkpoint_data(context)

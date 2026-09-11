@@ -6,7 +6,7 @@
 The manifest (``manifest.json`` with ``package_type=agent_template`` or an
 in-memory ``AgentTemplateSpec``) is the harness-expert authored description
 of one agent: identity, model, persona prompt sections, MCP servers and the
-DeepAgent-only extension points (tools, rails, sub-agents, skills).  The
+portable skills and DeepAgent-only extension points (tools, rails, sub-agents).  The
 factory maps it onto one of the built-in providers selected by name.
 """
 
@@ -34,7 +34,7 @@ from openjiuwen.harness_protocol import (
 HarnessProviderName = Literal["native", "native_v2", "claudecode", "codex", "dsh"]
 PROVIDER_NAMES: tuple[HarnessProviderName, ...] = ("native", "native_v2", "claudecode", "codex", "dsh")
 # Manifest sections only the in-process DeepAgent can materialize.
-_DEEP_AGENT_ONLY_SECTIONS = ("tools", "rails", "subagents", "skills")
+_DEEP_AGENT_ONLY_SECTIONS = ("tools", "rails", "subagents")
 
 
 def resolve_provider(provider: str) -> HarnessProvider:
@@ -112,8 +112,8 @@ def manifest_provider_config(
 ) -> dict[str, Any]:
     """Derive the provider SPI configuration for ``manifest``.
 
-    Explicit ``config`` keys always win; the manifest only fills the model
-    endpoint (and, for ``native``, the whole agent template).
+    Explicit ``config`` keys always win; the manifest fills the model
+    endpoint and portable skills (for native providers, the whole template).
     """
 
     values: dict[str, Any] = dict(config or {})
@@ -128,6 +128,8 @@ def manifest_provider_config(
                 f"manifest section {section!r} depends on the DeepAgent framework; "
                 f"provider {provider!r} cannot materialize it"
             )
+    if manifest.skills:
+        values.setdefault("skills", [skill.model_dump(mode="json") for skill in manifest.skills])
     model = manifest.model
     if model is None:
         return values

@@ -31,6 +31,7 @@ from openjiuwen.harness_protocol import (
     UserInputRequest,
     json_value_to_builtin,
 )
+from openjiuwen.harness_providers.skills import install_skills
 from openjiuwen.harness_providers.base import (
     PendingTurn,
     ProviderStartupError,
@@ -167,6 +168,8 @@ class CodexHarness(SerializedTurnHarness):
             raise HarnessProtocolError("Codex cannot resume a thread without a checkpoint")
 
     async def _open_session(self, context: HarnessContext) -> str | None:
+        await asyncio.to_thread(install_skills, self._config.skills, provider="codex",
+                                cwd=context.cwd or self._config.cwd, conflict=self._config.skill_conflict)
         sdk = load_codex_sdk()
         self._sdk = sdk
         self._loop = asyncio.get_running_loop()

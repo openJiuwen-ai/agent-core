@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 from openjiuwen.harness_protocol import JsonObject
+from openjiuwen.harness_providers.skills import SkillSource, normalize_skills
 
 _DEFAULT_TURN_IDLE_TIMEOUT_S = 180.0
 _DEFAULT_TURN_IDLE_RETRIES = 1
@@ -59,6 +60,8 @@ class CodexHarnessConfig:
 
     # Append to effective developer instructions, or replace their field.
     system_prompt_mode: Literal["append", "replace"] = "replace"
+    skills: tuple[SkillSource, ...] = ()
+    skill_conflict: str = "skip"
     cwd: str | None = None
     env: Mapping[str, str] = field(default_factory=dict, repr=False)
     inherit_process_env: bool = True
@@ -81,6 +84,7 @@ class CodexHarnessConfig:
     event_buffer_capacity: int = 1024
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
         if self.system_prompt_mode not in ("append", "replace"):
             raise ValueError("system_prompt_mode must be 'append' or 'replace'")
         for name in ("cwd", "codex_bin", "client_name", "client_title"):

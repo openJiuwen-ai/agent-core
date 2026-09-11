@@ -285,6 +285,11 @@ class ExternalCliAgentSpec(BaseModel):
     This is passed to ``spawn_member(cli_agent=...)``. See
     ``agent_teams/external/cli_agent``."""
 
+    skills: list[str | dict[str, Any]] = Field(default_factory=list)
+    """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
+    skill_conflict: Literal["skip", "replace"] = "skip"
+    """Keep or replace project skills with the same name."""
+
     system_prompt_mode: Literal["append", "replace"] | None = None
     """Prompt policy for Claude/Codex; None keeps each provider's default."""
 
