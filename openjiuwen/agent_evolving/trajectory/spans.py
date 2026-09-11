@@ -545,14 +545,14 @@ def _structured_parts_text(parts: Any) -> str:
 
 _TRACE_TEXT_LIMIT = 1000
 _MULTIMODAL_LABELS = {
-    "image": "图片",
-    "image_url": "图片",
-    "input_image": "图片",
-    "audio": "音频",
-    "input_audio": "音频",
-    "video": "视频",
-    "file": "文件",
-    "input_file": "文件",
+    "image": "image_content",
+    "image_url": "image_content",
+    "input_image": "image_content",
+    "audio": "audio_content",
+    "input_audio": "audio_content",
+    "video": "video_content",
+    "file": "file_content",
+    "input_file": "file_content",
 }
 
 
@@ -565,7 +565,7 @@ def _trace_safe_value(value: Any) -> Any:
         content_type = str(value.get("type") or "").lower()
         label = _MULTIMODAL_LABELS.get(content_type)
         if label:
-            return label
+            return {"type": content_type, "omitted": label}
         return {str(key): _trace_safe_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):
         return [_trace_safe_value(item) for item in value]

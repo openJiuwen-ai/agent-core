@@ -350,9 +350,9 @@ def test_multimodal_content_is_replaced_with_recognizable_labels() -> None:
             "role": "user",
             "content": [
                 {"type": "text", "text": "describe"},
-                "图片",
-                "音频",
-                "文件",
+                {"type": "image_url", "omitted": "image_content"},
+                {"type": "input_audio", "omitted": "audio_content"},
+                {"type": "input_file", "omitted": "file_content"},
             ],
         }
     ]
