@@ -20,6 +20,8 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans
+from openjiuwen.core.session import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs, ToolCallInputs
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.extensions.observability import span_context as shared_span_context
@@ -29,6 +31,7 @@ from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    build_model_edge_decisions,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import SymphonyExecutionFragment
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import CapabilityIdentity
@@ -37,6 +40,13 @@ from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
     SymphonyGraphEvolutionRail,
     TeamSymphonyGraphEvolutionRail,
 )
+
+
+def _graph_snapshot() -> dict[str, str]:
+    return {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+    }
 
 
 def _span(
@@ -97,6 +107,7 @@ def _ctx(
     session_id: str = "session-1",
     member_id: str = "member-1",
     result: dict | None = None,
+    query: object = "run",
 ) -> AgentCallbackContext:
     session = SimpleNamespace(
         get_session_id=lambda: session_id,
@@ -105,7 +116,7 @@ def _ctx(
     return AgentCallbackContext(
         agent=SimpleNamespace(card=SimpleNamespace(id=member_id)),
         inputs=InvokeInputs(
-            query="run",
+            query=query,  # type: ignore[arg-type]
             conversation_id=session_id,
             result=result or {"result_type": "answer", "output": "done"},
         ),
@@ -172,11 +183,17 @@ async def _prepare(
 async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot() -> None:
     model_a = SimpleNamespace(invoke=AsyncMock())
     model_b = SimpleNamespace(invoke=AsyncMock())
-    identity = CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",))
+    identity = CapabilityIdentity("skill:a", "skill", "a")
     provider = SimpleNamespace(snapshot_capabilities=lambda: [identity])
+    graph_snapshot = {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+        "merged_revision": "merged-start",
+    }
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
         capability_snapshot_provider=provider,
+        graph_snapshot_provider=lambda: graph_snapshot,
         edge_evaluator_llm=model_a,
         edge_search_max_depth=7,
     )
@@ -191,6 +208,9 @@ async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot
     assert prepared.edge_evaluator_llm is model_a
     assert prepared.edge_search_max_depth == 7
     assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot["static_revision"] == "static-start"
+    graph_snapshot["static_revision"] = "mutated"
+    assert prepared.graph_snapshot["static_revision"] == "static-start"
     with pytest.raises(FrozenInstanceError):
         prepared.query = "changed"  # type: ignore[misc]
     capture = rail._current_capture()
@@ -209,6 +229,23 @@ def test_constructor_rejects_bool_depth_and_clamps_negative_depth() -> None:
         edge_search_max_depth=-2,
     )
     assert rail._edge_search_max_depth == 0
+
+
+def test_constructor_requires_graph_snapshot_provider_for_submission() -> None:
+    with pytest.raises(ValueError, match="graph_snapshot_provider"):
+        SymphonyGraphEvolutionRail(
+            trajectory_span_processor=TrajectorySpanProcessor(),
+            submit_evolution=AsyncMock(),
+        )
+
+
+def test_prepared_input_rejects_invalid_capture_mode() -> None:
+    with pytest.raises(ValueError, match="capture_mode"):
+        SymphonyGraphEvolutionInput(
+            trajectory=_trajectory(),
+            messages=(),
+            capture_mode="invalid",  # type: ignore[arg-type]
+        )
 
 
 def test_constructor_validates_trajectory_history_limit() -> None:
@@ -243,7 +280,24 @@ async def test_first_ready_planned_graph_wins_and_is_detached() -> None:
 
 
 @pytest.mark.asyncio
-async def test_legacy_literal_payload_is_accepted_but_malformed_splits_continuity() -> None:
+@pytest.mark.parametrize("status", ["needs_input", "no_plan"])
+async def test_non_ready_planned_graph_status_is_not_marked_invalid(status: str) -> None:
+    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
+    ctx = _ctx()
+    await rail.before_invoke(ctx)
+    graph = _ready_graph("not-ready")
+    graph["graph"]["metadata"]["status"] = status
+    await rail._on_after_tool_call(_tool_ctx(ctx, {"success": True, "planned_graph": graph}), None)
+    capture = rail._current_capture()
+    assert capture is not None
+    state = rail._state(capture)
+    assert state is not None
+    assert "planned_graph_invalid" not in state.quality_codes
+    rail._unsubscribe_capture(capture)
+
+
+@pytest.mark.asyncio
+async def test_legacy_framework_error_and_truncated_text_are_accepted_but_malformed_splits() -> None:
     rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
     ctx = _ctx()
     await rail.before_invoke(ctx)
@@ -259,11 +313,29 @@ async def test_legacy_literal_payload_is_accepted_but_malformed_splits_continuit
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert not issues
     rail.trajectory_span_processor.on_end(
-        _span("tool.call", 3, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
+        _span("tool.call", 3, attributes={semconv.GEN_AI_TOOL_OUTPUT: "[ERROR]: request failed"})
+    )
+    _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
+    assert not issues
+    rail.trajectory_span_processor.on_end(
+        _span(
+            "tool.call",
+            4,
+            attributes={
+                semconv.GEN_AI_TOOL_OUTPUT: (
+                    '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
+                )
+            },
+        )
+    )
+    _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
+    assert not issues
+    rail.trajectory_span_processor.on_end(
+        _span("tool.call", 5, attributes={semconv.GEN_AI_TOOL_OUTPUT: "{'broken': ]"})
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert {issue["code"] for issue in issues} == {"tool_payload_json_error"}
-    rail.trajectory_span_processor.on_end(_span("llm.call", 4))
+    rail.trajectory_span_processor.on_end(_span("llm.call", 6))
     rail._drain_for_hook(ctx)
     prepared = await rail._prepare_evolution_input(_trajectory(), ctx)
     assert prepared is not None
@@ -688,6 +760,50 @@ async def test_unclaimed_parallel_tool_token_does_not_cross_invoke_cleanup() -> 
 
 
 @pytest.mark.asyncio
+async def test_interrupt_defers_and_exact_interactive_resume_keeps_original_query() -> None:
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        graph_snapshot_provider=_graph_snapshot,
+        submit_evolution=callback,
+        async_evolution=False,
+    )
+    interrupted = _ctx(result={"result_type": "interrupt", "component_ids": ["ask-user"]})
+    await rail.before_invoke(interrupted)
+    rail.trajectory_span_processor.on_end(_span("llm.first", 1))
+    rail._drain_for_hook(interrupted)
+    await rail.after_invoke(interrupted)
+
+    assert callback.await_count == 0
+    assert len(rail._paused_symphony_states) == 1
+
+    user_input = InteractiveInput()
+    user_input.update("ask-user", "yes")
+    resumed = _ctx(query=user_input, result={"result_type": "answer", "output": "done"})
+    await rail.before_invoke(resumed)
+    resumed_capture = rail._current_capture()
+    assert resumed_capture is not None
+    resumed_state = rail._state(resumed_capture)
+    assert resumed_state is not None
+    assert resumed_state.original_query == "run"
+    await rail.after_invoke(resumed)
+
+    assert callback.await_count == 0
+    assert not rail._paused_symphony_states
+
+
+def test_real_tool_interrupt_result_uses_interrupt_ids_and_conflicting_aliases_fail_closed() -> None:
+    result = ToolInterruptHandler.build_interrupt_result([("tool-call-1", {"question": "continue?"})])
+    assert rail_module._interrupt_component_ids(result) == ("tool-call-1",)
+    assert (
+        rail_module._interrupt_component_ids(
+            {"result_type": "interrupt", "interrupt_ids": ["a"], "component_ids": ["b"]}
+        )
+        == ()
+    )
+
+
+@pytest.mark.asyncio
 async def test_pending_tool_tokens_are_bounded_with_batched_trace() -> None:
     rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
     ctx = _ctx()
@@ -770,10 +886,11 @@ async def test_rail_preserves_repeated_skill_occurrences() -> None:
 
 @pytest.mark.asyncio
 async def test_private_invoke_history_is_bounded_and_reports_truncation() -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     ctx = _ctx()
     await rail.before_invoke(ctx)
@@ -794,8 +911,8 @@ async def test_private_invoke_history_is_bounded_and_reports_truncation() -> Non
     assert len(tuple(iter_spans(prepared.trajectory))) == 200
     assert "truncated_trace" in prepared.quality_flags
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert "truncated_trace" in submission.execution_graph["quality_flags"]
+    execution_graph = callback.await_args.args[1]
+    assert "truncated_trace" in execution_graph["quality_flags"]
     rail._unsubscribe_capture(capture)
 
 
@@ -1028,10 +1145,11 @@ async def test_team_callbacks_route_by_root_trace_and_root_loss_only_cleans(
 ) -> None:
     roots = {"value": _root(11)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = TeamSymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         async_evolution=False,
     )
     ctx = _ctx()
@@ -1043,7 +1161,7 @@ async def test_team_callbacks_route_by_root_trace_and_root_loss_only_cleans(
     roots["value"] = None
     await rail.after_invoke(ctx)
     assert capture.subscription not in rail._active_captures
-    sink.submit.assert_not_awaited()
+    callback.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1052,10 +1170,11 @@ async def test_detached_team_root_loss_cleans_unique_session_without_submission(
 ) -> None:
     roots = {"value": _root(13)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = TeamSymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         async_evolution=False,
     )
     ctx = _ctx()
@@ -1063,7 +1182,7 @@ async def test_detached_team_root_loss_cleans_unique_session_without_submission(
     assert len(rail._active_captures) == 1
     roots["value"] = None
     await Context().run(asyncio.create_task, rail.after_invoke(ctx))
-    sink.submit.assert_not_awaited()
+    callback.assert_not_awaited()
     assert not rail._active_captures
     assert not rail._symphony_states
 
@@ -1180,10 +1299,12 @@ async def test_snapshot_failure_marks_quality_and_before_exception_cleans() -> N
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
         capability_snapshot_provider=provider,
+        graph_snapshot_provider=lambda: (_ for _ in ()).throw(RuntimeError("private")),
     )
     ctx = _ctx()
     prepared = await _prepare(rail, ctx)
-    assert prepared.quality_flags == ("capability_snapshot_error",)
+    assert set(prepared.quality_flags) == {"capability_snapshot_error", "graph_snapshot_error"}
+    assert prepared.graph_snapshot is None
     capture = rail._current_capture()
     assert capture is not None
     rail._unsubscribe_capture(capture)
@@ -1247,7 +1368,7 @@ async def test_after_invoke_session_resolution_error_still_cleans_capture() -> N
 
 
 @pytest.mark.asyncio
-async def test_run_evolution_sends_every_candidate_to_frozen_model_and_sink(
+async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fragment_a = SymphonyExecutionFragment("a", "skill", "a", "trace", "1", "root", ("1",), 0)
@@ -1271,32 +1392,40 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_sink(
         return (judged,)
 
     monkeypatch.setattr(rail_module, "evaluate_symphony_edge_candidates", evaluate)
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     llm = SimpleNamespace(invoke=AsyncMock())
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     prepared = SymphonyGraphEvolutionInput(
         trajectory=_trajectory(),
         messages=(),
         execution_fragments=(fragment_a, fragment_b),
         capability_snapshot=(
-            CapabilityIdentity("skill:a", "skill", "a", "v1", "sha256:a", ("in",), ("out",)),
-            CapabilityIdentity("tool:b", "tool", "b", "v1", "sha256:b", ("in",), ("out",)),
+            CapabilityIdentity("skill:a", "skill", "a"),
+            CapabilityIdentity("tool:b", "tool", "b"),
         ),
         query="q",
         outcome="success",
         reason=None,
         trace_id="trace",
+        graph_snapshot={
+            "static_revision": "static-start",
+            "observation_revision": "observation-start",
+            "merged_revision": "merged-start",
+        },
         edge_evaluator_llm=llm,
     )
     await rail.run_evolution(prepared)
     assert seen["llm"] is llm
     assert seen["candidates"] == (candidate,)
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["graph"]["edges"]
-    assert submission.execution_graph["graph"]["nodes"]["skill:a"]["metadata"]["output_ports"] == ["out"]
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["graph"]["edges"]
+    assert execution_graph["graph_snapshot"]["static_revision"] == "static-start"
+    assert execution_graph["graph"]["nodes"]["skill:a"] == {"label": "skill"}
+    assert callback.await_args.kwargs == {"session_id": "unknown", "capture_mode": "agent"}
 
 
 @pytest.mark.asyncio
@@ -1322,8 +1451,12 @@ async def test_no_relation_decision_is_excluded_but_submission_is_kept(
         return (no_relation,)
 
     monkeypatch.setattr(rail_module, "evaluate_symphony_edge_candidates", evaluate)
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     await rail.run_evolution(
         SymphonyGraphEvolutionInput(
             trajectory=_trajectory(),
@@ -1336,16 +1469,17 @@ async def test_no_relation_decision_is_excluded_but_submission_is_kept(
             edge_evaluator_llm=SimpleNamespace(invoke=AsyncMock()),
         )
     )
-    assert sink.submit.await_args.args[0].execution_graph["graph"]["edges"] == []
+    assert callback.await_args.args[1]["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model", [None, SimpleNamespace(invoke=AsyncMock(side_effect=RuntimeError("boom")))])
 async def test_no_model_or_model_failure_still_submits_empty_graph(model: object | None) -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
+    callback = AsyncMock()
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
     )
     prepared = SymphonyGraphEvolutionInput(
         trajectory=_trajectory(),
@@ -1357,20 +1491,21 @@ async def test_no_model_or_model_failure_still_submits_empty_graph(model: object
         edge_evaluator_llm=model,  # type: ignore[arg-type]
     )
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["graph"]["edges"] == []
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
-async def test_consumer_and_sink_failures_are_isolated(caplog: pytest.LogCaptureFixture) -> None:
+async def test_consumer_and_callback_failures_are_isolated(caplog: pytest.LogCaptureFixture) -> None:
     async def broken_consumer(value: SymphonyGraphEvolutionInput) -> None:
         del value
         raise RuntimeError("consumer-secret")
 
-    sink = SimpleNamespace(submit=AsyncMock(side_effect=RuntimeError("sink-secret")))
+    callback = AsyncMock(side_effect=RuntimeError("callback-secret"))
     rail = SymphonyGraphEvolutionRail(
         trajectory_span_processor=TrajectorySpanProcessor(),
-        observation_sink=sink,
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
         input_consumer=broken_consumer,
     )
     prepared = SymphonyGraphEvolutionInput(
@@ -1381,15 +1516,19 @@ async def test_consumer_and_sink_failures_are_isolated(caplog: pytest.LogCapture
         trace_id="trace",
     )
     await rail.run_evolution(prepared)
-    sink.submit.assert_awaited_once()
+    callback.assert_awaited_once()
     assert "consumer-secret" not in caplog.text
-    assert "sink-secret" not in caplog.text
+    assert "callback-secret" not in caplog.text
 
 
 @pytest.mark.asyncio
 async def test_residual_invalid_planned_graph_is_omitted_without_losing_submission() -> None:
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     invalid = _ready_graph("invalid")
     del invalid["graph"]["id"]
     prepared = SymphonyGraphEvolutionInput(
@@ -1401,9 +1540,9 @@ async def test_residual_invalid_planned_graph_is_omitted_without_losing_submissi
         trace_id="trace",
     )
     await rail.run_evolution(prepared)
-    submission = sink.submit.await_args.args[0]
-    assert submission.planned_graph is None
-    assert submission.execution_graph["graph"]["edges"] == []
+    call = callback.await_args
+    assert call.args[0] is None
+    assert call.args[1]["graph"]["edges"] == []
 
 
 @pytest.mark.asyncio
@@ -1430,25 +1569,780 @@ async def test_candidate_probe_is_bounded_and_truncation_is_reported(
         )
 
     monkeypatch.setattr(rail_module, "build_symphony_edge_candidates", candidates)
-    sink = SimpleNamespace(submit=AsyncMock())
-    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor(), observation_sink=sink)
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
     await rail.run_evolution(
         SymphonyGraphEvolutionInput(
             trajectory=_trajectory(), messages=(), outcome="success", reason=None, trace_id="trace"
         )
     )
     assert seen["max_candidates"] == 65
-    submission = sink.submit.await_args.args[0]
-    assert submission.execution_graph["quality_flags"] == ["edge_candidates_truncated"]
-    assert submission.execution_graph["graph"]["edges"] == []
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["quality_flags"] == ["edge_candidates_truncated"]
+    assert execution_graph["graph"]["edges"] == []
 
 
 def test_summary_redacts_binary_and_bounds_values() -> None:
-    value = {"base64_blob": "A" * 1000, "normal": "B" * 1000, "raw": b"secret"}
+    value = {
+        "base64_blob": "A" * 1000,
+        "normal": "normal value " * 100,
+        "password": "secret",
+        "raw": b"secret",
+    }
     compact = rail_module._compact_trace_value(value)
     assert compact["base64_blob"] == "<redacted>"
+    assert compact["password"] == "<redacted>"
     assert compact["raw"] == "<redacted>"
-    assert len(compact["normal"].encode()) <= 256
+    assert len(compact["normal"].encode()) <= 512
+    assert "...<truncated>..." in compact["normal"]
+
+
+def test_summary_recovers_representative_branches_from_truncated_nested_json() -> None:
+    content = json.dumps(
+        {
+            "schema_version": "1.0",
+            "meta": {"title": "北京一日游", "description": "x" * 200},
+            "preferences": {"budget": "comfortable"},
+            "sources": [{"title": "天气来源", "source_ids": ["weather-wttr"]}],
+            "weather": {"date": "2026-09-11", "temperature": {"low_c": 18, "high_c": 31}},
+            "tail": {"notes": "y" * 1000},
+        },
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/guide.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+    truncated = f"{wrapped[: wrapped.index('tail')]}...<truncated 2048 chars>"
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": truncated, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    event = json.loads(event_text)
+    serialized = json.dumps(event, ensure_ascii=False)
+    assert event["input"]["structured"] is True
+    assert event["input"]["partial"] is True
+    assert "weather" in event["input"]["keys"]
+    assert '"branch": "weather"' in serialized
+    assert '"date"' in serialized
+    assert "2026-09-11" in serialized
+    assert "private-session" not in serialized
+    assert len(event_text.encode()) <= 1024
+
+
+def test_summary_preserves_short_complete_json_and_structures_long_complete_json() -> None:
+    short = '{"city":"北京","days":1}'
+    assert rail_module._compact_trace_value(short, max_bytes=128) == short
+    event_sized_json = json.dumps({"payload": "x" * 700})
+    event_text = rail_module._bounded_summary_event({"tool": "write_file", "ok": True, "input": event_sized_json})
+    assert json.loads(event_text)["input"] == event_sized_json
+
+    content = json.dumps(
+        {
+            "meta": {"title": "北京一日游"},
+            "preferences": {"pace": "relaxed"},
+            "sources": [{"title": "wttr.in 实时天气预报（北京）", "url": "https://wttr.in/Beijing"}],
+            "weather": [
+                {
+                    "date": "2026-09-12",
+                    "condition": "晴转多云，18–29°C，降水概率低",
+                }
+            ],
+            "schedule": [{"place": "故宫", "source_ids": ["weather-wttr"]}],
+            "notes": "x" * 4000,
+        },
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/guide.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": wrapped, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    event = json.loads(event_text)
+    structured = event["input"]["content"]
+    serialized = json.dumps(structured, ensure_ascii=False)
+    assert structured["structured"] is True
+    assert structured["partial"] is False
+    assert structured["keys"] == ["meta", "preferences", "sources", "weather", "schedule", "notes"]
+    assert '"branch": "sources"' in serialized
+    assert "wttr.in 实时天气预报（北京）" in serialized
+    assert '"branch": "weather"' in serialized
+    assert "2026-09-12" in serialized
+    assert "晴转多云" in serialized
+    assert "private-session" not in serialized
+    assert len(event_text.encode()) <= 1024
+
+
+def test_summary_structures_top_level_array_and_redacts_sensitive_values() -> None:
+    content = json.dumps(
+        [
+            {"name": "first", "api_key": "private-key", "payload": "x" * 800},
+            {"name": "second", "value": 2},
+        ]
+    )
+
+    compact = rail_module._compact_trace_value(content, max_bytes=512)
+
+    assert compact["structured"] is True
+    assert compact["partial"] is False
+    assert compact["keys"] == ["0", "1"]
+    serialized = json.dumps(compact)
+    assert "private-key" not in serialized
+    assert "<redacted>" in serialized
+    assert '"branch": "1"' in serialized
+
+
+def test_summary_recovers_complete_nested_json_when_envelope_tail_is_truncated() -> None:
+    content = json.dumps(
+        {"alpha": {"value": 1}, "middle": {"value": "保留内容"}, "omega": {"value": 3}},
+        ensure_ascii=False,
+    )
+    wrapped = json.dumps(
+        [[{"file_path": "/tmp/result.json", "content": content}], {"session_id": "private-session"}],
+        ensure_ascii=False,
+    )
+    truncated = f"{wrapped[:-8]}...<truncated 8 chars>"
+
+    summary = rail_module._structured_truncated_summary(truncated)
+
+    assert summary is not None
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert '"branch": "middle"' in serialized
+    assert '["value", "保留内容"]' in serialized
+    assert "保留内容" in serialized
+    assert "private-session" not in serialized
+
+
+def test_summary_keeps_utf8_valid_when_unicode_escape_is_truncated() -> None:
+    content = json.dumps({"emoji": "😀"}, ensure_ascii=True)
+    wrapped = json.dumps([[{"content": content}], {}])
+    cut = wrapped.index("ud83d") + len("ud83d")
+    truncated = f"{wrapped[:cut]}...<truncated 8 chars>"
+
+    event_text = rail_module._summary_tool_event(
+        {"name": "write_file", "input": truncated, "output": {"success": True}},
+        None,
+    )
+
+    assert event_text is not None
+    assert len(event_text.encode("utf-8")) <= 1024
+    assert "\\ud83d" not in event_text
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        '{"content":"bad\\q...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":xyz...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":trueX...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":01...<truncated 4 chars>',
+        '{"safe":{"value":"keep"},"bad":1.e...<truncated 4 chars>',
+        '{"content":"unterminated ordinary text}',
+        "plain text...<truncated 20 chars>",
+    ],
+)
+def test_summary_does_not_recover_nonstandard_or_invalid_json(value: str) -> None:
+    assert rail_module._structured_truncated_summary(value) is None
+    assert rail_module._unwrap_summary_payload(value) == value
+
+
+@pytest.mark.parametrize("partial_scalar", ["tru", "fals", "nul", "-", "1.", "1e", "1e+"])
+def test_summary_accepts_only_scalar_prefixes_that_can_be_completed(partial_scalar: str) -> None:
+    value = f'{{"safe":{{"value":"keep"}},"pending":{partial_scalar}...<truncated 4 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    assert "keep" in json.dumps(summary)
+
+
+@pytest.mark.parametrize("partial_number", ["1", "12.3", "1e2"])
+def test_summary_does_not_treat_number_at_truncation_boundary_as_complete(
+    partial_number: str,
+) -> None:
+    value = f'{{"safe":{{"value":"keep"}},"pending":{partial_number}...<truncated 4 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    serialized = json.dumps(summary)
+    assert "keep" in serialized
+    assert "pending" not in serialized
+
+
+def test_summary_redacts_sensitive_values_recovered_from_truncated_json() -> None:
+    value = '{"business":{"value":"keep"},"credentials":{"api_key":"private-key"...<truncated 9 chars>'
+
+    summary = rail_module._structured_truncated_summary(value)
+
+    assert summary is not None
+    serialized = json.dumps(summary, ensure_ascii=False)
+    assert "keep" in serialized
+    assert "private-key" not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "aws_access_key_id",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "secret_key",
+        "private_key",
+        "credential",
+        "authorization",
+        "auth",
+        "token",
+        "password",
+        "passphrase",
+        "cookie",
+        "session",
+    ],
+)
+def test_summary_redacts_normalized_sensitive_keys(key: str) -> None:
+    compact = rail_module._compact_trace_value({key: "private-value", "author": "keep-author"})
+
+    assert compact[key] == "<redacted>"
+    assert compact["author"] == "keep-author"
+
+
+@pytest.mark.parametrize(
+    ("text", "secret", "preserved"),
+    [
+        ("Authorization: Bearer fake-secret-bearer", "fake-secret-bearer", "Authorization:"),
+        ("Authorization=Basic fake-basic-value", "fake-basic-value", "Authorization="),
+        ("Authorization: ApiKey fake-auth-secret", "fake-auth-secret", "Authorization:"),
+        (
+            "Authorization: ApiKey fake-auth-secret --header=X-Test:ok",
+            "fake-auth-secret",
+            "<redacted> --header=X-Test:ok",
+        ),
+        ("Authorization=fake-raw-secret", "fake-raw-secret", "Authorization="),
+        (
+            "curl --header=Authorization:Bearer_fake-secret --url https://example.test",
+            "Bearer_fake-secret",
+            "--header=Authorization:<redacted> --url https://example.test",
+        ),
+        (
+            "curl -H 'Authorization: Custom fake-quoted-secret' https://example.test",
+            "fake-quoted-secret",
+            "-H 'Authorization: <redacted>' https://example.test",
+        ),
+        (
+            'curl -H Authorization:"Custom fake-value-secret" https://example.test',
+            "fake-value-secret",
+            'Authorization:"<redacted>" https://example.test',
+        ),
+        ("OPENAI_API_KEY=fake-api-value run --token fake-cli-token", "fake-api-value", "run --token"),
+        ("run --password=fake-cli-password --mode safe", "fake-cli-password", "--mode safe"),
+        ("https://user:fake-url-pass@example.test/path?token=fake-query&x=1", "fake-url-pass", "example.test"),
+        ("postgresql://user:fake-db-pass@db.test/app?password=fake-db-query", "fake-db-pass", "db.test/app"),
+        ("connection failed: password=fake-error-pass; retry=true", "fake-error-pass", "retry=true"),
+        (
+            "-----BEGIN PRIVATE KEY-----\nfake-pem-private-material\n-----END PRIVATE KEY-----",
+            "fake-pem-private-material",
+            "-----BEGIN PRIVATE KEY-----",
+        ),
+    ],
+)
+def test_summary_redacts_credentials_inside_free_text(text: str, secret: str, preserved: str) -> None:
+    compact = rail_module._compact_trace_value(text)
+
+    assert isinstance(compact, str)
+    assert secret not in compact
+    assert preserved in compact
+    assert "<redacted>" in compact
+
+
+def test_summary_redacts_all_secrets_in_mixed_command_and_url() -> None:
+    text = (
+        "TOKEN=fake-env-token run --api-key 'fake-cli-key' "
+        "https://user:fake-userinfo@host.test/path?api_key=fake-query-key"
+    )
+
+    compact = rail_module._compact_trace_value(text, max_bytes=512)
+
+    assert isinstance(compact, str)
+    assert "fake-env-token" not in compact
+    assert "fake-cli-key" not in compact
+    assert "fake-userinfo" not in compact
+    assert "fake-query-key" not in compact
+    assert "run" in compact and "host.test/path" in compact
+
+
+@pytest.mark.parametrize(
+    ("text", "forbidden", "preserved"),
+    [
+        (
+            'curl -H Authorization:Digest realm="fake-realm", nonce="fake-nonce", response="fake-response" --next ok',
+            ("realm", "nonce", "response", "fake-realm", "fake-nonce", "fake-response"),
+            "<redacted> --next ok",
+        ),
+        (
+            "Authorization: AWS4-HMAC-SHA256 Credential=fake-credential, "
+            "SignedHeaders=content-type;host;x-amz-date, "
+            "Signature=fake-signature https://service.example.test",
+            (
+                "Credential",
+                "SignedHeaders",
+                "x-amz-date",
+                "Signature",
+                "fake-credential",
+                "fake-signature",
+            ),
+            "<redacted> https://service.example.test",
+        ),
+        (
+            "Authorization: Custom fake-command-secret; echo ok",
+            ("fake-command-secret",),
+            "<redacted>; echo ok",
+        ),
+    ],
+)
+def test_summary_redacts_multi_parameter_authorization_until_clear_boundary(
+    text: str,
+    forbidden: tuple[str, ...],
+    preserved: str,
+) -> None:
+    compact = rail_module._compact_trace_value(text, max_bytes=512)
+
+    assert isinstance(compact, str)
+    assert all(token not in compact for token in forbidden)
+    assert preserved in compact
+
+
+def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, content: str) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: json.dumps({"content": content}),
+                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+                }
+            ),
+        }
+
+    source_ids = tuple(f"{index:016x}" for index in range(1, 4))
+    target_ids = tuple(f"{index:016x}" for index in range(10, 25))
+    spans = [tool_span(index, f"source-{index}", "source") for index in range(1, 4)]
+    for position, span_id in enumerate(range(10, 25), start=1):
+        marker = f"target-{position}"
+        content = marker
+        if position == 5:
+            content = f'{{"guide":"{"x" * 1500} weather-consumed-18-31C"}}'
+        spans.append(tool_span(span_id, marker, content))
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment("source", "skill", "weather", trace_id, source_ids[0], "branch", source_ids, 0)
+    target = SymphonyExecutionFragment(
+        "target", "skill", "travel-guide-generator", trace_id, target_ids[0], "branch", target_ids, 0
+    )
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_b
+
+    assert "target-1" in summary.fragment
+    assert "weather-consumed-18-31C" in summary.input
+    assert "target-15" in summary.output
+    assert "target-8" not in f"{summary.fragment}{summary.input}{summary.output}"
+
+
+def test_edge_summary_omits_framework_ids_and_read_bodies() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, input_value: object, output_value: object) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: input_value,
+                    semconv.GEN_AI_TOOL_OUTPUT: output_value,
+                    semconv.GEN_AI_TOOL_CALL_ID: "private-call-id",
+                }
+            ),
+        }
+
+    spans = [
+        tool_span(
+            1,
+            "skill_tool",
+            [[], {"skill_name": "alpha", "relative_file_path": "SKILL.md"}],
+            {"success": True, "skill_content": "private-skill-body"},
+        ),
+        tool_span(
+            2,
+            "read_file",
+            [[{"file_path": "/skills/alpha/scripts/run.py"}], {}],
+            {"success": True, "content": "private-source-body"},
+        ),
+        tool_span(
+            3,
+            "execute",
+            {
+                "tool_call_id": "nested-call-id",
+                "payload": {
+                    "session_id": "private-session",
+                    "api-key": "private-api-key",
+                    "business": "keep-business-input",
+                },
+            },
+            {
+                "success": True,
+                "data": {
+                    "artifact": "keep-business-output",
+                    "request_id": "private-request",
+                    "apikey": "private-api-key-2",
+                },
+            },
+        ),
+    ]
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment(
+        "source",
+        "skill",
+        "alpha",
+        trace_id,
+        f"{1:016x}",
+        "branch",
+        tuple(f"{i:016x}" for i in (1, 2, 3)),
+        0,
+    )
+    target = SymphonyExecutionFragment("target", "skill", "beta", trace_id, f"{2:016x}", "branch", (f"{2:016x}",), 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    serialized = f"{summary.fragment}\n{summary.input}\n{summary.output}"
+
+    assert "private-call-id" not in serialized
+    assert "private-skill-body" not in serialized
+    assert "private-source-body" not in serialized
+    assert "nested-call-id" not in serialized
+    assert "private-session" not in serialized
+    assert "private-request" not in serialized
+    assert "private-api-key" not in serialized
+    assert "alpha" in serialized
+    assert "/skills/alpha/scripts/run.py" in serialized
+    assert "keep-business-input" in serialized
+    assert "keep-business-output" in serialized
+    assert "<redacted>" in serialized
+    assert all(len(line.encode()) <= 512 for line in serialized.splitlines() if line)
+
+
+def test_edge_summary_errors_stay_within_ten_standard_events() -> None:
+    trace_id = "1" * 32
+    spans = []
+    span_ids = []
+    for span_id in range(1, 13):
+        span_ids.append(f"{span_id:016x}")
+        spans.append(
+            {
+                "traceId": trace_id,
+                "spanId": f"{span_id:016x}",
+                "name": "tool.execute",
+                "startTimeUnixNano": str(span_id),
+                "endTimeUnixNano": str(span_id + 1),
+                "status": {"code": "STATUS_CODE_ERROR", "message": f"failed-{span_id}"},
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: "execute",
+                        semconv.GEN_AI_TOOL_INPUT: {"value": span_id},
+                    }
+                ),
+            }
+        )
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": spans}],
+                }
+            ]
+        }
+    )
+    fragment = SymphonyExecutionFragment(
+        "fragment", "skill", "alpha", trace_id, span_ids[0], "branch", tuple(span_ids), 0
+    )
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        fragment,
+        SymphonyExecutionFragment("target", "skill", "beta", trace_id, span_ids[-1], "branch", (span_ids[-1],), 0),
+        (f"{trace_id}#span={span_ids[0]}", f"{trace_id}#span={span_ids[-1]}"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    serialized_events = f"{summary.fragment}\n{summary.input}\n{summary.output}"
+    events = [json.loads(line) for line in serialized_events.splitlines() if line]
+
+    assert len(events) == 10
+    assert all(set(event).issubset({"tool", "ok", "input", "output", "error"}) for event in events)
+    assert all(isinstance(event["tool"], str) and isinstance(event["ok"], bool) for event in events)
+    assert all(event["ok"] is False and "error" in event for event in events)
+    assert summary.error == ""
+
+
+def test_edge_summary_uses_standard_synthetic_event_for_span_error() -> None:
+    trace_id = "1" * 32
+    span_id = f"{1:016x}"
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [
+                        {
+                            "spans": [
+                                {
+                                    "traceId": trace_id,
+                                    "spanId": span_id,
+                                    "name": "llm.call",
+                                    "startTimeUnixNano": "1",
+                                    "endTimeUnixNano": "2",
+                                    "status": {"code": "STATUS_CODE_ERROR", "message": "failed"},
+                                    "attributes": [],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    fragment = SymphonyExecutionFragment("source", "skill", "alpha", trace_id, span_id, "branch", (span_id,), 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        fragment,
+        SymphonyExecutionFragment("target", "skill", "beta", trace_id, "2", "branch", ("2",), 0),
+        (f"{trace_id}#span={span_id}", f"{trace_id}#span=2"),
+        ("planned",),
+    )
+
+    summary = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))["candidate"].endpoint_a
+    event = json.loads(summary.fragment)
+
+    assert event == {
+        "error": {"message": "failed", "status": "STATUS_CODE_ERROR"},
+        "ok": False,
+        "tool": "span",
+    }
+
+
+@pytest.mark.parametrize(
+    ("wrapped_input", "expected_input"),
+    [
+        ([[1, 2], {}], [1, 2]),
+        ([[1, 2], {"mode": "safe"}], {"args": [1, 2], "kwargs": {"mode": "safe"}}),
+        (
+            [[{"command": "runner scripts/build.py"}], {"session_id": "framework-session"}],
+            {"command": "runner scripts/build.py"},
+        ),
+    ],
+)
+def test_summary_tool_event_removes_argument_and_result_wrappers(
+    wrapped_input: object,
+    expected_input: object,
+) -> None:
+    serialized = rail_module._summary_tool_event(
+        {
+            "name": "execute",
+            "input": wrapped_input,
+            "output": {
+                "success": False,
+                "data": {"value": 1},
+                "error": "failed",
+                "include_extracted_content_only_once": False,
+                "extracted_content": None,
+                "long_term_memory": None,
+            },
+        },
+        None,
+    )
+
+    assert serialized is not None
+    event = json.loads(serialized)
+    assert event == {
+        "error": "failed",
+        "input": expected_input,
+        "ok": False,
+        "output": {"value": 1},
+        "tool": "execute",
+    }
+    assert "success" not in event["output"]
+    assert "data" not in event["output"]
+    assert "error" not in event["output"]
+
+
+@pytest.mark.asyncio
+async def test_edge_summary_preserves_diverse_middle_tool_and_tail_command() -> None:
+    trace_id = "1" * 32
+
+    def tool_span(span_id: int, name: str, input_value: object, output_value: object) -> dict:
+        return {
+            "traceId": trace_id,
+            "spanId": f"{span_id:016x}",
+            "name": f"tool.{name}",
+            "startTimeUnixNano": str(span_id),
+            "endTimeUnixNano": str(span_id + 1),
+            "attributes": attributes_from_map(
+                {
+                    semconv.GEN_AI_TOOL_NAME: name,
+                    semconv.GEN_AI_TOOL_INPUT: json.dumps(input_value),
+                    semconv.GEN_AI_TOOL_OUTPUT: json.dumps(output_value),
+                }
+            ),
+        }
+
+    target_specs: list[tuple[str, object, object]] = [
+        ("skill_tool", {"skill_name": "beta", "relative_file_path": "SKILL.md"}, {"success": True}),
+        ("bash", {"command": "cd /skills/beta && echo prepare"}, {"success": True, "data": "ready"}),
+    ]
+    target_specs.extend(
+        ("read_file", {"file_path": f"/tmp/input-{index}.txt"}, {"success": True}) for index in range(15)
+    )
+    target_specs.extend(("fetch", {"url": f"https://example.test/{index}"}, {"success": True}) for index in range(13))
+    target_specs.extend(
+        ("edit_file", {"path": "/tmp/result.txt", "patch": str(index)}, {"success": True}) for index in range(13)
+    )
+    target_specs.append(
+        ("write_file", {"file_path": "/tmp/result.json", "content": "unique-business-mutation"}, {"success": True})
+    )
+    target_specs.extend(
+        ("fetch", {"url": f"https://example.test/tail-{index}"}, {"success": True}) for index in range(13)
+    )
+    target_specs.extend(
+        ("edit_file", {"path": "/tmp/result.txt", "patch": f"tail-{index}"}, {"success": True}) for index in range(15)
+    )
+    target_specs.append(
+        (
+            "bash",
+            [
+                [
+                    {
+                        "command": "cd /skills/beta && python scripts/build.py --input /tmp/result.json "
+                        + "--description "
+                        + "x" * 900
+                    }
+                ],
+                {"session_id": "framework-session"},
+            ],
+            {
+                "success": True,
+                "data": {"artifact": "/tmp/final.txt", "detail": "y" * 900},
+                "include_extracted_content_only_once": False,
+                "extracted_content": "transport-only",
+                "long_term_memory": None,
+            },
+        )
+    )
+    source_span = tool_span(1, "produce", {"value": "source"}, {"success": True, "data": "source-output"})
+    target_spans = [tool_span(index, *spec) for index, spec in enumerate(target_specs, start=10)]
+    trajectory = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "summary"})},
+                    "scopeSpans": [{"spans": [source_span, *target_spans]}],
+                }
+            ]
+        }
+    )
+    source = SymphonyExecutionFragment("source", "skill", "alpha", trace_id, f"{1:016x}", "branch", (f"{1:016x}",), 0)
+    target_ids = tuple(f"{index:016x}" for index in range(10, 10 + len(target_specs)))
+    target = SymphonyExecutionFragment("target", "skill", "beta", trace_id, target_ids[0], "branch", target_ids, 0)
+    candidate = SymphonyEdgeCandidate(
+        "candidate",
+        source,
+        target,
+        (f"{trace_id}#span={source.anchor_span_id}", f"{trace_id}#span={target.anchor_span_id}"),
+        ("planned",),
+    )
+    summaries = rail_module._build_edge_summaries((candidate,), ((0, trajectory),))
+    llm = SimpleNamespace(
+        invoke=AsyncMock(return_value=json.dumps({"status": "success", "reason": "target consumed source output"}))
+    )
+
+    await rail_module.evaluate_symphony_edge_candidates(
+        llm=llm,
+        query="Combine alpha and beta outputs",
+        candidates=(candidate,),
+        decisions=build_model_edge_decisions((candidate,)),
+        summaries=summaries,
+    )
+
+    assert llm.invoke.await_count == 1
+    messages = llm.invoke.await_args.args[0]
+    payload = json.loads(messages[1]["content"])
+    events = payload["target"]["events"]
+    serialized = json.dumps(messages, ensure_ascii=False, separators=(",", ":"))
+    assert len(events) <= 10
+    assert events[0]["tool"] == "skill_tool"
+    assert events[-1]["tool"] == "bash"
+    assert any(event["tool"] == "write_file" for event in events)
+    assert "scripts/build.py" in serialized
+    assert "unique-business-mutation" in serialized
+    assert "include_extracted_content_only_once" not in serialized
+    assert "transport-only" not in serialized
+    assert "framework-session" not in serialized
+    assert "SKILL.md" not in serialized
+    assert "#span=" not in serialized
+    assert len(serialized.encode()) <= 24 * 1024
 
 
 @pytest.mark.asyncio
@@ -1474,6 +2368,474 @@ async def test_background_prepared_input_survives_capture_cleanup() -> None:
     await rail.drain_pending_host_events(wait=True)
     assert len(received) == 1
     assert len(tuple(iter_spans(received[0].trajectory))) == 1
+
+
+def _resume_input(*components: str) -> InteractiveInput:
+    response = InteractiveInput()
+    for component in components:
+        response.update(component, "confirmed")
+    return response
+
+
+def _emit_interrupt_segment(rail: SymphonyGraphEvolutionRail, trace: int) -> None:
+    processor = rail.trajectory_span_processor
+    processor.on_end(_span("agent.root", 1, trace_id=trace))
+    processor.on_end(
+        _span("agent.worker", 2, trace_id=trace, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: "worker"})
+    )
+    processor.on_end(
+        _span(
+            "tool.skill_tool",
+            3,
+            trace_id=trace,
+            parent_span_id=2,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": "alpha", "relative_file_path": "SKILL.md"}),
+                semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True}),
+            },
+        )
+    )
+    processor.on_end(
+        _span("tool.lookup", 4, trace_id=trace, parent_span_id=2, attributes={semconv.GEN_AI_TOOL_NAME: "lookup"})
+    )
+    processor.on_end(_span("llm.call", 5, trace_id=trace, parent_span_id=2))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize("resumes", [1, 2])
+@pytest.mark.parametrize("id_field", ["component_ids", "interrupt_ids"])
+async def test_interrupt_lifecycle_matrix_preserves_complete_input(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    resumes: int,
+    id_field: str,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    initial_model = SimpleNamespace(invoke=AsyncMock())
+    identity = CapabilityIdentity("skill:alpha", "skill", "alpha")
+    snapshot = _graph_snapshot()
+    received = []
+    callback = AsyncMock()
+    consumer = AsyncMock(side_effect=received.append)
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        capability_snapshot_provider=SimpleNamespace(snapshot_capabilities=lambda: [identity]),
+        graph_snapshot_provider=lambda: snapshot,
+        submit_evolution=callback,
+        input_consumer=consumer,
+        async_evolution=False,
+        edge_evaluator_llm=initial_model,
+        edge_search_max_depth=7,
+    )
+    trigger = AsyncMock(wraps=rail._trigger_evolution)
+    monkeypatch.setattr(rail, "_trigger_evolution", trigger)
+    saved = None
+    for segment in range(resumes + 1):
+        roots["value"] = _root(segment + 1)
+        interrupt = segment < resumes
+        result = (
+            ToolInterruptHandler.build_interrupt_result([("ask-user", {"question": "continue?"})])
+            if interrupt and id_field == "interrupt_ids"
+            else {"result_type": "interrupt", id_field: ["ask-user"]}
+            if interrupt
+            else {"result_type": "answer", "output": "done"}
+        )
+        ctx = _ctx(query="original task" if segment == 0 else _resume_input("ask-user"), result=result)
+        await rail.before_invoke(ctx)
+        state = rail._state(rail._current_capture())
+        assert state is not None
+        if saved is not None:
+            assert state is saved
+            assert len(state.increments) == segment
+            assert state.current_continuity_index == 0
+        _emit_interrupt_segment(rail, segment + 1)
+        await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": _ready_graph(f"plan-{segment}")}), None)
+        if segment == 0:
+            await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": {"graph": {}}}), None)
+            rail.update_edge_evaluator_llm(SimpleNamespace(invoke=AsyncMock()))
+            rail._edge_search_max_depth = 1
+            snapshot["static_revision"] = "changed"
+        saved = state
+        await rail.after_invoke(ctx)
+        if interrupt:
+            trigger.assert_not_awaited()
+            callback.assert_not_awaited()
+            consumer.assert_not_awaited()
+            assert len(rail._paused_symphony_states) == 1
+    assert trigger.await_count == callback.await_count == consumer.await_count == 1
+    prepared = received[0]
+    assert prepared.query == "original task"
+    assert prepared.edge_evaluator_llm is initial_model
+    assert prepared.edge_search_max_depth == 7
+    assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot == {**_graph_snapshot(), "merged_revision": None}
+    assert prepared.planned_graph["graph"]["id"] == "plan-0"
+    assert prepared.quality_flags == ("planned_graph_invalid",)
+    assert prepared.trace_ids == tuple(f"{index:032x}" for index in range(1, resumes + 2))
+    assert len(prepared.interrupt_continuations) == resumes
+    assert {fragment.trace_id for fragment in prepared.execution_fragments} == set(prepared.trace_ids)
+    assert {index for index, _ in prepared.execution_continuities} == {0}
+    assert len(list(iter_spans(prepared.trajectory))) == 5 * (resumes + 1)
+    if rail_type is TeamSymphonyGraphEvolutionRail:
+        assert [fragment.capability_name for fragment in prepared.execution_fragments] == ["worker"] * (resumes + 1)
+        assert callback.await_args.kwargs["capture_mode"] == "team"
+    else:
+        assert {fragment.capability_type for fragment in prepared.execution_fragments} >= {"skill", "tool"}
+    assert callback.await_args.args[1]["trace_ids"] == list(prepared.trace_ids)
+    assert not rail._paused_symphony_states and not rail._symphony_states and not rail._active_captures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize(
+    "case", ["wrong", "multiple", "new_task", "cancel", "error", "conflict", "before", "after", "uninit"]
+)
+async def test_interrupt_lifecycle_invalidations_never_revive(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    case: str,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    ctx = _ctx(result={"result_type": "interrupt", "interrupt_ids": ["ask"]})
+    await rail.before_invoke(ctx)
+    _emit_interrupt_segment(rail, 1)
+    await rail.after_invoke(ctx)
+    assert rail._paused_symphony_states
+    roots["value"] = _root(2)
+    if case == "uninit":
+        rail.uninit(SimpleNamespace())
+    else:
+        query = (
+            "new task"
+            if case == "new_task"
+            else _resume_input("wrong")
+            if case == "wrong"
+            else (_resume_input("ask", "other") if case == "multiple" else _resume_input("ask"))
+        )
+        result = {"result_type": "interrupt", "interrupt_ids": ["ask"]}
+        if case == "cancel":
+            result = {"result_type": "cancelled"}
+        elif case == "error":
+            result = {"result_type": "error"}
+        elif case == "conflict":
+            result["success"] = False
+        elif case == "new_task":
+            result = {"result_type": "answer", "output": "new done"}
+        follow = _ctx(query=query, result=result)
+        if case == "before":
+            original = rail._on_before_invoke
+
+            async def broken_before(context):
+                await original(context)
+                raise RuntimeError("before failed")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(rail, "_on_before_invoke", broken_before)
+                with pytest.raises(RuntimeError, match="before failed"):
+                    await rail.before_invoke(follow)
+        else:
+            await rail.before_invoke(follow)
+            _emit_interrupt_segment(rail, 2)
+            if case == "after":
+                with monkeypatch.context() as patch:
+                    patch.setattr(rail, "_on_after_invoke", AsyncMock(side_effect=RuntimeError("after failed")))
+                    with pytest.raises(RuntimeError, match="after failed"):
+                        await rail.after_invoke(follow)
+            else:
+                await rail.after_invoke(follow)
+    assert not rail._paused_symphony_states
+    prior_calls = callback.await_count
+    assert prior_calls == (1 if case == "new_task" else 0)
+    # A rejected restore that itself interrupts must not establish a new chain.
+    roots["value"] = _root(3)
+    final = _ctx(query=_resume_input("ask"))
+    await rail.before_invoke(final)
+    _emit_interrupt_segment(rail, 3)
+    await rail.after_invoke(final)
+    assert callback.await_count == prior_calls
+    assert not rail._paused_symphony_states and not rail._active_captures and not rail._symphony_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["needs_input", "no_plan"])
+@pytest.mark.parametrize("malformed", ["nodes", "edges", "dangling"])
+async def test_nonready_plan_still_requires_valid_graph(status: str, malformed: str) -> None:
+    rail = SymphonyGraphEvolutionRail(trajectory_span_processor=TrajectorySpanProcessor())
+    ctx = _ctx()
+    await rail.before_invoke(ctx)
+    graph = _ready_graph("nonready")
+    graph["graph"]["metadata"]["status"] = status
+    if malformed == "dangling":
+        graph["graph"]["edges"] = [{"source": "missing", "target": "also-missing"}]
+    else:
+        graph["graph"][malformed] = "invalid"
+    await rail._on_after_tool_call(_tool_ctx(ctx, {"planned_graph": graph}), None)
+    assert "planned_graph_invalid" in rail._state(rail._current_capture()).quality_codes
+    await rail.after_invoke(ctx)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", ["session", "owner", "capture_mode"])
+async def test_same_component_isolated_by_resume_scope(monkeypatch: pytest.MonkeyPatch, scope: str) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    received = []
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        input_consumer=AsyncMock(side_effect=received.append),
+        async_evolution=False,
+    )
+    contexts = [
+        _ctx(query="first", result={"result_type": "interrupt", "component_ids": ["shared"]}),
+        _ctx(
+            query="second",
+            session_id="other" if scope == "session" else "session-1",
+            member_id="other" if scope == "owner" else "member-1",
+            result={"result_type": "interrupt", "component_ids": ["shared"]},
+        ),
+    ]
+    if scope == "capture_mode":
+        contexts[1].team_id = "member-1"
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await rail.before_invoke(ctx)
+        _emit_interrupt_segment(rail, index)
+        await rail.after_invoke(ctx)
+    assert len(rail._paused_symphony_states) == 2
+    for index, ctx in enumerate(contexts, 3):
+        roots["value"] = _root(index)
+        ctx.inputs = InvokeInputs(query=_resume_input("shared"), result={"result_type": "answer", "output": "done"})
+        await rail.before_invoke(ctx)
+        _emit_interrupt_segment(rail, index)
+        await rail.after_invoke(ctx)
+    assert [item.query for item in received] == ["first", "second"]
+    assert received[0].trace_ids == (f"{1:032x}", f"{3:032x}")
+    assert received[1].trace_ids == (f"{2:032x}", f"{4:032x}")
+    assert not rail._paused_symphony_states
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+@pytest.mark.parametrize("count", [2, 3])
+async def test_concurrent_same_scope_interrupt_key_never_selects_a_winner(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+    count: int,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    contexts = [_ctx(result={"result_type": "interrupt", "component_ids": ["shared"]}) for _ in range(count)]
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await Context().run(asyncio.create_task, rail.before_invoke(ctx))
+        _emit_interrupt_segment(rail, index)
+    assert len(rail._active_captures) == count
+    for index, ctx in enumerate(contexts, 1):
+        roots["value"] = _root(index)
+        await Context().run(asyncio.create_task, rail.after_invoke(ctx))
+    roots["value"] = _root(count + 1)
+    resume = _ctx(query=_resume_input("shared"))
+    await rail.before_invoke(resume)
+    _emit_interrupt_segment(rail, count + 1)
+    await rail.after_invoke(resume)
+    callback.assert_not_awaited()
+    assert not rail._paused_symphony_states and not rail._active_captures
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+async def test_resume_retains_pending_continuity_gap_and_quality(
+    monkeypatch: pytest.MonkeyPatch,
+    rail_type: type,
+) -> None:
+    roots = {"value": _root(1)}
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
+    received = []
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        input_consumer=AsyncMock(side_effect=received.append),
+        async_evolution=False,
+    )
+    ctx = _ctx(result={"result_type": "interrupt", "component_ids": ["ask"]})
+    await rail.before_invoke(ctx)
+    _emit_interrupt_segment(rail, 1)
+    rail._drain_for_hook(ctx)
+    # A real malformed tool payload is rejected after an earlier clean drain.
+    rail.trajectory_span_processor.on_end(
+        _span(
+            "tool.bad",
+            6,
+            trace_id=1,
+            parent_span_id=2,
+            attributes={semconv.GEN_AI_TOOL_NAME: "bad", semconv.GEN_AI_TOOL_OUTPUT: "{broken"},
+        )
+    )
+    await rail.after_invoke(ctx)
+    paused = next(iter(rail._paused_symphony_states.values()))
+    assert paused.continuity_break_pending
+    assert "tool_payload_json_error" in paused.quality_codes
+    roots["value"] = _root(2)
+    restored = _ctx(query=_resume_input("ask"))
+    await rail.before_invoke(restored)
+    _emit_interrupt_segment(rail, 2)
+    await rail.after_invoke(restored)
+    assert len(received) == 1
+    prepared = received[0]
+    assert {index for index, _ in prepared.execution_continuities} == {0, 1}
+    assert "tool_payload_json_error" in prepared.quality_flags
+    assert len(list(iter_spans(prepared.trajectory))) == 10
+    assert prepared.interrupt_continuations[0].continuity_index == 0
+
+
+@pytest.mark.asyncio
+async def test_team_member_spans_and_repeated_completion_do_not_duplicate_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: _root(1))
+    callback = AsyncMock()
+    rail = TeamSymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    leader = _ctx(member_id="leader")
+    await rail.before_invoke(leader)
+    _emit_interrupt_segment(rail, 1)
+    for index, member in enumerate(("worker", "reviewer"), 10):
+        rail.trajectory_span_processor.on_end(
+            _span("agent.member", index, trace_id=1, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: member})
+        )
+    callback.assert_not_awaited()
+    await rail.after_invoke(leader)
+    for member in ("worker", "reviewer", "leader"):
+        await rail.after_invoke(_ctx(member_id=member))
+    assert callback.await_count == 1
+    assert callback.await_args.kwargs["capture_mode"] == "team"
+
+
+def test_prepared_input_preserves_legacy_positional_constructor() -> None:
+    trajectory = _trajectory()
+    identity = CapabilityIdentity("skill:a", "skill", "a")
+    # Historical positional order includes inherited skill_name before the
+    # original Symphony fields, with capability_snapshot in position seven.
+    prepared = SymphonyGraphEvolutionInput(
+        trajectory,
+        (),
+        None,
+        _ready_graph("plan"),
+        (),
+        (),
+        (identity,),
+        _graph_snapshot(),
+        "original task",
+        "success",
+        None,
+        "trace",
+        "session",
+        "agent",
+        ("quality",),
+        None,
+        7,
+    )
+    assert prepared.capability_snapshot == (identity,)
+    assert prepared.graph_snapshot == _graph_snapshot()
+    assert prepared.query == "original task"
+    assert prepared.edge_search_max_depth == 7
+    assert prepared.trace_ids == prepared.interrupt_continuations == ()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rail_type", [SymphonyGraphEvolutionRail, TeamSymphonyGraphEvolutionRail])
+async def test_conflict_invalidates_third_pause_waiting_to_acquire_lock(
+    monkeypatch: pytest.MonkeyPatch, rail_type: type
+) -> None:
+    roots = threading.local()
+    roots.value = _root(1)
+    monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots.value)
+    callback = AsyncMock()
+    rail = rail_type(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+        async_evolution=False,
+    )
+    contexts = [_ctx(result={"result_type": "interrupt", "component_ids": ["shared"]}) for _ in range(3)]
+    for index, ctx in enumerate(contexts, 1):
+        roots.value = _root(index)
+        await Context().run(asyncio.create_task, rail.before_invoke(ctx))
+        _emit_interrupt_segment(rail, index)
+    roots.value = _root(1)
+    await Context().run(asyncio.create_task, rail.after_invoke(contexts[0]))
+    entered = threading.Event()
+    release = threading.Event()
+    original_lock = rail._symphony_states_lock
+    original_pause = rail._pause_interrupt_state
+    errors = []
+
+    class ControlledLock:
+        def __enter__(self):
+            if getattr(roots, "block_pause", False):
+                roots.block_pause = False
+                entered.set()
+                assert release.wait(5), "conflict thread did not release the waiting pause"
+            original_lock.acquire()
+            return self
+
+        def __exit__(self, *args):
+            original_lock.release()
+
+    def pause_after_outer_check(state, inputs):
+        if threading.current_thread().name == "third-pause":
+            roots.block_pause = True
+        original_pause(state, inputs)
+
+    monkeypatch.setattr(rail, "_symphony_states_lock", ControlledLock())
+    monkeypatch.setattr(rail, "_pause_interrupt_state", pause_after_outer_check)
+
+    def third_completion():
+        roots.value = _root(3)
+        try:
+            asyncio.run(rail.after_invoke(contexts[2]))
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=third_completion, name="third-pause")
+    worker.start()
+    try:
+        assert await asyncio.to_thread(entered.wait, 5), "third pause did not reach the lock boundary"
+        roots.value = _root(2)
+        await Context().run(asyncio.create_task, rail.after_invoke(contexts[1]))
+        assert not rail._paused_symphony_states
+    finally:
+        release.set()
+        await asyncio.to_thread(worker.join, 5)
+    assert not worker.is_alive() and not errors
+    assert not rail._paused_symphony_states
+    roots.value = _root(4)
+    restored = _ctx(query=_resume_input("shared"))
+    await rail.before_invoke(restored)
+    _emit_interrupt_segment(rail, 4)
+    await rail.after_invoke(restored)
+    callback.assert_not_awaited()
 
 
 def test_public_exports_are_available() -> None:

@@ -1,28 +1,41 @@
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
+from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, overload
+from unittest.mock import AsyncMock
 
 import pytest
 
+from openjiuwen.agent_evolving.trajectory.model import Trajectory
+from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
+    SymphonyEdgeEndpointSummary,
+    SymphonyEdgeEvaluationSummary,
+    evaluate_symphony_edge_candidates,
+)
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    SymphonyInterruptContinuation,
+    build_model_edge_decisions,
+    build_symphony_edge_candidates,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
+    project_symphony_execution_fragments,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     CapabilityIdentity,
-    CapabilitySnapshotProvider,
-    SymphonyGraphEvolutionSubmission,
-    SymphonyGraphObservationSink,
+    _canonical_graph_pair,
+    _execution_graph_id,
     build_symphony_execution_graph,
-    build_symphony_graph_evolution_submission,
 )
 
 _TRACE_ID = "1" * 32
@@ -32,7 +45,13 @@ class _ExplodingSequence(Sequence[Any]):
     def __init__(self, error: BaseException) -> None:
         self._error = error
 
-    def __getitem__(self, index: int) -> Any:
+    @overload
+    def __getitem__(self, index: int) -> Any: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> Sequence[Any]: ...
+
+    def __getitem__(self, index: int | slice) -> Any:
         del index
         raise self._error
 
@@ -64,44 +83,11 @@ class _ExplodingObservationCandidate(SymphonyEdgeCandidate):
         return super().__getattribute__(name)
 
 
-class _ExplodingPortsIdentity(CapabilityIdentity):
-    def __getattribute__(self, name: str) -> Any:
-        if name == "output_ports":
-            raise RuntimeError("ports unavailable")
-        return super().__getattribute__(name)
-
-
 class _ExplodingAliasIdentity(CapabilityIdentity):
     def __getattribute__(self, name: str) -> Any:
         if name == "capability_name":
             raise RuntimeError("alias unavailable")
         return super().__getattribute__(name)
-
-
-class _EvilDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise RuntimeError("malicious mapping")
-
-
-class _BaseExplodingDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise KeyboardInterrupt("system cancellation")
-
-
-class _MemoryExplodingDict(dict[str, Any]):
-    def items(self) -> Any:
-        raise MemoryError("memory exhausted")
-
-
-class _CustomMapping(Mapping[str, Any]):
-    def __getitem__(self, key: str) -> Any:
-        raise KeyError(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter(())
-
-    def __len__(self) -> int:
-        return 0
 
 
 def _fragment(
@@ -169,14 +155,11 @@ def _identity(
     input_ports: tuple[str, ...] = ("default_input",),
     output_ports: tuple[str, ...] = ("default_output",),
 ) -> CapabilityIdentity:
+    del version, content_hash, input_ports, output_ports
     return CapabilityIdentity(
         capability_id=capability_id,
         capability_type=capability_type,  # type: ignore[arg-type]
         capability_name=capability_name,
-        version=version,
-        content_hash=content_hash or f"sha256:{capability_id}",
-        input_ports=input_ports,
-        output_ports=output_ports,
     )
 
 
@@ -188,6 +171,7 @@ def _build(
     outcome: str = "success",
     reason: str | None = None,
     quality_flags: Sequence[str] = (),
+    graph_snapshot: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     return build_symphony_execution_graph(
         trace_id=_TRACE_ID,
@@ -198,66 +182,12 @@ def _build(
         decisions=decisions,
         capability_snapshot=identities,
         quality_flags=quality_flags,
-    )
-
-
-def _planned_graph(graph_id: str = "planned-1") -> dict[str, Any]:
-    return {
-        "graph": {
-            "id": graph_id,
-            "type": "planned_graph",
-            "directed": True,
-            "metadata": {"status": "ready"},
-            "nodes": {
-                "source-id": {"label": "source", "metadata": {"type": "skill"}},
-                "target-id": {"label": "target", "metadata": {"type": "tool"}},
-            },
-            "edges": [{"source": "source-id", "target": "target-id", "relation": "can_feed"}],
-        }
-    }
-
-
-def _execution_with_edge() -> dict[str, Any]:
-    source = _fragment(1, "skill", "source")
-    target = _fragment(2, "tool", "target")
-    candidate = _candidate(1, source, target)
-    return _build(
-        [candidate],
-        [_decision(candidate)],
-        [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
+        graph_snapshot=graph_snapshot,
     )
 
 
 def _edges(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return payload["graph"]["edges"]
-
-
-def _submission_hash(submission: SymphonyGraphEvolutionSubmission) -> str:
-    canonical = json.dumps(
-        {
-            "planned_graph": submission.planned_graph,
-            "execution_graph": submission.execution_graph,
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-
-
-def _refresh_execution_graph_id(execution: dict[str, Any]) -> None:
-    graph_without_id = dict(execution["graph"])
-    graph_without_id.pop("id", None)
-    envelope = {**execution, "graph": graph_without_id}
-    canonical = json.dumps(
-        envelope,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    execution["graph"]["id"] = "execution_graph:sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def test_builds_required_jgf_and_keeps_only_supported_example_edges() -> None:
@@ -296,23 +226,10 @@ def test_builds_required_jgf_and_keeps_only_supported_example_edges() -> None:
     ]
     assert _edges(result)[0]["relation"] == "can_feed"
     assert _edges(result)[0]["metadata"]["success"] is False
-    assert _edges(result)[0]["metadata"]["reason"] == "skill3 rejected the artifact"
+    assert _edges(result)[0]["metadata"] == {"success": False}
     assert _edges(result)[1]["metadata"]["success"] is True
-    assert "reason" not in _edges(result)[1]["metadata"]
     assert set(result["graph"]["nodes"]) == {"skill-2", "skill-3", "skill-5"}
-    assert result["graph"]["nodes"]["skill-2"] == {
-        "label": "skill",
-        "metadata": {
-            "capability_type": "skill",
-            "version": "1.0.0",
-            "content_hash": "sha256:skill-2",
-            "input_ports": ["default_input"],
-            "output_ports": ["artifact_uri"],
-        },
-    }
-    assert _edges(result)[0]["metadata"]["port_mappings"] == [
-        {"source_output": "artifact_uri", "target_input": "source_uri"}
-    ]
+    assert result["graph"]["nodes"]["skill-2"] == {"label": "skill"}
 
 
 def test_failed_and_partial_outcomes_require_outer_reason_while_success_omits_it() -> None:
@@ -382,8 +299,6 @@ def test_same_name_across_types_resolves_by_type() -> None:
         ("capability_id", ""),
         ("capability_type", "plugin"),
         ("capability_name", ""),
-        ("version", ""),
-        ("content_hash", ""),
     ],
 )
 def test_missing_or_invalid_identity_field_drops_related_edge(field: str, value: str) -> None:
@@ -391,7 +306,7 @@ def test_missing_or_invalid_identity_field_drops_related_edge(field: str, value:
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "source")
-    invalid_target = replace(_identity("target-id", "tool", "target"), **{field: value})
+    invalid_target = replace(_identity("target-id", "tool", "target"), **{field: value})  # type: ignore[arg-type]
 
     result = _build([candidate], [_decision(candidate)], [valid_source, invalid_target])
 
@@ -418,7 +333,7 @@ def test_ambiguous_name_or_name_id_collision_drops_edge() -> None:
     assert _edges(result) == []
 
 
-def test_conflicting_metadata_for_same_capability_id_drops_related_edges() -> None:
+def test_duplicate_capability_id_drops_related_edges() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -427,8 +342,8 @@ def test_conflicting_metadata_for_same_capability_id_drops_related_edges() -> No
         [candidate],
         [_decision(candidate)],
         [
-            _identity("source-id", "skill", "source", version="1"),
-            _identity("source-id", "skill", "source", version="2"),
+            _identity("source-id", "skill", "source"),
+            _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
         ],
     )
@@ -441,7 +356,7 @@ def test_valid_and_invalid_records_with_same_capability_id_block_the_id() -> Non
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "source")
-    invalid_source = replace(valid_source, content_hash="")
+    invalid_source = replace(valid_source, capability_name="")
 
     result = _build(
         [candidate],
@@ -457,7 +372,7 @@ def test_invalid_record_blocks_a_type_name_alias_shared_with_valid_record() -> N
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
     valid_source = _identity("source-id", "skill", "shared-name")
-    invalid_alias = replace(valid_source, capability_id="", version="")
+    invalid_alias = replace(valid_source, capability_id="")
 
     result = _build(
         [candidate],
@@ -517,8 +432,7 @@ def test_model_assisted_low_is_valid_and_evidence_must_be_candidate_allowlisted(
         identities,
     )
 
-    assert _edges(valid)[0]["metadata"]["evidence_method"] == "model_assisted"
-    assert _edges(valid)[0]["metadata"]["evidence_strength"] == "low"
+    assert _edges(valid)[0]["metadata"] == {"success": True}
     assert _edges(invalid) == []
 
 
@@ -536,7 +450,7 @@ def test_deterministic_decision_is_not_execution_evidence() -> None:
     assert _edges(result) == []
 
 
-def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
+def test_multiple_ports_do_not_block_a_valid_execution_edge() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -550,9 +464,7 @@ def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
         ],
     )
 
-    assert _edges(result)[0]["metadata"]["port_mappings"] == [
-        {"source_output": "report_uri", "target_input": "document_uri"}
-    ]
+    assert _edges(result)[0]["metadata"] == {"success": True}
 
 
 @pytest.mark.parametrize(
@@ -567,7 +479,7 @@ def test_port_mapping_comes_from_the_frozen_capability_snapshot() -> None:
         (("",), ("document_uri",)),
     ],
 )
-def test_missing_ambiguous_or_invalid_ports_fail_closed(
+def test_ports_are_not_part_of_execution_identity(
     source_ports: tuple[str, ...],
     target_ports: tuple[str, ...],
 ) -> None:
@@ -584,26 +496,7 @@ def test_missing_ambiguous_or_invalid_ports_fail_closed(
         ],
     )
 
-    assert _edges(result) == []
-
-
-@pytest.mark.parametrize(
-    ("field_name", "value"),
-    [
-        ("input_ports", ["input"]),
-        ("output_ports", ["output"]),
-        ("input_ports", (" spaced ",)),
-        ("output_ports", (42,)),
-    ],
-)
-def test_capability_port_collections_are_strict_immutable_tuples(field_name: str, value: Any) -> None:
-    source = replace(_identity("source-id", "skill", "source"), **{field_name: value})
-    target = _identity("target-id", "tool", "target")
-    candidate = _candidate(1, _fragment(1, "skill", "source"), _fragment(2, "tool", "target"))
-
-    result = _build([candidate], [_decision(candidate)], [source, target])
-
-    assert _edges(result) == []
+    assert len(_edges(result)) == 1
 
 
 @pytest.mark.parametrize(
@@ -611,10 +504,6 @@ def test_capability_port_collections_are_strict_immutable_tuples(field_name: str
     [
         ("capability_id", "bad\ud800id"),
         ("capability_name", "bad\u200bname"),
-        ("version", "1.0\ninvalid"),
-        ("content_hash", "sha256:\ud800"),
-        ("input_ports", ("bad\u200binput",)),
-        ("output_ports", ("bad\x00output",)),
     ],
 )
 def test_capability_identity_text_rejects_invalid_utf8_and_control_characters(
@@ -630,7 +519,7 @@ def test_capability_identity_text_rejects_invalid_utf8_and_control_characters(
     assert _edges(result) == []
 
 
-def test_surrogate_port_observation_does_not_clear_an_independent_valid_edge() -> None:
+def test_invalid_identity_does_not_clear_an_independent_valid_edge() -> None:
     valid = _candidate(1, _fragment(1, "skill", "source"), _fragment(2, "tool", "target"))
     invalid = _candidate(2, _fragment(3, "skill", "bad-source"), _fragment(4, "tool", "bad-target"))
 
@@ -640,39 +529,12 @@ def test_surrogate_port_observation_does_not_clear_an_independent_valid_edge() -
         [
             _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
-            _identity("bad-source-id", "skill", "bad-source", output_ports=("\ud800",)),
+            _identity("bad-source-id", "skill", "bad\ud800source"),
             _identity("bad-target-id", "tool", "bad-target"),
         ],
     )
 
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == [valid.candidate_id]
-
-
-def test_exploding_ports_still_poison_the_same_readable_alias() -> None:
-    source = _fragment(1, "skill", "shared")
-    target = _fragment(2, "tool", "target")
-    candidate = _candidate(1, source, target)
-    exploding = _ExplodingPortsIdentity(
-        capability_id="bad-source-id",
-        capability_type="skill",
-        capability_name="shared",
-        version="1",
-        content_hash="sha256:bad",
-        input_ports=("input",),
-        output_ports=("output",),
-    )
-
-    result = _build(
-        [candidate],
-        [_decision(candidate)],
-        [
-            _identity("source-id", "skill", "shared"),
-            exploding,
-            _identity("target-id", "tool", "target"),
-        ],
-    )
-
-    assert _edges(result) == []
+    assert [(edge["source"], edge["target"]) for edge in _edges(result)] == [("source-id", "target-id")]
 
 
 def test_unreadable_alias_invalidates_the_whole_snapshot_without_escaping() -> None:
@@ -683,10 +545,6 @@ def test_unreadable_alias_invalidates_the_whole_snapshot_without_escaping() -> N
         capability_id="unreadable-id",
         capability_type="skill",
         capability_name="unreadable",
-        version="1",
-        content_hash="sha256:unreadable",
-        input_ports=("input",),
-        output_ports=("output",),
     )
 
     result = _build(
@@ -713,10 +571,10 @@ def test_identity_without_readable_alias_fields_invalidates_the_whole_snapshot()
         outcome="success",
         candidates=[candidate],
         decisions=[_decision(candidate)],
-        capability_snapshot=[  # type: ignore[list-item]
+        capability_snapshot=[
             _identity("source-id", "skill", "source"),
             _identity("target-id", "tool", "target"),
-            object(),
+            object(),  # type: ignore[list-item]
         ],
     )
 
@@ -826,7 +684,7 @@ def test_malformed_candidate_does_not_clear_an_independent_valid_observation() -
         [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
     )
 
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == [valid.candidate_id]
+    assert [(edge["source"], edge["target"]) for edge in _edges(result)] == [("source-id", "target-id")]
 
 
 @pytest.mark.parametrize("failing_input", ["candidates", "decisions", "snapshot"])
@@ -977,8 +835,7 @@ def test_same_capability_pair_success_and_failure_observations_are_both_retained
     )
 
     assert len(_edges(result)) == 2
-    assert [edge["metadata"]["candidate_id"] for edge in _edges(result)] == ["candidate-1", "candidate-2"]
-    assert [edge["metadata"]["success"] for edge in _edges(result)] == [True, False]
+    assert [edge["metadata"]["success"] for edge in _edges(result)] == [False, True]
 
 
 def test_parallel_branch_observations_are_retained_independently() -> None:
@@ -1205,239 +1062,29 @@ def test_builder_signature_and_behavior_are_independent_of_planned_graph() -> No
     assert _build([], [], [])["graph"]["type"] == "execution_graph"
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "empty",
-        "missing_graph_id",
-        "wrong_graph_type",
-        "not_directed",
-        "nodes_not_mapping",
-        "edges_not_list",
-        "invalid_outcome",
-        "failed_without_reason",
-        "success_with_reason",
-        "invalid_trace",
-        "query_not_string",
-        "invalid_quality_flags",
-        "unsorted_quality_flags",
-    ],
-)
-def test_submission_rejects_invalid_execution_envelope(case: str) -> None:
-    execution = _build([], [], [])
-    if case == "empty":
-        execution = {}
-    elif case == "missing_graph_id":
-        execution["graph"]["id"] = ""
-    elif case == "wrong_graph_type":
-        execution["graph"]["type"] = "planned_graph"
-    elif case == "not_directed":
-        execution["graph"]["directed"] = False
-    elif case == "nodes_not_mapping":
-        execution["graph"]["nodes"] = []
-    elif case == "edges_not_list":
-        execution["graph"]["edges"] = {}
-    elif case == "invalid_outcome":
-        execution["outcome"] = "unknown"
-    elif case == "failed_without_reason":
-        execution["outcome"] = "failed"
-    elif case == "success_with_reason":
-        execution["reason"] = "must be omitted"
-    elif case == "invalid_trace":
-        execution["trace_id"] = "bad trace"
-    elif case == "query_not_string":
-        execution["query"] = 42
-    elif case == "invalid_quality_flags":
-        execution["quality_flags"] = ["valid", 42]
-    elif case == "unsorted_quality_flags":
-        execution["quality_flags"] = ["z", "a"]
-
-    if case not in {"empty", "missing_graph_id"}:
-        _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "missing_endpoint",
-        "wrong_relation",
-        "missing_metadata",
-        "success_not_bool",
-        "too_few_evidence_refs",
-        "invalid_port_mapping",
-        "deterministic_evidence",
-        "missing_candidate_ref",
-        "missing_fragment_ref",
-        "ambiguous_endpoint_ports",
-        "failure_without_reason",
-    ],
-)
-def test_submission_rejects_invalid_execution_edge_contract(case: str) -> None:
-    execution = _execution_with_edge()
-    edge = execution["graph"]["edges"][0]
-    if case == "missing_endpoint":
-        edge["target"] = "missing-node"
-    elif case == "wrong_relation":
-        edge["relation"] = "depends_on"
-    elif case == "missing_metadata":
-        edge.pop("metadata")
-    elif case == "success_not_bool":
-        edge["metadata"]["success"] = 1
-    elif case == "too_few_evidence_refs":
-        edge["metadata"]["evidence_refs"] = edge["metadata"]["evidence_refs"][:1]
-    elif case == "invalid_port_mapping":
-        edge["metadata"]["port_mappings"] = [{"source_output": "", "target_input": "context"}]
-    elif case == "deterministic_evidence":
-        edge["metadata"]["evidence_method"] = "deterministic"
-        edge["metadata"]["evidence_strength"] = "strong"
-    elif case == "missing_candidate_ref":
-        edge["metadata"]["candidate_id"] = ""
-    elif case == "missing_fragment_ref":
-        edge["metadata"].pop("target_fragment_id")
-    elif case == "ambiguous_endpoint_ports":
-        source_id = edge["source"]
-        execution["graph"]["nodes"][source_id]["metadata"]["output_ports"].append("another_output")
-    elif case == "failure_without_reason":
-        edge["metadata"]["success"] = False
-
-    _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-def test_submission_rejects_execution_content_with_a_stale_graph_id() -> None:
-    execution = _execution_with_edge()
-    execution["query"] = "tampered after graph ID generation"
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize("duplicate_identity", ["candidate", "occurrence_pair"])
-def test_submission_rejects_duplicate_execution_edge_identity(duplicate_identity: str) -> None:
-    execution = _execution_with_edge()
-    duplicate = json.loads(json.dumps(execution["graph"]["edges"][0]))
-    if duplicate_identity == "occurrence_pair":
-        duplicate["metadata"]["candidate_id"] = "different-candidate"
-    execution["graph"]["edges"].append(duplicate)
-    _refresh_execution_graph_id(execution)
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize(
-    "case",
-    [
-        "empty",
-        "missing_graph_id",
-        "wrong_graph_type",
-        "not_directed",
-        "not_ready",
-        "nodes_not_mapping",
-        "edges_not_list",
-        "missing_endpoint",
-        "wrong_relation",
-    ],
-)
-def test_submission_rejects_invalid_planned_envelope(case: str) -> None:
-    planned = _planned_graph()
-    if case == "empty":
-        planned = {}
-    elif case == "missing_graph_id":
-        planned["graph"]["id"] = ""
-    elif case == "wrong_graph_type":
-        planned["graph"]["type"] = "execution_graph"
-    elif case == "not_directed":
-        planned["graph"]["directed"] = False
-    elif case == "not_ready":
-        planned["graph"]["metadata"]["status"] = "needs_input"
-    elif case == "nodes_not_mapping":
-        planned["graph"]["nodes"] = []
-    elif case == "edges_not_list":
-        planned["graph"]["edges"] = {}
-    elif case == "missing_endpoint":
-        planned["graph"]["edges"][0]["target"] = "missing-node"
-    elif case == "wrong_relation":
-        planned["graph"]["edges"][0]["relation"] = "depends_on"
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(planned, _build([], [], []))
-
-
-@pytest.mark.parametrize("value", [{}, object(), _CustomMapping()])
-def test_submission_rejects_arbitrary_execution_objects(value: Any) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, value)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("value", [object(), _CustomMapping()])
-def test_submission_rejects_arbitrary_planned_objects(value: Any) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(value, _build([], [], []))  # type: ignore[arg-type]
-
-
-def test_capability_identity_and_submission_are_frozen_dataclasses() -> None:
-    identity = _identity("skill-id", "skill", "skill")
-    submission = build_symphony_graph_evolution_submission(None, _build([], [], []))
-
-    with pytest.raises(FrozenInstanceError):
-        identity.version = "2"  # type: ignore[misc]
-    with pytest.raises(FrozenInstanceError):
-        submission.submission_id = "changed"  # type: ignore[misc]
-
-
-def test_pair_submission_hash_uses_exact_canonical_pair_and_is_order_independent() -> None:
-    planned_a = _planned_graph()
-    planned_b = {
-        "graph": {
-            "edges": list(planned_a["graph"]["edges"]),
-            "nodes": dict(reversed(list(planned_a["graph"]["nodes"].items()))),
-            "metadata": dict(planned_a["graph"]["metadata"]),
-            "directed": True,
-            "type": "planned_graph",
-            "id": "planned-1",
-        }
+def test_builder_freezes_invoke_start_graph_snapshot_into_hashed_envelope() -> None:
+    snapshot = {
+        "static_revision": "static-start",
+        "observation_revision": "observation-start",
+        "merged_revision": "merged-start",
     }
-    execution_a = _build([], [], [])
-    execution_b = json.loads(json.dumps(execution_a, ensure_ascii=False))
 
-    first = build_symphony_graph_evolution_submission(planned_a, execution_a)
-    second = build_symphony_graph_evolution_submission(planned_b, execution_b)
-    canonical = json.dumps(
-        {"planned_graph": planned_a, "execution_graph": execution_a},
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-    expected = "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    result = _build([], [], [], graph_snapshot=snapshot)
+    snapshot["static_revision"] = "mutated"
 
-    assert first.submission_id == second.submission_id == expected
-    assert first.planned_graph == second.planned_graph
-    assert first.execution_graph == second.execution_graph
+    assert result["graph_snapshot"]["static_revision"] == "static-start"
+    assert result["graph"]["id"].startswith("execution_graph:sha256:")
 
 
-def test_pair_submission_isolated_from_later_input_mutation_and_supports_planned_none() -> None:
-    planned = _planned_graph()
+def test_callback_boundary_rejects_stale_execution_graph_id() -> None:
     execution = _build([], [], [])
-    submission = build_symphony_graph_evolution_submission(planned, execution)
-    without_planned = build_symphony_graph_evolution_submission(None, execution)
+    execution["graph"]["label"] = "tampered after hashing"
 
-    planned["graph"]["nodes"]["source-id"]["metadata"]["type"] = "mutated"
-    execution["graph"]["label"] = "mutated"
-
-    assert submission.planned_graph["graph"]["nodes"]["source-id"]["metadata"]["type"] == "skill"
-    assert submission.execution_graph["graph"]["label"] == "capability execution graph"
-    assert without_planned.planned_graph is None
-    assert without_planned.submission_id.startswith("sha256:")
+    with pytest.raises(ValueError, match="invalid Symphony graph submission"):
+        _canonical_graph_pair(None, execution)
 
 
-def test_submission_returns_deeply_isolated_json_views_and_hash_stays_current() -> None:
+def test_callback_boundary_rejects_illegal_edge_metadata() -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
     candidate = _candidate(1, source, target)
@@ -1446,139 +1093,241 @@ def test_submission_returns_deeply_isolated_json_views_and_hash_stays_current() 
         [_decision(candidate)],
         [_identity("source-id", "skill", "source"), _identity("target-id", "tool", "target")],
     )
-    planned = _planned_graph()
-    planned["graph"]["nodes"]["source-id"]["metadata"]["version"] = "1"
-    submission = build_symphony_graph_evolution_submission(planned, execution)
-    original_planned = submission.planned_graph
-    original_execution = submission.execution_graph
-    original_hash = submission.submission_id
+    execution["graph"]["edges"][0]["metadata"]["success"] = 1
+    graph_without_id = dict(execution["graph"])
+    graph_without_id.pop("id")
+    execution["graph"]["id"] = _execution_graph_id({**execution, "graph": graph_without_id})
 
-    submission.execution_graph["tampered"] = True
-    execution_view = submission.execution_graph
-    execution_view["graph"]["nodes"]["source-id"]["metadata"]["version"] = "mutated"
-    execution_view["graph"]["edges"].append({"source": "evil", "target": "evil"})
-    submission.planned_graph["tampered"] = True
-    planned_view = submission.planned_graph
-    planned_view["graph"]["nodes"]["source-id"]["metadata"]["version"] = "mutated"
-    planned_view["graph"]["edges"].clear()
-
-    assert submission.execution_graph == original_execution
-    assert submission.planned_graph == original_planned
-    assert submission.execution_graph is not submission.execution_graph
-    assert submission.planned_graph is not submission.planned_graph
-    assert json.loads(json.dumps(submission.execution_graph)) == original_execution
-    assert submission.submission_id == original_hash == _submission_hash(submission)
-    assert not hasattr(submission, "__dict__")
+    with pytest.raises(ValueError, match="invalid Symphony graph submission"):
+        _canonical_graph_pair(None, execution)
 
 
-def test_submission_public_serialization_api_returns_detached_json() -> None:
-    submission = build_symphony_graph_evolution_submission(_planned_graph(), _execution_with_edge())
-    payload = submission.to_dict()
-    pair_json = submission.canonical_pair_json()
-    pair_bytes = submission.canonical_pair_bytes()
+@pytest.mark.parametrize("invalid", [float("nan"), object()])
+def test_callback_boundary_rejects_non_finite_and_non_json_values(invalid: Any) -> None:
+    execution = _build([], [], [])
+    execution["extra"] = invalid
 
-    assert payload == {
-        "submission_id": submission.submission_id,
-        "planned_graph": submission.planned_graph,
-        "execution_graph": submission.execution_graph,
+    with pytest.raises(ValueError):
+        _canonical_graph_pair(None, execution)
+
+
+def test_callback_boundary_rejects_recursive_json() -> None:
+    execution = _build([], [], [])
+    recursive: dict[str, Any] = {}
+    recursive["self"] = recursive
+    execution["extra"] = recursive
+
+    with pytest.raises(ValueError):
+        _canonical_graph_pair(None, execution)
+
+
+def _native_cross_trace_input():
+    trajectories = []
+    for trace, name in ((_TRACE_ID, "producer"), ("2" * 32, "consumer")):
+        spans = [
+            {
+                "traceId": trace,
+                "spanId": "0" * 15 + "1",
+                "name": "agent.root",
+                "startTimeUnixNano": "1",
+                "endTimeUnixNano": "5",
+            },
+            {
+                "traceId": trace,
+                "spanId": "0" * 15 + "2",
+                "parentSpanId": "0" * 15 + "1",
+                "name": "tool.skill_tool",
+                "startTimeUnixNano": "2",
+                "endTimeUnixNano": "3",
+                "attributes": attributes_from_map(
+                    {
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": name, "relative_file_path": "SKILL.md"}),
+                        semconv.GEN_AI_TOOL_OUTPUT: json.dumps({"success": True, "artifact_id": "artifact"}),
+                    }
+                ),
+            },
+        ]
+        trajectories.append(
+            Trajectory.from_otlp(
+                {
+                    "resourceSpans": [
+                        {
+                            "resource": {
+                                "attributes": attributes_from_map(
+                                    {TRAJECTORY_ID: "interrupt-chain", SESSION_ID: "session"}
+                                )
+                            },
+                            "scopeSpans": [{"spans": spans}],
+                        }
+                    ]
+                }
+            )
+        )
+    continuities = tuple((0, trajectory) for trajectory in trajectories)
+    fragments = project_symphony_execution_fragments(continuities)
+    plan = {
+        "graph": {
+            "id": "plan",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": "ready"},
+            "nodes": {name: {"label": name, "metadata": {"type": "skill"}} for name in ("producer", "consumer")},
+            "edges": [{"source": "producer", "target": "consumer", "relation": "can_feed", "metadata": {}}],
+        }
     }
-    assert pair_bytes == pair_json.encode("utf-8")
-    assert json.loads(pair_json) == {
-        "planned_graph": submission.planned_graph,
-        "execution_graph": submission.execution_graph,
-    }
-
-    payload["execution_graph"]["graph"]["edges"].clear()
-    payload["planned_graph"]["graph"]["nodes"].clear()
-    assert submission.execution_graph["graph"]["edges"]
-    assert submission.planned_graph["graph"]["nodes"]
-    assert submission.submission_id == _submission_hash(submission)
-
-
-@pytest.mark.parametrize(
-    ("planned", "execution"),
-    [
-        ({"value": float("nan")}, {}),
-        ({"value": {1, 2}}, {}),
-        ({1: "non-string-key"}, {}),
-        ({"value": ("tuple",)}, {}),
-        ({}, {"value": object()}),
-    ],
-)
-def test_pair_submission_rejects_nan_and_non_json_values(planned: dict[Any, Any], execution: dict[str, Any]) -> None:
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(planned, execution)
-
-
-def test_pair_submission_rejects_values_that_cannot_be_canonically_encoded_as_utf8() -> None:
-    with pytest.raises(ValueError):
-        execution = _build([], [], [])
-        execution["extra"] = "\ud800"
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-@pytest.mark.parametrize("case", ["circular", "deep", "evil_dict", "custom_mapping", "bytes", "nan"])
-def test_submission_normalization_errors_are_uniform_value_errors(case: str) -> None:
-    execution = _build([], [], [])
-    if case == "circular":
-        value: Any = {}
-        value["self"] = value
-    elif case == "deep":
-        value = {}
-        cursor = value
-        for _ in range(200):
-            cursor["next"] = {}
-            cursor = cursor["next"]
-    elif case == "evil_dict":
-        value = _EvilDict(value="secret")
-    elif case == "custom_mapping":
-        value = _CustomMapping()
-    elif case == "bytes":
-        value = b"not-json"
-    else:
-        value = float("nan")
-    execution["extra"] = value
-
-    with pytest.raises(ValueError):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-def test_submission_normalization_does_not_swallow_base_exception() -> None:
-    execution = _build([], [], [])
-    execution["extra"] = _BaseExplodingDict(value="secret")
-
-    with pytest.raises(KeyboardInterrupt, match="system cancellation"):
-        build_symphony_graph_evolution_submission(None, execution)
-
-
-def test_submission_normalization_preserves_memory_error() -> None:
-    execution = _build([], [], [])
-    execution["extra"] = _MemoryExplodingDict(value="secret")
-
-    with pytest.raises(MemoryError, match="memory exhausted"):
-        build_symphony_graph_evolution_submission(None, execution)
+    continuation = SymphonyInterruptContinuation(_TRACE_ID, "2" * 32, 0, 0, 1, (_TRACE_ID, "2" * 32))
+    candidates = build_symphony_edge_candidates(
+        fragments, continuities, planned_graph=plan, interrupt_continuations=(continuation,)
+    )
+    assert len(candidates) == 1
+    return plan, continuation, candidates
 
 
 @pytest.mark.asyncio
-async def test_snapshot_provider_and_sink_protocols_are_usable_with_fakes() -> None:
-    identities = (_identity("skill-id", "skill", "skill"),)
+@pytest.mark.parametrize("status", ["success", "failure", "no_relation", "invalid"])
+async def test_native_cross_trace_candidates_through_model_and_graph(status: str) -> None:
+    plan, continuation, candidates = _native_cross_trace_input()
+    candidate = candidates[0]
 
-    class FakeProvider:
-        def snapshot_capabilities(self) -> tuple[CapabilityIdentity, ...]:
-            return identities
+    async def judge(messages, **kwargs):
+        del kwargs
+        payload = json.loads(messages[1]["content"])
+        assert set(payload) == {"task", "source", "target"}
+        assert "evidence_refs" not in json.dumps(payload)
+        if status == "invalid":
+            return "invalid JSON"
+        return json.dumps({"status": status, "reason": "consumer used the producer artifact"})
 
-    class FakeSink:
-        def __init__(self) -> None:
-            self.received: list[SymphonyGraphEvolutionSubmission] = []
+    model = SimpleNamespace(invoke=AsyncMock(side_effect=judge))
+    decisions = await evaluate_symphony_edge_candidates(
+        llm=model,
+        query="original task",
+        candidates=candidates,
+        decisions=build_model_edge_decisions(candidates),
+        summaries={
+            candidate.candidate_id: SymphonyEdgeEvaluationSummary(
+                endpoint_a=SymphonyEdgeEndpointSummary(output="artifact produced"),
+                endpoint_b=SymphonyEdgeEndpointSummary(input="artifact consumed"),
+            )
+        },
+    )
+    assert model.invoke.await_count == 1
+    assert decisions[0].status == ("insufficient_evidence" if status == "invalid" else status)
+    identities = [_identity(name, "skill", name) for name in ("producer", "consumer")]
+    args = dict(
+        trace_id=_TRACE_ID,
+        query="original task",
+        outcome="success",
+        candidates=candidates,
+        decisions=decisions,
+        capability_snapshot=identities,
+        trace_ids=continuation.trace_ids,
+        interrupt_continuations=(continuation,),
+    )
+    graph = build_symphony_execution_graph(**args)
+    assert graph["trace_ids"] == list(continuation.trace_ids)
+    assert json.loads(_canonical_graph_pair(plan, graph)) == {"planned_graph": plan, "execution_graph": graph}
+    assert len(graph["graph"]["edges"]) == (1 if status in {"success", "failure"} else 0)
+    if status in {"success", "failure"}:
+        edge = graph["graph"]["edges"][0]["metadata"]
+        assert edge == {"success": status == "success"}
+        for tamper in ("id", "trace_ids"):
+            altered = deepcopy(graph)
+            if tamper == "id":
+                altered["graph"]["id"] = "forged"
+            else:
+                altered["trace_ids"] = ["2" * 32, _TRACE_ID]
+            if tamper != "id":
+                altered["graph"]["id"] = _execution_graph_id(altered)
+            with pytest.raises(ValueError):
+                _canonical_graph_pair(plan, altered)
+    # Trace order is part of graph identity even when a segment has no edge.
+    first_order = build_symphony_execution_graph(**{**args, "trace_ids": (_TRACE_ID, "2" * 32, "3" * 32, "4" * 32)})
+    second_order = build_symphony_execution_graph(**{**args, "trace_ids": (_TRACE_ID, "2" * 32, "4" * 32, "3" * 32)})
+    assert first_order["graph"]["id"] != second_order["graph"]["id"]
 
-        async def submit(self, submission: SymphonyGraphEvolutionSubmission) -> None:
-            self.received.append(submission)
 
-    provider: CapabilitySnapshotProvider = FakeProvider()
-    sink: SymphonyGraphObservationSink = FakeSink()
-    assert isinstance(provider, CapabilitySnapshotProvider)
-    assert isinstance(sink, SymphonyGraphObservationSink)
-    submission = build_symphony_graph_evolution_submission(None, _build([], [], list(provider.snapshot_capabilities())))
-    await sink.submit(submission)
+@pytest.mark.parametrize(
+    "case",
+    ["missing", "wrong_order", "wrong_continuity", "malformed", "bool", "negative", "out_of_range", "forged_ref"],
+)
+def test_execution_graph_rejects_invalid_cross_trace_descriptor_or_ref(case: str) -> None:
+    _, continuation, candidates = _native_cross_trace_input()
+    changes = {
+        "wrong_continuity": {"continuity_index": 1},
+        "bool": {"source_segment_index": False},
+        "negative": {"source_segment_index": -1, "target_segment_index": 0},
+        "out_of_range": {"source_segment_index": 2, "target_segment_index": 3},
+    }
+    boundaries = (continuation,)
+    traces = continuation.trace_ids
+    if case == "missing":
+        boundaries = ()
+    elif case == "malformed":
+        boundaries = ({"source_trace_id": _TRACE_ID},)
+    elif case == "wrong_order":
+        traces = (_TRACE_ID, "3" * 32, "2" * 32)
+    elif case == "forged_ref":
+        candidates = (
+            replace(candidates[0], evidence_refs=(_TRACE_ID + "#span=unknown", candidates[0].evidence_refs[1])),
+        )
+    else:
+        changed = replace(continuation, **changes[case])
+        boundaries = (changed,)
+        candidates = (replace(candidates[0], interrupt_continuation=changed),)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=candidates,
+        decisions=(_decision(candidates[0]),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=traces,
+        interrupt_continuations=boundaries,
+    )
+    assert graph["graph"]["edges"] == []
 
-    assert sink.received == [submission]  # type: ignore[attr-defined]
+
+def test_cross_trace_anchors_with_equal_span_ids_cannot_borrow_source_refs() -> None:
+    _, continuation, candidates = _native_cross_trace_input()
+    candidate = candidates[0]
+    source = replace(candidate.source_fragment, span_ids=("0000000000000002", "0000000000000003"))
+    refs = (_TRACE_ID + "#span=0000000000000002", _TRACE_ID + "#span=0000000000000003")
+    forged = replace(candidate, source_fragment=source, evidence_refs=refs)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=(forged,),
+        decisions=(_decision(forged),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=continuation.trace_ids,
+        interrupt_continuations=(continuation,),
+    )
+    assert graph["graph"]["edges"] == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_conflicting_continuation_cannot_turn_existing_candidate_decision_into_edge(reverse: bool) -> None:
+    _, boundary, candidates = _native_cross_trace_input()
+    conflict = replace(boundary, trace_ids=boundary.trace_ids + ("3" * 32,))
+    descriptors = (boundary, conflict) if not reverse else (conflict, boundary)
+    graph = build_symphony_execution_graph(
+        trace_id=_TRACE_ID,
+        query="task",
+        outcome="success",
+        candidates=candidates,
+        decisions=(_decision(candidates[0]),),
+        capability_snapshot=[_identity(name, "skill", name) for name in ("producer", "consumer")],
+        trace_ids=conflict.trace_ids,
+        interrupt_continuations=descriptors,
+    )
+    assert graph["graph"]["edges"] == []
+
+
+def test_capability_identity_is_a_frozen_dataclass() -> None:
+    identity = _identity("skill-id", "skill", "skill")
+
+    with pytest.raises(FrozenInstanceError):
+        identity.version = "2"  # type: ignore[misc]

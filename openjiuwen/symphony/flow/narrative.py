@@ -7,6 +7,7 @@ from typing import Any
 
 from openjiuwen.symphony.flow.distill import topological_order
 from openjiuwen.symphony.flow.models import RecipeEvidence
+from openjiuwen.symphony.flow.privacy import model_response_text, sanitize_distilled_text
 
 NARRATIVE_SOURCE_LLM = "llm"
 NARRATIVE_SOURCE_TEMPLATE = "template"
@@ -39,7 +40,7 @@ def _distinct_queries(records: list[RecipeEvidence], *, limit: int) -> list[str]
     queries: list[str] = []
     seen: set[str] = set()
     for record in records:
-        query = record.query.strip()
+        query = sanitize_distilled_text(record.query)
         if query and query not in seen:
             seen.add(query)
             queries.append(query)
@@ -94,21 +95,45 @@ async def _distill_with_llm(
         },
         ensure_ascii=False,
     )
-    raw = await llm_client.complete_json_async(
-        system_prompt=_SYSTEM_PROMPT,
-        user_content=user_content,
-        error_context="CapabilityFlow narrative",
-    )
+    invoke = getattr(llm_client, "invoke", None)
+    if callable(invoke):
+        response = await invoke(
+            [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ]
+        )
+        raw = model_response_text(response)
+    else:
+        raw = await llm_client.complete_json_async(
+            system_prompt=_SYSTEM_PROMPT,
+            user_content=user_content,
+            error_context="CapabilityFlow narrative",
+        )
     payload = json.loads(raw)
-    task_description = str(payload.get("task_description") or "").strip()
-    narrative = str(payload.get("execution_narrative") or "").strip()
+    source_queries = [record.query for record in records if record.query]
+    task_description = sanitize_distilled_text(
+        payload.get("task_description"),
+        source_queries=source_queries,
+    )
+    narrative = sanitize_distilled_text(
+        payload.get("execution_narrative"),
+        source_queries=source_queries,
+    )
     if not task_description or not narrative:
         raise ValueError("narrative distillation produced empty text")
-    example_requests = [str(item).strip() for item in (payload.get("example_requests") or []) if str(item).strip()]
+    example_requests = []
+    for item in payload.get("example_requests") or []:
+        sanitized = sanitize_distilled_text(item, source_queries=source_queries)
+        if sanitized:
+            example_requests.append(sanitized)
     return {
         "applicability": {
             "task_description": task_description,
-            "trigger_conditions": str(payload.get("trigger_conditions") or "").strip(),
+            "trigger_conditions": sanitize_distilled_text(
+                payload.get("trigger_conditions"),
+                source_queries=source_queries,
+            ),
             "example_requests": example_requests[:max_examples],
         },
         "execution_narrative": narrative,
@@ -127,11 +152,7 @@ def _template_texts(
     trigger_conditions = "用户请求需要多个检索、整理或生成能力接力完成，且任务形态与历史成功执行相似。"
     example_requests = [f"请帮我完成类似任务：{query}" for query in queries]
     narrative_steps = "；".join(f"由能力 {member['id']}（{member['description']}）接力执行" for member in members)
-    execution_narrative = (
-        f"该组合共执行 {len(records)} 次，成功 "
-        f"{sum(1 for record in records if record.outcome == 'success')} 次。"
-        f"执行过程：{narrative_steps}。"
-    )
+    execution_narrative = f"执行过程：{narrative_steps}。"
     return {
         "applicability": {
             "task_description": task_description,

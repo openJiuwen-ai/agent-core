@@ -4,7 +4,7 @@
 
 The rails in this module own only the production side of the graph-evolution
 contract: capture one invoke, infer and model-judge occurrence edges, build a
-JGF execution graph, and hand the immutable planned/execution pair to a sink.
+JGF execution graph, and hand detached planned/execution graphs to a callback.
 Runtime graph aggregation and experience generation are intentionally outside
 this module.
 """
@@ -15,11 +15,11 @@ import ast
 import json
 import re
 import threading
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, TypeAlias, runtime_checkable
 
 from openjiuwen.agent_evolving.trajectory.messages import DEFAULT_EVOLUTION_MESSAGE_FIELDS
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
@@ -35,6 +35,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
 from openjiuwen.extensions.observability import semconv as observability_semconv
 from openjiuwen.harness.rails.evolution.evolution_rail import (
@@ -51,6 +52,7 @@ from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
 )
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
+    SymphonyInterruptContinuation,
     build_model_edge_decisions,
     build_symphony_edge_candidates,
 )
@@ -62,15 +64,107 @@ from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
     CapabilityIdentity,
     CapabilitySnapshotProvider,
     ExecutionOutcome,
-    SymphonyGraphObservationSink,
+    _canonical_graph_pair,
     build_symphony_execution_graph,
-    build_symphony_graph_evolution_submission,
 )
 from openjiuwen.symphony.interfaces.llm import SymphonyLLM
+from openjiuwen.symphony.observation import GraphSnapshotRef
 
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _MAX_EDGE_CANDIDATES = 64
 _CANDIDATE_PROBE_LIMIT = _MAX_EDGE_CANDIDATES + 1
+_SUMMARY_EDGE_EVENT_COUNT = 5
+_SUMMARY_MAX_EVENTS = _SUMMARY_EDGE_EVENT_COUNT * 2
+_SUMMARY_EVENT_MAX_BYTES = 1024
+_SUMMARY_VALUE_MAX_BYTES = 512
+_SUMMARY_MAX_KEYS = 12
+_SUMMARY_MAX_BRANCHES = 6
+_SUMMARY_MAX_BRANCH_VALUES = 2
+_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
+_SUMMARY_REDACTED_KEY_TOKENS = (
+    "accesskey",
+    "apikey",
+    "authorization",
+    "base64",
+    "binary",
+    "bytes",
+    "cookie",
+    "credential",
+    "password",
+    "passphrase",
+    "privatekey",
+    "secret",
+    "token",
+)
+_SUMMARY_IDENTITY_KEYS = frozenset(
+    {
+        "candidateid",
+        "fragmentid",
+        "id",
+        "invocationid",
+        "messageid",
+        "requestid",
+        "sessionid",
+        "spanid",
+        "toolcallid",
+        "traceid",
+    }
+)
+_SUMMARY_ARGUMENT_FRAMEWORK_KEYS = _SUMMARY_IDENTITY_KEYS | {"session"}
+_SUMMARY_OUTPUT_TRANSPORT_KEYS = frozenset(
+    {
+        "extractedcontent",
+        "includeextractedcontentonlyonce",
+        "longtermmemory",
+    }
+)
+_SUMMARY_PEM_PRIVATE_KEY = re.compile(
+    r"(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----).*?(-----END [A-Z0-9 ]*PRIVATE KEY-----)",
+    re.DOTALL,
+)
+_SUMMARY_QUOTED_AUTH_HEADER = re.compile(
+    r"(?i)(?P<quote>['\"])(?P<prefix>authorization\s*[:=]\s*)(?P<value>.*?)(?P=quote)"
+)
+_SUMMARY_QUOTED_AUTH_VALUE = re.compile(
+    r"(?i)(?P<prefix>(?:['\"]authorization['\"]|\bauthorization)\s*[:=]\s*)"
+    r"(?P<quote>['\"])(?P<value>.*?)(?P=quote)"
+)
+_SUMMARY_AUTH_START = re.compile(r"(?i)\bauthorization\s*[:=]\s*")
+_SUMMARY_URL_ARGUMENT = re.compile(r"(?i)[a-z][a-z0-9+.-]*://")
+_SUMMARY_URL_USERINFO = re.compile(r"(?i)(\b[a-z][a-z0-9+.-]*://[^\s/@:]+:)([^\s/@]+)(@)")
+_SUMMARY_SECRET_ASSIGNMENT = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>(?<![A-Za-z0-9_])['\"]?"
+    r"[A-Za-z0-9_]*(?:api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|token|password|passphrase)"
+    r"['\"]?\s*[:=]\s*)"
+    r"(?:(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|(?P<plain>[^\s,;&]+))"
+)
+_SUMMARY_SECRET_CLI = re.compile(
+    r"(?ix)"
+    r"(?P<prefix>--[a-z0-9-]*(?:api-key|access-key|secret-key|private-key|token|password|passphrase)"
+    r"(?:\s*=\s*|\s+))"
+    r"(?:(?P<quote>['\"])(?P<quoted>.*?)(?P=quote)|(?P<plain>[^\s,;&]+))"
+)
+
+CaptureMode: TypeAlias = Literal["agent", "team"]
+GraphSnapshotProvider: TypeAlias = Callable[[], Mapping[str, Any]]
+
+
+@runtime_checkable
+class SymphonyEvolutionSubmitCallback(Protocol):
+    """Runtime callback receiving one detached graph pair and invoke metadata."""
+
+    async def __call__(
+        self,
+        planned_graph: dict[str, Any] | None,
+        execution_graph: dict[str, Any],
+        *,
+        session_id: str,
+        capture_mode: CaptureMode,
+    ) -> Any:
+        """Submit one invocation without exposing Rail-internal state."""
+
+        raise NotImplementedError
 
 
 @dataclass(frozen=True)
@@ -80,16 +174,23 @@ class SymphonyGraphEvolutionInput(PreparedEvolutionInput):
     planned_graph: dict[str, Any] | None = None
     execution_fragments: tuple[SymphonyExecutionFragment, ...] = ()
     execution_continuities: tuple[tuple[int, Trajectory], ...] = ()
+    interrupt_continuations: tuple[SymphonyInterruptContinuation, ...] = field(default=(), kw_only=True)
+    trace_ids: tuple[str, ...] = field(default=(), kw_only=True)
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
+    graph_snapshot: dict[str, str] | None = None
     query: str = ""
     outcome: ExecutionOutcome = "partial"
     reason: str | None = "invoke_result_unverified"
     trace_id: str = "unknown"
     session_id: str = "unknown"
-    capture_mode: Literal["agent", "team"] = "agent"
+    capture_mode: CaptureMode = "agent"
     quality_flags: tuple[str, ...] = ()
     edge_evaluator_llm: SymphonyLLM | None = field(default=None, repr=False, compare=False)
     edge_search_max_depth: int = 3
+
+    def __post_init__(self) -> None:
+        if self.capture_mode not in {"agent", "team"}:
+            raise ValueError("capture_mode must be agent or team")
 
 
 @dataclass(frozen=True)
@@ -100,6 +201,16 @@ class _CapturedToolToken:
     tool_name: str
 
 
+@dataclass(frozen=True)
+class _PausedInvokeKey:
+    """Exact resume identity; deliberately excludes query and clock heuristics."""
+
+    session_id: str
+    capture_mode: CaptureMode
+    owner_id: str
+    component_id: str
+
+
 @dataclass
 class _SymphonyInvokeState:
     """State deliberately kept out of the shared EvolutionRail capture."""
@@ -108,10 +219,16 @@ class _SymphonyInvokeState:
     member_id: str | None
     team_id: str | None
     trace_id: str | None
-    capture_mode: Literal["agent", "team"]
+    capture_mode: CaptureMode
     edge_evaluator_llm: SymphonyLLM | None
     edge_search_max_depth: int
+    original_query: str = ""
+    active_trace_id: str | None = None
+    trace_ids: list[str] = field(default_factory=list)
+    interrupt_continuations: list[SymphonyInterruptContinuation] = field(default_factory=list)
+    suppress_evolution: bool = False
     capability_snapshot: tuple[CapabilityIdentity, ...] = ()
+    graph_snapshot: dict[str, str] | None = None
     planned_graph: dict[str, Any] | None = None
     increments: list[Trajectory] = field(default_factory=list)
     increment_continuities: list[int] = field(default_factory=list)
@@ -167,9 +284,36 @@ def _ready_planned_graph(tool_result: Any) -> dict[str, Any] | None:
         decisions=(),
         capability_snapshot=(),
     )
-    # Keep strict JSON and planned-JGF validation in the submission contract.
-    build_symphony_graph_evolution_submission(detached, validation_execution)
+    _canonical_graph_pair(detached, validation_execution)
     return detached
+
+
+def _is_valid_nonready_planned_graph(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    planned_graph = payload.get("planned_graph")
+    graph = planned_graph.get("graph") if isinstance(planned_graph, Mapping) else None
+    metadata = graph.get("metadata") if isinstance(graph, Mapping) else None
+    status = metadata.get("status") if isinstance(metadata, Mapping) else None
+    if not isinstance(graph, Mapping) or status not in {"needs_input", "no_plan"}:
+        return False
+    try:
+        candidate = deepcopy(planned_graph)
+        candidate["graph"]["metadata"]["status"] = "ready"
+        validation_execution = build_symphony_execution_graph(
+            trace_id="planned-graph-capture-validation",
+            query="",
+            outcome="success",
+            candidates=(),
+            decisions=(),
+            capability_snapshot=(),
+        )
+        _canonical_graph_pair(candidate, validation_execution)
+    except MemoryError:
+        raise
+    except Exception:
+        return False
+    return True
 
 
 class SymphonyGraphEvolutionRail(EvolutionRail):
@@ -186,8 +330,9 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         *,
         trajectory_span_processor: TrajectorySpanProcessor,
         capability_snapshot_provider: CapabilitySnapshotProvider | None = None,
+        graph_snapshot_provider: GraphSnapshotProvider | None = None,
         edge_evaluator_llm: SymphonyLLM | None = None,
-        observation_sink: SymphonyGraphObservationSink | None = None,
+        submit_evolution: SymphonyEvolutionSubmitCallback | None = None,
         input_consumer: Callable[[SymphonyGraphEvolutionInput], Awaitable[None]] | None = None,
         async_evolution: bool = True,
         edge_search_max_depth: int = 3,
@@ -202,24 +347,30 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             getattr(capability_snapshot_provider, "snapshot_capabilities", None)
         ):
             raise TypeError("capability_snapshot_provider must provide snapshot_capabilities")
-        if observation_sink is not None and not callable(getattr(observation_sink, "submit", None)):
-            raise TypeError("observation_sink must provide submit")
+        if graph_snapshot_provider is not None and not callable(graph_snapshot_provider):
+            raise TypeError("graph_snapshot_provider must be callable")
+        if submit_evolution is not None and not callable(submit_evolution):
+            raise TypeError("submit_evolution must be callable")
+        if submit_evolution is not None and graph_snapshot_provider is None:
+            raise ValueError("graph_snapshot_provider is required when submit_evolution is configured")
         if input_consumer is not None and not callable(input_consumer):
             raise TypeError("input_consumer must be callable")
         if isinstance(edge_search_max_depth, bool) or not isinstance(edge_search_max_depth, int):
             raise TypeError("edge_search_max_depth must be an integer")
         self._capability_snapshot_provider = capability_snapshot_provider
-        self._observation_sink = observation_sink
+        self._graph_snapshot_provider = graph_snapshot_provider
+        self._submit_evolution = submit_evolution
         self._input_consumer = input_consumer
         self._edge_evaluator_llm: SymphonyLLM | None = None
         self.update_edge_evaluator_llm(edge_evaluator_llm)
         self._edge_search_max_depth = max(0, edge_search_max_depth)
         self._symphony_states: dict[object, _SymphonyInvokeState] = {}
         self._symphony_states_lock = threading.RLock()
+        self._paused_symphony_states: dict[_PausedInvokeKey, _SymphonyInvokeState] = {}
 
     @property
-    def observation_sink(self) -> SymphonyGraphObservationSink | None:
-        return self._observation_sink
+    def submit_evolution(self) -> SymphonyEvolutionSubmitCallback | None:
+        return self._submit_evolution
 
     @property
     def input_consumer(self) -> Callable[[SymphonyGraphEvolutionInput], Awaitable[None]] | None:
@@ -296,14 +447,18 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             if session_id is not None and state.session_id != str(session_id):
                 continue
             if state.capture_mode == "team":
-                if route_trace is None or state.trace_id != route_trace:
+                if route_trace is None or state.active_trace_id != route_trace:
                     continue
                 if team_id is not None and state.team_id != str(team_id):
                     continue
             else:
                 if member_id is not None and state.member_id != str(member_id):
                     continue
-                if route_trace is not None and state.trace_id is not None and state.trace_id != route_trace:
+                if (
+                    route_trace is not None
+                    and state.active_trace_id is not None
+                    and state.active_trace_id != route_trace
+                ):
                     continue
             matches.append(capture)
         unique: list[_InvokeCapture] = []
@@ -352,14 +507,27 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         if route is None:
             raise RuntimeError("Symphony trajectory capture route is unavailable")
         member_id, team_id, trace_id = route
+        capture_mode: CaptureMode = "team" if team_id is not None else "agent"
+        owner_id = str(team_id if capture_mode == "team" else member_id or capture.member_id or "")
+        resumed = self._claim_paused_state(capture.session_id, capture_mode, owner_id, ctx.inputs)
+        if resumed is not None:
+            self._activate_resumed_state(resumed, trace_id)
+            with self._symphony_states_lock:
+                self._symphony_states[capture.subscription] = resumed
+            return
+        self._clear_paused_scope(capture.session_id, capture_mode, owner_id)
         state = _SymphonyInvokeState(
             session_id=capture.session_id,
             member_id=member_id or capture.member_id,
             team_id=team_id or capture.team_id,
             trace_id=trace_id,
-            capture_mode="team" if team_id is not None else "agent",
+            capture_mode=capture_mode,
             edge_evaluator_llm=self._edge_evaluator_llm,
             edge_search_max_depth=self._edge_search_max_depth,
+            original_query=_query_from_inputs(ctx.inputs),
+            active_trace_id=trace_id,
+            trace_ids=[trace_id] if trace_id else [],
+            suppress_evolution=isinstance(ctx.inputs.query, InteractiveInput),
         )
         with self._symphony_states_lock:
             self._symphony_states[capture.subscription] = state
@@ -373,6 +541,85 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 raise
             except Exception:
                 self._remember_quality(state, ({"code": "capability_snapshot_error"},))
+        graph_snapshot_provider = self._graph_snapshot_provider
+        if graph_snapshot_provider is not None:
+            try:
+                value = graph_snapshot_provider()
+                if hasattr(value, "model_dump"):
+                    value = value.model_dump(mode="json")
+                snapshot = GraphSnapshotRef.model_validate(deepcopy(value)).model_dump(mode="json")
+                with state.lock:
+                    state.graph_snapshot = snapshot
+            except MemoryError:
+                raise
+            except Exception:
+                self._remember_quality(state, ({"code": "graph_snapshot_error"},))
+
+    def _claim_paused_state(
+        self,
+        session_id: str,
+        capture_mode: CaptureMode,
+        owner_id: str,
+        inputs: Any,
+    ) -> _SymphonyInvokeState | None:
+        """Claim exactly one component-id matched pause, or fail closed."""
+
+        query = getattr(inputs, "query", None)
+        if not isinstance(query, InteractiveInput):
+            return None
+        component_ids = _interactive_component_ids(query)
+        with self._symphony_states_lock:
+            matches = [
+                (key, state)
+                for key, state in self._paused_symphony_states.items()
+                if key.session_id == session_id
+                and key.capture_mode == capture_mode
+                and key.owner_id == owner_id
+                and key.component_id in component_ids
+            ]
+            if len(component_ids) != 1 or len(matches) != 1:
+                # An invalid or ambiguous response cannot be attached to a
+                # paused task.  Drop same-scope pending state rather than
+                # guessing from session/query/time.
+                self._clear_paused_scope_locked(session_id, capture_mode, owner_id)
+                return None
+            _, state = matches[0]
+            self._remove_paused_state_locked(state)
+            return state
+
+    def _activate_resumed_state(self, state: _SymphonyInvokeState, trace_id: str | None) -> None:
+        with state.lock:
+            previous_trace_id = state.active_trace_id
+            previous_segment_index = len(state.trace_ids) - 1
+            if trace_id and trace_id not in state.trace_ids:
+                state.trace_ids.append(trace_id)
+            if previous_trace_id and trace_id and previous_trace_id != trace_id:
+                state.interrupt_continuations.append(
+                    SymphonyInterruptContinuation(
+                        source_trace_id=previous_trace_id,
+                        target_trace_id=trace_id,
+                        continuity_index=state.current_continuity_index,
+                        source_segment_index=previous_segment_index,
+                        target_segment_index=len(state.trace_ids) - 1,
+                        trace_ids=tuple(state.trace_ids),
+                    )
+                )
+            state.active_trace_id = trace_id
+            state.suppress_evolution = False
+
+    def _clear_paused_scope(self, session_id: str, capture_mode: CaptureMode, owner_id: str) -> None:
+        with self._symphony_states_lock:
+            self._clear_paused_scope_locked(session_id, capture_mode, owner_id)
+
+    def _clear_paused_scope_locked(self, session_id: str, capture_mode: CaptureMode, owner_id: str) -> None:
+        for key in tuple(self._paused_symphony_states):
+            if key.session_id == session_id and key.capture_mode == capture_mode and key.owner_id == owner_id:
+                self._paused_symphony_states.pop(key, None)
+
+    def _remove_paused_state_locked(self, state: _SymphonyInvokeState) -> None:
+        for key, value in tuple(self._paused_symphony_states.items()):
+            if value is state:
+                self._paused_symphony_states.pop(key, None)
 
     def _unsubscribe_capture(self, capture: _InvokeCapture) -> None:
         try:
@@ -387,6 +634,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         finally:
             with self._symphony_states_lock:
                 self._symphony_states.clear()
+                self._paused_symphony_states.clear()
 
     @staticmethod
     def _capture_quality_issues(trajectory: Trajectory | None) -> tuple[Mapping[str, object], ...]:
@@ -411,6 +659,9 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             for key in (observability_semconv.GEN_AI_TOOL_INPUT, observability_semconv.GEN_AI_TOOL_OUTPUT):
                 value = attrs.get(key)
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
+                    continue
+                stripped = value.strip()
+                if stripped.startswith("[ERROR]:") or _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped):
                     continue
                 if not _is_structured_tool_payload(value):
                     issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))
@@ -672,7 +923,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 self._remember_quality(state, ({"code": "planned_graph_capture_error"},))
                 return
             if has_planned_graph:
-                self._remember_quality(state, ({"code": "planned_graph_invalid"},))
+                if not _is_valid_nonready_planned_graph(payload):
+                    self._remember_quality(state, ({"code": "planned_graph_invalid"},))
             return
         with state.lock:
             if state.planned_graph is None:
@@ -698,6 +950,11 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             state = self._state(lifecycle_capture)
             trajectory = self._project_state_trajectory(lifecycle_capture, state) if state is not None else None
             await self._on_after_invoke(ctx, trajectory)
+            if state is not None and (state.suppress_evolution or _is_cancelled_or_error_result(ctx.inputs)):
+                return
+            if state is not None and _is_interrupt_result(ctx.inputs):
+                self._pause_interrupt_state(state, ctx.inputs)
+                return
             if (
                 trajectory is not None
                 and self._evolution_trigger == EvolutionTriggerPoint.AFTER_INVOKE
@@ -708,6 +965,48 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         finally:
             if cleanup_capture is not None:
                 self._unsubscribe_capture(cleanup_capture)
+
+    def _pause_interrupt_state(self, state: _SymphonyInvokeState, inputs: Any) -> None:
+        """Store a drained invoke only under explicit interrupt component IDs."""
+
+        component_ids = _interrupt_component_ids(getattr(inputs, "result", None))
+        owner_id = state.team_id if state.capture_mode == "team" else state.member_id
+        if not component_ids or not owner_id:
+            return
+        keys = tuple(
+            _PausedInvokeKey(
+                session_id=state.session_id,
+                capture_mode=state.capture_mode,
+                owner_id=str(owner_id),
+                component_id=component_id,
+            )
+            for component_id in component_ids
+        )
+        with self._symphony_states_lock:
+            # A concurrent conflict may invalidate this state after the
+            # lifecycle's outer check but before this lock is acquired.
+            if state.suppress_evolution:
+                return
+            # Do not overwrite an outstanding exact key; it would turn an
+            # otherwise visible conflict into an arbitrary resume target.
+            if any(
+                key in self._paused_symphony_states and self._paused_symphony_states[key] is not state for key in keys
+            ):
+                self._clear_paused_scope_locked(state.session_id, state.capture_mode, str(owner_id))
+                # Invalidate the overlapping invokes too: a third completion
+                # must not recreate the key after the first conflict cleared it.
+                for active in self._symphony_states.values():
+                    active_owner = active.team_id if active.capture_mode == "team" else active.member_id
+                    if (
+                        active.session_id == state.session_id
+                        and active.capture_mode == state.capture_mode
+                        and active_owner == owner_id
+                    ):
+                        active.suppress_evolution = True
+                return
+            self._remove_paused_state_locked(state)
+            for key in keys:
+                self._paused_symphony_states[key] = state
 
     async def _on_after_invoke(
         self,
@@ -740,7 +1039,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         ctx: AgentCallbackContext,
     ) -> bool:
         del trigger_point, ctx
-        return self._observation_sink is not None or self._input_consumer is not None
+        return self._submit_evolution is not None or self._input_consumer is not None
 
     async def _prepare_evolution_input(
         self,
@@ -774,21 +1073,28 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 )
             )
         )
-        query, outcome, reason = _invoke_result_contract(ctx)
+        _, outcome, reason = _invoke_result_contract(ctx)
         with state.lock:
             planned_graph = deepcopy(state.planned_graph)
             snapshot = tuple(deepcopy(state.capability_snapshot))
+            graph_snapshot = deepcopy(state.graph_snapshot)
             quality = tuple(state.quality_codes)
             llm = state.edge_evaluator_llm
             depth = state.edge_search_max_depth
             trace_id = state.trace_id
+            interrupt_continuations = tuple(state.interrupt_continuations)
+            trace_ids = tuple(state.trace_ids)
+            query = state.original_query
         return SymphonyGraphEvolutionInput(
             trajectory=Trajectory.from_otlp(invoke_trajectory.to_otlp()),
             messages=messages,
             planned_graph=planned_graph,
             execution_fragments=tuple(fragments),
             execution_continuities=tuple(continuities),
+            interrupt_continuations=interrupt_continuations,
+            trace_ids=trace_ids,
             capability_snapshot=snapshot,
+            graph_snapshot=graph_snapshot,
             query=query,
             outcome=outcome,
             reason=reason,
@@ -811,7 +1117,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                     "[SymphonyGraphEvolutionRail] input consumer failed (%s)",
                     type(exc).__name__,
                 )
-        if self._observation_sink is None:
+        if self._submit_evolution is None:
             return
 
         candidates_probe = build_symphony_edge_candidates(
@@ -820,7 +1126,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             planned_graph=prepared.planned_graph,
             edge_search_max_depth=prepared.edge_search_max_depth,
             max_candidates=_CANDIDATE_PROBE_LIMIT,
-            include_team_member_pairs=prepared.capture_mode == "team",
+            interrupt_continuations=prepared.interrupt_continuations,
         )
         candidate_truncated = len(candidates_probe) > _MAX_EDGE_CANDIDATES
         candidates = candidates_probe[:_MAX_EDGE_CANDIDATES]
@@ -843,10 +1149,14 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             candidates=candidates,
             decisions=decisions,
             capability_snapshot=prepared.capability_snapshot,
+            graph_snapshot=prepared.graph_snapshot,
             quality_flags=tuple(sorted(flags)),
+            trace_ids=prepared.trace_ids or tuple(_ordered_trace_ids(prepared.trace_id, prepared.execution_fragments)),
+            interrupt_continuations=prepared.interrupt_continuations,
         )
+        planned_graph = prepared.planned_graph
         try:
-            submission = build_symphony_graph_evolution_submission(prepared.planned_graph, execution_graph)
+            _canonical_graph_pair(planned_graph, execution_graph)
         except MemoryError:
             raise
         except Exception as exc:
@@ -855,7 +1165,8 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 type(exc).__name__,
             )
             try:
-                submission = build_symphony_graph_evolution_submission(None, execution_graph)
+                _canonical_graph_pair(None, execution_graph)
+                planned_graph = None
             except MemoryError:
                 raise
             except Exception as fallback_exc:
@@ -865,10 +1176,15 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 )
                 return
         try:
-            await self._observation_sink.submit(submission)
+            await self._submit_evolution(
+                deepcopy(planned_graph),
+                deepcopy(execution_graph),
+                session_id=prepared.session_id,
+                capture_mode=prepared.capture_mode,
+            )
         except Exception as exc:
             logger.warning(
-                "[SymphonyGraphEvolutionRail] observation sink failed (%s)",
+                "[SymphonyGraphEvolutionRail] evolution submission failed (%s)",
                 type(exc).__name__,
             )
 
@@ -925,6 +1241,84 @@ def _invoke_result_contract(ctx: AgentCallbackContext) -> tuple[str, ExecutionOu
     return query_text, "partial", "invoke_result_unverified"
 
 
+def _query_from_inputs(inputs: InvokeInputs) -> str:
+    return inputs.query if isinstance(inputs.query, str) else ""
+
+
+def _is_interrupt_result(inputs: Any) -> bool:
+    result = getattr(inputs, "result", None)
+    return isinstance(result, Mapping) and str(result.get("result_type") or "").lower() == "interrupt"
+
+
+def _interrupt_component_ids(result: Any) -> tuple[str, ...]:
+    if not isinstance(result, Mapping) or str(result.get("result_type") or "").lower() != "interrupt":
+        return ()
+    component_present, component_ids = _normalized_interrupt_ids(result, "component_ids")
+    interrupt_present, interrupt_ids = _normalized_interrupt_ids(result, "interrupt_ids")
+    if not component_present and not interrupt_present:
+        return ()
+    if component_ids is None or interrupt_ids is None:
+        # An explicitly supplied malformed alias must never be masked by the
+        # other field.
+        return ()
+    if component_present and interrupt_present:
+        return component_ids if component_ids == interrupt_ids else ()
+    return component_ids if component_present else interrupt_ids
+
+
+def _normalized_interrupt_ids(result: Mapping[str, Any], field_name: str) -> tuple[bool, tuple[str, ...] | None]:
+    if field_name not in result:
+        return False, ()
+    value = result.get(field_name)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return True, None
+    normalized = tuple(_nonempty_text(item) for item in value)
+    if not normalized or any(item is None for item in normalized):
+        return True, None
+    values = tuple(item for item in normalized if item is not None)
+    return True, values if len(set(values)) == len(values) else None
+
+
+def _interactive_component_ids(inputs: InteractiveInput) -> tuple[str, ...]:
+    try:
+        user_inputs = inputs.user_inputs
+    except MemoryError:
+        raise
+    except Exception:
+        return ()
+    if not isinstance(user_inputs, Mapping):
+        return ()
+    values = tuple(_nonempty_text(key) for key in user_inputs)
+    if not values or any(value is None for value in values):
+        return ()
+    component_ids = tuple(value for value in values if value is not None)
+    return component_ids if len(set(component_ids)) == len(component_ids) else ()
+
+
+def _is_cancelled_or_error_result(inputs: Any) -> bool:
+    result = getattr(inputs, "result", None)
+    if not isinstance(result, Mapping):
+        return False
+    status = str(result.get("status") or "").lower()
+    result_type = str(result.get("result_type") or "").lower()
+    return (
+        result.get("success") is False
+        or status in {"cancelled", "canceled", "error", "failed", "failure"}
+        or result_type in {"cancelled", "canceled", "error"}
+    )
+
+
+def _ordered_trace_ids(
+    first_trace_id: str,
+    fragments: Sequence[SymphonyExecutionFragment],
+) -> tuple[str, ...]:
+    values = [first_trace_id]
+    for fragment in fragments:
+        if fragment.trace_id not in values:
+            values.append(fragment.trace_id)
+    return tuple(values)
+
+
 def _first_fragment_trace(fragments: Sequence[SymphonyExecutionFragment]) -> str | None:
     return next((fragment.trace_id for fragment in fragments if fragment.trace_id), None)
 
@@ -941,7 +1335,10 @@ def _detach_prepared_input(prepared: SymphonyGraphEvolutionInput) -> SymphonyGra
         execution_continuities=tuple(
             (index, Trajectory.from_otlp(trajectory.to_otlp())) for index, trajectory in prepared.execution_continuities
         ),
+        interrupt_continuations=prepared.interrupt_continuations,
+        trace_ids=prepared.trace_ids,
         capability_snapshot=prepared.capability_snapshot,
+        graph_snapshot=deepcopy(prepared.graph_snapshot),
         query=prepared.query,
         outcome=prepared.outcome,
         reason=prepared.reason,
@@ -967,68 +1364,748 @@ def _build_edge_summaries(
             if identity is not None:
                 span_map[identity] = span
 
-    def endpoint(fragment: SymphonyExecutionFragment, *, keep_last: bool) -> SymphonyEdgeEndpointSummary:
+    def endpoint(fragment: SymphonyExecutionFragment) -> SymphonyEdgeEndpointSummary:
         events: list[str] = []
-        errors: list[str] = []
         for span_id in fragment.span_ids:
             span = span_map.get((fragment.trace_id, span_id))
             if span is None:
                 continue
             error = read_span_error(span)
-            if error:
-                errors.append(_truncate_trace_text(str(error), 256))
             call = read_tool_call(span)
             if isinstance(call, Mapping) and call:
-                safe = {
-                    key: _compact_trace_value(call[key])
-                    for key in ("name", "id", "input", "output", "error")
-                    if key in call
-                }
-                if safe:
-                    events.append(_truncate_trace_text(json.dumps(safe, ensure_ascii=False, sort_keys=True), 384))
-        selected = events[-3:] if keep_last else events[:3]
-        slots = [*selected, "", "", ""][:3]
-        error_text = errors[-1] if keep_last and errors else errors[0] if errors else ""
+                event = _summary_tool_event(call, error)
+                if event is not None:
+                    events.append(event)
+                elif error:
+                    events.append(_synthetic_error_event(error))
+            elif error:
+                events.append(_synthetic_error_event(error))
+        selected_indexes = _select_summary_event_indexes(events)
+        selected = [events[index] for index in selected_indexes]
+        head = selected[:_SUMMARY_EDGE_EVENT_COUNT]
+        tail = selected[_SUMMARY_EDGE_EVENT_COUNT:]
         return SymphonyEdgeEndpointSummary(
-            fragment=slots[0],
-            capability=f"{fragment.capability_type}:{fragment.capability_name or ''}",
-            input=slots[1],
-            output=slots[2],
-            error=error_text,
+            fragment=head[0] if head else "",
+            input="\n".join(head[1:]),
+            output="\n".join(tail),
         )
 
     return {
         candidate.candidate_id: SymphonyEdgeEvaluationSummary(
-            endpoint_a=endpoint(candidate.source_fragment, keep_last=True),
-            endpoint_b=endpoint(candidate.target_fragment, keep_last=False),
+            endpoint_a=endpoint(candidate.source_fragment),
+            endpoint_b=endpoint(candidate.target_fragment),
         )
         for candidate in candidates
     }
+
+
+def _select_summary_event_indexes(events: Sequence[str]) -> list[int]:
+    """Keep endpoint boundaries while using scarce slots for tool diversity."""
+
+    event_count = len(events)
+    if event_count <= _SUMMARY_MAX_EVENTS:
+        return list(range(event_count))
+
+    boundary_indexes = {
+        *range(_SUMMARY_EDGE_EVENT_COUNT),
+        *range(event_count - _SUMMARY_EDGE_EVENT_COUNT, event_count),
+    }
+    selected = set(boundary_indexes)
+    indexes_by_tool: dict[str, list[int]] = {}
+    for index, event in enumerate(events):
+        try:
+            tool = json.loads(event).get("tool")
+        except (AttributeError, TypeError, ValueError):
+            tool = None
+        indexes_by_tool.setdefault(tool if isinstance(tool, str) else "", []).append(index)
+
+    tool_by_index = {index: tool for tool, indexes in indexes_by_tool.items() for index in indexes}
+    covered_tools = {tool_by_index[index] for index in selected}
+    # A one-off event carries information that repeated reads/edits cannot
+    # replace. Keep the normal head/tail sample intact unless it contains a
+    # duplicate tool kind that can safely yield its slot.
+    tool_groups = sorted(
+        indexes_by_tool.items(),
+        key=lambda item: (
+            len(item[1]),
+            item[1][0],
+        ),
+    )
+    for tool, indexes in tool_groups:
+        if tool in covered_tools:
+            continue
+        selected_counts: dict[str, int] = {}
+        for index in selected:
+            selected_tool = tool_by_index[index]
+            selected_counts[selected_tool] = selected_counts.get(selected_tool, 0) + 1
+        replaceable = [
+            index
+            for index in selected
+            if index not in {0, event_count - 1} and selected_counts[tool_by_index[index]] > 1
+        ]
+        if not replaceable:
+            break
+        replaced = max(replaceable, key=lambda index: (selected_counts[tool_by_index[index]], index))
+        selected.remove(replaced)
+        representative = next((index for index in indexes if index not in boundary_indexes), indexes[0])
+        selected.add(representative)
+        covered_tools.add(tool)
+    return sorted(selected)
 
 
 def _truncate_trace_text(value: str, max_bytes: int) -> str:
     return value.encode("utf-8", errors="replace")[:max_bytes].decode("utf-8", errors="ignore")
 
 
-def _compact_trace_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {
-            str(key): "<redacted>"
-            if any(token in str(key).lower() for token in ("base64", "binary", "bytes"))
-            else _compact_trace_value(item)
-            for key, item in list(value.items())[:12]
+def _truncate_trace_text_head_tail(value: str, max_bytes: int) -> str:
+    encoded = value.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return value
+    marker = "...<truncated>..."
+    marker_bytes = marker.encode()
+    available = max(0, max_bytes - len(marker_bytes))
+    head_bytes = available // 2
+    tail_bytes = available - head_bytes
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore") if tail_bytes else ""
+    return f"{head}{marker}{tail}"
+
+
+@dataclass(frozen=True)
+class _PartialJSONString:
+    """A decoded string prefix whose closing quote was observability-truncated."""
+
+    value: str
+
+
+class _PartialJSONParser:
+    """Recover only values that are fully present in a truncated JSON prefix."""
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+        self._index = 0
+
+    def parse(self) -> Any:
+        value, _ = self._parse_value(0)
+        self._skip_whitespace()
+        if self._index != len(self._value):
+            raise ValueError("invalid JSON prefix")
+        return value
+
+    def _parse_value(self, depth: int) -> tuple[Any, bool]:
+        if depth > 32:
+            raise ValueError("JSON prefix is too deeply nested")
+        self._skip_whitespace()
+        if self._index == len(self._value):
+            return None, False
+        token = self._value[self._index]
+        if token == "{":
+            return self._parse_object(depth + 1)
+        if token == "[":
+            return self._parse_array(depth + 1)
+        if token == '"':
+            return self._parse_string()
+        return self._parse_scalar()
+
+    def _parse_object(self, depth: int) -> tuple[dict[str, Any], bool]:
+        self._index += 1
+        result: dict[str, Any] = {}
+        self._skip_whitespace()
+        if self._consume("}"):
+            return result, True
+        while self._index < len(self._value):
+            key, key_complete = self._parse_string()
+            if not key_complete:
+                return result, False
+            self._skip_whitespace()
+            if not self._consume(":"):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON object prefix")
+            item, item_complete = self._parse_value(depth)
+            if item is not None:
+                result[str(key)] = item
+            if not item_complete:
+                return result, False
+            self._skip_whitespace()
+            if self._consume("}"):
+                return result, True
+            if not self._consume(","):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON object prefix")
+            self._skip_whitespace()
+        return result, False
+
+    def _parse_array(self, depth: int) -> tuple[list[Any], bool]:
+        self._index += 1
+        result: list[Any] = []
+        self._skip_whitespace()
+        if self._consume("]"):
+            return result, True
+        while self._index < len(self._value):
+            item, item_complete = self._parse_value(depth)
+            if item is not None:
+                result.append(item)
+            if not item_complete:
+                return result, False
+            self._skip_whitespace()
+            if self._consume("]"):
+                return result, True
+            if not self._consume(","):
+                if self._index == len(self._value):
+                    return result, False
+                raise ValueError("invalid JSON array prefix")
+            self._skip_whitespace()
+        return result, False
+
+    def _parse_string(self) -> tuple[str | _PartialJSONString, bool]:
+        if not self._consume('"'):
+            raise ValueError("invalid JSON string prefix")
+        result: list[str] = []
+        while self._index < len(self._value):
+            token = self._value[self._index]
+            self._index += 1
+            if token == '"':
+                return "".join(result), True
+            if token == "\\":
+                escaped, complete = self._parse_escape()
+                if not complete:
+                    return _PartialJSONString("".join(result)), False
+                result.append(escaped)
+            elif ord(token) < 0x20:
+                raise ValueError("invalid control character in JSON string")
+            else:
+                result.append(token)
+        return _PartialJSONString("".join(result)), False
+
+    def _parse_escape(self) -> tuple[str, bool]:
+        if self._index == len(self._value):
+            return "", False
+        token = self._value[self._index]
+        self._index += 1
+        escapes = {'"': '"', "\\": "\\", "/": "/", "b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t"}
+        if token in escapes:
+            return escapes[token], True
+        if token != "u":
+            raise ValueError("invalid JSON escape")
+        digits = self._value[self._index : self._index + 4]
+        if len(digits) < 4:
+            self._index = len(self._value)
+            return "", False
+        if re.fullmatch(r"[0-9a-fA-F]{4}", digits) is None:
+            raise ValueError("invalid JSON unicode escape")
+        self._index += 4
+        codepoint = int(digits, 16)
+        if 0xD800 <= codepoint <= 0xDBFF:
+            return self._parse_low_surrogate(codepoint), True
+        if 0xDC00 <= codepoint <= 0xDFFF:
+            return "\N{REPLACEMENT CHARACTER}", True
+        return chr(codepoint), True
+
+    def _parse_low_surrogate(self, high: int) -> str:
+        if not self._value.startswith("\\u", self._index):
+            return "\N{REPLACEMENT CHARACTER}"
+        digits = self._value[self._index + 2 : self._index + 6]
+        if len(digits) != 4 or re.fullmatch(r"[0-9a-fA-F]{4}", digits) is None:
+            return "\N{REPLACEMENT CHARACTER}"
+        low = int(digits, 16)
+        if not 0xDC00 <= low <= 0xDFFF:
+            return "\N{REPLACEMENT CHARACTER}"
+        self._index += 6
+        return chr(0x10000 + ((high - 0xD800) << 10) + (low - 0xDC00))
+
+    def _parse_scalar(self) -> tuple[Any, bool]:
+        start = self._index
+        while self._index < len(self._value) and self._value[self._index] not in ",]} \t\r\n":
+            self._index += 1
+        token = self._value[start : self._index]
+        try:
+            value = json.loads(token)
+        except (TypeError, ValueError) as exc:
+            if self._index == len(self._value) and _is_possible_partial_json_scalar(token):
+                return None, False
+            raise ValueError("invalid JSON scalar prefix") from exc
+        if self._index == len(self._value) and isinstance(value, (int, float)) and not isinstance(value, bool):
+            return None, False
+        return value, True
+
+    def _skip_whitespace(self) -> None:
+        while self._index < len(self._value) and self._value[self._index] in " \t\r\n":
+            self._index += 1
+
+    def _consume(self, token: str) -> bool:
+        if self._value.startswith(token, self._index):
+            self._index += len(token)
+            return True
+        return False
+
+
+def _is_possible_partial_json_scalar(value: str) -> bool:
+    if value in {"t", "tr", "tru", "f", "fa", "fal", "fals", "n", "nu", "nul", "-"}:
+        return True
+    integer = r"-?(?:0|[1-9]\d*)"
+    return (
+        re.fullmatch(rf"{integer}\.", value) is not None
+        or re.fullmatch(
+            rf"{integer}(?:\.\d+)?[eE][+-]?",
+            value,
+        )
+        is not None
+    )
+
+
+def _structured_truncated_summary(value: str) -> Mapping[str, Any] | None:
+    match = _OBSERVABILITY_TRUNCATED_SUFFIX.search(value)
+    if match is None:
+        return None
+    prefix = value[: match.start()].rstrip()
+    if not prefix.lstrip().startswith(("{", "[")):
+        return None
+    try:
+        recovered = _PartialJSONParser(prefix).parse()
+    except ValueError:
+        return None
+    recovered = _unwrap_partial_summary_payload(recovered)
+    return _structured_json_value_summary(
+        recovered,
+        partial=True,
+        max_bytes=_SUMMARY_VALUE_MAX_BYTES,
+    )
+
+
+def _structured_complete_summary(value: str, *, max_bytes: int) -> Mapping[str, Any] | None:
+    prefix = value.lstrip()
+    if not prefix.startswith(("{", "[")):
+        return None
+    try:
+        recovered = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    recovered = _unwrap_partial_summary_payload(recovered)
+    return _structured_json_value_summary(recovered, partial=False, max_bytes=max_bytes)
+
+
+def _structured_json_value_summary(
+    value: Any,
+    *,
+    partial: bool,
+    max_bytes: int,
+) -> Mapping[str, Any] | None:
+    branches = _partial_summary_branches(value)
+    if not branches:
+        return None
+    keys = [_truncate_trace_text(branch, 48) for branch, _ in branches[:_SUMMARY_MAX_KEYS]]
+    sample_branches = sorted(
+        enumerate(branches),
+        key=lambda item: (len(item[1][1]) <= 1, item[0]),
+    )
+    ordered_branches = [branch for _, branch in sample_branches]
+    for branch_values in (_SUMMARY_MAX_BRANCH_VALUES, 1):
+        for branch_count in range(_SUMMARY_MAX_BRANCHES, 0, -1):
+            for value_bytes in (512, 256, 128, 96, 64, 48):
+                summary = {
+                    "structured": True,
+                    "partial": partial,
+                    "keys": keys,
+                    "samples": _fair_partial_summary_samples(
+                        ordered_branches,
+                        max_branches=branch_count,
+                        max_branch_values=branch_values,
+                        value_bytes=value_bytes,
+                    ),
+                }
+                if len(json.dumps(summary, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) <= max_bytes:
+                    return summary
+    return None
+
+
+def _unwrap_partial_summary_payload(value: Any) -> Any:
+    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], list) and isinstance(value[1], Mapping):
+        args, kwargs = value
+        business_kwargs = {
+            key: item
+            for key, item in kwargs.items()
+            if _normalized_summary_key(str(key)) not in _SUMMARY_ARGUMENT_FRAMEWORK_KEYS
         }
+        if business_kwargs:
+            return {"args": args, "kwargs": business_kwargs}
+        value = args
+    while isinstance(value, list) and len(value) == 1:
+        value = value[0]
+    return value
+
+
+def _partial_summary_branches(value: Any) -> list[tuple[str, list[tuple[str, Any]]]]:
+    items: Iterable[tuple[Any, Any]]
+    if isinstance(value, Mapping):
+        items = value.items()
+    elif isinstance(value, (list, tuple)):
+        items = ((str(index), item) for index, item in enumerate(value))
+    else:
+        return []
+    branches: list[tuple[str, list[tuple[str, Any]]]] = []
+    for key, item in items:
+        key_text = _truncate_trace_text(str(key), 48)
+        normalized_key = _normalized_summary_key(key_text)
+        if normalized_key in _SUMMARY_IDENTITY_KEYS:
+            continue
+        if _is_sensitive_summary_key(normalized_key):
+            branches.append((key_text, [("$", "<redacted>")]))
+            continue
+        expanded = _parse_nested_partial_json(item)
+        if isinstance(item, (str, _PartialJSONString)) and isinstance(expanded, (Mapping, list, tuple)):
+            nested_branches = _partial_summary_branches(expanded)
+            if nested_branches:
+                branches.extend(nested_branches)
+                continue
+        leaves = _partial_scalar_leaves(expanded, "")
+        if leaves:
+            branches.append((key_text, leaves))
+    return branches
+
+
+def _parse_nested_partial_json(value: Any) -> Any:
+    if isinstance(value, _PartialJSONString):
+        prefix = value.value.lstrip()
+    elif isinstance(value, str):
+        prefix = value.lstrip()
+    else:
+        return value
+    if not prefix.startswith(("{", "[")):
+        return value.value if isinstance(value, _PartialJSONString) else value
+    try:
+        return json.loads(prefix)
+    except (TypeError, ValueError):
+        try:
+            return _PartialJSONParser(prefix).parse()
+        except ValueError:
+            return value.value if isinstance(value, _PartialJSONString) else value
+
+
+def _partial_scalar_leaves(value: Any, path: str, *, depth: int = 0) -> list[tuple[str, Any]]:
+    if depth > 8:
+        return []
+    if isinstance(value, _PartialJSONString):
+        return [(path, value.value)] if value.value else []
+    if isinstance(value, Mapping):
+        leaves: list[tuple[str, Any]] = []
+        for key, item in value.items():
+            key_text = str(key)
+            normalized_key = _normalized_summary_key(key_text)
+            child_path = _join_summary_path(path, _truncate_trace_text(key_text, 48))
+            if _is_sensitive_summary_key(normalized_key):
+                leaves.append((child_path, "<redacted>"))
+            elif normalized_key not in _SUMMARY_IDENTITY_KEYS:
+                leaves.extend(_partial_scalar_leaves(item, child_path, depth=depth + 1))
+            if len(leaves) >= 8:
+                break
+        return leaves[:8]
     if isinstance(value, (list, tuple)):
-        return [_compact_trace_value(item) for item in value[:12]]
+        leaves = []
+        for index, item in enumerate(value[:8]):
+            leaves.extend(_partial_scalar_leaves(item, _join_summary_path(path, str(index)), depth=depth + 1))
+            if len(leaves) >= 8:
+                break
+        return leaves[:8]
+    if value is None:
+        return []
+    return [(path or "$", value)]
+
+
+def _join_summary_path(parent: str, child: str) -> str:
+    return f"{parent}.{child}" if parent else child
+
+
+def _fair_partial_summary_samples(
+    branches: Sequence[tuple[str, Sequence[tuple[str, Any]]]],
+    *,
+    max_branches: int,
+    max_branch_values: int,
+    value_bytes: int,
+) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for branch, branch_samples in branches[:max_branches]:
+        values = [
+            [_truncate_trace_text(path, 64), _compact_summary_scalar(value, max_bytes=value_bytes)]
+            for path, value in branch_samples[:max_branch_values]
+        ]
+        if values:
+            samples.append({"branch": _truncate_trace_text(branch, 48), "values": values})
+    return samples
+
+
+def _compact_summary_scalar(value: Any, *, max_bytes: int) -> Any:
     if isinstance(value, bytes):
         return "<redacted>"
     if isinstance(value, str):
-        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value[:128]):
+        value = _redact_summary_text(value)
+        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value):
             return "<redacted>"
-        return _truncate_trace_text(value, 256)
+        return _truncate_trace_text_head_tail(value, max_bytes)
     if value is None or isinstance(value, (bool, int, float)):
         return value
-    return _truncate_trace_text(str(value), 256)
+    return _truncate_trace_text_head_tail(str(value), max_bytes)
+
+
+def _compact_trace_value(value: Any, *, max_bytes: int = _SUMMARY_VALUE_MAX_BYTES) -> Any:
+    if isinstance(value, Mapping):
+        compact: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            normalized_key = _normalized_summary_key(key_text)
+            if normalized_key in _SUMMARY_IDENTITY_KEYS:
+                continue
+            if _is_sensitive_summary_key(normalized_key):
+                compact[key_text] = "<redacted>"
+            else:
+                compact[key_text] = _compact_trace_value(item, max_bytes=max_bytes)
+            if len(compact) == 12:
+                break
+        return _unwrap_summary_mapping(compact)
+    if isinstance(value, (list, tuple)):
+        return [_compact_trace_value(item, max_bytes=max_bytes) for item in value[:12]]
+    if isinstance(value, bytes):
+        return "<redacted>"
+    if isinstance(value, str):
+        complete_summary = _structured_complete_summary(value, max_bytes=max_bytes)
+        if complete_summary is not None and len(value.encode("utf-8", errors="replace")) > max_bytes:
+            return complete_summary
+        value = _redact_summary_text(value)
+        if len(value) > 256 and all(char.isalnum() or char in "+/=_-" for char in value):
+            return "<redacted>"
+        return _truncate_trace_text_head_tail(value, max_bytes)
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    return _truncate_trace_text_head_tail(str(value), max_bytes)
+
+
+def _summary_tool_event(call: Mapping[str, Any], span_error: Any) -> str | None:
+    tool_name = _truncate_trace_text(str(call.get("name") or "").rsplit(".", 1)[-1], 64)
+    if not tool_name:
+        return None
+    input_value = _unwrap_summary_payload(call.get("input"))
+    output_value, explicit_success, output_error = _summary_output_parts(call.get("output"))
+    event: dict[str, Any] = {
+        "tool": tool_name,
+        "ok": not bool(span_error or call.get("error") or output_error) and explicit_success is not False,
+    }
+    canonical_name = tool_name.lower().replace("-", "_")
+    if canonical_name == "skill_tool":
+        skill_name = _summary_named_value(input_value, ("skill_name",))
+        if skill_name:
+            event["input"] = {"skill_name": skill_name}
+    elif canonical_name == "read_file":
+        path = _summary_named_value(input_value, ("file_path", "path", "relative_file_path"))
+        if path:
+            event["input"] = {"path": path}
+    else:
+        if input_value not in (None, "", [], {}):
+            event["input"] = input_value
+        if output_value not in (None, "", [], {}):
+            event["output"] = output_value
+    error = span_error or call.get("error") or output_error
+    if error:
+        event["error"] = error
+    return _bounded_summary_event(event)
+
+
+def _synthetic_error_event(error: Any) -> str:
+    return _bounded_summary_event({"tool": "span", "ok": False, "error": error})
+
+
+def _unwrap_summary_payload(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return _structured_truncated_summary(value) or value
+    if (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and isinstance(value[0], (list, tuple))
+        and isinstance(value[1], Mapping)
+    ):
+        args, kwargs = value
+        business_kwargs = {
+            key: item
+            for key, item in kwargs.items()
+            if _normalized_summary_key(str(key)) not in _SUMMARY_ARGUMENT_FRAMEWORK_KEYS
+        }
+        if business_kwargs:
+            if not args:
+                return business_kwargs
+            return {"args": list(args), "kwargs": business_kwargs}
+        if len(args) == 1:
+            return args[0]
+        return list(args)
+    return value
+
+
+def _summary_output_parts(value: Any) -> tuple[Any, bool | None, Any]:
+    """Separate transport status from a tool's business output."""
+
+    decoded = _unwrap_summary_payload(value)
+    if not isinstance(decoded, Mapping):
+        return decoded, None, None
+    success = decoded.get("success") if isinstance(decoded.get("success"), bool) else None
+    error = decoded.get("error")
+    business = {
+        key: item
+        for key, item in decoded.items()
+        if key not in {"success", "error"} and _normalized_summary_key(str(key)) not in _SUMMARY_OUTPUT_TRANSPORT_KEYS
+    }
+    wrapper_values = [(name, business[name]) for name in ("data", "result") if name in business]
+    if len(wrapper_values) == 1 and set(business) == {wrapper_values[0][0]}:
+        business_value: Any = wrapper_values[0][1]
+    else:
+        business_value = business
+    return business_value, success, error
+
+
+def _normalized_summary_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", value.casefold())
+
+
+def _redact_summary_text(value: str) -> str:
+    redacted = _SUMMARY_PEM_PRIVATE_KEY.sub(r"\1\n<redacted>\n\2", value)
+    redacted = _SUMMARY_QUOTED_AUTH_HEADER.sub(_redact_quoted_auth_match, redacted)
+    redacted = _SUMMARY_QUOTED_AUTH_VALUE.sub(_redact_quoted_auth_value_match, redacted)
+    redacted = _redact_unquoted_auth_headers(redacted)
+    redacted = _SUMMARY_URL_USERINFO.sub(r"\1<redacted>\3", redacted)
+    redacted = _SUMMARY_SECRET_ASSIGNMENT.sub(_redact_assignment_match, redacted)
+    return _SUMMARY_SECRET_CLI.sub(_redact_assignment_match, redacted)
+
+
+def _redact_assignment_match(match: re.Match[str]) -> str:
+    quote = match.group("quote") or ""
+    return f"{match.group('prefix')}{quote}<redacted>{quote}"
+
+
+def _redact_quoted_auth_match(match: re.Match[str]) -> str:
+    quote = match.group("quote")
+    return f"{quote}{match.group('prefix')}<redacted>{quote}"
+
+
+def _redact_quoted_auth_value_match(match: re.Match[str]) -> str:
+    quote = match.group("quote")
+    return f"{match.group('prefix')}{quote}<redacted>{quote}"
+
+
+def _redact_unquoted_auth_headers(value: str) -> str:
+    parts: list[str] = []
+    cursor = 0
+    while match := _SUMMARY_AUTH_START.search(value, cursor):
+        parts.append(value[cursor : match.end()])
+        start = match.end()
+        already_redacted_end = _redacted_auth_value_end(value, start)
+        if already_redacted_end is not None:
+            parts.append(value[start:already_redacted_end])
+            cursor = already_redacted_end
+            continue
+        end = _unquoted_auth_value_end(value, start)
+        parts.append("<redacted>")
+        cursor = end
+    parts.append(value[cursor:])
+    return "".join(parts)
+
+
+def _redacted_auth_value_end(value: str, start: int) -> int | None:
+    marker = "<redacted>"
+    if value.startswith(marker, start):
+        return start + len(marker)
+    if start < len(value) and value[start] in {"'", '"'}:
+        quote = value[start]
+        quoted_marker = f"{quote}{marker}{quote}"
+        if value.startswith(quoted_marker, start):
+            return start + len(quoted_marker)
+    return None
+
+
+def _unquoted_auth_value_end(value: str, start: int) -> int:
+    index = start
+    while index < len(value):
+        if value[index] in {"\r", "\n"} or value.startswith(("&&", "||"), index):
+            return index
+        if value[index] == ";" and (index + 1 == len(value) or value[index + 1].isspace()):
+            return index
+        if value[index].isspace():
+            next_index = index
+            while next_index < len(value) and value[next_index].isspace():
+                next_index += 1
+            remainder = value[next_index:]
+            if (
+                re.match(r"-H(?:\s|=|$)", remainder) is not None
+                or re.match(r"--[A-Za-z0-9]", remainder) is not None
+                or _SUMMARY_URL_ARGUMENT.match(remainder) is not None
+            ):
+                return index
+        index += 1
+    return len(value)
+
+
+def _is_sensitive_summary_key(normalized_key: str) -> bool:
+    return normalized_key in {"auth", "session"} or any(
+        token in normalized_key for token in _SUMMARY_REDACTED_KEY_TOKENS
+    )
+
+
+def _unwrap_summary_mapping(value: Mapping[str, Any]) -> Any:
+    """Drop transport-only success/data/result envelopes recursively."""
+
+    compact = dict(value)
+    if isinstance(compact.get("success"), bool):
+        compact.pop("success")
+    wrapper_values = [(name, compact.get(name)) for name in ("data", "result") if name in compact]
+    other_keys = set(compact).difference({"data", "result", "error"})
+    if len(wrapper_values) == 1 and not other_keys:
+        return wrapper_values[0][1]
+    return compact
+
+
+def _summary_named_value(value: Any, names: Sequence[str]) -> str:
+    if not isinstance(value, Mapping):
+        return ""
+    for name in names:
+        item = value.get(name)
+        if isinstance(item, str) and item.strip():
+            return _truncate_trace_text_head_tail(item.strip(), 256)
+    return ""
+
+
+def _bounded_summary_event(event: Mapping[str, Any]) -> str:
+    bounded = dict(event)
+    # Input gets the largest share because it contains the invoked command or
+    # arguments. Output/error shrink independently instead of forcing a second
+    # whole-event truncation that could erase the command's useful prefix.
+    budgets: tuple[tuple[int, int, int], ...] = (
+        (952, 160, 96),
+        (704, 160, 96),
+        (640, 144, 80),
+        (576, 128, 80),
+        (512, 112, 64),
+        (448, 96, 64),
+        (384, 80, 48),
+        (320, 64, 48),
+        (256, 48, 32),
+        (192, 32, 24),
+    )
+    if "input" in bounded and not set(bounded).intersection({"output", "error"}):
+        budgets = ((952, 0, 0), *budgets)
+    for input_bytes, output_bytes, error_bytes in budgets:
+        candidate = {key: value for key, value in bounded.items() if key not in {"input", "output", "error"}}
+        for key, max_bytes in (("input", input_bytes), ("output", output_bytes), ("error", error_bytes)):
+            if key in bounded and max_bytes:
+                candidate[key] = _compact_trace_value(bounded[key], max_bytes=max_bytes)
+        serialized = json.dumps(candidate, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        if len(serialized.encode("utf-8")) <= _SUMMARY_EVENT_MAX_BYTES:
+            return serialized
+    return json.dumps(
+        {"ok": bool(event.get("ok")), "tool": event.get("tool", "")},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphEvolutionRail):
@@ -1038,6 +2115,9 @@ class TeamSymphonyGraphEvolutionRail(_TeamTrajectoryCaptureMixin, SymphonyGraphE
 
 
 __all__ = [
+    "CaptureMode",
+    "GraphSnapshotProvider",
+    "SymphonyEvolutionSubmitCallback",
     "SymphonyGraphEvolutionInput",
     "SymphonyGraphEvolutionRail",
     "TeamSymphonyGraphEvolutionRail",

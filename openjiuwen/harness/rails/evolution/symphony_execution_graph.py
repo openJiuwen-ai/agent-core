@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Pure SDD-0006 execution-graph and paired-submission contracts.
+"""Pure minimal point-edge execution-graph contracts.
 
 This module deliberately does not read a planned graph while deciding observed
 execution edges.  Capability identities must come from an invoke-start snapshot
@@ -16,13 +16,17 @@ import math
 import re
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Literal, Protocol, runtime_checkable
 from unicodedata import category as unicode_category
 
 from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
     SymphonyEdgeCandidate,
     SymphonyEdgeDecision,
+    SymphonyInterruptContinuation,
+)
+from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
+    _valid_interrupt_continuations as _unambiguous_interrupt_continuations,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
@@ -40,7 +44,7 @@ _MAX_JSON_DEPTH = 128
 
 @dataclass(frozen=True)
 class CapabilityIdentity:
-    """One immutable capability identity captured at invoke start.
+    """One immutable capability alias captured at invoke start.
 
     Runtime validation intentionally happens in the pure graph builder so a
     malformed provider record drops affected observations instead of raising in
@@ -50,86 +54,14 @@ class CapabilityIdentity:
     capability_id: str
     capability_type: CapabilityType
     capability_name: str
-    version: str
-    content_hash: str
-    input_ports: tuple[str, ...]
-    output_ports: tuple[str, ...]
 
 
 @runtime_checkable
 class CapabilitySnapshotProvider(Protocol):
-    """Synchronously freeze identities from one active artifact version."""
+    """Synchronously freeze capability aliases visible to one invocation."""
 
     def snapshot_capabilities(self) -> Sequence[CapabilityIdentity]:
         """Return the immutable identities visible at invoke start."""
-
-        ...
-
-
-@dataclass(frozen=True, init=False, slots=True)
-class SymphonyGraphEvolutionSubmission:
-    """Deeply immutable canonical planned/execution graph pair.
-
-    ``planned_graph`` and ``execution_graph`` return detached JSON-compatible
-    views on every read.  Mutating a returned mapping or nested list therefore
-    cannot change later reads or invalidate ``submission_id``.
-    """
-
-    submission_id: str
-    _canonical_pair_json: str = field(repr=False)
-
-    def __init__(
-        self,
-        planned_graph: dict[str, Any] | None,
-        execution_graph: dict[str, Any],
-    ) -> None:
-        canonical_pair = _canonical_graph_pair(planned_graph, execution_graph)
-        object.__setattr__(
-            self,
-            "submission_id",
-            f"sha256:{hashlib.sha256(canonical_pair.encode('utf-8')).hexdigest()}",
-        )
-        object.__setattr__(self, "_canonical_pair_json", canonical_pair)
-
-    @property
-    def planned_graph(self) -> dict[str, Any] | None:
-        """Return a detached planned-graph JSON view, if one was captured."""
-
-        return json.loads(self._canonical_pair_json)["planned_graph"]
-
-    @property
-    def execution_graph(self) -> dict[str, Any]:
-        """Return a detached execution-graph JSON view."""
-
-        return json.loads(self._canonical_pair_json)["execution_graph"]
-
-    def canonical_pair_json(self) -> str:
-        """Return the immutable canonical pair JSON used for hashing."""
-
-        return self._canonical_pair_json
-
-    def canonical_pair_bytes(self) -> bytes:
-        """Return the canonical UTF-8 bytes used to derive ``submission_id``."""
-
-        return self._canonical_pair_json.encode("utf-8")
-
-    def to_dict(self) -> dict[str, Any]:
-        """Return a detached sink payload; do not JSON-encode this object directly."""
-
-        pair = json.loads(self._canonical_pair_json)
-        return {
-            "submission_id": self.submission_id,
-            "planned_graph": pair["planned_graph"],
-            "execution_graph": pair["execution_graph"],
-        }
-
-
-@runtime_checkable
-class SymphonyGraphObservationSink(Protocol):
-    """Asynchronous sink contract; Rail owns failure isolation."""
-
-    async def submit(self, submission: SymphonyGraphEvolutionSubmission) -> None:
-        """Accept one completed graph-evolution submission."""
 
         ...
 
@@ -144,6 +76,9 @@ def build_symphony_execution_graph(
     capability_snapshot: Sequence[CapabilityIdentity],
     reason: str | None = None,
     quality_flags: Sequence[str] = (),
+    graph_snapshot: Mapping[str, Any] | None = None,
+    trace_ids: Sequence[str] = (),
+    interrupt_continuations: Sequence[SymphonyInterruptContinuation] = (),
 ) -> dict[str, Any]:
     """Build a deterministic JGF execution graph from observed edge decisions.
 
@@ -161,6 +96,9 @@ def build_symphony_execution_graph(
     normalized_reason = _nonempty_text(reason)
     if outcome in {"failed", "partial"} and normalized_reason is None:
         return {}
+    normalized_trace_ids = _normalized_trace_ids(normalized_trace_id, trace_ids)
+    if normalized_trace_ids is None:
+        return {}
 
     try:
         identity_index = _IdentityIndex(capability_snapshot)
@@ -175,6 +113,12 @@ def build_symphony_execution_graph(
 
     edges: list[dict[str, Any]] = []
     endpoint_identities: dict[str, CapabilityIdentity] = {}
+    valid_trace_ids = frozenset(normalized_trace_ids)
+    valid_continuations = frozenset(
+        item
+        for item in _valid_interrupt_continuations(interrupt_continuations)
+        if item.trace_ids == normalized_trace_ids[: len(item.trace_ids)]
+    )
     for candidate_id in sorted(candidate_index.keys() & decision_index.keys()):
         candidate = candidate_index.get(candidate_id)
         decision = decision_index.get(candidate_id)
@@ -182,6 +126,8 @@ def build_symphony_execution_graph(
             continue
         observation = _safe_validated_observation(
             normalized_trace_id,
+            valid_trace_ids,
+            valid_continuations,
             candidate,
             decision,
             identity_index,
@@ -193,25 +139,10 @@ def build_symphony_execution_graph(
         endpoint_identities[source_identity.capability_id] = source_identity
         endpoint_identities[target_identity.capability_id] = target_identity
 
-    edges.sort(
-        key=lambda edge: (
-            edge["source"],
-            edge["target"],
-            edge["metadata"]["candidate_id"],
-            edge["metadata"]["source_fragment_id"],
-            edge["metadata"]["target_fragment_id"],
-        )
-    )
+    edges = _deduplicate_edges(edges)
     nodes = {
         capability_id: {
             "label": identity.capability_type,
-            "metadata": {
-                "capability_type": identity.capability_type,
-                "version": identity.version,
-                "content_hash": identity.content_hash,
-                "input_ports": list(identity.input_ports),
-                "output_ports": list(identity.output_ports),
-            },
         }
         for capability_id, identity in sorted(endpoint_identities.items())
     }
@@ -228,11 +159,18 @@ def build_symphony_execution_graph(
         "outcome": outcome,
         "graph": graph_without_id,
     }
+    if len(normalized_trace_ids) > 1:
+        envelope_for_id["trace_ids"] = list(normalized_trace_ids)
     if outcome in {"failed", "partial"}:
         envelope_for_id["reason"] = normalized_reason
     flags = _normalized_quality_flags(quality_flags)
     if flags:
         envelope_for_id["quality_flags"] = list(flags)
+    if graph_snapshot is not None:
+        normalized_snapshot = _normalized_graph_snapshot(graph_snapshot)
+        if normalized_snapshot is None:
+            return {}
+        envelope_for_id["graph_snapshot"] = normalized_snapshot
     try:
         graph_id = _execution_graph_id(envelope_for_id)
     except (TypeError, ValueError):
@@ -244,15 +182,6 @@ def build_symphony_execution_graph(
         **graph_without_id,
     }
     return result
-
-
-def build_symphony_graph_evolution_submission(
-    planned_graph: dict[str, Any] | None,
-    execution_graph: dict[str, Any],
-) -> SymphonyGraphEvolutionSubmission:
-    """Build a deeply immutable pair with a canonical SHA-256 identity."""
-
-    return SymphonyGraphEvolutionSubmission(planned_graph, execution_graph)
 
 
 @dataclass(frozen=True)
@@ -399,12 +328,14 @@ def _safe_candidate_id(item: SymphonyEdgeCandidate | SymphonyEdgeDecision) -> st
 
 def _safe_validated_observation(
     trace_id: str,
+    trace_ids: frozenset[str],
+    interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
     decision: SymphonyEdgeDecision,
     identity_index: _IdentityIndex,
 ) -> tuple[dict[str, Any], CapabilityIdentity, CapabilityIdentity] | None:
     try:
-        return _validated_observation(trace_id, candidate, decision, identity_index)
+        return _validated_observation(trace_id, trace_ids, interrupt_continuations, candidate, decision, identity_index)
     except MemoryError:
         raise
     except Exception:
@@ -413,20 +344,30 @@ def _safe_validated_observation(
 
 def _validated_observation(
     trace_id: str,
+    trace_ids: frozenset[str],
+    interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
     decision: SymphonyEdgeDecision,
     identity_index: _IdentityIndex,
 ) -> tuple[dict[str, Any], CapabilityIdentity, CapabilityIdentity] | None:
     source = candidate.source_fragment
     target = candidate.target_fragment
-    if not _valid_fragment(source, trace_id) or not _valid_fragment(target, trace_id):
+    if not _valid_fragment(source, trace_ids) or not _valid_fragment(target, trace_ids):
         return None
-    if (
-        source.trace_id != target.trace_id
-        or source.continuity_index != target.continuity_index
-        or _fragment_occurrence_id(source) == _fragment_occurrence_id(target)
+    if source.continuity_index != target.continuity_index or _fragment_occurrence_id(source) == _fragment_occurrence_id(
+        target
     ):
         return None
+    if source.trace_id != target.trace_id:
+        continuation = candidate.interrupt_continuation
+        if (
+            continuation is None
+            or continuation not in interrupt_continuations
+            or continuation.source_trace_id != source.trace_id
+            or continuation.target_trace_id != target.trace_id
+            or continuation.continuity_index != source.continuity_index
+        ):
+            return None
     if _nonempty_text(decision.candidate_id) is None or decision.candidate_id != candidate.candidate_id:
         return None
     if decision.source_fragment_id != source.fragment_id or decision.target_fragment_id != target.fragment_id:
@@ -438,50 +379,51 @@ def _validated_observation(
     if (decision.evidence_method, decision.evidence_strength) not in _METHOD_STRENGTH:
         return None
 
-    allowed_span_ids = frozenset(source.span_ids) | frozenset(target.span_ids)
-    candidate_refs = _validated_evidence_refs(candidate.evidence_refs, trace_id, allowed_span_ids)
-    decision_refs = _validated_evidence_refs(decision.evidence_refs, trace_id, allowed_span_ids)
+    allowed_spans_by_trace = {
+        source.trace_id: frozenset(source.span_ids)
+        | (frozenset(target.span_ids) if source.trace_id == target.trace_id else frozenset()),
+        target.trace_id: frozenset(target.span_ids)
+        | (frozenset(source.span_ids) if source.trace_id == target.trace_id else frozenset()),
+    }
+    candidate_refs = _validated_evidence_refs(candidate.evidence_refs, allowed_spans_by_trace)
+    decision_refs = _validated_evidence_refs(decision.evidence_refs, allowed_spans_by_trace)
     if candidate_refs is None or decision_refs is None:
         return None
     if len(decision_refs) < 2 or not set(decision_refs).issubset(candidate_refs):
         return None
-    decision_span_ids = {_evidence_span_id(ref) for ref in decision_refs}
-    if source.anchor_span_id not in decision_span_ids or target.anchor_span_id not in decision_span_ids:
+    anchor_refs = {f"{fragment.trace_id}#span={fragment.anchor_span_id}" for fragment in (source, target)}
+    if not anchor_refs.issubset(decision_refs):
         return None
-    failure_reason = _nonempty_text(decision.reason)
-    if decision.status == "failure" and failure_reason is None:
+    if decision.status == "failure" and _nonempty_text(decision.reason) is None:
         return None
 
     source_identity = identity_index.resolve(source)
     target_identity = identity_index.resolve(target)
     if source_identity is None or target_identity is None:
         return None
-    port_mapping = _unique_port_mapping(source_identity, target_identity)
-    if port_mapping is None:
-        return None
-
-    metadata: dict[str, Any] = {
-        "success": decision.status == "success",
-        "evidence_refs": list(decision_refs),
-        "evidence_method": decision.evidence_method,
-        "evidence_strength": decision.evidence_strength,
-        "candidate_id": candidate.candidate_id,
-        "source_fragment_id": source.fragment_id,
-        "target_fragment_id": target.fragment_id,
-        "port_mappings": [port_mapping],
-    }
-    if decision.status == "failure":
-        metadata["reason"] = failure_reason
     edge = {
         "source": source_identity.capability_id,
         "target": target_identity.capability_id,
         "relation": "can_feed",
-        "metadata": metadata,
+        "metadata": {"success": decision.status == "success"},
     }
     return edge, source_identity, target_identity
 
 
-def _valid_fragment(fragment: Any, trace_id: str) -> bool:
+def _deduplicate_edges(edges: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    unique = {
+        (
+            str(edge["source"]),
+            str(edge["target"]),
+            str(edge["relation"]),
+            bool(edge["metadata"]["success"]),
+        ): edge
+        for edge in edges
+    }
+    return [unique[key] for key in sorted(unique)]
+
+
+def _valid_fragment(fragment: Any, trace_ids: frozenset[str]) -> bool:
     span_ids = _fragment_span_ids(fragment)
     return (
         isinstance(fragment, SymphonyExecutionFragment)
@@ -494,7 +436,7 @@ def _valid_fragment(fragment: Any, trace_id: str) -> bool:
         and isinstance(fragment.continuity_index, int)
         and not isinstance(fragment.continuity_index, bool)
         and _validated_trace_id(fragment.trace_id) is not None
-        and fragment.trace_id == trace_id
+        and fragment.trace_id in trace_ids
         and span_ids is not None
         and fragment.anchor_span_id in span_ids
     )
@@ -512,16 +454,6 @@ def _valid_identity(
         and capability_type in _CAPABILITY_TYPES
         and _valid_identity_text(capability_id)
         and _valid_identity_text(capability_name)
-        and _valid_identity_text(identity.version)
-        and _valid_identity_text(identity.content_hash)
-        and _valid_ports(identity.input_ports)
-        and _valid_ports(identity.output_ports)
-    )
-
-
-def _valid_ports(ports: Any) -> bool:
-    return (
-        isinstance(ports, tuple) and all(_valid_identity_text(port) for port in ports) and len(set(ports)) == len(ports)
     )
 
 
@@ -535,20 +467,6 @@ def _valid_identity_text(value: Any) -> bool:
     except UnicodeError:
         return False
     return True
-
-
-def _unique_port_mapping(
-    source: CapabilityIdentity,
-    target: CapabilityIdentity,
-) -> dict[str, str] | None:
-    if not _valid_ports(source.output_ports) or not _valid_ports(target.input_ports):
-        return None
-    if len(source.output_ports) != 1 or len(target.input_ports) != 1:
-        return None
-    return {
-        "source_output": source.output_ports[0],
-        "target_input": target.input_ports[0],
-    }
 
 
 def _raw_identity_text(identity: Any, field_name: str) -> str | None:
@@ -573,15 +491,9 @@ def _fragment_occurrence_id(fragment: SymphonyExecutionFragment) -> tuple[str, i
     return fragment.trace_id, fragment.continuity_index, fragment.anchor_span_id
 
 
-def _evidence_span_id(ref: str) -> str:
-    match = _EVIDENCE_REF_RE.fullmatch(ref)
-    return match.group("span") if match is not None else ""
-
-
 def _validated_evidence_refs(
     refs: Any,
-    trace_id: str,
-    allowed_span_ids: frozenset[str],
+    allowed_spans_by_trace: Mapping[str, frozenset[str]],
 ) -> tuple[str, ...] | None:
     if isinstance(refs, (str, bytes)) or not isinstance(refs, Sequence):
         return None
@@ -593,9 +505,10 @@ def _validated_evidence_refs(
         if match is None:
             return None
         matched_trace_id = match.group("trace")
-        if _validated_trace_id(matched_trace_id) is None or matched_trace_id != trace_id:
+        if _validated_trace_id(matched_trace_id) is None:
             return None
-        if match.group("span") not in allowed_span_ids:
+        allowed_span_ids = allowed_spans_by_trace.get(matched_trace_id)
+        if allowed_span_ids is None or match.group("span") not in allowed_span_ids:
             return None
         normalized.add(ref)
     return tuple(sorted(normalized))
@@ -630,6 +543,79 @@ def _validated_trace_id(value: Any) -> str | None:
     except UnicodeError:
         return None
     return value
+
+
+def _normalized_trace_ids(trace_id: str, trace_ids: Sequence[str]) -> tuple[str, ...] | None:
+    if isinstance(trace_ids, (str, bytes)):
+        return None
+    try:
+        supplied = tuple(trace_ids)
+    except MemoryError:
+        raise
+    except Exception:
+        return None
+    normalized = [trace_id]
+    for value in supplied:
+        valid = _validated_trace_id(value)
+        if valid is None:
+            return None
+        if valid not in normalized:
+            normalized.append(valid)
+    return tuple(normalized)
+
+
+def _valid_interrupt_continuations(
+    continuations: Sequence[SymphonyInterruptContinuation],
+) -> tuple[SymphonyInterruptContinuation, ...]:
+    if isinstance(continuations, (str, bytes)):
+        return ()
+    try:
+        items = _unambiguous_interrupt_continuations(continuations)
+    except MemoryError:
+        raise
+    except Exception:
+        return ()
+    return tuple(
+        item
+        for item in items
+        if isinstance(item, SymphonyInterruptContinuation)
+        and _validated_trace_id(item.source_trace_id) is not None
+        and _validated_trace_id(item.target_trace_id) is not None
+        and item.source_trace_id != item.target_trace_id
+        and isinstance(item.continuity_index, int)
+        and not isinstance(item.continuity_index, bool)
+        and item.continuity_index >= 0
+        and isinstance(item.source_segment_index, int)
+        and not isinstance(item.source_segment_index, bool)
+        and item.source_segment_index >= 0
+        and isinstance(item.target_segment_index, int)
+        and not isinstance(item.target_segment_index, bool)
+        and item.target_segment_index >= 0
+        and item.target_segment_index == item.source_segment_index + 1
+        and isinstance(item.trace_ids, tuple)
+        and len(item.trace_ids) > item.target_segment_index
+        and all(_validated_trace_id(trace_id) is not None for trace_id in item.trace_ids)
+        and item.trace_ids[item.source_segment_index] == item.source_trace_id
+        and item.trace_ids[item.target_segment_index] == item.target_trace_id
+    )
+
+
+def _normalized_graph_snapshot(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    output: dict[str, str] = {}
+    for field_name in ("static_revision", "observation_revision"):
+        normalized = _nonempty_text(value.get(field_name))
+        if normalized is None:
+            return None
+        output[field_name] = normalized
+    merged_revision = value.get("merged_revision")
+    if merged_revision is not None:
+        normalized = _nonempty_text(merged_revision)
+        if normalized is None:
+            return None
+        output["merged_revision"] = normalized
+    return output
 
 
 def _canonical_graph_pair(
@@ -743,22 +729,35 @@ def _validate_execution_envelope(envelope: Any) -> None:
             or flags != sorted(set(flags))
         ):
             raise ValueError("execution_graph.quality_flags must be sorted unique strings")
+    if "graph_snapshot" in envelope and _normalized_graph_snapshot(envelope["graph_snapshot"]) is None:
+        raise ValueError("execution_graph.graph_snapshot is invalid")
+    trace_ids = envelope.get("trace_ids")
+    if trace_ids is not None:
+        if (
+            not isinstance(trace_ids, list)
+            or len(trace_ids) < 2
+            or trace_ids[0] != trace_id
+            or len(set(trace_ids)) != len(trace_ids)
+            or any(_validated_trace_id(item) is None for item in trace_ids)
+        ):
+            raise ValueError("execution_graph.trace_ids is invalid")
 
     graph = envelope.get("graph")
     nodes, edges = _validate_graph_shell(graph, "execution_graph")
     _validate_graph_nodes(nodes, execution=True)
-    candidate_ids: set[str] = set()
-    occurrence_pairs: set[tuple[str, str]] = set()
+    edge_identities: set[tuple[str, str, str, bool]] = set()
     for edge in edges:
         metadata = _validate_graph_edge(edge, nodes)
-        _validate_execution_edge_metadata(metadata, trace_id)
-        candidate_id = metadata["candidate_id"]
-        occurrence_pair = (metadata["source_fragment_id"], metadata["target_fragment_id"])
-        if candidate_id in candidate_ids or occurrence_pair in occurrence_pairs:
+        _validate_execution_edge_metadata(metadata)
+        edge_identity = (
+            edge["source"],
+            edge["target"],
+            edge["relation"],
+            metadata["success"],
+        )
+        if edge_identity in edge_identities:
             raise ValueError("duplicate execution edge identity")
-        candidate_ids.add(candidate_id)
-        occurrence_pairs.add(occurrence_pair)
-        _validate_port_mapping_endpoints(edge, metadata, nodes)
+        edge_identities.add(edge_identity)
 
     graph_without_id = dict(graph)
     graph_without_id.pop("id", None)
@@ -810,21 +809,8 @@ def _validate_graph_nodes(nodes: Mapping[str, Any], *, execution: bool) -> None:
             continue
         if node.get("label") not in _CAPABILITY_TYPES:
             raise ValueError("execution node label must be a capability type")
-        metadata = node.get("metadata")
-        if not isinstance(metadata, Mapping):
-            raise ValueError("execution node metadata is required")
-        if metadata.get("capability_type") != node.get("label"):
-            raise ValueError("execution node capability_type must match its label")
-        if _nonempty_text(metadata.get("version")) is None or _nonempty_text(metadata.get("content_hash")) is None:
-            raise ValueError("execution node version and content_hash are required")
-        for port_field in ("input_ports", "output_ports"):
-            ports = metadata.get(port_field)
-            if (
-                not isinstance(ports, list)
-                or any(not isinstance(port, str) or not port or port != port.strip() for port in ports)
-                or len(set(ports)) != len(ports)
-            ):
-                raise ValueError(f"execution node {port_field} are invalid")
+        if set(node) != {"label"}:
+            raise ValueError("execution nodes may only contain label")
 
 
 def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -844,59 +830,15 @@ def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, An
     return metadata
 
 
-def _validate_execution_edge_metadata(metadata: Mapping[str, Any], trace_id: str) -> None:
+def _validate_execution_edge_metadata(metadata: Mapping[str, Any]) -> None:
+    if set(metadata) - {"success", "failure_domain"}:
+        raise ValueError("execution edge metadata contains unsupported fields")
     success = metadata.get("success")
     if not isinstance(success, bool):
         raise ValueError("execution edge success must be boolean")
-    refs = metadata.get("evidence_refs")
-    if not isinstance(refs, list) or len(set(refs)) < 2:
-        raise ValueError("execution edge requires two distinct evidence refs")
-    for ref in refs:
-        if not isinstance(ref, str):
-            raise ValueError("execution edge evidence refs must be strings")
-        match = _EVIDENCE_REF_RE.fullmatch(ref)
-        if match is None or match.group("trace") != trace_id or _validated_trace_id(match.group("trace")) is None:
-            raise ValueError("execution edge evidence ref is invalid")
-    method = metadata.get("evidence_method")
-    strength = metadata.get("evidence_strength")
-    if (method, strength) not in _METHOD_STRENGTH:
-        raise ValueError("execution edge evidence method and strength are invalid")
-    for field_name in ("candidate_id", "source_fragment_id", "target_fragment_id"):
-        if _nonempty_text(metadata.get(field_name)) is None:
-            raise ValueError(f"execution edge {field_name} is required")
-    port_mappings = metadata.get("port_mappings")
-    if not isinstance(port_mappings, list) or not port_mappings:
-        raise ValueError("execution edge port_mappings are required")
-    for mapping in port_mappings:
-        if not isinstance(mapping, Mapping) or set(mapping) != {"source_output", "target_input"}:
-            raise ValueError("execution edge port mapping is invalid")
-        if _nonempty_text(mapping.get("source_output")) is None:
-            raise ValueError("execution edge port mapping is invalid")
-        if _nonempty_text(mapping.get("target_input")) is None:
-            raise ValueError("execution edge port mapping is invalid")
-    if success:
-        if "reason" in metadata:
-            raise ValueError("successful execution edge must omit reason")
-    elif _nonempty_text(metadata.get("reason")) is None:
-        raise ValueError("failed execution edge requires reason")
-
-
-def _validate_port_mapping_endpoints(
-    edge: Mapping[str, Any],
-    metadata: Mapping[str, Any],
-    nodes: Mapping[str, Any],
-) -> None:
-    source_metadata = nodes[edge["source"]]["metadata"]
-    target_metadata = nodes[edge["target"]]["metadata"]
-    mapping = metadata["port_mappings"][0]
-    if len(metadata["port_mappings"]) != 1:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if len(source_metadata["output_ports"]) != 1 or len(target_metadata["input_ports"]) != 1:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if mapping["source_output"] not in source_metadata["output_ports"]:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
-    if mapping["target_input"] not in target_metadata["input_ports"]:
-        raise ValueError("execution edge port mapping is not declared by its endpoints")
+    failure_domain = metadata.get("failure_domain")
+    if failure_domain is not None and (success or _nonempty_text(failure_domain) is None):
+        raise ValueError("execution edge failure_domain is invalid")
 
 
 def _canonical_json(value: Any) -> str:
@@ -917,8 +859,5 @@ def _execution_graph_id(envelope_without_graph_id: Mapping[str, Any]) -> str:
 __all__ = [
     "CapabilityIdentity",
     "CapabilitySnapshotProvider",
-    "SymphonyGraphEvolutionSubmission",
-    "SymphonyGraphObservationSink",
     "build_symphony_execution_graph",
-    "build_symphony_graph_evolution_submission",
 ]
