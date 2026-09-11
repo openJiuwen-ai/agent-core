@@ -27,8 +27,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
+    cancellation_safe_release_then_dispose,
+)
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
@@ -48,6 +50,7 @@ from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -134,6 +137,7 @@ class AvatarSessionManager:
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._worker_base_spec = worker_base_spec
@@ -159,6 +163,7 @@ class AvatarSessionManager:
         # Scopes the reply topic so concurrent runs don't cross-resolve.
         # None falls back to the legacy session+team scope.
         self._run_id = run_id
+        self._kv_cache_runtime = kv_cache_runtime
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -242,16 +247,18 @@ class AvatarSessionManager:
         state = self._sessions.pop(session_id, None)
         if state is None or state.harness is None:
             return
-        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
+        session = state.harness.current_session()
+        release_kvc = getattr(session, "release_kvc", None)
         try:
-            await cancellation_safe_evict_then_dispose(
-                binding=binding,
+            await cancellation_safe_release_then_dispose(
+                release_kvc=release_kvc if callable(release_kvc) else None,
                 dispose=state.harness.dispose,
-                reason="swarmflow-stateful-session-close",
                 owner_id=session_id,
             )
         finally:
-            kv_cache_hooks.clear_harness_session_hooks(state.harness)
+            kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(
+                state.harness
+            )
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -355,19 +362,31 @@ class AvatarSessionManager:
             harness.add_rail(StructuredOutputFinishRail())
             # Cold start: the harness creates and owns its child session, so
             # DeepAgentState / context persist across this session's turns.
-            kv_cache_hooks.configure_harness_session_hooks(
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=False,
             )
-            await harness.start()
+            if self._kv_cache_runtime is None:
+                await harness.start()
+            else:
+                from openjiuwen.core.session.agent_team import Session as TeamSession
+
+                team_session = TeamSession(
+                    session_id=state.member_name,
+                    team_id=self._team_name,
+                    kv_cache_runtime=self._kv_cache_runtime,
+                )
+                await harness.start(team_session=team_session)
             await harness.subscribe(
                 on_state=self._make_state_cb(state),
                 on_round=self._make_round_cb(state),
             )
         except Exception as e:
             if harness is not None:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(
+                    harness
+                )
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
