@@ -388,6 +388,59 @@ class Bibliography:
     evidence_only_sources: list[str] = field(default_factory=list)
 
 
+_BIB_ENTRY_START_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,", re.MULTILINE)
+_BIB_TITLE_FIELD_RE = re.compile(r"title\s*=\s*\{([^{}]*)\}", re.IGNORECASE)
+
+
+def split_bib_entries(bib_text: str) -> dict[str, str]:
+    """Split a .bib file into ``{key: full entry}`` in document order."""
+    matches = list(_BIB_ENTRY_START_RE.finditer(bib_text))
+    entries: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        start = match.start()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(bib_text)
+        entries[match.group(1)] = bib_text[start:end].strip()
+    return entries
+
+
+def titles_from_bib_entries(entries: dict[str, str]) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for key, body in entries.items():
+        match = _BIB_TITLE_FIELD_RE.search(body)
+        if match:
+            mapping.setdefault(match.group(1).strip(), key)
+    return mapping
+
+
+def merge_bibliographies(
+    survey: Bibliography,
+    *,
+    prior_text: str = "",
+    prior_title_to_key: dict[str, str] | None = None,
+) -> Bibliography:
+    """Union prior-paper and topic-survey bibliographies by citation key.
+
+    Prior keys win on collision so historical ``\\cite{...}`` keys remain
+    valid; survey-only entries are appended.
+    """
+    prior_entries = split_bib_entries(prior_text) if prior_text.strip() else {}
+    survey_entries = split_bib_entries(survey.bib_text) if survey.bib_text.strip() else {}
+    merged: dict[str, str] = dict(prior_entries)
+    for key, entry in survey_entries.items():
+        merged.setdefault(key, entry)
+    title_to_key = titles_from_bib_entries(prior_entries)
+    title_to_key.update(survey.title_to_key)
+    if prior_title_to_key:
+        for title, key in prior_title_to_key.items():
+            title_to_key.setdefault(title, key)
+    return Bibliography(
+        bib_text="\n\n".join(entry for entry in merged.values() if entry),
+        title_to_key=title_to_key,
+        known_keys=set(merged),
+        evidence_only_sources=list(survey.evidence_only_sources),
+    )
+
+
 def build_bibliography(
     summary_path: Path,
     *,
