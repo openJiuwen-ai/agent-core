@@ -310,3 +310,49 @@ def test_malformed_tool_calls_are_not_preserved_in_the_structured_shape() -> Non
     messages = json.loads(attributes[semconv.GEN_AI_INPUT_MESSAGES])
 
     assert "tool_calls" not in messages[0]
+
+
+def test_system_message_boundaries_and_order_round_trip() -> None:
+    prompts = [
+        {"role": "system", "content": "first"},
+        {"role": "user", "content": "question"},
+        {"role": "system", "content": "second"},
+    ]
+
+    span = _span("llm", attrs=write_llm_exchange(prompts, []))
+
+    assert read_llm_exchange(span)[0] == prompts
+
+
+def test_long_content_is_truncated_before_json_encoding() -> None:
+    attributes = write_llm_exchange(
+        [{"role": "user", "content": "x" * 1001}],
+        [],
+    )
+
+    messages = json.loads(attributes[semconv.GEN_AI_INPUT_MESSAGES])
+
+    assert messages[0]["parts"][0]["content"] == f"{'x' * 1000}..."
+
+
+def test_multimodal_content_is_replaced_with_recognizable_labels() -> None:
+    content = [
+        {"type": "text", "text": "describe"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,secret"}},
+        {"type": "input_audio", "data": "secret"},
+        {"type": "input_file", "data": "secret"},
+    ]
+
+    span = _span("llm", attrs=write_llm_exchange([{"role": "user", "content": content}], []))
+
+    assert read_llm_exchange(span)[0] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe"},
+                "图片",
+                "音频",
+                "文件",
+            ],
+        }
+    ]

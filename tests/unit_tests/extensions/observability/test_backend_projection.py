@@ -90,6 +90,31 @@ def test_indices_are_zero_based_and_contiguous_with_instructions_first():
     assert "gen_ai.prompt.4.role" not in projected.attributes
 
 
+def test_ordered_system_messages_are_not_duplicated_by_projection():
+    span = _span(
+        **{
+            "gen_ai.system_instructions": json.dumps(
+                [{"type": "text", "content": "first\nsecond"}]
+            ),
+            "gen_ai.input.messages": json.dumps([
+                {"role": "system", "parts": [{"type": "text", "content": "first"}]},
+                {"role": "user", "parts": [{"type": "text", "content": "question"}]},
+                {"role": "system", "parts": [{"type": "text", "content": "second"}]},
+            ]),
+            "openjiuwen.gen_ai.input_messages.ordered": True,
+        }
+    )
+
+    projected = project_span_for_langfuse(span)
+
+    assert [projected.attributes[f"gen_ai.prompt.{index}.role"] for index in range(3)] == [
+        "system",
+        "user",
+        "system",
+    ]
+    assert "gen_ai.prompt.3.role" not in projected.attributes
+
+
 def test_tool_calls_survive_the_projection():
     projected = project_span_for_langfuse(_standard_span())
 

@@ -543,6 +543,35 @@ def _structured_parts_text(parts: Any) -> str:
     return "\n".join(texts)
 
 
+_TRACE_TEXT_LIMIT = 1000
+_MULTIMODAL_LABELS = {
+    "image": "图片",
+    "image_url": "图片",
+    "input_image": "图片",
+    "audio": "音频",
+    "input_audio": "音频",
+    "video": "视频",
+    "file": "文件",
+    "input_file": "文件",
+}
+
+
+def _trace_safe_value(value: Any) -> Any:
+    """Bound text and replace bulky multimodal payloads before JSON encoding."""
+
+    if isinstance(value, str):
+        return value if len(value) <= _TRACE_TEXT_LIMIT else f"{value[:_TRACE_TEXT_LIMIT]}..."
+    if isinstance(value, Mapping):
+        content_type = str(value.get("type") or "").lower()
+        label = _MULTIMODAL_LABELS.get(content_type)
+        if label:
+            return label
+        return {str(key): _trace_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_trace_safe_value(item) for item in value]
+    return to_json_compatible(value)
+
+
 def _tool_calls_from_parts(parts: Any) -> list[dict[str, Any]]:
     """Rebuild the flat tool-call list from a message's structured parts."""
 
@@ -606,14 +635,16 @@ def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
     if content is not None:
         # Recorded even when empty: a message that carried an empty content
         # field is not the same as one that carried none.
-        parts.append({"type": "text", "content": deepcopy(content)})
+        safe_content = _trace_safe_value(content)
+        part_type = "text" if isinstance(safe_content, str) else "multimodal"
+        parts.append({"type": part_type, "content": safe_content})
     tool_calls = message.get("tool_calls")
     if isinstance(tool_calls, list):
         for call in tool_calls:
             if isinstance(call, Mapping):
                 # Carried whole rather than spread: a call has its own ``type``
                 # field, which would otherwise overwrite the part's.
-                parts.append({"type": "tool_call", "call": deepcopy(dict(call))})
+                parts.append({"type": "tool_call", "call": _trace_safe_value(dict(call))})
     structured: dict[str, Any] = {
         "role": str(message.get("role") or "unknown"),
         "parts": parts,
@@ -621,7 +652,7 @@ def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
     for field, value in message.items():
         if field in ("role", "content", "parts", "tool_calls"):
             continue
-        structured[field] = deepcopy(value)
+        structured[field] = _trace_safe_value(value)
     return structured
 
 
@@ -652,8 +683,9 @@ def write_llm_exchange(
         if str(message.get("role") or "") == "system":
             content = message.get("content")
             if content not in (None, ""):
-                system_parts.append({"type": "text", "content": deepcopy(content)})
-            continue
+                safe_content = _trace_safe_value(content)
+                part_type = "text" if isinstance(safe_content, str) else "multimodal"
+                system_parts.append({"type": part_type, "content": safe_content})
         input_messages.append(_structure_message(message))
     output_messages = [
         _structure_message(message)
@@ -662,13 +694,14 @@ def write_llm_exchange(
     ]
 
     def encode(value: Any) -> str:
-        return json.dumps(to_json_compatible(value), ensure_ascii=False, default=str)
+        return json.dumps(_trace_safe_value(value), ensure_ascii=False, default=str)
 
     attributes: dict[str, Any] = {}
     if system_parts:
         attributes[semconv.GEN_AI_SYSTEM_INSTRUCTIONS] = encode(system_parts)
     if input_messages:
         attributes[semconv.GEN_AI_INPUT_MESSAGES] = encode(input_messages)
+        attributes[semconv.OJ_INPUT_MESSAGES_ORDERED] = True
     if output_messages:
         attributes[semconv.GEN_AI_OUTPUT_MESSAGES] = encode(output_messages)
     return attributes
@@ -681,16 +714,22 @@ def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
     chat history, so it leads; ``gen_ai.input.messages`` follows in order.
     """
 
+    input_messages = [
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+    ]
+    # New writers retain system messages in the ordered input list. Older
+    # standard spans omit them and need system_instructions prepended.
+    if attrs.get(semconv.OJ_INPUT_MESSAGES_ORDERED) is True:
+        return input_messages
+
     messages: list[dict[str, Any]] = []
     system_text = _structured_parts_text(
         _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
     )
     if system_text:
         messages.append({"role": "system", "content": system_text})
-    messages.extend(
-        _flatten_structured_message(message)
-        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
-    )
+    messages.extend(input_messages)
     return messages
 
 

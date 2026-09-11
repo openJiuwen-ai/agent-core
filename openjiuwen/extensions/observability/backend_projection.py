@@ -38,6 +38,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROMPT,
     GEN_AI_SYSTEM_INSTRUCTIONS,
+    OJ_INPUT_MESSAGES_ORDERED,
 )
 
 _LANGFUSE_BACKEND = "langfuse"
@@ -113,16 +114,18 @@ def _langfuse_prompt_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]
     derived: dict[str, Any] = {}
     index = 0
 
+    input_messages = _decode(attributes.get(GEN_AI_INPUT_MESSAGES))
+    ordered_messages = input_messages if isinstance(input_messages, list) else []
+    has_ordered_system = attributes.get(OJ_INPUT_MESSAGES_ORDERED) is True
     system_parts = _decode(attributes.get(GEN_AI_SYSTEM_INSTRUCTIONS))
     system_text = _parts_text(system_parts)
-    if system_text:
+    if system_text and not has_ordered_system:
         derived[f"{GEN_AI_PROMPT}.{index}.role"] = "system"
         derived[f"{GEN_AI_PROMPT}.{index}.content"] = system_text
         index += 1
 
-    input_messages = _decode(attributes.get(GEN_AI_INPUT_MESSAGES))
-    if isinstance(input_messages, list):
-        for message in input_messages:
+    if ordered_messages:
+        for message in ordered_messages:
             if not isinstance(message, Mapping):
                 continue
             derived[f"{GEN_AI_PROMPT}.{index}.role"] = str(message.get("role") or "user")

@@ -28,6 +28,7 @@ from opentelemetry.trace import SpanKind
 
 from openjiuwen.agent_teams.observability import (
     ObservabilityConfig,
+    ObservabilityRail,
     TeamObservabilityRail,
     init_observability,
     shutdown_observability,
@@ -2938,6 +2939,18 @@ def test_team_rail_runs_before_the_agent_rail():
     reason the team layer needs no subclass of the agent rail.
     """
     assert TeamObservabilityRail.priority > AgentObservabilityRail.priority
+
+
+def test_legacy_observability_rail_keeps_the_combined_callback_surface():
+    """The old public class remains a working facade over both new rails."""
+    facade = ObservabilityRail()
+
+    expected_events = (
+        TeamObservabilityRail().get_callbacks().keys()
+        | AgentObservabilityRail().get_callbacks().keys()
+    )
+
+    assert facade.get_callbacks().keys() == expected_events
 
 
 @pytest.mark.asyncio

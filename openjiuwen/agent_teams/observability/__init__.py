@@ -28,6 +28,7 @@ Quickstart::
 """
 
 from openjiuwen.agent_teams.observability.rail import (
+    ObservabilityRail,
     TeamObservabilityRail,
     maybe_observability_rails,
     maybe_team_observability_rail,
@@ -51,6 +52,7 @@ from openjiuwen.extensions.observability.config import ObservabilityConfig
 
 __all__ = [
     "ObservabilityConfig",
+    "ObservabilityRail",
     "abort_current_llm_span",
     "TeamObservabilityRail",
     "acquire_observability",

@@ -29,8 +29,10 @@ Span tree (the team.{name} root is opened by the Team runner, not here)::
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
+from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_teams.observability.span_context import get_team_span
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -104,7 +106,11 @@ class TeamObservabilityRail(DeepAgentRail):
             from openjiuwen.agent_teams.observability.setup import get_config
 
             config = get_config()
-            output_str = str(output)
+            output_str = (
+                output
+                if isinstance(output, str)
+                else json.dumps(to_json_compatible(output), ensure_ascii=False, default=str)
+            )
             redacted = redact_completion(output_str, config) if config else output_str
             team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
         except Exception as exc:
@@ -182,6 +188,58 @@ class TeamObservabilityRail(DeepAgentRail):
         )
 
 
+class ObservabilityRail(DeepAgentRail):
+    """Backward-compatible facade for the former team observability rail.
+
+    New code should mount :func:`maybe_observability_rails`. The facade keeps
+    the old single-rail API working by running the team decoration before the
+    generic agent lifecycle callback for every event.
+    """
+
+    priority: int = AgentObservabilityRail.priority
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._team_rail = TeamObservabilityRail()
+        self._agent_rail = AgentObservabilityRail()
+
+    def init(self, agent: Any) -> None:
+        self._team_rail.init(agent)
+        self._agent_rail.init(agent)
+
+    def uninit(self, agent: Any) -> None:
+        self._team_rail.uninit(agent)
+        self._agent_rail.uninit(agent)
+
+    def set_workspace(self, workspace: Any) -> None:
+        super().set_workspace(workspace)
+        self._team_rail.set_workspace(workspace)
+        self._agent_rail.set_workspace(workspace)
+
+    def set_sys_operation(self, sys_operation: Any) -> None:
+        super().set_sys_operation(sys_operation)
+        self._team_rail.set_sys_operation(sys_operation)
+        self._agent_rail.set_sys_operation(sys_operation)
+
+    def get_callbacks(self) -> dict[Any, Any]:
+        team_callbacks = self._team_rail.get_callbacks()
+        agent_callbacks = self._agent_rail.get_callbacks()
+        callbacks: dict[Any, Any] = {}
+        for event in team_callbacks.keys() | agent_callbacks.keys():
+            event_callbacks = tuple(
+                callback
+                for callback in (team_callbacks.get(event), agent_callbacks.get(event))
+                if callback is not None
+            )
+
+            async def run_callbacks(ctx: AgentCallbackContext, items=event_callbacks) -> None:
+                for callback in items:
+                    await callback(ctx)
+
+            callbacks[event] = run_callbacks
+        return callbacks
+
+
 def maybe_team_observability_rail() -> TeamObservabilityRail | None:
     """Return a ``TeamObservabilityRail`` when observability is on, else None."""
     from openjiuwen.agent_teams.observability.setup import is_initialized
@@ -216,6 +274,7 @@ def maybe_observability_rails() -> list[DeepAgentRail]:
 
 
 __all__ = [
+    "ObservabilityRail",
     "TeamObservabilityRail",
     "maybe_observability_rails",
     "maybe_team_observability_rail",
