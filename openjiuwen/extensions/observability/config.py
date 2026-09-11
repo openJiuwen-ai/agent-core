@@ -48,6 +48,12 @@ class ObservabilityConfig(BaseModel):
             span-end does not block the business thread.
         file_retention_days: Trace files older than this (by mtime) are
             lazily deleted by the ``file`` exporter. Default 7 days.
+        metrics_enabled: Master switch for OTel metrics. When False (default),
+            no MeterProvider is created and tracing-only users see zero extra
+            provider/exporter side effects.
+        metrics_endpoint: OTLP metrics endpoint. Empty means fall back to
+            ``endpoint`` when exporting metrics over OTLP.
+        metrics_exporter: Metrics exporter backend. Default ``otlp_grpc``.
     """
 
     enabled: bool = True
@@ -67,3 +73,7 @@ class ObservabilityConfig(BaseModel):
     # file exporter
     traces_dir: str = "./traces"
     file_retention_days: int = 7
+    # metrics
+    metrics_enabled: bool = False
+    metrics_endpoint: str = ""
+    metrics_exporter: Literal["otlp_grpc", "otlp_http", "console"] = "otlp_grpc"
