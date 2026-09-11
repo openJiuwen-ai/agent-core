@@ -265,29 +265,25 @@ class EnvAdapter(ABC):
         Override only when an environment needs a custom reflection pipeline.
         Callers drop ``None`` entries from the returned list.
         """
-        from openjiuwen.agent_evolving.skill_train.reflect import run_minibatch_reflect
-
-        pred_dir = _resolve_prediction_dir(out_dir, kwargs.get("prediction_dir"))
-        patch_dir = _patches_root(out_dir, kwargs.get("patches_dir"))
-        update_mode = getattr(self, "_cfg", {}).get("skill_update_mode", "patch")
-        buffer_ctx = str(kwargs.get("step_buffer_context") or "")
-        meta_ctx = str(kwargs.get("meta_skill_context") or "")
+        from openjiuwen.agent_evolving.skill_train.reflect import ReflectRequest, run_minibatch_reflect
 
         return run_minibatch_reflect(
-            results=results,
-            skill_content=skill_content,
-            prediction_dir=pred_dir,
-            patches_dir=patch_dir,
-            workers=self.analyst_workers,
-            failure_only=self.failure_only,
-            minibatch_size=self.minibatch_size,
-            edit_budget=self.edit_budget,
-            random_seed=kwargs.get("random_seed"),
-            error_system=self.get_error_minibatch_prompt(),
-            success_system=self.get_success_minibatch_prompt(),
-            step_buffer_context=buffer_ctx,
-            meta_skill_context=meta_ctx,
-            update_mode=update_mode,
+            ReflectRequest(
+                results=results,
+                skill_content=skill_content,
+                prediction_dir=_resolve_prediction_dir(out_dir, kwargs.get("prediction_dir")),
+                patches_dir=_patches_root(out_dir, kwargs.get("patches_dir")),
+                workers=self.analyst_workers,
+                failure_only=self.failure_only,
+                minibatch_size=self.minibatch_size,
+                edit_budget=self.edit_budget,
+                random_seed=kwargs.get("random_seed"),
+                error_system=self.get_error_minibatch_prompt(),
+                success_system=self.get_success_minibatch_prompt(),
+                step_buffer_context=str(kwargs.get("step_buffer_context") or ""),
+                meta_skill_context=str(kwargs.get("meta_skill_context") or ""),
+                update_mode=getattr(self, "_cfg", {}).get("skill_update_mode", "patch"),
+            )
         )
 
     @property

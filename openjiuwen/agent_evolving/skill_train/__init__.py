@@ -4,8 +4,11 @@
 
 from openjiuwen.agent_evolving.skill_train.config import SkillTrainConfig
 from openjiuwen.agent_evolving.skill_train.registry import get_env_adapter
+from openjiuwen.agent_evolving.skill_train.trainer import SkillReflACTTrainer, SkillTrainResult
 
 __all__ = [
     "SkillTrainConfig",
+    "SkillReflACTTrainer",
+    "SkillTrainResult",
     "get_env_adapter",
 ]

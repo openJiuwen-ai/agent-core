@@ -72,6 +72,18 @@ def _score_one(prediction: str, gold_answers: list[str]) -> tuple[float, float, 
     return best_em, best_f1, best_sub
 
 
+def exact_match(prediction: str, gold_answers: list[str]) -> float:
+    """Public EM helper used by unit tests and callers."""
+    em, _f1, _sub = _score_one(str(prediction), list(gold_answers))
+    return em
+
+
+def f1_score(prediction: str, gold_answers: list[str]) -> float:
+    """Public token-F1 helper used by unit tests and callers."""
+    _em, f1, _sub = _score_one(str(prediction), list(gold_answers))
+    return f1
+
+
 def evaluate(prediction_text: str, gold_answers: list[str]) -> dict:
     """Score one model response against a list of gold answers."""
     answer = _pull_answer(prediction_text)
