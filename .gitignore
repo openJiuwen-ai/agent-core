@@ -9,6 +9,10 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+!openjiuwen/symphony/retrieval/build/
+!openjiuwen/symphony/retrieval/build/**
+!tests/unit_tests/symphony/retrieval/build/
+!tests/unit_tests/symphony/retrieval/build/**
 develop-eggs/
 dist/
 downloads/
