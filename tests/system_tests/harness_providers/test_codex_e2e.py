@@ -121,3 +121,23 @@ async def test_manifest_factory_drives_the_developer_instructions(workdir: Path)
     assert terminal.kind is TurnEventKind.FINISHED, terminal.result
     assert "AMBER-7" in answer_text(terminal.result, events).upper()
     await harness.stop()
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+async def test_developer_instruction_modes(workdir: Path, mode: str) -> None:
+    import json
+    harness = CodexHarness(CodexHarnessConfig(
+        cwd=str(workdir), codex_bin=_CODEX_BIN, model=_MODEL,
+        bypass_approvals_and_sandbox=True, system_prompt_mode=mode,
+        config_overrides=("developer_instructions=" + json.dumps("The base codeword is COBALT-17."),),
+    ))
+    context = make_context(cwd=str(workdir), system_prompt="The host codeword is AMBER-83. When asked, list only codewords given in your instructions.")
+    await harness.start(context)
+    try:
+        receipt = await harness.send(HarnessInput(content="List the codewords from your instructions."))
+        terminal = terminal_of(await collect_turn(harness, receipt.turn_id))
+        assert terminal.kind is TurnEventKind.FINISHED
+        assert "AMBER-83" in terminal.result.final_output
+        assert ("COBALT-17" in terminal.result.final_output) is (mode == "append")
+    finally:
+        await harness.stop()

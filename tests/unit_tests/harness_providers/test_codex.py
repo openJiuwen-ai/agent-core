@@ -654,3 +654,37 @@ async def test_stop_closes_client_that_reconnects_after_stop(monkeypatch):
     assert _terminal(await consumer).kind is TurnEventKind.ABORTED
     assert all(client.closed for client in state.clients)
     assert not state.handles
+
+
+@pytest.mark.asyncio
+async def test_append_developer_instructions_reads_effective_config():
+    from unittest.mock import AsyncMock
+    from openjiuwen.harness_providers.codex.options import append_developer_instructions, build_thread_options
+
+    sdk = SimpleNamespace(generated=SimpleNamespace(v2_all=SimpleNamespace(ConfigReadResponse=object)),
+                          ApprovalMode=SimpleNamespace(deny_all="deny", auto_review="auto"))
+    request = AsyncMock(return_value=SimpleNamespace(config=SimpleNamespace(developer_instructions="Existing rules")))
+    client = SimpleNamespace(_ensure_initialized=AsyncMock(), _client=SimpleNamespace(request=request))
+    config = CodexHarnessConfig(system_prompt_mode="append")
+    for _ in range(2):
+        assert await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules") == "Existing rules\n\nHost rules"
+    assert request.call_args.args == ("config/read", {"cwd": "/work", "includeLayers": False})
+    config = CodexHarnessConfig(system_prompt_mode="append", thread_config={"developer_instructions": "Thread rules"})
+    assert await append_developer_instructions(client, sdk, config, cwd="/work", system_prompt="Host rules") == "Thread rules\n\nHost rules"
+    replace = CodexHarnessConfig(system_prompt_mode="replace")
+    options = build_thread_options(sdk=sdk, config=replace, model=None, cwd="/work", system_prompt="Host rules")
+    assert options["developer_instructions"] == "Host rules"
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        CodexHarnessConfig(system_prompt_mode="unknown")
+
+
+@pytest.mark.asyncio
+async def test_append_read_failure_closes_codex_client(monkeypatch):
+    from unittest.mock import AsyncMock
+    sdk, state = _install_fake_sdk(monkeypatch)
+    monkeypatch.setattr("openjiuwen.harness_providers.codex.harness.append_developer_instructions", AsyncMock(side_effect=RuntimeError("config unavailable")))
+    harness = CodexHarness(CodexHarnessConfig(system_prompt_mode="append", inherit_process_env=False))
+    with pytest.raises(Exception, match="startup failed"):
+        await harness.start(_context())
+    assert state.clients[0].closed
+    assert not state.thread_calls

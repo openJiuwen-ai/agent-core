@@ -607,7 +607,7 @@ async def test_unsupported_capabilities_fail_explicitly(monkeypatch: pytest.Monk
     _install_fake_sdk(monkeypatch)
     harness = DshHarness()
 
-    assert harness.card.capabilities == frozenset()
+    assert harness.card.supports(HarnessCapability.MCP_TOOLS)
     assert not harness.card.supports(HarnessCapability.STEER)
     assert await harness.export_checkpoint() is None
     with pytest.raises(UnsupportedHarnessCapabilityError, match="steering"):
@@ -622,8 +622,8 @@ async def test_unsupported_capabilities_fail_explicitly(monkeypatch: pytest.Monk
     with pytest.raises(UnsupportedHarnessCapabilityError, match="restore protocol checkpoints"):
         await harness.start(_context(resume_policy=ResumePolicy.REQUIRE_RESUME))
 
-    mcp = McpServerConfig(name="team", transport=McpTransport.STDIO, command=("team-mcp",))
-    with pytest.raises(UnsupportedHarnessCapabilityError, match="cannot dynamically install"):
+    mcp = McpServerConfig(name="team", transport=McpTransport.IN_PROCESS, instance=object())
+    with pytest.raises(UnsupportedHarnessCapabilityError, match="in-process"):
         await harness.start(_context(mcp_servers=(mcp,)))
 
 
@@ -752,3 +752,83 @@ async def test_event_cursor_is_single_consumer_and_close_is_idempotent(monkeypat
     third = harness.events()
     await third.aclose()
     await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlay_uses_environment_data_and_is_removed_after_stop(monkeypatch, tmp_path):
+    from pathlib import Path
+    _install_fake_sdk(monkeypatch)
+    harness = DshHarness(DshHarnessConfig(dsh_home=str(tmp_path)))
+    secret = "private-mcp-credential"
+    context = _context(system_prompt="Persona text", mcp_servers=(
+        McpServerConfig(name="files", transport=McpTransport.HTTP, url="https://mcp.invalid", headers={"Authorization": secret}),
+    ))
+    await harness.start(context)
+    directory = Path(harness._overlay.name)
+    patch = (directory / "host.patch.yml").read_text()
+    assert secret not in patch and "Persona text" not in patch
+    assert "@deepseek-ai/dsh-mcp-client" in patch
+    await harness.stop()
+    assert not directory.exists()
+
+
+
+def test_mcp_transport_validation_rejects_duplicate_names():
+    from openjiuwen.harness_providers.dsh.composition import mcp_configs
+    server = McpServerConfig(name="duplicate", transport=McpTransport.STDIO, command=("mcp",))
+    with pytest.raises(ValueError, match="unique"):
+        mcp_configs(_context(mcp_servers=(server, server)))
+
+
+@pytest.mark.asyncio
+async def test_failed_start_removes_overlay(monkeypatch, tmp_path):
+    from pathlib import Path
+    sdk = _install_fake_sdk(monkeypatch)
+    module = sys.modules["deepseek_harness"]
+
+    def fail_start(instance, session_id):
+        raise RuntimeError("failed startup")
+
+    monkeypatch.setattr(module.DeepSeekHarness, "start_session", fail_start)
+    harness = DshHarness(DshHarnessConfig(dsh_home=str(tmp_path)))
+    with pytest.raises(HarnessError, match="failed to start"):
+        await harness.start(_context(system_prompt="Host persona"))
+    path = Path(sdk.constructor_options[0]["patches"][-1])
+    assert not path.exists()
+    assert sdk.close_count == 1
+
+
+def test_stdio_mcp_configuration_preserves_argv_and_env():
+    from openjiuwen.harness_providers.dsh.composition import mcp_configs
+    server = McpServerConfig(name="files", transport=McpTransport.STDIO,
+                            command=("python", "-m", "fixture"), env={"TOKEN": "value"})
+    config = mcp_configs(_context(cwd="/work", mcp_servers=(server,)))[0]
+    assert config["command"] == "python"
+    assert config["args"] == ["-m", "fixture"]
+    assert config["env"] == {"TOKEN": "value"}
+    assert config["cwd"] == "/work"
+    assert config["failOnStartupError"] is True
+
+
+def test_append_prompt_uses_independent_section_without_plaintext(tmp_path):
+    from pathlib import Path
+    from openjiuwen.harness_providers.dsh.composition import write_overlay
+    import json
+
+    secret = 'Literal {{unknown_variable}} and private instructions'
+    directory, path, env = write_overlay(_context(system_prompt=secret), include_prompt=True, prompt_mode="append")
+    try:
+        patch = Path(path).read_text()
+        code = (Path(directory.name) / "host-prompt.mjs").read_text()
+        assert "personaPrefix" not in patch + code
+        assert "personaSuffix" not in patch + code
+        assert "systemPrompt.section" in code
+        assert "systemPrompt.variable" in code
+        assert secret not in patch + code
+        assert json.loads(next(iter(env.values())))["append"] == secret
+    finally:
+        directory.cleanup()
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        DshHarnessConfig(system_prompt_mode="unknown")
+    with pytest.raises(ValueError, match="system_prompt_env_var"):
+        DshHarnessConfig(system_prompt_mode="append", system_prompt_env_var="PROMPT")
