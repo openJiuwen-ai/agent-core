@@ -46,6 +46,7 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.finish_reason import normalize_finish_reason
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
@@ -356,7 +357,11 @@ def _parse_gateway_stream_line(line: str) -> Optional[AssistantMessageChunk]:
             arguments=str(function.get("arguments") or ""),
             index=raw_tool_call.get("index", fallback_index),
         ))
-    finish_reason = choice.get("finish_reason") or "null"
+    finish_reason = normalize_finish_reason(
+        choice.get("finish_reason"),
+        has_tool_calls=bool(tool_calls),
+        default="null",
+    )
     return AssistantMessageChunk(
         content=content or "",
         reasoning_content=reasoning_content,
@@ -2383,10 +2388,10 @@ class OpenAIModelClient(BaseModelClient):
             
         Note:
             Non-streaming finish_reason is normalized as follows:
-            - If the provider returns a value, it is preserved as-is (e.g. "stop",
-              "tool_calls", "length", "content_filter", etc.).
-            - If the provider returns None or an empty string, it defaults to
-              "tool_calls" when tool_calls are present, otherwise "stop".
+            - Explicit reasons other than "stop" are preserved (for example,
+              "length" and "content_filter").
+            - "tool_calls" is used for a normal or missing stop reason when
+              tool calls are present; otherwise the default is "stop".
         """
         choice = response.choices[0]
         message = choice.message
@@ -2479,9 +2484,10 @@ class OpenAIModelClient(BaseModelClient):
         prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
         completion_token_ids = getattr(choice, 'token_ids', None) or None
         logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-        finish_reason = getattr(choice, 'finish_reason', None) or None
-        if not finish_reason:
-            finish_reason = "tool_calls" if tool_calls else "stop"
+        finish_reason = normalize_finish_reason(
+            getattr(choice, "finish_reason", None),
+            has_tool_calls=bool(tool_calls),
+        )
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
@@ -2625,7 +2631,11 @@ class OpenAIModelClient(BaseModelClient):
             reasoning_content=reasoning_content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
-            finish_reason=choice.finish_reason or "null",
+            finish_reason=normalize_finish_reason(
+                choice.finish_reason,
+                has_tool_calls=bool(tool_calls),
+                default="null",
+            ),
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,

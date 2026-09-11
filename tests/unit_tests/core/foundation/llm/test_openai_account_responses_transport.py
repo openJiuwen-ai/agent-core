@@ -177,6 +177,25 @@ def test_parse_response_uses_output_text_fallback_and_incomplete_length():
     assert message.usage_metadata.total_tokens == 3
 
 
+def test_parse_response_keeps_incomplete_reason_with_tool_calls():
+    message = parse_response(
+        {
+            "status": "incomplete",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_1",
+                    "name": "search",
+                    "arguments": "{}",
+                }
+            ],
+        },
+        model_name="gpt-5.4-mini",
+    )
+
+    assert message.finish_reason == "length"
+
+
 def test_parse_response_preserves_explicit_zero_total_tokens():
     message = parse_response(
         {"output_text": "ok", "usage": {"input_tokens": 2, "output_tokens": 3, "total_tokens": 0}},
@@ -273,6 +292,29 @@ async def test_create_response_preserves_tool_call_finish_reason_from_stream():
 
     assert message.tool_calls[0].name == "search"
     assert message.finish_reason == "tool_calls"
+
+
+@pytest.mark.asyncio
+async def test_create_response_preserves_incomplete_finish_reason_with_tool_call():
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=(
+                "event: response.output_item.done\n"
+                'data: {"item":{"type":"function_call","call_id":"call_1","name":"search","arguments":"{}"}}\n\n'
+                "event: response.incomplete\n"
+                'data: {"response":{"usage":{"input_tokens":2,"output_tokens":3,"total_tokens":5}}}\n\n'
+            ),
+            headers={"content-type": "text/event-stream"},
+        )
+
+    transport = OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler))
+    body = build_request_body(model="gpt-5.4-mini", messages="hello")
+
+    message = await transport.create_response(body=body, access_token="access-token")
+
+    assert message.tool_calls[0].name == "search"
+    assert message.finish_reason == "length"
 
 
 @pytest.mark.asyncio
