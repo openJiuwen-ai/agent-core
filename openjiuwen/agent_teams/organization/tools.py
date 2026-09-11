@@ -1016,6 +1016,7 @@ class OrgAttachSummarySourcesTool(_OrgLeaderTool):
         result = await self.manager.attach_summary_sources(
             summary_task_id=inputs.get("summary_task_id", ""),
             source_task_ids=inputs.get("source_task_ids") or [],
+            team_id=self.team_id,
             source_role=inputs.get("source_role"),
             required=inputs.get("required", True),
         )

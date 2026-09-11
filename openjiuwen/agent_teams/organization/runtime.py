@@ -35,26 +35,25 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     ExpertGroupCatalog,
     ExpertTeamLauncher,
 )
+from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
+from openjiuwen.agent_teams.organization import runtime_prompts as prompts
+from openjiuwen.agent_teams.organization.runtime_summary import OrganizationSummaryMixin
 from openjiuwen.agent_teams.organization.schema import (
-    ORG_SUMMARY_CAPABILITY,
     ORG_SUMMARY_TASK_TYPE,
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     OrganizationSpec,
-    OrgSummaryExecutionStatus,
     OrgTaskFailureCode,
     OrgTaskReviewStatus,
     OrgTaskStatus,
     OrgUnclaimedTaskPolicy,
 )
 from openjiuwen.agent_teams.organization.task_pool import (
-    TERMINAL_SUMMARY_EXECUTION_STATUSES,
     OrgTaskManager,
     _is_supersedable_task,
 )
 from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
-from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.tools.team import TeamBackend
 
 _ORG_OWNER_LIFECYCLE_SECTION = "organization_owner_lifecycle"
@@ -109,7 +108,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
 
-class OrganizationRuntimeManager:
+class OrganizationRuntimeManager(OrganizationSummaryMixin):
     """Create organizations and bind active leaders without restarting teams."""
 
     def __init__(self, team_runtime_manager: "TeamRuntimeManager") -> None:
@@ -544,7 +543,7 @@ class OrganizationRuntimeManager:
             "agent_group_name": launched.agent_group_name or group_name,
         }
 
-    async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: Any, session_id: str) -> None:
+    async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: TeamOrganizationManager, session_id: str) -> None:
         backend.org_task_manager = manager.task_pool
         backend.org_message_service = manager.message_service
         self._team_organizations[(session_id, backend.team_name)] = manager.organization_id
@@ -583,7 +582,7 @@ class OrganizationRuntimeManager:
         )
         await self._ensure_unclaimed_service(manager, session_id)
 
-    async def _ensure_unclaimed_service(self, manager: Any, session_id: str) -> None:
+    async def _ensure_unclaimed_service(self, manager: TeamOrganizationManager, session_id: str) -> None:
         key = (session_id, manager.organization_id)
         service = self._unclaimed_services.get(key)
         if service is None:
@@ -782,112 +781,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
         )
 
-    async def _resume_summary_executions(self, *, manager: Any, session_id: str) -> None:
-        """Recover in-flight Summary Teams after a rebind (§8).
-
-        Event delivery is best-effort; the SummaryExecution table is the durable
-        source of truth.  For an execution that never bound a team (interrupted
-        during provisioning), re-provision it through the factory and converge on
-        the same post-launch binding.  For a bound one, re-schedule a ready Summary
-        Task to its running dynamic team, and re-evaluate sources for a still-
-        WAITING one so a dropped ''sources ready'' notification is rebuilt.
-        """
-        summary_factory = self._ensure_summary_factory()
-        for execution in await manager.task_pool.list_summary_executions():
-            # Terminal executions are done; a FAILED one is left for the root
-            # leader to repair or terminate rather than being retried here.
-            if execution.status in TERMINAL_SUMMARY_EXECUTION_STATUSES:
-                continue
-            summary_task = await manager.task_pool.get_task(execution.summary_task_id)
-            if summary_task is None:
-                logger.debug(
-                    "summary resume: task %s is gone; skipping execution %s",
-                    execution.summary_task_id,
-                    execution.execution_id,
-                )
-                continue
-            if summary_task.status is OrgTaskStatus.COMPLETED:
-                continue
-            summary_team_id = execution.summary_team_id
-            if not summary_team_id:
-                # The team was never bound: provisioning was interrupted, so the
-                # team must be re-created through the factory (§8).
-                if summary_factory is None:
-                    logger.debug(
-                        "summary resume: no factory; cannot recover execution %s",
-                        execution.execution_id,
-                    )
-                    continue
-                root_task_id = str(summary_task.root_task_id or execution.root_task_id)
-                from_team_id = summary_task.created_by.team_id or (await self._owner_team_id(manager))
-                logger.info(
-                    "summary resume: re-provisioning execution %s (task=%s root=%s owner=%s)",
-                    execution.execution_id,
-                    execution.summary_task_id,
-                    root_task_id,
-                    from_team_id,
-                )
-                try:
-                    launched = await summary_factory.recover(
-                        execution_id=execution.execution_id,
-                        organization_id=manager.organization_id,
-                        root_task_id=root_task_id,
-                        summary_task_id=execution.summary_task_id,
-                        owner_team_id=from_team_id,
-                        session_id=session_id,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "summary resume: recover failed for execution %s (task=%s): %s",
-                        execution.execution_id,
-                        execution.summary_task_id,
-                        exc,
-                        exc_info=True,
-                    )
-                    await self._fail_summary_provision(
-                        manager=manager,
-                        execution=execution,
-                        from_team_id=from_team_id,
-                        root_task_id=root_task_id,
-                        summary_task_id=execution.summary_task_id,
-                        failure_reason=str(exc),
-                    )
-                    continue
-                summary_team_id = launched.team_id
-                await self._complete_summary_provision(
-                    manager=manager,
-                    execution=execution,
-                    launched=launched,
-                    from_team_id=from_team_id,
-                    root_task_id=root_task_id,
-                    summary_task_id=execution.summary_task_id,
-                )
-            # Both paths converge here: a bound team (reused) or one just
-            # re-provisioned.  Wake it only when every source is ready, so a
-            # dropped "sources ready" notification is rebuilt without waking the
-            # team prematurely.
-            evaluation = await manager.task_pool.evaluate_summary_sources(summary_task_id=execution.summary_task_id)
-            if not evaluation.get("ready"):
-                logger.debug(
-                    "summary resume: sources not ready for task %s; leaving team %s idle",
-                    execution.summary_task_id,
-                    summary_team_id,
-                )
-                continue
-            logger.info(
-                "summary resume: sources ready; waking team %s for task %s",
-                summary_team_id,
-                execution.summary_task_id,
-            )
-            self._schedule_summary_turn(
-                manager=manager,
-                session_id=session_id,
-                summary_team_id=summary_team_id,
-                summary_task_id=execution.summary_task_id,
-                root_task_id=execution.root_task_id,
-            )
-
-    async def _resume_claimed_tasks(self, *, manager: Any, team_id: str, session_id: str) -> None:
+    async def _resume_claimed_tasks(self, *, manager: TeamOrganizationManager, team_id: str, session_id: str) -> None:
         """Resume work claimed before a process or harness recovery."""
 
         for task in await manager.task_pool.list_tasks_for_team(team_id, include_open=False):
@@ -902,7 +796,7 @@ class OrganizationRuntimeManager:
     async def _resume_parent_followups(
         self,
         *,
-        manager: Any,
+        manager: TeamOrganizationManager,
         team_id: str,
         session_id: str,
     ) -> None:
@@ -999,7 +893,7 @@ class OrganizationRuntimeManager:
     async def _subscribe_team_events(
         self,
         backend: TeamBackend,
-        manager: Any,
+        manager: TeamOrganizationManager,
         session_id: str,
         *,
         capabilities: set[str],
@@ -1008,87 +902,81 @@ class OrganizationRuntimeManager:
         if messager is None:
             return
 
-        async def _on_task_event(message: Any) -> None:
-            event = message.get_payload()
-            if isinstance(event, OrgTaskCreatedEvent):
-                if event.team_id == backend.team_name:
-                    return
-                task = await manager.task_pool.get_task(event.task_id)
-                required = set(task.required_capabilities) if task is not None else set()
-                if not required or not required.issubset(capabilities):
-                    return
-                self._schedule_claim_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    task_id=event.task_id,
-                    organization_id=manager.organization_id,
-                )
+        async def _on_task_created(event: OrgTaskCreatedEvent) -> None:
+            if event.team_id == backend.team_name:
                 return
-            if isinstance(event, OrgTaskClaimedEvent):
-                if event.claimed_by_team_id != backend.team_name:
-                    return
-                self._schedule_claimed_task_execution_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    task_id=event.task_id,
-                    organization_id=manager.organization_id,
-                )
+            task = await manager.task_pool.get_task(event.task_id)
+            required = set(task.required_capabilities) if task is not None else set()
+            if not required or not required.issubset(capabilities):
                 return
-            if isinstance(event, OrgTaskCompletedEvent):
-                # Completion is a second durable opportunity to claim matching
-                # OPEN tasks. Parent-team review wake is driven by
-                # OrgTaskReviewRequestedEvent so it aligns with PENDING review.
-                await self._schedule_matching_open_claims(
+            self._schedule_claim_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                task_id=event.task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_claimed(event: OrgTaskClaimedEvent) -> None:
+            if event.claimed_by_team_id != backend.team_name:
+                return
+            self._schedule_claimed_task_execution_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                task_id=event.task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_completed(event: OrgTaskCompletedEvent) -> None:
+            # Completion is a second durable opportunity to claim matching OPEN
+            # tasks. Parent-team review wake is driven by ReviewRequested.
+            await self._schedule_matching_open_claims(
+                manager=manager,
+                team_id=backend.team_name,
+                session_id=session_id,
+                capabilities=capabilities,
+                completed_task_id=event.task_id,
+            )
+
+        async def _on_task_failed(event: OrgTaskFailedEvent) -> None:
+            task = await manager.task_pool.get_task(event.task_id)
+            if self._is_unclaimed_expiration(task, event):
+                return
+            if task is None:
+                return
+            if task.task_type == ORG_SUMMARY_TASK_TYPE:
+                await self._handle_summary_task_failed(
                     manager=manager,
-                    team_id=backend.team_name,
+                    task_id=event.task_id,
                     session_id=session_id,
-                    capabilities=capabilities,
-                    completed_task_id=event.task_id,
                 )
                 return
-            if isinstance(event, OrgTaskFailedEvent):
-                task = await manager.task_pool.get_task(event.task_id)
-                if self._is_unclaimed_expiration(task, event):
-                    # The durable expiration inbox request also covers root tasks.
-                    return
-                if task is None:
-                    return
-                if task.task_type == ORG_SUMMARY_TASK_TYPE:
-                    # A failed/cancelled Summary Task releases its dynamic team.
-                    await self._handle_summary_task_failed(
-                        manager=manager,
-                        task_id=event.task_id,
-                        session_id=session_id,
-                    )
-                    return
-                if not task.parent_task_id:
-                    return
-                if task.created_by.team_id != backend.team_name:
-                    return
-                self._schedule_parent_child_failed_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    child_task_id=event.task_id,
-                    parent_task_id=task.parent_task_id,
-                    organization_id=manager.organization_id,
-                    failure_code=event.failure_code,
-                    failure_reason=event.failure_reason,
-                    repairs_task_id=self._original_repairs_target(task),
-                )
+            if not task.parent_task_id:
                 return
-            if isinstance(event, OrgTaskReviewRequestedEvent):
-                if event.reviewer_team_id != backend.team_name:
-                    return
-                self._schedule_parent_review_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    child_task_id=event.task_id,
-                    parent_task_id=event.parent_task_id,
-                    organization_id=manager.organization_id,
-                )
+            if task.created_by.team_id != backend.team_name:
                 return
-            if not isinstance(event, OrgTaskReviewedEvent):
+            self._schedule_parent_child_failed_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                child_task_id=event.task_id,
+                parent_task_id=task.parent_task_id,
+                organization_id=manager.organization_id,
+                failure_code=event.failure_code,
+                failure_reason=event.failure_reason,
+                repairs_task_id=self._original_repairs_target(task),
+            )
+
+        async def _on_task_review_requested(event: OrgTaskReviewRequestedEvent) -> None:
+            if event.reviewer_team_id != backend.team_name:
                 return
+            self._schedule_parent_review_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                child_task_id=event.task_id,
+                parent_task_id=event.parent_task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_reviewed(event: OrgTaskReviewedEvent) -> None:
             if event.team_id != backend.team_name:
                 return
             task = await manager.task_pool.get_task(event.task_id)
@@ -1121,6 +1009,21 @@ class OrganizationRuntimeManager:
                 parent_task_id=task.parent_task_id,
                 organization_id=manager.organization_id,
             )
+
+        task_handlers = {
+            OrgTaskCreatedEvent: _on_task_created,
+            OrgTaskClaimedEvent: _on_task_claimed,
+            OrgTaskCompletedEvent: _on_task_completed,
+            OrgTaskFailedEvent: _on_task_failed,
+            OrgTaskReviewRequestedEvent: _on_task_review_requested,
+            OrgTaskReviewedEvent: _on_task_reviewed,
+        }
+
+        async def _on_task_event(message: Any) -> None:
+            event = message.get_payload()
+            handler = task_handlers.get(type(event))
+            if handler is not None:
+                await handler(event)
 
         async def _on_inbox_event(message: Any) -> None:
             event_type = getattr(message, "event_type", None)
@@ -1156,53 +1059,71 @@ class OrganizationRuntimeManager:
                     organization_id=manager.organization_id,
                 )
 
+        async def _on_summary_task_created(event: OrgSummaryTaskCreatedEvent) -> None:
+            await self._handle_summary_task_created(
+                manager=manager,
+                summary_factory=summary_factory,
+                event=event,
+                session_id=session_id,
+            )
+
+        async def _on_summary_provisioned(event: OrgSummaryProvisionedEvent) -> None:
+            await self._handle_summary_provisioned(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_provision_failed(event: OrgSummaryProvisionFailedEvent) -> None:
+            await self._handle_summary_provision_failed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_sources_updated(event: OrgSummarySourcesUpdatedEvent) -> None:
+            await self._handle_summary_sources_updated(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_sources_ready(event: OrgSummarySourcesReadyEvent) -> None:
+            await self._handle_summary_sources_ready(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_source_failed(event: OrgSummarySourceFailedEvent) -> None:
+            await self._handle_summary_source_failed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_completed(event: OrgSummaryCompletedEvent) -> None:
+            await self._handle_summary_completed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        org_handlers = {
+            OrgSummaryTaskCreatedEvent: _on_summary_task_created,
+            OrgSummaryProvisionedEvent: _on_summary_provisioned,
+            OrgSummaryProvisionFailedEvent: _on_summary_provision_failed,
+            OrgSummarySourcesUpdatedEvent: _on_summary_sources_updated,
+            OrgSummarySourcesReadyEvent: _on_summary_sources_ready,
+            OrgSummarySourceFailedEvent: _on_summary_source_failed,
+            OrgSummaryCompletedEvent: _on_summary_completed,
+        }
+
         async def _on_org_event(message: Any) -> None:
+            nonlocal summary_factory
             summary_factory = self._ensure_summary_factory()
             if summary_factory is None:
-                # Summary lifecycle events are only meaningful with a host
-                # factory installed; without one they are dropped here (the
-                # Summary Task row itself still exists in the pool).
+                # Summary lifecycle events need a host factory; without one they
+                # are dropped (the Summary Task row itself still exists).
                 logger.debug(
                     "org event %s dropped: no summary team factory installed",
                     getattr(message, "event_type", None),
                 )
                 return
             event = message.get_payload()
-            if isinstance(event, OrgSummaryTaskCreatedEvent):
-                await self._handle_summary_task_created(
-                    manager=manager,
-                    summary_factory=summary_factory,
-                    event=event,
-                    session_id=session_id,
-                )
-                return
-            if isinstance(event, OrgSummaryProvisionedEvent):
-                self._schedule_summary_turn(
-                    manager=manager,
-                    session_id=session_id,
-                    summary_team_id=event.summary_team_id,
-                    summary_task_id=event.summary_task_id,
-                    root_task_id=event.root_task_id,
-                )
-                return
-            if isinstance(event, OrgSummaryProvisionFailedEvent):
-                await self._handle_summary_provision_failed(manager=manager, event=event, session_id=session_id)
-                return
-            if isinstance(event, OrgSummarySourcesUpdatedEvent):
-                await self._handle_summary_sources_updated(
-                    manager=manager,
-                    event=event,
-                    session_id=session_id,
-                )
-                return
-            if isinstance(event, OrgSummarySourcesReadyEvent):
-                await self._handle_summary_sources_ready(manager=manager, event=event, session_id=session_id)
-                return
-            if isinstance(event, OrgSummarySourceFailedEvent):
-                await self._handle_summary_source_failed(manager=manager, event=event, session_id=session_id)
-                return
-            if isinstance(event, OrgSummaryCompletedEvent):
-                await self._handle_summary_completed(manager=manager, event=event, session_id=session_id)
+            handler = org_handlers.get(type(event))
+            if handler is not None:
+                await handler(event)
+
+        summary_factory = None
 
         await self._subscribe_once(
             messager=messager,
@@ -1260,447 +1181,10 @@ class OrganizationRuntimeManager:
         await messager.subscribe(topic_id, handler)
         self._subscribed_topics.add(key)
 
-    async def _handle_summary_task_created(
-        self,
-        *,
-        manager: Any,
-        summary_factory: SummaryTeamFactory,
-        event: OrgSummaryTaskCreatedEvent,
-        session_id: str,
-    ) -> None:
-        """Provision a dynamic Summary Team and delegate the Summary Task to it (§4.4.1)."""
-        task = await manager.task_pool.get_task(event.summary_task_id)
-        if task is None:
-            # The Summary Task row vanished (or never landed) — nothing to back.
-            logger.warning(
-                "summary task created event ignored: task %s not found",
-                event.summary_task_id,
-            )
-            return
-        root_task_id = str(task.root_task_id or event.summary_task_id)
-        # The owner team is both the delegation source and the storage donor: the
-        # Summary Team must attach to the same TeamDatabase to see source tasks.
-        from_team_id = task.created_by.team_id or (await self._owner_team_id(manager))
-        logger.debug(
-            "provisioning summary team for task %s (root=%s owner=%s session=%s)",
-            event.summary_task_id,
-            root_task_id,
-            from_team_id,
-            session_id,
-        )
-        execution = await manager.task_pool.create_summary_execution(
-            root_task_id=root_task_id,
-            summary_task_id=event.summary_task_id,
-        )
-        try:
-            launched = await summary_factory.provision(
-                organization_id=manager.organization_id,
-                root_task_id=root_task_id,
-                summary_task_id=event.summary_task_id,
-                owner_team_id=from_team_id,
-                session_id=session_id,
-            )
-        except Exception as exc:  # noqa: BLE001
-            # Provision failure is a first-class outcome: fail the execution and
-            # the task, then wake the root leader to repair or terminate (§4.4.3).
-            logger.error(
-                "summary team provision failed for task %s (execution=%s): %s",
-                event.summary_task_id,
-                execution.execution_id,
-                exc,
-                exc_info=True,
-            )
-            await self._fail_summary_provision(
-                manager=manager,
-                execution=execution,
-                from_team_id=from_team_id,
-                root_task_id=root_task_id,
-                summary_task_id=event.summary_task_id,
-                failure_reason=str(exc),
-            )
-            return
-        logger.info(
-            "summary team provisioned: task=%s team=%s leader=%s",
-            event.summary_task_id,
-            launched.team_id,
-            launched.leader_id,
-        )
-        await self._complete_summary_provision(
-            manager=manager,
-            execution=execution,
-            launched=launched,
-            from_team_id=from_team_id,
-            root_task_id=root_task_id,
-            summary_task_id=event.summary_task_id,
-        )
-
-    async def _complete_summary_provision(
-        self,
-        *,
-        manager: Any,
-        execution: Any,
-        launched: Any,
-        from_team_id: str,
-        root_task_id: str,
-        summary_task_id: str,
-    ) -> None:
-        """Register the team, mark the execution RUNNING, and delegate the task.
-
-        Shared by the fresh-provision event path (§4.4.1) and the §8 recovery scan
-        so both converge on the same post-launch binding.
-        """
-        await manager.register_leader(
-            team_id=launched.team_id,
-            leader_id=launched.leader_id,
-            leader_member_name=launched.leader_id,
-            capabilities=[ORG_SUMMARY_CAPABILITY],
-        )
-        await manager.task_pool.update_summary_execution(
-            execution_id=execution.execution_id,
-            status=OrgSummaryExecutionStatus.RUNNING,
-            summary_team_id=launched.team_id,
-        )
-        summary_task = await manager.task_pool.get_task(summary_task_id)
-        already_delegated = summary_task is not None and summary_task.assignment.team_id == launched.team_id
-        if not already_delegated:
-            await manager.task_pool.delegate_task(
-                task_id=summary_task_id,
-                from_team_id=from_team_id,
-                to_team_id=launched.team_id,
-            )
-        else:
-            # §8 recovery re-enters here after delegation already succeeded.
-            logger.debug(
-                "summary task %s already delegated to %s; skipping delegate",
-                summary_task_id,
-                launched.team_id,
-            )
-        # Land the dynamic team id on the root task's aggregation too, so
-        # org_view_tasks on the root shows summary_team_id instead of None (§4.4.1).
-        await manager.task_pool.bind_root_summary_team(
-            root_task_id=root_task_id,
-            summary_team_id=launched.team_id,
-        )
-        logger.info(
-            "summary provision bound: task=%s team=%s execution=%s root=%s",
-            summary_task_id,
-            launched.team_id,
-            execution.execution_id,
-            root_task_id,
-        )
-        await manager.task_pool.publish_event(
-            OrgSummaryProvisionedEvent(
-                organization_id=manager.organization_id,
-                team_id=from_team_id,
-                root_task_id=root_task_id,
-                summary_task_id=summary_task_id,
-                summary_team_id=launched.team_id,
-            )
-        )
-
-    async def _fail_summary_provision(
-        self,
-        *,
-        manager: Any,
-        execution: Any,
-        from_team_id: str,
-        root_task_id: str,
-        summary_task_id: str,
-        failure_reason: str,
-    ) -> None:
-        """Mark the execution FAILED, fail the Summary Task, wake the root leader (§4.4.3 / §8)."""
-        logger.warning(
-            "summary provision failed: task=%s execution=%s reason=%s",
-            summary_task_id,
-            execution.execution_id,
-            failure_reason,
-        )
-        await manager.task_pool.update_summary_execution(
-            execution_id=execution.execution_id,
-            status=OrgSummaryExecutionStatus.FAILED,
-        )
-        # Surface the failure on the Summary Task itself (failure_code), not only
-        # the SummaryExecution, so org_view_tasks shows SUMMARY_PROVISION_FAILED.
-        await manager.task_pool.fail_summary_task(
-            summary_task_id=summary_task_id,
-            failure_reason=failure_reason,
-        )
-        await manager.task_pool.publish_event(
-            OrgSummaryProvisionFailedEvent(
-                organization_id=manager.organization_id,
-                team_id=from_team_id,
-                summary_task_id=summary_task_id,
-                root_task_id=root_task_id,
-                failure_reason=failure_reason,
-            )
-        )
-
-    async def _handle_summary_provision_failed(
-        self,
-        *,
-        manager: Any,
-        event: OrgSummaryProvisionFailedEvent,
-        session_id: str,
-    ) -> None:
-        """Wake the root leader so it can repair, replace, or terminate the summary (§4.4.3)."""
-        await self._schedule_summary_root_turn(
-            manager=manager,
-            session_id=session_id,
-            root_task_id=event.root_task_id,
-            summary_task_id=event.summary_task_id,
-        )
-
-    async def _handle_summary_sources_updated(
-        self,
-        *,
-        manager: Any,
-        event: OrgSummarySourcesUpdatedEvent,
-        session_id: str,
-    ) -> None:
-        """Evaluate bound sources after an attach: ready -> SourcesReady, failed -> SourceFailed."""
-        evaluation = await manager.task_pool.evaluate_summary_sources(summary_task_id=event.summary_task_id)
-        if evaluation.get("ready"):
-            await manager.task_pool.publish_event(
-                OrgSummarySourcesReadyEvent(
-                    organization_id=manager.organization_id,
-                    team_id=None,
-                    summary_task_id=event.summary_task_id,
-                )
-            )
-            return
-        source_failed = evaluation.get("source_failed")
-        if source_failed is not None:
-            await manager.task_pool.publish_event(
-                OrgSummarySourceFailedEvent(
-                    organization_id=manager.organization_id,
-                    team_id=None,
-                    summary_task_id=event.summary_task_id,
-                    source_task_id=source_failed,
-                    failure_reason=str(evaluation.get("reason") or "source task failed"),
-                )
-            )
-
-    async def _handle_summary_sources_ready(
-        self,
-        *,
-        manager: Any,
-        event: OrgSummarySourcesReadyEvent,
-        session_id: str,
-    ) -> None:
-        """Queue the dynamic Summary Leader turn that aggregates ready sources."""
-        summary_task = await manager.task_pool.get_task(event.summary_task_id)
-        if summary_task is None:
-            return
-        root_task_id = str(summary_task.root_task_id or event.summary_task_id)
-        execution = await self._running_summary_execution(manager=manager, summary_task_id=event.summary_task_id)
-        if execution is None or not execution.summary_team_id:
-            return
-        self._schedule_summary_turn(
-            manager=manager,
-            session_id=session_id,
-            summary_team_id=execution.summary_team_id,
-            summary_task_id=event.summary_task_id,
-            root_task_id=root_task_id,
-        )
-
-    async def _handle_summary_source_failed(
-        self,
-        *,
-        manager: Any,
-        event: OrgSummarySourceFailedEvent,
-        session_id: str,
-    ) -> None:
-        """Wake the root leader to supplement, replace, or terminate the failed source."""
-        summary_task = await manager.task_pool.get_task(event.summary_task_id)
-        if summary_task is None:
-            return
-        await self._schedule_summary_root_turn(
-            manager=manager,
-            session_id=session_id,
-            root_task_id=str(summary_task.root_task_id or event.summary_task_id),
-            summary_task_id=event.summary_task_id,
-        )
-
-    async def _handle_summary_completed(
-        self,
-        *,
-        manager: Any,
-        event: OrgSummaryCompletedEvent,
-        session_id: str,
-    ) -> None:
-        """Release the dynamic Summary Team and wake the root leader to inject the result."""
-        await self._release_summary_task(
-            manager=manager,
-            summary_task_id=event.summary_task_id,
-            session_id=session_id,
-        )
-        await self._schedule_summary_root_turn(
-            manager=manager,
-            session_id=session_id,
-            root_task_id=event.root_task_id,
-            summary_task_id=event.summary_task_id,
-        )
-
-    async def _handle_summary_task_failed(
-        self,
-        *,
-        manager: Any,
-        task_id: str,
-        session_id: str,
-    ) -> None:
-        """Release the dynamic Summary Team and wake the root leader on failure/cancel.
-
-        A failed or cancelled Summary Task otherwise leaves its dynamic team
-        running and its execution stuck in RUNNING, since no completion event
-        ever arrives to trigger release.
-        """
-        summary_task = await manager.task_pool.get_task(task_id)
-        if summary_task is None:
-            return
-        await self._release_summary_task(
-            manager=manager,
-            summary_task_id=task_id,
-            session_id=session_id,
-        )
-        await self._schedule_summary_root_turn(
-            manager=manager,
-            session_id=session_id,
-            root_task_id=str(summary_task.root_task_id or task_id),
-            summary_task_id=task_id,
-        )
-
-    async def _release_summary_task(self, *, manager: Any, summary_task_id: str, session_id: str) -> None:
-        """Release the Summary Task's live Summary Team and mark its execution RELEASED.
-
-        A Summary Task owns exactly one live execution (``create_summary_execution``
-        is idempotent), so there is nothing to fan out over: find that one row and
-        release it.  Terminal rows are skipped -- a completed or already-released
-        execution has no team left to stop.
-        """
-        execution = await self._live_summary_execution(
-            manager=manager,
-            summary_task_id=summary_task_id,
-        )
-        if execution is None:
-            logger.debug(
-                "no live summary execution for task %s; nothing to release",
-                summary_task_id,
-            )
-            return
-
-        summary_factory = self._ensure_summary_factory()
-        # An execution that never bound a team (provision failed) has nothing to
-        # stop, but is still marked RELEASED below so it stops being retried.
-        if summary_factory is None:
-            # No host factory: nothing can stop the team, so leave the execution
-            # as-is for a later scan rather than marking it RELEASED.
-            logger.debug(
-                "no summary factory; skipping release of execution %s",
-                execution.execution_id,
-            )
-            return
-        if execution.summary_team_id:
-            # Pass the team id (not the execution id): they are unrelated
-            # (summary-exec-* vs org-summary-*), so the wrong one stops nothing.
-            logger.debug(
-                "releasing summary team %s (execution=%s)",
-                execution.summary_team_id,
-                execution.execution_id,
-            )
-            try:
-                await summary_factory.release(
-                    execution_id=execution.execution_id,
-                    summary_team_id=execution.summary_team_id,
-                    session_id=session_id,
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "Failed to release summary execution %s",
-                    execution.execution_id,
-                    exc_info=True,
-                )
-        await manager.task_pool.update_summary_execution(
-            execution_id=execution.execution_id,
-            status=OrgSummaryExecutionStatus.RELEASED,
-            released_at=get_current_time(),
-        )
-
-    async def _live_summary_execution(self, *, manager: Any, summary_task_id: str) -> Any | None:
-        """Return the Summary Task's single non-terminal execution, if any.
-
-        Terminal executions (COMPLETED / FAILED / RELEASED) are skipped: they may
-        still exist as history but no longer back a live team.
-        """
-        for execution in await manager.task_pool.list_summary_executions(summary_task_id=summary_task_id):
-            if execution.status not in TERMINAL_SUMMARY_EXECUTION_STATUSES:
-                return execution
-        return None
-
-    async def _running_summary_execution(self, *, manager: Any, summary_task_id: str) -> Any | None:
-        for execution in await manager.task_pool.list_summary_executions(summary_task_id=summary_task_id):
-            if execution.summary_team_id and execution.status is not OrgSummaryExecutionStatus.RELEASED:
-                return execution
-        return None
-
-    async def _owner_team_id(self, manager: Any) -> str:
-        organization = await manager.get_organization()
-        return organization.owner_team_id if organization is not None else ""
-
-    def _schedule_summary_turn(
-        self,
-        *,
-        manager: Any,
-        session_id: str,
-        summary_team_id: str,
-        summary_task_id: str,
-        root_task_id: str,
-    ) -> None:
-        prompt = (
-            f"You are the Summary Team aggregating root task {root_task_id} in {manager.organization_id}. "
-            f"Organization summary task {summary_task_id} is delegated to your team. "
-            "Read its bound source outputs with org_view_tasks(action='get') and "
-            "org_view_child_tasks, integrate them into one final result, then call "
-            f"org_update_task(action='start') and org_update_task(action='complete') on "
-            f"{summary_task_id} in the same workflow. If material content is missing, create "
-            f"a focused supplementary task with org_create_task(parent_task_id='{root_task_id}') "
-            "rather than fabricating output."
-        )
-        self._schedule_leader_turn(team_id=summary_team_id, session_id=session_id, prompt=prompt)
-
-    async def _schedule_summary_root_turn(
-        self,
-        *,
-        manager: Any,
-        session_id: str,
-        root_task_id: str,
-        summary_task_id: str,
-    ) -> None:
-        team_id = await self._resolve_root_team_id(manager=manager, root_task_id=root_task_id)
-        if not team_id:
-            return
-        prompt = (
-            f"Organization summary task {summary_task_id} for root task {root_task_id} in "
-            f"{manager.organization_id} needs your attention. Inspect it with "
-            "org_view_tasks(action='get'). If summary sources failed or provisioning failed, "
-            "supplement them with new source tasks, create a replacement summary task, or "
-            "fail/terminate toward the root as appropriate. When the summary completes, "
-            "inject its final result into the root's output context."
-        )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
-
-    async def _resolve_root_team_id(self, *, manager: Any, root_task_id: str) -> str:
-        root = await manager.task_pool.get_task(root_task_id)
-        if root is not None:
-            if root.assignment.team_id:
-                return root.assignment.team_id
-            if root.created_by.team_id:
-                return root.created_by.team_id
-        return await self._owner_team_id(manager)
-
     async def _schedule_matching_open_claims(
         self,
         *,
-        manager: Any,
+        manager: TeamOrganizationManager,
         team_id: str,
         session_id: str,
         capabilities: set[str],
@@ -1728,37 +1212,22 @@ class OrganizationRuntimeManager:
         organization_id: str,
         trigger_task_id: str | None = None,
     ) -> None:
-        trigger_context = (
-            f" Task {trigger_task_id} just completed, so re-evaluate this open task now." if trigger_task_id else ""
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.claim_turn(
+                task_id=task_id,
+                organization_id=organization_id,
+                trigger_task_id=trigger_task_id,
+            ),
         )
-        prompt = (
-            f"Organization task {task_id} is available in {organization_id}.{trigger_context} "
-            "Inspect it with org_view_tasks(action='get'). If every required capability is present "
-            "in your team, you MUST call org_claim_task for this task in this turn. Do not leave a "
-            "capability-matched task OPEN merely because another team's artifact is not ready: claim "
-            "it first, prepare any independent work, and use org_view_tasks to wait for dependencies "
-            "before starting dependent validation. When the defined scope has been executed, produce "
-            "one final result or report and call org_update_task(action='complete') in the same "
-            "workflow, including failures and blockers in its output. Do not wait for another team to "
-            "fix a reported issue, and do not create an open-ended sequence of extra verification tasks "
-            "unless the parent task explicitly requests it. Only skip the claim when a required capability "
-            "is actually absent or the claim fails because another team already claimed it."
-        )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_delegated_turn(self, *, team_id: str, session_id: str, task_id: str, organization_id: str) -> None:
-        prompt = (
-            f"Organization task {task_id} in {organization_id} was delegated to your team. "
-            "Inspect it with org_view_tasks(action='get'), then use org_update_task(action='start') "
-            "when you are ready. If an independent part requires another organization team's "
-            "capabilities, keep this parent task assigned to your team and create a focused OPEN child "
-            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, "
-            "acceptance criteria, and only the capabilities it needs; do not set delegated_to_team_id. "
-            "Track children with org_view_child_tasks and do not complete the parent until its direct "
-            "children are completed and accepted. Otherwise execute the task through your team workflow "
-            "and complete it with the resulting output context and output abstract."
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.delegated_turn(task_id=task_id, organization_id=organization_id),
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_leader_message_turn(
         self,
@@ -1773,16 +1242,14 @@ class OrganizationRuntimeManager:
         if message_key in self._scheduled_leader_messages:
             return
         self._scheduled_leader_messages.add(message_key)
-        prompt = (
-            f"Leader message {message_id} arrived in organization {organization_id} "
-            f"from team {from_team_id}. Read it with org_get_leader_message, perform any required "
-            "cross-team coordination or task-pool updates, then call org_ack_leader_message only "
-            "after the message has been handled."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.leader_message_turn(
+                message_id=message_id,
+                from_team_id=from_team_id,
+                organization_id=organization_id,
+            ),
             message_key=message_key,
         )
 
@@ -1794,27 +1261,15 @@ class OrganizationRuntimeManager:
         task_id: str,
         organization_id: str,
     ) -> None:
-        """Continue an automatic claim with a separate execution turn.
-
-        A claim is persisted during a leader's tool call, but that LLM turn can
-        legitimately finish immediately afterwards.  Queue a second turn so a
-        successfully auto-claimed task never remains stranded in ``CLAIMED``.
-        """
-
-        prompt = (
-            f"Your team claimed organization task {task_id} in {organization_id}. "
-            "Inspect it with org_view_tasks(action='get'). If it is still assigned to your team and "
-            "its status is CLAIMED, immediately call org_update_task(action='start'). Then execute the "
-            "defined scope through your Team workflow. If an independent part requires another organization "
-            "team's capabilities, keep this parent task assigned to your team and create a focused OPEN child "
-            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, acceptance "
-            "criteria, and only the capabilities it needs; do not set delegated_to_team_id. Track children "
-            "with org_view_child_tasks and do not complete the parent until its direct children are completed "
-            "and accepted. When the task is actually complete, submit one concrete result with "
-            "org_update_task(action='complete'). If the task is already IN_PROGRESS or COMPLETED, do not "
-            "duplicate work."
+        """Continue an automatic claim with a separate execution turn."""
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.claimed_task_execution_turn(
+                task_id=task_id,
+                organization_id=organization_id,
+            ),
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_parent_review_turn(
         self,
@@ -1829,21 +1284,14 @@ class OrganizationRuntimeManager:
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
-        prompt = (
-            f"Child organization task {child_task_id} completed in {organization_id}. "
-            f"Inspect its result with org_review_task, then accept or reject it. "
-            f"If accepted, use the child output to continue parent task {parent_task_id}. "
-            "If rejected, create a repair with org_create_task "
-            f"(set repairs_task_id={child_task_id} on the original sibling; never repair-of-repair; "
-            "do not org_delegate_task the rejected child). "
-            "When all direct children are accepted or superseded by an accepted repair, "
-            "complete the parent. For a root task, put the user-facing delivery in "
-            "org_update_task output_context.description and provide output_abstract."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_review_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            ),
             review_key=review_key,
         )
 
@@ -1863,20 +1311,20 @@ class OrganizationRuntimeManager:
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
-        prompt = (
-            f"Child organization task {child_task_id} was reviewed as {review_status} "
-            f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
-            "Read the child result and review verdict/required_changes. "
-            + self._repair_create_instructions(
-                target_id=target_id,
-                report_phrase="defect report",
-                terminal_label="rejected/completed",
-            )
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_repair_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+                review_status=review_status,
+                repair_instructions=prompts.repair_create_instructions(
+                    target_id=target_id,
+                    report_phrase="defect report",
+                    terminal_label="rejected/completed",
+                ),
+            ),
             review_key=review_key,
         )
 
@@ -1892,17 +1340,13 @@ class OrganizationRuntimeManager:
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
-        prompt = (
-            f"All direct child tasks for parent organization task {parent_task_id} "
-            f"in {organization_id} are accepted or superseded by an accepted repair. "
-            "Integrate the child outputs and call org_update_task(action='complete') on the "
-            "parent with the final output_context and output_abstract. For a root task, put the "
-            "user-facing delivery in output_context.description."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_ready_turn(
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            ),
             review_key=review_key,
         )
 
@@ -1923,47 +1367,22 @@ class OrganizationRuntimeManager:
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
-        prompt = (
-            f"Child organization task {child_task_id} failed in {organization_id} "
-            f"(failure_code={failure_code}, failure_reason={failure_reason}). "
-            f"Parent task {parent_task_id} cannot advance on that child. "
-            "This is not a pending review — do not call org_review_task on the failed child. "
-            + self._repair_create_instructions(
-                target_id=target_id,
-                report_phrase="the failure report",
-                terminal_label="failed",
-            )
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_child_failed_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+                failure_code=failure_code,
+                failure_reason=failure_reason,
+                repair_instructions=prompts.repair_create_instructions(
+                    target_id=target_id,
+                    report_phrase="the failure report",
+                    terminal_label="failed",
+                ),
+            ),
             review_key=review_key,
-        )
-
-    @staticmethod
-    def _repair_create_instructions(
-        *,
-        target_id: str,
-        report_phrase: str,
-        terminal_label: str,
-    ) -> str:
-        """Shared wake guidance for creating a repair sibling of a terminal child."""
-        return (
-            "Create a focused repair task with org_create_task "
-            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
-            f"repair; include {report_phrase} and acceptance criteria; prefer capabilities that "
-            "match the defect; if the original has retry_limit, do not exceed it). "
-            "If org_create_task fails because retry_limit is reached, do not retry create in a "
-            "loop: call org_update_task(action='failed') on the parent with failure_reason "
-            "explaining that the repair budget is exhausted, so the owning/parent team can "
-            "decide the next step or fail/terminate toward the root. Same team may "
-            "execute the repair; switching teams is optional—only if switching teams, set "
-            "delegated_to_team_id on that new repair (or org_delegate_task the new OPEN repair "
-            "only). Do not call org_delegate_task on the "
-            f"{terminal_label} child, which is terminal. "
-            "Do not leave the parent waiting without creating that repair, and do not silently "
-            f"reopen the {terminal_label} child task."
         )
 
     @staticmethod
