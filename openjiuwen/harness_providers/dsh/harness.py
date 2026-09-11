@@ -9,11 +9,14 @@ import asyncio
 import importlib
 import json
 import uuid
+from dataclasses import replace
 from typing import Any, cast
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     HarnessCard,
+    HarnessCapability,
+    HostCapability,
     HarnessContext,
     HarnessError,
     HarnessInput,
@@ -25,10 +28,11 @@ from openjiuwen.harness_protocol import (
     json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, TurnTiming, logger
+from openjiuwen.harness_providers.dsh.composition import mcp_configs, write_overlay
 from openjiuwen.harness_providers.dsh.config import DshHarnessConfig
 from openjiuwen.harness_providers.dsh.mapping import DshTurnAccumulator, MappedDshEvent
 
-ADAPTER_VERSION = "0.2.0"
+ADAPTER_VERSION = "0.3.0"
 
 
 class DshHarness(SerializedTurnHarness):
@@ -45,6 +49,8 @@ class DshHarness(SerializedTurnHarness):
         implementation_version=ADAPTER_VERSION,
         protocol_version=PROTOCOL_VERSION,
         compatible_protocol_versions=frozenset({PROTOCOL_VERSION}),
+        capabilities=frozenset({HarnessCapability.MCP_TOOLS}),
+        optional_host_capabilities=frozenset({HostCapability.MCP_SERVERS}),
     )
 
     def __init__(self, config: DshHarnessConfig | None = None) -> None:
@@ -52,6 +58,7 @@ class DshHarness(SerializedTurnHarness):
         super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
         self._sdk_harness: Any = None
         self._sdk_session: Any = None
+        self._overlay: Any = None
 
     # ------------------------------------------------------------------
     # Provider hooks
@@ -60,16 +67,10 @@ class DshHarness(SerializedTurnHarness):
     def _validate_context(self, context: HarnessContext) -> None:
         super()._validate_context(context)
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None:
-            raise UnsupportedHarnessCapabilityError("the DSH Python SDK cannot restore protocol checkpoints")
-        if context.mcp_servers:
-            raise UnsupportedHarnessCapabilityError(
-                "the DSH Python SDK cannot dynamically install HarnessContext MCP servers"
-            )
-        if context.system_prompt and self._config.system_prompt_env_var is None:
-            raise HarnessProtocolError(
-                "the DSH Python SDK has no native system-prompt parameter; configure system_prompt_env_var "
-                "and a Cordis composition that consumes it"
-            )
+            raise UnsupportedHarnessCapabilityError("the DSH SDK server cannot restore protocol checkpoints")
+        mcp_configs(context)
+        if self._config.launch_args_override is not None and (context.mcp_servers or (context.system_prompt and self._config.system_prompt_env_var is None)):
+            raise UnsupportedHarnessCapabilityError("DSH host overlays require the standard profile launcher")
 
     async def _open_session(self, context: HarnessContext) -> str | None:
         """Start a fresh DSH subprocess/session cycle."""
@@ -80,6 +81,13 @@ class DshHarness(SerializedTurnHarness):
         sdk = _load_dsh_sdk()
         options = self._sdk_options(context)
         session_id = f"dsh-{uuid.uuid4().hex}"
+        overlay_context = replace(context, cwd=context.cwd or self._config.cwd)
+        overlay = write_overlay(overlay_context, include_prompt=self._config.system_prompt_env_var is None,
+                                prompt_mode=self._config.system_prompt_mode)
+        if overlay is not None:
+            self._overlay, path, env = overlay
+            options["env"].update(env)
+            options["patches"] = (*options.get("patches", ()), path)
         sdk_harness = None
         try:
             launch_args = self._config.launch_args_override
@@ -107,8 +115,13 @@ class DshHarness(SerializedTurnHarness):
         sdk_harness = self._sdk_harness
         self._sdk_harness = None
         self._sdk_session = None
-        if sdk_harness is not None:
-            await _close_sdk_quietly(sdk_harness)
+        try:
+            if sdk_harness is not None:
+                await _close_sdk_quietly(sdk_harness)
+        finally:
+            if self._overlay is not None:
+                self._overlay.cleanup()
+                self._overlay = None
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
@@ -205,7 +218,7 @@ async def _close_sdk_quietly(sdk_harness: Any) -> None:
     try:
         await asyncio.to_thread(sdk_harness.close)
     except Exception as exc:
-        logger.debug("DSH SDK close failed during teardown: %s", exc)
+        logger.debug("DSH SDK close failed during teardown: %s", type(exc).__name__)
 
 
 def _to_dsh_input(content: HarnessInput) -> str | list[dict[str, object]]:

@@ -389,6 +389,7 @@ async def external_cli_spawn(
             add_dirs=add_dirs,
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
             cli_path=cli_cfg.cli_path,
+            system_prompt_mode=cli_cfg.system_prompt_mode,
             codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
             mcp_default_tools_approval_mode=cli_cfg.mcp_default_tools_approval_mode,

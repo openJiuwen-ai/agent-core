@@ -44,6 +44,7 @@ from openjiuwen.harness_providers.codex.failure_classifier import classify_codex
 from openjiuwen.harness_providers.codex.mapping import PROVIDER_NAME, CodexTurnAccumulator
 from openjiuwen.harness_providers.codex.options import (
     build_codex_config,
+    append_developer_instructions,
     build_process_env,
     build_thread_options,
     load_codex_sdk,
@@ -224,6 +225,10 @@ class CodexHarness(SerializedTurnHarness):
         if context.host_capabilities & _INTERACTIVE_HOST_CAPABILITIES:
             _install_approval_handler(client, self._approval_handler)
         try:
+            if self._config.system_prompt_mode == "append" and context.system_prompt:
+                options["developer_instructions"] = await append_developer_instructions(
+                    client, sdk, self._config, cwd=cwd, system_prompt=context.system_prompt,
+                )
             if resume_thread_id is not None:
                 options.pop("ephemeral", None)
                 thread = await client.thread_resume(resume_thread_id, **options)

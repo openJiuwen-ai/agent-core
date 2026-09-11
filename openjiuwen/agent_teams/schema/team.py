@@ -285,6 +285,9 @@ class ExternalCliAgentSpec(BaseModel):
     This is passed to ``spawn_member(cli_agent=...)``. See
     ``agent_teams/external/cli_agent``."""
 
+    system_prompt_mode: Literal["append", "replace"] | None = None
+    """Prompt policy for Claude/Codex; None keeps each provider's default."""
+
     command: Optional[list[str]] = None
     """Full launch argv overriding an adapter backend's built-in command.
 

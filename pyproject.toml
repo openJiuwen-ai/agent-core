@@ -106,7 +106,7 @@ claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
 # The SDK has only ever published pre-releases; the lower bound names one so
 # PEP 440 lets a resolver pick it up at all. Import name stays `deepseek_harness`.
-dsh = ["deepseek-harness-sdk>=0.1.1rc1"]
+dsh = ["deepseek-harness-sdk>=0.1.5rc1"]
 ssh = ["asyncssh>=2.24.0"]
 observability = [
     "opentelemetry-api>=1.25.0",

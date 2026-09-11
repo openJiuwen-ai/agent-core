@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from types import MappingProxyType
-from typing import Mapping
+from typing import Literal, Mapping
 
 from openjiuwen.harness_protocol import JsonObject
 
@@ -20,14 +20,17 @@ class DshHarnessConfig:
     names mirror ``deepseek_harness.DeepSeekHarnessConfig``; ``dsh_home`` (or
     a non-empty ``DSH_HOME`` in ``env``) is mandatory for the SDK runtime,
     which never falls back to ``~/.dsh`` implicitly.  A custom Cordis
-    composition must consume ``system_prompt_env_var`` when it is set; the
-    DSH Python SDK does not expose a native system-prompt argument.
+    composition must consume ``system_prompt_env_var`` when it is explicitly
+    set. Otherwise the adapter uses the bundled system-prompt plugin through
+    a temporary launch overlay.
     """
 
     provider: str = "deepseek-official"
     model: str = "deepseek-v4-flash"
     reasoning_effort: str | None = None
     max_tokens: int | None = None
+    # Replace only the native prefix, or append an independent host section.
+    system_prompt_mode: Literal["append", "replace"] = "replace"
     cwd: str | None = None
     runtime_cwd: str | None = None
     dsh_bin: str | None = None
@@ -45,6 +48,10 @@ class DshHarnessConfig:
     event_buffer_capacity: int = 1024
 
     def __post_init__(self) -> None:
+        if self.system_prompt_mode == "append" and self.system_prompt_env_var is not None:
+            raise ValueError("append mode cannot use system_prompt_env_var")
+        if self.system_prompt_mode not in ("append", "replace"):
+            raise ValueError("system_prompt_mode must be 'append' or 'replace'")
         if not isinstance(self.provider, str) or not isinstance(self.model, str):
             raise TypeError("DSH provider and model must be strings")
         if not self.provider or not self.model:

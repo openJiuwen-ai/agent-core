@@ -243,9 +243,9 @@ name = "aiologic"
 version = "0.16.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "sniffio" },
-    { name = "typing-extensions" },
-    { name = "wrapt" },
+    { name = "sniffio", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
+    { name = "wrapt", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/a8/13/50b91a3ea6b030d280d2654be97c48b6ed81753a50286ee43c646ba36d3c/aiologic-0.16.0.tar.gz", hash = "sha256:c267ccbd3ff417ec93e78d28d4d577ccca115d5797cdbd16785a551d9658858f" }
 wheels = [
@@ -1105,8 +1105,8 @@ name = "culsans"
 version = "0.11.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "aiologic" },
-    { name = "typing-extensions" },
+    { name = "aiologic", marker = "python_full_version < '3.13'" },
+    { name = "typing-extensions", marker = "python_full_version < '3.13'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/d9/e3/49afa1bc180e0d28008ec6bcdf82a4072d1c7a41032b5b759b60814ca4b0/culsans-0.11.0.tar.gz", hash = "sha256:0b43d0d05dce6106293d114c86e3fb4bfc63088cfe8ff08ed3fe36891447fe33" }
 wheels = [
@@ -1178,25 +1178,26 @@ wheels = [
 
 [[package]]
 name = "deepseek-harness-runtime-bin"
-version = "0.1.2rc1"
+version = "0.1.5rc1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/33/91/be83a7f28b3f09c128913a6f331d3c7b35dd60b2a59e76ab3efe58b43db5/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:2cac2256cdebfda726c3378e24f4be31c0847aece7f2a7eb5a8523559f6b5894" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/95/63/56e9467299c01274143db7c5b122d5f6a5b5bfeb1d19d7f4f55f8d5716b3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:5052ca9fea2304e28d82a71012a32e7d2399322e1884a065cb08cf5bc57f017f" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/46/e3/7fdfffff5a5925e52d9726b6e90d489af87090847db54814aa3b14334cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:670d8af06845cc2fc16738f1b030375321f3f8268837152aa3100e14a7b9887d" },
-    { url = "https://mirrors.aliyun.com/pypi/packages/e7/63/16b5733796e85f5df2d5985f0c78fdf582cd002f687d7e985f16d19d9cb3/deepseek_harness_runtime_bin-0.1.2rc1-py3-none-win_amd64.whl", hash = "sha256:390bd8cd5f8700fc609c58e1ccb78091d5c8c6e11c21656e284e0f68da0e148f" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/ec/2d/04d1871e2e3dc8d4d04a3439e5286d55ae64e31a514ae12e95f3f4c9dfa2/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_arm64.whl", hash = "sha256:65f20c541a499f08c36ac3bfdafce350ca8c7cc23488c1faf4d9b9524b547156" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/51/f3/624219faa56a6a4883cc8dcdeece5f32c5ee3e4cd3cc65c8b3ccefeb57a0/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-macosx_14_0_x86_64.whl", hash = "sha256:c94e6b7f6339a79fea47cba2d841976d87faabab1fb35e7bb9609d8cde9238d5" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/b0/33/9bb2ad17dc0a48d3641c7dd0bfdb8742333577739b31c70f46356847706a/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:32b7bb7887ea89f12462274d1b21acfafb00d38d94e11a5d7122492f185e4f85" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/bc/ff/632fddc738effdbc8752f02641aba6eaeb96f820367b8cee68397501948d/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:ad877237382baff4628969a9ebdbfe38486d971b7987c032d0e29775759b5229" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/a2/0e/4b52e5792a7accb09c70831ad3182efa253e15118c683a49dc66f3cbd83a/deepseek_harness_runtime_bin-0.1.5rc1-py3-none-win_amd64.whl", hash = "sha256:d031a5ab4919c572fd7e48c7ef19ec8b1896e93d93c44b0937bb958c528f8acf" },
 ]
 
 [[package]]
 name = "deepseek-harness-sdk"
-version = "0.1.2rc1"
+version = "0.1.5rc1"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
     { name = "deepseek-harness-runtime-bin" },
     { name = "pydantic" },
 ]
 wheels = [
-    { url = "https://mirrors.aliyun.com/pypi/packages/d7/38/0220769bc89ca29318a8f09c30390095aaa071ae2116f677e8398763390e/deepseek_harness_sdk-0.1.2rc1-py3-none-any.whl", hash = "sha256:24689eec01e95233feb75ca08a0fe748b491e71682f80d2c04e6f9485f20488a" },
+    { url = "https://mirrors.aliyun.com/pypi/packages/ee/fa/9b3e2a449f876211fdcbd8082edcf70f0ead08617aa4e064a9bb14372291/deepseek_harness_sdk-0.1.5rc1-py3-none-any.whl", hash = "sha256:8d9897e97e8a95fd738cb2c3e2c563951d824e43847ec6f3b0fb172c0729b4d8" },
 ]
 
 [[package]]
@@ -3135,6 +3136,7 @@ dependencies = [
     { name = "oauthlib" },
     { name = "openai" },
     { name = "openpyxl" },
+    { name = "opentelemetry-sdk" },
     { name = "pdfplumber" },
     { name = "portalocker" },
     { name = "pycryptodome" },
@@ -3361,11 +3363,11 @@ requires-dist = [
     { name = "claude-agent-sdk", marker = "extra == 'claude'", specifier = ">=0.2.115" },
     { name = "click", marker = "extra == 'cli'", specifier = ">=8.0" },
     { name = "dashscope", specifier = ">=1.25.6" },
-    { name = "deepseek-harness-sdk", marker = "extra == 'dsh'", specifier = ">=0.1.1rc1" },
+    { name = "deepseek-harness-sdk", marker = "extra == 'dsh'", specifier = ">=0.1.5rc1" },
     { name = "docx2txt", specifier = ">=0.8" },
     { name = "elasticsearch", extras = ["async"], marker = "extra == 'elasticsearch'", specifier = ">=8.0.0" },
     { name = "fastapi", marker = "extra == 'online-rl'", specifier = ">=0.100" },
-    { name = "fastmcp", specifier = ">=2.14.2,<3.0" },
+    { name = "fastmcp", specifier = ">=2.14.2,<4.0" },
     { name = "filelock", specifier = ">=3.25.0" },
     { name = "gitcode-api", specifier = ">=1.2.20" },
     { name = "httpx", marker = "extra == 'jiuwen-memory'", specifier = ">=0.24" },
@@ -3392,6 +3394,7 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "opentelemetry-proto", marker = "extra == 'chromadb'", specifier = ">=1.33.0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.25.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "pandas", marker = "extra == 'online-rl'" },
     { name = "pdfplumber", specifier = ">=0.11.8" },
@@ -5281,8 +5284,8 @@ name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://mirrors.aliyun.com/pypi/simple" }
 dependencies = [
-    { name = "cryptography" },
-    { name = "jeepney" },
+    { name = "cryptography", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "jeepney", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/1c/03/e834bcd866f2f8a49a85eaff47340affa3bfa391ee9912a952a1faa68c7b/secretstorage-3.5.0.tar.gz", hash = "sha256:f04b8e4689cbce351744d5537bf6b1329c6fc68f91fa666f60a380edddcd11be" }
 wheels = [
@@ -5413,23 +5416,23 @@ resolution-markers = [
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "alabaster" },
-    { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "docutils" },
-    { name = "imagesize" },
-    { name = "jinja2" },
-    { name = "packaging" },
-    { name = "pygments" },
-    { name = "requests" },
-    { name = "roman-numerals" },
-    { name = "snowballstemmer" },
-    { name = "sphinxcontrib-applehelp" },
-    { name = "sphinxcontrib-devhelp" },
-    { name = "sphinxcontrib-htmlhelp" },
-    { name = "sphinxcontrib-jsmath" },
-    { name = "sphinxcontrib-qthelp" },
-    { name = "sphinxcontrib-serializinghtml" },
+    { name = "alabaster", marker = "python_full_version < '3.12'" },
+    { name = "babel", marker = "python_full_version < '3.12'" },
+    { name = "colorama", marker = "python_full_version < '3.12' and sys_platform == 'win32'" },
+    { name = "docutils", marker = "python_full_version < '3.12'" },
+    { name = "imagesize", marker = "python_full_version < '3.12'" },
+    { name = "jinja2", marker = "python_full_version < '3.12'" },
+    { name = "packaging", marker = "python_full_version < '3.12'" },
+    { name = "pygments", marker = "python_full_version < '3.12'" },
+    { name = "requests", marker = "python_full_version < '3.12'" },
+    { name = "roman-numerals", marker = "python_full_version < '3.12'" },
+    { name = "snowballstemmer", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version < '3.12'" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version < '3.12'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/42/50/a8c6ccc36d5eacdfd7913ddccd15a9cee03ecafc5ee2bc40e1f168d85022/sphinx-9.0.4.tar.gz", hash = "sha256:594ef59d042972abbc581d8baa577404abe4e6c3b04ef61bd7fc2acbd51f3fa3" }
 wheels = [
@@ -5449,23 +5452,23 @@ resolution-markers = [
     "python_full_version == '3.12.*' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 dependencies = [
-    { name = "alabaster" },
-    { name = "babel" },
-    { name = "colorama", marker = "sys_platform == 'win32'" },
-    { name = "docutils" },
-    { name = "imagesize" },
-    { name = "jinja2" },
-    { name = "packaging" },
-    { name = "pygments" },
-    { name = "requests" },
-    { name = "roman-numerals" },
-    { name = "snowballstemmer" },
-    { name = "sphinxcontrib-applehelp" },
-    { name = "sphinxcontrib-devhelp" },
-    { name = "sphinxcontrib-htmlhelp" },
-    { name = "sphinxcontrib-jsmath" },
-    { name = "sphinxcontrib-qthelp" },
-    { name = "sphinxcontrib-serializinghtml" },
+    { name = "alabaster", marker = "python_full_version >= '3.12'" },
+    { name = "babel", marker = "python_full_version >= '3.12'" },
+    { name = "colorama", marker = "python_full_version >= '3.12' and sys_platform == 'win32'" },
+    { name = "docutils", marker = "python_full_version >= '3.12'" },
+    { name = "imagesize", marker = "python_full_version >= '3.12'" },
+    { name = "jinja2", marker = "python_full_version >= '3.12'" },
+    { name = "packaging", marker = "python_full_version >= '3.12'" },
+    { name = "pygments", marker = "python_full_version >= '3.12'" },
+    { name = "requests", marker = "python_full_version >= '3.12'" },
+    { name = "roman-numerals", marker = "python_full_version >= '3.12'" },
+    { name = "snowballstemmer", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-applehelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-devhelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-htmlhelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-jsmath", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-qthelp", marker = "python_full_version >= '3.12'" },
+    { name = "sphinxcontrib-serializinghtml", marker = "python_full_version >= '3.12'" },
 ]
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/cd/bd/f08eb0f4eed5c83f1ba2a3bd18f7745a2b1525fad70660a1c00224ec468a/sphinx-9.1.0.tar.gz", hash = "sha256:7741722357dd75f8190766926071fed3bdc211c74dd2d7d4df5404da95930ddb" }
 wheels = [

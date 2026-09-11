@@ -193,6 +193,24 @@ def build_thread_options(
     return options
 
 
+async def append_developer_instructions(client: Any, sdk: Any, config: CodexHarnessConfig,
+                                        *, cwd: str | None, system_prompt: str) -> str:
+    """Read effective app-server configuration before appending host instructions.
+
+    Read on every connection, including resume/fallback; never append to our
+    own previously composed thread value. Failure is fatal, not a silent replace.
+    """
+    await client._ensure_initialized()
+    result = await client._client.request(
+        "config/read", {"cwd": cwd, "includeLayers": False},
+        response_model=sdk.generated.v2_all.ConfigReadResponse,
+    )
+    existing = config.thread_config.get("developer_instructions", result.config.developer_instructions)
+    if existing is not None and not isinstance(existing, str):
+        raise ValueError("developer_instructions must be a string")
+    return "\n\n".join(part for part in (existing, system_prompt) if part)
+
+
 async def start_thread_with_raw_events(*, client: Any, sdk: Any, options: dict[str, Any]) -> Any:
     """Start a thread with App Server model-response notifications enabled.
 

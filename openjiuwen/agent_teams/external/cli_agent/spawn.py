@@ -200,6 +200,7 @@ async def build_cli_runtime(
     fallback_external_model_config: ExternalCliModelConfig | None = None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     system_prompt: str | None = None,
+    system_prompt_mode: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
     resume_external_backend: bool = False,
@@ -249,6 +250,7 @@ async def build_cli_runtime(
         fallback_external_model_config: Optional endpoint used only after an
             explicit native authentication failure.
         promote_fallback_model: Callback persisting the fallback as active.
+        system_prompt_mode: Claude/Codex append or replace policy; None uses the provider default.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -311,6 +313,7 @@ async def build_cli_runtime(
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
+            system_prompt_mode=system_prompt_mode,
             extra_env=extra_env,
             ssh_transport=ssh_transport,
             resume_external_backend=resume_external_backend,
@@ -360,6 +363,7 @@ async def build_cli_runtime(
             fallback_external_model_config=fallback_external_model_config,
             promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
+            system_prompt_mode=system_prompt_mode,
             extra_env=extra_env,
             resume_external_backend=resume_external_backend,
             member_agent_id=member_agent_id,
@@ -510,6 +514,7 @@ def _build_claude_member_runtime(
     fallback_external_model_config: ExternalCliModelConfig | None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
     system_prompt: str | None,
+    system_prompt_mode: str | None,
     extra_env: dict[str, str] | None,
     ssh_transport: SshTransportConfig | None,
     resume_external_backend: bool,
@@ -537,6 +542,7 @@ def _build_claude_member_runtime(
     if external_model_config is None and fallback_external_model_config is not None:
         fallback_model = _claude_model(fallback_external_model_config)
     config = ClaudeCodeHarnessConfig(
+        system_prompt_mode=system_prompt_mode or "append",
         cwd=cwd,
         add_dirs=add_dirs,
         env=env,
@@ -629,6 +635,7 @@ async def _build_codex_member_runtime(
     fallback_external_model_config: ExternalCliModelConfig | None,
     promote_fallback_model: Callable[[], Awaitable[bool]] | None,
     system_prompt: str | None,
+    system_prompt_mode: str | None,
     extra_env: dict[str, str] | None,
     resume_external_backend: bool,
     member_agent_id: str,
@@ -670,6 +677,7 @@ async def _build_codex_member_runtime(
     if external_model_config is None and fallback_external_model_config is not None:
         fallback_model = _codex_model(fallback_external_model_config)
     config_kwargs: dict[str, Any] = {
+        "system_prompt_mode": system_prompt_mode or "replace",
         "cwd": cwd,
         "env": env,
         "inherit_process_env": False,
