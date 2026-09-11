@@ -611,6 +611,32 @@ class StatusCode(Enum):
         "retrieval query_rewriter input is invalid, reason: {error_msg}",
     )
 
+    # KnowledgeBase Retrieval - Code Graph 155700 - 155799
+    RETRIEVAL_CODE_GRAPH_INIT_FAILED = (
+        155700,
+        "retrieval code_graph init failed, reason: {error_msg}",
+    )
+    RETRIEVAL_CODE_GRAPH_PARAM_ERROR = (
+        155701,
+        "retrieval code_graph param is invalid, reason: {error_msg}",
+    )
+    RETRIEVAL_CODE_GRAPH_PATH_INVALID = (
+        155702,
+        "retrieval code_graph path is invalid, reason: {error_msg}",
+    )
+    RETRIEVAL_CODE_GRAPH_TIMEOUT = (
+        155703,
+        "retrieval code_graph timed out after {timeout}s, reason: {error_msg}",
+    )
+    RETRIEVAL_CODE_GRAPH_RUNTIME_ERROR = (
+        155704,
+        "retrieval code_graph runtime error, reason: {error_msg}",
+    )
+    RETRIEVAL_CODE_GRAPH_NOT_FOUND = (
+        155705,
+        "retrieval code_graph resource not found, reason: {error_msg}",
+    )
+
     # =========================
     # Memory Engine 158000 – 159999
     # =========================

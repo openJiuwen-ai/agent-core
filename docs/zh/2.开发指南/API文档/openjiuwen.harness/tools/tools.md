@@ -32,6 +32,24 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 |---|---|
 | `CodeTool` | 执行代码片段（Python 等），支持沙箱化执行 |
 
+### Code Graph 检索工具
+
+在 Code Agent 上设置 `code_graph_profile="graph"` 后注册。默认 `off`。需自行安装 `tree-sitter-language-pack`；语法在 `jiuwenswarm-init` / `jiuwenswarm-start` 时下载。Coding Agent 运行时不会下载。缺失或语法未缓存会提示并走 grep。`prompt_mode="locate"`（评测）额外注册 `submit_code_context`。
+
+| 工具 | 说明 |
+|---|---|
+| `resolve_symbol` | 按精确类/函数/方法名解析 `symbol_id` |
+| `find_code_symbols` | 未知精确名时生成定义候选 |
+| `search_source_text` | 搜索报错、配置键等精确字面量 |
+| `inspect_code_structure` | 列出文件或类的成员 |
+| `read_symbol` / `read_code` | 读取符号定义或带行号源码 |
+| `find_callers` / `find_callees` / `find_importers` / `find_base_classes` / `find_subclasses` | 单跳图关系 |
+| `trace_call_paths` | 多跳调用路径 |
+| `select_code_context` | 标记已读位置 |
+| `submit_code_context` | 仅 locate 评测：提交 `<PATCH_CONTEXT>` |
+
+示例：`examples/code_graph/code_agent_graph.py`。
+
 ### 视觉工具
 
 | 工具 | 说明 |
