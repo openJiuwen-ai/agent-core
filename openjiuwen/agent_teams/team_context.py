@@ -98,7 +98,9 @@ class TeamContextTracker:
             ``None`` degrades the tracker to the identity channel only (unit
             tests that only care about the static content).
         member_name: This member's semantic identifier.
-        role: This member's team role; gates the ``[human]`` roster tag.
+        role: This member's team role; gates the ``[human]`` roster tag
+            (the tag itself covers both human flavors — ``human_agent``
+            avatars and ``passive_human`` members).
         display_name: This member's human-readable label.
         member_workspace_path: This member's own artifact directory.
         member_prompt: This member's private working agreement.
@@ -108,7 +110,8 @@ class TeamContextTracker:
             only. Members bound to a project pass ``None`` and the bullet is
             suppressed (they keep deliverables in the project).
         expose_human_agents_to_teammates: Team switch letting teammates see the
-            ``[human]`` tag (leaders and human agents always see it).
+            ``[human]`` tag (leaders and human members always see it; the tag
+            marks both the avatar and passive flavors).
         language: Rendering language ('cn' or 'en').
         fork_source: When this member was forked from another (spawned with
             ``fork="..."``), the source member's name. ``None`` for a normal

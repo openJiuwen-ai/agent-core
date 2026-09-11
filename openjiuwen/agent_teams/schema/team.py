@@ -107,11 +107,23 @@ class TeamRole(str, Enum):
     aliasing it onto the plain ``TEAMMATE`` label. Role-driven dispatch
     (CLI-vs-DeepAgent) is gated on the ``cli_agent`` registry, not on this
     role value.
+
+    ``PASSIVE_HUMAN`` is a human member with **no avatar at all** — no
+    harness, no LLM, no coordination loop. It exists as a roster identity
+    plus a message-bus address: team-side messages and task assignments
+    are relayed straight to the controlling human through the SDK's HITT
+    inbound callback, and the human acts back through the interact channel
+    — natural-language messages via the ``$name`` grammar, and structured
+    tool calls via the ``HumanAgentToolCall`` passthrough payload, which
+    the runtime executes under this member's identity. It may hold and
+    complete tasks; it is never a coordinated member (no startup /
+    restart / recovery path may spawn a runtime for it).
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    PASSIVE_HUMAN = "passive_human"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
     EXTERNAL_CLI = "external_cli"
@@ -204,6 +216,7 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
+        TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
 
 

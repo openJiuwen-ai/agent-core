@@ -269,6 +269,18 @@ STRINGS: dict[str, dict[str, str]] = {
             "可使用文件、任务、工作空间等工具替用户完成事务，但不主动发声、不自主认领任务。"
         ),
         "hitt.human_agent_spawned": "[成员事件] 人类成员 human_agent 已加入团队",
+        # HITT — passive human member (no avatar)
+        "hitt.passive_human_display_name": "被动人类成员",
+        "hitt.passive_human_default_desc": (
+            "直接参与协作的真人，团队内没有代理（avatar）。"
+            "消息与任务指派经外部通道送达本人；"
+            "本人通过外部协议以工具透传方式回应该团队（发言、查看任务、认领、完成、审查），"
+            "工具操作与人类成员一致，由运行时以其身份直接执行。"
+        ),
+        "hitt.passive_task_assigned": (
+            "[任务指派] 任务 [{task_id}] {title} 已指派给你。"
+            "请通过你的外部通道完成该任务，并透传 member_complete_task 标记完成。"
+        ),
         # HITT — team events delivered to human_agent's harness. Different
         # wording from the teammate templates so the avatar LLM frames the
         # input as a notification for its controller (the real human who
@@ -660,6 +672,21 @@ STRINGS: dict[str, dict[str, str]] = {
             "claim tasks."
         ),
         "hitt.human_agent_spawned": "[Member Event] Human member 'human_agent' joined the team",
+        # HITT — passive human member (no avatar)
+        "hitt.passive_human_display_name": "Passive Human Member",
+        "hitt.passive_human_default_desc": (
+            "A real human collaborating on the team with no avatar. Messages "
+            "and task assignments are relayed to them over their external "
+            "channel; they act back through the external protocol by "
+            "relaying tool calls (speak, view tasks, claim, complete, "
+            "verify) that the runtime executes under their identity — the "
+            "same tool operations a human member has."
+        ),
+        "hitt.passive_task_assigned": (
+            "[Task Assigned] Task [{task_id}] \"{title}\" has been assigned "
+            "to you. Complete it through your external channel and relay "
+            "member_complete_task to mark it done."
+        ),
         # HITT — team events delivered to human_agent's harness. Wording is
         # distinct from the teammate templates so the avatar LLM frames the
         # input as a notification for its controller (the real human driving

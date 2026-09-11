@@ -1115,6 +1115,47 @@ class TeamBackend:
             team_logger.info("Shutdown failed member {} directly", member_name)
             return MemberOpResult.success()
 
+        # Passive humans have no process to consume a MEMBER_SHUTDOWN event,
+        # so the two-phase REQUESTED→SHUTDOWN dance would strand the row in
+        # SHUTDOWN_REQUESTED (a non-settled status) forever. Land the
+        # terminal state directly — READY→SHUTDOWN is a legal edge — and
+        # still publish the shutdown event so rosters and observers refresh.
+        # No shutdown notice message: the member is removed from the
+        # reachable set the moment the status flips.
+        if await self.is_passive_human(member_name):
+            from openjiuwen.agent_teams.schema.status import (
+                MEMBER_TRANSITIONS,
+                is_valid_transition,
+            )
+
+            if not is_valid_transition(current_status, MemberStatus.SHUTDOWN, MEMBER_TRANSITIONS):
+                return MemberOpResult.fail(
+                    f"Member {member_name} cannot shut down from status '{current_status.value}'"
+                )
+            success = await self.db.member.update_member_status(
+                member_name, self.team_name, MemberStatus.SHUTDOWN.value
+            )
+            if not success:
+                return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
+
+            try:
+                await self.messager.publish(
+                    topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                    message=EventMessage.from_event(
+                        MemberShutdownEvent(
+                            team_name=self.team_name,
+                            member_name=member_name,
+                            force=force,
+                        )
+                    ),
+                )
+                team_logger.debug(f"Member shutdown event published: {member_name}")
+            except Exception as e:
+                team_logger.error(f"Failed to publish member shutdown event for member {member_name}: {e}")
+
+            team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
+            return MemberOpResult.success()
+
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
             MEMBER_TRANSITIONS,
@@ -1977,6 +2018,11 @@ class TeamBackend:
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
                 continue
+            # Passive humans register as READY below (no runtime to start);
+            # the generic UNSTARTED path would feed them to the startup
+            # sweep, which must never spawn a runtime for them.
+            if member_spec.role_type == TeamRole.PASSIVE_HUMAN:
+                continue
             if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
                 skipped_bridge_specs.append(member_spec)
                 # Drop the index entry as well so downstream code does
@@ -2012,7 +2058,7 @@ class TeamBackend:
 
         # HITT: register every declared human member when the effective
         # capability is on. When the leader passed enable_hitt=False at
-        # build_team time, all predefined HUMAN_AGENT specs are skipped
+        # build_team time, all predefined human specs are skipped
         # (the ceiling itself stays open per the spec, but this run
         # declined to engage HITT).
         human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
@@ -2029,6 +2075,24 @@ class TeamBackend:
                 "Skipped %d predefined HUMAN_AGENT(s) for team %s because "
                 "build_team(enable_hitt=False) overrode the spec capability",
                 len(human_specs),
+                team_name,
+            )
+
+        # Passive humans ride the same gate: predefined PASSIVE_HUMAN specs
+        # register (as READY roster identities) only when HITT is engaged.
+        passive_specs = [m for m in self.predefined_members if m.role_type == TeamRole.PASSIVE_HUMAN]
+        if effective_enable_hitt:
+            for passive_spec in passive_specs:
+                await self.spawn_passive_human(
+                    member_name=passive_spec.member_name,
+                    display_name=passive_spec.display_name,
+                    desc=passive_spec.desc,
+                )
+        elif passive_specs:
+            team_logger.warning(
+                "Skipped %d predefined PASSIVE_HUMAN(s) for team %s because "
+                "build_team(enable_hitt=False) overrode the spec capability",
+                len(passive_specs),
                 team_name,
             )
 
@@ -2129,8 +2193,95 @@ class TeamBackend:
             )
         return result
 
+    async def spawn_passive_human(
+        self,
+        *,
+        member_name: str,
+        display_name: Optional[str] = None,
+        desc: Optional[str] = None,
+    ) -> MemberOpResult:
+        """Register a passive human member that is READY from birth.
+
+        Public method called by ``build_team`` (for predefined
+        PASSIVE_HUMAN specs) and ``SpawnPassiveHumanTool`` (dynamic
+        spawn). A passive member has **no avatar**: no harness, no LLM,
+        no prompt, no coordination loop — just a roster row and a
+        message-bus address. Team-side traffic reaches the controlling
+        human through the HITT inbound callback, and the human acts back
+        via ``HumanAgentMessage`` (bus messages) or the
+        ``HumanAgentToolCall`` passthrough (tools executed by the runtime
+        under this member's identity).
+
+        Status starts at READY — a legal settled state — so the startup
+        sweep (which only looks for UNSTARTED rows) never picks the
+        member up and no recovery path may spawn a runtime for it.
+        Events: ``MemberSpawnedEvent`` is published here (best-effort)
+        because the shared ``_spawn_and_publish`` helper is owned by the
+        startup path this role deliberately skips.
+
+        Args:
+            member_name: Unique member identifier for the human.
+            display_name: Optional display label; falls back to the
+                framework-managed default when omitted.
+            desc: Optional member description; falls back to the
+                framework default.
+
+        Returns:
+            ``MemberOpResult``. Returns failure when HITT is disabled
+            (``MemberOpResult.fail``) or the underlying member create
+            fails.
+        """
+        if not self._enable_hitt:
+            return MemberOpResult.fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team)"
+            )
+
+        resolved_display_name = display_name or t("hitt.passive_human_display_name")
+        resolved_desc = desc or t("hitt.passive_human_default_desc")
+        member_card = AgentCard(
+            id=f"{self.team_name}_{member_name}",
+            name=resolved_display_name,
+            description=resolved_desc,
+        )
+        result = await self.spawn_member(
+            member_name=member_name,
+            display_name=resolved_display_name,
+            agent_card=member_card,
+            desc=resolved_desc,
+            status=MemberStatus.READY,
+            execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE,
+            role=TeamRole.PASSIVE_HUMAN,
+        )
+        if not result.ok:
+            team_logger.warning(
+                "Failed to register passive human '%s' for team %s: %s",
+                member_name,
+                self.team_name,
+                result.reason,
+            )
+            return result
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberSpawnedEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                    ),
+                ),
+            )
+            team_logger.debug("Member spawned event published: {}", member_name)
+        except Exception as e:
+            team_logger.error("Failed to publish member spawned event for {}: {}", member_name, e)
+
+        team_logger.info("Passive human member {} registered as READY", member_name)
+        return result
+
     async def is_human_agent(self, member_name: Optional[str]) -> bool:
-        """Whether ``member_name`` is a registered human-agent member.
+        """Whether ``member_name`` is a registered human member (avatar or passive).
 
         Queries ``team_member.role`` from DB on every call — no in-memory
         cache, so the answer is always current regardless of when the
@@ -2143,10 +2294,26 @@ class TeamBackend:
             return False
         return await member_dao.is_human_agent(self.team_name, member_name)
 
-    async def is_live_human_agent(self, member_name: str | None) -> bool:
-        """Whether ``member_name`` is a human-agent member still on the team.
+    async def is_passive_human(self, member_name: Optional[str]) -> bool:
+        """Whether ``member_name`` is a registered passive human member.
 
-        Narrower than :meth:`is_human_agent`: a member whose status is in
+        The flavor probe that splits the human family: passive members
+        have no avatar, so they may drive the tool-call passthrough and
+        must never be routed through avatar-driving paths. Same DB-probe
+        discipline as :meth:`is_human_agent` (no in-memory cache).
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_passive_human(self.team_name, member_name)
+
+    async def is_live_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human member still on the team.
+
+        Covers both flavors (avatar and passive). Narrower than
+        :meth:`is_human_agent`: a member whose status is in
         ``MEMBER_DEPARTED_STATUSES`` (shutdown requested / shut down) answers
         False. The HITT task lock in ``UpdateTaskTool`` keys on this, so
         shutting a human down releases the tasks it still holds back to the

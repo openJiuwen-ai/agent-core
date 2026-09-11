@@ -40,6 +40,7 @@ from openjiuwen.agent_teams.interaction.payload import (
     GodViewMessage,
     HumanAgentInboundEvent,
     HumanAgentMessage,
+    HumanAgentToolCall,
     InteractPayload,
     OperatorMessage,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "HumanAgentInboundEvent",
     "HumanAgentMessage",
     "HumanAgentNotEnabledError",
+    "HumanAgentToolCall",
     "InteractPayload",
     "OperatorMessage",
     "REMOTE_UNAVAILABLE_SENTINEL",

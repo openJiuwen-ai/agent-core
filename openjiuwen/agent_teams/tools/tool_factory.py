@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.tools.tool_member import (
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
     SpawnHumanAgentTool,
+    SpawnPassiveHumanTool,
     SpawnTeammateTool,
 )
 from openjiuwen.agent_teams.tools.tool_message import ReportToLeaderTool, SendMessageTool
@@ -212,6 +213,7 @@ def create_team_tools(
         "checkpoint": CheckpointTool(agent_team, t),
         "list_checkpoints": ListCheckpointsTool(agent_team, t),
         "spawn_human_agent": SpawnHumanAgentTool(agent_team, t),
+        "spawn_passive_human": SpawnPassiveHumanTool(agent_team, t),
         "spawn_bridge_agent": SpawnBridgeAgentTool(agent_team, t),
         "spawn_external_cli": SpawnExternalCliTool(
             agent_team,
@@ -281,7 +283,7 @@ def create_team_tools(
     # Unconditional set subtraction is idempotent — teammate / human_agent
     # ``allowed`` sets don't contain these leader-only tools anyway.
     if not agent_team.hitt_enabled():
-        allowed = allowed - {"spawn_human_agent"}
+        allowed = allowed - {"spawn_human_agent", "spawn_passive_human"}
     if not agent_team.bridge_enabled():
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():

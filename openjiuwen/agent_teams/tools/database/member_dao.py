@@ -34,6 +34,14 @@ from openjiuwen.core.common.logging import team_logger
 _DEPARTED_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_DEPARTED_STATUSES)
 _UNREACHABLE_STATUS_VALUES: tuple[str, ...] = tuple(status.value for status in MEMBER_UNREACHABLE_STATUSES)
 
+# The human-member family: avatar-backed (``human_agent``) and passive
+# (``passive_human``). Spelled as literals to keep this module out of the
+# ``schema.team`` import cycle, mirroring ``create_member``'s ``role``
+# docstring convention. Every "human agent" probe below matches both — the
+# two roles share the HITT lifecycle surfaces (sender validation, inbound
+# callbacks, task locks); where they diverge, call ``is_passive_human``.
+_HUMAN_MEMBER_ROLES: tuple[str, ...] = ("human_agent", "passive_human")
+
 
 def _valid_predecessor_values(target, transitions) -> list[str]:
     """Return the status string values that may legally transition to ``target``.
@@ -114,22 +122,39 @@ class MemberDao:
                 return False
 
     async def is_human_agent(self, team_name: str, member_name: str) -> bool:
-        """Return True if ``member_name`` is a human-agent member.
+        """Return True if ``member_name`` is a human member (avatar or passive).
 
         Single-row probe (index-friendly) for the common case of
         checking one member's role without scanning the full roster.
 
         Role only — a member that has already left the team still answers
         True. Guards that must not fire for a departed member want
-        :meth:`is_live_human_agent` instead.
+        :meth:`is_live_human_agent` instead. Callers that need to tell the
+        avatar and passive flavors apart follow up with
+        :meth:`is_passive_human`.
         """
-        from openjiuwen.agent_teams.schema.team import TeamRole
-
         async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.member_name == member_name,
-                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.role.in_(_HUMAN_MEMBER_ROLES),
+            )
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def is_passive_human(self, team_name: str, member_name: str) -> bool:
+        """Return True if ``member_name`` is a passive human member.
+
+        Companion probe to :meth:`is_human_agent` for the branches where the
+        two human flavors diverge (tool-call passthrough eligibility,
+        avatar-driving refusal, role lookup for rendering): only the
+        passive role has no avatar, so only it may act through the
+        passthrough executor.
+        """
+        async with self._sessions.read() as session:
+            stmt = select(TeamMember.member_name).where(
+                TeamMember.team_name == team_name,
+                TeamMember.member_name == member_name,
+                TeamMember.role == "passive_human",
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
@@ -139,34 +164,31 @@ class MemberDao:
         member_name: str,
         excluded: tuple[str, ...],
     ) -> bool:
-        """Single-row human-agent probe with a status exclusion applied."""
-        from openjiuwen.agent_teams.schema.team import TeamRole
-
+        """Single-row human-member probe with a status exclusion applied."""
         async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
                 TeamMember.member_name == member_name,
-                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.role.in_(_HUMAN_MEMBER_ROLES),
                 TeamMember.status.notin_(excluded),
             )
             return (await session.execute(stmt)).scalar_one_or_none() is not None
 
     async def _list_human_agents_excluding(self, team_name: str, excluded: tuple[str, ...]) -> list[str]:
-        """Human-agent roster with a status exclusion applied."""
-        from openjiuwen.agent_teams.schema.team import TeamRole
-
+        """Human-member roster with a status exclusion applied."""
         async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
-                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.role.in_(_HUMAN_MEMBER_ROLES),
                 TeamMember.status.notin_(excluded),
             )
             return list((await session.execute(stmt)).scalars().all())
 
     async def is_live_human_agent(self, team_name: str, member_name: str) -> bool:
-        """Return True if ``member_name`` is a human-agent member still on the team.
+        """Return True if ``member_name`` is a human member still on the team.
 
-        Excludes ``MEMBER_DEPARTED_STATUSES``. The HITT task lock keys on this
+        Covers both flavors (avatar and passive). Excludes
+        ``MEMBER_DEPARTED_STATUSES``. The HITT task lock keys on this
         rather than on the bare role: the lock exists to stop the leader from
         stealing work out from under a live human, and a human the leader has
         already released is no longer there to do it.
@@ -174,34 +196,34 @@ class MemberDao:
         return await self._is_human_agent_excluding(team_name, member_name, _DEPARTED_STATUS_VALUES)
 
     async def is_reachable_human_agent(self, team_name: str, member_name: str) -> bool:
-        """Return True if ``member_name`` is a human-agent member still reachable.
+        """Return True if ``member_name`` is a human member still reachable.
 
-        Excludes only ``MEMBER_UNREACHABLE_STATUSES`` — a member that merely has
-        shutdown *requested* is still reachable, and must be, or the notice that
-        it was removed would never reach its controller. Message delivery keys on
-        this; work guards key on the stricter :meth:`is_live_human_agent`.
+        Covers both flavors (avatar and passive). Excludes only
+        ``MEMBER_UNREACHABLE_STATUSES`` — a member that merely has shutdown
+        *requested* is still reachable, and must be, or the notice that
+        it was removed would never reach its controller. Message delivery
+        keys on this; work guards key on the stricter
+        :meth:`is_live_human_agent`.
         """
         return await self._is_human_agent_excluding(team_name, member_name, _UNREACHABLE_STATUS_VALUES)
 
     async def list_human_agent_names(self, team_name: str) -> list[str]:
-        """Return member names whose ``role`` is ``human_agent``.
+        """Return member names whose ``role`` is a human member (avatar or passive).
 
-        Used by ``TeamBackend.human_agent_names()`` to enumerate all
-        human-agent members on the team. Role only — members on their way out
-        or already gone are included; see :meth:`list_live_human_agent_names`
+        Used by ``TeamBackend.human_agent_names()`` to enumerate all human
+        members on the team. Role only — members on their way out or
+        already gone are included; see :meth:`list_live_human_agent_names`
         and :meth:`list_reachable_human_agent_names`.
         """
-        from openjiuwen.agent_teams.schema.team import TeamRole
-
         async with self._sessions.read() as session:
             stmt = select(TeamMember.member_name).where(
                 TeamMember.team_name == team_name,
-                TeamMember.role == TeamRole.HUMAN_AGENT.value,
+                TeamMember.role.in_(_HUMAN_MEMBER_ROLES),
             )
             return list((await session.execute(stmt)).scalars().all())
 
     async def list_live_human_agent_names(self, team_name: str) -> list[str]:
-        """Return human-agent member names that have not left the team.
+        """Return human member names (avatar or passive) that have not left the team.
 
         Batch counterpart of :meth:`is_live_human_agent`, used by the cancel-all
         path to skip the tasks held by humans still on the team while cancelling
@@ -210,7 +232,7 @@ class MemberDao:
         return await self._list_human_agents_excluding(team_name, _DEPARTED_STATUS_VALUES)
 
     async def list_reachable_human_agent_names(self, team_name: str) -> list[str]:
-        """Return human-agent member names that can still be delivered to.
+        """Return human member names (avatar or passive) that can still be delivered to.
 
         Batch counterpart of :meth:`is_reachable_human_agent`, used to fan a
         broadcast out to human controllers.

@@ -51,7 +51,7 @@ class MemberInfo(BaseModel):
     status: str = Field(description="MemberStatus value")
     execution_status: str | None = Field(default=None, description="ExecutionStatus value")
     mode: str = Field(description="MemberMode value")
-    role: str = Field(description="TeamRole value (leader/teammate/human_agent)")
+    role: str = Field(description="TeamRole value (leader/teammate/human_agent/passive_human)")
     cli_agent: str | None = Field(
         default=None,
         description=(

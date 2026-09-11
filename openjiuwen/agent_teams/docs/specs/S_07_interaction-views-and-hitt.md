@@ -95,14 +95,37 @@ class DeliverResult:
     ok: bool
     message_id: Optional[str] = None
     reason: Optional[str] = None
+    output: Optional[str] = None       # F_111: 透传工具执行的 map_result 文本
+    data: Optional[dict] = None        # F_111: 透传工具执行的 ToolOutput.data
 
     @classmethod
     def success(cls, message_id: Optional[str] = None) -> "DeliverResult": ...
     @classmethod
+    def tool_success(cls, *, output: str, data: Optional[dict] = None) -> "DeliverResult": ...
+    @classmethod
     def failure(cls, reason: str) -> "DeliverResult": ...
 ```
 
-`reason` 是稳定 token（snake_case，可带 `:<arg>` 后缀），用于 SDK 区分错因。当前已用：`send_failed:<target>` / `broadcast_failed` / `unknown_member:<target>` / `agent_unavailable` / `deliver_to_leader_failed:<exc>` / `human_agent_not_enabled` / `unknown_human_agent` / `not_active` / `gate_closed` / `no_team_backend` / `unknown_payload:<cls>`。新增 reason 必须 grep 现有用法保唯一，且仅由 interaction 或 runtime 层产出。
+`reason` 是稳定 token（snake_case，可带 `:<arg>` 后缀），用于 SDK 区分错因。当前已用：`send_failed:<target>` / `broadcast_failed` / `unknown_member:<target>` / `agent_unavailable` / `deliver_to_leader_failed:<exc>` / `human_agent_not_enabled` / `unknown_human_agent` / `not_active` / `gate_closed` / `no_team_backend` / `unknown_payload:<cls>` / `passive_member_no_avatar` / `tool_passthrough_avatar_not_supported` / `tool_passthrough_no_runtime`。新增 reason 必须 grep 现有用法保唯一，且仅由 interaction 或 runtime 层产出。
+
+### `HumanAgentToolCall`（F_111 透传通道）
+
+```python
+@dataclass(frozen=True, slots=True)
+class HumanAgentToolCall:
+    sender: str           # passive human 成员名（avatar 型拒绝）
+    tool_name: str        # PASSIVE_HUMAN_TOOLS 内的工具名
+    tool_args: dict       # 与工具 input_params 一一对应
+```
+
+被动人类成员（无 avatar）的行动通道：外部协议把真人的动作以 tool call 透传进来，
+运行时按 sender 身份直接执行（`PassiveToolExecutor`，绑定该成员名的
+`TeamTaskManager` / `TeamMessageManager`，与 avatar 的工具身份守卫同构），结果
+经 `DeliverResult.tool_success(output=, data=)` 同步返回。只接受 dataclass 形态
+（`Runner.interact_agent_team(payload, ...)`），不做 str grammar；裸 `$passive`
+消息输入（无 @）返回 `passive_member_no_avatar`。出站方向：
+`HumanAgentInboundEvent` 增加可选 `meta` 字段透传模板消息的结构化载荷
+（template key + task refs），供外部协议机器可读分发。详见 F_111。
 
 ### `parse_mention`（router.py）
 
@@ -330,8 +353,8 @@ RESERVED_MEMBER_NAMES: frozenset[str] = frozenset({
 
 | 条件 | 结果 |
 |---|---|
-| `enable_hitt=False` 且 `predefined_members` 含 `HUMAN_AGENT` 角色 | `AGENT_TEAM_CONFIG_INVALID`（特性禁了但预配了人）|
-| `enable_hitt=True` 且 `predefined_members` 无 `HUMAN_AGENT` | 允许（动态 spawn 路径）|
+| `enable_hitt=False` 且 `predefined_members` 含 `HUMAN_AGENT` / `PASSIVE_HUMAN` 角色 | `AGENT_TEAM_CONFIG_INVALID`（特性禁了但预配了人）|
+| `enable_hitt=True` 且 `predefined_members` 无人类成员 | 允许（动态 spawn 路径）|
 | `predefined_members[*].member_name in RESERVED_MEMBER_NAMES` 且不是 `HUMAN_AGENT` | `AGENT_TEAM_CONFIG_INVALID` |
 
 ### 运行约束（代码层 + Prompt 层双重保证）

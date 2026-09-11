@@ -483,6 +483,63 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         )
 
 
+class SpawnPassiveHumanTool(_SpawnToolBase):
+    """Spawn a passive human member (``role_type='passive_human'``).
+
+    A passive human has no avatar — no harness, no LLM, no prompt — just
+    a READY roster identity plus a message-bus address. The controlling
+    human speaks through the interact channel (messages and tool-call
+    passthrough), so the member can be assigned tasks like any human
+    collaborator. Schema omits ``model_name`` / ``prompt`` for the same
+    reason as ``SpawnHumanAgentTool``; the HITT check below is a
+    defensive backstop (the tool is not wired when HITT is disabled).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_passive_human")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_passive_human", "desc")},
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        if not self.team.hitt_enabled():
+            return self._fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team). "
+                "Enable HITT in the team spec or use spawn_teammate instead."
+            )
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_passive_human(
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc", ""),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="passive_human",
+        )
+
+
 class SpawnBridgeAgentTool(_SpawnToolBase):
     """Spawn a bridge agent to a remote independent agent (``role_type='bridge_agent'``).
 

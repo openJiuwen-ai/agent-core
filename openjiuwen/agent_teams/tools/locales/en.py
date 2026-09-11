@@ -142,6 +142,30 @@ STRINGS: dict[str, str] = {
         "member via HumanAgentInbox; the model and startup prompt are managed "
         "by the framework template, so do not provide them here"
     ),
+    # ===== spawn_passive_human =================================================
+    # spawn_passive_human._desc lives in descs/en/member/spawn_passive_human.md
+    "spawn_passive_human.member_name": (
+        "[PUBLIC] Unique name for the passive human member (semantic slug, "
+        "e.g. product-owner, DNS-label kebab-case). **First character must be a "
+        "lowercase ASCII letter (a-z); the rest may be lowercase letters, "
+        "digits (0-9) or hyphen (-)** — no uppercase, underscore, whitespace, "
+        "CJK or any other non-ASCII characters. Serves as the primary "
+        "identifier and routing key; must be unique within the team"
+    ),
+    "spawn_passive_human.display_name": (
+        "[PUBLIC] Human-readable display label for the passive human member "
+        "(e.g. 'Product Owner'); purely presentational, not used for routing. "
+        "Injected into every other member's system prompt and returned by "
+        "list_members — do not put private content here"
+    ),
+    "spawn_passive_human.desc": (
+        "[PUBLIC] Role profile and responsibilities of the passive human "
+        "member, used for display and description persistence and injected "
+        "into other members' system prompts / returned by list_members. This "
+        "member has no internal avatar: the real human communicates and "
+        "relays tool calls through their external channel, and may be "
+        "assigned tasks"
+    ),
     # ===== spawn_bridge_agent ==================================================
     # spawn_bridge_agent._desc lives in descs/en/member/spawn_bridge_agent.md
     "spawn_bridge_agent.member_name": (

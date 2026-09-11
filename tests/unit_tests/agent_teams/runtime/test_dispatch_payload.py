@@ -26,6 +26,7 @@ import pytest
 from openjiuwen.agent_teams.interaction import (
     GodViewMessage,
     HumanAgentMessage,
+    HumanAgentToolCall,
     OperatorMessage,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
@@ -50,6 +51,10 @@ def _make_agent(*, known_members: set[str] | None = None) -> MagicMock:
     agent.team_backend.message_manager.send_message = AsyncMock(return_value="msg-id")
     agent.team_backend.message_manager.broadcast_message = AsyncMock(return_value="bcast-id")
     agent.team_backend.member_exists = AsyncMock(side_effect=lambda name: name in members)
+    # Bare-input passive probe (r2): the HumanAgentMessage branch awaits
+    # this before driving an avatar. Default False — tests exercising the
+    # passive path override it per-case.
+    agent.team_backend.is_passive_human = AsyncMock(return_value=False)
     agent.deliver_input = AsyncMock()
     agent.has_team_member = AsyncMock(side_effect=lambda name: name in members)
     agent.auto_start_member = AsyncMock(return_value=False)
@@ -346,3 +351,175 @@ async def test_interact_str_partial_match_routes_known_and_folds_unknown():
         from_member_name="user",
     )
     agent.deliver_input.assert_awaited_once_with("@ghost on it")
+
+
+# ----------------------------------------------------------------------
+# Passive human members — bare input refusal + tool-call passthrough (r2)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_bare_human_agent_message_from_passive_member_fails():
+    """``$passive hi`` (no @target) has no avatar to drive — stable failure."""
+    agent = _make_agent()
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"passive-pm"})
+    agent.team_backend.is_passive_human = AsyncMock(return_value=True)
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentMessage(body="hi", sender="passive-pm"),
+    )
+
+    assert not result.ok
+    assert result.reason == "passive_member_no_avatar"
+    agent._avatar.interact.assert_not_called()
+    agent.team_backend.message_manager.send_message.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_targeted_human_agent_message_from_passive_member_still_delivers():
+    """``$passive @dev-1 hi`` is a normal bus message — the bare-input guard
+    only fires when there is no target at all."""
+    agent = _make_agent(known_members={"dev-1"})
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"passive-pm"})
+    agent.team_backend.is_passive_human = AsyncMock(return_value=True)
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentMessage(body="hi", sender="passive-pm", target="dev-1"),
+    )
+
+    assert result.ok
+    agent.team_backend.message_manager.send_message.assert_awaited_once_with(
+        content="hi",
+        to_member_name="dev-1",
+        from_member_name="passive-pm",
+    )
+
+
+def _make_passive_tool_agent(*, passive: bool = True, hitt: bool = True) -> MagicMock:
+    """Fake agent wired for the ``HumanAgentToolCall`` dispatch branch."""
+    agent = _make_agent()
+    agent.team_backend.hitt_enabled = MagicMock(return_value=hitt)
+    agent.team_backend.human_agent_names = AsyncMock(
+        return_value={"passive-pm", "avatar-pm"} if passive else set()
+    )
+    agent.team_backend.is_passive_human = AsyncMock(return_value=passive)
+    agent.blueprint = None
+    return agent
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_tool_call_executes_and_returns_output():
+    """A relayed tool call runs under the sender's identity and the result
+    comes back synchronously on the DeliverResult."""
+    from openjiuwen.harness.tools.base_tool import ToolOutput
+
+    agent = _make_passive_tool_agent()
+    entry = ActiveTeam(team_name="alpha", agent=agent, current_session_id="s1")
+    executor = MagicMock(name="PassiveToolExecutor")
+    executor.execute = AsyncMock(
+        return_value=ToolOutput(success=True, data={"task_id": "t-1", "status": "completed"})
+    )
+    executor.map_output = MagicMock(return_value="Task #t-1 completed")
+    entry.passive_tool_executor = executor
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentToolCall(
+            sender="passive-pm",
+            tool_name="member_complete_task",
+            tool_args={"task_id": "t-1"},
+        ),
+        entry=entry,
+    )
+
+    assert result.ok
+    assert result.output == "Task #t-1 completed"
+    assert result.data == {"task_id": "t-1", "status": "completed"}
+    executor.execute.assert_awaited_once_with("passive-pm", "member_complete_task", {"task_id": "t-1"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_tool_call_failure_surfaces_tool_error():
+    """A failing tool execution maps to a failed DeliverResult carrying the
+    tool's error text as the reason token."""
+    from openjiuwen.harness.tools.base_tool import ToolOutput
+
+    agent = _make_passive_tool_agent()
+    entry = ActiveTeam(team_name="alpha", agent=agent, current_session_id="s1")
+    executor = MagicMock(name="PassiveToolExecutor")
+    executor.execute = AsyncMock(
+        return_value=ToolOutput(success=False, error="Task 't-9' not found")
+    )
+    entry.passive_tool_executor = executor
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentToolCall(sender="passive-pm", tool_name="member_complete_task", tool_args={"task_id": "t-9"}),
+        entry=entry,
+    )
+
+    assert not result.ok
+    assert "not found" in (result.reason or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_tool_call_from_avatar_rejected():
+    """Avatars keep their LLM tool loop as the governed path — a relayed
+    call under an avatar identity is refused with a stable token."""
+    agent = _make_passive_tool_agent(passive=False)
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"avatar-pm"})
+    entry = ActiveTeam(team_name="alpha", agent=agent, current_session_id="s1")
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentToolCall(sender="avatar-pm", tool_name="view_task", tool_args={}),
+        entry=entry,
+    )
+
+    assert not result.ok
+    assert result.reason == "tool_passthrough_avatar_not_supported"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_tool_call_unknown_sender_rejected():
+    """A sender that is not a registered human member never reaches the
+    executor — no rogue identity may act on the team."""
+    agent = _make_passive_tool_agent()
+    agent.team_backend.human_agent_names = AsyncMock(return_value=set())
+    entry = ActiveTeam(team_name="alpha", agent=agent, current_session_id="s1")
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentToolCall(sender="ghost", tool_name="view_task", tool_args={}),
+        entry=entry,
+    )
+
+    assert not result.ok
+    assert result.reason == "unknown_human_agent"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_human_agent_tool_call_hitt_disabled_rejected():
+    """Passthrough rides the same HITT capability ceiling as every other
+    human-member surface."""
+    agent = _make_passive_tool_agent(hitt=False)
+    agent.team_backend.human_agent_names = AsyncMock(return_value={"passive-pm"})
+    entry = ActiveTeam(team_name="alpha", agent=agent, current_session_id="s1")
+
+    result = await TeamRuntimeManager._dispatch_payload(
+        agent,
+        HumanAgentToolCall(sender="passive-pm", tool_name="view_task", tool_args={}),
+        entry=entry,
+    )
+
+    assert not result.ok
+    assert result.reason == "human_agent_not_enabled"

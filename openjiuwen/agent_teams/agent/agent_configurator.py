@@ -67,13 +67,14 @@ _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
 def _resolve_team_mode(spec: TeamAgentSpec) -> str:
     if spec.team_mode is not None:
         return spec.team_mode
-    # HUMAN_AGENT predefined members are HITT roster declarations, and
-    # BRIDGE_AGENT entries are bridge-to-remote declarations — neither
-    # is a signal to flip the team away from "default". A roster of
-    # ordinary predefined teammates derives "hybrid": the leader keeps
-    # its spawn_* tools so the roster can still grow at runtime.
-    # Lock it down by setting an explicit "predefined" team_mode.
-    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.BRIDGE_AGENT}
+    # HUMAN_AGENT / PASSIVE_HUMAN predefined members are HITT roster
+    # declarations, and BRIDGE_AGENT entries are bridge-to-remote
+    # declarations — none is a signal to flip the team away from
+    # "default". A roster of ordinary predefined teammates derives
+    # "hybrid": the leader keeps its spawn_* tools so the roster can
+    # still grow at runtime. Lock it down by setting an explicit
+    # "predefined" team_mode.
+    avatar_roles = {TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN, TeamRole.BRIDGE_AGENT}
     non_avatar_predefined = [m for m in spec.predefined_members if m.role_type not in avatar_roles]
     return "hybrid" if non_avatar_predefined else "default"
 

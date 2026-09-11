@@ -64,6 +64,7 @@ async def test_recover_team_restarts_error_but_not_departed_member() -> None:
                 _member("departed", MemberStatus.SHUTDOWN),
             ]
         ),
+        is_passive_human=AsyncMock(return_value=False),
         db=SimpleNamespace(member=member_dao),
     )
     spawn_manager = MagicMock()

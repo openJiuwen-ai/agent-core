@@ -114,6 +114,7 @@ class TaskBoardHandler(BaseCoordinationHandler):
             if is_self_human:
                 return
             await self.on_task_board_event(event)
+            await self._notify_passive_assignment(payload)
             return
         await self._poll.resume_polls()
 
@@ -154,6 +155,58 @@ class TaskBoardHandler(BaseCoordinationHandler):
             is_self_human,
         )
         await self._round.deliver_input(content)
+
+    async def _notify_passive_assignment(self, payload) -> None:
+        """Relay a foreign claim targeting a passive human member as a bus message.
+
+        A passive member has no runtime polling the board, so a claim
+        addressed to it would vanish silently. Only the leader writes the
+        notification (every member's handler sees the same event — an
+        unconditioned write would deliver one copy per coordination loop).
+        The row is a framework template (F_63): empty ``content`` plus a
+        ``passive_task_assigned`` meta, rendered at delivery time against
+        the current task row. From there everything is the ordinary
+        message pipeline — the leader's ``MessageHandler`` fires the
+        member's inbound callback and marks the row read, so
+        ``is_team_completed`` is never blocked by an unread assignment.
+
+        Skipped under scheduled dispatch: the scheduler's own handoff
+        (``_send_as_leader``) already wrote the assignee a templated
+        start message, and a second copy here would double-deliver.
+        """
+        backend = self._infra.team_backend
+        mm = self._infra.message_manager
+        if backend is None or mm is None:
+            return
+
+        from openjiuwen.agent_teams.message_template import build_meta
+
+        team_spec = self._blueprint.team_spec
+        member_name = self._blueprint.member_name
+        if not member_name or team_spec is None or member_name != team_spec.leader_member_name:
+            return
+        spec = self._blueprint.spec
+        if spec is not None and spec.dispatch_mode == "scheduled":
+            return
+        if not await backend.is_passive_human(payload.member_name):
+            return
+
+        try:
+            await mm.send_message(
+                content="",
+                to_member_name=payload.member_name,
+                meta=build_meta(
+                    "passive_task_assigned",
+                    refs={"task": payload.task_id, "member": payload.member_name},
+                ),
+            )
+        except Exception as exc:
+            team_logger.warning(
+                "passive assignment notification for {} / task {} failed: {}",
+                payload.member_name,
+                payload.task_id,
+                exc,
+            )
 
     async def on_task_revoked(self, event: EventMessage) -> None:
         """A task this member held was reassigned away by the leader.

@@ -1442,3 +1442,217 @@ async def test_hitt_enabled_false_when_capability_disabled(db, messager):
         messager=messager,
     )
     assert backend.hitt_enabled() is False
+
+
+# ---------------------------------------------------------------------------
+# Passive human members (r2) — READY birth, family queries, task assignment,
+# locks, shutdown. The avatar-free flavor of the human member: it may hold and
+# complete tasks via the tool-call passthrough, so the HITT task locks guard it
+# exactly as they guard an avatar.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.level0
+def test_enable_hitt_false_with_passive_predefined_raises():
+    """Spec.enable_hitt=False with a PASSIVE_HUMAN predefined is a misconfiguration."""
+    pre = TeamMemberSpec(
+        member_name="passive-pm",
+        display_name="PM",
+        role_type=TeamRole.PASSIVE_HUMAN,
+        desc="Real human on an external channel",
+    )
+    spec = _minimal_spec(enable_hitt=False, predefined_members=[pre])
+    from openjiuwen.core.common.exception.errors import BaseError
+
+    with pytest.raises(BaseError, match="enable_hitt=False"):
+        spec._validate_hitt_consistency()
+
+
+@pytest.mark.level0
+def test_enable_hitt_true_with_passive_predefined_passes():
+    pre = TeamMemberSpec(
+        member_name="passive-pm",
+        display_name="PM",
+        role_type=TeamRole.PASSIVE_HUMAN,
+        desc="Real human on an external channel",
+    )
+    spec = _minimal_spec(enable_hitt=True, predefined_members=[pre])
+    spec._validate_hitt_consistency()  # must not raise
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_passive_human_registers_ready(db, messager):
+    backend = TeamBackend(
+        team_name="passive_reg_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+        enable_hitt=True,
+    )
+    await backend.build_team(
+        display_name="T",
+        desc="t",
+        leader_display_name="Leader",
+        leader_desc="p",
+    )
+    result = await backend.spawn_passive_human(member_name="pm-1", display_name="PM")
+    assert result.ok, result.reason
+
+    member = await db.member.get_member("pm-1", "passive_reg_team")
+    assert member is not None
+    # READY from birth — the startup sweep (UNSTARTED-only) must never pick
+    # this member up, and no recovery path may spawn a runtime for it.
+    assert member.status == MemberStatus.READY.value
+    assert member.role == TeamRole.PASSIVE_HUMAN.value
+    assert await backend.is_passive_human("pm-1") is True
+    assert await backend.is_human_agent("pm-1") is True  # family probe covers both
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_passive_human_refused_without_hitt(db, messager):
+    backend = TeamBackend(
+        team_name="passive_nohitt_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+    )
+    await backend.build_team(
+        display_name="T",
+        desc="t",
+        leader_display_name="Leader",
+        leader_desc="p",
+    )
+    result = await backend.spawn_passive_human(member_name="pm-1", display_name="PM")
+    assert not result.ok
+    assert "HITT" in result.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_build_team_predefined_passive_registered(db, messager):
+    backend = TeamBackend(
+        team_name="passive_pre_team",
+        member_name="team_leader",
+        is_leader=True,
+        db=db,
+        messager=messager,
+        predefined_members=[
+            TeamMemberSpec(
+                member_name="pm-1",
+                display_name="PM",
+                role_type=TeamRole.PASSIVE_HUMAN,
+                desc="d",
+            ),
+        ],
+        enable_hitt=True,
+    )
+    await backend.build_team(
+        display_name="T",
+        desc="t",
+        leader_display_name="Leader",
+        leader_desc="p",
+    )
+    member = await db.member.get_member("pm-1", "passive_pre_team")
+    assert member is not None
+    assert member.status == MemberStatus.READY.value
+    assert member.role == TeamRole.PASSIVE_HUMAN.value
+    # Family queries enumerate the passive flavor too.
+    assert "pm-1" in await backend.human_agent_names()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_task_assignment_to_passive_member_succeeds(built_team, db):
+    """r2 reversal: a passive member is a valid assignee — the human completes
+    the work through the tool-call passthrough."""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import TaskCreateTool
+
+    await built_team.spawn_passive_human(member_name="pm-1", display_name="PM")
+    tool = TaskCreateTool(built_team, make_translator("cn"))
+    out = await tool.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-passive",
+                    "title": "sign the contract",
+                    "content": "review and sign",
+                    "assignee": "pm-1",
+                }
+            ]
+        }
+    )
+    assert out.success, out.error
+    task = await built_team.task_manager.get("t-passive")
+    assert task.assignee == "pm-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_task_owned_by_passive_is_refused(built_team, db):
+    """The HITT task lock guards the passive flavor too — same protection as
+    an avatar: a live human's active task is leader-immutable."""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    await built_team.spawn_passive_human(member_name="pm-1", display_name="PM")
+    await _create_and_assign(built_team, db, "t-p", "pm-1")
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "t-p", "status": "cancelled"})
+    assert out.success is False
+    assert "人类成员" in out.error
+    task = await built_team.task_manager.get("t-p")
+    assert task.status == TaskStatus.IN_PROGRESS.value
+    assert task.assignee == "pm-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cancel_all_preserves_passive_claimed_task(built_team, db):
+    await built_team.spawn_passive_human(member_name="pm-1", display_name="PM")
+    await _create_and_assign(built_team, db, "t-p-keep", "pm-1")
+    await built_team.task_manager.add(title="open", content="c", task_id="t-p-open")
+
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
+
+    tool = UpdateTaskTool(built_team, make_translator("cn"))
+    out = await tool.invoke({"task_id": "*", "status": "cancelled"})
+    assert out.success is True
+
+    preserved = await built_team.task_manager.get("t-p-keep")
+    released = await built_team.task_manager.get("t-p-open")
+    assert preserved.status == TaskStatus.IN_PROGRESS.value
+    assert released.status == TaskStatus.CANCELLED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_passive_lands_directly_in_shutdown(built_team, db):
+    """No two-phase REQUESTED dance: nothing consumes MEMBER_SHUTDOWN for a
+    passive member, so the row must land in the terminal state directly."""
+    await built_team.spawn_passive_human(member_name="pm-1", display_name="PM")
+    result = await built_team.shutdown_member("pm-1")
+    assert result.ok, result.reason
+    member = await db.member.get_member("pm-1", "hitt_team")
+    assert member.status == MemberStatus.SHUTDOWN.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_member_passive_with_active_task_refused(built_team, db):
+    """The live-human active-task guard covers the passive flavor: shutting
+    the member down would orphan work only the human can release."""
+    await built_team.spawn_passive_human(member_name="pm-1", display_name="PM")
+    await _create_and_assign(built_team, db, "t-busy", "pm-1")
+    result = await built_team.shutdown_member("pm-1")
+    assert not result.ok
+    # force bypasses the guard (leader's explicit recourse)
+    forced = await built_team.shutdown_member("pm-1", force=True)
+    assert forced.ok
+    member = await db.member.get_member("pm-1", "hitt_team")
+    assert member.status == MemberStatus.SHUTDOWN.value
