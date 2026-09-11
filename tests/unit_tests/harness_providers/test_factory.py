@@ -154,3 +154,31 @@ def test_native_v2_factory_uses_native_harness_template_construction():
         provider.create({"unknown": True})
     with pytest.raises(ValueError, match="positive integer"):
         provider.create({"event_buffer_capacity": 0})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider,relative,loader", [
+    ("claudecode", ".claude/skills", "load_claude_sdk"),
+    ("codex", ".agents/skills", "load_codex_sdk"),
+    ("dsh", ".dsh/skills", "_load_dsh_sdk"),
+])
+async def test_manifest_skills_are_copied_at_start_before_sdk_launch(tmp_path, monkeypatch, provider, relative, loader):
+    import importlib
+    from openjiuwen.harness.schema.extension_spec import SkillSpec
+    from openjiuwen.harness_protocol import HarnessContext
+    from tests.unit_tests.harness_providers.test_skills import bundle
+
+    source = bundle(tmp_path / "source")
+    project = tmp_path / "project"
+    project.mkdir()
+    manifest = _manifest().model_copy(update={"mcps": [], "skills": [SkillSpec(dir=str(source))]})
+    harness = create_harness(manifest, provider=provider, config={"skill_conflict": "replace"})
+    assert not (project / relative).exists()
+    assert harness._config.skills[0].dir == str(source)
+    module = importlib.import_module(f"openjiuwen.harness_providers.{provider}.harness")
+    def fail_loading():
+        assert (project / relative / "example/scripts/run.sh").is_file()
+        raise RuntimeError("SDK launch reached")
+    monkeypatch.setattr(module, loader, fail_loading)
+    with pytest.raises(RuntimeError, match="SDK launch reached"):
+        await harness.start(HarnessContext(agent_name="test", agent_id="test", host_session_id="test", system_prompt="", cwd=str(project)))

@@ -248,6 +248,8 @@ async def test_build_cli_runtime_dispatches_codex_to_protocol_harness():
             codex_turn_idle_retries=2,
             system_prompt="ROLE: isolated developer",
             system_prompt_mode="append",
+            skills=({"dir": "/portable-skills"},),
+            skill_conflict="replace",
             member_agent_id="ext_team_dev-1",
         )
     finally:
@@ -259,6 +261,8 @@ async def test_build_cli_runtime_dispatches_codex_to_protocol_harness():
     assert runtime.reliability_agent_kind == "codex"
     assert runtime.inject_mcp is True
     config = runtime.harness._config
+    assert config.skills[0].dir == "/portable-skills"
+    assert config.skill_conflict == "replace"
     assert config.system_prompt_mode == "append"
     assert config.cwd == "/workspace"
     assert config.codex_bin == "/opt/codex-cli"
