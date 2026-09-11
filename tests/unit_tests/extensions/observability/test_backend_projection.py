@@ -98,6 +98,29 @@ def test_tool_calls_survive_the_projection():
     ]
 
 
+def test_structured_tool_calls_survive_the_projection():
+    span = _span(
+        **{
+            "gen_ai.input.messages": json.dumps([
+                {
+                    "role": "assistant",
+                    "parts": [
+                        {"type": "tool_call", "call": {"id": "t1", "name": "bash"}},
+                        {"type": "tool_call", "id": "t2", "name": "search"},
+                    ],
+                }
+            ])
+        }
+    )
+
+    projected = project_span_for_langfuse(span)
+
+    assert json.loads(projected.attributes["gen_ai.prompt.0.tool_calls"]) == [
+        {"id": "t1", "name": "bash"},
+        {"id": "t2", "name": "search"},
+    ]
+
+
 def test_the_completion_is_derived_from_the_standard_output():
     projected = project_span_for_langfuse(_standard_span())
 

@@ -619,9 +619,7 @@ def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
         "parts": parts,
     }
     for field, value in message.items():
-        if field in ("role", "content", "parts"):
-            continue
-        if field == "tool_calls" and isinstance(tool_calls, list):
+        if field in ("role", "content", "parts", "tool_calls"):
             continue
         structured[field] = deepcopy(value)
     return structured

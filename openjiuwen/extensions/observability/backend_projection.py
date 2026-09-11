@@ -80,6 +80,28 @@ def _message_text(message: Mapping[str, Any]) -> str:
     return _parts_text(message.get("parts"))
 
 
+def _message_tool_calls(message: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read tool calls from either the flat or structured message shape."""
+
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        return [dict(call) for call in tool_calls if isinstance(call, Mapping)]
+
+    parts = message.get("parts")
+    if not isinstance(parts, list):
+        return []
+    calls: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, Mapping) or part.get("type") != "tool_call":
+            continue
+        nested = part.get("call")
+        if isinstance(nested, Mapping):
+            calls.append(dict(nested))
+        else:
+            calls.append({key: value for key, value in part.items() if key != "type"})
+    return calls
+
+
 def _langfuse_prompt_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]:
     """Expand the standard input attributes into Langfuse's indexed prompt keys.
 
@@ -105,7 +127,7 @@ def _langfuse_prompt_attributes(attributes: Mapping[str, Any]) -> dict[str, Any]
                 continue
             derived[f"{GEN_AI_PROMPT}.{index}.role"] = str(message.get("role") or "user")
             derived[f"{GEN_AI_PROMPT}.{index}.content"] = _message_text(message)
-            tool_calls = message.get("tool_calls")
+            tool_calls = _message_tool_calls(message)
             if tool_calls:
                 derived[f"{GEN_AI_PROMPT}.{index}.tool_calls"] = json.dumps(
                     tool_calls,

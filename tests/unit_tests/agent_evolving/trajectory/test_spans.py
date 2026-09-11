@@ -299,3 +299,14 @@ def test_an_llm_exchange_round_trips_through_the_standard_attributes() -> None:
     span = _span("llm", attrs=write_llm_exchange(prompts, completions))
 
     assert read_llm_exchange(span) == (prompts, completions)
+
+
+def test_malformed_tool_calls_are_not_preserved_in_the_structured_shape() -> None:
+    attributes = write_llm_exchange(
+        [{"role": "assistant", "content": "", "tool_calls": "invalid"}],
+        [],
+    )
+
+    messages = json.loads(attributes[semconv.GEN_AI_INPUT_MESSAGES])
+
+    assert "tool_calls" not in messages[0]
