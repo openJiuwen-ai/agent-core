@@ -26,7 +26,11 @@ _BIB_RE = re.compile(r"\\bibliography\s*\{([^}]+)\}")
 _CITE_RE = re.compile(r"\\cite[a-zA-Z*]*\s*(?:\[[^]]*\]\s*)?\{([^}]+)\}")
 _TITLE_RE = re.compile(r"\\title\s*\{(.+?)\}", re.DOTALL)
 _ABSTRACT_RE = re.compile(r"\\begin\s*\{abstract\}(.+?)\\end\s*\{abstract\}", re.DOTALL)
-_SECTION_RE = re.compile(r"\\(?:sub)*section\*?\s*\{([^}]+)\}")
+# Top-level ``\\section`` only. Matching ``\\subsection`` as well split
+# Method/Experiments/Related Work to empty bodies whenever the heading was
+# immediately followed by a subsection (the usual reporting layout), so
+# paper_preprocess fell back to the abstract as ``ResearchContext.method``.
+_SECTION_RE = re.compile(r"\\section\*?\s*\{([^}]+)\}")
 _COMMAND_RE = re.compile(r"\\(?:[a-zA-Z]+\*?|.)\s*(?:\[[^]]*\])?\s*(?:\{([^{}]*)\})?")
 _WS_RE = re.compile(r"\s+")
 _FIGURE_EXTENSIONS = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".svg")

@@ -299,6 +299,7 @@ class PaperTreeOrchestrator:
         self.artifact_path = artifact_path
         self.initial_prompt = ""
         self.initial_research_paths: list[str] = []
+        self.previous_context = None
         # AgentServer-resolved openjiuwen.core.foundation.llm.Model
         # instance (ArtifactEngineRequest.model), shared by scoring and all
         # model-backed pipeline modules. None retains standalone config/env
@@ -399,6 +400,7 @@ class PaperTreeOrchestrator:
         """Create the manager-facing context and paths for an uploaded paper."""
         self.initial_prompt = ""
         self.initial_research_paths = []
+        self.previous_context = None
         if not self.artifact_path:
             return
 
@@ -417,34 +419,32 @@ class PaperTreeOrchestrator:
         )
 
         initial_prompt = "TASK MODE: modify_paper\n\n" + artifact_instruction
-        research_paths = [context_path_relative]
+        # Paper directory/file first so the manager's initial_research_paths
+        # match the original modify_paper contract (the baseline paper itself).
+        research_paths = [relative_snapshot]
         main_tex = snapshot / "main.tex" if snapshot.is_dir() else None
         if main_tex is not None and main_tex.is_file():
             main_relative = to_project_relative(main_tex, root=run_dir)
             try:
-                processed = PaperPreprocessAgent().run(PaperPreprocessInput(paper_dir=str(snapshot))).initial_prompt
+                processed = PaperPreprocessAgent().run(PaperPreprocessInput(paper_dir=str(snapshot)))
             except LatexValidationError as exc:
-                processed = (
+                processed = None
+                initial_prompt = (
                     "TASK MODE: modify_paper\n\n"
                     f"The staged directory could not be validated as a complete LaTeX paper: {exc}. "
                     f"Inspect `{main_relative}` and the other files under `{relative_snapshot}` directly."
                 )
             else:
-                # Keep the prompt portable and consistent with the relative
-                # resource paths exposed to downstream agents.
-                processed = processed.replace(str(main_tex), main_relative)
-                processed = f"{processed}\n\n{artifact_instruction}"
-            initial_prompt = processed
-            # The explicit main.tex path is useful to experiment design even
-            # though directory expansion intentionally ignores .tex files.
-            research_paths.append(main_relative)
+                prompt = processed.initial_prompt.replace(str(main_tex), main_relative)
+                initial_prompt = f"{prompt}\n\n{artifact_instruction}"
+                self.previous_context = processed.research_context
+            if main_relative not in research_paths:
+                research_paths.append(main_relative)
         elif snapshot.is_dir():
-            # Directory expansion can still expose supported resources (for
-            # example an uploaded PDF plus sidecar notes).
             initial_prompt += f" The directory contains the uploaded paper resources; inspect `{relative_snapshot}`."
-            research_paths.append(relative_snapshot)
-        else:
-            research_paths.append(relative_snapshot)
+
+        if context_path_relative not in research_paths:
+            research_paths.append(context_path_relative)
 
         context_path.write_text(
             "\n".join(
@@ -762,6 +762,7 @@ class PaperTreeOrchestrator:
             parent_run_id=_node_run_id(frontier),
             initial_research_paths=self.initial_research_paths,
             initial_prompt=self.initial_prompt,
+            previous_context=self.previous_context,
             task_mode="modify_paper" if self.artifact_path else "create_new_paper",
         )
 
@@ -949,8 +950,9 @@ class PaperTreeOrchestrator:
                     run_id=seed.run_id,
                     objective=seed.objective,
                     constraints=seed.constraints or None,
-                    initial_prompt=getattr(seed, "initial_prompt", ""),
-                    task_mode=getattr(seed, "task_mode", "create_new_paper"),
+                    initial_prompt=seed.initial_prompt,
+                    task_mode=seed.task_mode,
+                    previous_context=seed.previous_context,
                 )
         except Exception as exc:  # noqa: BLE001 -- defensive: arun() itself already
             # turns internal failures into a TerminalReport; this only

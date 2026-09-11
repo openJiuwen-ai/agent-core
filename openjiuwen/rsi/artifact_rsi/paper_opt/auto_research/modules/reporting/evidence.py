@@ -20,6 +20,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_exec
     ExperimentResult,
     VariantResult,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 
 EvidenceSource = Literal["prior_paper", "current_run"]
 
@@ -188,3 +189,64 @@ def classify_numeric_status(old: Evidence, new: Evidence) -> ClaimStatus:
     if abs(delta) < _NO_CI_DELTA_THRESHOLD:
         return "no_significant_change"
     return "tentative"
+
+
+def normalize_prior_paper_evidence(context: ResearchContext) -> list[Evidence]:
+    """Flatten typed prior-paper claims into ``Evidence`` rows with
+    ``source="prior_paper"``. Qualitative claims keep their text as
+    ``value``; unmatched claims stay prior-only until a later metric match."""
+    evidence: list[Evidence] = []
+    for claim in context.claims:
+        numeric = claim.value if isinstance(claim.value, (int, float)) and not isinstance(claim.value, bool) else None
+        evidence.append(
+            Evidence(
+                evidence_id=claim.claim_id,
+                source="prior_paper",
+                method="prior_paper",
+                metric=claim.metric,
+                value=numeric if numeric is not None else claim.text,
+                provenance={
+                    "section": claim.source_section,
+                    "kind": claim.kind,
+                    **claim.provenance,
+                },
+            )
+        )
+    return evidence
+
+
+def classify_prior_vs_current(
+    prior: list[Evidence], current: list[Evidence]
+) -> list[tuple[Evidence | None, Evidence | None, ClaimStatus | None]]:
+    """Pair prior/current numeric evidence only when both sides share a metric.
+
+    Unmatched rows stay explicitly prior-only or current-only; they are not
+    classified. A metric-less prior claim never matches a current measurement.
+    """
+    unused: dict[str, list[Evidence]] = {}
+    for item in current:
+        if item.metric:
+            unused.setdefault(item.metric, []).append(item)
+
+    pairs: list[tuple[Evidence | None, Evidence | None, ClaimStatus | None]] = []
+    used_ids: set[str] = set()
+    for old in prior:
+        match: Evidence | None = None
+        if old.metric and unused.get(old.metric):
+            match = unused[old.metric].pop(0)
+            used_ids.add(match.evidence_id)
+        status: ClaimStatus | None = None
+        if (
+            match is not None
+            and isinstance(old.value, (int, float))
+            and not isinstance(old.value, bool)
+            and isinstance(match.value, (int, float))
+            and not isinstance(match.value, bool)
+        ):
+            status = classify_numeric_status(old, match)
+        pairs.append((old, match, status))
+
+    for item in current:
+        if item.evidence_id not in used_ids:
+            pairs.append((None, item, None))
+    return pairs

@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
@@ -92,7 +94,8 @@ async def test_uploaded_latex_baseline_score_is_persisted_and_projected(tmp_path
     assert root.score == 7.25
     assert root.paper_extra is not None
     assert root.paper_extra.score_overall == 7.25
-    assert calls and calls[0][0].endswith("input/paper/uploaded-paper/main.tex")
+    assert calls
+    assert Path(calls[0][0]).as_posix().endswith("input/paper/uploaded-paper/main.tex")
 
     projected_state = project_engine_state(state)
     projected_report = project_engine_report(state, artifact_index=[])
