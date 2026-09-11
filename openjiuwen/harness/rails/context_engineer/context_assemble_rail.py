@@ -3,6 +3,7 @@
 """Rail that injects workspace and context sections into system prompt builder."""
 from __future__ import annotations
 
+from typing import Any, Iterable
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.rails.base import DeepAgentRail
@@ -31,6 +32,15 @@ _ATTACHMENT_CONTEXT_SECTIONS = frozenset({
 _ALL_SPLIT_CONTEXT_SECTIONS = _SYSTEM_CONTEXT_SECTIONS | _ATTACHMENT_CONTEXT_SECTIONS
 
 
+def _normalize_tool_names(names: Iterable[str] | None) -> set[str]:
+    """Keep non-empty string tool names only (ignore None / non-str noise)."""
+    return {
+        name.strip()
+        for name in (names or [])
+        if isinstance(name, str) and name.strip()
+    }
+
+
 class ContextAssembleRail(DeepAgentRail):
     """Rail that injects workspace directory structure and context files into system prompt.
 
@@ -38,18 +48,30 @@ class ContextAssembleRail(DeepAgentRail):
 
     In ``before_model_call``, builds and injects workspace/context/tools sections
     into the system prompt builder.
+
+    ``disabled_tools`` (constructor / ``update_disabled_tools``) are omitted from
+    the ``# 可用工具`` prompt section even when those cards are still briefly
+    visible on ``ability_manager``. Callers (e.g. product adapters) own the
+    blacklist data flow; this rail does not scan sibling rails.
     """
 
     priority = 85
 
-    def __init__(self):
+    def __init__(self, disabled_tools: Iterable[str] | None = None):
         super().__init__()
         self.system_prompt_builder = None
         self.attachment_manager = None
         self._ability_manager = None
+        self._agent: Any | None = None
+        self._disabled_tools: set[str] = _normalize_tool_names(disabled_tools)
+
+    def update_disabled_tools(self, disabled_tools: Iterable[str] | None) -> None:
+        """Replace the local blacklist mirror used for the tools prompt section."""
+        self._disabled_tools = _normalize_tool_names(disabled_tools)
 
     def init(self, agent) -> None:
         """Capture references to system_prompt_builder and ability_manager."""
+        self._agent = agent
         self.system_prompt_builder = getattr(agent, "system_prompt_builder", None)
         self._ability_manager = getattr(agent, "ability_manager", None)
         self.attachment_manager = getattr(agent, "prompt_attachment_manager", None)
@@ -64,6 +86,7 @@ class ContextAssembleRail(DeepAgentRail):
             self.system_prompt_builder.remove_section("tools")
             self.system_prompt_builder = None
         self.attachment_manager = None
+        self._agent = None
 
     async def _upsert_attachment_section(self, writer, section, *, kind) -> None:
         try:
@@ -85,6 +108,20 @@ class ContextAssembleRail(DeepAgentRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject workspace directory structure and context files into messages before model call."""
+        # Bridge path: ctx.agent is the inner ReActAgent. Refresh managers from it,
+        # but keep self._agent as the DeepAgent captured in init().
+        ctx_agent = getattr(ctx, "agent", None)
+        if ctx_agent is not None:
+            ability = getattr(ctx_agent, "ability_manager", None)
+            if ability is not None:
+                self._ability_manager = ability
+            spb = getattr(ctx_agent, "system_prompt_builder", None)
+            if spb is not None:
+                self.system_prompt_builder = spb
+            pam = getattr(ctx_agent, "prompt_attachment_manager", None)
+            if pam is not None:
+                self.attachment_manager = pam
+
         if self.system_prompt_builder is None:
             return
         writer = None
@@ -112,7 +149,11 @@ class ContextAssembleRail(DeepAgentRail):
             workspace,
             lang,
         )
-        tools_section = build_tools_section(self._ability_manager, lang)
+        tools_section = build_tools_section(
+            self._ability_manager,
+            lang,
+            hidden_tools=self._disabled_tools,
+        )
         context_sections = await build_context_file_sections(
             self.sys_operation,
             workspace,

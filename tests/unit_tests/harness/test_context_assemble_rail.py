@@ -318,6 +318,140 @@ def test_build_tools_content():
     assert "## task_tool Guidelines" in en
 
 
+def test_build_tools_content_hides_disabled_tools():
+    """Extra hidden_tools (disabled_tools) must not appear in the tools section."""
+    mock_manager = Mock()
+    mock_manager.list.return_value = [
+        ToolCard(name="bash", description="run shell"),
+        ToolCard(name="audio_transcription", description="transcribe"),
+        ToolCard(name="memory_search", description="search memory"),
+        ToolCard(name="memory_get", description="get memory"),
+        ToolCard(name="write_memory", description="write memory"),
+        ToolCard(name="edit_memory", description="edit memory"),
+        ToolCard(name="read_memory", description="read memory"),
+        ToolCard(name="skill_acceleration_exec", description="turbo"),
+        ToolCard(name="get_current_goal", description="goal"),
+    ]
+    content = build_tools_content(
+        mock_manager,
+        "cn",
+        hidden_tools={
+            "audio_transcription",
+            "memory_search",
+            "skill_acceleration_exec",
+            "get_current_goal",
+        },
+    )
+    assert content is not None
+    assert "bash" in content
+    assert "audio_transcription" not in content
+    assert "skill_acceleration_exec" not in content
+    assert "get_current_goal" not in content
+    assert "memory_search" not in content
+    # Remaining memory tools listed individually (group incomplete).
+    assert "memory_get" in content
+    assert "write_memory" in content
+    assert "edit_memory" in content
+    assert "read_memory" in content
+    assert "memory_search / memory_get" not in content
+
+
+def test_update_disabled_tools_keeps_only_non_empty_strings():
+    rail = ContextAssembleRail(disabled_tools=["bash", None, "  ", 123, "memory_search"])  # type: ignore[list-item]
+    assert rail._disabled_tools == {"bash", "memory_search"}
+    rail.update_disabled_tools([None, "", "audio_transcription", 0])  # type: ignore[list-item]
+    assert rail._disabled_tools == {"audio_transcription"}
+
+
+def test_build_tools_content_ignores_non_string_hidden_tools():
+    mock_manager = Mock()
+    mock_manager.list.return_value = [
+        ToolCard(name="bash", description="run shell"),
+        ToolCard(name="memory_search", description="search"),
+    ]
+    content = build_tools_content(
+        mock_manager,
+        "cn",
+        hidden_tools=[None, 1, "memory_search"],  # type: ignore[list-item]
+    )
+    assert content is not None
+    assert "bash" in content
+    assert "memory_search" not in content
+    assert "None" not in content
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_hides_constructor_disabled_tools(tmp_path: Path):
+    """Constructor disabled_tools must drop tools from the prompt section."""
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+    agent.ability_manager.add(
+        ToolCard(id="bash-1", name="bash", description="run shell")
+    )
+    agent.ability_manager.add(
+        ToolCard(id="ms-1", name="memory_search", description="search memory")
+    )
+
+    rail = ContextAssembleRail(disabled_tools=["memory_search"])
+    await agent.register_rail(rail)
+
+    # Simulate DeepAgent bridge: BEFORE_MODEL_CALL ctx.agent is the inner ReAct.
+    react_like = SimpleNamespace(
+        ability_manager=agent.ability_manager,
+        system_prompt_builder=agent.system_prompt_builder,
+        prompt_attachment_manager=agent.prompt_attachment_manager,
+    )
+    ctx = _make_model_call_context(react_like)
+    await rail.before_model_call(ctx)
+
+    tools = agent.system_prompt_builder.get_section("tools")
+    assert tools is not None
+    content = tools.render("cn")
+    assert "bash" in content
+    assert "memory_search" not in content
+    # init-time DeepAgent must not be overwritten by bridged ctx.agent.
+    assert rail._agent is agent
+
+
+@pytest.mark.asyncio
+async def test_before_model_call_disabled_tools_ignore_sibling_rail_attrs(tmp_path: Path):
+    """Hide list is explicit only; sibling `_disabled_tools` must not be scanned."""
+    sys_operation = _make_sys_operation(tmp_path)
+    await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+    agent.ability_manager.add(
+        ToolCard(id="bash-2", name="bash", description="run shell")
+    )
+    agent.ability_manager.add(
+        ToolCard(id="audio-2", name="audio_transcription", description="transcribe")
+    )
+
+    sibling = SimpleNamespace(_disabled_tools={"audio_transcription"})
+    agent._registered_rails = [sibling]  # type: ignore[attr-defined]
+
+    rail = ContextAssembleRail()
+    await agent.register_rail(rail)
+    ctx = _make_model_call_context(agent)
+    await rail.before_model_call(ctx)
+
+    tools = agent.system_prompt_builder.get_section("tools")
+    assert tools is not None
+    content = tools.render("cn")
+    assert "bash" in content
+    # Without explicit constructor/update list, sibling attrs must not hide.
+    assert "audio_transcription" in content
+
+    rail.update_disabled_tools(["audio_transcription"])
+    await rail.before_model_call(ctx)
+    content_after = agent.system_prompt_builder.get_section("tools").render("cn")
+    assert "audio_transcription" not in content_after
+
+
 @pytest.mark.asyncio
 async def test_build_context_section_with_tools_content(tmp_path: Path):
     """build_context_section should include language-specific tools content."""
