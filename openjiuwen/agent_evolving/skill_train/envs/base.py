@@ -176,13 +176,17 @@ class EnvAdapter(ABC):
     def build_train_env(self, batch_size: int, seed: int, **kwargs):
         """Materialize the train-side env manager (or item list) for one batch."""
 
+    def build_reference_text(self, item: dict) -> str:
+        """Hidden reference blob used during reflection, if present."""
+        blob = item.get("reference_text")
+        if blob is None:
+            return ""
+        text = str(blob).strip()
+        return text
+
     @abstractmethod
     def build_eval_env(self, env_num: int, split: str, seed: int, **kwargs):
         """Materialize an eval-side env manager sized to ``env_num`` on ``split``."""
-
-    def build_reference_text(self, item: dict) -> str:
-        """Hidden reference blob used during reflection, if present."""
-        return str(item.get("reference_text") or "").strip()
 
     def get_reference_metadata(self, item: dict) -> dict:
         """Compact preview metadata for hidden reference material."""
@@ -265,17 +269,14 @@ class EnvAdapter(ABC):
         Override only when an environment needs a custom reflection pipeline.
         Callers drop ``None`` entries from the returned list.
         """
-        from openjiuwen.agent_evolving.skill_train.reflect import run_minibatch_reflect
+        from openjiuwen.agent_evolving.skill_train.reflect import ReflectRequest, run_minibatch_reflect
 
         pred_dir = _resolve_prediction_dir(out_dir, kwargs.get("prediction_dir"))
         patch_dir = _patches_root(out_dir, kwargs.get("patches_dir"))
-        update_mode = getattr(self, "_cfg", {}).get("skill_update_mode", "patch")
-        buffer_ctx = str(kwargs.get("step_buffer_context") or "")
-        meta_ctx = str(kwargs.get("meta_skill_context") or "")
-
-        return run_minibatch_reflect(
-            results=results,
-            skill_content=skill_content,
+        mode = getattr(self, "_cfg", {}).get("skill_update_mode", "patch")
+        request = ReflectRequest.assemble(
+            results,
+            skill_content,
             prediction_dir=pred_dir,
             patches_dir=patch_dir,
             workers=self.analyst_workers,
@@ -285,10 +286,11 @@ class EnvAdapter(ABC):
             random_seed=kwargs.get("random_seed"),
             error_system=self.get_error_minibatch_prompt(),
             success_system=self.get_success_minibatch_prompt(),
-            step_buffer_context=buffer_ctx,
-            meta_skill_context=meta_ctx,
-            update_mode=update_mode,
+            step_buffer_context=str(kwargs.get("step_buffer_context") or ""),
+            meta_skill_context=str(kwargs.get("meta_skill_context") or ""),
+            update_mode=mode,
         )
+        return run_minibatch_reflect(request)
 
     @property
     def _env_name(self) -> str:
