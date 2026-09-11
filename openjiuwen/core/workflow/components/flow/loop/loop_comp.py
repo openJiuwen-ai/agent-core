@@ -64,7 +64,8 @@ class LoopGroup(BaseWorkflow, Executable):
             outputs_schema: dict | Transformer = None,
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
-            comp_ability: list[ComponentAbility] = None
+            comp_ability: list[ComponentAbility] = None,
+            name: str = None,
     ) -> Self:
         # Check for nested loop components
         if isinstance(workflow_comp, LoopComponent):
@@ -75,7 +76,8 @@ class LoopGroup(BaseWorkflow, Executable):
         super().add_workflow_comp(comp_id, workflow_comp, wait_for_all=wait_for_all, inputs_schema=inputs_schema,
                                   stream_inputs_schema=stream_inputs_schema,
                                   stream_outputs_schema=stream_outputs_schema,
-                                  outputs_schema=outputs_schema, comp_ability=comp_ability)
+                                  outputs_schema=outputs_schema, comp_ability=comp_ability,
+                                  name=name)
         if isinstance(workflow_comp, LoopBreakComponent):
             self._break_components.append(workflow_comp)
         if self._drawable and isinstance(workflow_comp, LoopBreakComponent):

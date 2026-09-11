@@ -42,7 +42,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
-from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
+from .errors import BudgetExhausted, EngineError, WorkflowAborted
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
@@ -78,6 +78,11 @@ _current_phase: ContextVar[str | None] = ContextVar("wf_current_phase", default=
 # rather than silently truncating — a bounded fan-out keeps one call from
 # spawning an unbounded agent fleet by accident.
 _MAX_FANOUT = 4096
+# Seconds the cancel path of ``parallel()`` waits for branch tasks to actually
+# terminate before the engine unwinds (see its ``except CancelledError``). A
+# slow-to-finish branch would otherwise hold the teardown hostage for its
+# whole natural run; the cap bounds the drain.
+_BRANCH_DRAIN_TIMEOUT = 2.0
 
 
 @dataclass
@@ -91,6 +96,10 @@ class _BackendCallResult:
         raw_text:      The LLM's original text reply before coercion — used as
                        ``outcome`` in ``AGENT_COMPLETED`` progress events.
         tokens:        Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip / failure.
+        attempts:      Attempts actually spent when the call failed — the loop can
+                       short-circuit (skip / budget fail-fast) before using all
+                       ``rt.retries + 1``; ``None`` when no attempt ran (e.g. a
+                       spawn-limit rejection before the backend call).
     """
 
     result: Any = None
@@ -98,6 +107,7 @@ class _BackendCallResult:
     error_detail: str | None = None
     raw_text: str | None = None
     tokens: int | None = None
+    attempts: int | None = None
 
 
 def _task_id():
@@ -219,12 +229,13 @@ def _top_phases(rt) -> list[tuple[str, int]] | None:
     return sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
 
-def _check_budget(rt) -> None:
-    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
+def _budget_exhaustion(rt) -> tuple[str, str, int, int] | None:
+    """Return ``(scope, message, spent, total)`` for whichever ledger is dry.
 
-    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
-    entry gate only: a call already paid for must reach its journal record, or
-    a resume would rerun (and re-pay for) it.
+    One message format for every report of a drained ledger — the entry gate
+    (``_check_budget``) raises it, the retry loop (``_attempt_calls``) puts it
+    in the node's failure detail — so both read the same
+    ``"workflow token budget exhausted: X/Y"`` wording.
 
     Order-sensitive — **session first**: when both ledgers are dry, the
     terminal (not retryable) session reason wins. Relaunching after a session
@@ -232,25 +243,45 @@ def _check_budget(rt) -> None:
     would mislead the leader into "redesign the workflow" when raising the
     ceiling is the only way forward. A session still holding headroom never
     masks a per-run (workflow) exhaustion — that check still runs right after.
+    """
+    if rt.budget.exhausted:
+        return (
+            "session",
+            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
+            rt.budget.spent,
+            rt.budget.total,
+        )
+    if rt.workflow_budget.exhausted:
+        return (
+            "workflow",
+            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+            rt.workflow_budget.spent,
+            rt.workflow_budget.total,
+        )
+    return None
+
+
+def _check_budget(rt) -> None:
+    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
+
+    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
+    entry gate only: a call already paid for must reach its journal record, or
+    a resume would rerun (and re-pay for) it.
 
     This gate alone cannot hold the line — one agent's own loop can burn the
     whole budget long before it returns here. It is the backend's rails that
     stop an agent mid-loop; this stops the *next* one from starting.
     """
-    if rt.budget.exhausted:
-        raise BudgetExhausted(
-            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
-            scope="session", spent=rt.budget.spent, total=rt.budget.total,
-            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
-            top_phases=_top_phases(rt),
-        )
-    if rt.workflow_budget.exhausted:
-        raise BudgetExhausted(
-            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
-            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
-            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
-            top_phases=_top_phases(rt),
-        )
+    ex = _budget_exhaustion(rt)
+    if ex is None:
+        return
+    scope, message, spent, total = ex
+    raise BudgetExhausted(
+        message,
+        scope=scope, spent=spent, total=total,
+        workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+        top_phases=_top_phases(rt),
+    )
 
 
 def _branch_disambig(path: tuple) -> str:
@@ -444,7 +475,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
         The merged, validated, ``None``-stripped options dict.
 
     Raises:
-        WorkflowError: If any key is outside the allowed set.
+        EngineError: If any key is outside the allowed set.
     """
     merged: dict = {}
     for key, value in (options or {}).items():
@@ -456,7 +487,7 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     allowed = _ENGINE_OPTIONS | getattr(rt.backend, "KNOWN_OPTIONS", frozenset())
     unknown = sorted(k for k in merged if k not in allowed)
     if unknown:
-        raise WorkflowError(
+        raise EngineError(
             f"unknown option(s) {unknown}; allowed: {sorted(allowed)}"
         )
     return merged
@@ -521,7 +552,7 @@ async def agent(
     # whitelists every key against ``_ENGINE_OPTIONS | backend.KNOWN_OPTIONS``.
     opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
     if opts.get("isolation") not in (None, "worktree"):
-        raise WorkflowError("agent(options={'isolation': ...}) only supports 'worktree'")
+        raise EngineError("agent(options={'isolation': ...}) only supports 'worktree'")
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -571,9 +602,10 @@ async def agent(
         )
 
     if not call_result.succeeded:
-        attempts = rt.retries + 1
         label = opts.get("label") or "agent"
-        msg = f"agent {label!r} failed after {attempts} attempts"
+        msg = f"agent {label!r} failed"
+        if call_result.attempts is not None and call_result.attempts > 1:
+            msg = f"{msg} after {call_result.attempts} attempts"
         if call_result.error_detail:
             msg = f"{msg}: {call_result.error_detail}"
         _emit_agent_failed(
@@ -623,7 +655,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     bound ``make_call`` closure. Returns a ``_BackendCallResult``: a
     backend/timeout error or schema-validation failure retries up to
     ``rt.retries`` extra times; a ``skipped`` result short-circuits to a
-    non-success with no retry.
+    non-success with no retry, and so does a failed attempt that leaves a
+    token ledger dry — the budget never refunds, so a retry can only fail
+    again (and a human turn would re-ask the person).
     """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
@@ -635,6 +669,12 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     # consumption reaches the AGENT_FAILED event instead of being dropped.
     burned_tokens = 0
     for attempt in range(1, attempts + 1):
+        # A pause/stop may have landed while this call was queued or in flight:
+        # every attempt re-checks the abort gate before touching the backend, so
+        # a straggler (e.g. one the parallel() drain timed out on) ends with the
+        # proper WorkflowAborted instead of retrying into a torn-down backend.
+        # Outside the try — an abort is not a retryable failure.
+        _check_abort(rt)
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
@@ -647,6 +687,21 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
             burned_tokens += getattr(e, "tokens", 0) or 0
+            # A drained ledger can only fail again — the budget never refunds,
+            # and for a human turn a retry would re-ask the person. Fail fast
+            # and surface the same message the entry gate raises, so the node's
+            # failure carries the budget root cause (the rail stops the call
+            # with a force-finish, not an exception).
+            ex = _budget_exhaustion(rt)
+            if ex is not None:
+                rt.log_sink(
+                    f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: "
+                    f"{str(e)}; no retry — {ex[1]}"
+                )
+                return _BackendCallResult(
+                    result=None, succeeded=False, error_detail=ex[1], attempts=attempt,
+                    tokens=burned_tokens if burned_tokens > 0 else None,
+                )
             rt.log_sink(
                 f"[wf] agent {label!r} attempt {attempt}/{attempts} failed: {str(e)}"
             )
@@ -660,7 +715,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         if res.skipped:
             detail = "backend declined (skipped)"
             rt.log_sink(f"[wf] agent {label!r} skipped")
-            return _BackendCallResult(result=None, succeeded=False, error_detail=detail)
+            return _BackendCallResult(result=None, succeeded=False, error_detail=detail, attempts=attempt)
         if json_schema is not None:
             try:
                 coerced = coerce(res.structured, json_schema, model)
@@ -680,7 +735,7 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
     return _BackendCallResult(
-        result=None, succeeded=False, error_detail=detail,
+        result=None, succeeded=False, error_detail=detail, attempts=attempts,
         tokens=burned_tokens if burned_tokens > 0 else None,
     )
 
@@ -862,12 +917,12 @@ async def verify(
         aggregated review feedback.
 
     Raises:
-        WorkflowError: If ``reviewers`` is empty.
+        EngineError: If ``reviewers`` is empty.
     """
     rt = _rt.get()
     reviewers = list(reviewers)
     if not reviewers:
-        raise WorkflowError("verify() requires at least one reviewer")
+        raise EngineError("verify() requires at least one reviewer")
     base = label or "verify"
 
     _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
@@ -999,7 +1054,7 @@ class AgentSession:
         """
         rt = _rt.get()
         if notify and schema is not None:
-            raise WorkflowError("send(notify=True) is text-only; don't also pass a schema")
+            raise EngineError("send(notify=True) is text-only; don't also pass a schema")
         # Per-task current phase; fall back to the session's own default.
         phase_val = _current_phase.get() if _current_phase.get() is not None else self._phase
         opts = _build_opts(
@@ -1065,10 +1120,11 @@ class AgentSession:
             )
             call_result = await self._drive(rt, req)
             if not call_result.succeeded:
-                attempts = rt.retries + 1
                 who = "human" if self._human else "agent"
                 label = opts.get("label") or who
-                msg = f"{who} session {label!r} failed after {attempts} attempts"
+                msg = f"{who} session {label!r} failed"
+                if call_result.attempts is not None and call_result.attempts > 1:
+                    msg = f"{msg} after {call_result.attempts} attempts"
                 if call_result.error_detail:
                     msg = f"{msg}: {call_result.error_detail}"
                 _emit_agent_failed(
@@ -1145,9 +1201,9 @@ class AgentSession:
         inherit).
         """
         if self._human:
-            raise WorkflowError("fork() is only supported on agent_session")
+            raise EngineError("fork() is only supported on agent_session")
         if fork_mode != "full" and keep_rounds is None:
-            raise WorkflowError(
+            raise EngineError(
                 "fork() requires keep_rounds unless fork_mode='full'"
                 f" (fork_mode={fork_mode!r} has no split point without it)"
             )
@@ -1350,7 +1406,7 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
     base = _path.get()
     thunks = list(thunks)
     if len(thunks) > _MAX_FANOUT:
-        raise WorkflowError(
+        raise EngineError(
             f"parallel() got {len(thunks)} thunks; the per-call limit is "
             f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
         )
@@ -1367,7 +1423,30 @@ async def parallel(thunks: Sequence[Callable[[], Awaitable]]) -> list:
             # still propagates out of the branch; only real errors map to None.
             return None
 
-    return await asyncio.gather(*[branch(i, th) for i, th in enumerate(thunks)])
+    # Create branch tasks explicitly and re-cancel each one in the except block
+    # below: gather() already forwards cancellation to every child automatically
+    # in the common case, but if the driver's own cancel lands in the narrow
+    # window where its Task._fut_waiter is momentarily unset, CancelledError is
+    # thrown straight into this coroutine without ever touching the gather
+    # future, so gather's child-cancellation never runs. The explicit loop is
+    # the reliable backstop for that gap.
+    branch_tasks = [
+        asyncio.create_task(branch(i, th)) for i, th in enumerate(thunks)
+    ]
+    try:
+        return await asyncio.gather(*branch_tasks)
+    except asyncio.CancelledError:
+        for bt in branch_tasks:
+            bt.cancel()
+        # Drain the branches before unwinding: the engine's teardown closes the
+        # backend sessions (runner.py finally: backend.aclose()), so a branch
+        # still alive here would hit "unknown session" on its next send_turn
+        # (production 09-08: pause landed while a branch was still building its
+        # avatar, and its first turn found the session row already popped).
+        # Bounded wait for the DRIVER only — a branch that ignores its cancel
+        # keeps running past this timeout; it is not force-terminated here.
+        await asyncio.wait(branch_tasks, timeout=_BRANCH_DRAIN_TIMEOUT)
+        raise
 
 
 # ─────────────────────── pipeline (streaming) ───────────────────────
@@ -1376,7 +1455,7 @@ async def pipeline(items: Sequence, *stages: Callable) -> list:
     base = _path.get()
     items = list(items)
     if len(items) > _MAX_FANOUT:
-        raise WorkflowError(
+        raise EngineError(
             f"pipeline() got {len(items)} items; the per-call limit is "
             f"{_MAX_FANOUT}. Split into batches instead of one giant fan-out."
         )
@@ -1555,5 +1634,5 @@ async def _invoke_loaded(loaded, args: Any) -> Any:
     """
     run_fn = getattr(loaded.module, "run", None)
     if not inspect.iscoroutinefunction(run_fn):
-        raise WorkflowError(f"{loaded.path}: must define `async def run(args)`")
+        raise EngineError(f"{loaded.path}: must define `async def run(args)`")
     return await (run_fn(args) if _arity(run_fn) >= 1 else run_fn())

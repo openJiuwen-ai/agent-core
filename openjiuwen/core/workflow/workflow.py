@@ -139,6 +139,8 @@ class Workflow(metaclass=_WorkflowMeta):
             component: ComponentComposable,
             inputs_schema: dict | Transformer = None,
             outputs_schema: dict | Transformer = None,
+            *,
+            name: str = None,
     ) -> Self:
         """
         Set the starting component of the workflow.
@@ -150,6 +152,7 @@ class Workflow(metaclass=_WorkflowMeta):
             component: The component instance to use as start
             inputs_schema: Schema defining expected input structure
             outputs_schema: Schema defining output structure
+            name: Human-readable name for tracing; falls back to start_comp_id when None
 
         Returns:
             Self for method chaining
@@ -158,7 +161,8 @@ class Workflow(metaclass=_WorkflowMeta):
                                          component,
                                          wait_for_all=False,
                                          inputs_schema=inputs_schema,
-                                         outputs_schema=outputs_schema)
+                                         outputs_schema=outputs_schema,
+                                         name=name)
         self._internal.start_comp(start_comp_id)
         return self
 
@@ -176,6 +180,7 @@ class Workflow(metaclass=_WorkflowMeta):
             max_retries: int = 0,
             timeout: float = -1.0,
             exception_config: ExceptionConfig = None,
+            name: str = None,
     ) -> Self:
         """
         Add a component to the workflow graph.
@@ -192,6 +197,7 @@ class Workflow(metaclass=_WorkflowMeta):
             max_retries: Maximum number of retries on failure (default: 0, no retry)
             timeout: Per-node execution timeout in seconds (<=0 means no timeout)
             exception_config: Exception handling configuration for error recovery
+            name: Human-readable name for tracing; falls back to comp_id when None
 
         Returns:
             Self for method chaining
@@ -206,7 +212,8 @@ class Workflow(metaclass=_WorkflowMeta):
                                          comp_ability=comp_ability,
                                          max_retries=max_retries,
                                          timeout=timeout,
-                                         exception_config=exception_config)
+                                         exception_config=exception_config,
+                                         name=name)
         return self
 
     def set_end_comp(
@@ -217,7 +224,9 @@ class Workflow(metaclass=_WorkflowMeta):
             outputs_schema: dict | Transformer = None,
             stream_inputs_schema: dict | Transformer = None,
             stream_outputs_schema: dict | Transformer = None,
-            response_mode: str = None
+            response_mode: str = None,
+            *,
+            name: str = None,
     ) -> Self:
         """
         Set the ending component of the workflow.
@@ -232,6 +241,7 @@ class Workflow(metaclass=_WorkflowMeta):
             stream_inputs_schema: Schema for streaming inputs
             stream_outputs_schema: Schema for streaming outputs
             response_mode: How the component should respond (e.g., "stream", "batch")
+            name: Human-readable name for tracing; falls back to end_comp_id when None
 
         Returns:
             Self for method chaining
@@ -260,6 +270,7 @@ class Workflow(metaclass=_WorkflowMeta):
             outputs_schema=outputs_schema,
             stream_inputs_schema=stream_inputs_schema,
             stream_outputs_schema=stream_outputs_schema,
+            name=name,
         )
         self._internal.end_comp(end_comp_id)
         self._end_comp_id = end_comp_id
@@ -710,7 +721,8 @@ class Workflow(metaclass=_WorkflowMeta):
             workflow_session.set_stream_writer_manager(
                 StreamWriterManager(stream_emitter=StreamEmitter(), modes=stream_modes))
             if workflow_session.tracer() is None:
-                tracer = Tracer(session_id=workflow_session.session_id())
+                trace_id = session.get_trace_id() if hasattr(session, "get_trace_id") else None
+                tracer = Tracer(session_id=workflow_session.session_id(), trace_id=trace_id)
                 tracer.init(workflow_session.stream_writer_manager())
                 workflow_session.set_tracer(tracer)
             return workflow_session

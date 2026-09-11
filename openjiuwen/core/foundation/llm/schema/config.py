@@ -45,10 +45,7 @@ class LLMAuthMode(str, Enum):
 
 
 class KVCacheExtensionConfig(BaseModel):
-    mode: Literal["none", "release", "affinity"] = "none"
-    release_endpoint: str = "/release_kv_cache"
-    session_field: str = "cache_salt"
-    enable_cache_sharing_field: str = "cache_sharing"
+    mode: Literal["none", "affinity"] = "none"
     affinity_field: str = "agent_hint"
 
 
@@ -98,7 +95,7 @@ class ModelClientConfig(BaseModel):
     client_provider: Union[ProviderType, str] = Field(
         ...,
         description="Service provider identification, Enumeration value: OpenAI, OpenRouter, "
-                    "OpenAIAccount, SiliconFlow, DashScope, InferenceAffinity or ICBC"
+                    "OpenAIAccount, SiliconFlow, DashScope, AscendAffinity or ICBC"
     )
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")

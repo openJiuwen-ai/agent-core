@@ -14,7 +14,8 @@ class Session:
     Session is the main class for managing the workflow of a session.
     """
 
-    def __init__(self, parent: BaseSession = None, session_id: str = None, envs: dict[str, Any] = None):
+    def __init__(self, parent: BaseSession = None, session_id: str = None, envs: dict[str, Any] = None,
+                 *, trace_id: str = None):
         self._envs = envs
         self._parent = parent
         if parent is not None:
@@ -24,10 +25,14 @@ class Session:
             self._session_id = session_id
         else:
             self._session_id = str(uuid.uuid4())
+        self._trace_id = trace_id
         self._workflow_card = None
 
     def get_session_id(self) -> str:
         return self._session_id
+
+    def get_trace_id(self) -> str | None:
+        return self._trace_id
 
     def get_envs(self):
         return self._envs
@@ -43,6 +48,6 @@ class Session:
 
 
 def create_workflow_session(parent: "AgentSession" = None, session_id: str = None,
-                            envs: dict[str, Any] = None) -> Session:
-    return Session(parent=parent, session_id=session_id, envs=envs)
+                            envs: dict[str, Any] = None, *, trace_id: str = None) -> Session:
+    return Session(parent=parent, session_id=session_id, envs=envs, trace_id=trace_id)
 

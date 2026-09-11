@@ -58,11 +58,11 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
     SystemMessage
 )
-from openjiuwen.core.foundation.kv_cache import (
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
-    KVCacheAffinityConfig,
 )
-from openjiuwen.core.single_agent.kv_cache import kv_cache_hooks
+from openjiuwen.core.single_agent.kv_cache import kv_cache_react_model_call_hook
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session import with_session
 from openjiuwen.core.session.agent import Session, create_agent_session
@@ -435,12 +435,10 @@ class ReActAgentConfig(BaseModel):
     def configure_kv_cache_affinity(
             self,
             *,
-            enable_kv_cache_release: bool = False,
             enable_kv_cache_affinity: bool = False,
     ) -> 'ReActAgentConfig':
-        """Configure provider-side KV-cache release or Ascend affinity."""
+        """Configure the unified Ascend KV-cache affinity protocol."""
         self.kv_cache_affinity_config = KVCacheAffinityConfig(
-            enable_kv_cache_release=enable_kv_cache_release,
             enable_kv_cache_affinity=enable_kv_cache_affinity,
         )
         return self
@@ -609,7 +607,7 @@ class ReActAgent(BaseAgent):
         super().__init__(card)
         self._hitl_handler = ToolInterruptHandler(self)
         self._ability_manager.set_context_engine(self.context_engine)
-        self._kv_cache_model_call_hook = kv_cache_hooks.KVCacheModelCallHook()
+        self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
 
@@ -1616,7 +1614,6 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
-            context_window=context_window,
         )
 
         if self._config.llm_return_token_ids:
@@ -1637,6 +1634,7 @@ class ReActAgent(BaseAgent):
             except Exception as exc:
                 if image_input_present and self._is_image_input_unsupported_error(exc):
                     ai_message = self._build_image_input_unsupported_message()
+                    ctx.extra["_last_image_unsupported"] = True
                 else:
                     await self._emit_context_usage(
                         ctx,
@@ -1708,6 +1706,7 @@ class ReActAgent(BaseAgent):
             if image_input_present and self._is_image_input_unsupported_error(exc):
                 ai_message = self._build_image_input_unsupported_message()
                 ctx.inputs.response = ai_message
+                ctx.extra["_last_image_unsupported"] = True
                 await self._emit_context_usage(
                     ctx,
                     context_window,
@@ -1908,8 +1907,18 @@ class ReActAgent(BaseAgent):
     def _build_image_input_unsupported_message() -> AssistantMessage:
         return AssistantMessage(
             content=(
-                "当前主模型或模型服务端点不支持图片输入，因此无法直接读取这张图片的内容。"
-                "请切换到支持视觉输入的主模型，或配置专用视觉模型工具后再读取图片。"
+                "[Vision Input Unsupported] The current model or endpoint does not support image input.\n"
+                "当前主模型或模型服务端点不支持图片输入。\n\n"
+                "Suggested alternatives / 建议替代方案：\n"
+                "1. If reading a PDF, use `read_file` in text mode or use `pypdf`/`pdfplumber` "
+                "to extract text and form fields directly, without rendering pages to images.\n"
+                "   如果读取的是 PDF，请使用文本模式读取，或用 `pypdf` 提取文本和表单字段。\n"
+                "2. If reading an image (JPG/PNG), describe what information you need and ask the "
+                "user for a text transcription, or use an available OCR tool if one is configured.\n"
+                "   如果读取的是图片，请描述所需信息并请用户提供文字转录。\n"
+                "3. If the task absolutely requires vision, configure a `vision_model_config` "
+                "with a vision-capable endpoint.\n"
+                "   如果任务必须依赖视觉，请配置支持视觉输入的模型。"
             ),
             tool_calls=[],
         )
@@ -2520,7 +2529,7 @@ class ReActAgent(BaseAgent):
             ) or getattr(self, "_usage_parent_session_id", None) or current_usage_delegation().get(
                 "parent_session_id"
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,
@@ -2783,6 +2792,13 @@ class ReActAgent(BaseAgent):
                             # drains and injects it.
                             if force_model_continue or ctx.has_pending_steering():
                                 continue
+                            # If the only failure was an unsupported image
+                            # input, continue the loop so the model sees the
+                            # error message in context and can try a fallback.
+                            if ctx.extra.get("_last_image_unsupported"):
+                                ctx.extra["_last_image_unsupported"] = False
+                                await self.context_engine.save_contexts(session)
+                                continue
                             await self.context_engine.save_contexts(session)
                             result = {"output": ai_message.content, "result_type": "answer"}
                             invoke_inputs.result = result
@@ -2942,7 +2958,7 @@ class ReActAgent(BaseAgent):
                 if isinstance(inputs, dict)
                 else None
             )
-            session_kwargs = {}
+            session_kwargs: dict[str, Any] = {}
             if parent_session_id:
                 session_kwargs["envs"] = {
                     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV: parent_session_id,

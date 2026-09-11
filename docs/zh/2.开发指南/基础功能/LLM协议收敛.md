@@ -9,7 +9,7 @@
 
 ## 旧 `client_provider` 怎么用
 
-配置里仍可写 `DeepSeek`、`OpenRouter`、`SiliconFlow`、`DashScope`、`InferenceAffinity`、`AscendAffinity`。创建客户端时，框架把它们映射为 OpenAI 兼容实现，并带上对应的 `endpoint_profile` / `extensions`（例如 DashScope 多模态、Ascend KV affinity）。
+配置里仍可写 `DeepSeek`、`OpenRouter`、`SiliconFlow`、`DashScope`、`AscendAffinity`。创建客户端时，框架把它们映射为 OpenAI 兼容实现，并带上对应的 `endpoint_profile` / `extensions`（例如 DashScope 多模态、Ascend KV affinity）。
 
 推荐写法：
 

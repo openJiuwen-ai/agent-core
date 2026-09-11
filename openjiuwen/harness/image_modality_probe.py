@@ -58,6 +58,7 @@ _IMAGE_INPUT_UNSUPPORTED_ERROR_PATTERNS = (
     "multimodal input is not supported",
     "not a multimodal model",
     "not support image input",
+    "unknown variant",
     "unsupported image",
     "vision is not supported",
 )

@@ -381,6 +381,8 @@ def resolve_deep_agent_parts(
             skill_mode="all",
             disabled_skills=disabled_skills or None,
             include_tools=include_tools,
+            max_skills=config.skill_budget_max_skills,
+            max_total_chars=config.skill_budget_max_total_chars,
         )
 
     def _make_task_planning_rail() -> TaskPlanningRail:

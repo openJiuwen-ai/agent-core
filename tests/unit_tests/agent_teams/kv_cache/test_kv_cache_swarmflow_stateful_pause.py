@@ -13,12 +13,13 @@ from typing import Any
 import pytest
 
 from openjiuwen.agent_teams.harness.state import HarnessState
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.team_worker_backend import TeamWorkerBackend
 from openjiuwen.agent_teams.workflow.engine import run_workflow
 from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig, KVCacheIdentity
+from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.session.agent import Session
 
 
@@ -75,8 +76,11 @@ class _PauseHarness:
         return None
 
     async def start(self, *, team_session: Any = None) -> None:
-        self._session = Session()
-        kv_cache_hooks.on_harness_session_created(self, self._session)
+        self._session = team_session.create_agent_session(
+            agent_id="stateful-pause",
+            share_stream_writer=False,
+        )
+        kv_cache_harness_session_lifecycle_hook.on_harness_session_created(self, self._session)
         self.events.append("start")
 
     def current_session(self) -> Session | None:
@@ -156,13 +160,17 @@ def _backend(
         tools=[],
         kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=True),
     )
-    return TeamWorkerBackend(
+    backend = TeamWorkerBackend(
         model=None,
         worker_base_spec=base,
         team_name="team-a",
         session_id="team-session-a",
         run_id="run-a",
     )
+    backend._kv_cache_runtime = KVCacheRuntime(
+        binding_provider=lambda: harnesses[0].model if harnesses else None
+    )
+    return backend
 
 
 @pytest.mark.asyncio
@@ -225,7 +233,10 @@ async def test_stateful_pause_unwinds_cleanup_and_resume_cold_starts(
     new_harness = resume_harnesses[0]
     assert new_harness is not old_harness
     assert new_harness.started_identity is not None
-    assert new_harness.started_identity.cache_id != old_identity.cache_id
+    # Stateful avatars intentionally derive a stable child Session ID so
+    # checkpoint history can be restored. The prior release removes its live
+    # Runtime binding before the resumed avatar registers the same identity.
+    assert new_harness.started_identity.cache_id == old_identity.cache_id
     assert new_harness.started_identity.parent_cache_id == "team-session-a"
     assert new_harness.model.offload_calls == []
     assert new_harness.model.prefetch_calls == []

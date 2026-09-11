@@ -5,6 +5,8 @@ import asyncio
 
 import pytest
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import ExecutionError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.graph.pregel import (
     GraphInterrupt,
@@ -909,26 +911,30 @@ class TestPregelV2:
         config = PregelConfig(session_id="test_parallel_fail", ns="start-a-end")
         logger.debug("\n=============== Invoke 1 (Failure) ===============")
 
-        with pytest.raises(RuntimeError, match="a1 exception"):
+        with pytest.raises(ExecutionError, match="a1 exception") as exc_info:
             await graph.run(config)
+        # The engine wraps the node's raw RuntimeError into a typed graph error
+        # while preserving the original exception via `cause`.
+        assert exc_info.value.status == StatusCode.PREGEL_GRAPH_SUPER_STEP_EXECUTION_ERROR
+        assert isinstance(exc_info.value.cause, RuntimeError)
         checkpoint = await graph.store.get(config.get("session_id"), config.get('ns'))
         assert checkpoint is not None
         assert checkpoint.pending_node is not None
 
         logger.debug("\n=============== Invoke 2 (Resume) ===============")
         execution_trace.clear()
-        with pytest.raises(RuntimeError, match="a1 exception"):
+        with pytest.raises(ExecutionError, match="a1 exception"):
             await graph.run(config)
         assert len(execution_trace) == 0
 
         logger.debug("\n=============== Invoke 3/4 (No sessionId) ===============")
         config_stateless = PregelConfig()
         execution_trace.clear()
-        with pytest.raises(RuntimeError, match="a1 exception"):
+        with pytest.raises(ExecutionError, match="a1 exception"):
             await graph.run(config_stateless)
         assert execution_trace[0]["active_nodes"] == ["start"]
         execution_trace.clear()
-        with pytest.raises(RuntimeError, match="a1 exception"):
+        with pytest.raises(ExecutionError, match="a1 exception"):
             await graph.run(config_stateless)
         assert execution_trace[0]["active_nodes"] == ["start"]
 

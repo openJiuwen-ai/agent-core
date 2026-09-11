@@ -96,8 +96,8 @@ class TracerHandlerRegistry:
 
 
 class Tracer:
-    def __init__(self, session_id: str | None = None):
-        self._trace_id = str(uuid.uuid4())
+    def __init__(self, session_id: str | None = None, trace_id: str | None = None):
+        self._trace_id = trace_id if trace_id else str(uuid.uuid4())
         self._session_id = session_id
         self.tracer_agent_span_manager = SpanManager(self._trace_id, session_id=session_id)
         self.tracer_workflow_span_manager_dict = {}

@@ -25,6 +25,13 @@ class OtelSpanState:
     context_token: object
     invoke_id: str
     start_time: datetime | None = None  # cached start_time for elapsed calculation
+    # Reference to the inputs dict from on_pre_invoke. Used by on_invoke /
+    # on_call_done to re-serialize OJ_WORKFLOW_INPUTS after transform callbacks
+    # (e.g. resolve_global_vars_transform) have mutated the inputs in place.
+    # Holds a reference, not a copy, so mutations are visible.
+    inputs: Any | None = None
+    # Track which workflow this span belongs to for cross-workflow isolation.
+    workflow_id: str | None = None
 
 
 class OtelAgentSpanManager:

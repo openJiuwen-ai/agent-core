@@ -116,12 +116,19 @@ class NodeSession(BaseSession):
         self._workflow_nesting_depth = session.workflow_nesting_depth()
         self._main_workflow_id = session.main_workflow_id()
         self._skip_trace = skip_trace
+        # Cache node_name from NodeSpec; None when spec missing or name unset.
+        # Tracer falls back to node_id() when name is None, preserving prior behavior.
+        spec = self.node_config()
+        self._node_name = spec.name if spec is not None else None
 
     def node_id(self):
         return self._node_id
 
     def node_type(self):
         return self._node_type
+
+    def node_name(self):
+        return self._node_name
 
     def executable_id(self):
         return self._executable_id
@@ -177,6 +184,9 @@ class NodeSession(BaseSession):
 class SubWorkflowSession(NodeSession):
     def __init__(self, session: NodeSession, workflow_id: str, actor_manager: "ActorManager" = None):
         super().__init__(session=session.parent(), node_id=session.node_id(), node_type=session.node_type())
+        # Inherit node_name from the host NodeSession so the sub-workflow root and
+        # its internal components trace back to the host component's display name.
+        self._node_name = session.node_name()
         self._workflow_id = workflow_id
         self._workflow_nesting_depth = session.workflow_nesting_depth() + 1
         self._main_workflow_id = session.main_workflow_id()

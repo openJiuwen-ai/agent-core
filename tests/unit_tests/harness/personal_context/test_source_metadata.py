@@ -45,6 +45,21 @@ def test_source_id_uses_trimmed_locator_and_128_bit_digest() -> None:
     assert module.source_id_for_locator(locator) == f"src_{hashlib.sha256(locator.encode()).hexdigest()[:32]}"
 
 
+def test_source_item_version_matches_persisted_metadata(tmp_path: Path) -> None:
+    module = _module()
+    item = _item(revision="revision-7")
+    version = module.source_item_version(item)
+    source_id = module.upsert_source_metadata(
+        tmp_path,
+        item,
+        provider="github",
+        service_id="github-main",
+        observed_at="2026-09-07T00:00:00Z",
+    )
+    metadata = module.read_source_metadata(tmp_path / f"{source_id}.md")
+    assert version == (metadata["latest_revision"], metadata["latest_hash"])
+
+
 def test_source_locator_removes_url_credentials_query_and_fragment_but_preserves_local_path(tmp_path: Path) -> None:
     module = _module()
     local_path = str((tmp_path / "private note.md").resolve())
