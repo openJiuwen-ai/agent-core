@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-08-28 |
+| 最近一次修订日期 | 2026-09-11 |
 | 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md` |
 
 ## 范围 / 边界
@@ -103,9 +103,15 @@
    `WorkspaceSpec.root_path` 覆盖为 `worktree_path`，`stable_base=False`，且不
    注册到 `cleanup_path`。worker 完成后检查变更：干净则
    `remove_worktree`，有修改 / 有提交 / 状态不可确认则保留 worktree 给 leader
-   后续集成。`agent()` 返回值保持 worker 原始输出，不附加 worktree path / branch；
+   后续集成。**孤儿对账**（2026-09-11，F_39 修订）：slug 内嵌 run_id 使每次 relaunch 都
+   产生全新 slug，上一 run 保留的 worktree 对后续 run 不可寻址；`ensure` 在本 run 创建
+   第一个 worktree 前对 session worktrees 根做一次对账——只删**可证明干净**的孤儿
+   （无未提交修改且 worktree HEAD ⊆ 仓库 HEAD），脏 / 不可验证的 fail-closed 保留。
+   `agent()` 返回值保持 worker 原始输出，不附加 worktree path / branch；
    后续集成阶段由明确的 merge agent 基于真实仓库的 git 状态、`git worktree list`、
-   分支和提交信息完成提交、合并和冲突处理。
+   分支和提交信息完成提交、合并和冲突处理。**缓存命中重放不重建 worktree**——命中路径
+   跳过 worker 执行（"no semaphore, no backend"），脚本不得假设 worktree 文件产物在
+   resume/relaunch 后仍存在（工具描述已注明）。
 
 ## Resume Journal 持久化（`run_swarmflow`）
 
@@ -138,6 +144,10 @@ journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把�
   调(供未来 mid-run checkpoint);只有 `finalize`(workflow 完全跑完后,`run_workflow` 在
   `_exec_loaded` 正常返回**之后**调,任何异常/取消都会跳过)写 journal 后**校验 `used ⊆ 已落盘
   journal`(key+sig)** 才删 WAL,不一致则保留兜底。
+- **load 时 WAL compaction**(2026-09-11,F_40 修订):`load` 重放 WAL 后把 **sealed run 的
+  call 记录**从 WAL 删除——seal guard 强制 relaunch 换新 run_id、`get_cached` 又要求 run_id
+  匹配,这类记录永远不可能再命中,纯膨胀。pause/seal run 级记录与 unsealed run 的 call 记录
+  一律保留;无 seal 时 WAL 字节不动。`finalize` 仍是唯一整文件级删除,崩溃 durability 不变。
 - **原子写**:`save` 写 `<journal>.tmp` 后 `os.replace` 原子改名,崩溃中途不产生半截 journal。
 - **异步 I/O**:journal/WAL 的读写经 `aiofiles`(`load`/`use`/`save`/`finalize` 均 async),不阻塞
   共享事件循环(swarmflow 在 leader 进程内与其它团队协程同 loop);WAL append 由 `asyncio.Lock`
