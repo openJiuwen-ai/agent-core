@@ -18,11 +18,11 @@ from openjiuwen.extensions.observability.span_context import (
     close_current_agent_span,
     flush_child_spans,
     get_active_span_tracker,
+    get_bound_root_span,
     get_current_agent_span,
     get_current_llm_span,
     get_current_session_id,
     get_current_tool_span,
-    get_bound_root_span,
     get_root_span,
     pop_any_tool_span,
     pop_current_llm_span,
@@ -61,6 +61,7 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
         return span
 
     from opentelemetry.trace import SpanKind
+
     from openjiuwen.agent_teams.context import get_session_id
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_NAME,
@@ -121,6 +122,30 @@ def finalize_trace(team_name: str) -> None:
     del team_name
     team_span = get_bound_root_span()
     trace_id = getattr(getattr(team_span, "context", None), "trace_id", None)
+
+    # Drain the trace's usage rollup first so a team run never leaks an
+    # accumulator entry for the life of the process, and stamp the totals on
+    # the team root under the agentteam.task.* namespace.
+    if trace_id is not None:
+        try:
+            from openjiuwen.extensions.observability.usage_aggregation import drain_rollup
+
+            snapshot = drain_rollup(trace_id)
+            if snapshot and team_span is not None and team_span.is_recording():
+                from openjiuwen.extensions.observability.semconv import (
+                    AT_TASK_ESTIMATED_COST_USD,
+                    AT_TASK_TOTAL_COMPLETION_TOKENS,
+                    AT_TASK_TOTAL_PROMPT_TOKENS,
+                    AT_TASK_TOTAL_TOOL_CALLS,
+                )
+
+                team_span.set_attribute(AT_TASK_TOTAL_PROMPT_TOKENS, int(snapshot["prompt_tokens"]))
+                team_span.set_attribute(AT_TASK_TOTAL_COMPLETION_TOKENS, int(snapshot["completion_tokens"]))
+                team_span.set_attribute(AT_TASK_TOTAL_TOOL_CALLS, int(snapshot["tool_calls"]))
+                team_span.set_attribute(AT_TASK_ESTIMATED_COST_USD, snapshot["cost"])
+        except Exception as exc:
+            team_logger.warning("otel: team usage rollup stamp failed: {}", exc)
+
     if team_span is not None and team_span.is_recording():
         team_span.set_status(Status(StatusCode.OK))
         team_span.end()

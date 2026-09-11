@@ -31,19 +31,7 @@ from openjiuwen.agent_teams.observability import (
     init_observability,
     shutdown_observability,
 )
-from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
-from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_ID,
-    AT_AGENT_OUTPUT,
-    AT_MEMBER_NAME,
-    AT_PLAN_APPROVED,
-    AT_TASK_STATUS,
-    GEN_AI_REQUEST_MESSAGE_COUNT,
-    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-)
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
@@ -64,7 +52,18 @@ from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
-
+from openjiuwen.extensions.observability.semconv import (
+    AT_AGENT_ID,
+    AT_AGENT_OUTPUT,
+    AT_MEMBER_NAME,
+    AT_PLAN_APPROVED,
+    AT_TASK_STATUS,
+    GEN_AI_REQUEST_MESSAGE_COUNT,
+    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
+    LANGFUSE_OBSERVATION_INPUT,
+    LANGFUSE_OBSERVATION_OUTPUT,
+)
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -237,8 +236,8 @@ def _create_team_span(team_name: str) -> Any:
     UTs that directly trigger AGENT_INVOKE_INPUT must create the team
     span first, just like the runner does before calling agent.invoke/stream.
     """
-    from openjiuwen.agent_teams.observability.span_context import get_or_create_team_span
     from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import get_or_create_team_span
     return get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
 
 
@@ -651,7 +650,10 @@ async def test_tool_call_nests_under_agent_span(
     await rail.after_task_iteration(ctx)
 
     # Verify: tool span is child of agent span
-    agent_spans = [s for s in in_memory_exporter.get_finished_spans() if s.name.startswith("agent.leader.task_iteration")]
+    agent_spans = [
+        s for s in in_memory_exporter.get_finished_spans()
+        if s.name.startswith("agent.leader.task_iteration")
+    ]
     tool_spans = _spans_by_name(in_memory_exporter, "tool.calc")
     assert agent_spans, "agent span missing"
     assert tool_spans, "tool span missing"
@@ -662,8 +664,9 @@ async def test_tool_call_nests_under_agent_span(
     assert tool_span.parent.span_id == agent_span.context.span_id
 
     # Cleanup
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from opentelemetry.trace import Status, StatusCode
+
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     ts = remove_team_span("test_team")
     if ts is not None and ts.is_recording():
         ts.set_status(Status(StatusCode.OK))
@@ -681,11 +684,11 @@ async def test_child_spans_inherit_member_name_from_agent_span(
     agent span is closed abnormally, the orphaned llm.call/tool spans can
     still be traced back to the teammate that produced them.
     """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     _create_team_span("test_team")
 
@@ -759,11 +762,11 @@ async def test_reasoning_span_inherits_member_name_from_agent_span(
     the common path where the agent span is still alive (streaming within
     an iteration) and asserts the member name lands on the reasoning span.
     """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     _create_team_span("test_team")
 
@@ -977,7 +980,7 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """End-to-end Monitor handler verifies team / task / message spans."""
-    from openjiuwen.agent_teams.observability.span_context import set_team_span, remove_team_span
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span, set_team_span
 
     config = ObservabilityConfig(enabled=True, sample_rate=1.0)
     handler = OtelTeamMonitorHandler(config)
@@ -1241,11 +1244,11 @@ async def test_observability_rail_opens_and_closes_iteration_span(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """Rail emits one agent.*.task_iteration span per before/after pair."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     # Create team span (simulating Runner._maybe_attach_observability)
@@ -1290,11 +1293,11 @@ async def test_observability_rail_marks_error_on_exception(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """When ctx.exception is set, the iteration span closes as ERROR."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     # Create team span (simulating Runner._maybe_attach_observability)
@@ -1479,8 +1482,8 @@ async def test_team_span_survives_after_rail_iteration(
     """
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
-        reset_all,
         remove_team_span,
+        reset_all,
     )
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
@@ -1559,8 +1562,8 @@ async def test_two_runs_produce_two_separate_traces(
     """v15: Two Runner.run calls produce two independent traces.
     Each trace has its own team span as root.
     Team span is closed in finalize_team_trace (called from team_runner finally)."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span, get_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import get_team_span, remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -1653,8 +1656,8 @@ async def test_member_invoke_does_not_close_team_span(
 ) -> None:
     """v15: Member's AGENT_INVOKE_OUTPUT does NOT close the team span.
     Team span is closed in finalize_team_trace (called from team_runner finally)."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span, get_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import get_team_span, remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     fw = Runner.callback_framework
@@ -1708,8 +1711,8 @@ async def test_span_tree_shape(
       │       └── tool.xxx
     No duplicate team spans, no orphan spans.
     Team span is closed in finalize_team_trace."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -1890,11 +1893,11 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     still uses delta (only new messages), but per-message ``gen_ai.prompt.{i}.*``
     attributes use the full prompt so Langfuse always shows the complete context.
     """
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
         remove_team_span,
     )
-    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -2102,15 +2105,16 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
        path covered by ``test_concurrent_llm_requests_never_cross_write``
        is what resolves this case in production.
     """
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         LlmSpanState,
         get_active_span_tracker,
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
-    from opentelemetry.trace import SpanKind, set_span_in_context
-    from opentelemetry import context as otel_context
 
     team_span = _create_team_span("test_team")
     tracer = get_tracer("test")
@@ -2207,13 +2211,14 @@ async def test_concurrent_llm_requests_never_cross_write(
     Matching on the LLM call id instead keeps each request on its own span, and
     the assertions below pin prompt against completion on both.
     """
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
-    from opentelemetry.trace import SpanKind, set_span_in_context
 
     fw = Runner.callback_framework
     team_span = _create_team_span("test_team")
@@ -2320,13 +2325,14 @@ async def test_stream_callbacks_resolve_across_per_frame_task_hops(
     survive that hop, otherwise the chunk and completion callbacks fall back to
     guessing — which is where a second open request gets robbed.
     """
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
-    from opentelemetry.trace import SpanKind, set_span_in_context
 
     fw = Runner.callback_framework
     team_span = _create_team_span("test_team")
@@ -2387,15 +2393,16 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """A subagent invoke span must nest under the parent agent iteration span."""
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         get_current_agent_span,
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
-    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
-    from opentelemetry.trace import SpanKind, set_span_in_context
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+    from openjiuwen.extensions.observability.semconv import AT_AGENT_NAME, AT_MEMBER_NAME
 
     team_span = _create_team_span("test_team")
     tracer = get_tracer("test")
@@ -2512,13 +2519,13 @@ async def test_flush_spares_a_non_team_named_root_span(
     up as a leaked child: reported as an ORPHAN, force-ended by the tracker, and
     ended a second time by its actual owner.
     """
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import set_span_in_context
+
     from openjiuwen.agent_teams.observability import (
         clear_ambient_team_span,
         set_ambient_team_span,
     )
-    from opentelemetry import context as otel_context
-    from opentelemetry.trace import set_span_in_context
-
     from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import flush_child_spans
 
@@ -3016,12 +3023,9 @@ async def test_team_agent_execution_scope_binds_leader_subject(in_memory_exporte
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import TeamRole
     from openjiuwen.extensions.observability.semconv import (
-        OJ_AGENT_MODE,
+        OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
         OJ_EXECUTION_SUBJECT_ID,
         OJ_EXECUTION_SUBJECT_KIND,
-        OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
-        OJ_TEAM_ID,
-        OJ_TEAM_NAME,
     )
 
     _create_team_span("test_team")
@@ -3086,14 +3090,14 @@ async def test_team_agent_execution_scope_binds_leader_subject(in_memory_exporte
 
 def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter):
     """The team root span records agent mode and Team identity for routing."""
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
     from openjiuwen.extensions.observability.semconv import (
         OJ_AGENT_MODE,
+        OJ_SESSION_ID,
         OJ_TEAM_ID,
         OJ_TEAM_NAME,
         OJ_TEAM_SESSION_ID,
-        OJ_SESSION_ID,
     )
-    from openjiuwen.agent_teams.context import set_session_id, reset_session_id
 
     token = set_session_id("session-1")
     try:
@@ -3113,3 +3117,45 @@ def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter)
     assert attrs.get(OJ_TEAM_NAME) == "test_team"
     assert attrs.get(OJ_TEAM_SESSION_ID) == "session-1"
     assert attrs.get(OJ_SESSION_ID) == "session-1"
+
+
+def test_finalize_trace_stamps_usage_rollup_and_drains_it(in_memory_exporter):
+    """Team root close stamps agentteam.task.* totals and clears the trace."""
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+    from openjiuwen.extensions.observability import usage_aggregation as usage_mod
+    from openjiuwen.extensions.observability.semconv import (
+        AT_TASK_ESTIMATED_COST_USD,
+        AT_TASK_TOTAL_COMPLETION_TOKENS,
+        AT_TASK_TOTAL_PROMPT_TOKENS,
+        AT_TASK_TOTAL_TOOL_CALLS,
+    )
+
+    team_span = _create_team_span("test_team")
+    trace_id = team_span.context.trace_id
+    accumulator = usage_mod.get_accumulator()
+    accumulator.accumulate_llm(trace_id, prompt=1000, completion=500, cost=0.002)
+    accumulator.accumulate_tool(trace_id, is_error=True)
+
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    attrs = dict(spans[-1].attributes)
+    assert attrs.get(AT_TASK_TOTAL_PROMPT_TOKENS) == 1000
+    assert attrs.get(AT_TASK_TOTAL_COMPLETION_TOKENS) == 500
+    assert attrs.get(AT_TASK_TOTAL_TOOL_CALLS) == 1
+    assert attrs.get(AT_TASK_ESTIMATED_COST_USD) == pytest.approx(0.002)
+    assert accumulator.snapshot(trace_id) == {}
+
+
+def test_finalize_trace_without_rollup_does_not_stamp(in_memory_exporter):
+    """A team trace with no usage leaves no agentteam.task.* rollup attributes."""
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+    from openjiuwen.extensions.observability.semconv import AT_TASK_TOTAL_PROMPT_TOKENS
+
+    _create_team_span("test_team")
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    assert AT_TASK_TOTAL_PROMPT_TOKENS not in dict(spans[-1].attributes)

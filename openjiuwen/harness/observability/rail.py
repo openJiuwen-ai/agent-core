@@ -28,6 +28,7 @@ contribution belongs to.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,15 +45,15 @@ from opentelemetry.trace import (
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+# Imported as a module, never by name: the run-root fallback installs itself by
+# rebinding ``get_root_span`` on this module, and a name bound at import time
+# would keep calling the unwrapped accessor.
+from openjiuwen.extensions.observability import span_context as shared_span_context
+from openjiuwen.extensions.observability.demand import publish_span_snapshot
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
-)
-from openjiuwen.extensions.observability.demand import publish_span_snapshot
-from openjiuwen.extensions.observability.tool_outcome import (
-    TOOL_REPORTED_FAILURE,
-    tool_failure_reason,
-    tool_result_for_exception,
 )
 from openjiuwen.extensions.observability.semconv import (
     DA_AGENT_NAME,
@@ -79,16 +80,17 @@ from openjiuwen.extensions.observability.semconv import (
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
     LANGFUSE_SESSION_ID,
-    OJ_REQUEST_ID,
-    OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_REQUEST_ID,
+    OJ_RUN_ID,
+    OJ_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
+    OJ_TEAM_ID,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
@@ -98,11 +100,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
-from openjiuwen.harness.execution_subject import current_execution_subject
-# Imported as a module, never by name: the run-root fallback installs itself by
-# rebinding ``get_root_span`` on this module, and a name bound at import time
-# would keep calling the unwrapped accessor.
-from openjiuwen.extensions.observability import span_context as shared_span_context
 from openjiuwen.extensions.observability.span_context import (
     cascade_close_children,
     clear_tool_span_context,
@@ -113,6 +110,12 @@ from openjiuwen.extensions.observability.span_context import (
     push_tool_span,
     set_current_agent_span,
 )
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
+)
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.observability.span_context import current_session_id
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -347,6 +350,7 @@ class ToolSpanScope:
         span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
 
         if exception is not None:
+            self._accumulate_tool_usage(span, is_error=True)
             span.record_exception(exception)
             span.set_attribute(ERROR_TYPE, type(exception).__name__)
             span.set_status(Status(StatusCode.ERROR, str(exception)))
@@ -355,11 +359,26 @@ class ToolSpanScope:
 
         failure_reason = tool_failure_reason(output)
         if failure_reason is None:
+            self._accumulate_tool_usage(span, is_error=False)
             span.set_status(Status(StatusCode.OK))
         else:
+            self._accumulate_tool_usage(span, is_error=True)
             span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
             span.set_status(Status(StatusCode.ERROR, failure_reason))
         span.end()
+
+    @staticmethod
+    def _accumulate_tool_usage(span: Span, *, is_error: bool) -> None:
+        """Count one authoritative tool call into the trace rollup."""
+        try:
+            trace_id = getattr(getattr(span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            get_accumulator().accumulate_tool(trace_id, is_error=is_error)
+        except Exception as exc:
+            logger.warning("[AgentObservability] tool usage accumulation failed: %s", exc)
 
 
 class AgentObservabilityRail(DeepAgentRail):
@@ -544,6 +563,7 @@ class AgentObservabilityRail(DeepAgentRail):
             if inputs is not None:
                 output = getattr(inputs, "result", None)
 
+            self._emit_iteration_metrics(scope, exception=ctx.exception)
             scope.close(output=output, exception=ctx.exception)
 
             # Iteration close restores current to None (parent_agent_span is
@@ -563,6 +583,24 @@ class AgentObservabilityRail(DeepAgentRail):
             )
         except Exception as exc:
             logger.warning("[AgentObservability] after_task_iteration failed: %s", exc)
+
+    def _emit_iteration_metrics(self, scope, exception: BaseException | None) -> None:
+        from openjiuwen.extensions.observability import metrics as _metrics
+
+        rec = _metrics.get_metrics_recorder()
+        if rec is None:
+            return
+        span = scope.span
+        if not span.is_recording():
+            return
+        attributes = getattr(span, "attributes", None) or {}
+        agent_id = str(attributes.get(DA_AGENT_NAME) or "unknown")
+        team_id = str(attributes.get(OJ_TEAM_ID) or "")
+        start_time = getattr(span, "start_time", None)
+        duration_ms = (time.time_ns() - start_time) / 1_000_000.0 if start_time is not None else 0.0
+        rec.record_iteration_duration(agent_id, team_id, duration_ms)
+        if exception is not None:
+            rec.record_iteration_error(agent_id, team_id)
 
     # ------------------------------------------------------------------
     # Invoke-level fallback (covers single-round agents and sub-agents)

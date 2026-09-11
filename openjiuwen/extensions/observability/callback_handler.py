@@ -11,16 +11,16 @@ from __future__ import annotations
 
 import json
 import threading
-from collections import OrderedDict
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import asdict, is_dataclass
 from enum import Enum
 from typing import Any
 
-from opentelemetry import trace
 from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.trace import (
     Span,
     SpanKind,
@@ -30,19 +30,32 @@ from opentelemetry.trace import (
     set_span_in_context,
 )
 
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.call_scope import (
+    expects_unified_llm_completion,
+    get_current_llm_call_id,
+    is_llm_observation_suppressed,
+)
+from openjiuwen.core.foundation.llm.schema.message import (
+    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
+    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
+    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
+    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+)
+from openjiuwen.extensions.observability import metrics as _metrics
+from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.demand import publish_span_snapshot
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_prompt,
     truncate,
 )
-from openjiuwen.extensions.observability.config import ObservabilityConfig
-from openjiuwen.extensions.observability.demand import publish_span_snapshot
-from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
     AT_MEMBER_NAME,
     AT_SESSION_ID,
-
+    DA_AGENT_NAME,
     ERROR_TYPE,
     GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
@@ -53,10 +66,12 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
+    GEN_AI_REASONING_DURATION_MS,
+    GEN_AI_REASONING_TIMING,
+    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MESSAGE_COUNT,
     GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
-    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
     GEN_AI_REQUEST_TEMPERATURE,
@@ -71,25 +86,22 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_RESULT,
+    GEN_AI_TOOL_CALLS,
+    GEN_AI_TOOL_DEFINITIONS,
+    GEN_AI_TOOL_ID,
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_OUTPUT,
-    GEN_AI_TOOL_ID,
     GEN_AI_TOOL_TYPE,
-    GEN_AI_TOOL_CALLS,
-    GEN_AI_TOOL_DEFINITIONS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_TOTAL_TOKENS,
     GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_COMPLETION_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
-    GEN_AI_USAGE_REASONING_TOKENS,
+    GEN_AI_USAGE_PROMPT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    GEN_AI_REASONING_DURATION_MS,
-    GEN_AI_REASONING_TIMING,
-    REASONING_TIMING_UNMEASURED,
+    GEN_AI_USAGE_REASONING_TOKENS,
+    GEN_AI_USAGE_TOTAL_TOKENS,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
@@ -101,12 +113,12 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
-    OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE,
+    OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS,
     OJ_GEN_AI_RESPONSE_LOGPROBS,
     OJ_GEN_AI_RESPONSE_PARSER_RESULT,
-    OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS,
+    OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT,
     OJ_GEN_AI_RESPONSE_PROVIDER_METADATA,
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_GEN_AI_RESPONSE_TPOT_MS,
@@ -126,19 +138,15 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA,
     OJ_STREAM_TOOL_CALL_ID,
     OJ_STREAM_TOOL_CALL_NAME,
-    OJ_TRACE_SCHEMA_VERSION,
-    OJ_TRAJECTORY_RECORD_KIND,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
     OJ_TRACE_ROOT,
+    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
-)
-from openjiuwen.extensions.observability.tool_outcome import (
-    TOOL_REPORTED_FAILURE,
-    tool_failure_reason,
-    tool_result_for_exception,
+    REASONING_TIMING_UNMEASURED,
 )
 from openjiuwen.extensions.observability.span_context import (
     LlmSpanState,
@@ -154,20 +162,12 @@ from openjiuwen.extensions.observability.span_context import (
     push_tool_span,
     set_current_session_id,
 )
-from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.llm.schema.message import (
-    OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-    OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL,
-    OPENJIUWEN_MESSAGE_ORIGIN_METADATA,
-    OPENJIUWEN_MESSAGE_PROVENANCE_METADATA,
-    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA,
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
 )
-from openjiuwen.core.foundation.llm.call_scope import (
-    expects_unified_llm_completion,
-    get_current_llm_call_id,
-    is_llm_observation_suppressed,
-)
-
+from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 
 _TRACER_NAME = "openjiuwen.extensions.observability"
 _REQUEST_SEQUENCE_LOCK = threading.Lock()
@@ -797,6 +797,13 @@ class OtelCallbackHandler:
             else:
                 span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
                 span.set_status(Status(StatusCode.ERROR, failure_reason))
+            self._accumulate_tool_usage(span, is_error=failure_reason is not None)
+            self._emit_tool_metrics(
+                tool_name,
+                self._metrics_agent_id(span),
+                self._tool_duration_ms(span),
+                is_error=failure_reason is not None,
+            )
             span.end()
         except Exception as exc:
             import traceback
@@ -838,6 +845,13 @@ class OtelCallbackHandler:
                     span.set_status(Status(StatusCode.ERROR, str(exc)))
                 else:
                     span.set_status(Status(StatusCode.ERROR, "tool call error"))
+                self._accumulate_tool_usage(span, is_error=True)
+                self._emit_tool_metrics(
+                    tool_name,
+                    self._metrics_agent_id(span),
+                    self._tool_duration_ms(span),
+                    is_error=True,
+                )
                 span.end()
         except Exception as exc:
             logger.exception("otel: on_tool_call_error failed: {}", exc)
@@ -1130,6 +1144,9 @@ class OtelCallbackHandler:
 
             self._maybe_record_response_attrs(state, response)
 
+            self._emit_llm_metrics(state)
+            self._accumulate_llm_usage(state)
+
             self._finalize_llm_span_output(
                 state, completion_text, reasoning_text,
                 tc_json=tc_json, response=response,
@@ -1176,7 +1193,6 @@ class OtelCallbackHandler:
             self._record_response_details(state, response)
             total_latency_ms = (time.monotonic_ns() - state.start_ns) / 1_000_000.0
             state.span.set_attribute(OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS, total_latency_ms)
-            redacted_compl = redact_completion(completion_text, self._config)
 
             # Build langfuse.observation.output
             choice_obj: dict[str, Any] = {"index": 0, "message": {"role": "assistant"}}
@@ -1302,6 +1318,89 @@ class OtelCallbackHandler:
         span.set_attribute(LANGFUSE_OBSERVATION_TYPE, "generation")
         span.set_attribute(GEN_AI_REQUEST_STREAM, state.is_streaming)
 
+    @staticmethod
+    def _metrics_agent_id(span: Span) -> str:
+        attributes = getattr(span, "attributes", None) or {}
+        return str(
+            attributes.get(GEN_AI_AGENT_NAME)
+            or attributes.get(DA_AGENT_NAME)
+            or attributes.get(GEN_AI_AGENT_ID)
+            or "unknown"
+        )
+
+    @staticmethod
+    def _metrics_model(span: Span) -> str:
+        attributes = getattr(span, "attributes", None) or {}
+        return str(attributes.get(GEN_AI_RESPONSE_MODEL) or attributes.get(GEN_AI_REQUEST_MODEL) or "unknown")
+
+    def _emit_llm_metrics(self, state: LlmSpanState) -> None:
+        rec = _metrics.get_metrics_recorder()
+        if rec is None or not state.span.is_recording():
+            return
+        usage = getattr(state.span, "attributes", None) or {}
+        prompt = int(usage.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+        completion = int(usage.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+        if not prompt and not completion:
+            prompt = int(usage.get(GEN_AI_USAGE_PROMPT_TOKENS, 0) or 0)
+            completion = int(usage.get(GEN_AI_USAGE_COMPLETION_TOKENS, 0) or 0)
+        agent_id = self._metrics_agent_id(state.span)
+        model = self._metrics_model(state.span)
+        start_time = getattr(state.span, "start_time", None)
+        duration_ms = (time.time_ns() - start_time) / 1_000_000.0 if start_time is not None else 0.0
+        rec.record_llm_usage(agent_id, model, prompt, completion)
+        rec.record_llm_duration(agent_id, model, duration_ms)
+
+    @staticmethod
+    def _tool_duration_ms(span: Span) -> float:
+        start_time = getattr(span, "start_time", None)
+        if start_time is None:
+            return 0.0
+        return (time.time_ns() - start_time) / 1_000_000.0
+
+    @staticmethod
+    def _emit_tool_metrics(tool_name: str, agent_id: str, duration_ms: float, is_error: bool) -> None:
+        rec = _metrics.get_metrics_recorder()
+        if rec is None:
+            return
+        rec.record_tool_duration(tool_name, agent_id, duration_ms)
+        if is_error:
+            rec.record_tool_error(tool_name, agent_id)
+
+    @staticmethod
+    def _accumulate_llm_usage(state: LlmSpanState) -> None:
+        """Add one LLM call's final token/cost facts to the trace rollup."""
+        try:
+            attributes = getattr(state.span, "attributes", None) or {}
+            prompt = int(attributes.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+            completion = int(attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+            if not prompt and not completion:
+                prompt = int(attributes.get(GEN_AI_USAGE_PROMPT_TOKENS, 0) or 0)
+                completion = int(attributes.get(GEN_AI_USAGE_COMPLETION_TOKENS, 0) or 0)
+            if not prompt and not completion:
+                return
+            trace_id = getattr(getattr(state.span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            cost = float(attributes.get(OJ_GEN_AI_USAGE_TOTAL_COST, 0) or 0)
+            get_accumulator().accumulate_llm(trace_id, prompt=prompt, completion=completion, cost=cost)
+        except Exception as exc:
+            logger.warning("otel: llm usage accumulation failed - {}", exc)
+
+    @staticmethod
+    def _accumulate_tool_usage(span: Span, *, is_error: bool) -> None:
+        """Add one tool call's outcome fact to the trace rollup."""
+        try:
+            trace_id = getattr(getattr(span, "context", None), "trace_id", None)
+            if trace_id is None:
+                return
+            from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+            get_accumulator().accumulate_tool(trace_id, is_error=is_error)
+        except Exception as exc:
+            logger.warning("otel: tool usage accumulation failed - {}", exc)
+
     def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
         """Record usage attributes (tokens, model_name) from usage_metadata.
 
@@ -1392,6 +1491,27 @@ class OtelCallbackHandler:
         ):
             if value and not (skip_existing and dst_attr in state.span.attributes):
                 state.span.set_attribute(dst_attr, value)
+
+        provider_cost = (
+            float(getattr(usage, "input_cost", 0) or 0)
+            + float(getattr(usage, "output_cost", 0) or 0)
+            + float(getattr(usage, "total_cost", 0) or 0)
+        )
+        span_attributes = getattr(state.span, "attributes", None) or {}
+        model = str(
+            getattr(usage, "model_name", "")
+            or span_attributes.get(GEN_AI_RESPONSE_MODEL)
+            or ""
+        )
+        if not provider_cost and model:
+            from openjiuwen.extensions.observability.cost_tracker import estimate_cost
+            prompt = int(span_attributes.get(GEN_AI_USAGE_INPUT_TOKENS, 0) or 0)
+            completion = int(span_attributes.get(GEN_AI_USAGE_OUTPUT_TOKENS, 0) or 0)
+            est = estimate_cost(model, prompt, completion)
+            if est.known and not (skip_existing and OJ_GEN_AI_USAGE_TOTAL_COST in span_attributes):
+                state.span.set_attribute(OJ_GEN_AI_USAGE_INPUT_COST, est.input_cost)
+                state.span.set_attribute(OJ_GEN_AI_USAGE_OUTPUT_COST, est.output_cost)
+                state.span.set_attribute(OJ_GEN_AI_USAGE_TOTAL_COST, est.total_cost)
 
         raw_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
         has_chunk_window = (

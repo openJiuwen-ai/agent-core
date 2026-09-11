@@ -5,29 +5,30 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-import openjiuwen.harness.observability.rail as rail_module
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
+import openjiuwen.harness.observability.rail as rail_module
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     TaskIterationInputs,
     ToolCallInputs,
 )
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.extensions.observability import span_context as shared_span_context
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.semconv import (
+    AT_SESSION_ID,
     DA_AGENT_NAME,
     DA_TASK_ITERATION,
     GEN_AI_AGENT_DESCRIPTION,
@@ -43,48 +44,47 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_INPUT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_OUTPUT,
-    LANGFUSE_SESSION_ID,
-    AT_SESSION_ID,
     LANGFUSE_OBSERVATION_INPUT,
     LANGFUSE_OBSERVATION_OUTPUT,
     LANGFUSE_OBSERVATION_TYPE,
-    OJ_REQUEST_ID,
+    LANGFUSE_SESSION_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_INFERENCE_ID,
+    OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
     OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
-    OJ_INFERENCE_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_RESOURCE_ID,
     OJ_TOOL_TYPE,
-    OJ_TRACE_ROOT,
     OJ_TRACE_FORCED_CLOSE,
+    OJ_TRACE_ROOT,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
-)
-from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
-from openjiuwen.harness.observability.rail import (
-    AgentObservabilityRail,
-    AgentSpanDecoration,
-)
-from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.harness.execution_subject import (
-    ExecutionSubject,
-    execution_subject_scope,
 )
 from openjiuwen.extensions.observability.span_context import (
     clear_current_session_id,
     set_current_session_id,
 )
+from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
+from openjiuwen.harness.observability.rail import (
+    AgentObservabilityRail,
+    AgentSpanDecoration,
+)
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 @pytest.fixture
@@ -244,6 +244,56 @@ async def test_no_agent_span_without_a_run_root(tracing):
     await rail.after_task_iteration(ctx)
 
     assert _finished(tracing.exporter, "agent.solo.task_iteration.1") == []
+
+
+class _FakeMetricsRecorder:
+    def __init__(self) -> None:
+        self.iteration_duration_calls: list[tuple] = []
+        self.iteration_error_calls: list[tuple] = []
+
+    def record_iteration_duration(self, agent_id, team_id, duration_ms) -> None:
+        self.iteration_duration_calls.append((agent_id, team_id, duration_ms))
+
+    def record_iteration_error(self, agent_id, team_id) -> None:
+        self.iteration_error_calls.append((agent_id, team_id))
+
+
+@pytest.mark.asyncio
+async def test_iteration_close_emits_iteration_metrics(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = "the answer"
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    agent_id, team_id, _duration = rec.iteration_duration_calls[0]
+    assert agent_id == "solo"
+    assert team_id == ""
+    assert rec.iteration_error_calls == []
+
+
+@pytest.mark.asyncio
+async def test_iteration_error_emits_error_metric(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+    ctx.exception = RuntimeError("boom")
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = None
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    assert ("solo", "") in rec.iteration_error_calls
 
 
 @pytest.mark.asyncio
@@ -752,6 +802,37 @@ async def test_tool_exception_closes_authoritative_span_with_error(tracing):
     span = _finished(tracing.exporter, "tool.search")[0]
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_authoritative_tool_close_counts_into_trace_rollup(tracing):
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    accumulator = get_accumulator()
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    ok_ctx = _tool_ctx(agent, call_id="call-ok")
+    await rail.before_tool_call(ok_ctx)
+    ok_ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ok_ctx)
+
+    err_ctx = _tool_ctx(agent, call_id="call-err")
+    await rail.before_tool_call(err_ctx)
+    err_ctx.exception = ValueError("boom")
+    await rail.on_tool_exception(err_ctx)
+
+    await rail.after_task_iteration(iteration_ctx)
+
+    trace_id = tracing.root.context.trace_id
+    snap = accumulator.snapshot(trace_id)
+    assert snap["tool_calls"] == 2
+    assert snap["tool_errors"] == 1
+    accumulator.clear(trace_id)
 
 
 @pytest.mark.asyncio
