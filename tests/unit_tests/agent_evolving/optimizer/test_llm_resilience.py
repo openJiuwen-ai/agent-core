@@ -21,6 +21,35 @@ from openjiuwen.core.common.exception.errors import BaseError
 
 class TestInvokeTextWithRetry:
     @pytest.mark.asyncio
+    async def test_retries_timeout_without_retry_prompt_then_succeeds(self):
+        """Timeouts must retry with the same prompt when no retry_prompt is set."""
+        llm = Mock()
+        llm.invoke = AsyncMock(
+            side_effect=[
+                asyncio.TimeoutError("request timed out"),
+                asyncio.TimeoutError("request timed out"),
+                SimpleNamespace(content='{"ok": true}'),
+            ]
+        )
+
+        result = await invoke_text_with_retry(
+            llm=llm,
+            model="test-model",
+            prompt="full prompt",
+            policy=LLMInvokePolicy(
+                attempt_timeout_secs=5,
+                total_budget_secs=20,
+                max_attempts=3,
+                backoff_base_secs=0,
+            ),
+        )
+
+        assert result == '{"ok": true}'
+        assert llm.invoke.await_count == 3
+        for call in llm.invoke.await_args_list:
+            assert call.kwargs["messages"][0]["content"] == "full prompt"
+
+    @pytest.mark.asyncio
     async def test_retries_with_retry_prompt_after_timeout_then_succeeds(self):
         llm = Mock()
         llm.invoke = AsyncMock(
