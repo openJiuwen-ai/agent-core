@@ -3170,6 +3170,59 @@ async def test_summary_sources_ready_only_when_all_required_complete_and_accepte
 
 
 @pytest.mark.asyncio
+async def test_attach_summary_sources_rejects_terminal_summary_task(org_manager):
+    """A finished summary must not silently accept late source bindings.
+
+    Binding after the summary is COMPLETED used to write the rows and return
+    ok=True, but the wake-up was dropped (the execution is terminal), so the
+    caller saw a success that never took effect.
+    """
+    manager, messager = org_manager
+    summary = await manager.create_summary_task(
+        task_id="summary-done",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-root",
+            organization_id="org-1",
+            team_id="team-summary",
+        ),
+    )
+    assert summary.ok
+    # A summary task is born WAITING_SOURCES + UNASSIGNED (unclaimable), so it
+    # reaches a team the way the runtime does it: by delegation.
+    delegated = await manager.delegate_task(
+        task_id="summary-done",
+        from_team_id="team-root",
+        to_team_id="team-summary",
+    )
+    assert delegated.ok
+    completed = await manager.complete_task(task_id="summary-done", team_id="team-summary", output_abstract="empty")
+    assert completed.ok
+    assert completed.task.status is OrgTaskStatus.COMPLETED
+
+    await manager.create_task(
+        task_id="src-late",
+        title="Late source",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1"),
+    )
+    await manager.claim_task(task_id="src-late", team_id="team-a")
+    await manager.complete_task(task_id="src-late", team_id="team-a", output_abstract="out-late")
+
+    published_before = len(messager.published)
+    attach = await manager.attach_summary_sources(summary_task_id="summary-done", source_task_ids=["src-late"])
+    assert not attach.ok
+    assert "terminal" in attach.reason
+    assert "COMPLETED" in attach.reason
+    # Rejected outright: no row written and no SourcesUpdated event emitted.
+    assert await manager.list_summary_sources(summary_task_id="summary-done") == []
+    assert len(messager.published) == published_before
+
+
+@pytest.mark.asyncio
 async def test_summary_execution_lifecycle(org_manager):
     manager, _ = org_manager
     execution = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")

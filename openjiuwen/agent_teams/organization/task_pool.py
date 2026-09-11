@@ -652,7 +652,6 @@ class OrgTaskManager:
                     description=f"Automatically created summary task for root {task_id}.",
                     created_by=created_by,
                     root_task_id=task_id,
-                    source_task_ids=None,
                     output_spec=output_spec,
                     metadata={},
                     now=now,
@@ -1929,7 +1928,6 @@ class OrgTaskManager:
                 description=description,
                 created_by=created_by,
                 root_task_id=root_task_id,
-                source_task_ids=None,
                 output_spec=output_spec,
                 metadata=metadata or {},
                 now=now,
@@ -1957,7 +1955,6 @@ class OrgTaskManager:
         description: str,
         created_by: OrgTaskCreator,
         root_task_id: str,
-        source_task_ids: list[str] | None,
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None,
         metadata: dict[str, Any],
         now: int,
@@ -2054,6 +2051,15 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"summary task not found: {summary_task_id}")
             if summary.task_type != ORG_SUMMARY_TASK_TYPE:
                 return OrgTaskOpResult(ok=False, reason=f"task is not a summary task: {summary_task_id}")
+            if summary.status in ORG_TASK_TERMINAL_STATUS_VALUES:
+                # A finished summary already aggregated (or gave up on) its
+                # sources.  Writing the binding anyway would leave the task
+                # COMPLETED with sources it never read, and the wake-up would
+                # be dropped because the execution is terminal too.
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=f"summary task is terminal: {summary_task_id} (status={summary.status})",
+                )
             attached = await self._attach_summary_sources(
                 session,
                 summary_task_id=summary_task_id,

@@ -168,6 +168,7 @@ class OrganizationRuntimeManager:
 
     def set_summary_team_factory(self, factory: SummaryTeamFactory) -> None:
         """Set the host adapter that provisions and releases on-demand Summary Teams."""
+
         self._summary_team_factory = factory
 
     def set_summary_team_factory_installer(
@@ -181,14 +182,16 @@ class OrganizationRuntimeManager:
         """
         self._summary_team_factory_installer = installer
 
-    def _ensure_summary_factory(self) -> None:
+    def _ensure_summary_factory(self) -> SummaryTeamFactory | None:
         """Lazily run the host installer once the SummaryTeamFactory is still missing."""
+
         if self._summary_team_factory is not None:
-            return
+            return self._summary_team_factory
         installer = self._summary_team_factory_installer
         if installer is None:
-            return
+            return None
         installer(self)
+        return self._summary_team_factory
 
     def _ensure_expert_adapters(self) -> None:
         """Lazily run the host installer once Catalog or Launcher is still missing."""
@@ -789,7 +792,7 @@ class OrganizationRuntimeManager:
         Task to its running dynamic team, and re-evaluate sources for a still-
         WAITING one so a dropped ''sources ready'' notification is rebuilt.
         """
-        summary_factory = self._ensure_summary_factory() or self._summary_team_factory
+        summary_factory = self._ensure_summary_factory()
         for execution in await manager.task_pool.list_summary_executions():
             # Terminal executions are done; a FAILED one is left for the root
             # leader to repair or terminate rather than being retried here.
@@ -1154,7 +1157,7 @@ class OrganizationRuntimeManager:
                 )
 
         async def _on_org_event(message: Any) -> None:
-            summary_factory = self._ensure_summary_factory() or self._summary_team_factory
+            summary_factory = self._ensure_summary_factory()
             if summary_factory is None:
                 # Summary lifecycle events are only meaningful with a host
                 # factory installed; without one they are dropped here (the
@@ -1585,7 +1588,7 @@ class OrganizationRuntimeManager:
             )
             return
 
-        summary_factory = self._ensure_summary_factory() or self._summary_team_factory
+        summary_factory = self._ensure_summary_factory()
         # An execution that never bound a team (provision failed) has nothing to
         # stop, but is still marked RELEASED below so it stops being retried.
         if summary_factory is None:

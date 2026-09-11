@@ -65,13 +65,15 @@ class DefaultSummaryTeamFactory:
 
     Args:
         summary_team_builder: Receives ``(spec, organization_id, root_task_id,
-            summary_task_id, session_id)`` and returns the running Team.
+            summary_task_id, owner_team_id, session_id)`` and returns the running
+            Team.
         summary_team_stopper: Receives ``(summary_team_id, session_id)`` and
             stops / reclaims that Team.
         summary_team_recoverer: Receives ``(spec, execution_id, organization_id,
-            root_task_id, summary_task_id, session_id)`` and returns the running
-            Team for an interrupted execution.  Defaults to the builder, which
-            launches a fresh Team when the host has no re-attach path.
+            root_task_id, summary_task_id, owner_team_id, session_id)`` and
+            returns the running Team for an interrupted execution.  Defaults to
+            the builder, which launches a fresh Team when the host has no
+            re-attach path.
     """
 
     def __init__(
