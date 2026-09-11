@@ -221,7 +221,7 @@ run_id 在此无叙事价值。后果：多 run 并行时，这几类消息无�
 | governor 未装配 | — | `ToolOutput(success=False)` |
 | `launch_async_tool` 抛错 | L1 | invoke 内 `release_workflow`（幂等）+ `Internal error: ...` |
 | L2/L3 满 | L2/L3 | `agent()` 内 `acquire()` 阻塞，不上抛到工具层 |
-| worker backend 失败 | engine | `BackendError`（engine 内部异常）→ `_attempt_calls` retry → 耗尽 `agent()` 返 `None`；**不**穿透到工具层，不转 StatusCode |
+| worker backend 失败 | engine | `BackendError`（engine 内部异常）→ `_attempt_calls` retry → 耗尽 `agent()` 返 `None`；账本干涸的失败 fail-fast 不重试（`AGENT_FAILED` 带 budget 真因）；**不**穿透到工具层，不转 StatusCode |
 | 后台 run 失败 | — | `format_failed` → inject；L1 在 `finally` release |
 | pause（`F_43`） | L1 | pause 停 task 但 `WorkflowAborted → CancelledError` 触发 `run_background.finally`，**立即** release ticket；resume（`_relaunch`）复用同 ticket 但不重新 admit，故 resume 期间**不**占 L1 槽（resume 的 finally 再 release 为幂等 no-op） |
 

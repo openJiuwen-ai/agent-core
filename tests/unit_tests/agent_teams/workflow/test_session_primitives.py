@@ -18,7 +18,7 @@ import pytest
 
 from openjiuwen.agent_teams.workflow.engine import (
     ProgressKind,
-    WorkflowError,
+    EngineError,
     WorkflowProgressEvent,
     run_workflow,
 )
@@ -284,7 +284,7 @@ def test_options_bag_rejects_unknown_key(tmp_path):
     script = _write(tmp_path, "bad_opt.py", _BAD_OPTION_SCRIPT)
     backend = _RecordingBackend()
 
-    with pytest.raises(WorkflowError) as exc:
+    with pytest.raises(EngineError) as exc:
         asyncio.run(run_workflow(script, backend=backend))
     assert "bogus" in str(exc.value)
     # The bad turn never reached the backend.
@@ -332,7 +332,7 @@ async def run(args):
     return await s.send("hi", schema=SCHEMA, notify=True)
 """
     script = _write(tmp_path, "bad_notify.py", src)
-    with pytest.raises(WorkflowError):
+    with pytest.raises(EngineError):
         asyncio.run(run_workflow(script, backend=_RecordingBackend()))
 
 
@@ -612,14 +612,14 @@ async def run(args):
 """,
     )
     backend = _RecordingBackend()
-    with pytest.raises(WorkflowError, match="keep_rounds"):
+    with pytest.raises(EngineError, match="keep_rounds"):
         asyncio.run(run_workflow(script, backend=backend))
     # Nothing reached the backend: the error fires before any capture.
     assert backend.forks == []
 
 
 def test_fork_of_human_session_rejected(tmp_path):
-    """fork() on a human_session raises a clear WorkflowError."""
+    """fork() on a human_session raises a clear EngineError."""
     script = _write(
         tmp_path,
         "fork_human.py",
@@ -636,7 +636,7 @@ async def run(args):
 """,
     )
     backend = _RecordingBackend()
-    with pytest.raises(WorkflowError, match="fork"):
+    with pytest.raises(EngineError, match="fork"):
         asyncio.run(run_workflow(script, backend=backend))
     # No capture ever reached the backend for the rejected human fork.
     assert backend.forks == []

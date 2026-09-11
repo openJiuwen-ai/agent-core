@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PersonalContextState = Literal["CREATED", "CONFIGURED", "STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"]
 _FetchState = Literal["STOPPED", "STARTING", "RUNNING", "STOPPING", "FAILED"]
-_FETCH_RUN_STATES = {"idle", "running", "succeeded", "failed", "cancelled"}
+_FETCH_RUN_STATES = {"idle", "running", "stopping", "succeeded", "failed", "cancelled"}
 _FETCH_RUN_PROGRESS_FIELDS = {
     "service_id",
     "run_state",

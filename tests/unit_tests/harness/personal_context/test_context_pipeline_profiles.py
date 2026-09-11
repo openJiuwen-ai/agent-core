@@ -3,13 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, cast
 
 import pytest
 
 import openjiuwen.harness.personal_context.context_pipeline as context_pipeline
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.errors import BaseError, ExecutionError
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
 from openjiuwen.harness.personal_context.context_pipeline import (
     ContextPipelineService,
@@ -25,7 +26,12 @@ from openjiuwen.harness.personal_context.source_metadata import upsert_source_me
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 
-def _config(profile: str) -> PersonalContextConfig:
+def _config(
+    profile: str,
+    *,
+    max_pages_per_directory: int = 20,
+    max_subdirectories_per_directory: int = 20,
+) -> PersonalContextConfig:
     model = {"client_provider": "OpenAI", "api_key": "secret", "api_base": "https://example.test"}
     request = {"model": "test"}
     return PersonalContextConfig.from_dict(
@@ -35,6 +41,8 @@ def _config(profile: str) -> PersonalContextConfig:
             "strategy_profile": profile,
             "model_client": model if profile != "rules" else None,
             "model_request": request if profile != "rules" else None,
+            "max_pages_per_directory": max_pages_per_directory,
+            "max_subdirectories_per_directory": max_subdirectories_per_directory,
             "fetch_services": [],
         }
     )
@@ -126,6 +134,8 @@ def _write_atomic_source(
     *,
     locator: str = "file:///sources/one.md",
     title: str = "Source One",
+    provider: str = "local_files",
+    observed_at: str = "2026-08-12T00:00:00Z",
 ) -> str:
     return upsert_source_metadata(
         source_root,
@@ -138,9 +148,9 @@ def _write_atomic_source(
             original_ref=locator,
             metadata={},
         ),
-        provider="local_files",
+        provider=provider,
         service_id="local",
-        observed_at="2026-08-12T00:00:00Z",
+        observed_at=observed_at,
     )
 
 
@@ -183,6 +193,90 @@ def _assert_new_wiki_prompt(prompt: str) -> None:
     assert "source-proof" not in prompt.casefold()
 
 
+@pytest.mark.asyncio
+async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp_path: Path) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("rules"), input_queue=asyncio.Queue())
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(source_root, title="旧根页来源")
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [旧根页](旧根页.md)\n",
+        encoding="utf-8",
+    )
+    (context_root / "旧根页.md").write_text(
+        f"# 主动上下文迁移\n\n旧内容。\n\n[来源](../source-meta/{source_id}.md)\n",
+        encoding="utf-8",
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": [], "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(0),
+        run_time=datetime(2026, 9, 2, tzinfo=timezone.utc),
+    )
+
+    assert result == "rules"
+    assert not (sandbox / "context" / "旧根页.md").exists()
+    moved = next(
+        path
+        for path in (sandbox / "context").rglob("*.md")
+        if path.name != "description.md" and "旧内容。" in path.read_text(encoding="utf-8")
+    )
+    assert moved.parent != sandbox / "context"
+    assert "../../source-meta/" in moved.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_agent_fallback_does_not_migrate_invalid_legacy_root_page(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(source_root, title="迁移来源")
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n\n- [旧根页](旧根页.md)\n", encoding="utf-8")
+    (context_root / "旧根页.md").write_text(
+        f"# 迁移主题\n\n旧内容。\n\n[来源](../source-meta/{source_id}.md)\n",
+        encoding="utf-8",
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    original_plan = context_pipeline._plan_context_layout_normalization
+    planned_from_clean_copy: list[bool] = []
+
+    def plan_spy(candidate_root: Path, **kwargs: object) -> dict[str, str]:
+        planned_from_clean_copy.append((candidate_root / "旧根页.md").is_file())
+        return original_plan(candidate_root, **kwargs)  # type: ignore[arg-type]
+
+    async def failed_agent(**kwargs: object) -> str:
+        del kwargs
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="agent failed")
+
+    async def failed_balanced(**kwargs: object) -> tuple[set[str], int]:
+        del kwargs
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="balanced failed")
+
+    monkeypatch.setattr(context_pipeline, "_plan_context_layout_normalization", plan_spy)
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", failed_balanced)
+
+    with pytest.raises(ExecutionError, match="root may only contain"):
+        await service._filesystem_with_fallback(
+            processed={"documents": [], "blocks": [], "deleted_ids": []},
+            sandbox=sandbox,
+            batch=_processing_batch(0),
+            run_time=datetime(2026, 9, 2, tzinfo=timezone.utc),
+        )
+
+    assert planned_from_clean_copy == [True]
+    assert (context_root / "旧根页.md").is_file()
+    assert not any(path.is_dir() for path in context_root.iterdir())
+
+
 def _message_profile(messages: list[object], kwargs: dict[str, object]) -> str:
     configured = kwargs.get("profile")
     if isinstance(configured, str):
@@ -210,6 +304,16 @@ class _FakeDirectModel:
         if isinstance(output, BaseException):
             raise output
         return output
+
+
+def _page_model_calls() -> list[tuple[list[object], dict[str, object]]]:
+    """Count page batches separately from the final-tree directory requests."""
+    return [
+        call
+        for instance in _FakeDirectModel.instances
+        for call in instance.calls
+        if "items" in json.loads(str(getattr(call[0][0], "content", "")).split("\n", 1)[1])
+    ]
 
 
 @pytest.mark.asyncio
@@ -287,8 +391,8 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
                 {
                     "item_index": 0,
                     "summary": "Balanced filesystem summary.",
-                    "target": "sources",
-                    "new_topic_title": None,
+                    "page_title": "Balanced filesystem page",
+                    "keywords": [str("Balanced filesystem page")[:40]],
                 }
             ],
         }
@@ -328,12 +432,21 @@ async def test_total_profile_maps_processing_and_filesystem_stages_independently
         balanced_payload = json.loads(balanced_prompt.split("\n", 1)[1])
         assert set(balanced_payload) == {"items"}
         assert len(balanced_payload["items"]) == 1
-        assert set(balanced_payload["items"][0]) == {"item_index", "title", "preview", "candidates"}
+        assert set(balanced_payload["items"][0]) == {
+            "item_index",
+            "title",
+            "headings",
+            "preview",
+            "provider",
+            "source_type",
+            "service",
+        }
         assert "pages" not in balanced_payload
     assert len(agent_prompts) == expected_agent_calls
     assert published_profiles == [total_profile]
     assert all("existing context/description.md" in prompt for prompt in agent_prompts)
-    assert all("This is a small run: read every bounded source_preview" in prompt for prompt in agent_prompts)
+    assert all("This is a small run: use the bounded document_previews" in prompt for prompt in agent_prompts)
+    assert all("read every bounded source_preview" not in prompt for prompt in agent_prompts)
     assert all(
         "Do not create one page per source merely to satisfy this instruction" in prompt for prompt in agent_prompts
     )
@@ -389,13 +502,16 @@ async def test_total_agent_filesystem_starts_after_deterministic_processing(
 def test_changed_context_paths_uses_markdown_file_diff(tmp_path: Path) -> None:
     context = tmp_path / "context"
     page = context / "topics" / "page.md"
+    removed = context / "topics" / "removed.md"
     description = context / "description.md"
     page.parent.mkdir(parents=True)
     page.write_text("# Page\n\nOld.\n", encoding="utf-8")
+    removed.write_text("# Removed\n", encoding="utf-8")
     description.write_text("# Context\n", encoding="utf-8")
     baseline = context_pipeline._snapshot_managed_files(context)
 
     page.write_text("# Page\n\nUpdated.\n", encoding="utf-8")
+    removed.unlink()
     description.write_text("# Context\n\nUpdated.\n", encoding="utf-8")
     (context / "topics" / "new.md").write_text("# New\n", encoding="utf-8")
     (context / "ignored.txt").write_text("not Markdown", encoding="utf-8")
@@ -404,6 +520,7 @@ def test_changed_context_paths_uses_markdown_file_diff(tmp_path: Path) -> None:
         "description.md",
         "topics/new.md",
         "topics/page.md",
+        "topics/removed.md",
     }
 
 
@@ -421,120 +538,168 @@ def test_agent_sandbox_rejects_removed_manifest_contract(tmp_path: Path) -> None
     assert getattr(raised.value, "status", None) == StatusCode.CONTEXT_PROACTIVE_PUBLISH_EXECUTION_ERROR
 
 
-def test_balanced_directory_candidates_are_local_bounded_and_opaque(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("title", "expected"),
+    [
+        ("主动上下文", "主动上下文"),
+        ("OpenAI Agents SDK 开发指南", "OpenAI Agents SDK"),
+        ("RAG/LLM：检索实践", "RAG-LLM-检索实践"),
+        ("ＯｐｅｎＡＩ　开发", "OpenAI 开发"),
+        ("OpenAI", "OpenAI"),
+    ],
+)
+def test_balanced_topic_name_preserves_safe_unicode(title: str, expected: str) -> None:
+    assert context_pipeline._safe_balanced_topic_name(title) == expected
+
+
+def test_balanced_topic_name_uses_chinese_fallback_and_respects_limits() -> None:
+    illegal = '<>:"/\\|?*'
+    fallback = context_pipeline._safe_balanced_topic_name(illegal)
+
+    assert fallback == f"主题-{context_pipeline._digest(illegal)[:12]}"
+    assert context_pipeline._portable_context_segment_is_safe(fallback)
+
+    reserved = context_pipeline._safe_balanced_topic_name("CON")
+    assert reserved == f"主题-{context_pipeline._digest('CON')[:12]}"
+    assert context_pipeline._portable_context_segment_is_safe(reserved)
+
+    long_title = "中" * 100
+    shortened = context_pipeline._safe_balanced_topic_name(long_title)
+    assert len(shortened) == 20
+    assert context_pipeline._portable_context_segment_is_safe(shortened)
+
+    byte_heavy = "中" * 79 + "😀"
+    byte_shortened = context_pipeline._safe_balanced_topic_name(byte_heavy)
+    assert len(byte_shortened) <= 20
+    assert len(byte_shortened.encode("utf-8")) <= 240
+    assert context_pipeline._portable_context_segment_is_safe(byte_shortened)
+
+
+def test_semantic_collision_uses_stable_suffix_instead_of_reusing_different_h1(tmp_path: Path) -> None:
     context_root = tmp_path / "context"
-    for index in range(100):
-        description = context_root / "topics" / f"topic-{index:03d}" / "description.md"
-        description.parent.mkdir(parents=True)
-        description.write_text(
-            f"# Topic {index:03d}\n\nSemantic preview {index:03d}. " + ("x" * 2_000),
-            encoding="utf-8",
-        )
+    occupied = context_root / "统一主题"
+    occupied.mkdir(parents=True)
+    (occupied / "description.md").write_text("# 完全不同的旅行主题\n", encoding="utf-8")
 
-    public_candidates, target_paths = context_pipeline._balanced_directory_candidates(
+    first = context_pipeline._semantic_directory_candidate(
         context_root,
-        {
-            "title": "Topic 042 release notes",
-            "markdown": "Topic 042 contains a focused update.",
-        },
+        title="统一主题",
+        seed="1234567890abcdef",
+    )
+    first.mkdir()
+    (first / "description.md").write_text("# 统一主题\n", encoding="utf-8")
+    second = context_pipeline._semantic_directory_candidate(
+        context_root,
+        title="统一主题",
+        seed="1234567890abcdef",
     )
 
-    assert 1 <= len(public_candidates) <= 5
-    assert [candidate["id"] for candidate in public_candidates] == [
-        f"directory_{index}" for index in range(1, len(public_candidates) + 1)
-    ]
-    assert public_candidates[0]["title"] == "Topic 042"
-    assert all(set(candidate) == {"id", "title", "preview"} for candidate in public_candidates)
-    assert all(len(candidate["preview"]) <= 240 for candidate in public_candidates)
-    serialized = json.dumps(public_candidates, ensure_ascii=False)
-    assert str(context_root) not in serialized
-    assert "topic-042" not in serialized
-    assert set(target_paths) == {candidate["id"] for candidate in public_candidates}
-    assert target_paths["directory_1"] == context_root / "topics" / "topic-042"
+    assert first == second
+    assert first != occupied
+    assert first.name.endswith("-12345678")
 
 
-def test_balanced_enrichment_parser_accepts_items_independently() -> None:
-    allowed_targets = {index: {"sources", "new_topic", "directory_1"} for index in range(8)}
-    payload = {
-        "items": [
-            {
-                "item_index": 0,
-                "summary": "合法目录摘要。",
-                "target": "directory_1",
-                "new_topic_title": None,
-            },
-            {
-                "item_index": 1,
-                "summary": "合法来源摘要。",
-                "target": "sources",
-                "new_topic_title": None,
-            },
-            {
-                "item_index": 2,
-                "summary": "合法新主题摘要。",
-                "target": "new_topic",
-                "new_topic_title": "主动上下文",
-            },
-            {
-                "item_index": 3,
-                "summary": "带额外字段。",
-                "target": "sources",
-                "new_topic_title": None,
-                "extra": True,
-            },
-            {
-                "item_index": 4,
-                "summary": "[非法链接](https://example.test)",
-                "target": "sources",
-                "new_topic_title": None,
-            },
-            {
-                "item_index": 5,
-                "summary": "非法候选。",
-                "target": "directory_5",
-                "new_topic_title": None,
-            },
-            {
-                "item_index": 6,
-                "summary": "重复一。",
-                "target": "sources",
-                "new_topic_title": None,
-            },
-            {
-                "item_index": 6,
-                "summary": "重复二。",
-                "target": "sources",
-                "new_topic_title": None,
-            },
-        ]
-    }
+def test_semantic_collision_reuses_only_matching_h1_across_casefold_and_nfc_equivalent_siblings(
+    tmp_path: Path,
+) -> None:
+    context_root = tmp_path / "context"
+    casefold_sibling = context_root / "OPENAI"
+    casefold_sibling.mkdir(parents=True)
+    (casefold_sibling / "description.md").write_text("# OpenAI\n", encoding="utf-8")
+    nfd_sibling = context_root / "Cafe\u0301"
+    nfd_sibling.mkdir()
+    (nfd_sibling / "description.md").write_text("# Café\n", encoding="utf-8")
 
-    accepted = context_pipeline._parse_balanced_enrichments(
-        json.dumps(payload, ensure_ascii=False),
-        allowed_targets=allowed_targets,
+    assert (
+        context_pipeline._semantic_directory_candidate(
+            context_root,
+            title="openai",
+            seed="aaaaaaaaaaaaaaaa",
+        )
+        == casefold_sibling
+    )
+    assert (
+        context_pipeline._semantic_directory_candidate(
+            context_root,
+            title="Café",
+            seed="bbbbbbbbbbbbbbbb",
+        )
+        == nfd_sibling
     )
 
-    assert set(accepted) == {0, 1, 2}
-    assert accepted[0] == {
-        "summary": "合法目录摘要。",
-        "target": "directory_1",
-        "new_topic_title": None,
-    }
-    assert accepted[2]["new_topic_title"] == "主动上下文"
+
+def test_semantic_collision_uses_suffix_when_equivalent_sibling_has_no_h1(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    missing_identity = context_root / "OPENAI"
+    missing_identity.mkdir(parents=True)
+
+    candidate = context_pipeline._semantic_directory_candidate(
+        context_root,
+        title="openai",
+        seed="cccccccccccccccc",
+    )
+
+    assert candidate != missing_identity
+    assert candidate.name.endswith("-cccccccc")
+
+
+def test_semantic_name_prefers_natural_boundary_and_removes_source_extension() -> None:
+    name = context_pipeline._safe_semantic_name("EvoSkill Automated Skill Discovery for Multi-Agent Systems.pdf")
+
+    assert name == "EvoSkill Automated"
+    assert len(name) <= context_pipeline._MAX_SEMANTIC_NAME_CHARS
+    assert not name.casefold().endswith(".pdf")
+
+
+def test_semantic_name_uses_conventional_commit_subject_without_broken_wrapper() -> None:
+    name = context_pipeline._safe_semantic_name("fix(capabilities): prevent tool retries after invalid output.pdf")
+
+    assert name == "prevent tool retries"
+    assert "fix(" not in name
+    assert len(name) <= 20
+
+
+def test_semantic_name_keeps_complete_camel_case_token_before_ellipsis() -> None:
+    name = context_pipeline._safe_semantic_name("MessageSummaryOffload")
+
+    assert name == "MessageSummary…"
+    assert "MessageSummaryOffloa" not in name
+    assert len(name) <= 20
+
+
+def test_semantic_page_stem_reserves_digest_inside_twenty_characters() -> None:
+    stem = context_pipeline._semantic_page_stem("超长中文资料标题" * 4, suffix="a31f2c78")
+
+    assert stem.endswith("-a31f2c78")
+    assert len(stem) <= 20
+    assert context_pipeline._semantic_context_segment_is_safe(f"{stem}.md", markdown_file=True)
+
+
+def test_semantic_name_hard_truncates_only_without_a_useful_boundary() -> None:
+    assert context_pipeline._safe_semantic_name("中" * 21) == ("中" * 19) + "…"
+    assert context_pipeline._safe_semantic_name("能力治理（实验版本尚未结束") == "能力治理"
 
 
 @pytest.mark.parametrize(
-    "text",
+    "title",
     [
-        "not-json",
-        json.dumps([]),
-        json.dumps("invalid"),
-        json.dumps({"items": [], "extra": True}),
-        json.dumps({"items": {}}),
+        "Claude Code CLI 模式与 Terminal 闭环工作流",
+        "大模型行业 2026：路线之争、价格战与模应一体",
     ],
 )
-def test_balanced_enrichment_parser_returns_no_items_for_invalid_top_level(text: str) -> None:
-    assert context_pipeline._parse_balanced_enrichments(text, allowed_targets={0: {"sources"}}) == {}
+def test_semantic_name_does_not_leave_a_truncated_chinese_connector(title: str) -> None:
+    name = context_pipeline._safe_semantic_name(title)
+
+    assert len(name) <= 20
+    assert not name.endswith(("以及", "与", "和", "或", "及", "的"))
+
+
+def test_semantic_name_suffix_reserves_the_complete_twenty_character_budget() -> None:
+    stem = context_pipeline._semantic_page_stem("MessageSummaryOffload", suffix="a31f2c")
+
+    assert stem.endswith("-a31f2c")
+    assert len(stem) <= 20
+    assert "Offloa" not in stem
 
 
 @pytest.mark.asyncio
@@ -576,9 +741,9 @@ async def test_balanced_groups_at_most_five_upserts_without_retry(
                     "items": [
                         {
                             "item_index": index,
-                            "summary": f"LLM summary {index}.",
-                            "target": "sources",
-                            "new_topic_title": None,
+                            "summary": f"模型摘要 {index}。",
+                            "page_title": f"笔记 {index}",
+                            "keywords": [str(f"笔记 {index}")[:40]],
                         }
                         for index in range(start, min(start + 5, item_count))
                     ]
@@ -596,7 +761,7 @@ async def test_balanced_groups_at_most_five_upserts_without_retry(
         service_id="local",
     )
 
-    calls = [call for instance in _FakeDirectModel.instances for call in instance.calls]
+    calls = _page_model_calls()
     assert result == expected_profile
     assert len(calls) == expected_calls
     for messages, kwargs in calls:
@@ -607,35 +772,105 @@ async def test_balanced_groups_at_most_five_upserts_without_retry(
         assert '"pages"' not in content
         payload = json.loads(content.split("\n", 1)[1])
         assert 1 <= len(payload["items"]) <= 5
-        assert all(len(item["candidates"]) <= 5 for item in payload["items"])
-        assert all("path" not in candidate for item in payload["items"] for candidate in item["candidates"])
-    if item_count:
-        source_text = "\n".join(
-            path.read_text(encoding="utf-8")
-            for path in (sandbox / "context" / "sources" / "local").glob("*.md")
-            if path.name != "description.md"
+        assert all(
+            set(item) == {"item_index", "title", "headings", "preview", "provider", "source_type", "service"}
+            for item in payload["items"]
         )
+        assert "item_index, summary, keywords, page_title" in content
+        assert "Simplified Chinese" in content
+        assert "Retain accurate English names" in content
+        assert "Never return directories, paths" in content
+    if item_count:
+        managed_pages = context_pipeline._managed_pages_by_source(sandbox / "context")
+        assert len(managed_pages) == item_count
+        source_text = "\n".join(path.read_text(encoding="utf-8") for path in managed_pages.values())
         for index in range(item_count):
-            assert f"LLM summary {index}." in source_text
+            assert f"模型摘要 {index}。" in source_text
+            assert f"# 笔记 {index}" in source_text
+        assert sorted(path.name for path in (sandbox / "context").iterdir() if path.is_file()) == ["description.md"]
+        assert not (sandbox / "context" / "sources").exists()
+        assert not (sandbox / "context" / "topics").exists()
 
 
 @pytest.mark.asyncio
-async def test_balanced_applies_existing_directory_and_controlled_new_topic_without_rewriting_body(
+async def test_balanced_uses_shared_configured_capacity_in_prompt_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("balanced", max_pages_per_directory=2, max_subdirectories_per_directory=3),
+        input_queue=asyncio.Queue(),
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    documents = [
+        {
+            "logical_id": f"notes/{index}",
+            "revision_id": f"rev-{index}",
+            "title": f"检索笔记 {index}",
+            "markdown": "BM25 检索排序与索引。\n",
+        }
+        for index in range(3)
+    ]
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": index,
+                        "summary": f"模型摘要 {index}。",
+                        "page_title": f"检索页面 {index}",
+                        "keywords": [str(f"检索页面 {index}")[:40]],
+                    }
+                    for index in range(3)
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": documents, "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(3),
+        service_id="local",
+    )
+
+    assert result == "balanced"
+    calls = _page_model_calls()
+    assert len(calls) == 1
+    payload = json.loads(str(getattr(calls[0][0][0], "content", "")).split("\n", 1)[1])
+    assert all("candidates" not in item for item in payload["items"])
+    directory_payloads = [
+        json.loads(str(getattr(messages[0], "content", "")).split("\n", 1)[1])
+        for instance in _FakeDirectModel.instances
+        for messages, _kwargs in instance.calls
+        if "directory_id" in json.loads(str(getattr(messages[0], "content", "")).split("\n", 1)[1])
+    ]
+    assert directory_payloads
+    assert all(len(payload["files"]) <= 2 and len(payload["subdirectories"]) <= 3 for payload in directory_payloads)
+    context_pipeline._validate_context_capacities(
+        sandbox / "context",
+        max_pages_per_directory=2,
+        max_subdirectories_per_directory=3,
+    )
+
+
+@pytest.mark.asyncio
+async def test_balanced_enriches_pages_without_rewriting_existing_directory_body(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     context_root = tmp_path / "workspace" / "context"
-    existing = context_root / "topics" / "openjiuwen"
+    existing = context_root / "openjiuwen"
     existing.mkdir(parents=True)
     root_body = "根语义正文保持不变。"
-    topics_body = "主题导航正文保持不变。"
     existing_body = "OpenJiuWen 目录正文保持不变。"
     (context_root / "description.md").write_text(
-        f"# Agent 门户\n\n- [主题](topics/description.md)\n\n{root_body}\n",
-        encoding="utf-8",
-    )
-    (context_root / "topics" / "description.md").write_text(
-        f"# Topics\n\n- [OpenJiuWen](openjiuwen/description.md)\n\n{topics_body}\n",
+        f"# Agent 门户\n\n- [OpenJiuWen](openjiuwen/description.md)\n\n{root_body}\n",
         encoding="utf-8",
     )
     existing_description = existing / "description.md"
@@ -662,14 +897,14 @@ async def test_balanced_applies_existing_directory_and_controlled_new_topic_with
                     {
                         "item_index": 0,
                         "summary": "OpenJiuWen Rail 的有界摘要。",
-                        "target": "directory_1",
-                        "new_topic_title": None,
+                        "page_title": "OpenJiuWen Rail 接入说明",
+                        "keywords": [str("OpenJiuWen Rail 接入说明")[:40]],
                     },
                     {
                         "item_index": 1,
                         "summary": "主动上下文的有界摘要。",
-                        "target": "new_topic",
-                        "new_topic_title": "主动上下文",
+                        "page_title": "主动上下文设计说明",
+                        "keywords": [str("主动上下文设计说明")[:40]],
                     },
                 ]
             },
@@ -691,24 +926,143 @@ async def test_balanced_applies_existing_directory_and_controlled_new_topic_with
     candidate = sandbox / "context"
     assert result == "balanced"
     assert root_body in (candidate / "description.md").read_text(encoding="utf-8")
-    assert topics_body in (candidate / "topics" / "description.md").read_text(encoding="utf-8")
-    existing_text = (candidate / "topics" / "openjiuwen" / "description.md").read_text(encoding="utf-8")
+    existing_text = (candidate / "openjiuwen" / "description.md").read_text(encoding="utf-8")
     assert existing_body in existing_text
-    assert existing_text.count("<!-- personal-context:source-links:start -->") == 1
-    controlled_topics = [
-        path for path in (candidate / "topics").iterdir() if path.is_dir() and path.name != "openjiuwen"
-    ]
-    assert len(controlled_topics) == 1
-    controlled_description = (controlled_topics[0] / "description.md").read_text(encoding="utf-8")
-    assert "<!-- personal-context:managed-topic -->" in controlled_description
-    assert "<!-- personal-context:source-links:start -->" in controlled_description
-    topics_text = (candidate / "topics" / "description.md").read_text(encoding="utf-8")
-    assert "<!-- personal-context:topic-links:start -->" in topics_text
-    assert controlled_topics[0].name in topics_text
+    pages = context_pipeline._managed_pages_by_source(candidate)
+    assert len(pages) == 2
+    texts = {page.name: page.read_text(encoding="utf-8") for page in pages.values()}
+    assert "OpenJiuWen Rail 的有界摘要。" in texts["OpenJiuWen Rail 接入说明.md"]
+    assert "主动上下文的有界摘要。" in texts["主动上下文设计说明.md"]
+    assert not (candidate / "sources").exists()
+    assert not (candidate / "topics").exists()
 
 
 @pytest.mark.asyncio
-async def test_balanced_invalid_items_fall_back_individually_and_model_error_stops_later_groups(
+async def test_balanced_long_display_titles_keep_full_h1_with_one_model_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    long_page_title = "这是模型生成的完整页面显示标题而且明显超过二十个字符"
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "有界中文摘要。",
+                        "page_title": long_page_title,
+                        "keywords": [str(long_page_title)[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed={
+            "documents": [
+                {
+                    "logical_id": "notes/long-title",
+                    "revision_id": "rev-1",
+                    "title": "来源标题",
+                    "markdown": "确定性正文。\n",
+                }
+            ],
+            "blocks": [],
+            "deleted_ids": [],
+        },
+        sandbox=sandbox,
+        batch=_processing_batch(1),
+        service_id="local",
+    )
+
+    candidate = sandbox / "context"
+    assert result == "balanced"
+    assert len(_FakeDirectModel.instances) == 1
+    assert len(_page_model_calls()) == 1
+    page = next(path for path in candidate.rglob("*.md") if path.name != "description.md")
+    assert len(page.stem) <= 20
+    assert all(len(part) <= 20 for part in page.relative_to(candidate).parts[:-1])
+    assert page.read_text(encoding="utf-8").startswith(f"# {long_page_title}\n")
+
+
+@pytest.mark.asyncio
+async def test_balanced_preexisting_managed_source_updates_title_and_summary_without_moving(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logical_id = "notes/existing"
+    source_id = f"src_{context_pipeline._digest(logical_id)}"
+    context_root = tmp_path / "workspace" / "context"
+    assert _write_atomic_source(context_root.parent / "source-meta", locator=logical_id) == source_id
+    existing_directory = context_root / "既有主题"
+    existing_directory.mkdir(parents=True)
+    existing_page = existing_directory / "稳定路径.md"
+    existing_page.write_text(
+        f"# 旧标题\n\n<!-- personal-context-managed-source: {source_id} -->\n\n## 摘要\n\n旧摘要。\n",
+        encoding="utf-8",
+    )
+    (existing_directory / "description.md").write_text("# 既有主题\n\n- [旧标题](稳定路径.md)\n", encoding="utf-8")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [既有主题](既有主题/description.md)\n",
+        encoding="utf-8",
+    )
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "更新后的中文摘要。",
+                        "page_title": "更新后的中文标题",
+                        "keywords": [str("更新后的中文标题")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    service = ContextPipelineService(home=tmp_path, config=_config("balanced"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed={
+            "documents": [
+                {
+                    "logical_id": logical_id,
+                    "revision_id": "rev-2",
+                    "title": "来源的新标题",
+                    "markdown": "更新后的确定性正文。\n",
+                }
+            ],
+            "blocks": [],
+            "deleted_ids": [],
+        },
+        sandbox=sandbox,
+        batch=_processing_batch(1),
+        service_id="local",
+    )
+
+    assert result == "balanced"
+    candidate_page = context_pipeline._managed_pages_by_source(sandbox / "context")[source_id]
+    assert candidate_page.relative_to(sandbox / "context").as_posix() == "既有主题/稳定路径.md"
+    candidate_text = candidate_page.read_text(encoding="utf-8")
+    assert candidate_text.startswith("# 更新后的中文标题\n")
+    assert "更新后的中文摘要。" in candidate_text
+    assert not (sandbox / "context" / "不应创建的新主题").exists()
+
+
+@pytest.mark.asyncio
+async def test_balanced_invalid_items_fall_back_individually_and_later_groups_continue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -732,14 +1086,14 @@ async def test_balanced_invalid_items_fall_back_individually_and_model_error_sto
                     {
                         "item_index": 0,
                         "summary": "唯一被采用的摘要。",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "采用的页面标题",
+                        "keywords": [str("采用的页面标题")[:40]],
                     },
                     {
                         "item_index": 1,
                         "summary": "[非法链接](https://example.test)",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "不采用的页面标题",
+                        "keywords": [str("不采用的页面标题")[:40]],
                     },
                 ]
             },
@@ -757,11 +1111,10 @@ async def test_balanced_invalid_items_fall_back_individually_and_model_error_sto
     )
 
     assert result == "balanced"
-    assert len(_FakeDirectModel.instances[0].calls) == 2
+    assert len(_page_model_calls()) == 2
     pages = {
         path.read_text(encoding="utf-8")
-        for path in (sandbox / "context" / "sources" / "local").glob("*.md")
-        if path.name != "description.md"
+        for path in context_pipeline._managed_pages_by_source(sandbox / "context").values()
     }
     assert len(pages) == 7
     assert any("唯一被采用的摘要。" in page for page in pages)
@@ -803,9 +1156,7 @@ async def test_balanced_zero_accepted_items_returns_publishable_rules_candidate(
     assert result == "rules"
     assert processed["_filesystem_candidate_prepared"] is True
     assert processed["_balanced_accepted_count"] == 0
-    source_page = next(
-        path for path in (sandbox / "context" / "sources" / "local").glob("*.md") if path.name != "description.md"
-    )
+    source_page = next(iter(context_pipeline._managed_pages_by_source(sandbox / "context").values()))
     assert "Deterministic fallback." in source_page.read_text(encoding="utf-8")
 
 
@@ -957,6 +1308,8 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
         "# Existing\n\nExisting knowledge.\n",
         encoding="utf-8",
     )
+    context_pipeline._render_context_navigation(context)
+    context_pipeline._validate_candidate(context)
     validation_errors: list[str] = []
 
     async def noop_agent(*, sandbox_path: Path, validate_result: Any, **kwargs: object) -> str:
@@ -976,8 +1329,8 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
                     {
                         "item_index": 0,
                         "summary": "Balanced filesystem summary.",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "Balanced filesystem page",
+                        "keywords": [str("Balanced filesystem page")[:40]],
                     }
                 ],
             }
@@ -1010,7 +1363,7 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
     assert result == "balanced"
     assert len(validation_errors) == 1
     assert validation_errors[0].endswith("agent did not add or update any Context knowledge page")
-    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    source_page = next(iter(context_pipeline._managed_pages_by_source(sandbox / "context").values()))
     assert "Balanced filesystem summary." in source_page.read_text(encoding="utf-8")
 
 
@@ -1377,6 +1730,12 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
         record_paths,
         {"notes/one": "[[ref:0]]"},
     )
+    source_id = _write_atomic_source(
+        service._source_meta_root,
+        locator=str(batch.items[0].original_ref),
+        title="One",
+        observed_at="2026-08-12T00:00:00Z",
+    )
 
     processed = service._prepare_run_finish_io(
         sandbox,
@@ -1384,8 +1743,8 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
             "sandbox": sandbox,
             "batch_ids": ["batch-1"],
             "provider": "local_files",
-            "source_alias_by_id": {"src_test": "[[ref:0]]"},
-            "source_id_by_logical_id": {"notes/one": "src_test"},
+            "source_alias_by_id": {source_id: "[[ref:0]]"},
+            "source_id_by_logical_id": {"notes/one": source_id},
         },
     )
 
@@ -1400,7 +1759,7 @@ def test_run_finish_rewrites_preview_and_writes_complete_briefing_without_trunca
     assert processed["_large_run"] is False
     prompt_documents = context_pipeline._agent_documents_payload(processed, large_run=False)
     assert len(prompt_documents) == 1
-    assert len(str(prompt_documents[0]["summary"])) == 700
+    assert len(str(prompt_documents[0]["summary"])) == 1_200
     assert "markdown" not in prompt_documents[0] and "blocks" not in prompt_documents[0]
 
     briefing = json.loads((sandbox / "inputs" / "briefing.json").read_text(encoding="utf-8"))
@@ -1452,6 +1811,12 @@ async def test_deterministic_briefing_extracts_outline_first_paragraph_and_count
         record_paths,
         {"notes/one": "[[ref:0]]"},
     )
+    source_id = _write_atomic_source(
+        service._source_meta_root,
+        locator=str(batch.items[0].original_ref),
+        title="One",
+        observed_at="2026-08-12T00:00:00Z",
+    )
 
     service._prepare_run_finish_io(
         sandbox,
@@ -1459,8 +1824,8 @@ async def test_deterministic_briefing_extracts_outline_first_paragraph_and_count
             "sandbox": sandbox,
             "batch_ids": ["batch-1"],
             "provider": "local_files",
-            "source_alias_by_id": {"src_test": "[[ref:0]]"},
-            "source_id_by_logical_id": {"notes/one": "src_test"},
+            "source_alias_by_id": {source_id: "[[ref:0]]"},
+            "source_id_by_logical_id": {"notes/one": source_id},
         },
     )
 
@@ -1653,8 +2018,13 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
             == "rules"
         )
 
-    assert len(prompts) == 1
-    prompt = prompts[0]
+    if profile == "agent":
+        assert len(prompts) == 1
+        prompt = prompts[0]
+    else:
+        page_prompts = [prompt for prompt in prompts if "items" in json.loads(prompt.split("\n", 1)[1])]
+        assert len(page_prompts) == 3
+        prompt = page_prompts[0]
     payload = json.loads(prompt.split("\n", 1)[1])
     if profile == "agent":
         prompt_documents = payload["document_previews"]
@@ -1663,18 +2033,32 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
         assert payload["deleted_input_root"] == "inputs/deleted"
         assert "This is a large run: use the complete briefing first" in prompt
         assert "Do not eagerly read every source_preview or source_content" in prompt
-        assert "write that topic page before expanding the next topic" in prompt
-        assert "Never draft multiple complete pages in one model response" in prompt
-        assert "At most one complete page may be submitted per model response" in prompt
-        assert "continue with later tool calls until every planned topic page" in prompt
+        assert "Write a concise complete page in one write_file call" in prompt
+        assert "Never draft multiple complete pages in one model response" not in prompt
+        assert "At most one complete page may be submitted per model response" not in prompt
+        assert "Continue with later tool calls until every planned topic page" in prompt
         assert "Every upsert source with distinct, non-duplicative key facts" in prompt
-        assert "no more than 2000 characters" in prompt
+        assert "no more than 4000 characters" in prompt
+        assert "Update only pages and directory descriptions affected by this run" in prompt
+        assert "Update each affected description.md once" in prompt
         assert "delete temporary files directly" not in prompt
         assert "shell" not in prompt.casefold()
         assert "relative to the Markdown file that contains the link" in prompt
+        assert "../B/description.md" in prompt
+        assert "../../B/description.md escapes Context" in prompt
         assert "Do not leave links to planned pages that you did not create" in prompt
         assert "perform one lightweight check of the internal Context links" in prompt
         assert "exactly one top-level # heading outside fenced code blocks" in prompt
+        assert "Use only read_file, write_file, edit_file, glob, list_files, grep, and move_path" in prompt
+        assert "Only description.md and directories may exist directly under context/" in prompt
+        assert "Before choosing or creating a page path, use list_files" in prompt
+        assert "Organize knowledge by topic across providers" in prompt
+        assert "待整理" not in prompt
+        assert "fallback_route" not in prompt
+        assert "If a directory has 16 to 19 ordinary Markdown pages" in prompt
+        assert "If it has 20 or more ordinary Markdown pages" in prompt
+        assert "manually update every affected relative link and description.md navigation" in prompt
+        assert "personal-context-managed-source" in prompt
         assert len(prompt_documents) == 12
         assert all(len(str(document["title"])) <= 512 for document in prompt_documents)
         assert all("markdown" not in document and "blocks" not in document for document in prompt_documents)
@@ -1682,10 +2066,12 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
         assert set(payload) == {"items"}
         prompt_documents = payload["items"]
         assert len(prompt_documents) == 5
-        assert all(set(document) == {"item_index", "title", "preview", "candidates"} for document in prompt_documents)
+        assert all(
+            set(document) == {"item_index", "title", "headings", "preview", "provider", "source_type", "service"}
+            for document in prompt_documents
+        )
         assert all(len(str(document["title"])) <= 512 for document in prompt_documents)
-        assert all(len(str(document["preview"])) <= 240 for document in prompt_documents)
-        assert all(len(document["candidates"]) <= 5 for document in prompt_documents)
+        assert all(len(str(document["preview"])) <= 2800 for document in prompt_documents)
         assert "deleted_count" not in payload
         assert "deleted_ids" not in payload
         assert "deleted_input_root" not in payload
@@ -1734,6 +2120,15 @@ def test_large_run_preview_and_initial_prompt_are_bounded_while_disk_documents_s
         record_paths,
         {item.logical_id: f"[[ref:{index}]]" for index, item in enumerate(items)},
     )
+    source_ids = {
+        item.logical_id: _write_atomic_source(
+            service._source_meta_root,
+            locator=str(item.original_ref),
+            title=str(item.title),
+            observed_at="2026-08-12T00:00:00Z",
+        )
+        for item in items
+    }
 
     processed = service._prepare_run_finish_io(
         sandbox,
@@ -1741,15 +2136,15 @@ def test_large_run_preview_and_initial_prompt_are_bounded_while_disk_documents_s
             "sandbox": sandbox,
             "batch_ids": ["batch-1"],
             "provider": "local",
-            "source_alias_by_id": {f"src_{index}": f"[[ref:{index}]]" for index in range(11)},
-            "source_id_by_logical_id": {item.logical_id: f"src_{index}" for index, item in enumerate(items)},
+            "source_alias_by_id": {source_ids[item.logical_id]: f"[[ref:{index}]]" for index, item in enumerate(items)},
+            "source_id_by_logical_id": source_ids,
         },
     )
     prompt_documents = context_pipeline._agent_documents_payload(processed, large_run=True)
 
     assert processed["_large_run"] is True
     assert len(prompt_documents) == 11
-    assert all(len(str(document["summary"])) <= 320 for document in prompt_documents)
+    assert all(len(str(document["summary"])) <= 600 for document in prompt_documents)
     assert all("markdown" not in document and "blocks" not in document for document in prompt_documents)
     briefing = json.loads((sandbox / "inputs" / "briefing.json").read_text(encoding="utf-8"))
     assert briefing["source_count"] == 11
@@ -1777,7 +2172,1950 @@ def test_bounded_initial_prompt_lists_at_most_twelve_documents() -> None:
     prompt_documents = context_pipeline._agent_documents_payload(processed, large_run=True)
 
     assert len(prompt_documents) == 12
-    assert all(len(str(document["summary"])) == 320 for document in prompt_documents)
+    assert all(len(str(document["summary"])) == 600 for document in prompt_documents)
+
+
+@pytest.mark.parametrize(
+    ("segment", "expected"),
+    [
+        ("知识管理", True),
+        ("OpenAI Agents SDK", True),
+        ("研究.v2", True),
+        ("中" * 80, True),
+        ("", False),
+        (".", False),
+        ("..", False),
+        ("e\u0301", False),
+        ("\ud800", False),
+        ("主题\u200b页", False),
+        ("主题\x01页", False),
+        ("name.", False),
+        ("name ", False),
+        ("CON", False),
+        ("con.txt", False),
+        ("LPT9.md", False),
+        ("a/b", False),
+        ("a\\b", False),
+        ("a:name", False),
+        ("中" * 81, False),
+        ("中" * 79 + "😀", False),
+    ],
+)
+def test_portable_context_segment_contract(segment: str, expected: bool) -> None:
+    assert context_pipeline._portable_context_segment_is_safe(segment) is expected
+
+
+def _write_named_candidate(context: Path, *, directory: str, page_name: str) -> str:
+    page = context / directory / page_name
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text("# 长期记忆\n\n候选正文。\n", encoding="utf-8")
+    (page.parent / "description.md").write_text(
+        f"# 知识管理\n\n- [长期记忆]({page_name})\n",
+        encoding="utf-8",
+    )
+    (context / "description.md").write_text(
+        f"# Context\n\n- [知识管理]({directory}/description.md)\n",
+        encoding="utf-8",
+    )
+    return f"{directory}/{page_name}"
+
+
+def test_agent_candidate_rejects_new_non_nfc_path_as_repairable(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    relative = _write_named_candidate(
+        context,
+        directory="e\u0301",
+        page_name="长期记忆.md",
+    )
+
+    with pytest.raises(BaseError) as raised:
+        _validate_agent_candidate(
+            context,
+            baseline={},
+            changed_paths={relative, "description.md", "e\u0301/description.md"},
+            require_single_h1=True,
+        )
+
+    assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+    assert "portable" in str(raised.value)
+
+
+def test_description_navigation_error_identifies_safe_relative_source_and_target(tmp_path: Path) -> None:
+    root = tmp_path / "context"
+    topic = root / "Agent框架工程"
+    topic.mkdir(parents=True)
+    (root / "description.md").write_text("# Context\n", encoding="utf-8")
+    description = topic / "description.md"
+    description.write_text("# Agent框架工程\n\n[错误同级](../../Agent技能工程/description.md)\n", encoding="utf-8")
+
+    with pytest.raises(Exception) as captured:
+        context_pipeline._validate_description_navigation(root, repairable=True)
+
+    message = str(captured.value)
+    assert "Agent框架工程/description.md -> ../../Agent技能工程/description.md" in message
+    assert str(tmp_path) not in message
+
+
+def test_agent_new_semantic_path_over_twenty_chars_is_repairable() -> None:
+    relative = f"{'新' * 21}/{'页' * 21}.md"
+
+    with pytest.raises(BaseError, match="at most 20 Unicode characters") as raised:
+        context_pipeline._validate_new_context_path_segments(
+            {relative},
+            baseline_paths=set(),
+        )
+
+    assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+
+
+def test_agent_existing_long_semantic_path_is_not_rejected_as_new() -> None:
+    relative = f"{'旧' * 40}/{'页' * 40}.md"
+
+    context_pipeline._validate_new_context_path_segments(
+        {relative},
+        baseline_paths={relative},
+    )
+
+
+def test_agent_candidate_keeps_legacy_path_and_accepts_safe_chinese_and_english_names(
+    tmp_path: Path,
+) -> None:
+    context = tmp_path / "context"
+    legacy_directory = "e\u0301"
+    legacy_page = _write_named_candidate(
+        context,
+        directory=legacy_directory,
+        page_name="legacy.md",
+    )
+    baseline = context_pipeline._snapshot_managed_files(context)
+
+    legacy_root = context / legacy_directory
+    (legacy_root / "legacy.md").write_text("# Legacy\n\n更新后的旧页面。\n", encoding="utf-8")
+    (legacy_root / "长期记忆.md").write_text("# 长期记忆\n\n中文新页面。\n", encoding="utf-8")
+    (legacy_root / "OpenAI.md").write_text("# OpenAI\n\n安全英文专有名词页面。\n", encoding="utf-8")
+    (legacy_root / "description.md").write_text(
+        "# 知识管理\n\n- [Legacy](legacy.md)\n- [长期记忆](长期记忆.md)\n- [OpenAI](OpenAI.md)\n",
+        encoding="utf-8",
+    )
+
+    _validate_agent_candidate(
+        context,
+        baseline=baseline,
+        changed_paths={
+            legacy_page,
+            f"{legacy_directory}/description.md",
+            f"{legacy_directory}/长期记忆.md",
+            f"{legacy_directory}/OpenAI.md",
+        },
+        require_single_h1=True,
+    )
+
+
+def test_agent_root_layout_rejects_ordinary_markdown_as_repairable(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "description.md").write_text(
+        "# Context\n\n- [Root page](Root page.md)\n",
+        encoding="utf-8",
+    )
+    (context / "Root page.md").write_text("# Root page\n\nContent.\n", encoding="utf-8")
+
+    with pytest.raises(BaseError) as raised:
+        _validate_agent_candidate(
+            context,
+            baseline={},
+            changed_paths={"description.md", "Root page.md"},
+            require_description=True,
+            require_single_h1=True,
+        )
+
+    assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+    assert "root" in str(raised.value).casefold()
+
+
+def test_agent_description_coverage_rejects_unlisted_page_as_repairable(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    topic = context / "主动上下文"
+    topic.mkdir(parents=True)
+    (context / "description.md").write_text(
+        "# Context\n\n- [主动上下文](主动上下文/description.md)\n",
+        encoding="utf-8",
+    )
+    (topic / "description.md").write_text("# 主动上下文\n", encoding="utf-8")
+    (topic / "目录治理.md").write_text("# 目录治理\n\n正文。\n", encoding="utf-8")
+
+    with pytest.raises(BaseError) as raised:
+        _validate_agent_candidate(
+            context,
+            baseline={},
+            changed_paths={
+                "description.md",
+                "主动上下文/description.md",
+                "主动上下文/目录治理.md",
+            },
+            require_description=True,
+            require_single_h1=True,
+        )
+
+    assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+    assert "coverage" in str(raised.value).casefold()
+
+
+def _managed_agent_candidate_fixture(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, dict[str, tuple[int, str]], dict[str, str], str, str]:
+    final_context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(source_root, locator="file:///sources/managed-one.md")
+    second_source_id = _write_atomic_source(source_root, locator="file:///sources/managed-two.md")
+    managed_link = _source_link(
+        page_relative="旧主题/来源页.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+        label="原子来源",
+    )
+    _write_context_pages(
+        final_context_root,
+        {
+            "description.md": "# Context\n\n- [旧主题](旧主题/description.md)\n",
+            "旧主题/description.md": "# 旧主题\n\n- [来源页](来源页.md)\n- [关联页](关联页.md)\n",
+            "旧主题/来源页.md": (
+                f"# 来源页\n\n<!-- personal-context-managed-source: {source_id} -->\n\n{managed_link}\n"
+            ),
+            "旧主题/关联页.md": "# 关联页\n\n[来源页](来源页.md)\n",
+        },
+    )
+    baseline = context_pipeline._snapshot_managed_files(final_context_root)
+    baseline_managed_pages = {
+        managed_id: path.relative_to(final_context_root).as_posix()
+        for managed_id, path in context_pipeline._managed_pages_by_source(final_context_root).items()
+    }
+    sandbox = tmp_path / "sandbox"
+    _prepare_agent_candidate(final_context_root, sandbox)
+    return (
+        sandbox / "context",
+        final_context_root,
+        source_root,
+        baseline,
+        baseline_managed_pages,
+        source_id,
+        second_source_id,
+    )
+
+
+def test_agent_managed_source_marker_can_move_with_page_and_updated_links(tmp_path: Path) -> None:
+    (
+        candidate,
+        final_context_root,
+        source_root,
+        baseline,
+        baseline_managed_pages,
+        source_id,
+        _second_source_id,
+    ) = _managed_agent_candidate_fixture(tmp_path)
+    old_page = candidate / "旧主题" / "来源页.md"
+    new_directory = candidate / "新主题"
+    new_directory.mkdir()
+    new_page = new_directory / "来源页.md"
+    old_page.replace(new_page)
+    new_page.write_text(
+        "# 来源页\n\n"
+        f"<!-- personal-context-managed-source: {source_id} -->\n\n"
+        f"{_source_link(page_relative='新主题/来源页.md', final_context_root=final_context_root, source_root=source_root, source_id=source_id)}\n\n"
+        "[关联页](../旧主题/关联页.md)\n",
+        encoding="utf-8",
+    )
+    (candidate / "旧主题" / "关联页.md").write_text(
+        "# 关联页\n\n[来源页](../新主题/来源页.md)\n",
+        encoding="utf-8",
+    )
+    (candidate / "旧主题" / "description.md").write_text(
+        "# 旧主题\n\n- [关联页](关联页.md)\n",
+        encoding="utf-8",
+    )
+    (new_directory / "description.md").write_text(
+        "# 新主题\n\n- [来源页](来源页.md)\n",
+        encoding="utf-8",
+    )
+    (candidate / "description.md").write_text(
+        "# Context\n\n- [旧主题](旧主题/description.md)\n- [新主题](新主题/description.md)\n",
+        encoding="utf-8",
+    )
+
+    _validate_agent_candidate(
+        candidate,
+        baseline=baseline,
+        changed_paths=context_pipeline._changed_context_paths(candidate, baseline),
+        baseline_root=final_context_root,
+        final_context_root=final_context_root,
+        source_root=source_root,
+        baseline_managed_pages_by_source=baseline_managed_pages,
+        require_description=True,
+        require_single_h1=True,
+    )
+    context_pipeline._validate_reference_graph(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+        alias_targets={},
+        repairable=True,
+    )
+    inputs = candidate.parent / "inputs"
+    inputs.mkdir()
+    assert (
+        context_pipeline._validate_filesystem_agent_result(
+            "done",
+            candidate.parent,
+            {},
+            context_baseline=baseline,
+            materialized_baseline=None,
+            inputs_baseline={},
+            baseline_root=final_context_root,
+            baseline_path_by_candidate=None,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            alias_targets={},
+            deleted_source_ids=set(),
+            baseline_managed_pages_by_source=baseline_managed_pages,
+        )
+        == []
+    )
+
+
+def test_agent_candidate_tracks_unmanaged_aggregate_move_by_stable_page_identity(tmp_path: Path) -> None:
+    final_context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/retrieval.md",
+        title="BM25 检索实践",
+    )
+    source_link = _source_link(
+        page_relative="主题甲/检索综合.md",
+        final_context_root=final_context_root,
+        source_root=source_root,
+        source_id=source_id,
+        label="检索来源",
+    )
+    _write_context_pages(
+        final_context_root,
+        {
+            "description.md": "# Context\n\n- [主题甲](主题甲/description.md)\n- [主题乙](主题乙/description.md)\n",
+            "主题甲/description.md": "# 主题甲\n\n- [检索综合](检索综合.md)\n- [保留页](保留页.md)\n",
+            "主题甲/检索综合.md": f"# 检索综合\n\nBM25 与向量召回的综合说明。\n\n{source_link}\n",
+            "主题甲/保留页.md": f"# 保留页\n\n主题甲的稳定内容。\n\n{source_link}\n",
+            "主题乙/description.md": "# 主题乙\n",
+        },
+    )
+    baseline = context_pipeline._snapshot_managed_files(final_context_root)
+    baseline_paths_by_identity = context_pipeline._context_page_paths_by_identity(final_context_root)
+    sandbox = tmp_path / "sandbox-aggregate-move"
+    _prepare_agent_candidate(final_context_root, sandbox)
+    candidate = sandbox / "context"
+    moved = candidate / "主题乙" / "检索综合.md"
+    (candidate / "主题甲" / "检索综合.md").replace(moved)
+    moved.write_text(
+        "# 检索综合\n\nBM25 与向量召回的综合说明。\n\n"
+        + _source_link(
+            page_relative="主题乙/检索综合.md",
+            final_context_root=final_context_root,
+            source_root=source_root,
+            source_id=source_id,
+            label="检索来源",
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (candidate / "主题甲" / "description.md").write_text(
+        "# 主题甲\n\n- [保留页](保留页.md)\n",
+        encoding="utf-8",
+    )
+    (candidate / "主题乙" / "description.md").write_text(
+        "# 主题乙\n\n- [检索综合](检索综合.md)\n",
+        encoding="utf-8",
+    )
+    (sandbox / "inputs").mkdir()
+
+    assert (
+        context_pipeline._validate_filesystem_agent_result(
+            "done",
+            sandbox,
+            {},
+            context_baseline=baseline,
+            materialized_baseline=None,
+            inputs_baseline={},
+            baseline_root=final_context_root,
+            baseline_path_by_candidate=None,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            alias_targets={},
+            deleted_source_ids=set(),
+            baseline_managed_pages_by_source={},
+            baseline_partition_path_by_identity=baseline_paths_by_identity,
+        )
+        == []
+    )
+
+    pending_page = candidate / "待整理" / "本地来源" / "2026年08月" / "检索综合.md"
+    pending_page.parent.mkdir(parents=True)
+    moved.replace(pending_page)
+    with pytest.raises(BaseError, match="normal_page_in_fallback"):
+        context_pipeline._validate_context_partition_integrity(
+            candidate,
+            source_root=source_root,
+            baseline_root=final_context_root,
+            baseline_path_by_identity=baseline_paths_by_identity,
+            alias_targets={},
+            repairable=True,
+        )
+
+
+def test_agent_candidate_allows_complete_normal_directory_move_but_partition_gate_rejects_pending(
+    tmp_path: Path,
+) -> None:
+    final_context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/directory-move.md",
+        title="目录移动来源",
+    )
+
+    def source_link(page_relative: str) -> str:
+        return _source_link(
+            page_relative=page_relative,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            source_id=source_id,
+            label="原子来源",
+        )
+
+    _write_context_pages(
+        final_context_root,
+        {
+            "description.md": "# Context\n\n- [旧父级](旧父级/description.md)\n- [新父级](新父级/description.md)\n",
+            "旧父级/description.md": "# 旧父级\n\n- [稳定页](稳定页.md)\n- [检索主题](检索主题/description.md)\n",
+            "旧父级/稳定页.md": f"# 稳定页\n\n旧父级保留内容。\n\n{source_link('旧父级/稳定页.md')}\n",
+            "旧父级/检索主题/description.md": "# 检索主题\n\n- [来源页](来源页.md)\n",
+            "旧父级/检索主题/来源页.md": (
+                "# BM25 检索来源\n\n"
+                f"<!-- personal-context-managed-source: {source_id} -->\n\n"
+                f"{source_link('旧父级/检索主题/来源页.md')}\n"
+            ),
+            "新父级/description.md": "# 新父级\n\n- [稳定页](稳定页.md)\n",
+            "新父级/稳定页.md": f"# 稳定页\n\n新父级保留内容。\n\n{source_link('新父级/稳定页.md')}\n",
+        },
+    )
+    baseline = context_pipeline._snapshot_managed_files(final_context_root)
+    baseline_paths_by_identity = context_pipeline._context_page_paths_by_identity(final_context_root)
+    baseline_managed_pages = {
+        managed_id: page.relative_to(final_context_root).as_posix()
+        for managed_id, page in context_pipeline._managed_pages_by_source(final_context_root).items()
+    }
+    sandbox = tmp_path / "sandbox-directory-move"
+    _prepare_agent_candidate(final_context_root, sandbox)
+    candidate = sandbox / "context"
+    moved_directory = candidate / "新父级" / "检索主题"
+    (candidate / "旧父级" / "检索主题").replace(moved_directory)
+    moved_page = moved_directory / "来源页.md"
+    moved_page.write_text(
+        "# BM25 检索来源\n\n"
+        f"<!-- personal-context-managed-source: {source_id} -->\n\n"
+        f"{source_link('新父级/检索主题/来源页.md')}\n",
+        encoding="utf-8",
+    )
+    (candidate / "旧父级" / "description.md").write_text(
+        "# 旧父级\n\n- [稳定页](稳定页.md)\n",
+        encoding="utf-8",
+    )
+    (candidate / "新父级" / "description.md").write_text(
+        "# 新父级\n\n- [稳定页](稳定页.md)\n- [检索主题](检索主题/description.md)\n",
+        encoding="utf-8",
+    )
+    (sandbox / "inputs").mkdir()
+
+    assert (
+        context_pipeline._validate_filesystem_agent_result(
+            "done",
+            sandbox,
+            {},
+            context_baseline=baseline,
+            materialized_baseline=None,
+            inputs_baseline={},
+            baseline_root=final_context_root,
+            baseline_path_by_candidate=None,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            alias_targets={},
+            deleted_source_ids=set(),
+            baseline_managed_pages_by_source=baseline_managed_pages,
+            baseline_partition_path_by_identity=baseline_paths_by_identity,
+        )
+        == []
+    )
+
+    pending_directory = candidate / "待整理" / "本地来源" / "2026年08月" / "检索主题"
+    pending_directory.parent.mkdir(parents=True)
+    moved_directory.replace(pending_directory)
+    with pytest.raises(BaseError, match="normal_page_in_fallback"):
+        context_pipeline._validate_context_partition_integrity(
+            candidate,
+            source_root=source_root,
+            baseline_root=final_context_root,
+            baseline_path_by_identity=baseline_paths_by_identity,
+            alias_targets={},
+            repairable=True,
+        )
+
+
+@pytest.mark.parametrize("mode", ["delete", "duplicate", "change", "forge", "malformed"])
+def test_agent_managed_source_marker_rejects_identity_changes(tmp_path: Path, mode: str) -> None:
+    (
+        candidate,
+        final_context_root,
+        source_root,
+        baseline,
+        baseline_managed_pages,
+        source_id,
+        second_source_id,
+    ) = _managed_agent_candidate_fixture(tmp_path)
+    managed_page = candidate / "旧主题" / "来源页.md"
+    original = managed_page.read_text(encoding="utf-8")
+    marker = f"<!-- personal-context-managed-source: {source_id} -->"
+
+    if mode == "delete":
+        managed_page.write_text(original.replace(marker + "\n\n", ""), encoding="utf-8")
+    elif mode == "change":
+        managed_page.write_text(original.replace(source_id, second_source_id), encoding="utf-8")
+    elif mode == "malformed":
+        managed_page.write_text(
+            original.replace(marker, "<!-- personal-context-managed-source: forged -->"),
+            encoding="utf-8",
+        )
+    else:
+        new_page = candidate / "旧主题" / ("复制页.md" if mode == "duplicate" else "伪造页.md")
+        forged_id = source_id if mode == "duplicate" else second_source_id
+        new_page.write_text(
+            f"# 新页面\n\n<!-- personal-context-managed-source: {forged_id} -->\n",
+            encoding="utf-8",
+        )
+        description = candidate / "旧主题" / "description.md"
+        description.write_text(
+            description.read_text(encoding="utf-8") + f"- [新页面]({new_page.name})\n",
+            encoding="utf-8",
+        )
+
+    with pytest.raises(BaseError) as raised:
+        _validate_agent_candidate(
+            candidate,
+            baseline=baseline,
+            changed_paths=context_pipeline._changed_context_paths(candidate, baseline),
+            baseline_root=final_context_root,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            baseline_managed_pages_by_source=baseline_managed_pages,
+            require_description=True,
+            require_single_h1=True,
+        )
+
+    assert raised.value.status == StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR
+    assert "managed source" in str(raised.value).casefold()
+
+
+def _write_partition_page(
+    context_root: Path,
+    source_root: Path,
+    *,
+    relative: str,
+    source_id: str | None,
+    title: str,
+    body: str,
+) -> Path:
+    page = context_root / relative
+    page.parent.mkdir(parents=True, exist_ok=True)
+    source_link = ""
+    if source_id is not None:
+        source_link = "\n\n" + _source_link(
+            page_relative=relative,
+            final_context_root=context_root,
+            source_root=source_root,
+            source_id=source_id,
+        )
+    page.write_text(f"# {title}\n\n{body}{source_link}\n", encoding="utf-8")
+    return page
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("VLAct：表征中心的 VLA 持续预训练", "VLAct:表征中心的 VLA 持续预训练"),
+        ("RFC：传输规范", "RFC:传输规范"),
+    ],
+)
+def test_human_semantic_title_with_colon_is_not_treated_as_uri(value: str, expected: str) -> None:
+    assert context_pipeline._page_label_candidate(value) == (expected, "readable")
+    assert context_pipeline._source_title_label({"title": value, "locator": "file:///source.md"}) == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "https://example.com/topic",
+        "mailto:user@example.com",
+        "tel:+8613800000000",
+        "urn:isbn:9780000000000",
+        r"C:\Users\mega\topic.md",
+        r"\\server\share\topic.md",
+    ],
+)
+def test_human_semantic_title_rejects_real_uri_and_absolute_path(value: str) -> None:
+    assert context_pipeline._page_label_candidate(value)[0] is None
+    assert context_pipeline._source_title_label({"title": value, "locator": "file:///source.md"}) == ""
+
+
+@pytest.mark.parametrize("value", [r"C:\Users\mega\topic.md", "C:/Users/mega/topic.md", "/home/user/topic.md"])
+def test_human_semantic_title_rejects_cross_platform_absolute_paths(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    from pathlib import PurePosixPath
+
+    monkeypatch.setattr(context_pipeline, "Path", PurePosixPath)
+    assert context_pipeline._page_label_candidate(value)[0] is None
+    assert context_pipeline._source_title_label({"title": value, "locator": "file:///source.md"}) == ""
+
+
+def test_candidate_source_reference_uses_final_context_projection(tmp_path: Path) -> None:
+    final_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/vlact.md",
+        title="VLAct：表征中心的 VLA 持续预训练",
+    )
+    relative = "视觉语言模型/VLAct.md"
+    source_link = _source_link(
+        page_relative=relative,
+        final_context_root=final_context,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    final_page = final_context / relative
+    final_page.parent.mkdir(parents=True)
+    final_page.write_text(f"# VLAct：表征中心的 VLA 持续预训练\n\n{source_link}\n", encoding="utf-8")
+
+    candidate_context = tmp_path / "workspace" / "sandboxes" / "service" / "run" / "context"
+    candidate_page = candidate_context / relative
+    candidate_page.parent.mkdir(parents=True)
+    candidate_page.write_text(final_page.read_text(encoding="utf-8"), encoding="utf-8")
+
+    expected = {source_id}
+    assert (
+        context_pipeline._source_ids_reachable_from_page(
+            final_context,
+            source_root=source_root,
+            page_relative=relative,
+        )
+        == expected
+    )
+    assert (
+        context_pipeline._source_ids_reachable_from_page(
+            candidate_context,
+            final_context_root=final_context,
+            source_root=source_root,
+            page_relative=relative,
+        )
+        == expected
+    )
+    assert {
+        str(item["source_id"])
+        for item in context_pipeline._page_source_metadata(
+            candidate_page,
+            context_root=candidate_context,
+            final_context_root=final_context,
+            source_root=source_root,
+            alias_targets=None,
+        )
+    } == expected
+
+
+def test_agent_authored_pending_directory_is_validated_as_an_ordinary_directory(tmp_path: Path) -> None:
+    final_context = tmp_path / "workspace" / "context"
+    final_context.mkdir(parents=True)
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/search.md",
+        title="BM25 检索实践",
+    )
+    sandbox = tmp_path / "workspace" / "sandboxes" / "service" / "run"
+    candidate = sandbox / "context"
+    pending = candidate / "待整理"
+    pending.mkdir(parents=True)
+    relative = "待整理/检索实践.md"
+    source_link = _source_link(
+        page_relative=relative,
+        final_context_root=final_context,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    (candidate / "description.md").write_text(
+        "# 个人上下文\n\n- [待整理](待整理/description.md)\n",
+        encoding="utf-8",
+    )
+    (pending / "description.md").write_text(
+        "# 待整理\n\n- [检索实践](检索实践.md)\n",
+        encoding="utf-8",
+    )
+    (pending / "检索实践.md").write_text(
+        f"# BM25 检索实践\n\n语义清晰但由 Agent 自主选择目录。\n\n{source_link}\n",
+        encoding="utf-8",
+    )
+    inputs = sandbox / "inputs"
+    inputs.mkdir()
+
+    assert (
+        context_pipeline._validate_filesystem_agent_result(
+            "done",
+            sandbox,
+            {},
+            context_baseline={},
+            materialized_baseline=None,
+            inputs_baseline={},
+            baseline_root=final_context,
+            baseline_path_by_candidate=None,
+            final_context_root=final_context,
+            source_root=source_root,
+            alias_targets={},
+            deleted_source_ids=set(),
+            baseline_managed_pages_by_source={},
+            baseline_partition_path_by_identity={},
+        )
+        == []
+    )
+
+
+def test_second_agent_service_accepts_formal_source_links_from_existing_context(tmp_path: Path) -> None:
+    final_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    existing_relative = "视觉语言模型/VLAct.md"
+    source_ids = [
+        _write_atomic_source(
+            source_root,
+            locator=f"file:///sources/vlact-{index}.md",
+            title=f"VLAct 来源 {index}",
+        )
+        for index in range(4)
+    ]
+    existing_links = "\n".join(
+        _source_link(
+            page_relative=existing_relative,
+            final_context_root=final_context,
+            source_root=source_root,
+            source_id=source_id,
+        )
+        for source_id in source_ids
+    )
+    _write_context_pages(
+        final_context,
+        {
+            "description.md": "# 个人上下文\n\n- [视觉语言模型](视觉语言模型/description.md)\n",
+            "视觉语言模型/description.md": "# 视觉语言模型\n\n- [VLAct](VLAct.md)\n",
+            existing_relative: f"# VLAct：表征中心的 VLA 持续预训练\n\n{existing_links}\n",
+        },
+    )
+    baseline = context_pipeline._snapshot_managed_files(final_context)
+    baseline_paths = context_pipeline._context_page_paths_by_identity(final_context)
+
+    sandbox = tmp_path / "workspace" / "sandboxes" / "second-service" / "second-run"
+    _prepare_agent_candidate(final_context, sandbox)
+    candidate = sandbox / "context"
+    incoming_source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/vision-action.md",
+        title="视觉动作模型实践",
+    )
+    incoming_relative = "视觉语言模型/视觉动作模型.md"
+    incoming_link = _source_link(
+        page_relative=incoming_relative,
+        final_context_root=final_context,
+        source_root=source_root,
+        source_id=incoming_source_id,
+    )
+    (candidate / incoming_relative).write_text(
+        f"# 视觉动作模型实践\n\n第二个服务新增的知识。\n\n{incoming_link}\n",
+        encoding="utf-8",
+    )
+    (candidate / "视觉语言模型" / "description.md").write_text(
+        "# 视觉语言模型\n\n- [VLAct](VLAct.md)\n- [视觉动作模型](视觉动作模型.md)\n",
+        encoding="utf-8",
+    )
+    inputs = sandbox / "inputs"
+    inputs.mkdir()
+
+    assert (
+        context_pipeline._validate_filesystem_agent_result(
+            "done",
+            sandbox,
+            {
+                "documents": [
+                    {
+                        "logical_id": "file:///sources/vision-action.md",
+                        "revision_id": "rev-1",
+                        "title": "视觉动作模型实践",
+                        "markdown": "第二个服务新增的知识。",
+                    }
+                ]
+            },
+            context_baseline=baseline,
+            materialized_baseline=None,
+            inputs_baseline={},
+            baseline_root=final_context,
+            baseline_path_by_candidate=None,
+            final_context_root=final_context,
+            source_root=source_root,
+            alias_targets={},
+            deleted_source_ids=set(),
+            baseline_managed_pages_by_source={},
+            baseline_partition_path_by_identity=baseline_paths,
+        )
+        == []
+    )
+    assert context_pipeline._source_ids_reachable_from_page(
+        candidate,
+        final_context_root=final_context,
+        source_root=source_root,
+        page_relative=existing_relative,
+    ) == set(source_ids)
+
+
+def test_rules_balanced_partition_rejects_new_readable_page_in_pending_with_sanitized_error(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    locator = "https://user:TOP_SECRET@example.test/private?token=HIDDEN"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="BM25 检索实践",
+        provider="feishu",
+        observed_at="2026-08-12T00:00:00Z",
+    )
+    relative = "待整理/飞书/2026年08月/检索实践.md"
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative=relative,
+        source_id=source_id,
+        title="BM25 检索实践",
+        body="TOP_SECRET 正文不应出现在错误中。",
+    )
+
+    with pytest.raises(BaseError) as raised:
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=source_root,
+            baseline_root=None,
+            alias_targets=None,
+            repairable=True,
+        )
+
+    rendered = str(raised.value)
+    assert relative in rendered
+    assert "normal_page_in_fallback" in rendered
+    assert "TOP_SECRET" not in rendered
+    assert "HIDDEN" not in rendered
+    assert locator not in rendered
+
+
+def test_rules_balanced_partition_rejects_normal_baseline_page_moved_into_pending(tmp_path: Path) -> None:
+    baseline_root = tmp_path / "formal" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    _write_partition_page(
+        baseline_root,
+        source_root,
+        relative="正常主题/稳定页面.md",
+        source_id=None,
+        title="稳定语义页面",
+        body="稳定内容。",
+    )
+    context_root = tmp_path / "candidate" / "context"
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/未归属/2026年08月/稳定页面.md",
+        source_id=None,
+        title="稳定语义页面",
+        body="稳定内容。",
+    )
+
+    with pytest.raises(BaseError, match="normal_page_in_fallback"):
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=source_root,
+            baseline_root=baseline_root,
+            alias_targets=None,
+            repairable=True,
+        )
+
+
+def test_rules_balanced_partition_rejects_empty_pending_tree(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    pending = context_root / "待整理"
+    pending.mkdir(parents=True)
+    (pending / "description.md").write_text("# 待整理\n", encoding="utf-8")
+
+    with pytest.raises(BaseError, match="empty_fallback_tree"):
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=tmp_path / "workspace" / "source-meta",
+            baseline_root=None,
+            alias_targets=None,
+            repairable=True,
+        )
+
+
+def test_rules_balanced_partition_rejects_empty_nested_pending_navigation(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="2026",
+        provider="feishu",
+        observed_at="2026-08-12T00:00:00Z",
+    )
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/飞书/2026年08月/2026.md",
+        source_id=source_id,
+        title="2026",
+        body="123 2026-08-12",
+    )
+    fake_navigation = context_root / "待整理" / "飞书" / "2026年08月" / "待整理导航"
+    fake_navigation.mkdir(parents=True)
+    (fake_navigation / "description.md").write_text("# 待整理导航\n", encoding="utf-8")
+
+    with pytest.raises(BaseError, match="empty_fallback_navigation"):
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=source_root,
+            baseline_root=None,
+            alias_targets=None,
+            repairable=True,
+        )
+
+
+def test_rules_balanced_partition_rejects_pending_marker_hidden_in_normal_forest(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    disguised_pending = context_root / "正常主题" / "待整理"
+    disguised_pending.mkdir(parents=True)
+    (disguised_pending / "description.md").write_text("# 待整理\n", encoding="utf-8")
+
+    with pytest.raises(BaseError, match=r"正常主题/待整理 \[fallback_root_misplaced\]"):
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=tmp_path / "workspace" / "source-meta",
+            baseline_root=None,
+            alias_targets=None,
+            repairable=True,
+        )
+
+
+@pytest.mark.parametrize(
+    ("relative", "with_source", "expected_error"),
+    [
+        ("待整理/飞书/2026年08月/2026.md", False, "fallback_source_metadata_missing"),
+        ("待整理/本地文件/2026年09月/2026.md", True, "fallback_route_mismatch"),
+    ],
+)
+def test_rules_balanced_partition_requires_page_provenance_and_exact_pending_route(
+    tmp_path: Path,
+    relative: str,
+    with_source: bool,
+    expected_error: str,
+) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="2026",
+        provider="feishu",
+        observed_at="2026-08-12T00:00:00Z",
+    )
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative=relative,
+        source_id=source_id if with_source else None,
+        title="2026",
+        body="123 2026-08-12",
+    )
+
+    with pytest.raises(BaseError, match=expected_error):
+        context_pipeline._validate_context_partition_integrity(
+            context_root,
+            source_root=source_root,
+            baseline_root=None,
+            alias_targets=None,
+            repairable=True,
+        )
+
+
+def test_rules_balanced_partition_accepts_only_genuine_page_provenance_pending_route(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="2026",
+        provider="feishu",
+        observed_at="2026-08-12T00:00:00Z",
+    )
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/飞书/2026年08月/2026.md",
+        source_id=source_id,
+        title="2026",
+        body="123 2026-08-12",
+    )
+
+    context_pipeline._validate_context_partition_integrity(
+        context_root,
+        source_root=source_root,
+        baseline_root=None,
+        alias_targets=None,
+        repairable=True,
+    )
+
+
+def test_page_partition_ignores_fenced_headings_and_code_text_as_semantic_evidence(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    page = _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/GitHub/2026年06月/Page Content.md",
+        source_id=source_id,
+        title="Page Content",
+        body="```markdown\n# BM25 检索高级实践\n向量检索与稀疏排序优化。\n```\n\n123 2026",
+    )
+
+    partition, label, reason = context_pipeline._context_page_partition(
+        page,
+        context_root=context_root,
+        source_root=source_root,
+        baseline_relative=None,
+        allow_existing_fallback_promotion=False,
+    )
+
+    assert partition == "fallback"
+    assert label is None
+    assert reason == "generic_or_numeric_only"
+
+
+def test_prospective_rules_partition_ignores_generated_empty_preview_placeholder(tmp_path: Path) -> None:
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/Page Content.md",
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+
+    partition, label, reason = context_pipeline._prospective_rules_page_partition(
+        {
+            "logical_id": "file:///sources/Page Content.md",
+            "revision_id": "rev-empty",
+            "title": "Page Content",
+            "markdown": "",
+        },
+        source_root=source_root,
+        source_id=source_id,
+    )
+
+    assert partition == "fallback"
+    assert label is None
+    assert reason == "generic_or_numeric_only"
+
+
+def test_page_partition_ignores_related_managed_block_as_semantic_evidence(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    page = _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/GitHub/2026年06月/Page Content.md",
+        source_id=source_id,
+        title="Page Content",
+        body=(
+            "123 2026\n\n"
+            f"{context_pipeline._RELATED_START}\n"
+            "## 相关文档\n\n- [BM25 检索高级实践](../../检索/BM25.md)\n"
+            f"{context_pipeline._RELATED_END}"
+        ),
+    )
+
+    partition, label, reason = context_pipeline._context_page_partition(
+        page,
+        context_root=context_root,
+        source_root=source_root,
+        baseline_relative=None,
+        allow_existing_fallback_promotion=False,
+    )
+
+    assert partition == "fallback"
+    assert label is None
+    assert reason == "generic_or_numeric_only"
+
+
+def test_page_partition_ignores_inline_code_as_semantic_evidence(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/2026.md",
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    page = _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/GitHub/2026年06月/Page Content.md",
+        source_id=source_id,
+        title="Page Content",
+        body="`BM25 检索高级实践与向量召回优化`\n\n123 2026",
+    )
+
+    partition, label, reason = context_pipeline._context_page_partition(
+        page,
+        context_root=context_root,
+        source_root=source_root,
+        baseline_relative=None,
+        allow_existing_fallback_promotion=False,
+    )
+
+    assert partition == "fallback"
+    assert label is None
+    assert reason == "generic_or_numeric_only"
+
+
+@pytest.mark.parametrize(
+    ("locator", "expected_label"),
+    [
+        ("file:///private/source/BM25检索实践.md", "BM25检索实践"),
+        (
+            "https://user:TOP_SECRET@example.test/private/BM25%E6%A3%80%E7%B4%A2%E5%AE%9E%E8%B7%B5.md?token=HIDDEN",
+            "BM25检索实践",
+        ),
+    ],
+    ids=["file", "percent-encoded-http"],
+)
+def test_page_partition_uses_only_safe_source_locator_basename_when_title_defaults_to_locator(
+    tmp_path: Path,
+    locator: str,
+    expected_label: str,
+) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    page = _write_partition_page(
+        context_root,
+        source_root,
+        relative="正常主题/Page Content.md",
+        source_id=source_id,
+        title="Page Content",
+        body="123 2026",
+    )
+
+    partition, label, reason = context_pipeline._context_page_partition(
+        page,
+        context_root=context_root,
+        source_root=source_root,
+        baseline_relative=None,
+        allow_existing_fallback_promotion=False,
+    )
+
+    assert partition == "normal"
+    assert label == expected_label
+    assert reason is None
+
+
+def test_page_partition_rejects_generic_source_locator_basename_when_title_defaults_to_locator(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///private/source/2026.md",
+        title="",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    page = _write_partition_page(
+        context_root,
+        source_root,
+        relative="待整理/GitHub/2026年06月/Page Content.md",
+        source_id=source_id,
+        title="Page Content",
+        body="123 2026",
+    )
+
+    partition, label, reason = context_pipeline._context_page_partition(
+        page,
+        context_root=context_root,
+        source_root=source_root,
+        baseline_relative=None,
+        allow_existing_fallback_promotion=False,
+    )
+
+    assert partition == "fallback"
+    assert label is None
+    assert reason == "generic_or_numeric_only"
+
+
+def test_rules_balanced_partition_keeps_legacy_baseline_pending_route_as_authoritative(tmp_path: Path) -> None:
+    baseline_root = tmp_path / "formal" / "context"
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/legacy-low-confidence.md",
+        title="2025",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    legacy_relative = "待整理/历史Git平台/2026年06月/2025.md"
+    for root in (baseline_root, context_root):
+        _write_partition_page(
+            root,
+            source_root,
+            relative=legacy_relative,
+            source_id=source_id,
+            title="2025",
+            body="123 2025-06-12",
+        )
+
+    context_pipeline._validate_context_partition_integrity(
+        context_root,
+        source_root=source_root,
+        baseline_root=baseline_root,
+        baseline_path_by_identity=context_pipeline._context_page_paths_by_identity(baseline_root),
+        alias_targets=None,
+        repairable=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_fallback_uses_available_navigation_when_source_month_leaf_is_full(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    old_locator = "file:///sources/2025.md"
+    old_source_id = _write_atomic_source(
+        source_root,
+        locator=old_locator,
+        title="2025",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    old_relative = "待整理/GitHub/2026年06月/2025.md"
+    _write_partition_page(
+        context_root,
+        source_root,
+        relative=old_relative,
+        source_id=old_source_id,
+        title="2025",
+        body="123 2025-06-12",
+    )
+    new_locator = "file:///sources/2026.md"
+    new_source_id = _write_atomic_source(
+        source_root,
+        locator=new_locator,
+        title="2026",
+        provider="github",
+        observed_at="2026-06-03T00:00:00Z",
+    )
+
+    await context_pipeline._apply_rules_increment(
+        context_root,
+        source_root=source_root,
+        provider="feishu",
+        processed={
+            "documents": [
+                {
+                    "logical_id": new_locator,
+                    "revision_id": "rev-new",
+                    "title": "2026",
+                    "markdown": "123 2026-07-03\n",
+                }
+            ],
+            "blocks": [],
+            "deleted_ids": [],
+        },
+        source_ids_by_logical_id={new_locator: new_source_id},
+        deleted_source_ids=set(),
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=2,
+        preserve_existing_paths=True,
+    )
+
+    assert (context_root / old_relative).is_file()
+    new_page = context_pipeline._managed_pages_by_source(context_root)[new_source_id]
+    new_relative = new_page.relative_to(context_root).as_posix()
+    assert new_relative.startswith("待整理/GitHub/2026年06月/")
+    assert new_page.parent != (context_root / "待整理" / "GitHub" / "2026年06月")
+    assert "飞书" not in new_relative
+    assert "2026年09月" not in new_relative
+    context_pipeline._validate_context_capacities(
+        context_root,
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=2,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_embedding", [False, True], ids=["sparse", "hybrid"])
+async def test_agent_fallback_routes_new_readable_page_away_from_full_normal_leaf(
+    tmp_path: Path,
+    with_embedding: bool,
+) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    full_topic = context_root / "BM25检索高级实践"
+    full_topic.mkdir(parents=True)
+    existing_page = full_topic / "既有检索实践.md"
+    existing_page.write_text(
+        "# BM25 检索高级实践\n\nBM25 稀疏检索、相关性排序与召回优化。\n",
+        encoding="utf-8",
+    )
+    context_pipeline._render_context_navigation(context_root)
+    baseline_relative = existing_page.relative_to(context_root).as_posix()
+    locator = "file:///sources/bm25-advanced.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="BM25 检索高级实践",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    embedding_calls = 0
+
+    async def embed_texts(texts: list[str]) -> list[list[float]]:
+        nonlocal embedding_calls
+        embedding_calls += 1
+        return [[1.0, 0.0] for _ in texts]
+
+    await context_pipeline._apply_rules_increment(
+        context_root,
+        source_root=source_root,
+        provider="feishu",
+        processed={
+            "documents": [
+                {
+                    "logical_id": locator,
+                    "revision_id": "rev-new",
+                    "title": "BM25 检索高级实践",
+                    "markdown": "BM25 稀疏检索、相关性排序与召回优化。\n",
+                }
+            ],
+            "blocks": [],
+            "deleted_ids": [],
+        },
+        source_ids_by_logical_id={locator: source_id},
+        deleted_source_ids=set(),
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=1,
+        embed_texts=embed_texts if with_embedding else None,
+        preserve_existing_paths=True,
+    )
+
+    assert (context_root / baseline_relative).is_file()
+    new_page = context_pipeline._managed_pages_by_source(context_root)[source_id]
+    assert new_page.parent != full_topic
+    assert new_page.is_relative_to(full_topic)
+    assert new_page.parent.parent == full_topic
+    assert "检索" in new_page.parent.name or "BM25" in new_page.parent.name
+    assert new_page.parent.name.endswith("导航")
+    assert embedding_calls > 0 if with_embedding else embedding_calls == 0
+    context_pipeline._validate_context_capacities(
+        context_root,
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hybrid_capacity_route_uses_dense_only_full_leaf_match_in_one_embedding_call(tmp_path: Path) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    full_topic = context_root / "历史向量召回记录"
+    full_topic.mkdir(parents=True)
+    (full_topic / "既有记录.md").write_text(
+        "# 历史向量召回记录\n\n面团发酵、烤箱温度与历史评估记录。\n",
+        encoding="utf-8",
+    )
+    context_pipeline._render_context_navigation(context_root)
+    locator = "file:///sources/vector-ranking.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="向量召回实验",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    document: Mapping[str, object] = {
+        "logical_id": locator,
+        "revision_id": "rev-new",
+        "title": "向量召回实验",
+        "markdown": "向量索引、召回排序与近邻搜索评估。\n",
+    }
+    title, headings, preview = context_pipeline._document_semantic_parts(document)
+    sparse_query = context_pipeline._semantic_fields(title, headings, preview)
+    sparse_ranked = context_pipeline._rank_semantic_candidates(
+        sparse_query,
+        [context_pipeline._directory_semantic_fields(full_topic)],
+    )
+    assert sparse_ranked[0][1] > 0.22
+    assert context_pipeline._accepted_semantic_directory(sparse_query, [full_topic]) is None
+    embedding_calls = 0
+
+    async def embed_texts(texts: list[str]) -> list[list[float]]:
+        nonlocal embedding_calls
+        embedding_calls += 1
+        assert len(texts) == 2
+        return [[1.0, 0.0], [1.0, 0.0]]
+
+    target = await context_pipeline._select_rules_directory_hybrid(
+        context_root,
+        provider="feishu",
+        document=document,
+        source_id=source_id,
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        embed_texts=embed_texts,
+        max_pages=1,
+        max_subdirectories=1,
+        source_root=source_root,
+        provider_neutral_fallback=True,
+    )
+
+    assert embedding_calls == 1
+    assert target.parent == full_topic
+    assert target.name.endswith("导航")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_embedding", [False, True], ids=["sparse", "hybrid"])
+@pytest.mark.parametrize("title_kind", ["generic", "locator"])
+async def test_provider_neutral_rules_uses_partition_label_for_directory_page_and_heading(
+    tmp_path: Path,
+    with_embedding: bool,
+    title_kind: str,
+) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    misleading_topic = context_root / "Page Content"
+    misleading_topic.mkdir(parents=True)
+    (misleading_topic / "旧页面.md").write_text("# Page Content\n\n123 2026\n", encoding="utf-8")
+    fenced_topic = context_root / "烘焙温度控制"
+    fenced_topic.mkdir(parents=True)
+    (fenced_topic / "旧页面.md").write_text("# 烘焙温度控制\n\n烤箱与面团。\n", encoding="utf-8")
+    existing_locator = "file:///sources/existing.md"
+    existing_source_id = _write_atomic_source(
+        source_root,
+        locator=existing_locator,
+        title="既有稳定主题",
+        provider="github",
+        observed_at="2026-06-01T00:00:00Z",
+    )
+    existing_relative = "既有稳定主题/固定路径.md"
+    existing_page = context_root / existing_relative
+    existing_page.parent.mkdir(parents=True)
+    existing_page.write_text(
+        f"# 既有稳定主题\n\n<!-- personal-context-managed-source: {existing_source_id} -->\n",
+        encoding="utf-8",
+    )
+    context_pipeline._render_context_navigation(context_root)
+
+    locator = "file:///sources/2026.md"
+    semantic_label = "BM25 检索与向量召回排序工程深度实践指南"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title=semantic_label,
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    document_title = locator if title_kind == "locator" else "Page Content"
+    document: Mapping[str, object] = {
+        "logical_id": locator,
+        "revision_id": "rev-new",
+        "title": document_title,
+        "markdown": "```markdown\n# 烘焙温度控制\n代码中的伪语义。\n```\n\n123 2026\n",
+    }
+    partition, label, reason = context_pipeline._prospective_rules_page_partition(
+        document,
+        source_root=source_root,
+        source_id=source_id,
+    )
+    assert (partition, label, reason) == ("normal", semantic_label, None)
+    embedding_calls = 0
+
+    async def embed_texts(texts: list[str]) -> list[list[float]]:
+        nonlocal embedding_calls
+        embedding_calls += 1
+        if embedding_calls == 1:
+            assert texts[0] == semantic_label
+            return [[1.0, 0.0], *([[0.0, 1.0]] * (len(texts) - 1))]
+        return [[1.0, 0.0] for _ in texts]
+
+    await context_pipeline._apply_rules_increment(
+        context_root,
+        source_root=source_root,
+        provider="feishu",
+        processed={"documents": [document], "blocks": [], "deleted_ids": []},
+        source_ids_by_logical_id={locator: source_id},
+        deleted_source_ids=set(),
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        max_pages_per_directory=5,
+        max_subdirectories_per_directory=8,
+        embed_texts=embed_texts if with_embedding else None,
+        preserve_existing_paths=True,
+    )
+
+    assert existing_page.is_file()
+    assert context_pipeline._managed_pages_by_source(context_root)[existing_source_id] == existing_page
+    new_page = context_pipeline._managed_pages_by_source(context_root)[source_id]
+    assert new_page.parent.name == context_pipeline._safe_semantic_name(semantic_label)
+    assert new_page.name == f"{context_pipeline._semantic_page_stem(semantic_label)}.md"
+    assert new_page.read_text(encoding="utf-8").splitlines()[0] == f"# {semantic_label}"
+    assert new_page.parent not in {misleading_topic, fenced_topic}
+    assert embedding_calls > 0 if with_embedding else embedding_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_embedding", [False, True], ids=["sparse", "hybrid"])
+async def test_provider_neutral_rules_keeps_sanitized_h2_and_preview_for_directory_matching(
+    tmp_path: Path,
+    with_embedding: bool,
+) -> None:
+    context_root = tmp_path / "candidate" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    database_topic = context_root / "PostgreSQL索引"
+    database_topic.mkdir(parents=True)
+    (database_topic / "既有索引.md").write_text(
+        "# PostgreSQL 索引策略\n\nBTree 查询优化、执行计划与数据库索引维护。\n",
+        encoding="utf-8",
+    )
+    context_pipeline._render_context_navigation(context_root)
+    locator = "file:///sources/2026.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="工程周报",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    document: Mapping[str, object] = {
+        "logical_id": locator,
+        "revision_id": "rev-new",
+        "title": "Page Content",
+        "markdown": (
+            "```markdown\n# 家庭烘焙伪主题\n烤箱与面团。\n```\n\n"
+            "## PostgreSQL 索引策略\n\nBTree 查询优化、执行计划与数据库索引维护。\n\n"
+            f"{context_pipeline._RELATED_START}\n## 相关文档\n"
+            "- [家庭烘焙](../家庭烘焙.md)\n"
+            f"{context_pipeline._RELATED_END}\n"
+        ),
+    }
+    assert context_pipeline._prospective_rules_page_partition(
+        document,
+        source_root=source_root,
+        source_id=source_id,
+    ) == ("normal", "工程周报", None)
+    label_only = context_pipeline._semantic_fields("工程周报", (), "")
+    expected_query = context_pipeline._semantic_fields(
+        "工程周报",
+        ("PostgreSQL 索引策略",),
+        "BTree 查询优化、执行计划与数据库索引维护。",
+    )
+    assert context_pipeline._accepted_semantic_directory(label_only, [database_topic]) is None
+    assert context_pipeline._accepted_semantic_directory(expected_query, [database_topic]) == database_topic
+    embedding_calls = 0
+
+    async def embed_texts(texts: list[str]) -> list[list[float]]:
+        nonlocal embedding_calls
+        embedding_calls += 1
+        assert "工程周报" in texts[0]
+        assert "PostgreSQL 索引策略" in texts[0]
+        assert "BTree 查询优化" in texts[0]
+        assert "Page Content" not in texts[0]
+        assert "家庭烘焙" not in texts[0]
+        return [[1.0, 0.0] for _ in texts]
+
+    if with_embedding:
+        target = await context_pipeline._select_rules_directory_hybrid(
+            context_root,
+            provider="feishu",
+            document=document,
+            source_id=source_id,
+            run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+            embed_texts=embed_texts,
+            source_root=source_root,
+            provider_neutral_fallback=True,
+        )
+    else:
+        target = context_pipeline._select_rules_directory(
+            context_root,
+            provider="feishu",
+            document=document,
+            source_id=source_id,
+            run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+            source_root=source_root,
+            provider_neutral_fallback=True,
+        )
+
+    assert target == database_topic
+    assert embedding_calls == (1 if with_embedding else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_target", "new_topic_title"),
+    [
+        ("directory_1", None),
+        ("new_topic", "BM25检索实践"),
+        ("new_topic", "家庭烘焙技巧"),
+    ],
+    ids=["existing-full-leaf", "new-topic-existing-full-leaf", "new-topic-overflow-root"],
+)
+async def test_agent_to_balanced_cannot_move_new_readable_page_back_into_full_leaf(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    model_target: str,
+    new_topic_title: str | None,
+) -> None:
+    config = _config("agent", max_pages_per_directory=1, max_subdirectories_per_directory=2)
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=config,
+        input_queue=asyncio.Queue(),
+    )
+    formal_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    full_topic = formal_context / "BM25检索实践"
+    full_topic.mkdir(parents=True)
+    existing_page = full_topic / "既有检索.md"
+    existing_page.write_text("# BM25 检索实践\n\n稀疏召回与相关性排序。\n", encoding="utf-8")
+    other_topic = formal_context / "数据库索引"
+    other_topic.mkdir(parents=True)
+    (other_topic / "既有索引.md").write_text("# 数据库索引\n\nBTree 与查询计划。\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(formal_context)
+    baseline_root_directories = {path.name for path in formal_context.iterdir() if path.is_dir()}
+    locator = "file:///sources/bm25-capacity.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="BM25 检索实践",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+
+    async def failed_agent(**kwargs: object) -> str:
+        del kwargs
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "BM25 检索实践摘要。",
+                        "page_title": "BM25 检索实践",
+                        "keywords": [str("BM25 检索实践")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": locator,
+                "revision_id": "rev-new",
+                "title": "BM25 检索实践",
+                "markdown": "BM25 稀疏召回、相关性排序与检索优化。\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+    sandbox = tmp_path / "sandbox-agent-balanced-capacity"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+        provider="feishu",
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source_ids_by_logical_id={locator: source_id},
+    )
+
+    assert result == "balanced"
+    candidate = sandbox / "context"
+    assert (candidate / existing_page.relative_to(formal_context)).is_file()
+    new_page = context_pipeline._managed_pages_by_source(candidate)[source_id]
+    assert new_page.parent != candidate / full_topic.relative_to(formal_context)
+    assert new_page.is_relative_to(candidate / full_topic.relative_to(formal_context))
+    assert {path.name for path in candidate.iterdir() if path.is_dir()} == baseline_root_directories
+    assert all(
+        context_pipeline._directory_ordinary_markdown_count(directory) > 0
+        or context_pipeline._directory_direct_subdirectory_count(directory) > 0
+        for directory in context_pipeline._context_directories(candidate)[1:]
+    )
+    context_pipeline._validate_context_capacities(
+        candidate,
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=2,
+    )
+    assert len(_FakeDirectModel.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empty_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent", max_pages_per_directory=2, max_subdirectories_per_directory=4),
+        input_queue=asyncio.Queue(),
+    )
+    formal_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    existing_target = formal_context / "BM25历史资料"
+    existing_target.mkdir(parents=True)
+    existing_page = existing_target / "既有会议.md"
+    existing_page.write_text("# BM25 团队会议\n\n历史决策与会议记录。\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(formal_context)
+    locator = "file:///sources/bm25-routing.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="BM25 检索实践",
+        provider="github",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    document: Mapping[str, object] = {
+        "logical_id": locator,
+        "revision_id": "rev-new",
+        "title": "BM25 检索实践",
+        "markdown": "稀疏召回、相关性排序与查询优化。\n",
+    }
+    title, headings, preview = context_pipeline._document_semantic_parts(document)
+    ranked = context_pipeline._rank_semantic_candidates(
+        context_pipeline._semantic_fields(title, headings, preview),
+        [context_pipeline._directory_semantic_fields(existing_target)],
+    )
+    assert 0.0 < ranked[0][1] < context_pipeline._DIRECTORY_ACCEPT_SCORE
+
+    async def failed_agent(**kwargs: object) -> str:
+        del kwargs
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "BM25 检索实践的有界摘要。",
+                        "page_title": "BM25 检索实践",
+                        "keywords": [str("BM25 检索实践")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    sandbox = tmp_path / "sandbox-agent-balanced-legal-route"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": [document], "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_batch(),
+        provider="feishu",
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source_ids_by_logical_id={locator: source_id},
+    )
+
+    assert result == "balanced"
+    candidate = sandbox / "context"
+    assert (candidate / existing_page.relative_to(formal_context)).is_file()
+    incoming_page = context_pipeline._managed_pages_by_source(candidate)[source_id]
+    rules_directory = candidate / context_pipeline._safe_semantic_name("BM25 检索实践")
+    assert incoming_page.parent == rules_directory
+    assert incoming_page.parent != candidate / existing_target.relative_to(formal_context)
+    assert all(
+        context_pipeline._directory_ordinary_markdown_count(directory) > 0
+        or context_pipeline._directory_direct_subdirectory_count(directory) > 0
+        for directory in context_pipeline._context_directories(candidate)[1:]
+    )
+    assert len(_FakeDirectModel.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_agent_authored_pending_path_does_not_trigger_profile_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    validation_errors: list[str] = []
+    secret_sentinels = (
+        "TOKEN_SENTINEL_8f20",
+        "https://user:password@example.test/private?token=hidden",
+        "D:\\private\\source\\secret.md",
+    )
+
+    async def misplaced_agent(*, sandbox_path: Path, validate_result: Any, **kwargs: object) -> str:
+        del kwargs
+        page = sandbox_path / "context" / "待整理" / "飞书" / "2026年08月" / "检索实践.md"
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            "# BM25 检索实践\n\n这是清晰可读的新主题。\n\n" + "\n".join(secret_sentinels) + "\n",
+            encoding="utf-8",
+        )
+        context_pipeline._render_context_navigation(sandbox_path / "context")
+        errors = validate_result("done", sandbox_path)
+        validation_errors.extend(errors)
+        if errors:
+            raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg=errors[0])
+        return "done"
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", misplaced_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "回退摘要。",
+                        "page_title": "检索实践",
+                        "keywords": [str("检索实践")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed={
+            "documents": [
+                {
+                    "logical_id": "notes/search",
+                    "revision_id": "rev-1",
+                    "title": "BM25 检索实践",
+                    "markdown": "清晰的检索实践内容。\n",
+                }
+            ],
+            "blocks": [],
+            "deleted_ids": [],
+        },
+        sandbox=sandbox,
+        batch=_batch(),
+    )
+
+    assert result == "agent"
+    assert validation_errors == []
+    assert (sandbox / "context" / "待整理" / "飞书" / "2026年08月" / "检索实践.md").is_file()
+
+
+def test_agent_twenty_first_page_is_a_hard_validation_failure(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    topic = context / "容量治理"
+    topic.mkdir(parents=True)
+    links: list[str] = []
+    changed_paths = {"description.md", "容量治理/description.md"}
+    for index in range(21):
+        name = f"页面-{index:02d}.md"
+        (topic / name).write_text(f"# 页面 {index}\n\n正文。\n", encoding="utf-8")
+        links.append(f"- [页面 {index}]({name})")
+        changed_paths.add(f"容量治理/{name}")
+    (topic / "description.md").write_text("# 容量治理\n\n" + "\n".join(links) + "\n", encoding="utf-8")
+    (context / "description.md").write_text(
+        "# Context\n\n- [容量治理](容量治理/description.md)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BaseError, match="page capacity"):
+        _validate_agent_candidate(
+            context,
+            baseline={},
+            changed_paths=changed_paths,
+            baseline_managed_pages_by_source={},
+            max_pages_per_directory=20,
+            max_subdirectories_per_directory=20,
+            require_description=True,
+            require_single_h1=True,
+        )
+
+
+def test_agent_fallback_capacity_exemption_does_not_bypass_root_safety(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "越界页面.md").write_text("# 越界页面\n\n正文。\n", encoding="utf-8")
+    (context / "description.md").write_text(
+        "# Context\n\n- [越界页面](越界页面.md)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BaseError, match="root may only contain"):
+        _validate_agent_candidate(
+            context,
+            baseline={},
+            changed_paths={"description.md", "越界页面.md"},
+            baseline_managed_pages_by_source={},
+            capacity_exempt=True,
+        )
 
 
 def test_agent_nested_description_must_be_utf8(tmp_path: Path) -> None:
@@ -1852,7 +4190,14 @@ def test_agent_candidate_does_not_recheck_unchanged_historical_page_headings(tmp
     context = tmp_path / "context"
     page = context / "topics" / "legacy.md"
     page.parent.mkdir(parents=True)
-    (context / "description.md").write_text("# Context\n", encoding="utf-8")
+    (context / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    (page.parent / "description.md").write_text(
+        "# Topics\n\n- [Legacy](legacy.md)\n",
+        encoding="utf-8",
+    )
     page.write_text("# Legacy title\n\n# Historical second title\n", encoding="utf-8")
     baseline = context_pipeline._snapshot_managed_files(context)
 
@@ -2208,8 +4553,78 @@ async def test_deterministic_processing_does_not_prevent_filesystem_agent_attemp
 
     assert not (tmp_path / "workspace" / "source-proofs").exists()
     assert profiles == ["agent"]
-    assert len(_FakeDirectModel.instances[0].calls) == 1
+    assert len(_page_model_calls()) == 1
     await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_direct_agent_prompt_and_inputs_do_not_expose_prescribed_fallback_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    batch = _batch(
+        content="BODY_SENTINEL should remain source content only.",
+        original_ref="https://user:TOP_SECRET@example.test/private/route-note.md?token=HIDDEN",
+    )
+    source_id = upsert_source_metadata(
+        tmp_path / "workspace" / "source-meta",
+        batch.items[0],
+        provider="github",
+        service_id="github-service",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    captured: dict[str, object] = {}
+
+    async def failed_agent(*, messages: list[object], sandbox_path: Path, **kwargs: object) -> str:
+        del kwargs
+        content = str(getattr(messages[0], "content", ""))
+        captured["payload"] = json.loads(content.rsplit("\n", maxsplit=1)[-1])
+        captured["briefing"] = (sandbox_path / "inputs" / "briefing.md").read_text(encoding="utf-8")
+        metadata_path = next((sandbox_path / "inputs" / "records").rglob("metadata.json"))
+        captured["metadata"] = json.loads(metadata_path.read_text(encoding="utf-8"))
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    async def failed_balanced(**kwargs: object) -> tuple[set[str], int]:
+        del kwargs
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", failed_balanced)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": "notes/one",
+                "revision_id": "rev-1",
+                "title": "BM25 检索实践",
+                "markdown": "BM25 检索与排序。",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=batch,
+        provider="feishu",
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source_ids_by_logical_id={"notes/one": source_id},
+    )
+
+    assert result == "rules"
+    payload = cast(dict[str, object], captured["payload"])
+    previews = cast(list[dict[str, object]], payload["document_previews"])
+    assert "fallback_route" not in previews[0]
+    metadata = cast(dict[str, object], captured["metadata"])
+    assert "fallback_route" not in metadata
+    assert "fallback_route" not in str(captured["briefing"])
+    route_projection = json.dumps({"payload": previews[0], "metadata": metadata}, ensure_ascii=False)
+    for forbidden in ("TOP_SECRET", "HIDDEN", "BODY_SENTINEL", "飞书", "2026年09月"):
+        assert forbidden not in route_projection
 
 
 @pytest.mark.asyncio
@@ -2219,6 +4634,7 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=4)
     service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=queue)
     calls: list[tuple[str, str]] = []
+    route_projections: list[tuple[bool, bool]] = []
 
     async def successful_agent(*, messages: list[object], **kwargs: object) -> str:
         content = str(getattr(messages[0], "content", ""))
@@ -2227,6 +4643,8 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
             "model_request",
             "sandbox_path",
             "validate_result",
+            "max_pages_per_directory",
+            "max_subdirectories_per_directory",
         }
         profile = _message_profile(messages, kwargs)
         calls.append((profile, content))
@@ -2234,8 +4652,25 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
         sandbox_path = Path(str(kwargs["sandbox_path"]))
         assert "summary-first semantic portal" in content
         assert "Simplified Chinese" in content
-        assert "short ASCII slug" in content
-        assert "This is a small run: read every bounded source_preview" in content
+        assert "short ASCII slug" not in content
+        assert "short, clear Simplified Chinese semantic names whenever possible" in content
+        assert "safe English-only name remains valid" in content
+        assert "Do not mechanically rename existing Context paths" in content
+        assert "待整理" not in content
+        assert "readable but isolated topic in its own semantic directory" in content
+        assert "content-derived navigation directories" in content
+        assert "fallback_route" not in content
+        assert "at most 20 Unicode characters" in content
+        assert "The final .md extension does not count" in content
+        assert "Keep the complete display title in the Markdown H1" in content
+        assert "240 UTF-8 bytes" in content
+        assert "This is a small run: use the bounded document_previews" in content
+        assert "read every bounded source_preview" not in content
+        prompt_payload = json.loads(content.rsplit("\n", maxsplit=1)[-1])
+        prompt_has_route = "fallback_route" in prompt_payload["document_previews"][0]
+        briefing_payload = json.loads((sandbox_path / "inputs" / "briefing.json").read_text(encoding="utf-8"))
+        briefing_has_route = "fallback_route" in briefing_payload["sources"][0]
+        route_projections.append((prompt_has_route, briefing_has_route))
         source_content = next((sandbox_path / "inputs" / "records").rglob("content.md"))
         assert source_content.read_text(encoding="utf-8") == "First paragraph."
         processed_document = next((sandbox_path / "inputs" / "processed").rglob("context-document.md"))
@@ -2243,18 +4678,18 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
         blocks = next((sandbox_path / "inputs" / "processed").rglob("blocks.jsonl"))
         assert '"text": "First paragraph."' in blocks.read_text(encoding="utf-8")
         (sandbox_path / "tmp" / "filesystem-notes.md").write_text("scratch", encoding="utf-8")
-        page = sandbox_path / "context" / "topics" / "agent.md"
+        page = sandbox_path / "context" / "知识管理" / "长期记忆.md"
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text(
-            "# Agent filesystem result.\n\nAgent-authored knowledge. [[ref:0]]\n",
+            "# 长期记忆\n\nAgent 整理后的知识。[[ref:0]]\n",
             encoding="utf-8",
         )
         (page.parent / "description.md").write_text(
-            "# Topics\n\n- [Agent](agent.md)\n",
+            "# 知识管理\n\n- [长期记忆](长期记忆.md)\n",
             encoding="utf-8",
         )
         (sandbox_path / "context" / "description.md").write_text(
-            "# Agent root\n\n- [Topics](topics/description.md)\n",
+            "# 个人上下文\n\n- [知识管理](知识管理/description.md)\n",
             encoding="utf-8",
         )
         return "done"
@@ -2280,9 +4715,12 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
         "binary source" not in content and "hidden-secret" not in content and "user:pass" not in content
         for _, content in calls
     )
+    assert len(route_projections) == 1
+    assert route_projections[0] == (False, False)
     assert not (tmp_path / "workspace" / "source-proofs").exists()
-    published_page = tmp_path / "workspace" / "context" / "topics" / "agent.md"
-    assert "Agent filesystem result." in published_page.read_text(encoding="utf-8")
+    published_page = tmp_path / "workspace" / "context" / "知识管理" / "长期记忆.md"
+    assert "Agent 整理后的知识。" in published_page.read_text(encoding="utf-8")
+    assert not (tmp_path / "workspace" / "context" / "topics" / "agent.md").exists()
     assert not (tmp_path / "workspace" / "inputs").exists()
     assert not (tmp_path / "workspace" / "tmp").exists()
     assert not (tmp_path / "workspace" / "personal_context_provenance_manifest.json").exists()
@@ -2336,6 +4774,15 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
     service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
+    existing_context = tmp_path / "workspace" / "context"
+    existing_topic = existing_context / "既有主题"
+    existing_topic.mkdir(parents=True)
+    (existing_context / "description.md").write_text(
+        "# Context\n\n- [既有主题](既有主题/description.md)\n", encoding="utf-8"
+    )
+    (existing_topic / "description.md").write_text("# 既有主题\n\n- [既有页面](既有页面.md)\n", encoding="utf-8")
+    existing_page = existing_topic / "既有页面.md"
+    existing_page.write_text("# 既有页面\n\n既有内容。\n", encoding="utf-8")
     processed = {
         "documents": [
             {
@@ -2369,14 +4816,481 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
                     {
                         "item_index": 0,
                         "summary": "Balanced filesystem summary.",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "Balanced filesystem page",
+                        "keywords": [str("Balanced filesystem page")[:40]],
                     }
                 ],
             }
         )
     ]
     monkeypatch.setattr("openjiuwen.harness.personal_context.context_pipeline.Model", _FakeDirectModel)
+    balanced_options: dict[str, object] = {}
+    original_balanced_attempt = service._filesystem_balanced_model_attempt
+
+    async def capture_balanced_attempt(**kwargs: object) -> tuple[set[str], int]:
+        balanced_options.update(kwargs)
+        return await original_balanced_attempt(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", capture_balanced_attempt)
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+        provider="feishu",
+        run_time=datetime(2026, 9, 4, tzinfo=timezone.utc),
+    )
+
+    assert result == "balanced"
+    assert len(_FakeDirectModel.instances) == 1
+    assert balanced_options["preserve_existing_paths"] is True
+    assert balanced_options["provider"] == "feishu"
+    assert balanced_options["run_time"] == datetime(2026, 9, 4, tzinfo=timezone.utc)
+    assert processed["_filesystem_capacity_exempt"] is True
+    assert (sandbox / "context" / "既有主题" / "既有页面.md").is_file()
+
+
+@pytest.mark.asyncio
+async def test_agent_originated_fallback_preserves_over_capacity_existing_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent", max_pages_per_directory=1, max_subdirectories_per_directory=2),
+        input_queue=asyncio.Queue(),
+    )
+    formal_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    legacy_source_id = _write_atomic_source(source_root, locator="file:///sources/legacy.md")
+    incoming_source_id = _write_atomic_source(
+        source_root,
+        locator="notes/fallback",
+        title="降级输入",
+        provider="local_files",
+        observed_at="2026-09-05T00:00:00Z",
+    )
+    existing_topic = formal_context / "原路径"
+    legacy_directory = formal_context / "既有来源" / "本地资料"
+    existing_topic.mkdir(parents=True)
+    legacy_directory.mkdir(parents=True)
+    legacy_filename = "旧来源页.md"
+    for name in ("页面一.md", "页面二.md"):
+        (existing_topic / name).write_text(f"# {name[:-3]}\n\n既有内容。\n", encoding="utf-8")
+    legacy_page = legacy_directory / legacy_filename
+    legacy_page.write_text(
+        context_pipeline._rules_source_page(
+            {
+                "logical_id": "file:///sources/legacy.md",
+                "title": "旧来源页",
+                "markdown": "旧正文。",
+            },
+            source_id=legacy_source_id,
+            summary_override="旧摘要。",
+        ),
+        encoding="utf-8",
+    )
+    context_pipeline._render_context_navigation(formal_context)
+    context_pipeline._validate_candidate(
+        formal_context,
+        final_context_root=formal_context,
+        source_root=source_root,
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=2,
+        capacity_exempt=True,
+    )
+
+    async def failed_agent(*, sandbox_path: Path, **kwargs: object) -> str:
+        del kwargs
+        rogue = sandbox_path / "context" / "rogue.md"
+        rogue.write_text("# 失败候选\n", encoding="utf-8")
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "降级摘要。",
+                        "page_title": "降级页面",
+                        "keywords": [str("降级页面")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": "notes/fallback",
+                "revision_id": "rev-1",
+                "title": "降级输入",
+                "markdown": "降级输入内容。\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+        source_ids_by_logical_id={"notes/fallback": incoming_source_id},
+    )
+
+    assert result == "balanced"
+    assert (sandbox / "context" / "原路径" / "页面一.md").is_file()
+    assert (sandbox / "context" / "原路径" / "页面二.md").is_file()
+    assert (sandbox / "context" / "既有来源" / "本地资料" / legacy_filename).is_file()
+    assert processed["_filesystem_preserve_existing_paths"] is True
+    assert processed["_filesystem_capacity_exempt"] is True
+    assert not (sandbox / "context" / "rogue.md").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fallback_profile", ["balanced", "rules"])
+async def test_agent_fallback_preserves_every_baseline_path_and_uses_page_metadata_pending_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fallback_profile: str,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent", max_pages_per_directory=1, max_subdirectories_per_directory=2),
+        input_queue=asyncio.Queue(),
+    )
+    formal_context = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    crowded = formal_context / "稳定原路径"
+    crowded.mkdir(parents=True)
+    for name in ("既有一.md", "既有二.md"):
+        (crowded / name).write_text(f"# {name[:-3]}\n\n既有语义内容。\n", encoding="utf-8")
+    legacy_source_id = _write_atomic_source(
+        source_root,
+        locator="file:///sources/legacy-low.md",
+        title="2025",
+        provider="local_files",
+        observed_at="2026-06-12T00:00:00Z",
+    )
+    existing_pending_relative = "待整理/本地文件/2026年06月/2025.md"
+    _write_partition_page(
+        formal_context,
+        source_root,
+        relative=existing_pending_relative,
+        source_id=legacy_source_id,
+        title="2025",
+        body="123 2025-06-12",
+    )
+    context_pipeline._render_context_navigation(formal_context)
+    context_pipeline._validate_candidate(
+        formal_context,
+        final_context_root=formal_context,
+        source_root=source_root,
+        max_pages_per_directory=1,
+        max_subdirectories_per_directory=2,
+        capacity_exempt=True,
+    )
+    baseline_entries = {
+        path.relative_to(formal_context).as_posix(): path.is_dir()
+        for path in [formal_context, *formal_context.rglob("*")]
+    }
+    partition_validation_calls: list[tuple[Path, Mapping[str, object]]] = []
+    validate_partition = context_pipeline._validate_context_partition_integrity
+
+    def track_partition_validation(context_root: Path, **kwargs: object) -> None:
+        partition_validation_calls.append((context_root, kwargs))
+        validate_partition(context_root, **kwargs)
+
+    monkeypatch.setattr(context_pipeline, "_validate_context_partition_integrity", track_partition_validation)
+
+    async def failed_agent(*, sandbox_path: Path, **kwargs: object) -> str:
+        del kwargs
+        rogue = sandbox_path / "context" / "Agent失败残留.md"
+        rogue.write_text("# Agent失败残留\n", encoding="utf-8")
+        raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", failed_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "低置信来源的有界摘要。",
+                        "page_title": "模型生成可读标题",
+                        "keywords": [str("模型生成可读标题")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    if fallback_profile == "rules":
+
+        async def failed_balanced(**kwargs: object) -> tuple[set[str], int]:
+            del kwargs
+            raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg="invalid output")
+
+        monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", failed_balanced)
+    incoming_locator = "file:///sources/2026.md"
+    incoming_source_id = _write_atomic_source(
+        source_root,
+        locator=incoming_locator,
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-03T00:00:00Z",
+    )
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": incoming_locator,
+                "revision_id": "rev-new",
+                "title": "Page Content",
+                "markdown": "123 2026\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+        provider="feishu",
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source_ids_by_logical_id={incoming_locator: incoming_source_id},
+    )
+
+    # No legal model result was applied to this deterministic low-confidence page.
+    assert result == "rules"
+    candidate = sandbox / "context"
+    for relative, is_directory in baseline_entries.items():
+        path = candidate / relative
+        assert path.is_dir() if is_directory else path.is_file()
+    assert (candidate / existing_pending_relative).is_file()
+    incoming_page = context_pipeline._managed_pages_by_source(candidate)[incoming_source_id]
+    incoming_relative = incoming_page.relative_to(candidate).as_posix()
+    assert incoming_relative.startswith("待整理/GitHub/2026年06月/")
+    assert "飞书" not in incoming_relative
+    assert "2026年09月" not in incoming_relative
+    assert not (candidate / "Agent失败残留.md").exists()
+    assert processed["_filesystem_capacity_exempt"] is True
+    assert len(_FakeDirectModel.instances) == (1 if fallback_profile == "balanced" else 0)
+    assert len(partition_validation_calls) == 1
+    validated_root, validation_kwargs = partition_validation_calls[0]
+    assert validated_root == candidate
+    assert validation_kwargs["repairable"] is True
+    assert validation_kwargs["baseline_path_by_identity"]
+
+
+@pytest.mark.asyncio
+async def test_direct_balanced_cannot_launder_new_deterministic_fallback_with_model_title(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("balanced"),
+        input_queue=asyncio.Queue(),
+    )
+    source_root = tmp_path / "workspace" / "source-meta"
+    locator = "file:///sources/2026.md"
+    source_id = _write_atomic_source(
+        source_root,
+        locator=locator,
+        title="Page Content",
+        provider="github",
+        observed_at="2026-06-03T00:00:00Z",
+    )
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "模型生成的检索摘要。",
+                        "page_title": "BM25 检索实践",
+                        "keywords": [str("BM25 检索实践")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": locator,
+                "revision_id": "rev-new",
+                "title": "Page Content",
+                "markdown": "123 2026\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+    assert (
+        context_pipeline._prospective_rules_page_partition(
+            cast(Mapping[str, object], cast(list[object], processed["documents"])[0]),
+            source_root=source_root,
+            source_id=source_id,
+        )[0]
+        == "fallback"
+    )
+    sandbox = tmp_path / "sandbox-direct-balanced-low"
+    sandbox.mkdir()
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+        provider="feishu",
+        run_time=datetime(2026, 9, 20, tzinfo=timezone.utc),
+        source_ids_by_logical_id={locator: source_id},
+    )
+
+    assert result == "rules"
+    incoming_page = context_pipeline._managed_pages_by_source(sandbox / "context")[source_id]
+    incoming_relative = incoming_page.relative_to(sandbox / "context").as_posix()
+    assert incoming_relative.startswith("待整理/GitHub/2026年06月/")
+    assert "BM25" not in incoming_page.read_text(encoding="utf-8")
+    assert len(_FakeDirectModel.instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_direct_balanced_fallback_to_rules_reclusters_over_capacity_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("balanced", max_pages_per_directory=2, max_subdirectories_per_directory=2),
+        input_queue=asyncio.Queue(),
+    )
+    formal_context = tmp_path / "workspace" / "context"
+    crowded_topic = formal_context / "拥挤主题"
+    crowded_topic.mkdir(parents=True)
+    (formal_context / "description.md").write_text(
+        "# Context\n\n- [拥挤主题](拥挤主题/description.md)\n", encoding="utf-8"
+    )
+    (crowded_topic / "description.md").write_text(
+        "# 拥挤主题\n\n- [页面1](页面1.md)\n- [页面2](页面2.md)\n- [页面3](页面3.md)\n",
+        encoding="utf-8",
+    )
+    for index in range(1, 4):
+        (crowded_topic / f"页面{index}.md").write_text(
+            f"# 页面{index}\n\n关于主题 {index} 的既有内容。\n", encoding="utf-8"
+        )
+    context_pipeline._render_context_navigation(formal_context)
+
+    class FailingModel:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        async def invoke(self, messages: list[object], **kwargs: object) -> object:
+            del messages, kwargs
+            raise RuntimeError("balanced model unavailable")
+
+    monkeypatch.setattr(context_pipeline, "Model", FailingModel)
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    processed: dict[str, object] = {
+        "documents": [
+            {
+                "logical_id": "notes/new",
+                "revision_id": "rev-new",
+                "title": "新增主题页面",
+                "markdown": "新增主题内容。\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+
+    result = await service._filesystem_with_fallback(
+        processed=processed,
+        sandbox=sandbox,
+        batch=_batch(),
+    )
+
+    assert result == "rules"
+    assert processed["_filesystem_capacity_exempt"] is False
+    candidate_context = sandbox / "context"
+    for directory in [candidate_context, *[path for path in candidate_context.rglob("*") if path.is_dir()]]:
+        ordinary_pages = [path for path in directory.glob("*.md") if path.name != "description.md" and path.is_file()]
+        child_directories = [path for path in directory.iterdir() if path.is_dir()]
+        assert len(ordinary_pages) <= 2
+        assert len(child_directories) <= 2
+
+
+@pytest.mark.asyncio
+async def test_filesystem_agent_root_layout_failure_falls_back_from_clean_baseline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    processed = {
+        "documents": [
+            {
+                "logical_id": "notes/one",
+                "revision_id": "rev-1",
+                "title": "One",
+                "markdown": "Processed text.\n",
+            }
+        ],
+        "blocks": [],
+        "deleted_ids": [],
+    }
+
+    async def invalid_root_agent(*, sandbox_path: Path, validate_result: Any, **kwargs: object) -> str:
+        del kwargs
+        root_page = sandbox_path / "context" / "Agent 根层残留.md"
+        root_page.parent.mkdir(parents=True, exist_ok=True)
+        root_page.write_text("# Agent 根层残留\n\n[[ref:0]]\n", encoding="utf-8")
+        (sandbox_path / "context" / "description.md").write_text(
+            "# Context\n\n- [Agent 根层残留](<Agent 根层残留.md>)\n",
+            encoding="utf-8",
+        )
+        errors = validate_result("done", sandbox_path)
+        if errors:
+            raise build_error(StatusCode.CONTEXT_PROACTIVE_PIPELINE_EXECUTION_ERROR, error_msg=errors[0])
+        return "done"
+
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", invalid_root_agent)
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Balanced 重新整理后的摘要。",
+                        "page_title": "Balanced 重新整理",
+                        "keywords": [str("Balanced 重新整理")[:40]],
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
         processed=processed,
@@ -2385,13 +5299,17 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
     )
 
     assert result == "balanced"
-    assert len(_FakeDirectModel.instances) == 1
+    assert not (sandbox / "context" / "Agent 根层残留.md").exists()
+    assert all(entry.name == "description.md" or entry.is_dir() for entry in (sandbox / "context").iterdir())
 
 
 @pytest.mark.asyncio
 async def test_filesystem_rules_fallback_discards_failed_candidate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    caplog.set_level("INFO", logger=context_pipeline.__name__)
     service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
     sandbox = tmp_path / "sandbox"
     sandbox.mkdir()
@@ -2435,9 +5353,10 @@ async def test_filesystem_rules_fallback_discards_failed_candidate(
     assert sorted(entry.name for entry in sandbox.iterdir()) == ["context", "inputs"]
     assert not (sandbox / "context" / "rogue.md").exists()
     assert not (sandbox / "context" / "balanced-rogue.md").exists()
-    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    source_page = next(iter(context_pipeline._managed_pages_by_source(sandbox / "context").values()))
     assert source_page.is_file()
     assert processed["_filesystem_candidate_prepared"] is True
+    assert "capacity_exempt_due_to_agent_fallback=true actual_profile=rules" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -2465,8 +5384,12 @@ async def test_filesystem_agent_missing_markdown_link_does_not_force_fallback(
         page = sandbox_path / "context" / "topics" / "agent.md"
         page.parent.mkdir(parents=True, exist_ok=True)
         page.write_text("# Agent page\n\nSee [missing](missing.md). [[ref:0]]\n", encoding="utf-8")
+        (page.parent / "description.md").write_text(
+            "# Topics\n\n[Agent](agent.md)\n",
+            encoding="utf-8",
+        )
         (sandbox_path / "context" / "description.md").write_text(
-            "# Context\n\n[Agent](topics/agent.md)\n",
+            "# Context\n\n[Topics](topics/description.md)\n",
             encoding="utf-8",
         )
         errors = validate_result("done", sandbox_path)
@@ -2509,8 +5432,8 @@ async def test_balanced_invalid_output_does_not_retry(tmp_path: Path, monkeypatc
                     {
                         "item_index": 0,
                         "summary": "This output must remain unused.",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "Unused page title",
+                        "keywords": [str("Unused page title")[:40]],
                     }
                 ],
             }
@@ -2536,14 +5459,14 @@ async def test_balanced_invalid_output_does_not_retry(tmp_path: Path, monkeypatc
         batch=_batch(),
     )
     assert result == "rules"
-    calls = _FakeDirectModel.instances[0].calls
+    calls = _page_model_calls()
     assert len(calls) == 1
     assert len(calls[0][0]) == 1
-    assert len(_FakeDirectModel.outputs) == 1
+    assert len(_FakeDirectModel.outputs) == 0  # Subsequent calls are directory requests, not page retries.
 
 
 @pytest.mark.asyncio
-async def test_balanced_delete_only_uses_rules_without_model_and_does_not_restore_page(
+async def test_balanced_delete_only_skips_page_model_and_does_not_restore_page(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2551,10 +5474,9 @@ async def test_balanced_delete_only_uses_rules_without_model_and_does_not_restor
     context_root = tmp_path / "workspace" / "context"
     source_root = tmp_path / "workspace" / "source-meta"
     source_id = _write_atomic_source(source_root)
-    page_relative = f"sources/local/{context_pipeline._digest('notes/one')}.md"
-    context_pipeline._apply_rules_increment(
+    await context_pipeline._apply_rules_increment(
         context_root,
-        service_id="local",
+        provider="local",
         processed={
             "documents": [
                 {
@@ -2566,7 +5488,13 @@ async def test_balanced_delete_only_uses_rules_without_model_and_does_not_restor
             ],
             "deleted_ids": [],
         },
+        source_ids_by_logical_id={"notes/one": source_id},
+        deleted_source_ids=set(),
+        run_time=datetime(2026, 9, 2, tzinfo=timezone.utc),
         fallback_references=("[[ref:0]]",),
+    )
+    page_relative = (
+        context_pipeline._managed_pages_by_source(context_root)[source_id].relative_to(context_root).as_posix()
     )
 
     _FakeDirectModel.instances.clear()
@@ -2604,7 +5532,7 @@ async def test_balanced_delete_only_uses_rules_without_model_and_does_not_restor
 
     assert not (context_root / page_relative).exists()
     assert page_relative not in (context_root / "description.md").read_text(encoding="utf-8")
-    assert _FakeDirectModel.instances == []
+    assert _page_model_calls() == []
 
 
 @pytest.mark.asyncio
@@ -2622,8 +5550,8 @@ async def test_source_ref_alias_survives_balanced_enrichment(
                     {
                         "item_index": 0,
                         "summary": "Balanced source summary.",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "Balanced source page",
+                        "keywords": [str("Balanced source page")[:40]],
                     }
                 ],
             }
@@ -2636,18 +5564,14 @@ async def test_source_ref_alias_survives_balanced_enrichment(
         await _submit_run(queue, _batch())
 
         assert len(_FakeDirectModel.instances) == 1
-        calls = _FakeDirectModel.instances[0].calls
+        calls = _page_model_calls()
         assert len(calls) == 1
         for messages, _kwargs in calls:
             prompt = "\n".join(str(getattr(message, "content", "")) for message in messages)
             assert "[[ref:0]]" not in prompt
             assert "src_" not in prompt
             assert "source-meta" not in prompt
-        source_page = next(
-            path
-            for path in (tmp_path / "workspace" / "context" / "sources" / "local").glob("*.md")
-            if path.name != "description.md"
-        )
+        source_page = next(iter(context_pipeline._managed_pages_by_source(tmp_path / "workspace" / "context").values()))
         source_text = source_page.read_text(encoding="utf-8")
         assert "Balanced source summary." in source_text
         assert "[[ref:" not in source_text
@@ -2686,8 +5610,8 @@ async def test_balanced_model_error_publishes_rules_candidate(tmp_path: Path, mo
         )
         == "rules"
     )
-    assert len(_FakeDirectModel.instances[0].calls) == 1
-    source_page = sandbox / "context" / "sources" / "local" / f"{context_pipeline._digest('notes/one')}.md"
+    assert len(_page_model_calls()) == 1
+    source_page = next(iter(context_pipeline._managed_pages_by_source(sandbox / "context").values()))
     assert "Processed text." in source_page.read_text(encoding="utf-8")
 
 
@@ -3164,8 +6088,8 @@ async def test_filesystem_fallback_downshifts_after_deterministic_processing(
                     {
                         "item_index": 0,
                         "summary": "Balanced filesystem result.",
-                        "target": "sources",
-                        "new_topic_title": None,
+                        "page_title": "Balanced filesystem page",
+                        "keywords": [str("Balanced filesystem page")[:40]],
                     }
                 ],
             }
@@ -3177,11 +6101,7 @@ async def test_filesystem_fallback_downshifts_after_deterministic_processing(
 
     assert not (tmp_path / "workspace" / "source-proofs").exists()
     assert profiles == ["agent"]
-    source_page = next(
-        path
-        for path in (tmp_path / "workspace" / "context" / "sources" / "local").glob("*.md")
-        if path.name != "description.md"
-    )
+    source_page = next(iter(context_pipeline._managed_pages_by_source(tmp_path / "workspace" / "context").values()))
     assert "Balanced filesystem result." in source_page.read_text(encoding="utf-8")
     await service.stop(timeout_seconds=1)
 
@@ -3357,15 +6277,31 @@ async def test_materialized_source_is_copied_once_and_not_exposed_to_balanced_fa
             validate_result("invalid", sandbox_path)
         raise RuntimeError("model output remained invalid")
 
+    original_balanced = service._filesystem_balanced_model_attempt
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = [
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "item_index": 0,
+                        "summary": "Processed source summary.",
+                        "page_title": "Processed source",
+                        "keywords": ["source processing"],
+                    }
+                ]
+            }
+        )
+    ]
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
     async def balanced_success(**kwargs: object) -> tuple[set[str], int]:
         assert "batch" not in kwargs
         assert "materialized_baseline" not in kwargs
         assert "materialized_path" not in kwargs
         assert "payload" not in kwargs
-        assert "deleted_source_ids" not in kwargs
-        baseline = kwargs["context_baseline"]
-        assert isinstance(baseline, dict)
-        return context_pipeline._changed_context_paths(sandbox / "context", baseline), 1
+        assert kwargs["deleted_source_ids"] == set()
+        return await original_balanced(**kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(context_pipeline, "_materialize_candidate_source", materialize_once)
     monkeypatch.setattr(context_pipeline, "run_personal_context_agent", fail_agent_with_two_validations)

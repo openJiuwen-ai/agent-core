@@ -43,6 +43,7 @@ class NodeSpec(BaseModel):
     max_retries: int = Field(default=0, ge=0)
     timeout: float = Field(default=-1.0)  # Per-node execution timeout in seconds; <=0 means no timeout
     exception_config: Optional[ExceptionConfig] = None  # Exception handling configuration for error recovery
+    name: Optional[str] = None  # Human-readable component name; None falls back to comp_id at trace time
 
 
 class WorkflowSpec(BaseModel):

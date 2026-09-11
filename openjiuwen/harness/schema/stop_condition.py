@@ -3,6 +3,7 @@
 """Stop condition definitions for DeepAgent task loop."""
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import (
@@ -11,6 +12,8 @@ from typing import (
     Dict,
     Optional,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ================================================================
@@ -136,6 +139,69 @@ class TimeoutEvaluator(StopConditionEvaluator):
         return ctx.elapsed_seconds >= self._timeout_seconds
 
 
+class NoProgressAnswerEvaluator(StopConditionEvaluator):
+    """Stop after repeated no-tool answers with little or no content."""
+
+    def __init__(
+        self,
+        *,
+        max_consecutive_empty_answers: int = 3,
+        min_answer_chars: int = 80,
+    ) -> None:
+        self._max_consecutive_empty_answers = max(
+            1,
+            int(max_consecutive_empty_answers),
+        )
+        self._min_answer_chars = max(0, int(min_answer_chars))
+        self._consecutive_empty_answers = 0
+
+    def should_stop(self, ctx: StopEvaluationContext) -> bool:
+        """Return True once repeated short answers indicate no progress."""
+        result = ctx.last_result or {}
+        result_type = str(result.get("result_type", "")).strip().lower()
+        output_len = len(str(result.get("output", "")).strip())
+
+        if result_type == "answer" and output_len < self._min_answer_chars:
+            self._consecutive_empty_answers += 1
+        else:
+            self._consecutive_empty_answers = 0
+
+        if (
+            self._consecutive_empty_answers
+            >= self._max_consecutive_empty_answers
+        ):
+            logger.info(
+                "No progress answer guard triggered: "
+                "round=%s, output_len=%s, "
+                "consecutive_empty_answers=%s, "
+                "max_consecutive_empty_answers=%s, "
+                "min_answer_chars=%s",
+                ctx.iteration,
+                output_len,
+                self._consecutive_empty_answers,
+                self._max_consecutive_empty_answers,
+                self._min_answer_chars,
+            )
+            return True
+        return False
+
+    def reset(self) -> None:
+        self._consecutive_empty_answers = 0
+
+    def get_state(self) -> Optional[Dict[str, Any]]:
+        return {
+            "consecutive_empty_answers": self._consecutive_empty_answers,
+            "max_consecutive_empty_answers": self._max_consecutive_empty_answers,
+            "min_answer_chars": self._min_answer_chars,
+        }
+
+    def load_state(self, data: Dict[str, Any]) -> None:
+        self._consecutive_empty_answers = max(
+            0,
+            int(data.get("consecutive_empty_answers", 0) or 0),
+        )
+
+
 class CompletionPromiseEvaluator(StopConditionEvaluator):
     """Stop when a completion promise has been fulfilled.
 
@@ -251,6 +317,7 @@ __all__ = [
     "MaxRoundsEvaluator",
     "TokenBudgetEvaluator",
     "TimeoutEvaluator",
+    "NoProgressAnswerEvaluator",
     "CompletionPromiseEvaluator",
     "CustomPredicateEvaluator",
 ]

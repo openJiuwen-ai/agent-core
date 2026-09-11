@@ -138,7 +138,6 @@ def _render_content(
 
     truncated = len(description) > _MAX_DESCRIPTION_CHARS
     body = description[:_MAX_DESCRIPTION_CHARS] if truncated else description
-    sources_description_path = context_root / "sources" / "description.md"
     if truncated:
         body = f"{body}\n\n[{_TRUNCATION_NOTICE}]"
     return (
@@ -147,7 +146,6 @@ def _render_content(
         f"- context_root: `{context_root}`\n"
         f"- description_path: `{description_path}`\n"
         f"- description_size_bytes: `{description_size_bytes}`\n"
-        f"- sources_description_path: `{sources_description_path}`\n"
         "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。\n\n"
         "## 当前上下文说明\n\n"
         f"{body}"

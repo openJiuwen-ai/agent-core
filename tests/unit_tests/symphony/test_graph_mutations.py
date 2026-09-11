@@ -12,7 +12,8 @@ from typing import cast
 
 import pytest
 
-from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.symphony import (
     CapabilityFingerprint,
     CapabilityIO,
@@ -391,6 +392,34 @@ async def test_matcher_failure_leaves_active_graph_unchanged(tmp_path: Path) -> 
         )
 
     assert _mutation_code(exc_info) == "matcher_failed"
+    assert (tmp_path / "current.json").read_bytes() == current_before
+    assert service.status(expected_snapshot=service.read()["source_snapshot"]).version == initial.version
+
+
+@pytest.mark.asyncio
+async def test_framework_matcher_failure_preserves_original_error(tmp_path: Path) -> None:
+    text_output = CapabilityIO(name="text", type="text")
+    text_input = CapabilityIO(name="text", type="text", required=True)
+    extract = _fingerprint("extract", "extract-v1", outputs=(text_output,))
+    summarize = _fingerprint("summarize", "summarize-v1", inputs=(text_input,))
+    provider = _AtomicProvider("snapshot-1", (extract,))
+    model = _MatcherLLM()
+    service = _service(tmp_path, provider, model)
+    initial = await service.build()
+    current_before = (tmp_path / "current.json").read_bytes()
+    target_snapshot = provider.replace("snapshot-2", (extract, summarize))
+    error = build_error(StatusCode.MODEL_CALL_FAILED, error_msg="model unavailable")
+    model.failure = error
+
+    with pytest.raises(BaseError) as exc_info:
+        await _engine(service).add_skills(
+            ["summarize"],
+            request_id="framework-matcher-failure",
+            source_revision=target_snapshot.snapshot_id,
+        )
+
+    assert exc_info.value is error
+    assert exc_info.value.status is StatusCode.MODEL_CALL_FAILED
     assert (tmp_path / "current.json").read_bytes() == current_before
     assert service.status(expected_snapshot=service.read()["source_snapshot"]).version == initial.version
 

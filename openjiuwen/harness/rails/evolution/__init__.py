@@ -47,6 +47,34 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
+from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
+    SymphonyEdgeEndpointSummary,
+    SymphonyEdgeEvaluationSummary,
+    evaluate_symphony_edge_candidates,
+)
+from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
+    SymphonyEdgeCandidate,
+    SymphonyEdgeDecision,
+    build_model_edge_decisions,
+    build_symphony_edge_candidates,
+)
+from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
+    SymphonyExecutionFragment,
+    project_symphony_execution_fragments,
+)
+from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
+    CapabilityIdentity,
+    CapabilitySnapshotProvider,
+    SymphonyGraphEvolutionSubmission,
+    SymphonyGraphObservationSink,
+    build_symphony_execution_graph,
+    build_symphony_graph_evolution_submission,
+)
+from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
+    SymphonyGraphEvolutionInput,
+    SymphonyGraphEvolutionRail,
+    TeamSymphonyGraphEvolutionRail,
+)
 from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
     MergedMemoryItem,
     MergedRetrieveResult,
@@ -74,6 +102,18 @@ __all__ = [
     "SkillEvolutionRail",
     "MemberSkillEvolutionRail",
     "SkillEvolutionSharingMixin",
+    "CapabilityIdentity",
+    "CapabilitySnapshotProvider",
+    "SymphonyEdgeCandidate",
+    "SymphonyEdgeDecision",
+    "SymphonyEdgeEndpointSummary",
+    "SymphonyEdgeEvaluationSummary",
+    "SymphonyExecutionFragment",
+    "SymphonyGraphEvolutionInput",
+    "SymphonyGraphEvolutionRail",
+    "SymphonyGraphEvolutionSubmission",
+    "SymphonyGraphObservationSink",
+    "TeamSymphonyGraphEvolutionRail",
     "TeamSkillCreateRail",
     "TeamSkillEvolutionRail",
     "TrajectoryRail",
@@ -92,6 +132,12 @@ __all__ = [
     "build_rebuild_command_prompt",
     "build_simplify_command_prompt",
     "build_skill_approval_event",
+    "build_model_edge_decisions",
+    "build_symphony_edge_candidates",
+    "build_symphony_execution_graph",
+    "build_symphony_graph_evolution_submission",
+    "evaluate_symphony_edge_candidates",
+    "project_symphony_execution_fragments",
     "build_evolution_review_agent_config",
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",

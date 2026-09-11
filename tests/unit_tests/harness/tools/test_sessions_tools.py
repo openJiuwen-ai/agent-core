@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from openjiuwen.core.common.exception.errors import FrameworkError
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.harness.tools import (
     SESSION_SPAWN_TASK_TYPE,
@@ -179,6 +181,41 @@ class TestSessionsSpawnTool:
 
         task = tm.add_task.await_args.args[0]
         assert task.metadata["browser_capabilities"] == ["pdf"]
+
+    async def test_team_member_spawn_keeps_business_owner_and_uses_cache_lineage(self) -> None:
+        tm = MagicMock()
+        tm.add_task = AsyncMock()
+        agent = SimpleNamespace(
+            deep_config=SimpleNamespace(
+                enable_task_loop=True,
+                kv_cache_affinity_config=KVCacheAffinityConfig(
+                    enable_kv_cache_affinity=True
+                ),
+            ),
+            event_handler=SimpleNamespace(task_manager=tm),
+        )
+        tool = SessionsSpawnTool(
+            parent_agent=agent,
+            toolkit=SessionToolkit(),
+            language="en",
+        )
+        session = Session(session_id="product-session")
+        session.set_team_cache_scope(team_id="team-a", agent_id="member-a")
+
+        await tool.invoke(
+            {"subagent_type": "code", "task_description": "do work"},
+            session=session,
+        )
+
+        task = tm.add_task.await_args.args[0]
+        assert task.session_id == "product-session"
+        assert task.metadata["parent_session_id"] == (
+            "team:product-session:team:team-a:member:member-a"
+        )
+        assert re.fullmatch(
+            r"product-session_sub_[0-9a-f]{8}",
+            task.metadata["sub_session_id"],
+        )
 
 
 def test_build_session_tools_returns_three() -> None:

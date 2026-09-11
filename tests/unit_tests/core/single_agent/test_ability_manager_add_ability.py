@@ -267,6 +267,61 @@ def test_non_parallel_safe_tool_call_runs_as_exclusive_barrier() -> None:
     asyncio.run(_run())
 
 
+def test_parallel_tool_tasks_are_scheduled_only_when_allowed() -> None:
+    """Barrier tools must not become live Tasks until earlier work finishes."""
+
+    async def _run():
+        calls = [
+            ToolCall(id="c1", type="function", name="read_file", arguments="{}"),
+            ToolCall(id="c2", type="function", name="write_file", arguments="{}"),
+            ToolCall(id="c3", type="function", name="grep", arguments="{}"),
+        ]
+        cards = {
+            "read_file": ToolCard(id="read_file", name="read_file", parallel_safe=True),
+            "write_file": ToolCard(id="write_file", name="write_file", parallel_safe=False),
+            "grep": ToolCard(id="grep", name="grep", parallel_safe=True),
+        }
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+        started_names: list[str] = []
+
+        async def read():
+            read_started.set()
+            await release_read.wait()
+            return "read"
+
+        async def write():
+            return "write"
+
+        async def grep():
+            return "grep"
+
+        def on_started(task: asyncio.Task) -> None:
+            started_names.append(task.get_name())
+
+        run_task = asyncio.create_task(
+            AbilityManager._execute_parallel_tool_tasks(
+                calls,
+                [read(), write(), grep()],
+                tool_cards=cards,
+                on_task_started=on_started,
+            )
+        )
+        await asyncio.wait_for(read_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        assert started_names == ["tool:read_file:c1"]
+
+        release_read.set()
+        assert await run_task == ["read", "write", "grep"]
+        assert started_names == [
+            "tool:read_file:c1",
+            "tool:write_file:c2",
+            "tool:grep:c3",
+        ]
+
+    asyncio.run(_run())
+
+
 def test_read_and_edit_equivalent_paths_share_one_execution_lane(tmp_path) -> None:
     direct_path = tmp_path / "config" / "settings.json"
     equivalent_path = direct_path.parent / ".." / "config" / "settings.json"

@@ -31,7 +31,7 @@ from openjiuwen.harness.execution_subject import (
     current_execution_subject,
     execution_subject_scope,
 )
-from openjiuwen.harness.kv_cache import kv_cache_hooks
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.subagent_lifecycle import (
     cleanup_subagent_task_resources,
@@ -74,7 +74,6 @@ def _summarize_task_description(task_description: Any) -> dict[str, Any]:
 async def _run_subagent_with_observable_stream(
     subagent: Any,
     inputs: dict[str, Any],
-    *,
     session: Session | None = None,
 ) -> dict[str, Any]:
     """Run a subagent through its public stream while returning invoke-style output.
@@ -85,14 +84,14 @@ async def _run_subagent_with_observable_stream(
     to the parent agent.  Third-party test/adaptor agents that only implement
     ``invoke`` retain their existing behavior.
     """
-    invocation_kwargs = {} if session is None else {"session": session}
+    invoke_kwargs = {"session": session} if session is not None else {}
     stream = getattr(subagent, "stream", None)
     if not callable(stream):
-        return await subagent.invoke(inputs, **invocation_kwargs)
+        return await subagent.invoke(inputs, **invoke_kwargs)
 
     output_parts: list[str] = []
     terminal_result: dict[str, Any] | None = None
-    async for chunk in stream(inputs, **invocation_kwargs):
+    async for chunk in stream(inputs, **invoke_kwargs):
         chunk_type = getattr(chunk, "type", None)
         payload = getattr(chunk, "payload", None)
         if isinstance(chunk, dict):
@@ -204,7 +203,7 @@ class TaskTool(Tool):
             if normalized_type != "browser_agent" or not normalized_resume_id.startswith(expected_prefix):
                 raise ValueError("resume_task_id is not valid for this parent browser task")
             return normalized_resume_id
-        if kv_cache_hooks.is_sticky_subagent_type(normalized_type):
+        if kv_cache_subagent_lifecycle.is_sticky_subagent_type(normalized_type):
             # Deterministic ID so the session can be resumed on a FAIL → fix → re-verify loop.
             return f"{parent_session_id}_sub_{normalized_type}"
         return f"{parent_session_id}_sub_{normalized_type}_{uuid.uuid4().hex[:8]}"
@@ -768,11 +767,13 @@ class TaskTool(Tool):
         task_description: Any,
         sub_session_id: str,
         parent_session_id: str,
+        parent_cache_id: str,
         parent_session: Session,
         browser_query: _BrowserQueryContext | None,
         affinity_enabled: bool,
     ) -> ToolOutput:
         succeeded = False
+        child_session: Session | None = None
         parent_subject = current_execution_subject()
         parent_subject_id = parent_subject.subject_id if parent_subject else "main"
         subject = ExecutionSubject(
@@ -809,29 +810,35 @@ class TaskTool(Tool):
                 await prepare_subagent_task_resources(subagent)
                 parent_invocation_id = current_usage_invocation_id()
                 if affinity_enabled:
-                    kv_cache_hooks.prefetch_sticky_subagent(
-                        self.parent_agent,
-                        subagent_type=normalized_type,
+                    child_session = kv_cache_subagent_lifecycle.create_subagent_session(
+                        parent_session,
                         sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
+                        parent_cache_id=parent_cache_id,
+                        card=subagent.card,
                     )
                 subagent_inputs = self._build_subagent_inputs(
                     task_description,
                     _SubagentInputContext(
                         sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
+                        parent_session_id=parent_cache_id,
                         parent_invocation_id=parent_invocation_id,
                         affinity_enabled=affinity_enabled,
                         browser_query=browser_query,
                     ),
                 )
+                if child_session is not None:
+                    await child_session.pre_run(inputs=subagent_inputs)
+                    await kv_cache_subagent_lifecycle.prepare_subagent(
+                        child_session,
+                        subagent_type=normalized_type,
+                    )
                 result = await self._invoke_with_usage_delegation(
                     subagent,
                     subagent_inputs,
                     parent_session_id=parent_session_id,
                     sub_session_id=sub_session_id,
                     parent_invocation_id=parent_invocation_id,
-                    session=None,
+                    session=child_session,
                 )
                 succeeded = True
                 return self._build_task_output(
@@ -871,14 +878,13 @@ class TaskTool(Tool):
                 await cleanup_subagent_task_resources(subagent)
                 if browser_query is not None:
                     self._active_browser_queries.discard(browser_query.key)
-                if affinity_enabled:
-                    await kv_cache_hooks.finish_subagent(
-                        self.parent_agent,
+                if child_session is not None:
+                    await kv_cache_subagent_lifecycle.finish_subagent(
+                        child_session,
                         subagent_type=normalized_type,
-                        sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
                         succeeded=succeeded,
                     )
+                    await child_session.post_run()
 
     async def invoke(self, inputs: Input, **kwargs) -> ToolOutput:
         """Execute task by delegating to a subagent.
@@ -904,7 +910,12 @@ class TaskTool(Tool):
             self._parse_invocation_inputs(inputs)
         )
         runtime_parent_session_id = parent_session.get_session_id()
-        affinity_enabled = kv_cache_hooks.affinity_enabled(self.parent_agent)
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self.parent_agent)
+        parent_cache_id = runtime_parent_session_id
+        if affinity_enabled:
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
+                parent_session
+            )
         browser_query: _BrowserQueryContext | None = None
         if normalized_type == "browser_agent":
             browser_query = self._prepare_browser_query(
@@ -929,6 +940,12 @@ class TaskTool(Tool):
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=str(exc),
             ) from exc
+        if affinity_enabled and not resume_task_id:
+            sub_session_id = kv_cache_subagent_lifecycle.scope_sub_session_id(
+                sub_session_id,
+                runtime_parent_session_id=runtime_parent_session_id,
+                parent_cache_id=parent_cache_id,
+            )
         if browser_query is not None:
             browser_query.record["sub_session_id"] = sub_session_id
             browser_query.records[str(browser_query.record["query_id"])] = browser_query.record
@@ -936,7 +953,8 @@ class TaskTool(Tool):
             self._active_browser_queries.add(browser_query.key)
         logger.info(
             f"[TaskTool] Creating subagent: {normalized_type}, "
-            f"parent_session={runtime_parent_session_id}, sub_session={sub_session_id}"
+            f"runtime_parent_session={runtime_parent_session_id}, "
+            f"cache_parent_session={parent_cache_id}, sub_session={sub_session_id}"
         )
 
         query_summary = _summarize_task_description(task_description)
@@ -961,6 +979,7 @@ class TaskTool(Tool):
             task_description=task_description,
             sub_session_id=sub_session_id,
             parent_session_id=runtime_parent_session_id,
+            parent_cache_id=parent_cache_id,
             parent_session=parent_session,
             browser_query=browser_query,
             affinity_enabled=affinity_enabled,

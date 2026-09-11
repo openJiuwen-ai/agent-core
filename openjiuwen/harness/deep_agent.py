@@ -69,6 +69,10 @@ from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
 from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.stop_condition import (
+    NoProgressAnswerEvaluator,
+    StopConditionEvaluator,
+)
 from openjiuwen.harness.schema.state import (
     _SESSION_RUNTIME_ATTR,
     _SESSION_STATE_KEY,
@@ -137,6 +141,7 @@ from openjiuwen.harness.resources import (
 from openjiuwen.harness.resources.extension_resolver import (
     ExtensionParts,
     ResolvedSkill,
+    ResourceKind,
     resolve_agent_template_parts,
     resolve_plugin_parts,
 )
@@ -585,6 +590,18 @@ class DeepAgent(BaseAgent):
         self._sync_prompt_builder_references()
         logger.info("[DeepAgent] Model configuration hot reloaded")
 
+    def _extension_bound_tool_names(self) -> set[str]:
+        """Return tool names owned by successful Plugin / AgentTemplate loads."""
+        names: set[str] = set()
+        for record in self._load_records.values():
+            for ref in record.refs:
+                if ref.kind != ResourceKind.TOOL:
+                    continue
+                for name in ref.extra.get("ability_names") or ():
+                    if name:
+                        names.add(str(name))
+        return names
+
     def _hot_reload_tools(
         self,
         config: DeepAgentConfig,
@@ -606,11 +623,17 @@ class DeepAgent(BaseAgent):
         }
 
         # Only remove tools that were previously managed by config.tools.
-        # Rail-registered tools such as task_tool must survive hot reload.
+        # Rail-registered tools such as task_tool, and extension/plugin tools
+        # recorded in ``_load_records``, must survive hot reload.
         managed_tool_names = set(previous_by_name)
         if not managed_tool_names:
             managed_tool_names = set(new_by_name)
-        stale = [name for name in managed_tool_names if name not in new_by_name]
+        extension_tool_names = self._extension_bound_tool_names()
+        stale = [
+            name
+            for name in managed_tool_names
+            if name not in new_by_name and name not in extension_tool_names
+        ]
         if stale:
             for name in stale:
                 card = previous_by_name.get(name)
@@ -2271,6 +2294,46 @@ class DeepAgent(BaseAgent):
             )
         return await self._react_agent.invoke(effective_inputs, session)
 
+    def _build_task_loop_evaluators(self) -> List[StopConditionEvaluator]:
+        """Build stop evaluators for the outer task loop."""
+        evaluators = (
+            self._task_completion_rail.build_evaluators()
+            if self._task_completion_rail is not None
+            else []
+        )
+        guard_cfg = (
+            self._deep_config.task_loop_no_progress_guard
+            if self._deep_config is not None
+            else None
+        )
+        if isinstance(guard_cfg, dict):
+            guard_enabled = bool(guard_cfg.get("enabled", False))
+            max_consecutive_empty_answers = guard_cfg.get(
+                "max_consecutive_empty_answers",
+                3,
+            )
+            min_answer_chars = guard_cfg.get("min_answer_chars", 80)
+        else:
+            guard_enabled = bool(getattr(guard_cfg, "enabled", False))
+            max_consecutive_empty_answers = getattr(
+                guard_cfg,
+                "max_consecutive_empty_answers",
+                3,
+            )
+            min_answer_chars = getattr(
+                guard_cfg,
+                "min_answer_chars",
+                80,
+            )
+        if guard_enabled:
+            evaluators.append(
+                NoProgressAnswerEvaluator(
+                    max_consecutive_empty_answers=max_consecutive_empty_answers,
+                    min_answer_chars=min_answer_chars,
+                )
+            )
+        return evaluators
+
     async def _setup_task_loop(
         self,
         session: Session,
@@ -2295,11 +2358,7 @@ class DeepAgent(BaseAgent):
         ):
             coordinator = self._loop_coordinator
             if coordinator is None:
-                evaluators = (
-                    self._task_completion_rail.build_evaluators()
-                    if self._task_completion_rail is not None
-                    else []
-                )
+                evaluators = self._build_task_loop_evaluators()
                 coordinator = LoopCoordinator(evaluators=evaluators)
                 self._loop_coordinator = coordinator
             coordinator.reset()
@@ -2309,11 +2368,7 @@ class DeepAgent(BaseAgent):
         if self._loop_controller is not None:
             await self._force_cleanup_controller()
 
-        evaluators = (
-            self._task_completion_rail.build_evaluators()
-            if self._task_completion_rail is not None
-            else []
-        )
+        evaluators = self._build_task_loop_evaluators()
         coordinator = LoopCoordinator(evaluators=evaluators)
         coordinator.reset()
 
@@ -2624,9 +2679,24 @@ class DeepAgent(BaseAgent):
         try:
             current_query = modified.query
             outer_round = 0
+            max_outer_rounds = 50
 
             while coordinator.should_continue():
                 outer_round += 1
+                if outer_round > max_outer_rounds:
+                    self._log_loop(
+                        f"round={outer_round} exceeded max_outer_rounds={max_outer_rounds}, forcing stop"
+                    )
+                    yield {
+                        "output": (
+                            "Task loop stopped after exceeding the maximum number of "
+                            f"outer rounds ({max_outer_rounds}). This usually indicates "
+                            "the model is not making observable progress."
+                        ),
+                        "result_type": "error",
+                        "stop_reason": "MaxOuterRounds",
+                    }
+                    break
                 # Drain new follow-ups, merge into state buffer
                 new_follow_ups = controller.drain_follow_up()
                 _state = self.load_state(session)
@@ -2702,6 +2772,18 @@ class DeepAgent(BaseAgent):
                 self._log_loop(
                     f"loop stopped by: {stop_reason}"
                 )
+                if stop_reason == "NoProgressAnswerEvaluator":
+                    yield {
+                        "output": (
+                            "Task loop stopped after repeated empty or "
+                            "near-empty no-tool answers. This indicates "
+                            "the model is not making observable progress."
+                        ),
+                        "result_type": "error",
+                        "stop_reason": stop_reason,
+                    }
+                # Note: MaxOuterRounds yields its own error result inside the loop,
+                # so no additional yield is needed here.
         finally:
             # Clear stop_condition_state so the next invoke starts fresh.
             _state = self.load_state(session)
@@ -2823,6 +2905,36 @@ class DeepAgent(BaseAgent):
             await self._cancel_stream_process_task()
             raise
         finally:
+            # Stall aclose / GeneratorExit does not raise CancelledError, so
+            # CancelledError-only teardown left _stream_process, parallel tool
+            # gathers, and SubagentControl caches pending.
+            if not task.done():
+                try:
+                    await self._cancel_session_deep_tasks(
+                        session.get_session_id()
+                    )
+                except Exception:
+                    logger.debug(
+                        "deep task cancel during stream close failed",
+                        exc_info=True,
+                    )
+                try:
+                    await self._release_session_subagent_controls(
+                        session,
+                        reason="stream_cancelled",
+                    )
+                except Exception:
+                    logger.debug(
+                        "subagent control release during stream close failed",
+                        exc_info=True,
+                    )
+                try:
+                    await self._cancel_stream_process_task()
+                except Exception:
+                    logger.debug(
+                        "stream process cancel during stream close failed",
+                        exc_info=True,
+                    )
             if self._stream_process_task is task:
                 self._stream_process_task = None
 
@@ -3104,15 +3216,31 @@ class DeepAgent(BaseAgent):
         )
 
     async def _cancel_stream_process_task(self) -> None:
-        """Cancel the in-flight task-loop stream background task, if any."""
+        """Cancel the in-flight task-loop stream background task, if any.
+
+        Must not ``await`` the current task. Doing so (or cancelling a
+        gather that includes the waiter) creates an asyncio
+        ``Task.cancel`` parent cycle and raises ``RecursionError`` —
+        observed when headless stream-stall timeouts cancel a DeepAgent
+        mid parallel tool batch.
+        """
         task = self._stream_process_task
         if task is None or task.done():
+            return
+        # Same guard as ``_cancel_active_round`` for ``_interaction_round_task``.
+        if task is asyncio.current_task():
+            task.cancel()
             return
         task.cancel()
         try:
             await task
         except asyncio.CancelledError:
             pass
+        except RecursionError:
+            logger.warning(
+                "RecursionError while awaiting cancelled stream process task; "
+                "leaving task to be collected by the event loop"
+            )
         except Exception:
             logger.debug(
                 "stream process task raised during cancel",

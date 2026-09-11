@@ -11,18 +11,20 @@ from typing import (
 from openjiuwen.core.session import (
     Config,
 )
-from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KV_CACHE_AFFINITY_PARENT_SESSION_ID_ENV,
     KV_CACHE_AFFINITY_SESSION_ID_ENV,
     KVCacheIdentity,
     team_member_cache_identity,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.session.checkpointer import CheckpointerFactory
 from openjiuwen.core.session.interaction.interaction import SimpleAgentInteraction
 from openjiuwen.core.session.internal.agent import AgentSession
 from openjiuwen.core.session.stream.manager import StreamWriterManager
 from openjiuwen.core.session.stream import BaseStreamMode, OutputSchema
 from openjiuwen.core.session.workflow import Session as WorkflowSession
+from openjiuwen.core.common.logging import logger
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent import AgentCard
@@ -37,7 +39,8 @@ class Session:
                  stream_writer_manager: StreamWriterManager | None = None,
                  close_stream_on_post_run: bool = True,
                  source_metadata: dict[str, Any] | None = None,
-                 parent_session_id: str | None = None):
+                 parent_session_id: str | None = None,
+                 kv_cache_runtime: KVCacheRuntimeProtocol | None = None):
         if session_id is None:
             session_id = str(uuid.uuid4())
         self._session_id = session_id
@@ -62,6 +65,8 @@ class Session:
             else None
         )
         self._team_cache_scope: tuple[str, str] | None = None
+        self._kv_cache_runtime: KVCacheRuntimeProtocol | None = kv_cache_runtime
+        self._kvc_released = False
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -134,7 +139,7 @@ class Session:
                     team_id,
                     agent_id,
                 ),
-                parent_cache_id=self._session_id,
+                parent_cache_id=self._parent_session_id or self._session_id,
             )
         source_agent_id = self._source_metadata.get("source_agent_id")
         source_team_id = self._source_metadata.get("source_team_id")
@@ -165,6 +170,46 @@ class Session:
             cache_id=self._session_id,
             parent_cache_id=self._session_id,
         )
+
+    def get_kv_cache_runtime(self) -> KVCacheRuntimeProtocol | None:
+        """Return the process-local KVC runtime while this Session is live."""
+        return None if self._kvc_released else self._kv_cache_runtime
+
+    async def prepare_kvc(self) -> bool:
+        """Start best-effort cache preparation for this Session."""
+        runtime = self.get_kv_cache_runtime()
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.prepare(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("KVC prepare failed; continue normal flow: %s", exc)
+            return False
+
+    async def suspend_kvc(self) -> bool:
+        """Start best-effort cache offload for this Session."""
+        runtime = self.get_kv_cache_runtime()
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.suspend(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("KVC suspend failed; continue normal flow: %s", exc)
+            return False
+
+    async def release_kvc(self) -> bool:
+        """Permanently release this Session's remote cache only."""
+        if self._kvc_released:
+            return False
+        runtime = self._kv_cache_runtime
+        self._kvc_released = True
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.release(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("KVC release failed; continue normal cleanup: %s", exc)
+            return False
 
     def tracer(self):
         """Return the tracer bound to this session."""
@@ -284,6 +329,7 @@ def create_agent_session(session_id: str = None,
                          stream_writer_manager: StreamWriterManager | None = None,
                          source_metadata: dict[str, Any] | None = None,
                          parent_session_id: str | None = None,
+                         kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
                          **kwargs) -> Session:
     close_stream_on_post_run = kwargs.get("close_stream_on_post_run", True)
     session = Session(
@@ -294,5 +340,6 @@ def create_agent_session(session_id: str = None,
         close_stream_on_post_run=close_stream_on_post_run,
         source_metadata=source_metadata,
         parent_session_id=parent_session_id,
+        kv_cache_runtime=kv_cache_runtime,
     )
     return session

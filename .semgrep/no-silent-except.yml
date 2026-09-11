@@ -1,0 +1,57 @@
+rules:
+  - id: no-except-pass
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Silent exception swallow. Log the exception (with traceback via
+      logger.exception / exc_info=True / exception=e) and re-raise or convert
+      to a typed BaseError subclass (openjiuwen.core.common.exception.errors).
+    pattern-either:
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              pass
+      - pattern: |
+          try:
+              ...
+          except $EXC as $E:
+              pass
+      - pattern: |
+          try:
+              ...
+          except $EXC:
+              continue
+      - pattern: |
+          try:
+              ...
+          except $EXC as $E:
+              continue
+
+  - id: broad-except-outside-boundary
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Broad `except Exception` outside a designated boundary. Catch specific
+      exception types, or raise/convert to a typed BaseError subclass. Broad
+      catches are allowed only in the boundary files listed in this rule's
+      exclude list (node executor, tool invoker, MQ worker, harness task loop).
+    pattern-either:
+      - pattern: |
+          try:
+              ...
+          except Exception:
+              ...
+      - pattern: |
+          try:
+              ...
+          except Exception as $E:
+              ...
+    paths:
+      exclude:
+        # Designated boundaries: broad catch is legal here (log + convert + re-raise).
+        - openjiuwen/core/graph/pregel/engine.py
+        - openjiuwen/core/single_agent/ability_manager.py
+        - openjiuwen/core/runner/drunner/server_adapter/mq_server_adapter.py
+        - openjiuwen/harness/task_loop/**
+        - tests/**
