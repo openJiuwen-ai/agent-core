@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
-from sqlalchemy import Index, Table
+from sqlalchemy import Index, Table, text
 from sqlmodel import Field as SQLField
 from sqlmodel import SQLModel
 
@@ -389,6 +389,25 @@ class OrgTaskSourceRecord(SQLModel, table=True):
 
 class OrgSummaryExecutionRecord(SQLModel, table=True):
     __tablename__ = "org_summary_execution"
+    __table_args__ = (
+        # A Summary Task backs exactly one *live* Summary Team.  Terminal rows
+        # (COMPLETED / FAILED / RELEASED) are history and may coexist, so the
+        # uniqueness is partial rather than over the whole column: it is the
+        # database, not the read-then-write check in create_summary_execution,
+        # that makes "one live execution per task" impossible to violate under
+        # concurrent duplicate events.
+        Index(
+            "uq_org_summary_execution_live",
+            "summary_task_id",
+            unique=True,
+            sqlite_where=text(
+                "status NOT IN ('COMPLETED', 'FAILED', 'RELEASED')"
+            ),
+            postgresql_where=text(
+                "status NOT IN ('COMPLETED', 'FAILED', 'RELEASED')"
+            ),
+        ),
+    )
 
     execution_id: str = SQLField(primary_key=True)
     organization_id: str = SQLField(index=True)

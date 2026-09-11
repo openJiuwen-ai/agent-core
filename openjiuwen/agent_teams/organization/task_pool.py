@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import case, delete, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlmodel import col
 
 from openjiuwen.agent_teams.context import get_session_id
@@ -96,6 +97,16 @@ _SUPERSEDEABLE_REVIEW_STATUSES = frozenset(
     {
         OrgTaskReviewStatus.REJECTED.value,
         OrgTaskReviewStatus.NEEDS_REVISION.value,
+    }
+)
+
+# A SummaryExecution in one of these states is finished with: the summary task
+# has exactly one live execution, so creating another one replaces nothing.
+TERMINAL_SUMMARY_EXECUTION_STATUSES = frozenset(
+    {
+        OrgSummaryExecutionStatus.COMPLETED.value,
+        OrgSummaryExecutionStatus.FAILED.value,
+        OrgSummaryExecutionStatus.RELEASED.value,
     }
 )
 
@@ -426,6 +437,22 @@ class OrgTaskManager:
         spec_model = self._coerce_output_spec(output_spec)
         async with self._write() as session:
             now = get_current_time()
+            if summary_task_id is not None:
+                # One Summary Team per organization: the organization may run at
+                # most one SUMMARY_TEAM root at a time.  Checked inside the write
+                # session so it shares this insert's snapshot -- a concurrent
+                # create either commits first (and is seen here) or is rejected
+                # against this one.
+                active_root = await self._find_active_summary_root(session)
+                if active_root is not None:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "organization already has an active SUMMARY_TEAM root task "
+                            f"({active_root.task_id}, status={active_root.status}); complete or "
+                            "fail it before creating another summary aggregation"
+                        ),
+                    )
             recreated_from = None
             if recreation_request_id is not None:
                 notification = await session.get(OrgLeaderMessageRecord, recreation_request_id)
@@ -1668,6 +1695,52 @@ class OrgTaskManager:
         review = await self._get_latest_review_row(session, repaired.task_id)
         return _is_supersedable_task(repaired.status, review)
 
+    async def _find_any_summary_task(self, session: Any) -> OrgTaskRecord | None:
+        """Return the organization's live Summary Task, if one exists.
+
+        Used by the standalone summary-creation path: a Summary Task is created
+        once and outlives the root that requested it, so "already present" means
+        the organization's aggregation slot is taken.
+        """
+        rows = (
+            await session.execute(
+                select(OrgTaskRecord).where(
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.task_type == ORG_SUMMARY_TASK_TYPE,
+                    OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
+                )
+            )
+        ).scalars().all()
+        return rows[0] if rows else None
+
+    async def _find_active_summary_root(self, session: Any) -> OrgTaskRecord | None:
+        """Return the organization's live SUMMARY_TEAM root, if one exists.
+
+        The aggregation mode lives inside ``aggregation_json`` rather than in a
+        column, so the rows are read and filtered here (same approach as
+        ``_is_summary_team_for_parent_guard``).  Framework-owned Summary Tasks are
+        excluded: they also have ``parent_task_id IS NULL``, but they are the
+        aggregation target, not a root that owns a team -- and they outlive the
+        root that created them.  Terminal roots are ignored too: a completed or
+        failed aggregation has released its team and no longer blocks a new one.
+        """
+        rows = (
+            await session.execute(
+                select(OrgTaskRecord).where(
+                    OrgTaskRecord.organization_id == self.organization_id,
+                    OrgTaskRecord.parent_task_id.is_(None),
+                    OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
+                )
+            )
+        ).scalars().all()
+        for row in rows:
+            if row.task_type == ORG_SUMMARY_TASK_TYPE:
+                continue
+            config = _json_loads(row.aggregation_json, {}) or {}
+            if config.get("mode") == OrgTaskAggregationMode.SUMMARY_TEAM.value:
+                return row
+        return None
+
     async def _is_summary_team_for_parent_guard(
         self, session: Any, parent: OrgTaskRecord, team_id: str
     ) -> bool:
@@ -1832,6 +1905,21 @@ class OrgTaskManager:
         await self.initialize()
         now = get_current_time()
         async with self._write() as session:
+            # Second guard for the "one Summary Team per organization" rule: this
+            # path is reached directly by org_create_summary_task, which would
+            # otherwise let a leader bypass the check in create_task.  Writes hold
+            # a process-wide lock, so the check and the insert below cannot be
+            # interleaved by another writer.
+            existing_summary = await self._find_any_summary_task(session)
+            if existing_summary is not None:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        "organization already has a summary task "
+                        f"({existing_summary.task_id}); complete or fail the current summary "
+                        "aggregation before creating another"
+                    ),
+                )
             if await session.get(OrgTaskRecord, task_id) is not None:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             row = await self._insert_summary_task_row(
@@ -2073,8 +2161,33 @@ class OrgTaskManager:
         summary_task_id: str,
         execution_id: str | None = None,
     ) -> OrgSummaryExecution:
-        """Persist a new Summary Team instance in PROVISIONING for the given Summary Task."""
+        """Return the Summary Task's live SummaryExecution, creating one if needed.
+
+        A Summary Task owns exactly one live execution, so this is idempotent: a
+        duplicate ``OrgSummaryTaskCreatedEvent`` (delivery is at-least-once)
+        reuses the existing PROVISIONING / WAITING_SOURCES / RUNNING row instead
+        of spawning a second Summary Team for the same task.  A terminal row
+        (COMPLETED / FAILED / RELEASED) does not block a fresh one -- a summary
+        that finished, failed, or was released may legitimately run again.
+
+        The pre-insert read below is only a fast path: two duplicate events can
+        arrive concurrently on different coroutines, both find nothing, and both
+        try to insert.  The partial unique index
+        ``uq_org_summary_execution_live`` rejects the loser, which then reads
+        back the winner's row -- that constraint, not this check, is what makes
+        the one-live-execution invariant hold.
+        """
         await self.initialize()
+        existing = await self._find_live_summary_execution(summary_task_id)
+        if existing is not None:
+            logger.debug(
+                "reusing live summary execution %s for task %s (status=%s)",
+                existing.execution_id,
+                summary_task_id,
+                existing.status,
+            )
+            return existing
+
         execution_id = execution_id or f"summary-exec-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
         record = OrgSummaryExecutionRecord(
@@ -2085,10 +2198,39 @@ class OrgTaskManager:
             status=OrgSummaryExecutionStatus.PROVISIONING.value,
             created_at=now,
         )
-        async with self._write() as session:
-            session.add(record)
-            await session.commit()
+        try:
+            async with self._write() as session:
+                session.add(record)
+                await session.commit()
+        except IntegrityError:
+            # Lost the race against a concurrent duplicate event: adopt the row
+            # that won instead of surfacing a spurious failure to the caller.
+            winner = await self._find_live_summary_execution(summary_task_id)
+            if winner is None:
+                raise
+            logger.debug(
+                "concurrent create for task %s lost the race; adopting execution %s",
+                summary_task_id,
+                winner.execution_id,
+            )
+            return winner
         return self._to_summary_execution(record)
+
+    async def _find_live_summary_execution(self, summary_task_id: str) -> OrgSummaryExecution | None:
+        """Return the task's non-terminal execution, if one exists."""
+        async with self._read() as session:
+            row = (
+                await session.execute(
+                    select(OrgSummaryExecutionRecord).where(
+                        OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                        OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        OrgSummaryExecutionRecord.status.not_in(
+                            TERMINAL_SUMMARY_EXECUTION_STATUSES
+                        ),
+                    )
+                )
+            ).scalars().first()
+        return self._to_summary_execution(row) if row is not None else None
 
     async def list_summary_executions(
         self,

@@ -464,7 +464,12 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                     "description": (
                         "Root-task aggregation mode. HIERARCHICAL splits work into "
                         "children resolved upward; SUMMARY_TEAM creates a framework "
-                        "Summary Task and a task-specific Summary Team on demand."
+                        "Summary Task and a task-specific Summary Team on demand. "
+                        "An organization may have at most ONE active SUMMARY_TEAM root "
+                        "at a time: creating another is rejected until the current one "
+                        "completes or fails. Only choose SUMMARY_TEAM when the "
+                        "organization's work genuinely needs a unified aggregation, and "
+                        "reuse the existing aggregation instead of starting a second one."
                     ),
                 },
             },

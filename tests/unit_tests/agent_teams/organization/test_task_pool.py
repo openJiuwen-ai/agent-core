@@ -849,6 +849,114 @@ async def test_bind_root_summary_team_rejects_non_summary_root(org_manager):
     assert "not SUMMARY_TEAM" in bound.reason
 
 
+@pytest.mark.asyncio
+async def test_second_summary_team_root_is_rejected_while_one_is_active(org_manager):
+    """一个组织同时只允许一个 SUMMARY_TEAM 根任务。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_task(
+        task_id="root-a",
+        title="A",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert first.ok
+
+    second = await manager.create_task(
+        task_id="root-b",
+        title="B",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert not second.ok
+    # The reason names the blocking root so the leader can act on it.
+    assert "root-a" in second.reason
+    assert await manager.get_task("root-b") is None
+
+
+@pytest.mark.asyncio
+async def test_summary_team_root_allowed_again_after_terminal(org_manager):
+    """活跃根任务终结后，可以再建一个 SUMMARY_TEAM 根任务。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_task(
+        task_id="root-a",
+        title="A",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert first.ok
+    await manager.claim_task(task_id="root-a", team_id="team-a")
+    assert (await manager.complete_task(task_id="root-a", team_id="team-a", output_abstract="done")).ok
+
+    second = await manager.create_task(
+        task_id="root-b",
+        title="B",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert second.ok, second.reason
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_root_does_not_block_summary_team_root(org_manager):
+    """守卫只针对 SUMMARY_TEAM 根任务，普通（HIERARCHICAL）根任务不受影响。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    hierarchical = await manager.create_task(
+        task_id="root-hier",
+        title="H",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert hierarchical.ok
+
+    summary_root = await manager.create_task(
+        task_id="root-sum",
+        title="S",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert summary_root.ok, summary_root.reason
+
+
+@pytest.mark.asyncio
+async def test_create_summary_task_rejected_when_one_already_exists(org_manager):
+    """org_create_summary_task 这条路径也不能绕过"每组织一个摘要"的约束。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_summary_task(
+        task_id="summary-1", title="S", description="d", created_by=creator
+    )
+    assert first.ok
+
+    second = await manager.create_summary_task(
+        task_id="summary-2", title="S2", description="d", created_by=creator
+    )
+    assert not second.ok
+    assert "summary-1" in second.reason
+    assert await manager.get_task("summary-2") is None
+
+
 def test_to_task_normalizes_legacy_terminal_statuses():
     for legacy_status, failure_code in ORG_TASK_LEGACY_STATUS_FAILURE_CODES.items():
         row = OrgTaskRecord(
@@ -3087,6 +3195,137 @@ async def test_summary_execution_lifecycle(org_manager):
         released_at=1234,
     )
     assert released is not None and released.released_at == 1234
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_reuses_the_live_row(org_manager):
+    """同一 Summary Task 的第二次创建复用活着的 execution（事件重投不产生重复团队）。"""
+    manager, _ = org_manager
+    first = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    second = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+
+    assert second.execution_id == first.execution_id
+    assert len(await manager.list_summary_executions(summary_task_id="summary-1")) == 1
+
+    # Still reused once the team is bound and running.
+    await manager.update_summary_execution(
+        execution_id=first.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    third = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    assert third.execution_id == first.execution_id
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_after_terminal_starts_fresh(org_manager):
+    """终态 execution 不阻止新建：汇总结束后可以再跑一轮。"""
+    manager, _ = org_manager
+    first = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    await manager.update_summary_execution(
+        execution_id=first.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+    )
+
+    second = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    assert second.execution_id != first.execution_id
+    assert second.status is OrgSummaryExecutionStatus.PROVISIONING
+    # The terminal row is kept as history.
+    assert len(await manager.list_summary_executions(summary_task_id="summary-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_release_summary_task_marks_unbound_execution_released(active_organization_runtime):
+    """没绑定团队的 execution 也要被标 RELEASED，否则会永久滞留被重试。"""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-release-unbound"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # PROVISIONING, never bound to a team (provision failed / interrupted).
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    assert execution.summary_team_id is None
+    runtime.set_summary_team_factory(FakeSummaryFactory())
+
+    # The runtime calls this with the TeamOrganizationManager wrapper, not the raw pool.
+    await runtime._release_summary_task(
+        manager=org_manager,
+        summary_task_id=summary_id,
+        session_id=session_id,
+    )
+
+    released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert released.status is OrgSummaryExecutionStatus.RELEASED
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_is_atomic_under_concurrency(org_manager):
+    """并发重复事件只能产生一条 live execution（唯一索引兜住读-写竞态）。"""
+    manager, _ = org_manager
+
+    results = await asyncio.gather(
+        *[
+            manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-race")
+            for _ in range(5)
+        ]
+    )
+
+    # Every caller converges on the same row...
+    assert len({r.execution_id for r in results}) == 1
+    # ...and the table holds exactly one live execution for the task.
+    execs = await manager.list_summary_executions(summary_task_id="summary-race")
+    assert len(execs) == 1
+    assert execs[0].status is OrgSummaryExecutionStatus.PROVISIONING
+
+
+@pytest.mark.asyncio
+async def test_live_execution_unique_index_allows_terminal_history(org_manager):
+    """部分唯一索引只约束 live 行：终态历史行可以共存。"""
+    manager, _ = org_manager
+    first = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-hist")
+    await manager.update_summary_execution(
+        execution_id=first.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+    )
+    # A second live row is allowed because the first is now terminal.
+    second = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-hist")
+    assert second.execution_id != first.execution_id
+
+    # But a third *live* row cannot be added while the second is live.
+    third = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-hist")
+    assert third.execution_id == second.execution_id
+    assert len(await manager.list_summary_executions(summary_task_id="summary-hist")) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_adopts_winner_on_unique_violation(org_manager):
+    """竞态输家（唯一索引拒绝插入）应回退读出赢家那一行，而不是抛错。
+
+    直接制造冲突：先把预检查会看到的行"藏"起来（用另一 org 无关行站位），
+    再让插入撞上唯一索引——这正是两个并发调用交错时输家的处境。
+    """
+    manager, _ = org_manager
+    # A live row that the *pre-check* cannot see, so the insert is attempted and
+    # rejected by uq_org_summary_execution_live.
+    hidden = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-hidden")
+    assert hidden.status is OrgSummaryExecutionStatus.PROVISIONING
+
+    real_find = manager._find_live_summary_execution
+    calls = {"n": 0}
+
+    async def _find_once_hidden(task_id: str):
+        # First call (the fast path) reports nothing; the retry after the
+        # IntegrityError sees the winner.
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return None
+        return await real_find(task_id)
+
+    manager._find_live_summary_execution = _find_once_hidden  # type: ignore[method-assign]
+
+    adopted = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-hidden")
+    assert adopted.execution_id == hidden.execution_id
+    # No duplicate live row was created.
+    assert len(await manager.list_summary_executions(summary_task_id="summary-hidden")) == 1
 
 
 async def _seed_summary_team_org(runtime, agents, session_id: str, org_id: str):

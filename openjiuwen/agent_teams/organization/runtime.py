@@ -48,6 +48,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgUnclaimedTaskPolicy,
 )
 from openjiuwen.agent_teams.organization.task_pool import (
+    TERMINAL_SUMMARY_EXECUTION_STATUSES,
     OrgTaskManager,
     _is_supersedable_task,
 )
@@ -792,11 +793,7 @@ class OrganizationRuntimeManager:
         for execution in await manager.task_pool.list_summary_executions():
             # Terminal executions are done; a FAILED one is left for the root
             # leader to repair or terminate rather than being retried here.
-            if execution.status in {
-                OrgSummaryExecutionStatus.COMPLETED,
-                OrgSummaryExecutionStatus.FAILED,
-                OrgSummaryExecutionStatus.RELEASED,
-            }:
+            if execution.status in TERMINAL_SUMMARY_EXECUTION_STATUSES:
                 continue
             summary_task = await manager.task_pool.get_task(execution.summary_task_id)
             if summary_task is None:
@@ -1529,7 +1526,7 @@ class OrganizationRuntimeManager:
         session_id: str,
     ) -> None:
         """Release the dynamic Summary Team and wake the root leader to inject the result."""
-        await self._release_summary_executions(
+        await self._release_summary_task(
             manager=manager,
             summary_task_id=event.summary_task_id,
             session_id=session_id,
@@ -1557,7 +1554,7 @@ class OrganizationRuntimeManager:
         summary_task = await manager.task_pool.get_task(task_id)
         if summary_task is None:
             return
-        await self._release_summary_executions(
+        await self._release_summary_task(
             manager=manager,
             summary_task_id=task_id,
             session_id=session_id,
@@ -1569,20 +1566,28 @@ class OrganizationRuntimeManager:
             summary_task_id=task_id,
         )
 
-    async def _release_summary_executions(self, *, manager: Any, summary_task_id: str, session_id: str) -> None:
-        """Release every non-RELEASED dynamic Summary Team for a Summary Task."""
-        executions = await manager.task_pool.list_summary_executions(summary_task_id=summary_task_id)
-        for execution in executions:
-            if execution.status is OrgSummaryExecutionStatus.RELEASED:
-                continue
-            await self._release_summary_execution(
-                manager=manager,
-                execution=execution,
-                session_id=session_id,
-            )
+    async def _release_summary_task(self, *, manager: Any, summary_task_id: str, session_id: str) -> None:
+        """Release the Summary Task's live Summary Team and mark its execution RELEASED.
 
-    async def _release_summary_execution(self, *, manager: Any, execution: Any, session_id: str) -> None:
+        A Summary Task owns exactly one live execution (``create_summary_execution``
+        is idempotent), so there is nothing to fan out over: find that one row and
+        release it.  Terminal rows are skipped -- a completed or already-released
+        execution has no team left to stop.
+        """
+        execution = await self._live_summary_execution(
+            manager=manager,
+            summary_task_id=summary_task_id,
+        )
+        if execution is None:
+            logger.debug(
+                "no live summary execution for task %s; nothing to release",
+                summary_task_id,
+            )
+            return
+
         summary_factory = self._ensure_summary_factory() or self._summary_team_factory
+        # An execution that never bound a team (provision failed) has nothing to
+        # stop, but is still marked RELEASED below so it stops being retried.
         if summary_factory is None:
             # No host factory: nothing can stop the team, so leave the execution
             # as-is for a later scan rather than marking it RELEASED.
@@ -1606,12 +1611,27 @@ class OrganizationRuntimeManager:
                     session_id=session_id,
                 )
             except Exception:  # noqa: BLE001
-                logger.warning("Failed to release summary execution %s", execution.execution_id, exc_info=True)
+                logger.warning(
+                    "Failed to release summary execution %s",
+                    execution.execution_id,
+                    exc_info=True,
+                )
         await manager.task_pool.update_summary_execution(
             execution_id=execution.execution_id,
             status=OrgSummaryExecutionStatus.RELEASED,
             released_at=get_current_time(),
         )
+
+    async def _live_summary_execution(self, *, manager: Any, summary_task_id: str) -> Any | None:
+        """Return the Summary Task's single non-terminal execution, if any.
+
+        Terminal executions (COMPLETED / FAILED / RELEASED) are skipped: they may
+        still exist as history but no longer back a live team.
+        """
+        for execution in await manager.task_pool.list_summary_executions(summary_task_id=summary_task_id):
+            if execution.status not in TERMINAL_SUMMARY_EXECUTION_STATUSES:
+                return execution
+        return None
 
     async def _running_summary_execution(self, *, manager: Any, summary_task_id: str) -> Any | None:
         for execution in await manager.task_pool.list_summary_executions(summary_task_id=summary_task_id):
