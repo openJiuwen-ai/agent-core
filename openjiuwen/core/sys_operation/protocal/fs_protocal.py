@@ -135,6 +135,7 @@ class BaseFsProtocal(ABC):
     @abstractmethod
     async def search_files(self, path: str,
                            pattern: str,
-                           exclude_patterns: Optional[List[str]] = None
+                           exclude_patterns: Optional[List[str]] = None,
+                           options: Optional[Dict[str, Any]] = None
                            ) -> SearchFilesResult:
         pass

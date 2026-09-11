@@ -856,6 +856,7 @@ class YuanrongFSProvider(_YuanrongProviderMixin, BaseFSProvider):
         path: str,
         pattern: str,
         exclude_patterns: Optional[List[str]] = None,
+        options: Optional[Dict[str, Any]] = None,
     ) -> SearchFilesResult:
         try:
             raw_items = await asyncio.to_thread(

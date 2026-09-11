@@ -8,6 +8,7 @@ from typing import Any, Dict
 from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
+from openjiuwen.harness.security.permission_engine.access_extra import attach_extra_paths_param
 
 DESCRIPTION: Dict[str, str] = {
     "cn": (
@@ -17,6 +18,7 @@ DESCRIPTION: Dict[str, str] = {
         "python 和 PowerShell cmdlet。不要用它做文件搜索、内容搜索、读文件、"
         "写文件、编辑文件，除非用户明确要求，或你已经确认专用工具无法完成任务。"
         "优先使用 glob、grep、read_file、edit_file、write_file。\n\n"
+        "访问工作区以外的路径时，先分析路径并填进 extra.paths，执行前会弹窗审批。\n\n"
         "PowerShell 版本兼容：默认按 Windows PowerShell 5.1 兼容方式编写命令，"
         "除非你非常确定当前环境是 PowerShell 7+。\n"
         " - 不要默认使用 `&&`、`||`、三元表达式 `?:`、空合并 `??`、空条件 `?.`；"
@@ -244,7 +246,7 @@ def get_powershell_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the full JSON Schema for powershell tool input_params."""
     p = POWERSHELL_PARAMS
     lang = language if language in ("cn", "en") else "cn"
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": p["command"][lang]},
@@ -264,7 +266,7 @@ def get_powershell_input_params(language: str = "cn") -> Dict[str, Any]:
             },
         },
         "required": ["command"],
-    }
+    }, language)
 
 
 class PowerShellMetadataProvider(ToolMetadataProvider):

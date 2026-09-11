@@ -20,6 +20,7 @@ from openjiuwen.core.common.logging import sys_operation_logger
 from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.security.permission_engine.access_extra import with_access_extra
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.shell.bash._output import (
     CommandOutput,
@@ -167,6 +168,7 @@ class BashTool(Tool):
             f"file_ops_{agent_id}_{session.get_session_id()}.json",
         )
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs: Any) -> ToolOutput:
         from openjiuwen.core.sys_operation.cwd import get_cwd
 
@@ -262,6 +264,7 @@ class BashTool(Tool):
 
     # ── stream ────────────────────────────────────────────────
 
+    @with_access_extra
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[ToolOutput]:
         from openjiuwen.core.sys_operation.cwd import get_cwd
 

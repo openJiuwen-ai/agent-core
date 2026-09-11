@@ -13,6 +13,7 @@ from typing import Any, Dict
 from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
+from openjiuwen.harness.security.permission_engine.access_extra import attach_extra_paths_param
 
 # ── tool description (injected as the tool-level system prompt) ──
 
@@ -27,6 +28,8 @@ DESCRIPTION: Dict[str, str] = {
         "Windows 注意：`cmd`/PowerShell 自带 `mkdir` **不支持 `-p`**，不要在 cmd/PowerShell 中使用 `mkdir -p`。"
         "只有运行环境信息显示 Git Bash 或非 WSL stub 的 PATH bash 可用，并且实际使用 bash/Git Bash 时，POSIX `mkdir -p` 才适用。"
         "否则应使用 PowerShell `New-Item ... -Force` 或 cmd 逐级 `mkdir`。\n"
+        "\n"
+        "访问工作区以外的路径时，先分析路径并填进 extra.paths，执行前会弹窗审批。\n"
         "\n"
         "重要：避免使用本工具执行 `find`、`grep`、`cat`、`head`、`tail`、"
         "`sed`、`awk` 或 `echo` 命令，除非明确指示或确认专用工具无法完成任务。"
@@ -265,7 +268,7 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
     """
     p = BASH_PARAMS
     lang = language if language in ("cn", "en") else "cn"
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "command": {"type": "string", "description": p["command"][lang]},
@@ -281,7 +284,7 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
             },
         },
         "required": ["command"],
-    }
+    }, language)
 
 
 class BashMetadataProvider(ToolMetadataProvider):

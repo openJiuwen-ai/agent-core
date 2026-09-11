@@ -966,7 +966,8 @@ class FsOperation(BaseFsOperation):
             self,
             path: str,
             pattern: str,
-            exclude_patterns: Optional[List[str]] = None
+            exclude_patterns: Optional[List[str]] = None,
+            options: Optional[Dict[str, Any]] = None
     ) -> SearchFilesResult:
         """
         Asynchronously search files under the specified path.

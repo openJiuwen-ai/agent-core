@@ -500,7 +500,22 @@ def extract_paths_legacy(
     permission_config: Mapping[str, Any] | None = None,
 ) -> list[Path]:
     """develop 抽取：仅路径字符串，无 R/W/X（供 Legacy 投影锁定现网行为）。"""
+    from openjiuwen.harness.security.permission_engine.access_extra import extract_extra_paths
+
     paths: list[Path] = []
+    for raw in extract_extra_paths(tool_args):
+        text = raw.strip().strip('"').strip("'")
+        if not text:
+            continue
+        try:
+            p = Path(os.path.expandvars(os.path.expanduser(text)))
+            if not p.is_absolute():
+                p = (workspace / p).resolve()
+            else:
+                p = p.resolve()
+            paths.append(p)
+        except (OSError, RuntimeError):
+            continue
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         workdir = tool_args.get("workdir", "")
         try:
@@ -508,7 +523,7 @@ def extract_paths_legacy(
         except (OSError, RuntimeError):
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
-        paths = _extract_paths_from_command(cmd, workdir_resolved)
+        paths.extend(_extract_paths_from_command(cmd, workdir_resolved))
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")
@@ -620,9 +635,6 @@ class FileGuardChecker:
             action = _tool_default_action(tool_name, self._permission_config)
             accesses = [(p, action) for p in paths]
 
-        if not accesses:
-            return None
-
         overall = PermissionLevel.ALLOW
         hit_external: list[str] = []
         matched_bits: list[str] = []
@@ -660,6 +672,71 @@ class FileGuardChecker:
             matched_rule=matched,
             external_paths=hit_external or None,
         )
+
+    def is_explicitly_allowed(self, path: Path, action: FileGuardAction) -> bool:
+        """True when a prefix/glob/workspace/trusted rule allows ``action``.
+
+        ``file_guard.defaults`` ALLOW does **not** count — that is the
+        jiuwenswarm default and must not skip extra.paths HITL.
+        """
+        level, rule_id = self._resolve_one(path, action)
+        if level != PermissionLevel.ALLOW or not rule_id:
+            return False
+        return rule_id != "file_guard:defaults"
+
+    def _pending_extra_accesses(
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, Any],
+    ) -> list[tuple[str, FileGuardAction]]:
+        from openjiuwen.harness.security.permission_engine.access_extra import (
+            extra_paths_file_action,
+            extract_extra_paths,
+        )
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+            _extra_paths_accesses,
+        )
+
+        workspace = self._effective.workspace_root
+        action: FileGuardAction = extra_paths_file_action(tool_name)
+        if workspace is None:
+            return [(raw, action) for raw in extract_extra_paths(tool_args)]
+
+        out: list[tuple[str, FileGuardAction]] = []
+        seen: set[tuple[str, FileGuardAction]] = set()
+        for path, acc_action, _src in _extra_paths_accesses(tool_name, dict(tool_args), workspace):
+            if self.is_explicitly_allowed(path, acc_action):
+                continue
+            level, _rule_id = self._resolve_one(path, acc_action)
+            if level == PermissionLevel.DENY:
+                continue
+            key = (path.as_posix(), acc_action)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(key)
+        return out
+
+    def evaluate_extra_paths(
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, Any],
+    ) -> PermissionResult | None:
+        """ASK for model-declared extra.paths that are not yet explicitly allowed."""
+        from openjiuwen.harness.security.permission_engine.access_extra import extra_paths_ask_result
+
+        pending = self._pending_extra_accesses(tool_name, tool_args)
+        if not pending:
+            return None
+        return extra_paths_ask_result([path for path, _action in pending])
+
+    def collect_extra_persist_accesses(
+        self,
+        tool_name: str,
+        tool_args: Mapping[str, Any],
+    ) -> list[tuple[str, FileGuardAction]]:
+        """extra.paths that need HITL, for session/always persist into file_guard.paths."""
+        return list(self._pending_extra_accesses(tool_name, tool_args))
 
     def collect_ask_accesses(
         self,

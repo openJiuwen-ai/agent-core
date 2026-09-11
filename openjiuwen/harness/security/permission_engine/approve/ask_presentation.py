@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.harness.security.permission_engine.access_extra import extract_extra_paths
 from openjiuwen.harness.security.permission_engine.models import PermissionResult
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
     is_shell_tool,
@@ -200,6 +201,10 @@ def _resolve_category(
     rule = (result.matched_rule or "").strip()
     parts = [p.strip() for p in rule.split("|") if p.strip()] if rule else []
 
+    if extract_extra_paths(tool_args):
+        return "path"
+    if "extra.paths" in rule or any("extra.paths" in p for p in parts):
+        return "path"
     if any("file_guard" in p for p in parts) or rule.startswith("file_guard"):
         return "path"
     if _is_network_category(rule, parts, tool_name):
@@ -253,6 +258,17 @@ def _path_summary(
     result: PermissionResult,
     permission_config: Mapping[str, Any] | None = None,
 ) -> str:
+    extra_paths = extract_extra_paths(tool_args)
+    if not extra_paths and "extra.paths" in (result.matched_rule or ""):
+        extra_paths = [str(p) for p in (result.external_paths or []) if p]
+    if extra_paths:
+        # Keep paths on the first line: the HITL bar is collapsed and only
+        # renders that line, so a trailing "申请访问:" looked empty.
+        if len(extra_paths) == 1:
+            return f"{tool_name} 申请访问 {extra_paths[0]}"
+        head = "、".join(extra_paths[:3])
+        more = f" 等共 {len(extra_paths)} 条" if len(extra_paths) > 3 else ""
+        return f"{tool_name} 申请访问 {head}{more}"
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
         extracted = _shell_file_access_summary(
             tool_name, tool_args, result, permission_config,
@@ -260,12 +276,7 @@ def _path_summary(
         if extracted:
             return extracted
     action = _PATH_ACTION.get(tool_name, tool_name)
-    path = ""
-    external = result.external_paths or []
-    if external:
-        path = str(external[0])
-    if not path:
-        path = _first_path_arg(tool_args)
+    path = _first_path_arg(tool_args)
     if path:
         return f"{action} {path}"
     return action

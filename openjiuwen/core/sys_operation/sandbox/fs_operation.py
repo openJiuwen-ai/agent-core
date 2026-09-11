@@ -145,9 +145,11 @@ class FsOperation(BaseFsOperation, BaseSandboxMixin):
         return raw if isinstance(raw, ListDirsResult) else ListDirsResult(**raw)
 
     async def search_files(
-            self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None
+            self, path: str, pattern: str, exclude_patterns: Optional[List[str]] = None,
+            options: Optional[Dict[str, Any]] = None,
     ) -> SearchFilesResult:
         raw = await self.invoke(
-            "search_files", path=path, pattern=pattern, exclude_patterns=exclude_patterns
+            "search_files", path=path, pattern=pattern, exclude_patterns=exclude_patterns,
+            options=options,
         )
         return raw if isinstance(raw, SearchFilesResult) else SearchFilesResult(**raw)

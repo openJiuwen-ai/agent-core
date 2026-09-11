@@ -203,6 +203,43 @@ def test_tool_ask_for_non_shell_defaults() -> None:
     assert "todo_list" in pres.summary
 
 
+def test_extra_paths_ask_lists_declared_paths() -> None:
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="extra.paths",
+        external_paths=[r"D:\docs", r"E:\data"],
+    )
+    pres = build_permission_ask_presentation(
+        "bash",
+        {
+            "command": "python run.py",
+            "extra": {"paths": [r"D:\docs", r"E:\data"]},
+        },
+        result,
+    )
+    assert pres.category == "path"
+    assert r"D:\docs" in pres.summary
+    assert r"E:\data" in pres.summary
+    assert "extra.paths" not in pres.summary
+    assert pres.summary.splitlines()[0].startswith("bash 申请访问")
+    assert r"D:\docs" in pres.summary.splitlines()[0]
+
+
+def test_extra_paths_ask_uses_result_external_paths_when_args_omit_them() -> None:
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule="extra.paths",
+        external_paths=[r"D:\d2\jjjj"],
+    )
+    pres = build_permission_ask_presentation(
+        "powershell",
+        {"command": 'New-Item -Path "D:\\d2\\jjjj" -ItemType File -Force'},
+        result,
+    )
+    assert pres.category == "path"
+    assert r"D:\d2\jjjj" in pres.summary.splitlines()[0]
+
+
 def test_render_message_puts_summary_first() -> None:
     result = PermissionResult(
         permission=PermissionLevel.ASK,

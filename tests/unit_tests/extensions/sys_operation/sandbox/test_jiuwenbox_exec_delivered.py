@@ -149,3 +149,30 @@ async def test_run_exec_pipeline_daemon_unavailable_triggers_fallback(
     assert err is None
     assert result["stdout"] == "local"
     local_op.assert_awaited_once()
+
+
+def test_sandbox_shell_argv_powershell_type_on_windows() -> None:
+    cmd = (
+        'New-Item -Path "D:\\d2\\jjjj" -ItemType File -Force'
+        " | Select-Object FullName, Length, LastWriteTime"
+    )
+    argv = jb._sandbox_shell_argv(cmd, "powershell", windows=True)
+    assert argv == ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd]
+
+
+def test_sandbox_shell_argv_auto_detects_new_item_on_windows() -> None:
+    cmd = 'New-Item -Path "D:\\d2\\jjjj" -ItemType File -Force'
+    argv = jb._sandbox_shell_argv(cmd, "auto", windows=True)
+    assert argv[0] == "powershell"
+    assert argv[-1] == cmd
+    assert "bash" not in argv[0]
+
+
+def test_sandbox_shell_argv_linux_stays_bash() -> None:
+    cmd = 'New-Item -Path "D:\\d2\\jjjj" -ItemType File -Force'
+    assert jb._sandbox_shell_argv(cmd, "powershell", windows=False) == ["bash", "-lc", cmd]
+
+
+def test_sandbox_shell_argv_posix_on_windows_stays_bash() -> None:
+    cmd = "ls -la /tmp"
+    assert jb._sandbox_shell_argv(cmd, "auto", windows=True) == ["bash", "-lc", cmd]

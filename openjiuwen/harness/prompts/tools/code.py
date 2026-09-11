@@ -8,17 +8,20 @@ from typing import Any, Dict
 from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
+from openjiuwen.harness.security.permission_engine.access_extra import attach_extra_paths_param
 
 DESCRIPTION: Dict[str, str] = {
     "cn": (
         "执行代码（Python 或 JavaScript）。\n\n"
-        "每次调用在独立进程中执行，变量与对象不跨调用保留，请提交可独立运行的完整代码。\n\n"
+        "每次调用在独立进程中执行，变量与对象不跨调用保留，请提交可独立运行的完整代码。"
+        "访问工作区以外的路径时，先分析路径并填进 extra.paths，执行前会弹窗审批。\n\n"
     ),
 
     "en": (
         "Execute code (Python or JavaScript).\n\n"
         "Each invocation runs in an isolated process; variables and objects do not persist"
-        "across calls—submit self-contained code every time\n\n"
+        "across calls—submit self-contained code every time. "
+        "When accessing paths outside the workspace, analyze them first and put them in extra.paths; a popup asks the user to approve before the tool runs.\n\n"
     )
 }
 
@@ -41,7 +44,7 @@ CODE_PARAMS: Dict[str, Dict[str, str]] = {
 def get_code_input_params(language: str = "cn") -> Dict[str, Any]:
     """Return the full JSON Schema for code tool input_params."""
     p = CODE_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "code": {"type": "string", "description": p["code"].get(language, p["code"]["cn"])},
@@ -49,7 +52,7 @@ def get_code_input_params(language: str = "cn") -> Dict[str, Any]:
             "timeout": {"type": "integer", "description": p["timeout"].get(language, p["timeout"]["cn"])},
         },
         "required": ["code"],
-    }
+    }, language)
 
 
 class CodeMetadataProvider(ToolMetadataProvider):
