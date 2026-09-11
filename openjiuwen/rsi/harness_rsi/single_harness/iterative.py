@@ -845,6 +845,30 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             elif failed_retention_case_ids:
                 checkpoint_status = "rejected"
 
+            # The filtered artifact is the one that may be promoted, so it —
+            # not the pre-filter cumulative replay — must carry the trusted
+            # score. Unfiltered epochs reuse the full replay unchanged.
+            performed_selected_replay = selected_refs != current_refs
+            if performed_selected_replay:
+                selected_eval_ref = await self._evaluate(
+                    cases=all_cases,
+                    harness_refs_path=selected_refs,
+                    output_dir=output_dir / "evaluations" / f"e{epoch:03d}" / "selected_full",
+                    case_concurrency=self.config.scheduling.full_evaluation_concurrency,
+                    dataset=dataset,
+                    node_ref=epoch_node_ref,
+                    on_event=on_event,
+                )
+                selected_payload = _read_yaml(selected_refs)
+                checkpoint_filter = selected_payload.get("checkpoint_filter")
+                if isinstance(checkpoint_filter, dict):
+                    checkpoint_filter["post_checkpoint_replay_performed"] = True
+                    checkpoint_filter["selected_eval_ref_path"] = selected_eval_ref
+                    _write_yaml_atomic(Path(selected_refs), selected_payload)
+            else:
+                selected_eval_ref = full_eval_ref
+            selected_score = _eval_score(selected_eval_ref)
+
             checkpoint.update(
                 {
                     "status": checkpoint_status,
@@ -859,23 +883,40 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "retained_candidate_action_ids": _capability_action_ids(retained_gates),
                     "removed_candidate_action_ids": _capability_action_ids(removed_gates),
                     "selected_harness_refs_path": (selected_refs if retained_gates else epoch_start_refs),
-                    "post_checkpoint_replay_performed": False,
+                    "post_checkpoint_replay_performed": performed_selected_replay,
                 }
             )
             state["epoch_checkpoints"].append(checkpoint)
-            checkpoint["promotion_applied"] = bool(retained_gates)
+            # Candidate-local retention alone cannot promote a Harness
+            # version: the final selected artifact must also be globally
+            # non-regressing against the previous best.
+            if retained_gates:
+                promotable, promotion_reason = _globally_promotable(
+                    selected_eval_ref=selected_eval_ref,
+                    previous_best_eval_ref=previous_best_eval_ref,
+                    previous_best_score=best_score,
+                )
+            else:
+                promotable, promotion_reason = False, ""
+            checkpoint["promotion_applied"] = promotable
+            checkpoint["promotion_reason"] = promotion_reason
             checkpoint["noop_initial_score_seed"] = bool(
                 not epoch_provisional_gates and checkpoint_status == "verified" and best_score is None
             )
-            if retained_gates or checkpoint["noop_initial_score_seed"]:
+            if promotable or checkpoint["noop_initial_score_seed"]:
+                # The promoted checkpoint describes the final artifact and its
+                # own verified evaluation, not the pre-filter cumulative replay.
+                checkpoint["score"] = selected_score
+                checkpoint["eval_ref_path"] = selected_eval_ref
+                checkpoint["harness_refs_path"] = selected_refs
                 current_refs = selected_refs
-                state["best_score"] = full_score
-                state["best_eval_ref_path"] = full_eval_ref
+                state["best_score"] = selected_score
+                state["best_eval_ref_path"] = selected_eval_ref
                 state["best_harness_refs_path"] = current_refs
-                state["retained_case_ids"] = sorted(full_passing_case_ids)
+                state["retained_case_ids"] = sorted(_passing_case_ids(selected_eval_ref))
                 if not epoch_provisional_gates:
-                    state["baseline_score"] = full_score
-                    state["baseline_eval_ref_path"] = full_eval_ref
+                    state["baseline_score"] = selected_score
+                    state["baseline_eval_ref_path"] = selected_eval_ref
             else:
                 current_refs = epoch_start_refs
                 state["best_score"] = epoch_start_score
@@ -896,7 +937,9 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     "status": "retained" if retained else "removed",
                     "eval_ref_path": full_eval_ref,
                     "selected_harness_refs_path": (selected_refs if retained else ""),
-                    "post_checkpoint_replay_performed": False,
+                    "post_checkpoint_replay_performed": performed_selected_replay,
+                    "promotion_applied": promotable,
+                    "promotion_reason": promotion_reason,
                 }
                 _persist_promotion(
                     str(gate.get("member_optimization_ref_path", "")),
@@ -3117,7 +3160,9 @@ def _select_gate_from_epoch_checkpoint(
     candidate-local: a change survives only when its own targets still pass and
     its runtime capability was actually used where applicable. Unrelated case
     outcomes remain audit evidence; they cannot establish that this candidate
-    caused a regression. No post-pruning replay is run.
+    caused a regression. Whether the epoch may still be adopted is decided
+    separately by the global promotion gate, which replays the final filtered
+    artifact when one was materialized.
     """
     target_case_ids = {str(case_id) for case_id in gate.get("target_case_ids", []) if str(case_id)}
     inconclusive_target_case_ids = sorted(target_case_ids & (error_case_ids | machine_evidence_case_ids))
@@ -3187,6 +3232,34 @@ def _select_gate_from_epoch_checkpoint(
         "missing_runtime_invocations": [],
         "correlated_regression_case_ids": [],
     }
+
+
+_PROMOTION_SCORE_EPSILON = 1e-9
+
+
+def _globally_promotable(
+    *,
+    selected_eval_ref: str,
+    previous_best_eval_ref: str,
+    previous_best_score: float | None,
+) -> tuple[bool, str]:
+    """Decide whether the epoch's final artifact may become the new global best.
+
+    Candidate-local retention only proves a change still helps its own
+    targets; it cannot certify the whole Harness version. Promotion requires
+    the final selected artifact to be non-regressing against the previous
+    best: the average score must not drop, and every case the previous best
+    passed must still pass. The epsilon only absorbs judge float noise; a
+    real regression differs by at least one whole case score.
+    """
+    selected_score = _eval_score(selected_eval_ref)
+    if previous_best_score is not None and selected_score < previous_best_score - _PROMOTION_SCORE_EPSILON:
+        return False, "selected_score_regressed"
+    if previous_best_eval_ref:
+        previous_passing = _passing_case_ids(previous_best_eval_ref)
+        if previous_passing - _passing_case_ids(selected_eval_ref):
+            return False, "protected_case_regressed"
+    return True, "selected_global_non_regression"
 
 
 def _reject_mixed_opaque_snapshot_selection(

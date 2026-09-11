@@ -2442,7 +2442,7 @@ def test_epoch_checkpoint_keeps_effective_skill_and_prunes_failed_skill_once(
     assert evaluator.full_calls == 1
     assert report["accepted_candidate_count"] == 1
     assert report["epoch_checkpoints"][0]["status"] == "filtered"
-    assert report["epoch_checkpoints"][0]["post_checkpoint_replay_performed"] is False
+    assert report["epoch_checkpoints"][0]["post_checkpoint_replay_performed"] is True
     gate_status_by_skill = {
         gate["capabilities"][0]["runtime_name"]: gate["status"] for gate in report["candidate_gates"]
     }
@@ -2456,7 +2456,8 @@ def test_epoch_checkpoint_keeps_effective_skill_and_prunes_failed_skill_once(
     assert published_skills["skills"] == ["skills/baseline", "skills/keep_skill"]
     assert (published_harness / "skills" / "keep_skill" / "SKILL.md").is_file()
     assert not (published_harness / "skills" / "drop_skill").exists()
-    assert published_refs["checkpoint_filter"]["post_checkpoint_replay_performed"] is False
+    assert published_refs["checkpoint_filter"]["post_checkpoint_replay_performed"] is True
+    assert Path(published_refs["checkpoint_filter"]["selected_eval_ref_path"]).name == "eval_ref.yaml"
 
 
 def test_skill_prompt_uses_runtime_skill_tool() -> None:
@@ -4749,3 +4750,319 @@ def _write_yaml(path: Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
         encoding="utf-8",
     )
+
+
+class _PlannedReplayEvaluator:
+    """Score cases from a per-(evaluations subdir, case) plan.
+
+    Keys are (parent_dir_name, dir_name) pairs such as ``("e001", "full")`` and
+    ``("e001", "selected_full")``. Evaluations outside the plan follow the
+    standard fixture convention: candidate refs pass, source refs fail.
+    """
+
+    def __init__(self, plan: dict[tuple[str, str], dict[str, float]]) -> None:
+        self.plan = plan
+        self.calls: list[dict[str, Any]] = []
+
+    async def evaluate_batch(self, **kwargs: Any) -> str:
+        self.calls.append(kwargs)
+        output_dir = Path(kwargs["output_dir"])
+        output_dir.mkdir(parents=True, exist_ok=True)  # noqa: ASYNC240
+        key = (output_dir.parent.name, output_dir.name)
+        optimized = "candidate" in Path(kwargs["harness_refs_path"]).name
+        case_refs = []
+        for case in kwargs["cases"]:
+            case_id = str(case["case_id"])
+            score = self.plan[key][case_id] if key in self.plan else (1.0 if optimized else 0.0)
+            case_dir = output_dir / "cases" / case_id
+            case_dir.mkdir(parents=True, exist_ok=True)
+            result_path = case_dir / "result.json"
+            trace_path = case_dir / "trace.json"
+            result_path.write_text("{}", encoding="utf-8")
+            trace_path.write_text("{}", encoding="utf-8")
+            case_refs.append(
+                {
+                    "case_id": case_id,
+                    "status": "passed" if score >= 1.0 else "failed",
+                    "score": score,
+                    "result_path": str(result_path),
+                    "trace_path": str(trace_path),
+                }
+            )
+        eval_ref = output_dir / "eval_ref.yaml"
+        _write_yaml(eval_ref, {"harness_refs_path": kwargs["harness_refs_path"], "cases": case_refs})
+        return str(eval_ref)
+
+
+class _PromptModifyOptimizer:
+    """Produce one prompt-modify candidate per call in its own run dir, so
+    checkpoint filtering can still read earlier candidates' packages."""
+
+    def __init__(self, base_harness_dir: Path) -> None:
+        self.base_harness_dir = base_harness_dir
+        self.calls = 0
+
+    async def optimize(self, **kwargs: Any) -> str:
+        self.calls += 1
+        run_dir = Path(kwargs["output_dir"]) / f"member_optimization_{self.calls:03d}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        candidate = run_dir / "candidate"
+        shutil.copytree(self.base_harness_dir, candidate)
+        section = candidate / "prompt_sections" / "debugging.md"
+        section.parent.mkdir(parents=True, exist_ok=True)
+        section.write_text(f"# guidance v{self.calls}\n", encoding="utf-8")
+        _write_yaml(candidate / "prompt_sections" / "sections.yaml", {"sections": ["prompt_sections/debugging.md"]})
+        candidate_refs = run_dir / "candidate_refs.yaml"
+        _write_yaml(candidate_refs, {"harness_refs": {"solver": str(candidate)}})
+        plan_path = run_dir / "plan.yaml"
+        _write_yaml(
+            plan_path,
+            {
+                "actions": [
+                    {
+                        "action_id": f"prompt_v{self.calls}",
+                        "role": "solver",
+                        "action_group": "prompt",
+                        "operation": "modify",
+                        "target_path": "prompt_sections/debugging.md",
+                    }
+                ]
+            },
+        )
+        member_ref = run_dir / "member_ref.yaml"
+        _write_yaml(
+            member_ref,
+            {
+                "status": "success",
+                "optimized_harness_refs_path": str(candidate_refs),
+                "candidate_ready_roles": ["solver"],
+                "plan_path": str(plan_path),
+            },
+        )
+        return str(member_ref)
+
+
+def _run_filtered_epoch_scenario(
+    tmp_path: Path,
+    plan: dict[tuple[str, str], dict[str, float]],
+    *,
+    max_epochs: int = 2,
+    batch_size: int = 1,
+) -> tuple[dict[str, Any], dict[str, Any], _PlannedReplayEvaluator, list[EngineEvent]]:
+    """Run a two-epoch scenario whose epoch checkpoints go through filtering.
+
+    Epoch 1 always filters to a verified best of 2/3 with only ``case_001``
+    passing; ``plan`` shapes epoch 2's pre-filter replay and selected replay.
+    """
+    events: list[EngineEvent] = []
+
+    async def sink(event: EngineEvent) -> None:
+        events.append(event)
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    dataset_path.write_text(
+        json.dumps(
+            {
+                "cases": [
+                    {"case_id": "case_001", "input": "fix"},
+                    {"case_id": "case_002", "input": "fix"},
+                    {"case_id": "case_003", "input": "fix"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    base_harness = tmp_path / "baseline_harness"
+    (base_harness / "prompt_sections").mkdir(parents=True)
+    (base_harness / "harness.yaml").write_text("name: baseline\n", encoding="utf-8")
+    _write_yaml(base_harness / "prompt_sections" / "sections.yaml", {"sections": []})
+    harness_refs = tmp_path / "baseline_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": str(base_harness)}})
+    evaluator = _PlannedReplayEvaluator(plan)
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            max_epochs=max_epochs,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=batch_size),
+            member_optimizer=MemberOptimizerConfig(candidate_holdout_cases=0),
+        ),
+        evaluator=evaluator,
+        analyzer=_Analyzer(),
+        member_optimizer=_PromptModifyOptimizer(base_harness),
+    )
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+            ),
+            on_event=sink,
+        )
+    )
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    report = yaml.safe_load(Path(result.report_path).read_text(encoding="utf-8"))
+    return state, report, evaluator, events
+
+
+def _epoch_nodes(events: list[EngineEvent]) -> dict[str, Any]:
+    nodes: dict[str, Any] = {}
+    for event in events:
+        if isinstance(event, EventNode) and event.node.node_id.startswith("epoch-"):
+            nodes[event.node.node_id] = event.node
+    return nodes
+
+
+# Epoch 1 filters to a verified 2/3 best where only case_001 passes; each
+# epoch-2 test then shapes the pre-filter replay and the selected replay.
+_EPOCH1_PLAN = {
+    ("e001", "full"): {"case_001": 1.0, "case_002": 0.5, "case_003": 0.5},
+    ("e001", "selected_full"): {"case_001": 1.0, "case_002": 0.5, "case_003": 0.5},
+    # Batches 2 and 3 re-source against the cumulative candidate Harness after
+    # batch 1 is accepted, and the fixture fallback scores candidate refs 1.0
+    # (all passing). Pin them to still fail so every case produces its own
+    # provisional gate for the epoch checkpoint to filter.
+    ("b002", "source"): {"case_002": 0.0},
+    ("b003", "source"): {"case_003": 0.0},
+}
+
+
+def test_globally_regressed_filtered_epoch_is_rolled_back(tmp_path: Path) -> None:
+    plan = {
+        **_EPOCH1_PLAN,
+        ("e002", "full"): {"case_001": 0.0, "case_002": 1.0, "case_003": 0.0},
+        ("e002", "selected_full"): {"case_001": 0.0, "case_002": 1.0, "case_003": 0.0},
+    }
+    state, report, evaluator, events = _run_filtered_epoch_scenario(tmp_path, plan)
+    checkpoints = state["epoch_checkpoints"]
+    promoted = checkpoints[0]
+    rejected = checkpoints[1]
+
+    assert promoted["status"] == "filtered"
+    assert promoted["promotion_applied"] is True
+    assert state["best_score"] == pytest.approx(2 / 3)
+    best_refs = state["best_harness_refs_path"]
+    assert state["best_eval_ref_path"] == promoted["eval_ref_path"]
+
+    # The replayed cumulative Harness regressed, its locally retained candidate
+    # survives selection, but the final artifact still regresses globally.
+    assert rejected["status"] == "filtered"
+    assert rejected["promotion_applied"] is False
+    assert rejected["promotion_reason"] == "selected_score_regressed"
+    assert rejected["score"] == pytest.approx(1 / 3)
+    assert rejected["post_checkpoint_replay_performed"] is True
+    assert state["best_score"] == pytest.approx(2 / 3)
+    assert state["best_harness_refs_path"] == best_refs
+    assert state["retained_case_ids"] == ["case_001"]
+    assert state["current_harness_refs_path"] == best_refs
+
+    # The final artifact was fully replayed on all cases before the decision.
+    selected_calls = [call for call in evaluator.calls if Path(call["output_dir"]).name == "selected_full"]
+    assert len(selected_calls) == 2
+    assert {str(case["case_id"]) for case in selected_calls[-1]["cases"]} == {
+        "case_001",
+        "case_002",
+        "case_003",
+    }
+    assert "epoch_selections" in Path(selected_calls[-1]["harness_refs_path"]).parts
+
+    nodes = _epoch_nodes(events)
+    assert nodes["epoch-001"].type == "ADOPTED"
+    assert nodes["epoch-001"].score == pytest.approx(2 / 3)
+    assert nodes["epoch-002"].type == "UNCHANGED"
+    assert nodes["epoch-002"].adopted is False
+    assert nodes["epoch-002"].reason == "selected_score_regressed"
+
+    published = yaml.safe_load(Path(report["published_harness_refs_path"]).read_text(encoding="utf-8"))
+    assert published["published_best_score"] == pytest.approx(2 / 3)
+    assert published["published_from_harness_refs_path"] == best_refs
+
+
+def test_epoch_promotion_uses_verified_selected_artifact(tmp_path: Path) -> None:
+    plan = {
+        **_EPOCH1_PLAN,
+        ("e002", "full"): {"case_001": 0.0, "case_002": 1.0, "case_003": 0.0},
+        ("e002", "selected_full"): {"case_001": 1.0, "case_002": 1.0, "case_003": 0.5},
+    }
+    state, report, evaluator, events = _run_filtered_epoch_scenario(tmp_path / "filtered", plan)
+    checkpoints = state["epoch_checkpoints"]
+    promoted = checkpoints[1]
+
+    # The promoted checkpoint describes the verified selected artifact (5/6),
+    # not the regressed pre-filter replay (1/3).
+    assert promoted["status"] == "filtered"
+    assert promoted["promotion_applied"] is True
+    assert promoted["promotion_reason"] == "selected_global_non_regression"
+    assert promoted["score"] == pytest.approx(5 / 6)
+    assert Path(promoted["eval_ref_path"]).parent.name == "selected_full"
+    assert "epoch_selections" in Path(promoted["harness_refs_path"]).parts
+    assert promoted["post_checkpoint_replay_performed"] is True
+    assert state["best_score"] == pytest.approx(5 / 6)
+    assert state["best_eval_ref_path"] == promoted["eval_ref_path"]
+    assert state["best_harness_refs_path"] == promoted["harness_refs_path"]
+    assert state["retained_case_ids"] == ["case_001", "case_002"]
+
+    nodes = _epoch_nodes(events)
+    assert nodes["epoch-002"].type == "ADOPTED"
+    assert nodes["epoch-002"].adopted is True
+    assert nodes["epoch-002"].score == pytest.approx(5 / 6)
+
+    published = yaml.safe_load(Path(report["published_harness_refs_path"]).read_text(encoding="utf-8"))
+    assert published["published_best_score"] == pytest.approx(5 / 6)
+    assert published["published_from_harness_refs_path"] == state["best_harness_refs_path"]
+
+    # An unfiltered epoch materializes no new artifact: promotion reuses the
+    # full replay with zero extra evaluation.
+    unfiltered_state, _, unfiltered_evaluator, unfiltered_events = _run_filtered_epoch_scenario(
+        tmp_path / "unfiltered", plan={}, max_epochs=1, batch_size=3
+    )
+    checkpoints = unfiltered_state["epoch_checkpoints"]
+    assert len(checkpoints) == 1
+    checkpoint = checkpoints[0]
+
+    assert checkpoint["status"] == "verified"
+    assert checkpoint["promotion_applied"] is True
+    assert checkpoint["post_checkpoint_replay_performed"] is False
+    assert Path(checkpoint["eval_ref_path"]).parent.name == "full"
+    assert checkpoint["eval_ref_path"] == unfiltered_state["best_eval_ref_path"]
+    assert unfiltered_state["best_score"] == pytest.approx(1.0)
+    assert unfiltered_state["retained_case_ids"] == ["case_001", "case_002", "case_003"]
+    assert not [call for call in unfiltered_evaluator.calls if Path(call["output_dir"]).name == "selected_full"]
+
+    unfiltered_nodes = _epoch_nodes(unfiltered_events)
+    assert unfiltered_nodes["epoch-001"].type == "ADOPTED"
+    assert unfiltered_nodes["epoch-001"].score == pytest.approx(1.0)
+
+
+def test_protected_case_regression_blocks_promotion_despite_score_gain(tmp_path: Path) -> None:
+    plan = {
+        **_EPOCH1_PLAN,
+        ("e002", "full"): {"case_001": 0.0, "case_002": 1.0, "case_003": 0.0},
+        # Removing the failing candidate recovers case_003, so the selected
+        # artifact matches the previous best on average - but case_001, which
+        # the previous best passed, still fails.
+        ("e002", "selected_full"): {"case_001": 0.0, "case_002": 1.0, "case_003": 1.0},
+    }
+    state, report, evaluator, events = _run_filtered_epoch_scenario(tmp_path, plan)
+    checkpoints = state["epoch_checkpoints"]
+    rejected = checkpoints[1]
+
+    assert rejected["status"] == "filtered"
+    assert rejected["promotion_applied"] is False
+    assert rejected["promotion_reason"] == "protected_case_regressed"
+    assert rejected["regressed_best_case_ids"] == ["case_001"]
+    assert rejected["post_checkpoint_replay_performed"] is True
+    assert state["best_score"] == pytest.approx(2 / 3)
+    assert state["retained_case_ids"] == ["case_001"]
+    assert len([call for call in evaluator.calls if Path(call["output_dir"]).name == "selected_full"]) == 2
+
+    nodes = _epoch_nodes(events)
+    assert nodes["epoch-002"].type == "UNCHANGED"
+    assert nodes["epoch-002"].adopted is False
+    assert nodes["epoch-002"].reason == "protected_case_regressed"
+
+    published = yaml.safe_load(Path(report["published_harness_refs_path"]).read_text(encoding="utf-8"))
+    assert published["published_best_score"] == pytest.approx(2 / 3)
+    assert published["published_from_harness_refs_path"] == state["best_harness_refs_path"]

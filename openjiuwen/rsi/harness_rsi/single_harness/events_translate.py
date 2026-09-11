@@ -216,6 +216,9 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
                 changes.extend(_changes(candidate.get("capabilities")))
     # A filtered or rolled-back Harness was not the one in the full replay.
     score = _number(checkpoint.get("score")) if selected and selected == evaluated else None
+    reason = None
+    if not running and not adopted:
+        reason = str(checkpoint.get("promotion_reason") or "") or "No Harness change passed the acceptance checks"
     return EventNode(
         node=RsiTreeNode(
             node_id=f"epoch-{epoch:03d}",
@@ -226,7 +229,7 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             score=score,
             summary=_summary(changes, "Optimizing Harness" if running else "No retained Harness change"),
             snapshot_artifact_id=None,
-            reason=None if running or adopted else "No Harness change passed the acceptance checks",
+            reason=reason,
             failure_class=None,
             changes=changes,
             extra={
