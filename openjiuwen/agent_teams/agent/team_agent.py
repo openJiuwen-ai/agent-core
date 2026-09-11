@@ -549,6 +549,7 @@ class TeamAgent(BaseAgent):
             spec,
             ctx,
             on_teammate_created=self._on_teammate_created,
+            on_teammate_revive=self._revive_error_teammate,
             on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
@@ -1022,6 +1023,35 @@ class TeamAgent(BaseAgent):
             session=self.session_id,
             spawn_config=SpawnConfig(health_check_timeout=30, health_check_interval=50),
         )
+
+    async def _revive_error_teammate(self, member_name: str) -> None:
+        """发配按需拉起（spawn-on-dispatch）：ERROR（进程级失败）成员被发消息时
+        后台重启。CAS ERROR→RESTARTING 抢重启所有权，与 recover_team / 健康检查
+        路径互斥；失败说明已有重启在进行，直接放弃。邮箱行已持久化，成员复活后
+        的 initial mailbox/task sweep 会消费积压。"""
+        if self.role != TeamRole.LEADER:
+            return
+        team_backend = self._configurator.team_backend
+        if team_backend is None:
+            return
+        try:
+            won = await team_backend.db.member.try_transition_member_status(
+                member_name,
+                team_backend.team_name,
+                MemberStatus.ERROR,
+                MemberStatus.RESTARTING,
+            )
+        except Exception as e:
+            team_logger.warning(
+                "[{}] revive-dispatch status CAS failed for {}: {}",
+                self._member_name() or "?",
+                member_name,
+                e,
+            )
+            return
+        if not won:
+            return
+        await self._spawn_manager.restart_teammate(member_name)
 
     async def _mark_team_cleaned(self) -> None:
         """Latch ``state.team_cleaned`` from the ``clean_team`` success path.

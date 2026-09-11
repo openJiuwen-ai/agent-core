@@ -288,7 +288,9 @@ class SpawnManager:
         if team_backend:
             team_name = self._configurator.team_name
             if team_name:
-                await team_backend.db.member.update_member_status(member_name, team_name, MemberStatus.ERROR.value)
+                # set_member_status：DAO 直写补发 MemberStatusChangedEvent，
+                # 前端不再只能等快照轮询才发现成员失败
+                await team_backend.set_member_status(member_name, MemberStatus.ERROR)
         return False
 
     async def on_teammate_unhealthy(self, member_name: str) -> None:

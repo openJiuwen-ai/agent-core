@@ -136,6 +136,7 @@ class AgentConfigurator:
         self._resources = PrivateAgentResources()
         self.leader_allocation: Optional[Allocation] = None
         self._on_teammate_created: Optional[Any] = None
+        self._on_teammate_revive: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Field forwarding to TeamInfra / PrivateAgentResources
@@ -248,6 +249,7 @@ class AgentConfigurator:
         ctx: TeamRuntimeContext,
         *,
         on_teammate_created=None,
+        on_teammate_revive=None,
         on_before_team_cleaned=None,
         on_team_cleaned=None,
         on_team_built=None,
@@ -263,6 +265,7 @@ class AgentConfigurator:
         )
         self._spawn_payload_builder = SpawnPayloadBuilder(spec, ctx)
         self._on_teammate_created = on_teammate_created
+        self._on_teammate_revive = on_teammate_revive
 
         messager_config = ctx.messager_config
         member_name = ctx.member_name
@@ -878,6 +881,7 @@ class AgentConfigurator:
             on_team_cleaned=on_team_cleaned,
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
+            member_reviver=self._on_teammate_revive,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager

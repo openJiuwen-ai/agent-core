@@ -374,10 +374,11 @@ class CoordinationKernel:
             if current in {MemberStatus.UNSTARTED, MemberStatus.SHUTDOWN}:
                 continue
             try:
-                await team_backend.db.member.update_member_status(
+                # set_member_status：DAO 直写补发 MemberStatusChangedEvent，
+                # 前端实时看到 PAUSED/STOPPED 而非等快照轮询
+                await team_backend.set_member_status(
                     member.member_name,
-                    team_name,
-                    target_status.value,
+                    target_status,
                 )
             except Exception as e:
                 team_logger.error(
