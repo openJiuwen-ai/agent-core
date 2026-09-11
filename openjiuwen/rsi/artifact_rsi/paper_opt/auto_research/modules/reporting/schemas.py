@@ -15,25 +15,17 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
     ResearchBrief,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import Reflection
 
-
-class ResearchContext(BaseModel):
-    """Derived state from a previous paper — see
-    docs/reporting_iteration_design.md. Always re-derived from a compiled
-    paper by the (not yet implemented) Preprocessing step, never
-    hand-updated by ReportingAgent itself: Paper is the source of truth,
-    ResearchContext is derived state, and re-deriving it every time is what
-    keeps the two from silently drifting apart. Minimal shape for Phase 1 of
-    that design — just enough to type ReportingInput.previous_context
-    correctly ahead of Preprocessing (Phase 3) and Claim Management
-    (Phase 2/4) actually existing.
-    """
-
-    problem: str = ""
-    method: str = ""
-    claims: list[dict] = Field(default_factory=list)
-    limitations: list[str] = Field(default_factory=list)
+__all__ = [
+    "FigureEdge",
+    "FigureNode",
+    "MethodFigureSpec",
+    "ReportingInput",
+    "ReportingOutput",
+    "ResearchContext",
+]
 
 
 class ReportingInput(BaseModel):

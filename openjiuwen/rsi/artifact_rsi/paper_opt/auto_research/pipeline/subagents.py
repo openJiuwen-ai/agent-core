@@ -1617,6 +1617,7 @@ class ReportingAdapter:
                     plan=plan,
                     result=result,
                     reflection=state.latest_reflection,
+                    previous_context=state.original_task.previous_context,
                     repair_instruction=contract.repair_instruction,
                     attempt=attempt,
                 )

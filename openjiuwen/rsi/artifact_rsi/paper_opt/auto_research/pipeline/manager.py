@@ -55,6 +55,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     report_requirement,
     utc_now,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.agent import ReportingAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.hitl import (
@@ -721,6 +722,7 @@ class ManagerRuntime:
         initial_prompt: str = "",
         task_mode: str = "create_new_paper",
         followup: str = "",
+        previous_context: ResearchContext | None = None,
     ) -> TerminalReport:
         existing = try_load_state(run_id) if resume and run_id else None
         if resume and run_id and existing is None:
@@ -732,6 +734,8 @@ class ManagerRuntime:
             if not should_continue:
                 return state.terminal  # type: ignore[return-value]
         else:
+            if task_mode != "modify_paper" and previous_context is not None:
+                raise ValueError("previous_context is only accepted when task_mode='modify_paper'")
             task = OriginalTask(
                 topic=topic,
                 objective=objective,
@@ -739,6 +743,7 @@ class ManagerRuntime:
                 initial_prompt=initial_prompt,
                 task_mode=task_mode,
                 initial_research_paths=list(research_paths or []),
+                previous_context=previous_context,
                 run_id=run_id or new_run_id(),
             )
             state = build_initial_state(

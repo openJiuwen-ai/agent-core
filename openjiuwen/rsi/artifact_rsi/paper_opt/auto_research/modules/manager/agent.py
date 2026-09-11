@@ -23,6 +23,8 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
 AGENT_CARD_ID = "manager-agent"
 AGENT_CARD_NAME = "manager"
 _SYSTEM_PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "system.md"
+_PROMPT_CHARS = 2_500
+_KEEP_INITIAL_PATHS = 6
 
 
 def _load_system_prompt() -> str:
@@ -72,6 +74,39 @@ def _build_model_from_config(config: dict[str, Any]):
             top_p=float(_cfg_or("top_p", 0.9)),
         ),
     )
+
+
+def _clip_text(text: str, max_chars: int) -> tuple[str, int]:
+    cleaned = (text or "").strip()
+    if max_chars <= 0:
+        return "", len(cleaned)
+    if len(cleaned) <= max_chars:
+        return cleaned, 0
+    return cleaned[:max_chars].rstrip(), len(cleaned) - max_chars
+
+
+def _shrink_str_list(data: dict[str, Any], key: str, *, keep: int) -> None:
+    items = data.get(key)
+    if not isinstance(items, list) or not items:
+        return
+    total = len(items)
+    data[f"{key.removesuffix('s')}_count" if key.endswith("s") else f"{key}_count"] = total
+    if total <= keep:
+        return
+    data[key] = items[:keep]
+    data[f"omitted_{key}_count"] = total - keep
+
+
+def _compact_original_task(snapshot: ManagerSnapshot) -> dict[str, Any]:
+    data = snapshot.original_task.model_dump(mode="json")
+    # Host-only payload for ReportingAgent. The manager LLM uses initial_prompt.
+    data.pop("previous_context", None)
+    prompt, omitted = _clip_text(str(data.get("initial_prompt") or ""), _PROMPT_CHARS)
+    data["initial_prompt"] = prompt
+    if omitted:
+        data["initial_prompt_omitted_chars"] = omitted
+    _shrink_str_list(data, "initial_research_paths", keep=_KEEP_INITIAL_PATHS)
+    return data
 
 
 def _compact_plan(plan: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -130,7 +165,7 @@ def render_manager_query(snapshot: ManagerSnapshot) -> str:
     body = {
         "routing": routing,
         "round_index": snapshot.round_index,
-        "original_task": snapshot.original_task.model_dump(mode="json"),
+        "original_task": _compact_original_task(snapshot),
         "task_state": _compact_task_state(snapshot),
         "reports": reports,
     }

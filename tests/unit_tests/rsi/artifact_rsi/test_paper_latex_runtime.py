@@ -126,6 +126,7 @@ async def test_reporting_agent_continues_after_preflight_failure(tmp_path, monke
         result=_Result(),
         attempt=1,
         repair_instruction="",
+        previous_context=None,
     )
 
     try:

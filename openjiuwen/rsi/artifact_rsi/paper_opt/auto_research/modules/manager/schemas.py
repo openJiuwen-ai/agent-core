@@ -17,6 +17,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
     _reject_unsafe_relative_path,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import Reflection
 
 ControlSignal = Literal["EXECUTE", "DONE", "BLOCKED"]
@@ -70,6 +71,7 @@ class OriginalTask(BaseModel):
     task_mode: TaskMode = "create_new_paper"
     initial_prompt: str = ""
     initial_research_paths: list[str] = Field(default_factory=list)
+    previous_context: ResearchContext | None = None
     run_id: str = Field(default_factory=new_run_id)
 
     @field_validator("topic")

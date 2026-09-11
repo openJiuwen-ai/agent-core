@@ -309,7 +309,12 @@ def assemble_document(
     return sanitize_for_pdflatex(document)
 
 
-def render_results_table(rows: list[tuple[str, dict[str, str]]], metric_order: list[str]) -> str:
+def render_results_table(
+    rows: list[tuple[str, dict[str, str]]],
+    metric_order: list[str],
+    *,
+    caption: str = "Results by variant.",
+) -> str:
     """Deterministically render the results as a LaTeX ``tabular`` — host
     builds the table, the model writes prose around it, mirroring
     ``reporting._build_task_prompt``'s host-rendered variant list
@@ -330,8 +335,103 @@ def render_results_table(rows: list[tuple[str, dict[str, str]]], metric_order: l
     for name, metrics in rows:
         cells = [metrics.get(metric, "--") for metric in metric_order]
         lines.append(" & ".join([name, *cells]) + r" \\")
-    lines.extend([r"\bottomrule", r"\end{tabular}", r"\caption{Results by variant.}", r"\end{table}"])
+    lines.extend([r"\bottomrule", r"\end{tabular}", f"\\caption{{{caption}}}", r"\end{table}"])
     return "\n".join(lines)
+
+
+_NUMBER_CELL_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_NAME_TOKEN_RE = re.compile(r"^[A-Za-z][\w-]*$")
+
+
+def _is_number_cell(text: str) -> bool:
+    return bool(_NUMBER_CELL_RE.fullmatch(text.strip()))
+
+
+def parse_flattened_variant_table(
+    text: str,
+) -> tuple[list[str], list[tuple[str, list[str]]]] | None:
+    """Recover (metric_names, [(variant, cells)]) from cleaned-LaTeX table text."""
+    match = re.search(r"Variant\s*&", text, flags=re.IGNORECASE)
+    if match is None:
+        return None
+    body = re.split(r"\btabular\b|\bThe proposed\b", text[match.end() :], maxsplit=1)[0]
+    cells = [cell.strip() for cell in body.split("&") if cell.strip()]
+    if len(cells) < 3:
+        return None
+
+    metrics: list[str] = []
+    first_variant: str | None = None
+    rest_start = 0
+    for index, cell in enumerate(cells):
+        tokens = cell.split()
+        if (
+            index > 0
+            and len(tokens) >= 2
+            and _NAME_TOKEN_RE.fullmatch(tokens[-1])
+            and not _is_number_cell(tokens[-1])
+        ):
+            metric_tokens = tokens[:-1]
+            if metric_tokens and all(not _is_number_cell(token) for token in metric_tokens):
+                metrics.append(" ".join(metric_tokens).replace(" ", "_"))
+                first_variant = tokens[-1]
+                rest_start = index + 1
+                break
+        if _is_number_cell(cell):
+            return None
+        metrics.append(cell.replace(" ", "_"))
+    if first_variant is None or not metrics:
+        return None
+
+    n_metrics = len(metrics)
+    remaining = cells[rest_start:]
+    rows: list[tuple[str, list[str]]] = []
+    variant = first_variant
+    while variant is not None:
+        values: list[str] = []
+        next_variant: str | None = None
+        while len(values) < n_metrics and remaining:
+            cell = remaining.pop(0)
+            tokens = cell.split()
+            if (
+                len(values) == n_metrics - 1
+                and len(tokens) >= 2
+                and _is_number_cell(tokens[0])
+                and _NAME_TOKEN_RE.fullmatch(tokens[-1])
+            ):
+                values.append(tokens[0])
+                next_variant = tokens[-1]
+                break
+            if not _is_number_cell(tokens[0] if tokens else cell):
+                return None
+            values.append(tokens[0])
+        if len(values) != n_metrics:
+            return None
+        rows.append((variant, values))
+        variant = next_variant
+    return (metrics, rows) if rows else None
+
+
+def render_prior_results_table(texts: list[str]) -> str:
+    """Host-render a historical results table from prior-paper claim/setup text."""
+    for text in texts:
+        parsed = parse_flattened_variant_table(text)
+        if parsed is None:
+            continue
+        metrics, raw_rows = parsed
+        escaped_metrics = [escape_latex(name) for name in metrics]
+        rows = [
+            (
+                escape_latex(name),
+                {escaped_metrics[i]: escape_latex(values[i]) for i in range(len(metrics))},
+            )
+            for name, values in raw_rows
+        ]
+        return render_results_table(
+            rows,
+            escaped_metrics,
+            caption="Prior-paper published results (historical evidence; not re-run).",
+        )
+    return ""
 
 
 @dataclass
