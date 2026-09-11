@@ -372,3 +372,34 @@ __all__ = [
     "DeterministicSignals",
     "EvaluationSummaryInput",
 ]
+
+
+def project_execution_history(trace_data: Any) -> dict[str, Any]:
+    """Retain recorded observations and citations, not provider/config metadata."""
+    traces = trace_data.get("traces", []) if isinstance(trace_data, dict) else []
+    history = []
+    for trace in traces if isinstance(traces, list) else []:
+        if not isinstance(trace, dict) or not isinstance(trace.get("messages"), list):
+            continue
+        messages = []
+        for message in trace["messages"]:
+            if not isinstance(message, dict) or message.get("role") in ("system", "developer"):
+                continue
+            message_fields = ("role", "content", "message_index", "step_pointer")
+            row = {key: message[key] for key in message_fields if key in message}
+            calls = message.get("tool_calls", [])
+            call_fields = ("name", "input", "output", "error", "step_pointer")
+            row["tool_calls"] = [
+                {key: call[key] for key in call_fields if key in call}
+                for call in (calls if isinstance(calls, list) else [])
+                if isinstance(call, dict)
+            ]
+            messages.append(row)
+        history.append(
+            {
+                "trace_id": trace.get("trace_id", ""),
+                "role": trace.get("member_role", trace.get("role", "")),
+                "messages": messages,
+            }
+        )
+    return {"traces": history}

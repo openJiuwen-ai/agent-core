@@ -266,14 +266,16 @@ provider session/Turn 协议合并。
 - **member**（cli-agent 三方团队成员）：`ExternalTeamClient.connect` 建最小 `TeamBackend` +
   `create_team_tools(role="teammate")`，对外暴露**真实** teammate `TeamTool`
   （`view_task` / `claim_task[claimed|completed]` / `send_message`，结果即 `map_result()`
-  文本，与进程内成员逐字一致）+ 外部专有 `read_inbox`（原生 push、外部 pull）。`complete_task`
+  文本，与进程内成员逐字一致）。入站消息与原生成员同路——父进程 coordination push 进 CLI，
+  **不暴露** pull 工具（operator 专有的 `read_inbox` 对 member 不可见）。`complete_task`
   折进 `claim_task(status=completed)`、list/get/claimable 折进 `view_task`。MCP instructions
   空（系统提示词已在 spawn 时直接注入 CLI，见 [[F_25]]）。
 - **operator**（团队外非成员控制接口，默认 scope）：`ExternalTeamClient` 的 per-op 方法
   （send/broadcast/list/get/claimable/claim/complete/update/list_members + `create_task`）+
-  `fetch_inbox`/`watch`，全团队控制面；MCP instructions = 控制工作流。
+  `fetch_inbox`/`watch`，全团队控制面；operator 没有自己的 coordination 层，MCP 工具集
+  含 operator 专有的 `read_inbox` pull 工具；MCP instructions = 控制工作流。
 
-公共件：`client.tools`（member 真实工具字典）、`client.read_inbox()`（`<team-inbound>`/`<team-event>` XML）、
+公共件：`client.tools`（member 真实工具字典）、`client.read_inbox()`（operator 侧 pull，`<team-inbound>`/`<team-event>` XML）、
 `client.bind_session_context()`（每调用重绑 session/language contextvar）。
 - `external/format.py`：纯函数把消息 / 任务板渲染成与进程内 dispatcher 一致的
   `<team-inbound>`/`<team-event>` XML（复用 `inbound_render` 结构 + `i18n.t` note 文案）；

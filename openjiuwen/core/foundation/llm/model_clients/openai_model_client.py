@@ -45,7 +45,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    _deepseek_reasoning_content,
+    apply_message_transforms,
+    model_requires_reasoning_content,
+)
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
@@ -946,6 +950,8 @@ class OpenAIModelClient(BaseModelClient):
             self.model_client_config,
             params["messages"],
         )
+        if model_requires_reasoning_content(params.get("model")):
+            params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()
         kv_mode = self._kv_cache_mode()

@@ -232,12 +232,14 @@ STRINGS: dict[str, str] = {
         "a model so the agent uses its own default model"
     ),
     "spawn_external_cli.fallback_model_name": (
-        "Required. Select this model from the team model pool, choosing one whose model API protocol is "
-        "compatible with the protocol supported by this third-party agent. It is used for automatic fallback "
+        "Required, but may be null when no compatible model exists. When a compatible model is available, "
+        "select it from the team model pool according to the model API protocol supported by this third-party "
+        "agent. Prefer the current model when it is present in the pool and its protocol is compatible; when the "
+        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
+        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
         "when the agent uses its own default model but authentication is unavailable. It applies only to "
-        "authentication failures explicitly reported by the runtime. If the model is unavailable, incompatible, "
-        "or the agent does not support authentication fallback, its own default model can still be used without "
-        "automatic fallback"
+        "authentication failures explicitly reported by the runtime. Use null only when the team model pool has "
+        "no compatible model; the agent can then use its own default model without automatic fallback"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/member/shutdown_member.md

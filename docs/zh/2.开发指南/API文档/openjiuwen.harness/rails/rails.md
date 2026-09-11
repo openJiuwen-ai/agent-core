@@ -36,7 +36,9 @@ class DeepAgentRail(AgentRail): ...
 | `HeartbeatRail` | 心跳护栏，周期性写入 HEARTBEAT.md 状态文件 |
 | `ProgressiveToolRail` | 渐进式工具护栏，根据需要动态暴露/隐藏工具，控制可见工具数量 |
 | `TeamSkillCreateRail` | 团队技能创建护栏，自动检测多 Agent 协作模式并建议创建团队技能 |
+| `TeamSkillEvolutionRail` | 使用聚合 team trajectory 演进已有 team skill，并通过审批治理经验记录 |
 | `TeamSkillRail` | `TeamSkillEvolutionRail` 的兼容 alias，使用聚合 team trajectory 演进已有 team skill，并通过审批治理经验记录 |
+| `TrajectoryRail` | 为每次完成的 Agent invoke 归档一条 canonical trajectory |
 
 ---
 
@@ -63,7 +65,10 @@ signals -> local apply preview -> pending approval 或 auto-approved -> Evolutio
 
 - `configure_skill_evolution(...)`：普通 skill 演进。
 - `configure_skill_evolution(..., team=True)`：team/swarm 演进。
+- `configure_skill_evolution_runtime(...)`：为已经初始化的 Agent 立即注册演进 Rails。
+- `unconfigure_skill_evolution(...)`：移除已配置的演进 stack。
 
 - 普通 `SkillEvolutionRail` 见 [`skill_evolution_rail`](./evolution/skill_evolution_rail.md)。
 - `TeamSkillCreateRail`、`TeamSkillEvolutionRail` 和 `TeamSkillRail` 兼容 alias 见 [`team_skill_evolution_rail`](./evolution/team_skill_evolution_rail.md)。
+- 按 invoke 归档 canonical trajectory 见 [`trajectory_rail`](./evolution/trajectory_rail.md)。
 - 演进 host events 以 `OutputSchema` 缓存在 rail 中。canonical drain API 是 `drain_pending_host_events()`；`drain_pending_approval_events()` 是兼容 wrapper。

@@ -14,8 +14,8 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.extensions.observability.otlp_codec import (
-    encode_recording_span_snapshot_to_otlp_json,
     encode_span_to_otlp_json,
+    snapshot_readable_span,
 )
 from openjiuwen.extensions.observability.semconv import (
     AT_SESSION_ID,
@@ -38,11 +38,46 @@ from openjiuwen.extensions.observability.semconv import (
 )
 
 
+class _LazyOtlpPayload:
+    """One frozen span's OTLP JSON, encoded on first read rather than on capture.
+
+    ``SpanProcessor`` callbacks run on the thread that started or ended the span,
+    which for an async runtime is normally the event loop. Encoding there costs
+    around two orders of magnitude more than freezing the span, and a snapshot a
+    consumer later coalesces away would be encoded for nothing. Holding the frozen
+    span and encoding on first read moves that cost onto the consumer's own thread
+    and skips it entirely for records nobody reads.
+
+    The wrapped span must already be immutable: an ended ``ReadableSpan``, or a
+    copy taken by ``snapshot_readable_span`` for a still-recording one.
+    """
+
+    __slots__ = ("_encoded", "_lock", "_span")
+
+    def __init__(self, span: ReadableSpan) -> None:
+        self._span = span
+        self._encoded: bytes | None = None
+        self._lock = threading.Lock()
+
+    @property
+    def raw_json(self) -> bytes:
+        """Return the OTLP JSON bytes, encoding them once on first access."""
+        encoded = self._encoded
+        if encoded is not None:
+            return encoded
+        with self._lock:
+            if self._encoded is None:
+                self._encoded = encode_span_to_otlp_json(self._span)
+            return self._encoded
+
+
 @dataclass(frozen=True, slots=True)
 class OtlpSpanRecord:
     """One complete single-span OTLP request plus immutable routing hints."""
 
-    raw_json: bytes
+    # Identity fields alone decide record equality: the payload is derived from
+    # them, and comparing it would force the encoding this type exists to defer.
+    payload: _LazyOtlpPayload = field(compare=False, repr=False)
     trace_id: str
     span_id: str
     parent_span_id: str | None
@@ -62,12 +97,18 @@ class OtlpSpanRecord:
     execution_subject_parent_id: str | None = None
     execution_subject_session_id: str | None = None
 
+    @property
+    def raw_json(self) -> bytes:
+        """Return the complete single-span OTLP request bytes."""
+        return self.payload.raw_json
+
 
 @dataclass(frozen=True, slots=True)
 class OtlpSpanSnapshotRecord:
     """One independently recoverable current snapshot of a recording span."""
 
-    raw_json: bytes
+    # See OtlpSpanRecord.payload for why the payload stays out of equality.
+    payload: _LazyOtlpPayload = field(compare=False, repr=False)
     trace_id: str
     span_id: str
     parent_span_id: str | None
@@ -87,6 +128,11 @@ class OtlpSpanSnapshotRecord:
     execution_subject_kind: str | None = None
     execution_subject_parent_id: str | None = None
     execution_subject_session_id: str | None = None
+
+    @property
+    def raw_json(self) -> bytes:
+        """Return the OTLP-shaped bytes of this recording-span snapshot."""
+        return self.payload.raw_json
 
 
 class OtlpSpanRecordConsumer(Protocol):
@@ -450,7 +496,8 @@ class SpanRecordProcessor(SpanProcessor):
 
         attributes = getattr(span, "attributes", None) or {}
         return OtlpSpanRecord(
-            raw_json=encode_span_to_otlp_json(span),
+            # An ended span is already immutable, so it needs no defensive copy.
+            payload=_LazyOtlpPayload(span),
             trace_id=trace_id,
             span_id=span_id,
             parent_span_id=parent_span_id,
@@ -501,7 +548,8 @@ class SpanRecordProcessor(SpanProcessor):
 
         attributes = getattr(span, "attributes", None) or {}
         return OtlpSpanSnapshotRecord(
-            raw_json=encode_recording_span_snapshot_to_otlp_json(span),
+            # The span is still recording, so freeze it before handing it on.
+            payload=_LazyOtlpPayload(snapshot_readable_span(span)),
             trace_id=trace_id,
             span_id=span_id,
             parent_span_id=parent_span_id,

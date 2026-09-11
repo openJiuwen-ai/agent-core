@@ -1156,5 +1156,3 @@ class TestMultiRoundConversationTraceContinuity:
         round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
         assert len(round2_spans) == 1
         assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
-
-

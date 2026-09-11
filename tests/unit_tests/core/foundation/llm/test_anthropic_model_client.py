@@ -880,31 +880,43 @@ class TestSamplingParams:
 
     def test_temperature_wins_when_both_set(self):
         params = self._params(_make_client(), temperature=0.6, top_p=0.8)
-        assert params["temperature"] == 0.6
+        extra = params.get("extra_body") or {}
+        assert extra.get("temperature") == 0.6
+        assert "temperature" not in params
         assert "top_p" not in params
+        assert "top_p" not in extra
 
     def test_config_defaults_do_not_override_anthropic_sampling(self):
         # Common config defaults are OpenAI-oriented. Omitting both lets the
         # Anthropic model choose its protocol default and avoids Claude 4.7+ 400s.
         params = self._params(_make_client())
+        extra = params.get("extra_body") or {}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_top_p_forwarded_when_temperature_absent(self):
         # temperature can only be absent if the config itself has no default.
         client = _make_client()
         client.model_config.temperature = None
         params = self._params(client, top_p=0.8)
-        assert params["top_p"] == 0.8
+        extra = params.get("extra_body") or {}
+        assert extra.get("top_p") == 0.8
+        assert "top_p" not in params
         assert "temperature" not in params
+        assert "temperature" not in extra
 
     def test_default_top_p_dropped_when_temperature_absent(self):
         # top_p=1.0 is the default (no nucleus truncation); skip it entirely.
         client = _make_client()
         client.model_config.temperature = None
         params = self._params(client, top_p=1.0)
+        extra = params.get("extra_body") or {}
         assert "top_p" not in params
         assert "temperature" not in params
+        assert "top_p" not in extra
+        assert "temperature" not in extra
 
     def test_anthropic_native_reasoning_controls_are_forwarded(self):
         client = _make_client()
@@ -914,10 +926,13 @@ class TestSamplingParams:
             output_config={"effort": "high"},
         )
         params = self._params(client, model="claude-opus-4-6")
+        extra = params.get("extra_body") or {}
         assert params["thinking"] == {"type": "adaptive"}
         assert params["output_config"] == {"effort": "high"}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_compatible_endpoint_reasoning_effort_is_forwarded(self):
         client = _make_client()
@@ -939,6 +954,27 @@ class TestSamplingParams:
             "reasoning_effort": "high",
         }
 
+    def test_sampling_merges_into_existing_extra_body(self):
+        client = _make_client()
+        client.model_config.temperature = None
+        client.model_config = ModelRequestConfig(
+            model="glm-5",
+            extra_body={"vendor_flag": True},
+        )
+        params = self._params(client, model="glm-5", temperature=0.4)
+        extra = params["extra_body"]
+        assert extra["vendor_flag"] is True
+        assert extra["temperature"] == 0.4
+        assert "temperature" not in params
+
+    def test_top_k_goes_to_extra_body(self):
+        client = _make_client()
+        client.model_config.temperature = None
+        params = self._params(client, top_k=5)
+        extra = params.get("extra_body") or {}
+        assert extra.get("top_k") == 5
+        assert "top_k" not in params
+
     def test_current_claude_model_drops_explicit_custom_sampling(self):
         params = self._params(
             _make_client(),
@@ -946,8 +982,11 @@ class TestSamplingParams:
             temperature=0.6,
             top_p=0.8,
         )
+        extra = params.get("extra_body") or {}
         assert "temperature" not in params
         assert "top_p" not in params
+        assert "temperature" not in extra
+        assert "top_p" not in extra
 
     def test_base_message_metadata_survives_common_conversion(self):
         client = _make_client()

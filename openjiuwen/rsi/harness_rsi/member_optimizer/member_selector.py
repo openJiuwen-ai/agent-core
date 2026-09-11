@@ -35,7 +35,6 @@ _SEVERITY_WEIGHTS: dict[str, int] = {
     "low": 1,
 }
 _INSUFFICIENT_ROLE_EVIDENCE = MechanismType.INSUFFICIENT_ROLE_EVIDENCE.value
-_UNSUPPORTED_OPTIMIZATION_SURFACES = frozenset({"rail"})
 
 
 def _severity_weight(severity: str) -> int:
@@ -196,7 +195,7 @@ class MemberSelector:
                     if m.issue_id == ri.issue_id and m.mechanism_type:
                         mechanism_types.append(m.mechanism_type)
                     surface = str(getattr(m, "optimization_surface", "") or "").strip()
-                    if m.issue_id == ri.issue_id and surface and surface not in _UNSUPPORTED_OPTIMIZATION_SURFACES:
+                    if m.issue_id == ri.issue_id and surface:
                         optimization_surfaces.append(surface)
 
             harness_ref_path = ""

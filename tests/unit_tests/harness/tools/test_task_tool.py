@@ -175,6 +175,39 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(cleanup_calls, 1)
 
+    async def test_dispatch_hook_forwards_explicit_session(self) -> None:
+        calls = []
+        child_session = Session(session_id="child_session")
+        inputs = {"query": "run task"}
+
+        class InvokeOnlySubAgent:
+            async def invoke(self, received_inputs, *, session):
+                calls.append(("invoke", received_inputs, session))
+                return {"output": "done"}
+
+        class StreamingSubAgent:
+            async def stream(self, received_inputs, *, session):
+                calls.append(("stream", received_inputs, session))
+                yield {
+                    "type": "answer",
+                    "payload": {"output": "done", "result_type": "answer"},
+                }
+
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=SimpleNamespace(),
+        )
+        for subagent in (InvokeOnlySubAgent(), StreamingSubAgent()):
+            result = await tool._invoke_subagent(
+                subagent, inputs, parent_session_id="parent_session", session=child_session,
+            )
+            self.assertEqual(result["output"], "done")
+
+        self.assertEqual(
+            calls,
+            [("invoke", inputs, child_session), ("stream", inputs, child_session)],
+        )
+
     async def test_task_tool_cleans_up_after_subagent_failure(self) -> None:
         cleanup_calls = 0
 

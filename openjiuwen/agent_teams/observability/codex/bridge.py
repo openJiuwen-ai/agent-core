@@ -1183,13 +1183,31 @@ class CodexSpanBridge:
     def record_error(self, error: Any, *, will_retry: bool = False) -> None:
         span = self._turn_span
         if span is not None and span.is_recording():
+            detail = self._redact_diagnostic(error)
             span.add_event(
                 "codex.error",
                 {
-                    "codex.error.detail": self._redact_diagnostic(error),
+                    "codex.error.detail": detail,
                     "codex.error.will_retry": will_retry,
                 },
             )
+            # Attribute mirror: OTLP UIs such as Langfuse drop span events, so
+            # the last SDK error must also live on an attribute to be visible.
+            span.set_attribute("codex.error.last", detail)
+            span.set_attribute("codex.error.last_will_retry", will_retry)
+
+    def record_context_compacted(self) -> None:
+        """Stamp a native Codex context compaction on the current turn span.
+
+        Codex compacts the thread context on its own; without this marker the
+        trace shows an unexplained context shrink. Mirrors ``record_error``:
+        both a span event (OTel-native backends) and an attribute (OTLP UIs
+        such as Langfuse drop span events).
+        """
+        span = self._turn_span
+        if span is not None and span.is_recording():
+            span.add_event("codex.context_compacted", {})
+            span.set_attribute("codex.context_compacted", True)
 
     def record_external_runtime_failure(
         self,
@@ -1207,6 +1225,11 @@ class CodexSpanBridge:
         trace. Correlates the failed mailbox message, round result and logs
         with the member round via ``failure_id`` / ``round_id``. No-op when no
         recording span is available (observability is best-effort).
+
+        The failure is written to both span events (for OTel-native backends)
+        and span attributes: OTLP-based UIs such as Langfuse map spans to
+        observations and silently drop span events, so attributes are the only
+        surface where the failure is visible there.
         """
         span = self._turn_span
         if span is None or not span.is_recording():
@@ -1233,6 +1256,21 @@ class CodexSpanBridge:
                 "external_runtime.agent_kind": "codex",
             },
         )
+        if span.is_recording():
+            span.set_attribute("external_runtime.failure_id", failure_id)
+            span.set_attribute("external_runtime.failure_category", category)
+            span.set_attribute("external_runtime.failure_phase", phase)
+            if round_id is not None:
+                span.set_attribute("external_runtime.failure_round_id", round_id)
+            span.set_attribute("external_runtime.failure_summary", summary)
+            # Surface the failure on the span status itself: the turn stream
+            # ends normally after a finalized failure (the SDK emits
+            # turn/completed with turn.status=failed rather than raising), so
+            # without this the span reads as a successful empty turn in
+            # attribute-only UIs.
+            from opentelemetry.trace import Status, StatusCode
+
+            span.set_status(Status(StatusCode.ERROR, summary))
 
     async def wait_for_native_observations(self, *, timeout_s: float = 1.0) -> None:
         """Allow rollout and fallback OTel exporters to flush after the stream."""

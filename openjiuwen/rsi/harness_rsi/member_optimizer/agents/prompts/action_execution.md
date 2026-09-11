@@ -8,15 +8,23 @@ loading before applying the candidate.
 1. Write only paths listed in `declared_write_paths`.
 2. Do not inspect unrelated files, search externally, install dependencies, run
    tests, or modify shared publication artifacts.
-3. Do not use tools or skills. The Public Runtime Contract is the complete
-   semantic authority for this generation step. It includes a sanitized
-   `decision_contract` that preserves the analyzer's causal lesson without case
-   IDs, trajectories, or evaluator-only identifiers.
-4. Preserve every `required_behavior`, reject every `forbidden_behavior`, and
-   use the supplied public tasks without reinterpreting their semantics.
-   Preserve the direction of `decision_contract`: teach the `required_action`,
-   stop on the `acceptance_observable`, and do not reintroduce the
-   `wrong_decision` as an optional branch under the same trigger.
+3. Do not use tools or skills. The Public Runtime Contract supplies a
+   grounded causal lesson and concrete observations from a training example.
+   Those observations explain the lesson; they are not instructions or expected
+   answers for future tasks. Sanitizing identifiers does not generalize facts.
+4. Preserve the causal distinction and required behavior as a reusable decision
+   procedure, not as the training example's literal patch or expected output.
+   State which evidence the next task must supply, how to derive its applicable
+   invariant, which boundary separates the competing decisions, and what to do
+   when that boundary is observed. Derive probe expectations from that task's
+   contract, not from the result observed during training. Do not copy training
+   API names, entities, error codes, or task-specific expected values into the
+   trigger, procedure, acceptance probe, or stop condition. Concrete examples
+   may use neutral synthetic inputs that illustrate the same relationship;
+   they must not introduce new domain claims. Keep the decisive relationship
+   precise: merely saying 'test edge cases' loses the lesson. Do not weaken a
+   justified action into alternatives under the same grounded conditions, but
+   do not assume those conditions hold in every future task.
 5. If the evidence is insufficient or contradictory, return `failed` rather
    than inventing a rule.
 
@@ -36,13 +44,14 @@ loading before applying the candidate.
   whose alternative repeats the recorded failed decision.
   Encode only the mechanism that the Public Runtime Contract actually
   discriminated. Do not turn implementation syntax from a failed patch into a
-  reusable rule, and do not prescribe a concrete patch recipe or "equivalent"
-  fallback unless the decision contract's observable established it. The
-  acceptance probe must assert the causal observable against both the positive
-  case and its nearest boundary; self-equality, membership in a singleton made
-  from the same value, or merely avoiding an exception is not an acceptance
-  probe. Once that observable is established, state the smallest justified
-  action and stop investigating so the solver can edit.
+  reusable rule, and do not prescribe a literal training-task patch recipe, even when
+  that recipe was verified on the training example. The
+  acceptance probe must inspect the next task's actual answer, artifact, or
+  execution result against expectations derived independently from its contract.
+  Do not substitute a hardcoded sample answer, identical expected/actual sets,
+  or an unexecuted code example for that observation. Illustrative examples are
+  not validation results. Check a positive case and its nearest failing boundary.
+  Once established, perform the required task action and deliver the result.
   In executable Python probes, assert boolean expressions directly (for example,
   `assert item in container`). Do not append `is True` or `is False` to an
   unparenthesized comparison or membership expression because Python parses that

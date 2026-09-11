@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections import deque
 from contextlib import aclosing, nullcontext
 from dataclasses import dataclass
@@ -13,9 +14,11 @@ import json
 from typing import Any, AsyncIterator, Awaitable, Callable, ContextManager, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.claude.failure_classifier import (
+    classify_api_retry,
     classify_assistant_error,
     classify_claude_exception,
     classify_result_message,
+    merge_claude_failure_messages,
 )
 from openjiuwen.agent_teams.external.cli_agent.claude.options import build_claude_options, load_claude_sdk
 from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
@@ -24,6 +27,7 @@ from openjiuwen.agent_teams.external.cli_agent.claude.sdk_mcp import (
 )
 from openjiuwen.agent_teams.external.cli_agent.claude.ssh_transport import build_claude_sdk_ssh_transport
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailureReason
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.core.common.logging import team_logger
@@ -36,6 +40,20 @@ class _ClaudeToolMetadata:
 
     tool_name: str = ""
     is_team_tool: bool = False
+
+
+_MAX_FAILURE_DETAIL_CHARS = 8000
+_INTERRUPT_TIMEOUT_S = 5.0
+
+# Same rationale as the Codex idle ceiling: a Claude member's message stream
+# stays silent while a sub-agent or a long-running tool executes, and a hung
+# LLM endpoint otherwise parks the turn (and the member, stuck BUSY) forever.
+# Per-team override: ``ExternalCliAgentSpec.claude_turn_idle_timeout_s``.
+_DEFAULT_TURN_IDLE_TIMEOUT_S = 600.0
+
+
+class _ClaudeTurnIdleTimeout(RuntimeError):
+    """Signal that one Claude turn's message stream stalled past the ceiling."""
 
 
 class _ClaudeStderrTail:
@@ -83,6 +101,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         member_agent_id: str | None = None,
         team_context_tracker: Any = None,
         span_bridge: Any | None = None,
+        turn_idle_timeout_s: float = _DEFAULT_TURN_IDLE_TIMEOUT_S,
     ):
         """Bind SDK options; the SDK client is connected on start."""
         super().__init__(
@@ -90,6 +109,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             member_agent_id=member_agent_id,
             team_context_tracker=team_context_tracker,
         )
+        if turn_idle_timeout_s <= 0:
+            raise ValueError("turn_idle_timeout_s must be greater than zero")
         self._options = options
         self._fallback_options = fallback_options
         self._promote_fallback_model = promote_fallback_model
@@ -97,6 +118,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         self._transport = transport
         self._inject_mcp = inject_mcp
         self._mcp_server_name = mcp_server_name
+        self._turn_idle_timeout_s = turn_idle_timeout_s
         self._sdk_mcp_tool_set: ClaudeSdkMcpToolSet | None = None
         self._client: Any | None = None
         self._abort_requested = False
@@ -261,6 +283,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             return False
         self._client = fallback_client
         self._fallback_activated = True
+        if self._reliability_ctx is not None:
+            self._reliability_ctx.clear_model()
         team_logger.info("[external-cli] member {} activated Claude authentication fallback", self._member_name)
         return True
 
@@ -308,47 +332,79 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         status = "ok"
         error: BaseException | None = None
         retry_with_fallback = False
-        deferred_auth_chunks: list[OutputSchema] = []
+        deferred_failure_chunks: list[OutputSchema] = []
         try:
             await client.query(text)
             chunk_index = 0
-            async for message in client.receive_response():
+            message_stream = client.receive_response().__aiter__()
+            while True:
+                try:
+                    message = await asyncio.wait_for(
+                        anext(message_stream),
+                        timeout=self._turn_idle_timeout_s,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError as exc:
+                    # A stalled message stream otherwise parks this turn (and
+                    # the member, stuck BUSY) forever. Interrupt so the SDK
+                    # terminates the stream, then raise through the shared
+                    # failure path: classify → leader mailbox → failed round
+                    # → member settles back to READY.
+                    team_logger.warning(
+                        "[{}] claude sdk message stream silent for {}s; interrupting turn",
+                        self._member_name,
+                        self._turn_idle_timeout_s,
+                    )
+                    await self._interrupt_client(client)
+                    raise _ClaudeTurnIdleTimeout(
+                        f"Claude SDK member {self._member_name!r} message stream "
+                        f"produced no messages for {self._turn_idle_timeout_s:g}s",
+                    ) from exc
                 if self._abort_requested:
                     team_logger.debug("[{}] claude sdk turn aborted", self._member_name)
                     status = "cancelled"
                     return
                 # Classify structured failure signals before chunk conversion.
-                # AssistantMessage.error records a pending candidate;
-                # ResultMessage.is_error finalizes it.
-                auth_diagnostic = self._reliability_ctx is not None and self._is_auth_diagnostic_message(message)
-                finalize_payload = self._classify_sdk_message(message)
+                # SystemMessage.api_retry and AssistantMessage.error record a
+                # pending candidate; ResultMessage.is_error finalizes it.
+                failure_diagnostic = self._reliability_ctx is not None and self._is_failure_diagnostic_message(message)
+                finalize_payload = await self._classify_sdk_message(message)
                 if finalize_payload is not None:
                     category, reason, summary = finalize_payload
                     if category == "auth_required" and chunk_index == 0 and await self._activate_auth_fallback():
                         retry_with_fallback = True
                         status = "cancelled"
+                        # Distinguish this designed self-healing retry from a
+                        # real abort on the turn span.
+                        self._span_bridge.record_cancel_reason("auth_fallback")
                         break
-                    for chunk in deferred_auth_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                     await self._reliability_ctx.finalize_failure(
                         category=category,
                         reason=reason,
                         summary=summary,
                     )
+                    # Mark the turn span failed: the generator returns normally
+                    # from here, so without an explicit status the span would
+                    # read as a successful turn in trace backends.
+                    status = "failed"
+                    error = RuntimeError(summary)
                     # Turn terminal failure delivered; end the generator cleanly
                     # so _drive_turn maps it onto a failed round.
                     return
-                if deferred_auth_chunks:
-                    for chunk in deferred_auth_chunks:
+                if deferred_failure_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                 chunks = _iter_sdk_chunks(
                     message,
                     chunk_index,
@@ -356,8 +412,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     mcp_server_name=self._mcp_server_name,
                     team_tool_names=set(self._sdk_mcp_tool_set.tools) if self._sdk_mcp_tool_set is not None else set(),
                 )
-                if auth_diagnostic:
-                    deferred_auth_chunks.extend(chunks)
+                if failure_diagnostic:
+                    deferred_failure_chunks.extend(chunks)
                     continue
                 for chunk in chunks:
                     team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
@@ -380,47 +436,77 @@ class ClaudeSdkRuntime(CliRuntimeBase):
                     retry_with_fallback = True
                     status = "cancelled"
                 else:
-                    for chunk in deferred_auth_chunks:
+                    for chunk in deferred_failure_chunks:
                         team_logger.debug("[{}] claude sdk chunk type={}", self._member_name, chunk.type)
                         self._span_bridge.record_chunk(chunk)
                         yield chunk
                         chunk_index = chunk.index + 1
-                    deferred_auth_chunks.clear()
+                    deferred_failure_chunks.clear()
                     status = "failed"
                     await self._finalize_turn_failure(exc)
                     raise exc
         finally:
+            # Native OTel body events can trail the message stream slightly;
+            # give the batched export a moment before the turn span closes.
+            wait_native = getattr(self._span_bridge, "wait_for_native_observations", None)
+            if wait_native is not None and status != "cancelled":
+                with contextlib.suppress(Exception):
+                    await wait_native()
             self._span_bridge.finish_turn(status=status, error=error)
         if retry_with_fallback:
             raise _ClaudeAuthFallbackRequested()
 
     @staticmethod
-    def _is_auth_diagnostic_message(message: Any) -> bool:
-        """Return whether an assistant message carries a structured authentication error."""
+    def _is_failure_diagnostic_message(message: Any) -> bool:
+        """Return whether an assistant message carries a structured failure."""
         sdk = load_claude_sdk()
-        if not isinstance(message, sdk.AssistantMessage) or not message.error:
-            return False
-        category, _ = classify_assistant_error(message.error)
-        return category == "auth_required"
+        return isinstance(message, sdk.AssistantMessage) and bool(message.error)
 
-    def _classify_sdk_message(
+    async def _classify_sdk_message(
         self,
         message: Any,
     ) -> Optional[tuple[str, Any, str]]:
         """Record a candidate or describe the Claude SDK terminal failure.
 
-        ``AssistantMessage.error`` is a candidate: recorded as pending, returns
-        ``None`` (no finalize yet). ``ResultMessage`` with ``is_error=True`` is
-        the turn terminal state: returns a ``(category, reason, summary)``
-        tuple for the caller to finalize.
+        ``SystemMessage.api_retry`` and ``AssistantMessage.error`` are
+        candidates: recorded as pending, return ``None`` (no finalize yet).
+        ``ResultMessage`` with ``is_error=True`` is the turn terminal state:
+        returns a ``(category, reason, summary)`` tuple for the caller to
+        finalize.
         """
         ctx = self._reliability_ctx
         if ctx is None:
             return None
         sdk = load_claude_sdk()
+        if isinstance(message, sdk.SystemMessage):
+            if message.subtype == "init":
+                model = message.data.get("model")
+                if isinstance(model, str):
+                    ctx.update_model(model)
+            if message.subtype == "api_retry":
+                category, reason = classify_api_retry(message.data)
+                ctx.record_pending(category=category, reason=reason)
+                attempt = _int_message_field(message.data, "attempt")
+                max_attempts = _int_message_field(message.data, "max_retries")
+                await ctx.publish_retrying(
+                    category=category,
+                    reason=reason,
+                    summary=f"{self._member_name} Claude SDK retrying: {category} ({reason.message})",
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                )
+            return None
         if isinstance(message, sdk.AssistantMessage):
             if message.error:
                 category, reason = classify_assistant_error(message.error)
+                detail = _assistant_failure_detail(message)
+                if detail:
+                    reason = ExternalRuntimeFailureReason(
+                        message=detail,
+                        sdk_error_code=str(message.error),
+                    )
+                if ctx.pending_reason is not None:
+                    reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
                 ctx.record_pending(category=category, reason=reason)
             return None
         if isinstance(message, sdk.ResultMessage) and message.is_error:
@@ -431,6 +517,8 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             if ctx.has_pending and (reason.http_status is None or category == "sdk_error"):
                 if ctx.pending_category is not None and ctx.pending_category != "sdk_error":
                     category = ctx.pending_category
+            if ctx.pending_reason is not None:
+                reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
             ctx.record_pending(category=category, reason=reason)
             summary = _claude_failure_summary(message, ctx.pending_reason)
             return category, ctx.pending_reason or reason, summary
@@ -443,9 +531,11 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             return
         category, reason = classify_claude_exception(exc, phase="turn")
         if ctx.has_pending:
-            # Keep the pending structured signal; enrich reason with exc text.
+            # Keep the pending structured signal while preserving exception
+            # diagnostics such as the idle-watchdog error type.
             category = ctx.pending_category if ctx.pending_category is not None else category
-            reason = ctx.pending_reason or reason
+            if ctx.pending_reason is not None:
+                reason = _merge_claude_failure_reasons(ctx.pending_reason, reason)
         await ctx.finalize_failure(
             category=category,
             reason=reason,
@@ -454,10 +544,6 @@ class ClaudeSdkRuntime(CliRuntimeBase):
 
     async def _finalize_startup_failure(self, exc: BaseException) -> None:
         """Finalize and surface a Claude startup failure (member → ERROR)."""
-        from openjiuwen.agent_teams.schema.external_runtime_reliability import (
-            ExternalRuntimeFailureReason,
-        )
-
         ctx = self._reliability_ctx
         if ctx is None or ctx.has_finalized:
             return
@@ -491,10 +577,32 @@ class ClaudeSdkRuntime(CliRuntimeBase):
         """Interrupt the in-flight Claude turn if the SDK client is connected."""
         self._abort_requested = True
         if self._client is not None:
-            await self._client.interrupt()
+            await self._interrupt_client(self._client)
+
+    async def _interrupt_client(self, client: Any) -> bool:
+        """Interrupt one Claude turn without allowing the SDK call to hang."""
+        try:
+            await asyncio.wait_for(client.interrupt(), timeout=_INTERRUPT_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001 - optional SDK failure types vary by version
+            team_logger.warning(
+                "[{}] Claude SDK interrupt failed: {}",
+                self._member_name,
+                exc,
+            )
+            return False
+        return True
 
     async def aclose(self) -> None:
         """Disconnect the SDK client. Idempotent."""
+        detach = getattr(self._span_bridge, "detach_native_trace", None)
+        if callable(detach):
+            try:
+                detach()
+            except Exception:  # noqa: BLE001 - observability is optional
+                team_logger.warning(
+                    "[{}] failed to detach claude native otel subscription",
+                    self._member_name,
+                )
         if self._client is None:
             self._sdk_mcp_tool_set = None
             return
@@ -506,7 +614,7 @@ class ClaudeSdkRuntime(CliRuntimeBase):
             self._sdk_mcp_tool_set = None
 
 
-def build_claude_runtime(
+async def build_claude_runtime(
     *,
     member_name: str,
     cwd: str | None,
@@ -527,37 +635,10 @@ def build_claude_runtime(
     team_context_tracker: Any = None,
     team_name: str | None = None,
     role: str | None = None,
+    turn_idle_timeout_s: float | None = None,
 ) -> ClaudeSdkRuntime:
     """Build a Claude SDK runtime, using an SSH SDK transport when configured."""
     _ = mcp_server_command
-    options = build_claude_options(
-        cwd=cwd,
-        add_dirs=add_dirs,
-        env=env,
-        cli_path=cli_path,
-        external_model_config=external_model_config,
-        system_prompt=system_prompt,
-        team_session_id=team_session_id,
-        member_name=member_name,
-        resume_external_backend=resume_external_backend,
-    )
-    fallback_options = None
-    if external_model_config is None and fallback_external_model_config is not None:
-        fallback_options = build_claude_options(
-            cwd=cwd,
-            add_dirs=add_dirs,
-            env=env,
-            cli_path=cli_path,
-            external_model_config=fallback_external_model_config,
-            system_prompt=system_prompt,
-            team_session_id=team_session_id,
-            member_name=member_name,
-            resume_external_backend=True,
-        )
-    transport = None
-    if ssh_transport is not None:
-        team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
-        transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
     span_bridge = _build_claude_span_bridge(
         member_name=member_name,
         member_agent_id=member_agent_id,
@@ -565,6 +646,84 @@ def build_claude_runtime(
         session_id=team_session_id,
         role=role,
     )
+    # Native Claude Code OTel spans (claude_code.llm_request) are best-effort:
+    # a failure to attach only disables the augmentation.
+    otel_trace_endpoint = None
+    otel_source_id = None
+    attach_native_trace = getattr(span_bridge, "attach_native_trace", None)
+    if ssh_transport is not None and callable(attach_native_trace):
+        team_logger.info(
+            "[external-cli] claude native otel disabled for ssh member {}; loopback receiver is local-only",
+            member_name,
+        )
+    elif callable(attach_native_trace):
+        try:
+            otel_trace_endpoint = await attach_native_trace()
+        except Exception as exc:  # noqa: BLE001 - observability is optional
+            team_logger.warning(
+                "[external-cli] claude native otel disabled for member {}: {}",
+                member_name,
+                exc,
+            )
+            otel_trace_endpoint = None
+    process_env = dict(env)
+    if otel_trace_endpoint:
+        team_logger.info(
+            "[external-cli] claude native otel enabled for member {} endpoint={}",
+            member_name,
+            otel_trace_endpoint,
+        )
+        # Pin the trace parent explicitly. The SDK injects the ambient OTel
+        # context at connect() time, but member turns (and the auth-fallback
+        # reconnect) run in bare background tasks with no active span — the
+        # CLI subprocess would then start its own root trace and the bridge's
+        # trace-id filter would drop every native span. Explicit env wins over
+        # the SDK's injection, and the team span's trace id matches the turn
+        # spans' (children of it), so the filter accepts either.
+        traceparent = None
+        native_traceparent = getattr(span_bridge, "native_traceparent", None)
+        if callable(native_traceparent):
+            try:
+                traceparent = native_traceparent()
+            except Exception:  # noqa: BLE001 - observability is optional
+                traceparent = None
+        if traceparent:
+            process_env.setdefault("TRACEPARENT", traceparent)
+        native_source_id = getattr(span_bridge, "native_source_id", None)
+        if callable(native_source_id):
+            otel_source_id = native_source_id()
+    options = build_claude_options(
+        cwd=cwd,
+        add_dirs=add_dirs,
+        env=process_env,
+        cli_path=cli_path,
+        external_model_config=external_model_config,
+        system_prompt=system_prompt,
+        team_session_id=team_session_id,
+        member_name=member_name,
+        resume_external_backend=resume_external_backend,
+        otel_trace_endpoint=otel_trace_endpoint,
+        otel_source_id=otel_source_id,
+    )
+    fallback_options = None
+    if external_model_config is None and fallback_external_model_config is not None:
+        fallback_options = build_claude_options(
+            cwd=cwd,
+            add_dirs=add_dirs,
+            env=process_env,
+            cli_path=cli_path,
+            external_model_config=fallback_external_model_config,
+            system_prompt=system_prompt,
+            team_session_id=team_session_id,
+            member_name=member_name,
+            resume_external_backend=True,
+            otel_trace_endpoint=otel_trace_endpoint,
+            otel_source_id=otel_source_id,
+        )
+    transport = None
+    if ssh_transport is not None:
+        team_logger.info("[external-cli] using claude sdk ssh transport for member {}", member_name)
+        transport = build_claude_sdk_ssh_transport(prompt=_empty_prompt(), options=options, config=ssh_transport)
     return ClaudeSdkRuntime(
         member_name=member_name,
         options=options,
@@ -576,6 +735,9 @@ def build_claude_runtime(
         member_agent_id=member_agent_id,
         team_context_tracker=team_context_tracker,
         span_bridge=span_bridge,
+        turn_idle_timeout_s=(
+            _DEFAULT_TURN_IDLE_TIMEOUT_S if turn_idle_timeout_s is None else turn_idle_timeout_s
+        ),
     )
 
 
@@ -599,6 +761,15 @@ class _NoopClaudeSpanBridge:
     @staticmethod
     def finish_turn(*, status: str, error: Any | None = None) -> None:
         """Ignore turn completion."""
+
+    @staticmethod
+    def record_cancel_reason(_: str) -> None:
+        """Ignore the cancellation reason."""
+
+    @staticmethod
+    def native_source_id() -> str | None:
+        """Report no native OTel source identity."""
+        return None
 
     @staticmethod
     def tool_execution_context() -> ContextManager[None]:
@@ -643,13 +814,53 @@ def _claude_failure_summary(result: Any, reason: Any) -> str:
     non-empty handling cue.
     """
     errors = getattr(result, "errors", None) or []
-    if errors:
+    if errors and any(str(error).strip().lower() != "unknown" for error in errors):
         return f"Claude SDK turn failed: {' '.join(str(e) for e in errors)}"
+    api_error_status = getattr(result, "api_error_status", None)
+    if isinstance(api_error_status, int):
+        return f"Claude SDK turn failed: HTTP {api_error_status}"
     if reason is not None:
         message = getattr(reason, "message", "") or ""
         if message:
             return f"Claude SDK turn failed: {message}"
     return "Claude SDK turn failed"
+
+
+def _int_message_field(data: Any, field: str) -> int | None:
+    """Return one integer SDK message field without accepting booleans."""
+    if not isinstance(data, dict):
+        return None
+    value = data.get(field)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def _assistant_failure_detail(message: Any) -> str:
+    """Extract bounded text diagnostics from a failed assistant message."""
+    sdk = load_claude_sdk()
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return ""
+    parts = [block.text for block in content if isinstance(block, sdk.TextBlock) and block.text]
+    detail = "\n".join(parts)
+    if len(detail) <= _MAX_FAILURE_DETAIL_CHARS:
+        return detail
+    return detail[:_MAX_FAILURE_DETAIL_CHARS] + "...[truncated]"
+
+
+def _merge_claude_failure_reasons(
+    pending: ExternalRuntimeFailureReason,
+    terminal: ExternalRuntimeFailureReason,
+) -> ExternalRuntimeFailureReason:
+    """Merge assistant diagnostics with structured terminal failure fields."""
+    message = merge_claude_failure_messages(pending.message, terminal.message)
+    return ExternalRuntimeFailureReason(
+        message=message,
+        sdk_error_type=terminal.sdk_error_type or pending.sdk_error_type,
+        sdk_error_code=terminal.sdk_error_code or pending.sdk_error_code,
+        http_status=terminal.http_status if terminal.http_status is not None else pending.http_status,
+    )
 
 
 def _iter_sdk_chunks(

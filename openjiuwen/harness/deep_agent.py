@@ -219,6 +219,7 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
         "skill_tool",
         "memory_search",
         "memory_get",
+        "free_search",
         "paid_search",
         "fetch_webpage",
         "write_memory",
@@ -1321,6 +1322,7 @@ class DeepAgent(BaseAgent):
         for rail_inst in initialized_rails:
             if isinstance(rail_inst, TaskCompletionRail):
                 self._task_completion_rail = rail_inst
+                self._bind_live_goal_manager(rail_inst)
             if isinstance(rail_inst, DeepAgentRail):
                 rail_inst.set_sys_operation(self._deep_config.sys_operation)
                 rail_inst.set_workspace(self._deep_config.workspace)
@@ -1911,10 +1913,24 @@ class DeepAgent(BaseAgent):
 
         return removed
 
+    def _bind_live_goal_manager(self, rail: TaskCompletionRail) -> None:
+        """Copy ``DeepAgent.goal_manager`` onto a rail created after ``start()``.
+
+        ``start()`` is the only place that constructs ``GoalManager``. Hot
+        reconfigure queues a fresh ``TaskCompletionRail`` with
+        ``_goal_manager is None``, so the next ``init()`` would skip goal
+        tools and protocol injection unless this binding runs first.
+        """
+        manager = self.goal_manager
+        if manager is None:
+            return
+        rail.set_goal_manager(manager)
+
     async def register_rail(self, rail: AgentRail) -> "DeepAgent":
         """Register a rail with selective routing."""
         if isinstance(rail, TaskCompletionRail):
             self._task_completion_rail = rail
+            self._bind_live_goal_manager(rail)
         if isinstance(rail, DeepAgentRail):
             rail.set_sys_operation(self.deep_config.sys_operation)
             rail.set_workspace(self.deep_config.workspace)
@@ -3551,8 +3567,8 @@ class DeepAgent(BaseAgent):
             )
 
             rail = self._task_completion_rail
-            if rail is not None and hasattr(rail, "set_goal_manager"):
-                rail.set_goal_manager(self.goal_manager)
+            if isinstance(rail, TaskCompletionRail):
+                self._bind_live_goal_manager(rail)
                 try:
                     init_rail(rail, self)
                 except Exception:

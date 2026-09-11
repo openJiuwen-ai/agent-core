@@ -48,6 +48,54 @@ class _FakeIssueStrategy:
             metadata={"analysis_status": "completed"},
         )
 
+    def test_system_prompt_separates_evidence_from_intervention(self) -> None:
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
+            DIAGNOSIS_SYSTEM_PROMPT,
+        )
+
+        assert "current_harness" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "execution_history.json" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "repository is not required" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Never inspect gold/solution patches" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "The Improver chooses and implements" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Paired evaluation establishes whether it activates" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "If the evidence contradicts your cause" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "unavailable task inputs or broken infrastructure" in DIAGNOSIS_SYSTEM_PROMPT
+        assert "Aggregation schema:" not in DIAGNOSIS_SYSTEM_PROMPT
+        assert "intermediate container" not in DIAGNOSIS_SYSTEM_PROMPT
+
+
+class _FakeTeamIssueStrategy:
+    async def analyze(self, invocation):  # type: ignore[no-untyped-def]
+        from openjiuwen.rsi.harness_rsi.schema import (
+            EvaluationResultAnalysisArtifact,
+            TeamIssue,
+        )
+
+        return EvaluationResultAnalysisArtifact(
+            analysis_id="analysis",
+            analysis_ref_path="",
+            issues=[
+                TeamIssue(
+                    issue_id="issue_001",
+                    category="team_coordination",
+                    severity="high",
+                    summary="solver repeated an identical read without editing",
+                    affected_cases=["case_001"],
+                    suspected_team_scope="team_skill",
+                    optimization_target="team_skill",
+                    recommendation="break the repeated-read loop and proceed",
+                    metadata={
+                        "affected_components": ["solver"],
+                        "attribution": {
+                            "target_ref": "team_skill.solver.workflow_inefficiency",
+                        },
+                    },
+                )
+            ],
+            metadata={"analysis_status": "completed"},
+        )
+
 
 class TestAnalyzerConfiguration:
     """Analyzer configuration and public protocol contracts."""
@@ -62,8 +110,6 @@ class TestAnalyzerConfiguration:
                 "diagnosis_agent_max_retries": 3,
                 "diagnosis_agent_max_concurrency": 7,
                 "diagnosis_agent_max_iterations": 25,
-                "diagnosis_agent_max_tokens": 12288,
-                "causal_investigation_required": False,
                 "max_issues": 8,
                 "evidence_limit_per_issue": 3,
                 "output_filename": "issues.yaml",
@@ -75,9 +121,6 @@ class TestAnalyzerConfiguration:
         assert config.diagnosis_agent_max_retries == 3
         assert config.diagnosis_agent_max_concurrency == 7
         assert config.diagnosis_agent_max_iterations == 25
-        assert config.diagnosis_agent_max_tokens == 12288
-        assert config.causal_investigation_required is False
-        assert EvaluationResultAnalyzerConfig().causal_investigation_required is True
         assert config.max_issues == 8
         assert config.evidence_limit_per_issue == 3
         assert config.output_filename == "issues.yaml"
@@ -596,7 +639,7 @@ class TestSignalExtractors:
         assert signals.method_specific["evidence_missing_cases"] == ["case_001"]
         assert signals.method_specific["fallback_reason"] == "pytest_evidence_missing"
 
-    def test_reward_trace_seed_uses_real_role_without_solver_fallback(self) -> None:
+    def test_terminal_bench_trace_seed_uses_real_role_without_solver_fallback(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             RewardSignalExtractor,
         )
@@ -642,7 +685,7 @@ class TestSignalExtractors:
         assert attribution["target_ref"] == "member_harness.content_writer.skill"
         assert attribution["evidence_refs"][0]["role"] == "content_writer"
 
-    def test_reward_trace_seed_does_not_invent_solver_role(self) -> None:
+    def test_terminal_bench_trace_seed_does_not_invent_solver_role(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.signal_extractor import (
             RewardSignalExtractor,
         )
@@ -768,17 +811,25 @@ class TestDiagnosisAgentStrategy:
     """DeepAgent strategy factory and normalization contracts."""
 
     def test_json_extraction_ignores_braces_inside_strings(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
 
         parsed = analyzer_module._extract_json_object(
             'Reasoning first. {"diagnoses":[{"root_cause":"literal } in source"}]}'
         )
 
-        assert parsed == {"diagnoses": [{"root_cause": "literal } in source"}]}
+        assert parsed == {
+            "diagnoses": [{"root_cause": "literal } in source"}],
+        }
 
     def test_truncated_diagnosis_json_is_retryable(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
+        from openjiuwen.rsi.harness_rsi.model_call import (
+            RetryableModelOutputError,
+        )
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -792,7 +843,9 @@ class TestDiagnosisAgentStrategy:
         assert "incomplete JSON after repair" in str(error)
 
     def test_non_json_service_error_remains_non_retryable(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -804,7 +857,9 @@ class TestDiagnosisAgentStrategy:
         assert "contained a model-service error" in str(error)
 
     def test_non_json_diagnosis_prose_is_a_format_error(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
 
         error = analyzer_module._unusable_diagnosis_output_error(
             "case_001",
@@ -838,6 +893,9 @@ class TestDiagnosisAgentStrategy:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            agent_runtime as runtime_module,
+        )
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         model_config = tmp_path / "model.yaml"
@@ -870,8 +928,8 @@ class TestDiagnosisAgentStrategy:
             captured["agent_kwargs"] = kwargs
             return kwargs
 
-        monkeypatch.setattr(analyzer_module, "TeamModelConfig", FakeTeamModelConfig)
-        monkeypatch.setattr(analyzer_module, "create_deep_agent", fake_create_deep_agent)
+        monkeypatch.setattr(runtime_module, "TeamModelConfig", FakeTeamModelConfig)
+        monkeypatch.setattr(runtime_module, "create_deep_agent", fake_create_deep_agent)
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
             EvaluationResultAnalyzerConfig(model_config_ref=str(model_config))
@@ -880,17 +938,23 @@ class TestDiagnosisAgentStrategy:
         agent = await strategy._build_agent(str(tmp_path))
 
         assert captured["model_data"]["model_client_config"]["api_key"] == "expanded-key"
-        assert captured["model_data"]["model_request_config"]["max_tokens"] == 16384
         assert agent["model"] == "fake-model"
         rails = captured["agent_kwargs"]["rails"]
-        assert rails == []
-        assert captured["agent_kwargs"]["enable_sys_operation"] is False
+        assert len(rails) == 2
+        assert isinstance(rails[0], runtime_module.RSISysOperationRail)
+        assert rails[0]._read_only is True
+        assert rails[0]._bash_pipefail is True
+        assert rails[0]._bash_deny_patterns == runtime_module._DIAGNOSIS_BASH_DENY_PATTERNS
+        assert isinstance(rails[1], runtime_module._DiagnosisBudgetRail)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("method,passing_score", [("swebench_official", 1.0), ("llm_as_judge", 0.8)])
     async def test_analyze_diagnoses_only_nonpassing_cases(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        passing_score: float,
     ) -> None:
         from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
@@ -907,9 +971,9 @@ class TestDiagnosisAgentStrategy:
                     {
                         "case_id": case_id,
                         "status": "passed" if passed else "failed",
-                        "score": 1.0 if passed else 0.0,
+                        "score": passing_score if passed else 0.0,
                         "evaluation": {
-                            "method": "swebench_official",
+                            "method": method,
                             "passed": passed,
                             "reason": "",
                             "metadata": {},
@@ -926,8 +990,8 @@ class TestDiagnosisAgentStrategy:
                     "total_cases": 2,
                     "passed_cases": 1,
                     "failed_cases": 1,
-                    "average_score": 0.5,
-                    "evaluation_method": "swebench_official",
+                    "average_score": passing_score / 2,
+                    "evaluation_method": method,
                 }
             ),
             encoding="utf-8",
@@ -938,7 +1002,7 @@ class TestDiagnosisAgentStrategy:
             encoding="utf-8",
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False),
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"),
         )
         diagnosed_case_ids: list[str] = []
 
@@ -965,11 +1029,6 @@ class TestDiagnosisAgentStrategy:
         assert diagnosed_case_ids == ["unresolved"]
         assert artifact.metadata["per_case_count"] == 2
         assert artifact.metadata["diagnosed_case_count"] == 1
-        causal_evidence_path = Path(artifact.metadata["causal_evidence_path"])
-        causal_evidence = json.loads(causal_evidence_path.read_text(encoding="utf-8"))
-        assert causal_evidence["schema_version"] == 2
-        assert [case["case_id"] for case in causal_evidence["cases"]] == ["unresolved"]
-        assert causal_evidence["cases"][0]["causal_digest"]["outcome"]["case_id"] == "unresolved"
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_uses_case_dir_as_workspace(
@@ -988,7 +1047,6 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_concurrency=2,
-                causal_investigation_required=False,
             ),
         )
         case_inputs = []
@@ -1126,7 +1184,7 @@ class TestDiagnosisAgentStrategy:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
         observed_runtime: Path | None = None
 
@@ -1176,7 +1234,7 @@ class TestDiagnosisAgentStrategy:
         ) == "FORMAT = root.opts.datetimeformat\n"
 
     @pytest.mark.asyncio
-    async def test_per_case_diagnosis_raises_when_agent_returns_service_error_text(
+    async def test_per_case_diagnosis_raises_when_agent_returns_non_json(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -1212,7 +1270,7 @@ class TestDiagnosisAgentStrategy:
         )
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1224,102 +1282,15 @@ class TestDiagnosisAgentStrategy:
         monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
         monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
 
-        with pytest.raises(ValueError, match="contained a model-service error"):
+        with pytest.raises(
+            ValueError,
+            match="per-case diagnosis output contained a model-service error",
+        ):
             await strategy._per_case_diagnosis(
                 [case],
                 DeterministicSignals(method="script_based"),
                 None,
             )
-
-    @pytest.mark.asyncio
-    async def test_per_case_diagnosis_isolates_one_case_format_failure(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
-            CaseAnalysisInput,
-            DeterministicSignals,
-        )
-
-        cases: list[CaseAnalysisInput] = []
-        for case_id in ("case_bad", "case_good"):
-            case_dir = tmp_path / "case_results" / case_id
-            result_path = case_dir / "result.json"
-            result_path.parent.mkdir(parents=True)
-            result_path.write_text("{}", encoding="utf-8")
-            cases.append(
-                CaseAnalysisInput(
-                    case_id=case_id,
-                    status="failed",
-                    score=0.0,
-                    input="input",
-                    expected=None,
-                    response="response",
-                    error="",
-                    evaluation_method="script_based",
-                    evaluation_passed=False,
-                    evaluation_reason="failed",
-                    evaluation_metadata={},
-                    trace_path=str(case_dir / "trace.json"),
-                    result_path=str(result_path),
-                )
-            )
-
-        strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
-        )
-
-        async def fake_build_agent(workspace: str) -> dict[str, str]:
-            return {"workspace": workspace}
-
-        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
-            if "case_bad" in agent["workspace"]:
-                return "Diagnosis prose without a JSON object."
-            return json.dumps(
-                {
-                    "diagnoses": [
-                        {
-                            "issue_category": "unassigned",
-                            "severity": "low",
-                            "summary": "No optimizable cause is supported.",
-                            "failure_mode": "insufficient_evidence",
-                            "failure_cluster": {
-                                "failed_checks": ["check_good"],
-                                "observable_behavior": "the check remains unresolved",
-                            },
-                            "root_cause": "Evidence does not separate the mechanisms.",
-                            "critical_mistake": "No evidence-backed decision is available.",
-                            "general_mechanism": "Collect a discriminator before optimization.",
-                            "target_ref": "unassigned",
-                            "evidence_refs": [],
-                            "affected_components": [],
-                            "recommendation": "Keep this diagnosis unassigned.",
-                            "decision_contract": {
-                                "acceptance_observable": "the check remains unresolved",
-                                "activation_phase": "during_investigation",
-                            },
-                            "confidence": "low",
-                        }
-                    ]
-                }
-            )
-
-        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
-        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
-
-        results = await strategy._per_case_diagnosis(
-            cases,
-            DeterministicSignals(method="script_based"),
-            None,
-        )
-
-        assert [item["case_id"] for item in results] == ["case_bad", "case_good"]
-        assert results[0]["analysis_failed"] is True
-        assert results[0]["diagnosis_error_type"] == "output_format"
-        assert results[1]["failure_mode"] == "insufficient_evidence"
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_runs_cases_sequentially(
@@ -1365,7 +1336,6 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_concurrency=2,
-                causal_investigation_required=False,
             )
         )
 
@@ -1417,156 +1387,6 @@ class TestDiagnosisAgentStrategy:
         assert call_order[1].startswith("case_002")
 
     @pytest.mark.asyncio
-    async def test_insufficient_case_is_supplemented_before_next_case(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
-            CaseAnalysisInput,
-            DeterministicSignals,
-        )
-
-        cases = []
-        for case_id in ("case_a", "case_b"):
-            case_dir = tmp_path / "case_results" / case_id
-            result_path = case_dir / "result.json"
-            result_path.parent.mkdir(parents=True)
-            result_path.write_text("{}", encoding="utf-8")
-            normalized_trace = case_dir / "judge" / "normalized_trace.json"
-            normalized_trace.parent.mkdir(parents=True)
-            messages = []
-            if case_id == "case_a":
-                messages = [
-                    {
-                        "role": "assistant",
-                        "message_index": 7,
-                        "step_pointer": "trial_1:message_7",
-                        "content": "",
-                        "tool_calls": [
-                            {
-                                "name": "read_file",
-                                "input": '{"path":"contract.txt"}',
-                                "output": "SUPPLEMENT_MARKER conflicting deadline is stated in the contract",
-                                "error": "",
-                                "step_pointer": "trial_1:message_7",
-                            }
-                        ],
-                    }
-                ]
-            normalized_trace.write_text(
-                json.dumps(
-                    {
-                        "case_id": case_id,
-                        "traces": [{"trace_id": f"{case_id}:trial_1", "messages": messages}],
-                    }
-                ),
-                encoding="utf-8",
-            )
-            cases.append(
-                CaseAnalysisInput(
-                    case_id=case_id,
-                    status="failed",
-                    score=0.0,
-                    input=f"{case_id} input",
-                    expected=None,
-                    response=f"{case_id} response",
-                    error="",
-                    evaluation_method="llm_as_judge",
-                    evaluation_passed=False,
-                    evaluation_reason="failed",
-                    evaluation_metadata={},
-                    trace_path=str(case_dir / "trace.json"),
-                    result_path=str(result_path),
-                )
-            )
-
-        strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
-        )
-        call_order: list[str] = []
-
-        async def fake_build_agent(workspace: str) -> dict[str, str]:
-            return {"workspace": workspace}
-
-        def diagnosis(evidence_status: str) -> dict[str, Any]:
-            assigned = evidence_status == "confirmed"
-            return {
-                "diagnoses": [
-                    {
-                        "issue_category": "member_harness" if assigned else "unassigned",
-                        "severity": "medium",
-                        "summary": "deadline conflict diagnosis",
-                        "failure_mode": "wrong_deadline_decision",
-                        "evidence_status": evidence_status,
-                        "failed_requirement": "deadline requirement",
-                        "competing_hypotheses": ["contract deadline conflict"],
-                        "discriminating_evidence": "inspect the contract deadline",
-                        "root_cause": "deadline conflict" if assigned else "not yet distinguished",
-                        "critical_mistake": "selected the wrong deadline" if assigned else "unknown",
-                        "general_mechanism": "resolve conflicting source requirements",
-                        "target_ref": "member_harness.solver.prompt" if assigned else "unassigned",
-                        "evidence_refs": ([{"step_pointer": "trial_1:message_7"}] if assigned else []),
-                        "affected_components": ["solver"] if assigned else [],
-                        "recommendation": "compare governing sources before answering",
-                        "confidence": "high" if assigned else "low",
-                    }
-                ]
-            }
-
-        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
-            del agent, max_retries
-            if "inside the Analyzer, before any Harness candidate" in prompt:
-                call_order.append("case_a_supplement")
-                assert "SUPPLEMENT_MARKER" in prompt
-                return json.dumps(diagnosis("confirmed"))
-            if "case_a input" in prompt:
-                call_order.append("case_a_initial")
-                return json.dumps(diagnosis("insufficient"))
-            call_order.append("case_b_initial")
-            return json.dumps(diagnosis("confirmed"))
-
-        monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
-        monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
-        monkeypatch.setattr(
-            analyzer_module,
-            "_case_diagnoses_validation_conflicts",
-            lambda *args, **kwargs: [],
-        )
-
-        results = await strategy._per_case_diagnosis(
-            cases,
-            DeterministicSignals(method="llm_as_judge"),
-            None,
-        )
-
-        assert call_order == ["case_a_initial", "case_a_supplement", "case_b_initial"]
-        assert results[0]["case_id"] == "case_a"
-        assert results[0]["evidence_status"] == "confirmed"
-        assert results[0]["evidence_supplement"]["status"] == "resolved"
-        assert results[1]["case_id"] == "case_b"
-        assert results[1]["evidence_supplement"]["status"] == "not_needed"
-
-    def test_compactor_omission_claim_forces_raw_evidence_supplement(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _diagnoses_need_evidence_supplement,
-        )
-
-        diagnoses = [
-            {
-                "evidence_status": "confirmed",
-                "discriminating_evidence": (
-                    "The displayed tool response contained ...[omitted 2319 chars]... "
-                    "where the controlling clause should appear."
-                ),
-            }
-        ]
-
-        assert _diagnoses_need_evidence_supplement(diagnoses) is True
-
-    @pytest.mark.asyncio
     async def test_per_case_diagnosis_records_retryable_empty_output_without_aborting(
         self,
         tmp_path: Path,
@@ -1604,7 +1424,7 @@ class TestDiagnosisAgentStrategy:
         )
 
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1673,7 +1493,6 @@ class TestDiagnosisAgentStrategy:
             EvaluationResultAnalyzerConfig(
                 model_config_ref="unused.yaml",
                 diagnosis_agent_max_retries=1,
-                causal_investigation_required=False,
             )
         )
 
@@ -1720,52 +1539,52 @@ class TestDiagnosisAgentStrategy:
         assert results[0]["target_ref"] == "unassigned"
 
     @pytest.mark.asyncio
-    async def test_non_json_correction_still_enters_outcome_independent_recovery(
+    async def test_per_case_diagnosis_continues_after_non_json_repair_fails(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.config import (
+            EvaluationResultAnalyzerConfig,
+        )
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import (
             CaseAnalysisInput,
             DeterministicSignals,
         )
 
-        case_dir = tmp_path / "case_results" / "case_recovery"
+        case_dir = tmp_path / "case_results" / "case_non_json"
         result_path = case_dir / "result.json"
-        trace_path = case_dir / "trace.json"
         result_path.parent.mkdir(parents=True)
         result_path.write_text("{}", encoding="utf-8")
-        trace_path.write_text(json.dumps({"case_id": "case_recovery", "events": []}), encoding="utf-8")
+        trace_path = case_dir / "judge" / "normalized_trace.json"
+        trace_path.parent.mkdir(parents=True)
+        trace_path.write_text(
+            json.dumps({"case_id": "case_non_json", "traces": []}),
+            encoding="utf-8",
+        )
         case = CaseAnalysisInput(
-            case_id="case_recovery",
+            case_id="case_non_json",
             status="failed",
-            score=0.0,
-            input="Inspect the task-visible evidence and answer.",
+            score=0.4,
+            input="input",
             expected=None,
-            response="A released conclusion.",
+            response="response",
             error="",
-            evaluation_method="llm_as_judge",
+            evaluation_method="atomic_checks",
             evaluation_passed=False,
-            evaluation_reason="one opaque criterion failed",
-            evaluation_metadata={
-                "judge_evidence": {
-                    "criteria": [
-                        {
-                            "criterion_id": "opaque",
-                            "score": 0.0,
-                            "status": "failed",
-                            "rationale": "the evaluator-owned label differs",
-                        }
-                    ]
-                }
-            },
-            trace_path=str(trace_path),
+            evaluation_reason="failed",
+            evaluation_metadata={},
+            trace_path=str(case_dir / "trace.json"),
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=True)
+            EvaluationResultAnalyzerConfig(
+                model_config_ref="unused.yaml",
+                diagnosis_agent_max_retries=0,
+            )
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1773,66 +1592,31 @@ class TestDiagnosisAgentStrategy:
 
         calls = 0
 
-        async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
+        async def fake_run_agent(
+            agent: Any,
+            prompt: str,
+            *,
+            max_retries: int,
+        ) -> str:
             nonlocal calls
             calls += 1
-            if calls == 1:
-                return json.dumps(
-                    {
-                        "causal_investigation": {
-                            "hypotheses": [
-                                {
-                                    "hypothesis_id": "h_leak",
-                                    "claim": "The expected answer requires another conclusion.",
-                                    "explains_requirement_ids": ["criterion:opaque"],
-                                    "falsified_if": "The target result agrees.",
-                                    "evidence_requests": [],
-                                }
-                            ]
-                        }
-                    }
-                )
-            if calls == 2:
-                return "correction was not JSON"
-            assert "CAUSAL_INVESTIGATION_PHASE=outcome_independent_recovery" in prompt
-            return json.dumps(
-                {
-                    "causal_investigation": {
-                        "hypotheses": [
-                            {
-                                "hypothesis_id": f"h{index}",
-                                "claim": f"Runtime mechanism {index} released an unsupported decision ground.",
-                                "explains_requirement_ids": ["criterion:opaque"],
-                                "current_support": [],
-                                "falsified_if": f"The trace verifies decision ground {index} before release.",
-                                "evidence_requests": [
-                                    {
-                                        "request_id": f"q{index}",
-                                        "operation": "search_trace",
-                                        "query": f"decision ground {index} release",
-                                    }
-                                ],
-                            }
-                            for index in (1, 2)
-                        ]
-                    }
-                }
-            )
-
-        def entered_evidence_execution(*args: Any, **kwargs: Any) -> dict[str, Any]:
-            raise RuntimeError("entered task-visible evidence execution")
+            return "Confirmed. The verifier flagged a residual raw source header."
 
         monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
         monkeypatch.setattr(analyzer_module, "_run_agent", fake_run_agent)
-        monkeypatch.setattr(analyzer_module, "execute_causal_investigation", entered_evidence_execution)
 
-        with pytest.raises(RuntimeError, match="entered task-visible evidence execution"):
-            await strategy._per_case_diagnosis(
-                [case],
-                DeterministicSignals(method="llm_as_judge"),
-                None,
-            )
-        assert calls == 3
+        results = await strategy._per_case_diagnosis(
+            [case],
+            DeterministicSignals(method="atomic_checks"),
+            None,
+        )
+
+        assert calls == 2
+        assert len(results) == 1
+        assert results[0]["case_id"] == "case_non_json"
+        assert results[0]["analysis_failed"] is True
+        assert results[0]["diagnosis_error_type"] == "output_format"
+        assert results[0]["target_ref"] == "unassigned"
 
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_repairs_deterministic_evidence_conflict(
@@ -1873,7 +1657,7 @@ class TestDiagnosisAgentStrategy:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
 
         async def fake_build_agent(workspace: str) -> dict[str, str]:
@@ -1967,8 +1751,11 @@ class TestDiagnosisAgentStrategy:
             encoding="utf-8",
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
+
+        async def fake_retrieve_experience(invocation: Any) -> dict[str, Any]:
+            return {}
 
         async def fake_per_case(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             return [{"case_id": "case_001", "issue_category": "member_harness"}]
@@ -2024,10 +1811,12 @@ class TestDiagnosisAgentStrategy:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
 
         attempts = 0
+        sessions: list[str] = []
 
         async def fake_run_agent(*args: Any, **kwargs: Any) -> str:
             nonlocal attempts
             attempts += 1
+            sessions.append(kwargs["session"])
             if attempts == 1:
                 raise asyncio.TimeoutError("diagnosis model request timed out")
             return '{"issues": []}'
@@ -2038,6 +1827,7 @@ class TestDiagnosisAgentStrategy:
 
         assert raw == '{"issues": []}'
         assert attempts == 2
+        assert len(set(sessions)) == 2
 
     @pytest.mark.asyncio
     async def test_run_agent_repairs_non_json_output(
@@ -2066,71 +1856,33 @@ class TestDiagnosisAgentStrategy:
         assert "single valid JSON object" in prompts[1]
 
     @pytest.mark.asyncio
-    async def test_run_agent_does_not_replay_prose_for_service_retry_budget(
+    async def test_run_agent_bounds_format_repair_independently_of_service_retries(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         from openjiuwen.core.runner import Runner
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import (
+            analyzer as analyzer_module,
+        )
 
         prompts: list[str] = []
 
         async def fake_run_agent(*args: Any, **kwargs: Any) -> str:
             prompts.append(kwargs["inputs"]["query"])
-            return "I will analyze this case in prose instead of returning JSON."
+            return "Confirmed. This is diagnosis prose, not JSON."
 
         monkeypatch.setattr(Runner, "run_agent", fake_run_agent)
 
-        raw = await analyzer_module._run_agent(object(), "large evidence prompt", max_retries=20)
+        raw = await analyzer_module._run_agent(
+            object(),
+            "original diagnosis prompt",
+            max_retries=20,
+        )
 
-        assert raw.startswith("I will analyze")
+        assert raw == "Confirmed. This is diagnosis prose, not JSON."
         assert len(prompts) == 2
-        assert prompts[0] == "large evidence prompt"
-        assert "FORMAT-ONLY TASK" in prompts[1]
-
-    def test_json_repair_prompt_is_format_only_and_keeps_completed_analysis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-
-        original = "ORIGINAL-EVIDENCE " * 10_000
-        conclusion = "The first wrong decision was submitting before checking all receipts."
-
-        prompt = analyzer_module._build_json_repair_prompt(original, conclusion)
-
-        assert "FORMAT-ONLY TASK" in prompt
-        assert conclusion in prompt
-        assert "ORIGINAL-EVIDENCE" not in prompt
-        assert '"diagnoses"' in prompt
-        assert '"evidence_relation"' in prompt
-        assert '"evidence_independence"' in prompt
-
-    def test_handoff_repair_preserves_entailment_fields(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-
-        prompt = analyzer_module._build_causal_handoff_repair_prompt(
-            public_task_contract="Use the declared public mode.",
-            diagnoses=[{"hypothesis_assessment": [{"hypothesis_id": "h1", "status": "falsified"}]}],
-            investigation={"hypotheses": [], "evidence_requests": []},
-            evidence_results={"results": []},
-            audit={"diagnosis_audits": []},
-        )
-
-        assert "evidence_relation" in prompt
-        assert "evidence_independence" in prompt
-        assert 'evidence_relation="direct_falsifier"' in prompt
-
-    def test_entailment_audit_json_repair_is_format_only(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-
-        prompt = analyzer_module._build_hypothesis_entailment_audit_json_repair_prompt(
-            "large frozen audit input",
-            "h1 was rejected because the cited result came from the questioned mechanism.",
-        )
-
-        assert "FORMAT-ONLY TASK" in prompt
-        assert '"assessment_audits"' in prompt
-        assert '"evidence_entails_status"' in prompt
-        assert '"evidence_independent"' in prompt
-        assert "large frozen audit input" not in prompt
+        assert prompts[0] == "original diagnosis prompt"
+        assert "Previous diagnosis output was not valid JSON" in prompts[1]
 
 
 class TestDiagnosisPromptEvidenceSummary:
@@ -2164,19 +1916,6 @@ class TestDiagnosisPromptEvidenceSummary:
 
         return DeterministicSignals(method="llm_as_judge")
 
-    def test_inline_payload_uses_compact_json(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer import analyzer as analyzer_module
-
-        payload = analyzer_module._build_diagnosis_input_json(
-            case=self._make_case_input(str(tmp_path / "result.json")),
-            signals=self._make_signals(),
-            retrieved_experience=None,
-            evidence_summary_available=False,
-        )
-
-        assert '\n  "authoritative_task_contract"' not in payload
-        assert payload.startswith('{"analysis_protocol":')
-
     def test_prompt_contains_evidence_summary_when_available(self, tmp_path: Path) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_prompt,
@@ -2201,7 +1940,7 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "bounded read-only discriminator" in prompt
         assert "Authoritative Task Contract" in prompt
         assert "Commands and probes in Agent-Generated Execution Evidence are not task facts" in prompt
-        assert '"evidence_summary_available":true' in prompt
+        assert '"evidence_summary_available": true' in prompt
         assert "Analyze concrete member harness capability" in prompt
         assert "member_harness.<role>.<variable>" in prompt
         assert "judge/normalized_trace.json" not in prompt
@@ -2225,7 +1964,7 @@ class TestDiagnosisPromptEvidenceSummary:
         )
 
         assert "No evidence_summary.md is available" in prompt
-        assert '"evidence_summary_available":false' in prompt
+        assert '"evidence_summary_available": false' in prompt
         assert "Analyze team organization" in prompt
 
     def test_prompt_does_not_contain_absolute_case_dir_path(self, tmp_path: Path) -> None:
@@ -2280,65 +2019,35 @@ class TestDiagnosisPromptEvidenceSummary:
     ) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _build_diagnosis_input_json,
-            _case_prior_candidate_feedback,
         )
 
         result_path = tmp_path / "case_feedback" / "result.json"
         result_path.parent.mkdir(parents=True)
         result_path.write_text("{}", encoding="utf-8")
 
-        paired_feedback = {
-            "by_case": {
-                "case_001": [
-                    {
-                        "schema_version": 2,
-                        "prediction": {
-                            "causal_intervention_contracts": [
-                                {
-                                    "source_causal_hypothesis_id": "h1",
-                                    "predicted_behavior_and_outcome": "state_b becomes valid",
-                                }
-                            ]
-                        },
-                        "activation": {"availability": "observed", "state": "triggered"},
-                        "observed_outcome": {
-                            "strict_score": {"source": 0.0, "candidate": 0.0, "delta": 0.0},
-                            "continuous_score": {"source": 0.2, "candidate": 0.8, "delta": 0.6},
-                            "requirement_delta": {
-                                "newly_passed_fail_to_pass": ["state_a"],
-                                "remaining_failed_fail_to_pass": ["state_b"],
-                            },
-                        },
-                    }
-                ],
-                "unrelated_case": [{"experiment_id": "must_not_leak"}],
-            }
-        }
-        case_feedback = _case_prior_candidate_feedback(paired_feedback, "case_001")
         payload = json.loads(
             _build_diagnosis_input_json(
                 case=self._make_case_input(str(result_path)),
                 signals=self._make_signals(),
                 retrieved_experience=None,
                 evidence_summary_available=True,
-                prior_candidate_feedback=case_feedback,
+                prior_candidate_feedback={
+                    "case_id": "case_001",
+                    "experiments": [
+                        {
+                            "verifier_delta": {
+                                "newly_passed_fail_to_pass": ["state_a"],
+                                "remaining_failed_fail_to_pass": ["state_b"],
+                            },
+                        }
+                    ],
+                },
             )
         )
 
         assert payload["prior_candidate_feedback"]["experiments"][0]["verifier_delta"][
             "remaining_failed_fail_to_pass"
         ] == ["state_b"]
-        experiment = payload["prior_candidate_feedback"]["experiments"][0]
-        assert (
-            experiment["prediction"]["causal_intervention_contracts"][0]["predicted_behavior_and_outcome"]
-            == "state_b becomes valid"
-        )
-        assert experiment["activation"]["state"] == "triggered"
-        assert experiment["observed_outcome"]["strict_score"]["delta"] == 0.0
-        assert experiment["observed_outcome"]["continuous_score"]["delta"] == 0.6
-        assert experiment["observed_outcome"]["requirement_delta"]["remaining_failed_fail_to_pass"] == ["state_b"]
-        assert payload["prior_candidate_feedback"]["case_id"] == "case_001"
-        assert "must_not_leak" not in json.dumps(payload["prior_candidate_feedback"])
         assert "Preserve newly passing operations" in payload["prior_candidate_feedback_policy"]
 
     def test_diagnosis_input_preserves_complete_authoritative_task(self, tmp_path: Path) -> None:
@@ -2393,352 +2102,9 @@ class TestDiagnosisPromptEvidenceSummary:
         )
         payload = json.loads(raw)
 
-        assert payload["analysis_protocol"]["version"] == "generic_behavior_causal_v19"
         assert payload["retrieved_experience"]["matches"][0]["component_layer"] == "prompt_section"
         assert payload["experience_usage_policy"]["must_use_current_evidence_first"] is True
         assert "Do not copy a historical target_ref" in payload["experience_usage_policy"]["rules"][0]
-
-    def test_system_prompt_uses_generic_evidence_grounded_protocol(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            DIAGNOSIS_SYSTEM_PROMPT,
-        )
-
-        assert "trace.json" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "result.json" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "repository/" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "code, documents, spreadsheets, search" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Scores establish that an outcome failed" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "score alone never establishes why" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Compare at least two plausible explanations" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "evidence_status" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "supported_hypothesis" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "same aggregate score by itself is not new causal evidence" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "case-root `trace.json`" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "authoritative_benchmark_test_contract.test_patch" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "evidence_summary.md" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "no-exception smoke probe" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Requirement-classification audit" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "false rejection" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "incorporation by" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Do not convert a Tool, Skill, Config" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "member_harness.<role>.execution_budget" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "member_harness.<role>.rail" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "Failed-requirement coverage (hard)" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "task_sufficient" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "counterfactual_prediction" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "public task contract is available" in DIAGNOSIS_SYSTEM_PROMPT
-        assert "do not claim it is unavailable" in DIAGNOSIS_SYSTEM_PROMPT
-
-    def test_causal_prompt_preserves_late_controller_results_under_independent_budgets(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _causal_prompt_json
-
-        rendered = _causal_prompt_json(
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h1",
-                        "claim": "The first mechanism explains the failure.",
-                        "falsified_if": "A decisive artifact contradicts it.",
-                        "current_support": ["X" * 20_000],
-                    }
-                ]
-            },
-            {
-                "results": [
-                    {
-                        "request_id": "q1",
-                        "operation": "read_event",
-                        "availability": "available",
-                        "event": {"content": "A" * 20_000, "tool_calls": []},
-                    },
-                    {
-                        "request_id": "q2",
-                        "operation": "read_artifact_window",
-                        "availability": "available",
-                        "source": "artifacts/decisive.txt",
-                        "text": "LATE_DECISIVE_EVIDENCE",
-                    },
-                ]
-            },
-        )
-        payload = json.loads(rendered)
-
-        results = payload["controller_evidence_results"]["results"]
-        assert [item["request_id"] for item in results] == ["q1", "q2"]
-        assert results[1]["text"] == "LATE_DECISIVE_EVIDENCE"
-        assert "current_support" not in payload["investigation"]["hypotheses"][0]
-
-    def test_input_builds_complete_failed_requirement_inventory(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_diagnosis_input_json,
-        )
-
-        result_path = tmp_path / "case_requirements" / "result.json"
-        result_path.parent.mkdir(parents=True)
-        result_path.write_text("{}", encoding="utf-8")
-        case = replace(
-            self._make_case_input(str(result_path)),
-            evaluation_metadata={
-                "judge_evidence": {
-                    "criteria": [
-                        {
-                            "criterion_id": "correct_value",
-                            "score": 0.0,
-                            "status": "ok",
-                            "rationale": "the produced value differs from the required value",
-                        },
-                        {
-                            "criterion_id": "artifact_exists",
-                            "score": 1.0,
-                            "status": "ok",
-                            "rationale": "the artifact exists",
-                        },
-                    ]
-                }
-            },
-        )
-
-        payload = json.loads(
-            _build_diagnosis_input_json(
-                case=case,
-                signals=self._make_signals(),
-                retrieved_experience=None,
-                evidence_summary_available=False,
-            )
-        )
-
-        inventory = payload["deterministic_failed_requirement_inventory"]
-        assert [item["requirement_id"] for item in inventory["items"]] == ["criterion:correct_value"]
-        assert "does not identify their causes" in inventory["policy"]
-
-    def test_failed_requirement_inventory_does_not_drop_criteria_after_twenty_four(self, tmp_path: Path) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _build_failed_requirement_inventory
-
-        result_path = tmp_path / "case_many_requirements" / "result.json"
-        result_path.parent.mkdir(parents=True)
-        result_path.write_text("{}", encoding="utf-8")
-        case = replace(
-            self._make_case_input(str(result_path)),
-            evaluation_metadata={
-                "judge_evidence": {
-                    "criteria": [
-                        {
-                            "criterion_id": f"requirement_{index}",
-                            "score": 0.0,
-                            "status": "failed",
-                            "rationale": f"requirement {index} failed",
-                        }
-                        for index in range(30)
-                    ]
-                }
-            },
-        )
-
-        inventory = _build_failed_requirement_inventory(case)
-
-        assert len(inventory["items"]) == 30
-        assert inventory["items"][-1]["requirement_id"] == "criterion:requirement_29"
-
-    def test_causal_coverage_rejects_local_cause_claimed_as_complete(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _diagnosis_validation_conflicts,
-        )
-
-        inventory = {
-            "items": [
-                {"requirement_id": "criterion:value"},
-                {"requirement_id": "criterion:format"},
-            ]
-        }
-        diagnosis = {
-            "evidence_status": "confirmed",
-            "target_ref": "member_harness.solver.prompt",
-            "failed_requirement": "the output value is wrong",
-            "discriminating_evidence": "the trace shows the decision and resulting value",
-            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
-            "failure_cluster": {
-                "failed_checks": ["criterion:value"],
-                "observable_behavior": "the value is wrong",
-            },
-            "causal_coverage": {
-                "explained_requirement_ids": ["criterion:value"],
-                "residual_requirement_ids": ["criterion:format"],
-                "unexplained_observations": ["format remains wrong"],
-                "causal_chain": [
-                    {
-                        "cause": "the solver chose the wrong value",
-                        "effect": "the value criterion failed",
-                        "evidence_status": "observed",
-                        "evidence_refs": [],
-                    }
-                ],
-                "counterfactual_prediction": "the value changes while formatting remains unchanged",
-                "sufficiency_status": "task_sufficient",
-            },
-            "decision_contract": {"acceptance_observable": "the value criterion passes"},
-            "confidence": "high",
-        }
-
-        conflicts = _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            failed_requirement_inventory=inventory,
-        )
-
-        assert any(
-            "task_sufficient requires all inventory IDs in this diagnosis's failure cluster" in item
-            for item in conflicts
-        )
-
-    def test_causal_coverage_accepts_explicit_local_contributor(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _diagnosis_validation_conflicts,
-        )
-
-        inventory = {
-            "items": [
-                {"requirement_id": "criterion:value"},
-                {"requirement_id": "criterion:format"},
-            ]
-        }
-        diagnosis = {
-            "evidence_status": "confirmed",
-            "target_ref": "member_harness.solver.prompt",
-            "failed_requirement": "the output value is wrong",
-            "discriminating_evidence": "the trace links the decision to the wrong value",
-            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
-            "failure_cluster": {
-                "failed_checks": ["criterion:value"],
-                "observable_behavior": "the value is wrong",
-            },
-            "causal_coverage": {
-                "explained_requirement_ids": ["criterion:value"],
-                "residual_requirement_ids": ["criterion:format"],
-                "unexplained_observations": ["the format failure has another cause"],
-                "causal_chain": [
-                    {
-                        "cause": "the solver chose the wrong value",
-                        "effect": "the value criterion failed",
-                        "evidence_status": "observed",
-                        "evidence_refs": [],
-                    }
-                ],
-                "counterfactual_prediction": "the value changes while formatting remains unchanged",
-                "sufficiency_status": "local_contributor",
-            },
-            "decision_contract": {"acceptance_observable": "the value criterion improves"},
-            "confidence": "high",
-        }
-
-        assert (
-            _diagnosis_validation_conflicts(
-                diagnosis,
-                {},
-                failed_requirement_inventory=inventory,
-            )
-            == []
-        )
-
-    def test_causal_coverage_rejects_explaining_checks_outside_own_cluster(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _diagnosis_validation_conflicts
-
-        diagnosis = {
-            "evidence_status": "supported_hypothesis",
-            "target_ref": "member_harness.solver.prompt",
-            "failed_requirement": "the value requirement failed",
-            "discriminating_evidence": "the trace supports the value-decision gap",
-            "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 2}],
-            "failure_cluster": {
-                "failed_checks": ["criterion:value"],
-                "observable_behavior": "the value is wrong",
-            },
-            "causal_coverage": {
-                "explained_requirement_ids": ["criterion:value", "criterion:format"],
-                "residual_requirement_ids": [],
-                "unexplained_observations": [],
-                "causal_chain": [
-                    {"cause": "wrong value decision", "effect": "value failed", "evidence_status": "supported"}
-                ],
-                "counterfactual_prediction": "the value changes",
-                "sufficiency_status": "cluster_sufficient",
-            },
-            "decision_contract": {"acceptance_observable": "the value criterion improves"},
-            "confidence": "medium",
-        }
-
-        conflicts = _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            failed_requirement_inventory={
-                "items": [
-                    {"requirement_id": "criterion:value"},
-                    {"requirement_id": "criterion:format"},
-                ]
-            },
-        )
-
-        assert any("must exactly match this diagnosis's failure_cluster" in item for item in conflicts)
-
-    def test_diagnosis_set_cannot_drop_an_independent_failed_requirement(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _case_diagnoses_validation_conflicts,
-        )
-
-        inventory = {
-            "items": [
-                {"requirement_id": "criterion:value"},
-                {"requirement_id": "criterion:format"},
-            ]
-        }
-        diagnosis = {
-            "failure_cluster": {
-                "failed_checks": ["criterion:value"],
-                "observable_behavior": "the value is wrong",
-            },
-            "causal_coverage": {
-                "explained_requirement_ids": ["criterion:value"],
-                "residual_requirement_ids": ["criterion:format"],
-                "unexplained_observations": ["the format failure has another cause"],
-                "causal_chain": [
-                    {
-                        "cause": "wrong decision",
-                        "effect": "wrong value",
-                        "evidence_status": "supported",
-                    }
-                ],
-                "counterfactual_prediction": "the value changes but formatting does not",
-                "sufficiency_status": "local_contributor",
-            },
-        }
-
-        conflicts = _case_diagnoses_validation_conflicts(
-            [diagnosis],
-            {},
-            failed_requirement_inventory=inventory,
-        )
-
-        assert conflicts == ["diagnosis set omitted failed requirement IDs: criterion:format"]
-
-    def test_generic_protocol_rejects_assigned_target_with_insufficient_evidence(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _diagnosis_validation_conflicts,
-        )
-
-        conflicts = _diagnosis_validation_conflicts(
-            {
-                "evidence_status": "insufficient",
-                "target_ref": "member_harness.solver.prompt",
-                "confidence": "medium",
-                "failed_requirement": "unknown",
-                "discriminating_evidence": "none",
-                "evidence_refs": [{"trace_id": "t", "role": "solver", "message_index": 1}],
-                "decision_contract": {"acceptance_observable": "a changed answer"},
-            },
-            {},
-        )
-
-        assert "insufficient evidence must use target_ref=unassigned" in conflicts
-        assert "insufficient evidence must use confidence=low" in conflicts
 
     def test_system_prompt_preserves_role_aware_target_refs(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
@@ -3089,38 +2455,24 @@ class TestDiagnosisPromptEvidenceSummary:
             == []
         )
 
-    def test_diagnosis_gate_rejects_generic_iterable_attribution_for_test_next(self) -> None:
+    @pytest.mark.parametrize("test_name", ["test_next", "test_safe_create_replace_file", "arbitrary_check"])
+    def test_fact_gate_does_not_infer_semantics_from_test_names(self, test_name: str) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
-        diagnosis = {
-            "summary": "The object did not fully implement the iterable protocol.",
-            "recommendation": "Add __iter__ and verify that list(obj) returns values.",
-            "verifier_observations": {
-                "patch_successfully_applied": True,
-                "failed_fail_to_pass_tests": ["test_next"],
-                "failed_pass_to_pass_tests": [],
-            },
-        }
-        verifier_inventory = {
+        observations = {
             "patch_successfully_applied": True,
-            "resolved": False,
-            "failed_fail_to_pass_tests": ["test_next"],
+            "failed_fail_to_pass_tests": [test_name],
             "failed_pass_to_pass_tests": [],
-            "verifier_failure_output_excerpt": ("FAILED test_next: AttributeError before direct next is initialized"),
         }
+        diagnosis = {"verifier_observations": observations}
+        # Passing this fact check is not proof of a correct causal diagnosis.
+        assert _diagnosis_validation_conflicts(diagnosis, {}, {**observations, "resolved": False}) == []
+        diagnosis["verifier_observations"] = {**observations, "patch_successfully_applied": False}
+        assert _diagnosis_validation_conflicts(diagnosis, {}, {**observations, "resolved": False})
 
-        assert _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            verifier_inventory,
-        ) == [
-            "test_next attribution must preserve the direct operation and its stateful iterator lifecycle",
-            "test_next attribution omits the verifier's pre-initialization boundary",
-        ]
-
-    def test_diagnosis_gate_rejects_instruction_for_known_edit_after_empty_patch(self) -> None:
+    def test_fact_gate_does_not_classify_execution_lever_from_keywords(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
@@ -3130,20 +2482,11 @@ class TestDiagnosisPromptEvidenceSummary:
             "root_cause": "The solver completed investigation and then returned.",
             "target_ref": "member_harness.solver.skill",
             "decision_contract": {
-                "required_action": "Write a concrete edit to the identified source file.",
-                "activation_phase": "during_investigation",
+                "required_action": "Compare the justified action to the next attempted operation.",
+                "activation_phase": "post_diagnosis",
             },
         }
-
-        assert _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            {"empty_patch": True},
-        ) == [
-            "empty-patch diagnosis says the concrete edit was already justified, "
-            "so activation_phase must be post_diagnosis or pre_submission",
-            "empty-patch diagnosis attributes a post-diagnosis action transition to a reusable harness instruction",
-        ]
+        assert _diagnosis_validation_conflicts(diagnosis, {}, {"empty_patch": True}) == []
 
     def test_diagnosis_gate_keeps_earlier_investigation_error_actionable(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
@@ -3172,60 +2515,20 @@ class TestDiagnosisPromptEvidenceSummary:
             == []
         )
 
-    def test_diagnosis_gate_rejects_late_empty_patch_instruction_without_phrase_match(
-        self,
-    ) -> None:
+    def test_fact_gate_keeps_post_diagnosis_behavior_for_intervention_planning(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _diagnosis_validation_conflicts,
         )
 
         diagnosis = {
             "summary": "The final turn contained no workspace action.",
-            "target_ref": "member_harness.solver.prompt_section",
+            "target_ref": "member_harness.solver.prompt",
             "decision_contract": {
-                "required_action": "Persist the selected correction.",
+                "required_action": "Check execution of the supported next action before completion.",
                 "activation_phase": "post_diagnosis",
             },
         }
-
-        assert _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            {"empty_patch": True},
-        ) == [
-            "empty-patch post-diagnosis action transition must be "
-            "target_ref=unassigned rather than reusable Prompt/Skill",
-        ]
-
-    def test_diagnosis_gate_rejects_encoding_only_safe_replace_attribution(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _diagnosis_validation_conflicts,
-        )
-
-        diagnosis = {
-            "target_ref": "member_harness.solver.skill",
-            "decision_contract": {
-                "causal_distinction": "A lossy error handler changes Unicode text.",
-                "required_action": "Always write with UTF-8 and no error handler.",
-                "acceptance_observable": "Unicode content round-trips.",
-                "scope_boundary": ["Ignoring characters is also lossy."],
-            },
-        }
-
-        assert _diagnosis_validation_conflicts(
-            diagnosis,
-            {},
-            {
-                "failed_fail_to_pass_tests": [
-                    "test_safe_create_replace_file[utf8_update]",
-                ],
-                "verifier_failure_output_excerpt": "existing file must survive",
-            },
-        ) == [
-            "safe file-replacement attribution must preserve the transactional "
-            "boundary: write separately and leave the existing file unchanged "
-            "when encoding or writing fails",
-        ]
+        assert _diagnosis_validation_conflicts(diagnosis, {}, {"empty_patch": True}) == []
 
     def test_diagnosis_gate_accepts_transactional_safe_replace_attribution(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
@@ -3877,7 +3180,9 @@ class TestBoundedMultiDiagnosis:
             "confidence": "medium",
         }
 
-    def test_normalize_case_diagnoses_bounds_deduplicates_and_prioritizes_residuals(self) -> None:
+    def test_normalize_case_diagnoses_bounds_deduplicates_and_prioritizes_residuals(
+        self,
+    ) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _normalize_case_diagnoses,
         )
@@ -3944,1689 +3249,6 @@ class TestBoundedMultiDiagnosis:
         legacy = _normalize_case_diagnoses(remaining)
         assert legacy == [remaining]
 
-    def test_normalize_case_diagnoses_rejects_empty_json_placeholders(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _normalize_case_diagnoses,
-        )
-
-        assert _normalize_case_diagnoses({"diagnoses": [{}]}) == []
-        assert _normalize_case_diagnoses({"diagnoses": [{"severity": "medium"}]}) == []
-        assert _normalize_case_diagnoses(
-            {
-                "diagnoses": [
-                    {
-                        "target_ref": "unassigned",
-                        "summary": "Current evidence cannot attribute the failure.",
-                    }
-                ]
-            }
-        ) == [
-            {
-                "target_ref": "unassigned",
-                "summary": "Current evidence cannot attribute the failure.",
-            }
-        ]
-
-    def test_normalize_preserves_supported_issue_and_splits_unresolved_residual(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
-
-        diagnosis = self._diagnosis(
-            failure_mode="incomplete_extraction",
-            failed_check="criterion:value",
-            observable="the extracted value is incomplete",
-        )
-        diagnosis.update(
-            {
-                "evidence_status": "confirmed",
-                "causal_coverage": {
-                    "explained_requirement_ids": ["criterion:value"],
-                    "residual_requirement_ids": ["criterion:format"],
-                    "unexplained_observations": ["the format mechanism is unresolved"],
-                    "causal_chain": [
-                        {
-                            "cause": "the extraction stopped early",
-                            "effect": "the value is incomplete",
-                            "evidence_status": "supported",
-                        }
-                    ],
-                    "counterfactual_prediction": "the extracted value becomes complete",
-                    "sufficiency_status": "local_contributor",
-                },
-                "hypothesis_assessment": [
-                    {
-                        "hypothesis_id": "h_extract",
-                        "status": "supported",
-                        "falsifying_condition_status": "not_observed",
-                        "claim_follows_from_evidence": "yes",
-                        "logic_check": "the exact read ends before the required value",
-                        "controller_request_ids": ["q1"],
-                    },
-                    {
-                        "hypothesis_id": "h_format",
-                        "status": "unresolved",
-                        "falsifying_condition_status": "unknown",
-                        "claim_follows_from_evidence": "unknown",
-                        "logic_check": "the format discriminator is unavailable",
-                        "controller_request_ids": [],
-                    },
-                ],
-            }
-        )
-
-        normalized = _normalize_case_diagnoses({"diagnoses": [diagnosis]})
-
-        assert len(normalized) == 2
-        supported, residual = normalized
-        assert supported["target_ref"] == "member_harness.solver.skill"
-        assert supported["evidence_status"] == "supported_hypothesis"
-        assert supported["causal_coverage"]["sufficiency_status"] == "local_contributor"
-        assert [item["hypothesis_id"] for item in supported["hypothesis_assessment"]] == ["h_extract"]
-        assert residual["target_ref"] == "unassigned"
-        assert residual["evidence_status"] == "insufficient"
-        assert residual["causal_coverage"]["explained_requirement_ids"] == []
-        assert residual["failure_cluster"]["failed_checks"] == ["criterion:format"]
-        assert residual["causal_coverage"]["residual_requirement_ids"] == ["criterion:format"]
-        assert [item["hypothesis_id"] for item in residual["hypothesis_assessment"]] == ["h_format"]
-
-    def test_normalize_keeps_supported_local_issue_when_only_an_alternative_is_unresolved(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_decision",
-            failed_check="criterion:value",
-            observable="the selected value is unsupported",
-        )
-        diagnosis.update(
-            {
-                "evidence_status": "supported_hypothesis",
-                "hypothesis_assessment": [
-                    {"hypothesis_id": "h_observed", "status": "supported"},
-                    {"hypothesis_id": "h_alternative", "status": "unresolved"},
-                ],
-                "causal_coverage": {
-                    "explained_requirement_ids": ["criterion:value"],
-                    "residual_requirement_ids": [],
-                    "unexplained_observations": [],
-                    "causal_chain": [
-                        {
-                            "cause": "an observed decision",
-                            "effect": "the selected value is unsupported",
-                            "evidence_status": "supported",
-                        }
-                    ],
-                    "counterfactual_prediction": "the selected value follows the observed source",
-                    "sufficiency_status": "cluster_sufficient",
-                },
-            }
-        )
-
-        normalized = _normalize_case_diagnoses({"diagnoses": [diagnosis]})
-
-        assert len(normalized) == 1
-        assert normalized[0]["target_ref"] == "member_harness.solver.skill"
-        assert [item["hypothesis_id"] for item in normalized[0]["hypothesis_assessment"]] == ["h_observed"]
-        assert normalized[0]["causal_coverage"]["sufficiency_status"] == "local_contributor"
-
-    def test_causal_reconciliation_downgrades_only_the_unsupported_hypothesis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_decision",
-            failed_check="criterion:value",
-            observable="the selected value violates the source",
-        )
-        diagnosis["evidence_status"] = "confirmed"
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_supported",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 contains the source value used by the agent",
-                "controller_request_ids": ["q1"],
-            },
-            {
-                "hypothesis_id": "h_bad",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "logic_check": "q2 supports the alternative",
-                "controller_request_ids": ["q2"],
-            },
-        ]
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {"hypothesis_id": "h_supported", "claim": "observed wrong decision"},
-                    {"hypothesis_id": "h_bad", "claim": "unobserved alternative"},
-                ],
-                "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "read_artifact_window"},
-                    {"request_id": "q2", "hypothesis_ids": ["h_bad"], "operation": "inspect_artifact"},
-                ],
-            },
-            evidence_results={
-                "results": [
-                    {"request_id": "q1", "availability": "available"},
-                    {"request_id": "q2", "availability": "not_available"},
-                ]
-            },
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
-        assert reconciled[0]["evidence_status"] == "supported_hypothesis"
-        statuses = {item["hypothesis_id"]: item["status"] for item in reconciled[0]["hypothesis_assessment"]}
-        assert statuses == {"h_supported": "supported", "h_bad": "unresolved"}
-        assert any("downgraded h_bad" in warning for warning in warnings)
-
-    def test_causal_reconciliation_preserves_paired_experiment_when_model_omits_assessment(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _normalize_prior_experiment_assessment,
-            _reconcile_causal_assessments,
-        )
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_order",
-            failed_check="criterion:value",
-            observable="the downstream operation used unchanged source state",
-        )
-        diagnosis["evidence_status"] = "supported_hypothesis"
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_order",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "logic_check": "q1 shows the downstream operation preceded the source mutation",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [{"hypothesis_id": "h_order", "claim": "the causal order was reversed"}],
-                "evidence_requests": [{"request_id": "q1", "hypothesis_ids": ["h_order"], "operation": "search_trace"}],
-            },
-            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-            prior_candidate_feedback={
-                "experiments": [
-                    {
-                        "activation": {"state": "unknown"},
-                        "target_score_delta": 0.0,
-                        "causal_intervention_contracts": [{"source_causal_hypothesis_id": "h_previous"}],
-                    }
-                ]
-            },
-        )
-
-        assessment = reconciled[0]["prior_experiment_assessment"]
-        assert assessment["availability"] == "available"
-        assert assessment["intervention_activated"] == "unknown"
-        assert assessment["predicted_outcome_occurred"] == "no"
-        assert assessment["causal_hypothesis_status"] == "inconclusive"
-        assert any("synthesized a conservative paired-experiment" in warning for warning in warnings)
-
-        corrected, correction = _normalize_prior_experiment_assessment(
-            {
-                "availability": "available",
-                "intervention_activated": "no",
-                "predicted_behavior_occurred": "no",
-                "predicted_outcome_occurred": "no",
-                "causal_hypothesis_status": "falsified",
-                "reason": "The score did not improve.",
-            }
-        )
-        assert corrected["causal_hypothesis_status"] == "not_tested"
-        assert "did not activate" in correction
-
-    def test_causal_reconciliation_rejects_form_only_activation_when_failure_persists(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="unverified_decision_ground_used",
-            failed_check="criterion:value",
-            observable="the released decision still uses a ground with an incomplete requirement chain",
-        )
-        diagnosis["evidence_status"] = "supported_hypothesis"
-        diagnosis["prior_experiment_assessment"] = {
-            "availability": "available",
-            "intervention_activated": "yes",
-            "predicted_behavior_occurred": "yes",
-            "predicted_outcome_occurred": "no",
-            "causal_hypothesis_status": "falsified",
-            "reason": "A verification table was visible, but the score did not improve.",
-        }
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_ground",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 shows the incomplete ground was retained",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-        feedback = {
-            "experiments": [
-                {
-                    "causal_intervention_contracts": [
-                        {"source_causal_hypothesis_semantic_id": ("chs:unverified_decision_ground_used")}
-                    ]
-                }
-            ]
-        }
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [{"hypothesis_id": "h_ground", "claim": "an unverified ground was used"}],
-                "evidence_requests": [{"request_id": "q1", "hypothesis_ids": ["h_ground"], "operation": "read_event"}],
-            },
-            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-            prior_candidate_feedback=feedback,
-        )
-
-        assessment = reconciled[0]["prior_experiment_assessment"]
-        assert assessment["intervention_activated"] == "yes"
-        assert assessment["predicted_behavior_occurred"] == "no"
-        assert assessment["predicted_outcome_occurred"] == "no"
-        assert assessment["causal_hypothesis_status"] == "not_tested"
-        assert "visible form may have appeared" in assessment["reason"]
-        assert any("pre-registered failure mechanism remained supported" in warning for warning in warnings)
-
-    def test_causal_reconciliation_preserves_valid_cluster_when_sibling_uses_unknown_id(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        supported = self._diagnosis(
-            failure_mode="wrong_decision",
-            failed_check="criterion:value",
-            observable="the selected value violates the source",
-        )
-        supported["evidence_status"] = "confirmed"
-        supported["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [
-                {
-                    "cause": "the proven conversion was not reused",
-                    "effect": "the final artifact retained the old value",
-                    "evidence_status": "observed",
-                }
-            ],
-            "counterfactual_prediction": "reusing the proven conversion persists the selected value",
-            "sufficiency_status": "task_sufficient",
-        }
-        supported["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_supported",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 shows the successful method was not reused",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-        malformed_sibling = self._diagnosis(
-            failure_mode="redundant_story",
-            failed_check="criterion:typo_value",
-            observable="a second narrative repeats the same failed output",
-        )
-        malformed_sibling["evidence_status"] = "supported_hypothesis"
-        malformed_sibling["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:typo_value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [
-                {
-                    "cause": "an unsupported alternative",
-                    "effect": "the same output failed",
-                    "evidence_status": "supported",
-                }
-            ],
-            "counterfactual_prediction": "the alternative would change the output",
-            "sufficiency_status": "cluster_sufficient",
-        }
-        malformed_sibling["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_alternative",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "the alternative remains unresolved",
-                "controller_request_ids": [],
-            }
-        ]
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [supported, malformed_sibling],
-            {
-                "hypotheses": [
-                    {"hypothesis_id": "h_supported", "claim": "the proven method was not reused"},
-                    {"hypothesis_id": "h_alternative", "claim": "an alternative mechanism occurred"},
-                ],
-                "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "read_event"},
-                    {"request_id": "q2", "hypothesis_ids": ["h_alternative"], "operation": "search_trace"},
-                ],
-            },
-            evidence_results={
-                "results": [
-                    {"request_id": "q1", "availability": "available"},
-                    {"request_id": "q2", "availability": "not_found"},
-                ]
-            },
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        assert len(reconciled) == 1
-        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
-        statuses = {item["hypothesis_id"]: item["status"] for item in reconciled[0]["hypothesis_assessment"]}
-        assert statuses == {"h_supported": "supported", "h_alternative": "unresolved"}
-        assert any("dropped a redundant cluster" in warning for warning in warnings)
-
-    def test_causal_refinement_admits_only_independently_tested_new_hypothesis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _merge_causal_investigation,
-            _normalize_causal_refinement,
-        )
-
-        base = {
-            "hypotheses": [
-                {
-                    "hypothesis_id": "h_initial",
-                    "claim": "The conversion command failed.",
-                    "explains_requirement_ids": ["criterion:artifact"],
-                    "current_support": [],
-                    "falsified_if": "The conversion command succeeded.",
-                    "numeric_change_check_required": True,
-                }
-            ],
-            "evidence_requests": [
-                {
-                    "request_id": "q1",
-                    "hypothesis_ids": ["h_initial"],
-                    "operation": "search_trace",
-                    "query": "conversion succeeded",
-                }
-            ],
-        }
-        refinement = _normalize_causal_refinement(
-            {
-                "investigation": {
-                    "hypotheses": [
-                        {
-                            "hypothesis_id": "h_persist",
-                            "claim": "A successful intermediate artifact was not persisted as the deliverable.",
-                            "explains_requirement_ids": ["criterion:artifact"],
-                            "current_support": ["q1 revealed a successful conversion"],
-                            "falsified_if": "The converted artifact was copied to the final deliverable path.",
-                            "origin": "abductive_refinement",
-                            "discovery_evidence_request_ids": ["q1"],
-                            "evidence_requests": [
-                                {
-                                    "request_id": "q_persist",
-                                    "operation": "search_trace",
-                                    "query": "copy final deliverable converted artifact",
-                                }
-                            ],
-                        }
-                    ]
-                }
-            },
-            base=base,
-            failed_requirement_ids=["criterion:artifact"],
-        )
-
-        assert refinement is not None
-        hypotheses = {item["hypothesis_id"]: item for item in refinement["hypotheses"]}
-        assert hypotheses["h_initial"]["numeric_change_check_required"] is True
-        assert hypotheses["h_persist"]["origin"] == "abductive_refinement"
-        assert hypotheses["h_persist"]["discovery_evidence_request_ids"] == ["q1"]
-        merged, additions = _merge_causal_investigation(base, refinement)
-        assert [item["hypothesis_id"] for item in merged["hypotheses"]] == ["h_initial", "h_persist"]
-        assert len(additions) == 1
-        assert additions[0]["hypothesis_ids"] == ["h_persist"]
-
-    def test_causal_refinement_rejects_discovered_story_without_new_test(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _merge_causal_investigation,
-            _normalize_causal_refinement,
-        )
-
-        base = {
-            "hypotheses": [
-                {
-                    "hypothesis_id": "h_initial",
-                    "claim": "The parser failed.",
-                    "explains_requirement_ids": ["criterion:value"],
-                    "falsified_if": "The parser succeeded.",
-                    "numeric_change_check_required": False,
-                }
-            ],
-            "evidence_requests": [
-                {
-                    "request_id": "q1",
-                    "hypothesis_ids": ["h_initial"],
-                    "operation": "search_trace",
-                    "query": "parser succeeded",
-                }
-            ],
-        }
-        refinement = _normalize_causal_refinement(
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_story",
-                        "claim": "A different mechanism caused the failure.",
-                        "explains_requirement_ids": ["criterion:value"],
-                        "falsified_if": "The different mechanism did not occur.",
-                        "origin": "abductive_refinement",
-                        "discovery_evidence_request_ids": ["q1"],
-                        "evidence_requests": [],
-                    }
-                ]
-            },
-            base=base,
-            failed_requirement_ids=["criterion:value"],
-        )
-
-        assert refinement is not None
-        merged, additions = _merge_causal_investigation(base, refinement)
-        assert [item["hypothesis_id"] for item in merged["hypotheses"]] == ["h_initial"]
-        assert additions == []
-
-    def test_investigation_diagnosis_prompt_requires_cluster_wide_falsifier_matrix(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_investigation_diagnosis_prompt,
-        )
-
-        prompt = _build_investigation_diagnosis_prompt(
-            original_prompt="diagnose",
-            investigation={"hypotheses": [], "evidence_requests": []},
-            evidence_results={"results": []},
-        )
-
-        assert "internal falsifier matrix" in prompt
-        assert "does not give one hypothesis exclusive ownership" in prompt
-        assert "Test every necessary subclaim in a composite explanation" in prompt
-        assert "another hypothesis's evidence-backed" in prompt
-        assert "`current_support`" in prompt
-
-    def test_compatible_evidence_requests_share_facts_only_inside_requirement_cluster(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _compatible_evidence_requests,
-        )
-
-        compatible = _compatible_evidence_requests(
-            {
-                "hypotheses": [
-                    {"hypothesis_id": "h1", "explains_requirement_ids": ["criterion:value"]},
-                    {"hypothesis_id": "h2", "explains_requirement_ids": ["criterion:value"]},
-                    {"hypothesis_id": "h3", "explains_requirement_ids": ["criterion:format"]},
-                ],
-                "evidence_requests": [
-                    {"request_id": "q2", "hypothesis_ids": ["h2"]},
-                    {"request_id": "q3", "hypothesis_ids": ["h3"]},
-                ],
-            }
-        )
-
-        assert compatible["h1"] == {"q2"}
-        assert compatible["h2"] == {"q2"}
-        assert compatible["h3"] == {"q3"}
-
-    def test_causal_reconciliation_does_not_borrow_unrelated_hypothesis_evidence(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_decision",
-            failed_check="criterion:value",
-            observable="the selected value is wrong",
-        )
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_read",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "logic_check": "q_route was available",
-                "controller_request_ids": ["q_route"],
-            },
-            {
-                "hypothesis_id": "h_route",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "routing remains unresolved",
-                "controller_request_ids": [],
-            },
-        ]
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {"hypothesis_id": "h_read", "claim": "The source read stopped early."},
-                    {"hypothesis_id": "h_route", "claim": "Routing selected the wrong source."},
-                ],
-                "evidence_requests": [
-                    {"request_id": "q_read", "hypothesis_ids": ["h_read"], "operation": "read_event"},
-                    {"request_id": "q_route", "hypothesis_ids": ["h_route"], "operation": "read_event"},
-                ],
-            },
-            evidence_results={
-                "results": [
-                    {"request_id": "q_read", "availability": "not_found"},
-                    {"request_id": "q_route", "availability": "available"},
-                ]
-            },
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        statuses = {item["hypothesis_id"]: item["status"] for item in reconciled[0]["hypothesis_assessment"]}
-        assert statuses["h_read"] == "unresolved"
-        assert any("stripped evidence outside h_read" in warning for warning in warnings)
-
-    def test_causal_reconciliation_shares_discriminator_with_competing_hypothesis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_state",
-            failed_check="criterion:value",
-            observable="the downstream value used unchanged source state",
-        )
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_skipped",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "the source-state inspection is inconclusive for this alternative",
-                "controller_request_ids": [],
-            },
-            {
-                "hypothesis_id": "h_stale",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q_state shows the source changed while the derived value stayed stale",
-                "controller_request_ids": ["q_state"],
-            },
-        ]
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_skipped",
-                        "claim": "the source mutation was skipped",
-                        "explains_requirement_ids": ["criterion:value"],
-                    },
-                    {
-                        "hypothesis_id": "h_stale",
-                        "claim": "the source changed but the derived state stayed stale",
-                        "explains_requirement_ids": ["criterion:value"],
-                    },
-                ],
-                "evidence_requests": [
-                    {
-                        "request_id": "q_state",
-                        "hypothesis_ids": ["h_skipped"],
-                        "operation": "read_artifact_window",
-                    }
-                ],
-            },
-            evidence_results={"results": [{"request_id": "q_state", "availability": "available"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        statuses = {item["hypothesis_id"]: item["status"] for item in reconciled[0]["hypothesis_assessment"]}
-        assert statuses["h_stale"] == "supported"
-        assert not any("stripped evidence outside h_stale" in warning for warning in warnings)
-
-    def test_causal_reconciliation_keeps_valid_scoped_evidence_when_extra_citation_is_stripped(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="proven_method_not_reused",
-            failed_check="criterion:value",
-            observable="the final artifact retained the old value",
-        )
-        diagnosis["evidence_status"] = "confirmed"
-        diagnosis["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [
-                {
-                    "cause": "the proven method was not reused",
-                    "effect": "the final artifact retained the old value",
-                    "evidence_status": "observed",
-                }
-            ],
-            "counterfactual_prediction": "reusing the method updates the final artifact",
-            "sufficiency_status": "task_sufficient",
-        }
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_reuse",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q_reuse shows the working method was not applied to the final artifact",
-                "controller_request_ids": ["q_reuse", "q_other"],
-            }
-        ]
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_reuse",
-                        "claim": "the proven method was not reused",
-                        "explains_requirement_ids": ["criterion:value"],
-                    },
-                    {"hypothesis_id": "h_other", "claim": "another mechanism occurred"},
-                ],
-                "evidence_requests": [
-                    {"request_id": "q_reuse", "hypothesis_ids": ["h_reuse"], "operation": "read_event"},
-                    {"request_id": "q_other", "hypothesis_ids": ["h_other"], "operation": "search_trace"},
-                ],
-            },
-            evidence_results={
-                "results": [
-                    {"request_id": "q_reuse", "availability": "available"},
-                    {"request_id": "q_other", "availability": "available"},
-                ]
-            },
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        assessment = reconciled[0]["hypothesis_assessment"][0]
-        assert assessment["status"] == "supported"
-        assert assessment["controller_request_ids"] == ["q_reuse"]
-        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
-        assert any("stripped evidence outside h_reuse" in warning for warning in warnings)
-
-    def test_causal_reconciliation_repairs_residual_coverage_for_already_unassigned_diagnosis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="unresolved_mechanism",
-            failed_check="criterion:value",
-            observable="the authoritative value remains unmet",
-            target_ref="unassigned",
-        )
-        diagnosis["evidence_status"] = "insufficient"
-        diagnosis["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [
-                {
-                    "cause": "unknown mechanism",
-                    "effect": "the value remains unmet",
-                    "evidence_status": "unknown",
-                }
-            ],
-            "counterfactual_prediction": "no change is predicted without a discriminator",
-            "sufficiency_status": "unknown",
-        }
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_unknown",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "the available request did not distinguish the mechanism",
-                "controller_request_ids": [],
-            }
-        ]
-
-        reconciled, _ = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_unknown",
-                        "claim": "an unresolved mechanism occurred",
-                        "explains_requirement_ids": ["criterion:value"],
-                    }
-                ],
-                "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_unknown"], "operation": "search_trace"}
-                ],
-            },
-            evidence_results={"results": [{"request_id": "q1", "availability": "not_found"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        assert reconciled[0]["evidence_status"] == "insufficient"
-        assert reconciled[0]["causal_coverage"]["explained_requirement_ids"] == []
-        assert reconciled[0]["causal_coverage"]["residual_requirement_ids"] == ["criterion:value"]
-
-    def test_causal_reconciliation_drops_redundant_unresolved_alternative(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _case_diagnoses_validation_conflicts,
-            _reconcile_causal_assessments,
-        )
-
-        supported = self._diagnosis(
-            failure_mode="supported_decision_failure",
-            failed_check="criterion:value",
-            observable="the wrong branch was selected",
-        )
-        supported["evidence_status"] = "confirmed"
-        supported["evidence_refs"] = [{"trace_id": "trace-1", "message_index": 3}]
-        supported["failed_requirement"] = "criterion:value must be satisfied"
-        supported["discriminating_evidence"] = "q1 directly distinguishes the selected branch"
-        supported["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [
-                {
-                    "cause": "the wrong branch was selected",
-                    "effect": "the required value was omitted",
-                    "evidence_status": "observed",
-                }
-            ],
-            "counterfactual_prediction": "selecting the supported branch emits the required value",
-            "sufficiency_status": "task_sufficient",
-        }
-        supported["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_supported",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 directly shows the wrong branch decision",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-        unresolved = self._diagnosis(
-            failure_mode="unresolved_alternative",
-            failed_check="criterion:value",
-            observable="the same failed value may have another cause",
-            target_ref="unassigned",
-        )
-        unresolved["evidence_status"] = "insufficient"
-        unresolved["issue_category"] = "unassigned"
-        unresolved["confidence"] = "low"
-        unresolved["evidence_refs"] = []
-        unresolved["causal_coverage"] = {
-            "explained_requirement_ids": [],
-            "residual_requirement_ids": ["criterion:value"],
-            "unexplained_observations": ["the alternative remains unresolved"],
-            "causal_chain": [
-                {
-                    "cause": "an unknown alternative",
-                    "effect": "the required value was omitted",
-                    "evidence_status": "unknown",
-                }
-            ],
-            "counterfactual_prediction": "no change is predicted without a discriminator",
-            "sufficiency_status": "unknown",
-        }
-        unresolved["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_unresolved",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "no discriminator is available",
-                "controller_request_ids": [],
-            }
-        ]
-        investigation = {
-            "hypotheses": [
-                {"hypothesis_id": "h_supported", "explains_requirement_ids": ["criterion:value"]},
-                {"hypothesis_id": "h_unresolved", "explains_requirement_ids": ["criterion:value"]},
-            ],
-            "evidence_requests": [{"request_id": "q1", "hypothesis_ids": ["h_supported"], "operation": "read_event"}],
-        }
-        failed_inventory = {"items": [{"requirement_id": "criterion:value"}]}
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [supported, unresolved],
-            investigation,
-            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
-            failed_requirement_inventory=failed_inventory,
-        )
-
-        assert len(reconciled) == 1
-        assert reconciled[0]["failure_mode"] == "supported_decision_failure"
-        assert any("redundant unresolved alternative" in warning for warning in warnings)
-        assert not _case_diagnoses_validation_conflicts(
-            reconciled,
-            {"project_test_events": []},
-            failed_requirement_inventory=failed_inventory,
-        )
-
-    def test_causal_reconciliation_isolates_outcome_dependent_handoff_and_preserves_ledger(
-        self,
-    ) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _causal_investigation_conflicts,
-            _reconcile_causal_assessments,
-        )
-
-        invalid = self._diagnosis(
-            failure_mode="outcome_fitted_action",
-            failed_check="criterion:value",
-            observable="the released value violates the public contract",
-        )
-        invalid["evidence_status"] = "supported_hypothesis"
-        invalid["selected_hypothesis_id"] = "h_observed"
-        invalid["root_cause"] = "The runtime should choose the evaluator's expected answer."
-        invalid["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_observed",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 shows which branch the runtime selected",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-        valid = self._diagnosis(
-            failure_mode="post_mutation_validation_omitted",
-            failed_check="criterion:value",
-            observable="the exact released object was not checked after its last mutation",
-        )
-        valid["evidence_status"] = "confirmed"
-        valid["selected_hypothesis_id"] = "h_validation"
-        valid["root_cause"] = "The final mutation was followed by release rather than validation."
-        valid["recommendation"] = "Validate the exact released object after its last mutation."
-        valid["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_validation",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q2 shows mutation followed directly by release",
-                "controller_request_ids": ["q2"],
-                "handoff_disposition": "selected",
-                "handoff_reason": "This diagnosis selects the observed validation omission.",
-            }
-        ]
-        investigation = {
-            "hypotheses": [
-                {
-                    "hypothesis_id": "h_observed",
-                    "claim": "The runtime selected the observed branch.",
-                    "falsified_if": "The trace shows a different branch.",
-                    "explains_requirement_ids": ["criterion:value"],
-                },
-                {
-                    "hypothesis_id": "h_validation",
-                    "claim": "The exact released object was not validated after its last mutation.",
-                    "falsified_if": "A post-mutation validation of that object is present.",
-                    "explains_requirement_ids": ["criterion:value"],
-                },
-                {
-                    "hypothesis_id": "h_alternative",
-                    "claim": "A different production mechanism caused the invalid value.",
-                    "falsified_if": "The production state is proven valid before release.",
-                    "explains_requirement_ids": ["criterion:value"],
-                },
-            ],
-            "evidence_requests": [
-                {"request_id": "q1", "hypothesis_ids": ["h_observed"], "operation": "read_event"},
-                {"request_id": "q2", "hypothesis_ids": ["h_validation"], "operation": "read_event"},
-                {"request_id": "q3", "hypothesis_ids": ["h_alternative"], "operation": "read_event"},
-            ],
-        }
-        evidence_results = {
-            "results": [
-                {"request_id": "q1", "availability": "available"},
-                {"request_id": "q2", "availability": "available"},
-                {"request_id": "q3", "availability": "not_found"},
-            ]
-        }
-        failed_inventory = {"items": [{"requirement_id": "criterion:value"}]}
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [invalid, valid],
-            investigation,
-            evidence_results=evidence_results,
-            failed_requirement_inventory=failed_inventory,
-        )
-
-        assert len(reconciled) == 1
-        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
-        assert reconciled[0]["selected_hypothesis_id"] == "h_validation"
-        assessments = {item["hypothesis_id"]: item for item in reconciled[0]["hypothesis_assessment"]}
-        assert set(assessments) == {"h_observed", "h_validation", "h_alternative"}
-        assert assessments["h_observed"]["handoff_disposition"] == "non_actionable"
-        assert assessments["h_alternative"]["status"] == "unresolved"
-        assert reconciled[0]["evidence_status"] == "supported_hypothesis"
-        assert any("evaluator-outcome-dependent" in warning for warning in warnings)
-        assert not _causal_investigation_conflicts(
-            reconciled,
-            investigation,
-            evidence_results=evidence_results,
-            prior_candidate_feedback=None,
-        )
-
-    def test_causal_reconciliation_keeps_structural_support_with_numeric_context(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="artifact_update_not_persisted",
-            failed_check="criterion:scenario_value",
-            observable="the persisted artifact still contains the source state",
-        )
-        diagnosis["evidence_status"] = "confirmed"
-        diagnosis["causal_coverage"] = {
-            "explained_requirement_ids": ["criterion:scenario_value"],
-            "residual_requirement_ids": [],
-            "unexplained_observations": [],
-            "causal_chain": [],
-            "counterfactual_prediction": "persisting the update changes the artifact state",
-            "sufficiency_status": "cluster_sufficient",
-        }
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_write",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 shows the update existed only in memory and no artifact write occurred",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_write",
-                        "claim": "The +1pp update was not persisted to the artifact.",
-                        "numeric_change_check_required": False,
-                    }
-                ],
-                "evidence_requests": [
-                    {
-                        "request_id": "q1",
-                        "hypothesis_ids": ["h_write"],
-                        "operation": "read_event",
-                    }
-                ],
-            },
-            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:scenario_value"}]},
-        )
-
-        assert warnings == []
-        assert reconciled[0]["target_ref"] == "member_harness.solver.skill"
-        assert reconciled[0]["evidence_status"] == "confirmed"
-        assert reconciled[0]["hypothesis_assessment"][0]["status"] == "supported"
-
-    def test_causal_reconciliation_rejects_expected_label_as_root_cause(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="expected_verdict_mismatch",
-            failed_check="criterion:verdict",
-            observable="the response verdict differs from the scored label",
-        )
-        diagnosis["evidence_status"] = "supported_hypothesis"
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_label",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "logic_check": "The evaluator expects answer Yes and the candidate that said Yes passed.",
-                "controller_request_ids": ["q1"],
-            }
-        ]
-
-        reconciled, warnings = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_label",
-                        "claim": "The evaluator requires the expected answer Yes.",
-                    }
-                ],
-                "evidence_requests": [
-                    {
-                        "request_id": "q1",
-                        "hypothesis_ids": ["h_label"],
-                        "operation": "search_trace",
-                    }
-                ],
-            },
-            evidence_results={"results": [{"request_id": "q1", "availability": "available"}]},
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:verdict"}]},
-        )
-
-        assert reconciled[0]["target_ref"] == "unassigned"
-        assert reconciled[0]["evidence_status"] == "insufficient"
-        assert reconciled[0]["hypothesis_assessment"][0]["status"] == "unresolved"
-        assert any("outcome_reverse_engineering_is_not_causal_evidence" in warning for warning in warnings)
-
-    def test_causal_reconciliation_rejects_handoff_not_bound_to_one_supported_hypothesis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _reconcile_causal_assessments
-
-        diagnosis = self._diagnosis(
-            failure_mode="post_hoc_mechanism",
-            failed_check="criterion:value",
-            observable="the candidate value remained wrong",
-        )
-        diagnosis["evidence_status"] = "supported_hypothesis"
-        diagnosis["root_cause"] = "The unresolved third mechanism should have been used."
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": "h_observed",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q1 shows the observed mutation",
-                "controller_request_ids": ["q1"],
-            },
-            {
-                "hypothesis_id": "h_runtime",
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "evidence_relation": "direct_claim",
-                "evidence_independence": "direct_observation",
-                "logic_check": "q2 shows the runtime mismatch",
-                "controller_request_ids": ["q2"],
-            },
-            {
-                "hypothesis_id": "h_unresolved_action",
-                "status": "unresolved",
-                "falsifying_condition_status": "unknown",
-                "claim_follows_from_evidence": "unknown",
-                "logic_check": "the action discriminator was not run",
-                "controller_request_ids": [],
-            },
-        ]
-
-        reconciled, _ = _reconcile_causal_assessments(
-            [diagnosis],
-            {
-                "hypotheses": [
-                    {"hypothesis_id": "h_observed", "claim": "an observed mutation occurred"},
-                    {"hypothesis_id": "h_runtime", "claim": "a runtime mismatch occurred"},
-                    {
-                        "hypothesis_id": "h_unresolved_action",
-                        "claim": "a different action would satisfy the requirement",
-                    },
-                ],
-                "evidence_requests": [
-                    {"request_id": "q1", "hypothesis_ids": ["h_observed"], "operation": "read_event"},
-                    {"request_id": "q2", "hypothesis_ids": ["h_runtime"], "operation": "read_artifact_window"},
-                ],
-            },
-            evidence_results={
-                "results": [
-                    {"request_id": "q1", "availability": "available"},
-                    {"request_id": "q2", "availability": "available"},
-                ]
-            },
-            failed_requirement_inventory={"items": [{"requirement_id": "criterion:value"}]},
-        )
-
-        assert reconciled[0]["target_ref"] == "unassigned"
-        assert reconciled[0]["selected_hypothesis_id"] == ""
-        assert reconciled[0]["evidence_status"] == "insufficient"
-        assert "not bound to exactly one supported" in " ".join(
-            reconciled[0]["causal_coverage"]["unexplained_observations"]
-        )
-
-    def test_causal_handoff_audit_requires_exact_selected_hypothesis_and_fails_closed(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _causal_handoff_audit_approved,
-            _downgrade_rejected_causal_handoffs,
-            _normalize_causal_handoff_audit,
-        )
-
-        diagnosis = self._diagnosis(
-            failure_mode="wrong_decision",
-            failed_check="criterion:value",
-            observable="the selected action violated the public contract",
-        )
-        diagnosis["selected_hypothesis_id"] = "h_contract"
-        audit = _normalize_causal_handoff_audit(
-            {
-                "diagnosis_audits": [
-                    {
-                        "diagnosis_index": 1,
-                        "selected_hypothesis_id": "h_contract",
-                        "hypothesis_binding": True,
-                        "runtime_decidable": False,
-                        "public_contract_consistent": False,
-                        "decision_rule_entailed": False,
-                        "decision_rule_source": "none",
-                        "decision_rule_evidence": "",
-                        "evaluation_independent": False,
-                        "single_intervention": True,
-                        "approved": False,
-                        "violations": ["the action depends on an evaluator-owned expected value"],
-                    }
-                ]
-            },
-            diagnoses=[diagnosis],
-        )
-
-        assert not _causal_handoff_audit_approved(audit)
-        downgraded = _downgrade_rejected_causal_handoffs(
-            [diagnosis],
-            rejected_indices={1},
-            violations_by_index={1: audit["diagnosis_audits"][0]["violations"]},
-        )
-        assert downgraded[0]["target_ref"] == "unassigned"
-        assert downgraded[0]["evidence_status"] == "insufficient"
-        assert downgraded[0]["causal_coverage"]["explained_requirement_ids"] == []
-        assert downgraded[0]["causal_coverage"]["residual_requirement_ids"] == ["criterion:value"]
-
-    def test_causal_handoff_audit_marks_only_omitted_diagnosis_rejected(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _causal_handoff_audit_approved,
-            _normalize_causal_handoff_audit,
-            _replace_rejected_causal_handoffs,
-        )
-
-        first = self._diagnosis(
-            failure_mode="first_failure",
-            failed_check="criterion:first",
-            observable="first observed failure",
-        )
-        first["selected_hypothesis_id"] = "h1"
-        second = self._diagnosis(
-            failure_mode="second_failure",
-            failed_check="criterion:second",
-            observable="second observed failure",
-        )
-        second["selected_hypothesis_id"] = "h2"
-
-        audit = _normalize_causal_handoff_audit(
-            {
-                "diagnosis_audits": [
-                    {
-                        "diagnosis_index": 1,
-                        "selected_hypothesis_id": "h1",
-                        "hypothesis_binding": True,
-                        "runtime_decidable": True,
-                        "public_contract_consistent": True,
-                        "decision_rule_entailed": True,
-                        "decision_rule_source": "runtime_safety_invariant",
-                        "decision_rule_evidence": ("Validate the exact released object after its final mutation."),
-                        "evaluation_independent": True,
-                        "single_intervention": True,
-                        "approved": True,
-                        "violations": [],
-                    }
-                ]
-            },
-            diagnoses=[first, second],
-        )
-
-        assert not _causal_handoff_audit_approved(audit)
-        assert audit["diagnosis_audits"][0]["approved"] is True
-        assert audit["diagnosis_audits"][1]["approved"] is False
-        assert "omitted" in audit["diagnosis_audits"][1]["violations"][0]
-        replacement = self._diagnosis(
-            failure_mode="repaired_second_failure",
-            failed_check="criterion:second",
-            observable="second failure is now residual",
-            target_ref="unassigned",
-        )
-        merged = _replace_rejected_causal_handoffs(
-            [first, second],
-            rejected_indices={2},
-            replacements=[replacement],
-        )
-        assert merged[0]["failure_mode"] == "first_failure"
-        assert merged[0]["selected_hypothesis_id"] == "h1"
-        assert merged[1]["failure_mode"] == "repaired_second_failure"
-
-    def test_causal_handoff_audit_rejects_rule_that_is_only_contract_compatible(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_causal_handoff_audit_prompt,
-            _causal_handoff_audit_approved,
-            _normalize_causal_handoff_audit,
-        )
-
-        diagnosis = self._diagnosis(
-            failure_mode="speculative_interpretation",
-            failed_check="criterion:value",
-            observable="the output does not satisfy the explicit task clause",
-        )
-        diagnosis["selected_hypothesis_id"] = "h1"
-        audit = _normalize_causal_handoff_audit(
-            {
-                "diagnosis_audits": [
-                    {
-                        "diagnosis_index": 1,
-                        "selected_hypothesis_id": "h1",
-                        "hypothesis_binding": True,
-                        "runtime_decidable": True,
-                        "public_contract_consistent": True,
-                        "decision_rule_entailed": False,
-                        "decision_rule_source": "none",
-                        "decision_rule_evidence": "",
-                        "evaluation_independent": True,
-                        "single_intervention": True,
-                        "approved": False,
-                        "violations": ["The proposed action is merely compatible with one possible interpretation."],
-                    }
-                ]
-            },
-            diagnoses=[diagnosis],
-        )
-
-        assert not _causal_handoff_audit_approved(audit)
-        prompt = _build_causal_handoff_audit_prompt(
-            public_task_contract="Keep the value constant in all later periods.",
-            diagnoses=[diagnosis],
-            investigation={"hypotheses": [{"hypothesis_id": "h1", "claim": "a visible decision occurred"}]},
-            evidence_results={"results": []},
-        )
-        assert "decision_rule_entailed is stricter than consistency" in prompt
-        assert '"May mean", "could mean", "perhaps intended"' in prompt
-
-    def test_rejected_handoff_with_missing_authority_returns_to_evidence_acquisition(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_causal_handoff_evidence_prompt,
-            _causal_handoff_audit_needs_evidence,
-        )
-
-        audit = {
-            "diagnosis_audits": [
-                {
-                    "diagnosis_index": 1,
-                    "approved": False,
-                    "runtime_decidable": False,
-                    "decision_rule_entailed": False,
-                    "decision_rule_source": "none",
-                    "violations": ["No task-visible authority establishes the decision rule."],
-                }
-            ]
-        }
-
-        assert _causal_handoff_audit_needs_evidence(audit)
-        prompt = _build_causal_handoff_evidence_prompt(
-            public_task_contract="Use the public files to assess the requested outcome.",
-            investigation={
-                "hypotheses": [{"hypothesis_id": "h1", "claim": "the decision used the wrong authority"}],
-                "evidence_requests": [],
-            },
-            evidence_results={"results": []},
-            diagnoses=[{"selected_hypothesis_id": "h1"}],
-            audit=audit,
-        )
-
-        assert "Do not repair the diagnosis to unassigned yet" in prompt
-        assert "sources it named," in prompt
-        assert "opened, cited, relied on" in prompt
-        assert "use inspect_artifact/read_artifact_window" in prompt
-        assert "expected answer" in prompt
-
-    def test_rejected_handoff_without_source_gap_does_not_request_more_evidence(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _causal_handoff_audit_needs_evidence,
-        )
-
-        audit = {
-            "diagnosis_audits": [
-                {
-                    "diagnosis_index": 1,
-                    "approved": False,
-                    "runtime_decidable": True,
-                    "decision_rule_entailed": True,
-                    "decision_rule_source": "public_task_contract",
-                    "violations": ["The diagnosis bundled two independent interventions."],
-                }
-            ]
-        }
-
-        assert not _causal_handoff_audit_needs_evidence(audit)
-
-    def test_evaluator_owned_outcome_cannot_define_causal_hypothesis(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_causal_plan_correction_prompt,
-            _causal_plan_outcome_dependency_conflicts,
-        )
-
-        conflicts = _causal_plan_outcome_dependency_conflicts(
-            {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_leak",
-                        "claim": "The expected values require a different runtime action.",
-                        "falsified_if": "The target result is consistent with the current action.",
-                    },
-                    {
-                        "hypothesis_id": "h_runtime",
-                        "claim": "The final artifact contains an error value after conversion.",
-                        "falsified_if": "Reading the final artifact returns valid values.",
-                    },
-                ]
-            }
-        )
-
-        assert conflicts == [
-            "hypothesis h_leak uses evaluator-owned outcomes in claim",
-            "hypothesis h_leak uses evaluator-owned outcomes in falsified_if",
-        ]
-        correction = _build_causal_plan_correction_prompt(
-            "{}",
-            '{"causal_investigation":{}}',
-            validation_conflicts=conflicts,
-        )
-        assert conflicts[0] in correction
-        assert "independently observable prediction" in correction
-
-    def test_causal_plan_salvages_outcome_independent_siblings(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _normalize_outcome_independent_causal_plan,
-        )
-
-        requirement_id = "criterion:opaque"
-        raw = {
-            "causal_investigation": {
-                "hypotheses": [
-                    {
-                        "hypothesis_id": "h_trace",
-                        "claim": "The Agent released a conclusion before checking the cited source span.",
-                        "explains_requirement_ids": [requirement_id],
-                        "current_support": ["trial_1:message_8"],
-                        "falsified_if": "The trace contains a source read covering every cited ground before release.",
-                        "evidence_requests": [
-                            {
-                                "request_id": "q_trace",
-                                "operation": "search_trace",
-                                "query": "source read cited ground release",
-                            }
-                        ],
-                    },
-                    {
-                        "hypothesis_id": "h_scope",
-                        "claim": "A material decision ground was used without a task-visible scope check.",
-                        "explains_requirement_ids": [requirement_id],
-                        "current_support": ["trial_1:message_12"],
-                        "falsified_if": "Every material ground has a scope witness in the trace or artifact.",
-                        "evidence_requests": [
-                            {
-                                "request_id": "q_scope",
-                                "operation": "search_trace",
-                                "query": "scope witness material ground",
-                            }
-                        ],
-                    },
-                    {
-                        "hypothesis_id": "h_leak",
-                        "claim": "The expected answer requires a different conclusion.",
-                        "explains_requirement_ids": [requirement_id],
-                        "current_support": ["grader"],
-                        "falsified_if": "The target result matches the released conclusion.",
-                        "evidence_requests": [
-                            {
-                                "request_id": "q_leak",
-                                "operation": "inspect_evaluation",
-                                "query": "target result",
-                            }
-                        ],
-                    },
-                ]
-            }
-        }
-
-        plan, conflicts = _normalize_outcome_independent_causal_plan(
-            raw,
-            failed_requirement_ids=[requirement_id],
-        )
-
-        assert conflicts
-        assert plan is not None
-        assert [item["hypothesis_id"] for item in plan["hypotheses"]] == ["h_trace", "h_scope"]
-        assert {item["request_id"] for item in plan["evidence_requests"]} == {"q_trace", "q_scope"}
-
-    def test_structurally_invalid_plan_still_reports_outcome_leakage(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _normalize_outcome_independent_causal_plan,
-        )
-
-        plan, conflicts = _normalize_outcome_independent_causal_plan(
-            {
-                "causal_investigation": {
-                    "hypotheses": [
-                        {
-                            "hypothesis_id": "h_leak",
-                            "claim": "The expected answer requires a different action.",
-                            "explains_requirement_ids": ["criterion:opaque"],
-                            "falsified_if": "The target result agrees with the current action.",
-                            "evidence_requests": [],
-                        }
-                    ]
-                }
-            },
-            failed_requirement_ids=["criterion:opaque"],
-        )
-
-        assert plan is None
-        assert "hypothesis h_leak uses evaluator-owned outcomes in claim" in conflicts
-
-    def test_outcome_independent_plan_rejects_hidden_evaluation_requests(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _normalize_outcome_independent_causal_plan,
-        )
-
-        hypotheses = []
-        for index in (1, 2):
-            hypotheses.append(
-                {
-                    "hypothesis_id": f"h{index}",
-                    "claim": f"Runtime decision mechanism {index} released an unsupported claim.",
-                    "explains_requirement_ids": ["criterion:opaque"],
-                    "current_support": ["the judge target value disagrees"],
-                    "falsified_if": f"Task-visible evidence supports mechanism {index} before release.",
-                    "evidence_requests": [
-                        {
-                            "request_id": f"q{index}",
-                            "operation": "inspect_evaluation",
-                            "query": "judge target value",
-                        }
-                    ],
-                }
-            )
-
-        plan, conflicts = _normalize_outcome_independent_causal_plan(
-            {"causal_investigation": {"hypotheses": hypotheses}},
-            failed_requirement_ids=["criterion:opaque"],
-        )
-
-        assert plan is None
-        assert any("current_support" in item for item in conflicts)
-        assert any("inspect_evaluation" in item for item in conflicts)
-
-    def test_outcome_independent_recovery_input_keeps_behavior_but_removes_labels(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _build_outcome_independent_causal_plan_recovery_prompt,
-        )
-
-        diagnosis_input = json.dumps(
-            {
-                "authoritative_task_contract": {"input_excerpt": "Inspect the artifact and answer."},
-                "authoritative_benchmark_test_contract": {"expected_answer": "YES"},
-                "primary_evidence": {
-                    "evidence_summary_text": "grader expects YES",
-                    "causal_digest": {
-                        "outcome": {"score": 0.0, "judge_evidence": "YES"},
-                        "trials": [
-                            {
-                                "trace_id": "trial_1",
-                                "final_output": {"excerpt": "The Agent answered NO after reading clause 4."},
-                                "trial_evaluation": {"score": 0.0, "passed": False},
-                            }
-                        ],
-                    },
-                },
-                "deterministic_failed_requirement_inventory": {
-                    "items": [{"requirement_id": "criterion:opaque", "expected": "YES"}]
-                },
-                "case_facts": {
-                    "case_id": "case_1",
-                    "score": 0.0,
-                    "evaluation_reason": "expected YES",
-                },
-            }
-        )
-
-        prompt = _build_outcome_independent_causal_plan_recovery_prompt(
-            diagnosis_input,
-            failed_requirement_ids=["criterion:opaque"],
-            validation_conflicts=["hypothesis h1 uses evaluator-owned outcomes in claim"],
-        )
-
-        task_visible = prompt.split("TASK_VISIBLE_DIAGNOSIS_INPUT:\n", maxsplit=1)[1]
-        assert "The Agent answered NO after reading clause 4." in task_visible
-        assert '"expected_answer":"YES"' not in task_visible
-        assert '"score":0.0' not in task_visible
-        assert "grader expects YES" not in task_visible
-        assert '"requirement_id":"criterion:opaque"' in task_visible
-
-    def test_supported_sibling_hypothesis_cannot_disappear_from_handoff(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
-            _causal_investigation_conflicts,
-        )
-
-        diagnosis = self._diagnosis(
-            failure_mode="two_supported_mechanisms",
-            failed_check="criterion:value",
-            observable="two independent runtime mechanisms were observed",
-        )
-        diagnosis["selected_hypothesis_id"] = "h1"
-        diagnosis["hypothesis_assessment"] = [
-            {
-                "hypothesis_id": hypothesis_id,
-                "status": "supported",
-                "falsifying_condition_status": "not_observed",
-                "claim_follows_from_evidence": "yes",
-                "logic_check": f"{request_id} supports the runtime mechanism",
-                "controller_request_ids": [request_id],
-            }
-            for hypothesis_id, request_id in (("h1", "q1"), ("h2", "q2"))
-        ]
-        investigation = {
-            "hypotheses": [
-                {"hypothesis_id": "h1", "explains_requirement_ids": ["criterion:value"]},
-                {"hypothesis_id": "h2", "explains_requirement_ids": ["criterion:value"]},
-            ],
-            "evidence_requests": [
-                {"request_id": "q1", "hypothesis_ids": ["h1"], "operation": "read_event"},
-                {"request_id": "q2", "hypothesis_ids": ["h2"], "operation": "read_event"},
-            ],
-        }
-        evidence = {
-            "results": [
-                {"request_id": "q1", "availability": "available"},
-                {"request_id": "q2", "availability": "available"},
-            ]
-        }
-
-        conflicts = _causal_investigation_conflicts(
-            [diagnosis],
-            investigation,
-            evidence_results=evidence,
-            prior_candidate_feedback=None,
-        )
-        assert "supported causal hypothesis was not handed off or explicitly disposed: h2" in conflicts
-
-        diagnosis["hypothesis_assessment"][1].update(
-            {
-                "handoff_disposition": "non_actionable",
-                "handoff_reason": "the observed environment behavior has no Harness-controlled decision",
-            }
-        )
-        conflicts = _causal_investigation_conflicts(
-            [diagnosis],
-            investigation,
-            evidence_results=evidence,
-            prior_candidate_feedback=None,
-        )
-        assert not any("supported causal hypothesis was not handed off" in item for item in conflicts)
-
-    def test_normalize_keeps_independent_surfaces_for_the_same_failed_check(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _normalize_case_diagnoses
-
-        extraction = self._diagnosis(
-            failure_mode="incomplete_extraction",
-            failed_check="criterion:value",
-            observable="the final value is wrong",
-            target_ref="member_harness.solver.skill",
-        )
-        extraction["critical_mistake"] = "the source read stopped before the controlling clause"
-        calculation = self._diagnosis(
-            failure_mode="wrong_calculation",
-            failed_check="criterion:value",
-            observable="the final value is wrong",
-            target_ref="member_harness.solver.tool",
-        )
-        calculation["critical_mistake"] = "the calculator used the wrong operands"
-
-        normalized = _normalize_case_diagnoses({"diagnoses": [extraction, calculation]})
-
-        assert len(normalized) == 2
-        assert {item["target_ref"] for item in normalized} == {
-            "member_harness.solver.skill",
-            "member_harness.solver.tool",
-        }
-
-    def test_causal_refinement_runs_when_a_failed_requirement_is_only_residual(self) -> None:
-        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _diagnoses_need_causal_refinement
-
-        diagnoses = [
-            {
-                "evidence_status": "supported_hypothesis",
-                "causal_coverage": {
-                    "explained_requirement_ids": ["criterion:value"],
-                    "residual_requirement_ids": ["criterion:format"],
-                    "sufficiency_status": "local_contributor",
-                },
-                "hypothesis_assessment": [{"hypothesis_id": "h1", "status": "supported"}],
-            }
-        ]
-
-        assert _diagnoses_need_causal_refinement(
-            diagnoses,
-            failed_requirement_ids=["criterion:value", "criterion:format"],
-        )
-
     @pytest.mark.asyncio
     async def test_per_case_diagnosis_flattens_wrapped_diagnoses(
         self,
@@ -5660,7 +3282,7 @@ class TestBoundedMultiDiagnosis:
             result_path=str(result_path),
         )
         strategy = analyzer_module.DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
+            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml")
         )
         diagnoses = [
             self._diagnosis(
@@ -5680,7 +3302,7 @@ class TestBoundedMultiDiagnosis:
             return {"workspace": workspace}
 
         async def fake_run_agent(agent: Any, prompt: str, *, max_retries: int) -> str:
-            assert "CAUSAL_INVESTIGATION_PHASE=plan" in prompt
+            assert "Return at most 3 diagnoses" in prompt
             return json.dumps({"diagnoses": diagnoses})
 
         monkeypatch.setattr(strategy, "_build_agent", fake_build_agent)
@@ -5705,7 +3327,9 @@ class TestBoundedMultiDiagnosis:
         assert [item["diagnosis_index"] for item in results] == [1, 2]
         assert all(item["diagnosis_count"] == 2 for item in results)
 
-    def test_aggregation_keeps_distinct_clusters_from_same_case_independent(self) -> None:
+    def test_aggregation_keeps_distinct_clusters_from_same_case_independent(
+        self,
+    ) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             _aggregate_structured_diagnoses,
         )
@@ -5720,15 +3344,6 @@ class TestBoundedMultiDiagnosis:
             failed_check="formula_check",
             observable="the computed formula matches the contract",
         )
-        for diagnosis in (first, second):
-            diagnosis.update(
-                {
-                    "evidence_status": "supported_hypothesis",
-                    "failed_requirement": "one explicit output requirement was not satisfied",
-                    "competing_hypotheses": ["instruction gap", "tool result handling gap"],
-                    "discriminating_evidence": "the trace shows the omitted final-output action",
-                }
-            )
         per_case = [
             {"case_id": "case_multi", **first},
             {"case_id": "case_multi", **second},
@@ -5746,8 +3361,6 @@ class TestBoundedMultiDiagnosis:
             ("formula_check",),
         }
         assert all(issue.affected_cases == ["case_multi"] for issue in issues)
-        assert all(issue.metadata["attribution"]["evidence_status"] == "supported_hypothesis" for issue in issues)
-        assert all(issue.metadata["attribution"]["competing_hypotheses"] for issue in issues)
 
 
 class TestDeterministicAggregation:
@@ -5765,9 +3378,7 @@ class TestDeterministicAggregation:
             EvaluationSummaryInput,
         )
 
-        strategy = DiagnosisAgentStrategy(
-            EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml", causal_investigation_required=False)
-        )
+        strategy = DiagnosisAgentStrategy(EvaluationResultAnalyzerConfig(model_config_ref="unused.yaml"))
 
         async def fail_build_agent(*args: Any, **kwargs: Any) -> None:
             raise AssertionError("aggregation should not require another LLM call")
@@ -5922,6 +3533,39 @@ class TestAnalyzerFacadeArtifacts:
             }
         ]
 
+    @pytest.mark.asyncio
+    async def test_single_harness_invocation_remaps_team_issue_to_member_surface(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from openjiuwen.rsi.harness_rsi.config import EvaluationResultAnalyzerConfig
+        from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
+            EvaluationResultAnalyzer,
+        )
+        from openjiuwen.rsi.harness_rsi.schema import EvaluationResultAnalysisInvocation
+
+        analyzer = EvaluationResultAnalyzer(EvaluationResultAnalyzerConfig())
+        analyzer._strategy = _FakeTeamIssueStrategy()
+
+        analysis_ref_path = await analyzer.analyze(
+            EvaluationResultAnalysisInvocation(
+                eval_ref_path=str(tmp_path / "eval_ref.yaml"),
+                case_results_dir=str(tmp_path / "case_results"),
+                case_traces_dir=str(tmp_path / "case_results"),
+                team_skill_ref_path="",
+                harness_refs_path=str(tmp_path / "harness_refs.yaml"),
+                output_dir=str(tmp_path / "analysis"),
+                source_stage="single_harness_batch",
+            )
+        )
+
+        analysis_ref = yaml.safe_load(Path(analysis_ref_path).read_text(encoding="utf-8"))
+        issue = analysis_ref["issues"][0]
+        assert issue["optimization_target"] == "member_harness"
+        assert issue["suspected_team_scope"] == "member"
+        assert issue["target_members"] == ["solver"]
+        assert issue["metadata"]["attribution"]["target_ref"] == ("member_harness.solver.workflow_inefficiency")
+
 
 class TestAnalyzerRealModelIntegration:
     """Real-model analyzer smoke test guarded by explicit local configuration."""
@@ -5950,7 +3594,6 @@ class TestAnalyzerRealModelIntegration:
                 max_issues=3,
                 evidence_limit_per_issue=3,
                 output_filename="team_issues.yaml",
-                causal_investigation_required=False,
             ),
         )
         invocation = EvaluationResultAnalysisInvocation(
@@ -6030,7 +3673,6 @@ class TestAnalyzerRealModelIntegration:
             EvaluationResultAnalyzerConfig(
                 model_config_ref=str(model_config_path),
                 output_filename="team_issues.yaml",
-                causal_investigation_required=False,
             ),
         )
         invocation = EvaluationResultAnalysisInvocation(

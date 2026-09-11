@@ -17,6 +17,7 @@ Promp caching layout:
 """
 
 import copy
+import importlib
 import json
 import re
 from typing import (
@@ -31,8 +32,6 @@ from typing import (
     Tuple,
     Union,
 )
-
-import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -203,6 +202,14 @@ def _convert_tool_choice(tool_choice: Any) -> Optional[dict]:
     if tool_choice.get("type") in {"auto", "any", "none", "tool"}:
         return copy.deepcopy(dict(tool_choice))
     return None
+
+
+def _sampling_from_anthropic_params(params: Mapping[str, Any], key: str) -> Any:
+    """Read a sampling field from extra_body (SDK 1.x) or the top-level dict."""
+    extra = params.get("extra_body")
+    if isinstance(extra, Mapping) and key in extra:
+        return extra[key]
+    return params.get(key)
 
 
 def _model_forbids_custom_sampling(model: str) -> bool:
@@ -563,6 +570,20 @@ def _apply_messages_cache_breakpoint(
 # Client
 # ---------------------------------------------------------------------------
 
+def _anthropic_sdk_httpx_module():
+    """Return ``httpx`` or ``httpx2``, matching the installed Anthropic SDK.
+
+    Anthropic 1.0+ type-checks ``http_client`` against ``httpx2.AsyncClient``.
+    ``DefaultAsyncHttpxClient`` subclasses that class, so ``Limits`` must come
+    from the same package — a bare ``httpx.AsyncClient`` / ``httpx.Limits``
+    fails the 1.x check even though the APIs look identical.
+    """
+    from anthropic import DefaultAsyncHttpxClient
+
+    root = DefaultAsyncHttpxClient.__bases__[0].__module__.split(".", 1)[0]
+    return importlib.import_module(root)
+
+
 class AnthropicModelClient(BaseModelClient):
     """Anthropic Messages API client."""
 
@@ -683,7 +704,7 @@ class AnthropicModelClient(BaseModelClient):
 
     def _build_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
         """Build a fresh ``AsyncAnthropic`` client with its own httpx connection pool."""
-        from anthropic import AsyncAnthropic
+        from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
@@ -693,10 +714,12 @@ class AnthropicModelClient(BaseModelClient):
         # 60s to keep connections warm across typical inter-request gaps while
         # staying at/under common upstream/LB idle timeouts (avoids reusing a
         # server-closed "dead" connection).
-        http_client = httpx.AsyncClient(
+        # Use the SDK helper so 0.x (httpx) and 1.x (httpx2) both type-check.
+        http_pkg = _anthropic_sdk_httpx_module()
+        http_client = DefaultAsyncHttpxClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
             verify=verify,
-            limits=httpx.Limits(
+            limits=http_pkg.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=60.0,
@@ -837,9 +860,11 @@ class AnthropicModelClient(BaseModelClient):
             params["tools"] = anthropic_tools
 
         # Forward Anthropic-native controls that the common OpenAI-shaped
-        # builder intentionally treats as extras.
+        # builder intentionally treats as extras. Sampling keys (temperature /
+        # top_p / top_k) must not go here: anthropic>=1.0 removed them from
+        # messages.create/stream and they must travel via extra_body.
         for key in (
-                "thinking", "output_config", "metadata", "service_tier", "top_k",
+                "thinking", "output_config", "metadata", "service_tier",
         ):
             if key in openai_params:
                 params[key] = openai_params[key]
@@ -870,17 +895,7 @@ class AnthropicModelClient(BaseModelClient):
         ):
             if key in openai_params:
                 extra_body[key] = openai_params[key]
-        if extra_body:
-            params["extra_body"] = extra_body
-        reasoning_controls = reasoning_request_controls(params)
-        if reasoning_controls:
-            logger.info(
-                "Resolved Anthropic-compatible reasoning request controls: "
-                "model=%s provider=%s controls=%s",
-                params.get("model"),
-                self.model_client_config.client_provider,
-                reasoning_controls,
-            )
+
         anthropic_tool_choice = _convert_tool_choice(openai_params.get("tool_choice"))
         if anthropic_tool_choice is not None:
             params["tool_choice"] = anthropic_tool_choice
@@ -888,6 +903,8 @@ class AnthropicModelClient(BaseModelClient):
         # ModelRequestConfig carries OpenAI-oriented defaults. Treat those as
         # "unset" for Anthropic unless the caller explicitly configured them;
         # current Claude families reject non-default sampling with HTTP 400.
+        # anthropic 0.x still accepts temperature= kwargs; 1.x only extra_body.
+        # extra_body works on both (merged into request JSON).
         temperature_explicit = temperature is not None or "temperature" in self.model_config.model_fields_set
         top_p_explicit = top_p is not None or "top_p" in self.model_config.model_fields_set
         temperature = openai_params.get("temperature")
@@ -900,24 +917,43 @@ class AnthropicModelClient(BaseModelClient):
         )
         sampling_forbidden = _model_forbids_custom_sampling(params["model"])
         thinking_restricts_sampling = thinking_type in {"enabled", "adaptive"}
+        sampling_allowed = not (sampling_forbidden or thinking_restricts_sampling)
 
-        if sampling_forbidden or thinking_restricts_sampling:
-            if temperature_explicit or top_p_explicit:
+        if not sampling_allowed:
+            if temperature_explicit or top_p_explicit or openai_params.get("top_k") is not None:
                 llm_logger.debug(
                     "Anthropic: dropping sampling overrides that are incompatible "
                     "with this model/thinking mode."
                 )
-        elif temperature_explicit and temperature is not None:
-            params["temperature"] = temperature
-            if top_p_explicit and top_p is not None:
-                llm_logger.debug(
-                    "Anthropic: dropping top_p because temperature is set "
-                    "(the API forbids specifying both)."
-                )
-        elif top_p_explicit and top_p is not None and top_p != 1.0:
-            # top_p=1.0 is the default (no nucleus truncation); skip it so we
-            # send the API only meaningful overrides.
-            params["top_p"] = top_p
+        else:
+            if temperature_explicit and temperature is not None:
+                extra_body["temperature"] = temperature
+                if top_p_explicit and top_p is not None:
+                    llm_logger.debug(
+                        "Anthropic: dropping top_p because temperature is set "
+                        "(the API forbids specifying both)."
+                    )
+            elif top_p_explicit and top_p is not None and top_p != 1.0:
+                # top_p=1.0 is the default (no nucleus truncation); skip it so we
+                # send the API only meaningful overrides.
+                extra_body["top_p"] = top_p
+            if "top_k" in openai_params and openai_params.get("top_k") is not None:
+                extra_body["top_k"] = openai_params["top_k"]
+
+        if extra_body:
+            params["extra_body"] = extra_body
+        for key in ("temperature", "top_p", "top_k"):
+            params.pop(key, None)
+
+        reasoning_controls = reasoning_request_controls(params)
+        if reasoning_controls:
+            logger.info(
+                "Resolved Anthropic-compatible reasoning request controls: "
+                "model=%s provider=%s controls=%s",
+                params.get("model"),
+                self.model_client_config.client_provider,
+                reasoning_controls,
+            )
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]
             params["stop_sequences"] = stop_val if isinstance(stop_val, list) else [stop_val]
@@ -974,8 +1010,8 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 messages=params.get("messages"),
                 tools=params.get("tools"),
-                temperature=params.get("temperature"),
-                top_p=params.get("top_p"),
+                temperature=_sampling_from_anthropic_params(params, "temperature"),
+                top_p=_sampling_from_anthropic_params(params, "top_p"),
                 max_tokens=params.get("max_tokens"),
             )
 
@@ -1082,8 +1118,8 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 messages=params.get("messages"),
                 tools=params.get("tools"),
-                temperature=params.get("temperature"),
-                top_p=params.get("top_p"),
+                temperature=_sampling_from_anthropic_params(params, "temperature"),
+                top_p=_sampling_from_anthropic_params(params, "top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=True,
             )

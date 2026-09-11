@@ -373,6 +373,9 @@ class AgenticSkillRetrievalToolkit:
                 except SkillIndexBuildCancelled:
                     return self._cancelled_result(build_id=build_id, started=started, fingerprint=fingerprint)
                 config = _to_retrieval_build_config(build_cfg, llm_cfg)
+                if previous_index_available and build_cfg.preserve_previous_index_on_failure:
+                    # A successful flat fallback must not replace a usable taxonomy after an LLM failure.
+                    config = replace(config, allow_fallback_tree=False)
                 if plan.operation == "build":
                     _run_index_builder(
                         operation=plan.operation,

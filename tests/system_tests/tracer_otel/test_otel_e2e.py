@@ -610,4 +610,3 @@ class TestE2EAgentTeamTraceId:
         # Access internal tracer to verify trace_id propagated
         inner = session._inner
         assert inner._tracer._trace_id == "team-trace-abc"
-

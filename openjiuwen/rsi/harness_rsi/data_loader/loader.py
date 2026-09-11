@@ -5,14 +5,17 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from json import JSONDecodeError
 from pathlib import Path
 
 from openjiuwen.rsi.harness_rsi.config import DataLoaderConfig
 from openjiuwen.rsi.harness_rsi.data_loader.batch_planner import BatchPlanner
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import validate_dataset_files
+from openjiuwen.rsi.harness_rsi.data_loader.grading_contract import normalize_grading_case
 from openjiuwen.rsi.harness_rsi.data_loader.plan_store import BatchPlanStore
 from openjiuwen.rsi.harness_rsi.data_loader.profiler import DatasetProfiler
+from openjiuwen.rsi.harness_rsi.data_loader.reference_adapter import adapt_reference
 from openjiuwen.rsi.harness_rsi.schema import CaseMapping
 
 
@@ -36,6 +39,7 @@ class DataLoader:
         - a single case object: ``{"case_id": "...", ...}``
         - a list of case objects: ``[{...}, {...}]``
         - an object with a ``cases`` list: ``{"cases": [{...}]}``
+        - a benchmark suite with one ``validation`` or ``evaluation`` list
 
         Returns a one-shot iterator; call ``load()`` again for a fresh traversal.
         """
@@ -78,9 +82,9 @@ class DataLoader:
 
         cases: list[CaseMapping] = []
         for dataset_file in dataset_files:
-            for case_index, case in enumerate(_load_json_cases(dataset_file), start=1):
+            for case_index, case in enumerate(load_json_cases(dataset_file), start=1):
                 loaded_case: CaseMapping = dict(case)
-                loaded_case.setdefault("case_path", str(dataset_file))
+                loaded_case["case_path"] = str(dataset_file)
                 loaded_case.setdefault("case_index", case_index)
                 cases.append(loaded_case)
 
@@ -99,7 +103,7 @@ class DataLoader:
             yield batch
 
 
-def _load_json_cases(path: Path) -> list[CaseMapping]:
+def load_json_cases(path: Path) -> list[CaseMapping]:
     """Load one or more case mappings from a JSON file."""
     try:
         with open(path, "r", encoding="utf-8") as file:
@@ -107,11 +111,24 @@ def _load_json_cases(path: Path) -> list[CaseMapping]:
     except JSONDecodeError as exc:
         raise ValueError(f"dataset json is invalid: {path}") from exc
 
+    suite_shape = False
     if isinstance(data, dict):
         if isinstance(data.get("cases"), list):
             raw_cases = data["cases"]
         elif "cases" in data:
             raise ValueError(f"dataset cases must be a list: {path}")
+        elif any(key in data for key in ("validation", "evaluation")):
+            split_keys = [key for key in ("validation", "evaluation") if key in data]
+            invalid = [key for key in split_keys if not isinstance(data[key], list)]
+            if invalid:
+                raise ValueError(f"dataset suite splits must be lists: {path}: {invalid}")
+            populated = [key for key in split_keys if data[key]]
+            if len(populated) > 1:
+                raise ValueError(
+                    f"dataset suite must select exactly one populated split: {path}: {populated}"
+                )
+            raw_cases = data[populated[0]] if populated else []
+            suite_shape = True
         else:
             raw_cases = [data]
     elif isinstance(data, list):
@@ -123,10 +140,31 @@ def _load_json_cases(path: Path) -> list[CaseMapping]:
     for index, case in enumerate(raw_cases, start=1):
         if not isinstance(case, dict):
             raise ValueError(f"dataset case must be a mapping: {path}#{index}")
-        cases.append(case)
-    return cases
+        normalized = _normalize_suite_case(case, path=path, index=index) if suite_shape else case
+        cases.append(normalize_grading_case(normalized))
+    if not cases:
+        raise ValueError(f"dataset cases must not be empty: {path}")
+    # Metadata-only cases remain usable by the dataset profiler. Execution and
+    # service admission require an explicit task input instead of exposing a case.
+    validate_dataset_files(cases, path.resolve().parent, require_input=False)
+    return [adapt_reference(case, path.resolve()) for case in cases]
+
+
+def _normalize_suite_case(case: Mapping[str, object], *, path: Path, index: int) -> CaseMapping:
+    """Add the engine aliases required by a benchmark task without dropping its contract."""
+
+    normalized: CaseMapping = dict(case)
+    case_id = str(case.get("case_id") or case.get("task_id") or case.get("id") or "").strip()
+    if not case_id:
+        raise ValueError(f"dataset suite task must have a non-empty id: {path}#{index}")
+    normalized.setdefault("case_id", case_id)
+    normalized.setdefault("task_id", case_id)
+    if "input" not in normalized:
+        normalized["input"] = str(case.get("prompt") or "")
+    return normalized
 
 
 __all__ = [
     "DataLoader",
+    "load_json_cases",
 ]
