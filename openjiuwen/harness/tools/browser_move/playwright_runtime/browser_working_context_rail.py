@@ -11,7 +11,6 @@ from typing import Any, Optional
 
 from pydantic import ValidationError
 
-from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     AgentRail,
@@ -27,7 +26,7 @@ from .browser_working_context import (
     BrowserWorkingContextConfig,
     BrowserWorkingContextStore,
     BrowserWorkingMemory,
-    BrowserTaskItem,
+    latest_browser_user_request,
 )
 from .browser_logging import browser_agent_log_warning
 
@@ -38,26 +37,6 @@ _WORKING_MEMORY_RECORD_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 _REQUEST_STARTED_EXTRA_KEY = "_browser_working_context_request_started"
-_REQUIRED_MEMORY_FIELDS = frozenset(
-    {
-        "task_list",
-        "errors",
-        "failures",
-        "blockers",
-        "key_facts",
-        "important_information",
-    }
-)
-_FALLBACK_TASK = {
-    "en": "Continue the active browser request.",
-    "cn": "继续处理当前浏览器请求。",
-}
-_EPHEMERAL_USER_MESSAGE_NAMES = frozenset(
-    {
-        "browser_working_context",
-        "current_browser_state",
-    }
-)
 
 
 class BrowserWorkingContextRail(AgentRail):
@@ -113,21 +92,14 @@ class BrowserWorkingContextRail(AgentRail):
         response.content = cleaned_content
         tool_calls = getattr(response, "tool_calls", None) or []
 
-        memory = None
-        update_error = None
-        if not payloads and tool_calls:
-            memory = self._carry_forward_memory(ctx)
-        elif len(payloads) != 1:
-            update_error = (
-                "Model omitted the required working-memory record."
-                if not payloads
-                else "Model emitted more than one working-memory record."
-            )
-        else:
+        memory: Optional[BrowserWorkingMemory] = None
+        update_error: Optional[str] = None
+        if len(payloads) > 1:
+            update_error = "Model emitted more than one optional working-memory note record."
+        elif payloads:
             memory, update_error = self._parse_memory(payloads[0])
-
-        if memory is None:
-            memory = self._enforce_context_update(ctx, update_error)
+        if update_error:
+            browser_agent_log_warning("[BrowserWorkingContextRail] %s", update_error)
 
         self._store.stage_model_step(
             ctx.session,
@@ -177,9 +149,6 @@ class BrowserWorkingContextRail(AgentRail):
             return None, "Model emitted invalid JSON in the working-memory record."
         if not isinstance(parsed, dict):
             return None, "Model working-memory record must contain a JSON object."
-        missing_fields = sorted(_REQUIRED_MEMORY_FIELDS.difference(parsed))
-        if missing_fields:
-            return None, (f"Model working-memory record omitted required fields: {', '.join(missing_fields)}.")
         try:
             memory = BrowserWorkingMemory.model_validate(parsed)
         except ValidationError as exc:
@@ -188,48 +157,20 @@ class BrowserWorkingContextRail(AgentRail):
             )
             suffix = f" Invalid fields: {', '.join(invalid_fields)}." if invalid_fields else ""
             return None, f"Model working-memory record failed validation.{suffix}"
-        if not memory.task_list:
-            return None, "Model working-memory record must contain at least one task."
-        return memory, None
-
-    def _carry_forward_memory(
-        self,
-        ctx: AgentCallbackContext,
-    ) -> BrowserWorkingMemory:
-        """Return a complete current record without reporting a tool-step omission."""
-
-        state = self._store.load(ctx.session)
-        memory = self._store.sanitize_memory(state.current)
-        if memory.task_list:
-            return memory
-
-        task = state.active_request or self._latest_user_request(ctx)
-        if not task:
-            task = _FALLBACK_TASK[self.config.language]
-        return self._store.sanitize_memory(
-            memory.model_copy(
-                update={
-                    "task_list": [
-                        BrowserTaskItem(task=task, status="pending"),
-                    ]
-                }
+        runtime_owned_fields_present = any(
+            (
+                memory.task_list,
+                memory.errors,
+                memory.failures,
+                memory.blockers,
             )
         )
-
-    def _enforce_context_update(
-        self,
-        ctx: AgentCallbackContext,
-        update_error: Optional[str],
-    ) -> BrowserWorkingMemory:
-        """Synthesize a complete carry-forward update after invalid model output."""
-
-        memory = self._carry_forward_memory(ctx)
-
-        browser_agent_log_warning(
-            "[BrowserWorkingContextRail] %s Rail synthesized a complete carry-forward working-memory record.",
-            update_error or "Model emitted an invalid working-memory record.",
-        )
-        return memory
+        if runtime_owned_fields_present:
+            memory = BrowserWorkingMemory(
+                key_facts=memory.key_facts,
+                important_information=memory.important_information,
+            )
+        return memory, None
 
     @classmethod
     def _extract_and_strip_records(
@@ -265,32 +206,7 @@ class BrowserWorkingContextRail(AgentRail):
     def _latest_user_request(cls, ctx: AgentCallbackContext) -> str:
         inputs = ctx.inputs
         messages = inputs.messages if isinstance(inputs, ModelCallInputs) else []
-        for message in reversed(messages):
-            if not isinstance(message, UserMessage):
-                continue
-            if message.name in _EPHEMERAL_USER_MESSAGE_NAMES:
-                continue
-            metadata = getattr(message, "metadata", {}) or {}
-            if metadata.get("browser_working_context") or metadata.get("browser_state_context"):
-                continue
-            text = cls._message_content_to_text(message.content)
-            if text:
-                return text
-        return ""
-
-    @staticmethod
-    def _message_content_to_text(content: Any) -> str:
-        if isinstance(content, str):
-            return content.strip()
-        if not isinstance(content, list):
-            return str(content or "").strip()
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts).strip()
+        return latest_browser_user_request(messages)
 
 
 __all__ = ["BrowserWorkingContextRail"]

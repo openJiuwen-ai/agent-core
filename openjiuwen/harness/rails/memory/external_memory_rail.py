@@ -139,6 +139,7 @@ class ExternalMemoryRail(DeepAgentRail):
                 logger.info(f"[ExternalMemoryRail] Provider '{self._provider.name}' initialized")
             except Exception as e:
                 logger.error(f"[ExternalMemoryRail] Provider initialize failed: {e}")
+        await self.before_model_call(ctx)
     
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         if not self._initialized:

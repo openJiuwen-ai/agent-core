@@ -13,7 +13,10 @@ from openjiuwen.agent_evolving.prompts.tools import (
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.core.session.agent import create_agent_session
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
@@ -478,13 +481,19 @@ async def test_read_trajectory_spans_projects_llm_and_context_allowlists():
                 "llm-1",
                 attributes={
                     semconv.GEN_AI_REQUEST_MODEL: "model-a",
-                    f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                    f"{semconv.GEN_AI_PROMPT}.0.content": [
-                        {"type": "text", "text": "review this"},
-                        {"type": "image_url", "image_url": "data:image/png;base64,secret"},
-                    ],
-                    f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                    f"{semconv.GEN_AI_COMPLETION}.0.content": "done",
+                    **write_llm_exchange(
+                        [{
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "review this"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": "data:image/png;base64,secret",
+                                },
+                            ],
+                        }],
+                        [{"role": "assistant", "content": "done"}],
+                    ),
                     semconv.GEN_AI_USAGE_TOTAL_TOKENS: 42,
                     semconv.GEN_AI_REQUEST_TEMPERATURE: 0.8,
                     semconv.LANGFUSE_OBSERVATION_INPUT: "duplicate prompt",

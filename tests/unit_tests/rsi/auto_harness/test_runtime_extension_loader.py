@@ -19,11 +19,11 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.rails import SkillUseRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_loader import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_loader import (
     load_runtime_rails,
     load_runtime_tools,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     RuntimeExtensionArtifact,
 )
 
@@ -141,7 +141,7 @@ def test_load_runtime_resources_from_manifest(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_runtime_extension_skills_are_refreshed_and_preferred(
+async def test_runtime_extension_skill_overrides_same_named_host_skill(
     tmp_path: Path,
 ):
     old_root = tmp_path / "old_skills"

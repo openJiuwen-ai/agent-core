@@ -12,7 +12,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
     ToolCallInputs,
 )
-from openjiuwen.rsi.auto_harness.rails.security_rail import (
+from openjiuwen.rsi.harness_rsi.auto_harness.rails.security_rail import (
     SecurityRail,
 )
 
@@ -34,8 +34,8 @@ class TestSecurityRail(IsolatedAsyncioTestCase):
     def _make_rail(self):
         return SecurityRail(
             immutable_files=[
-                "openjiuwen/rsi/auto_harness/prompts/identity.md",
-                "openjiuwen/rsi/auto_harness/tools/ci_gate.yaml",
+                "openjiuwen/rsi/harness_rsi/auto_harness/prompts/identity.md",
+                "openjiuwen/rsi/harness_rsi/auto_harness/tools/ci_gate.yaml",
             ],
             high_impact_prefixes=["openjiuwen/core/*"],
         )
@@ -46,7 +46,7 @@ class TestSecurityRail(IsolatedAsyncioTestCase):
             inputs=ToolCallInputs(
                 tool_name="write_file",
                 tool_args={
-                    "file_path": ("openjiuwen/rsi/auto_harness/prompts/identity.md"),
+                    "file_path": ("openjiuwen/rsi/harness_rsi/auto_harness/prompts/identity.md"),
                 },
             ),
         )
@@ -61,7 +61,7 @@ class TestSecurityRail(IsolatedAsyncioTestCase):
             inputs=ToolCallInputs(
                 tool_name="edit_file",
                 tool_args={
-                    "file_path": ("openjiuwen/rsi/auto_harness/tools/ci_gate.yaml"),
+                    "file_path": ("openjiuwen/rsi/harness_rsi/auto_harness/tools/ci_gate.yaml"),
                 },
             ),
         )
@@ -100,7 +100,7 @@ class TestSecurityRail(IsolatedAsyncioTestCase):
             inputs=ToolCallInputs(
                 tool_name="read_file",
                 tool_args={
-                    "file_path": ("openjiuwen/rsi/auto_harness/prompts/identity.md"),
+                    "file_path": ("openjiuwen/rsi/harness_rsi/auto_harness/prompts/identity.md"),
                 },
             ),
         )

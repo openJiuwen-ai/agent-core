@@ -120,4 +120,5 @@ def build_task_section(
         name=SectionName.TASK_TOOL,
         content={language: content},
         priority=85,
+        category="system_prompt",
     )

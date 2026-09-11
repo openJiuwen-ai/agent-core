@@ -283,6 +283,7 @@ async def build_context_section(
         name=SectionName.CONTEXT,
         content={language: content},
         priority=80,
+        category="memory",
     )
 
 
@@ -315,6 +316,7 @@ async def build_context_file_sections(
             name=section_name,
             content={language: f"{title}\n\n{content}\n"},
             priority=80,
+            category="memory",
         )
     return sections
 
@@ -380,4 +382,7 @@ def build_tools_section(
         name=SectionName.TOOLS,
         content={language: content},
         priority=30,
+        # This section contains tool-use rules.  The actual tool schemas are
+        # counted separately from ContextWindow.tools.
+        category="system_prompt",
     )

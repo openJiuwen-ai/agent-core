@@ -116,6 +116,7 @@ class Session:
         agent_id: str | None = None,
         *,
         share_stream_writer: bool = True,
+        member_name: str | None = None,
     ) -> AgentSession:
         if card is None:
             card = AgentCard(id=agent_id or "team_agent", name=agent_id or "team_agent")
@@ -126,6 +127,8 @@ class Session:
                 "source_agent_id": card.id,
                 "source_team_id": self._team_id,
             }
+            if member_name:
+                source_metadata["source_member_name"] = member_name
         child = create_agent_session(
             session_id=self._session_id,
             envs=self.get_envs(),

@@ -23,8 +23,8 @@ present it writes `pending_create`. `TeamAgent._mark_team_built` and
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/session_manager.py`、`openjiuwen/agent_teams/agent/recovery_manager.py`、`openjiuwen/agent_teams/runtime/metadata.py`、`openjiuwen/agent_teams/context.py` |
-| 最近一次修订日期 | 2026-08-11 |
-| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md` |
+| 最近一次修订日期 | 2026-08-19 |
+| 关联 feature | `F_01_coordination-protocol-cleanup.md`、`F_05_lifecycle-finalize-relocation.md`、`F_83_session-ddl-under-write-lock.md` |
 
 ## 范围 / 边界
 
@@ -112,6 +112,8 @@ reset** contextvar——故意为之：
 `team_backend.db.create_cur_session_tables()`。该调用必须幂等：同一 session
 重复 `bind_session`（如 stop 后又 resume）不允许产生重复建表副作用。
 `SessionManager` 自身不缓存"已建表"标记，幂等性由 backend 实现保证。
+DDL 在 `DbSessions` 进程级写锁内执行、与 DAO 写同锁串行——不允许经
+`engine.begin()` 直连绕过锁（并发 bind 耗尽写池的修复，见 F_83）。
 
 ### I-6 Checkpoint 写入只走 namespace 入口
 
@@ -252,7 +254,7 @@ class SessionManager:
 ```python
 class RecoveryManager:
     async def recover_team(self) -> list[str]:
-        """leader-only：从 DB 拉所有非自身成员，逐个置 RESTARTING 后重启。"""
+        """leader-only：按持久状态恢复仍在队成员，并保留显式退场。"""
 
     def persist_leader_config(self, session) -> None:
         """leader-only：把 spec / context / allocator state 写到 per-team namespace。"""
@@ -276,6 +278,9 @@ class RecoveryManager:
 
 关键语义：
 
+- **`recover_team` 不等于复活整份名册**：`SHUTDOWN_REQUESTED` / `SHUTDOWN` 都由关闭链路
+  拥有，冷恢复只跳过、不代写状态也不清 runtime handle。其余无 live handle 的成员延续
+  既有流程：尝试更新为 `RESTARTING`，再调用 `restart_teammate`。
 - **`collect_live_teammates_for_session_switch`** 只对 `role == LEADER` 且
   `team_backend` 存在的情况下返回非空。它的判定条件是
   "DB 里 status 不在 `{UNSTARTED, SHUTDOWN, STOPPED}`" **且** "spawn_manager 上仍持有

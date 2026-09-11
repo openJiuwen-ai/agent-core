@@ -6,11 +6,13 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     AudioGenerationResponse,
     VideoGenerationResponse
 )
+from openjiuwen.core.foundation.llm.schema.config import ReasoningConfig
 
 __all__ = [
     "ImageGenerationResponse",
     "AudioGenerationResponse",
-    "VideoGenerationResponse"
+    "VideoGenerationResponse",
+    "ReasoningConfig",
 ]
 
 

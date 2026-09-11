@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
+pytest.importorskip("psycopg2")
+
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_vector_store import (
     CollectionSchema,

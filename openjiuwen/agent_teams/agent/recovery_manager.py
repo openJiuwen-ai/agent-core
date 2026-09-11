@@ -51,6 +51,16 @@ class RecoveryManager:
         for member in all_members:
             if member.member_name == member_name:
                 continue
+
+            # Shutdown is owned by the member finalizer. Recovery must neither
+            # revive a departed member nor complete an in-flight shutdown on
+            # behalf of a runtime that may still be starting or exiting.
+            if member.status in {
+                MemberStatus.SHUTDOWN_REQUESTED.value,
+                MemberStatus.SHUTDOWN.value,
+            }:
+                continue
+
             # Idempotency: a teammate already running in this runtime keeps its
             # live spawn handle, so skip it. ``recover_team`` can be invoked more
             # than once per activation (the runtime manager's COLD_RECOVER path
@@ -64,6 +74,7 @@ class RecoveryManager:
                     member.member_name,
                 )
                 continue
+
             team_name = self._configurator.team_name
             if team_name:
                 await team_backend.db.member.update_member_status(

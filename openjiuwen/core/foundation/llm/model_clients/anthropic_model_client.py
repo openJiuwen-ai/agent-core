@@ -16,9 +16,22 @@ Promp caching layout:
   3. messages
 """
 
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterable, List, Mapping, Optional, Tuple, Union
-
-import httpx
+import copy
+import importlib
+import json
+import re
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -30,6 +43,13 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.reasoning import (
+    UNSET_REASONING,
+    apply_reasoning_plan,
+    is_reasoning_config_intent,
+    reasoning_request_controls,
+    resolve_reasoning_plan,
+)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema import (
@@ -38,6 +58,7 @@ from openjiuwen.core.foundation.llm.schema import (
     VideoGenerationResponse,
 )
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -58,6 +79,178 @@ if TYPE_CHECKING:
     import anthropic
 
 
+_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY = "anthropic_content_blocks"
+_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY = "__anthropic_content_blocks"
+# Model families that accept ``role: "system"`` inside ``messages``, GA and
+# with no beta header. Every other model answers 400 "role 'system' is not
+# supported on this model", so the entry is folded into top-level ``system``.
+_MID_CONVERSATION_SYSTEM_MODEL_FAMILIES = (
+    "claude-opus-5",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+)
+
+_ANTHROPIC_CACHEABLE_BLOCK_TYPES = frozenset({
+    "text", "image", "document", "tool_use", "tool_result",
+})
+_IMAGE_DATA_URL_PATTERN = re.compile(
+    r"^data:(image/(?:jpeg|png|gif|webp));base64,(.+)$",
+    flags=re.IGNORECASE | re.DOTALL,
+)
+
+
+def _to_plain_data(value: Any) -> Any:
+    """Convert Anthropic SDK models into JSON-compatible data."""
+    if hasattr(value, "model_dump"):
+        return value.model_dump(exclude_none=True)
+    if isinstance(value, Mapping):
+        return {key: _to_plain_data(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_to_plain_data(item) for item in value]
+    return value
+
+
+def _sanitize_replay_block(block: Any) -> Optional[dict]:
+    """Keep only fields accepted by Anthropic's message input schema."""
+    data = _to_plain_data(block)
+    if not isinstance(data, Mapping):
+        return None
+
+    block_type = data.get("type")
+    if block_type == "thinking":
+        return {
+            "type": "thinking",
+            "thinking": str(data.get("thinking") or ""),
+            "signature": str(data.get("signature") or ""),
+        }
+    if block_type == "redacted_thinking":
+        opaque_data = data.get("data")
+        if not opaque_data:
+            return None
+        return {"type": "redacted_thinking", "data": opaque_data}
+    if block_type == "text":
+        result = {"type": "text", "text": str(data.get("text") or "")}
+        if data.get("citations") is not None:
+            result["citations"] = copy.deepcopy(data["citations"])
+        return result
+    if block_type == "tool_use":
+        return {
+            "type": "tool_use",
+            "id": str(data.get("id") or ""),
+            "name": str(data.get("name") or ""),
+            "input": copy.deepcopy(data.get("input") or {}),
+        }
+    return None
+
+
+def _preserved_content_blocks(message: Mapping[str, Any]) -> List[dict]:
+    raw_blocks = message.get(_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY)
+    if raw_blocks is None:
+        metadata = message.get("metadata")
+        if isinstance(metadata, Mapping):
+            raw_blocks = metadata.get(_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY)
+    if not isinstance(raw_blocks, list):
+        return []
+    blocks: List[dict] = []
+    for block in raw_blocks:
+        sanitized = _sanitize_replay_block(block)
+        if sanitized is not None:
+            blocks.append(sanitized)
+    return blocks
+
+
+def _copy_preserved_blocks_to_converted_messages(
+        source_messages: Union[str, List[BaseMessage], List[dict]],
+        converted_messages: List[dict],
+) -> None:
+    """Restore provider-private metadata stripped by the common converter."""
+    if not isinstance(source_messages, list) or len(source_messages) != len(converted_messages):
+        return
+    for source, converted in zip(source_messages, converted_messages):
+        metadata = source.get("metadata") if isinstance(source, dict) else getattr(source, "metadata", None)
+        if not isinstance(metadata, Mapping):
+            continue
+        raw_blocks = metadata.get(_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY)
+        if isinstance(raw_blocks, list):
+            converted[_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY] = copy.deepcopy(raw_blocks)
+
+
+def _stream_blocks_metadata(block_acc: Mapping[int, dict]) -> dict[str, Any]:
+    blocks = []
+    for _, block in sorted(block_acc.items()):
+        sanitized = _sanitize_replay_block(block)
+        if sanitized is not None:
+            blocks.append(sanitized)
+    if not blocks:
+        return {}
+    return {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: blocks}
+
+
+def _convert_tool_choice(tool_choice: Any) -> Optional[dict]:
+    """Translate common/OpenAI tool-choice shapes into Anthropic's shape."""
+    if tool_choice is None or tool_choice == "auto":
+        return None
+    if isinstance(tool_choice, str):
+        mapped = {"required": "any", "none": "none", "any": "any"}.get(tool_choice)
+        return {"type": mapped} if mapped else None
+    if not isinstance(tool_choice, Mapping):
+        return None
+    if tool_choice.get("type") == "function":
+        function = tool_choice.get("function") or {}
+        return {"type": "tool", "name": function.get("name", "")}
+    if tool_choice.get("type") in {"auto", "any", "none", "tool"}:
+        return copy.deepcopy(dict(tool_choice))
+    return None
+
+
+def _sampling_from_anthropic_params(params: Mapping[str, Any], key: str) -> Any:
+    """Read a sampling field from extra_body (SDK 1.x) or the top-level dict."""
+    extra = params.get("extra_body")
+    if isinstance(extra, Mapping) and key in extra:
+        return extra[key]
+    return params.get(key)
+
+
+def _model_forbids_custom_sampling(model: str) -> bool:
+    """Return whether a current Claude family accepts only default sampling."""
+    normalized = str(model or "").lower().replace(".", "-")
+    if not normalized.startswith("claude-"):
+        return False
+    if any(name in normalized for name in ("fable", "mythos")):
+        return True
+    if re.search(r"claude-(?:opus|sonnet)-5(?:-|$)", normalized):
+        return True
+    return bool(re.search(r"claude-opus-4-(?:7|8)(?:-|$)", normalized))
+
+
+def _image_source_block(value: Any) -> dict:
+    """Convert an OpenAI-style image value to an Anthropic image block."""
+    if isinstance(value, Mapping):
+        value = value.get("url")
+    if not isinstance(value, str) or not value:
+        raise ValueError("Anthropic image input requires a non-empty image URL.")
+
+    data_url = _IMAGE_DATA_URL_PATTERN.fullmatch(value)
+    if data_url:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": data_url.group(1).lower(),
+                "data": data_url.group(2),
+            },
+        }
+    if value.startswith("data:"):
+        raise ValueError(
+            "Anthropic image inputs support base64 JPEG, PNG, GIF, or WebP data URLs only."
+        )
+    return {
+        "type": "image",
+        "source": {"type": "url", "url": value},
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shape converters: openJiuwen BaseMessage list  <->  Anthropic Messages API payload
 # ---------------------------------------------------------------------------
@@ -72,6 +265,15 @@ def _content_to_blocks(content: Any) -> List[dict]:
         blocks2: List[dict] = []
         for item in content:
             if isinstance(item, dict):
+                item_type = item.get("type")
+                image_value = None
+                if item_type in {"image_url", "input_image"}:
+                    image_value = item.get("image_url")
+                elif item_type == "image" and "source" not in item:
+                    image_value = item.get("data_url", item.get("image"))
+                if image_value is not None or item_type in {"image_url", "input_image"}:
+                    blocks2.append(_image_source_block(image_value))
+                    continue
                 blocks2.append(dict(item))
             elif isinstance(item, str):
                 if item:
@@ -88,16 +290,109 @@ def _mark_cache_control(blocks: List[dict], ttl: str) -> None:
     Anthropic caches the prefix up to and including the marked block; only the
     final block in a message needs the marker to anchor the prefix there.
     """
-    if not blocks:
-        return
     marker: dict = {"type": "ephemeral"}
     if ttl == "1h":
         marker["ttl"] = "1h"
-    blocks[-1]["cache_control"] = marker
+    for block in reversed(blocks):
+        if block.get("type") in _ANTHROPIC_CACHEABLE_BLOCK_TYPES:
+            block["cache_control"] = marker
+            return
+
+
+def _content_to_text(content: Any) -> str:
+    """Flatten message content down to the plain text a system turn allows.
+
+    A mid-conversation system message is text-only, so image and tool blocks
+    have nowhere to go; they never appear on one in practice, and dropping
+    them is better than sending a shape the API rejects.
+    """
+
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in _content_to_blocks(content)
+        if block.get("type") == "text"
+    )
+
+
+def _supports_mid_conversation_system(model: Optional[str]) -> bool:
+    """Report whether this model accepts ``role: "system"`` inside ``messages``.
+
+    Only some models do, with no beta header; the rest answer a 400. Gateways
+    prefix and suffix the id (``anthropic/``, ``us.anthropic.``, ``-v1:0``),
+    so match on the family substring rather than on equality, and stay
+    conservative: an unrecognized id keeps the always-valid behavior of
+    folding the message into the top-level ``system`` parameter.
+    """
+
+    name = str(model or "").strip().lower()
+    if not name:
+        return False
+    return any(family in name for family in _MID_CONVERSATION_SYSTEM_MODEL_FAMILIES)
+
+
+def _inline_system_is_placeable(converted: List[dict], index: int) -> bool:
+    """Report whether a system message may stay where it sits.
+
+    The API accepts one only after a ``user`` turn, and only when it is last
+    or followed by an ``assistant`` turn. It can never be ``messages[0]`` --
+    which is exactly what the leading system prompt is, so that one keeps
+    going to the top-level parameter it belongs in.
+
+    Neighbours are read from the pre-partition list on purpose: a system
+    message next to another one is judged against that neighbour and both fall
+    back, rather than each assuming the other will be moved away.
+    """
+
+    if index == 0:
+        return False
+    if converted[index - 1].get("role") != "user":
+        return False
+    if index == len(converted) - 1:
+        return True
+    return converted[index + 1].get("role") == "assistant"
+
+
+def _partition_system_messages(
+        converted: List[dict],
+        *,
+        allow_mid_conversation_system: bool,
+) -> tuple[List[dict], List[dict]]:
+    """Split system turns into top-level blocks and the ones that stay put.
+
+    Leaving a system message in place is the whole point of this pass. Folding
+    it into the top-level ``system`` parameter puts it ahead of the entire
+    conversation, so every cached turn after it is re-processed -- on a long
+    agent run one appended instruction costs a full cache rewrite. A message
+    that stays where it was written leaves the cached prefix intact, and keeps
+    the operator authority a user-turn block could not carry.
+
+    Args:
+        converted: Messages already in Anthropic shape, system turns included.
+        allow_mid_conversation_system: Whether the target model accepts them.
+
+    Returns:
+        The top-level system blocks, and the messages to send.
+    """
+
+    system_blocks: List[dict] = []
+    kept: List[dict] = []
+    for index, message in enumerate(converted):
+        if message.get("role") != "system":
+            kept.append(message)
+            continue
+        if allow_mid_conversation_system and _inline_system_is_placeable(converted, index):
+            kept.append(message)
+            continue
+        system_blocks.extend(_content_to_blocks(message.get("content")))
+    return system_blocks, kept
 
 
 def _convert_message_schemas(
         messages: List[dict],
+        *,
+        allow_mid_conversation_system: bool = False,
 ) -> tuple[Optional[List[dict]], List[dict]]:
     """Split an OpenAI-shape message list into (system_blocks, anthropic_messages).
 
@@ -106,8 +401,18 @@ def _convert_message_schemas(
     OpenAI-style ``tool_calls`` on an assistant message become ``tool_use``
     blocks; OpenAI-style ``role: "tool"`` messages become ``user`` messages
     carrying ``tool_result`` blocks.
+
+    System turns are laid out in place first and partitioned afterwards, since
+    whether one may stay depends on the neighbours it ends up with.
+
+    Args:
+        messages: OpenAI-shape messages.
+        allow_mid_conversation_system: Whether the target model accepts a
+            ``role: "system"`` entry inside ``messages``.
+
+    Returns:
+        The top-level system blocks (None when empty), and the messages.
     """
-    system_blocks: List[dict] = []
     out: List[dict] = []
     pending_tool_results: List[dict] = []
 
@@ -120,7 +425,13 @@ def _convert_message_schemas(
         role = msg.get("role")
 
         if role == "system":
-            system_blocks.extend(_content_to_blocks(msg.get("content", "")))
+            # Emit in place; _partition_system_messages decides afterwards
+            # whether this position is one the API accepts.
+            _flush_tool_results()
+            out.append({
+                "role": "system",
+                "content": _content_to_text(msg.get("content", "")),
+            })
             continue
 
         if role == "tool":
@@ -140,13 +451,17 @@ def _convert_message_schemas(
         _flush_tool_results()
 
         if role == "assistant":
+            preserved_blocks = _preserved_content_blocks(msg)
+            if preserved_blocks:
+                out.append({"role": "assistant", "content": preserved_blocks})
+                continue
+
             blocks = _content_to_blocks(msg.get("content", ""))
             tool_calls = msg.get("tool_calls") or []
             for tc in tool_calls:
                 fn = tc.get("function", {}) if isinstance(tc, dict) else {}
                 args_str = fn.get("arguments", "{}") or "{}"
                 try:
-                    import json
                     args_obj = json.loads(args_str) if isinstance(args_str, str) else args_str
                 except Exception:
                     args_obj = {"_raw_arguments": args_str}
@@ -169,6 +484,10 @@ def _convert_message_schemas(
 
     _flush_tool_results()
 
+    system_blocks, out = _partition_system_messages(
+        out,
+        allow_mid_conversation_system=allow_mid_conversation_system,
+    )
     return (system_blocks or None), out
 
 
@@ -235,6 +554,13 @@ def _apply_messages_cache_breakpoint(
     idx = len(anthropic_messages) - 1
     if exclude_tail and idx >= 1:
         idx -= 1
+    # A mid-conversation system turn carries plain text, which has no block to
+    # hang the marker on. Walk back to the nearest message that does rather
+    # than dropping the breakpoint and leaving the turn uncached.
+    while idx >= 0 and not isinstance(anthropic_messages[idx].get("content"), list):
+        idx -= 1
+    if idx < 0:
+        return
     blocks = anthropic_messages[idx].get("content")
     if isinstance(blocks, list):
         _mark_cache_control(blocks, "5m")
@@ -243,6 +569,20 @@ def _apply_messages_cache_breakpoint(
 # ---------------------------------------------------------------------------
 # Client
 # ---------------------------------------------------------------------------
+
+def _anthropic_sdk_httpx_module():
+    """Return ``httpx`` or ``httpx2``, matching the installed Anthropic SDK.
+
+    Anthropic 1.0+ type-checks ``http_client`` against ``httpx2.AsyncClient``.
+    ``DefaultAsyncHttpxClient`` subclasses that class, so ``Limits`` must come
+    from the same package — a bare ``httpx.AsyncClient`` / ``httpx.Limits``
+    fails the 1.x check even though the APIs look identical.
+    """
+    from anthropic import DefaultAsyncHttpxClient
+
+    root = DefaultAsyncHttpxClient.__bases__[0].__module__.split(".", 1)[0]
+    return importlib.import_module(root)
+
 
 class AnthropicModelClient(BaseModelClient):
     """Anthropic Messages API client."""
@@ -260,6 +600,14 @@ class AnthropicModelClient(BaseModelClient):
     def __init__(self, model_config: ModelRequestConfig, model_client_config: ModelClientConfig):
         super().__init__(model_config, model_client_config)
         self._base_headers = build_base_headers(custom_headers=model_client_config.custom_headers)
+
+    def _validate_config(self):
+        super()._validate_config()
+        if not str(self.model_client_config.api_key or "").strip():
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg="model client config api_key is required for Anthropic client.",
+            )
 
     def _get_client_name(self) -> str:
         return "Anthropic client"
@@ -284,7 +632,9 @@ class AnthropicModelClient(BaseModelClient):
         :meth:`aclose_connections`.
         """
         cfg = model_client_config
+        auth_mode = cfg.auth_mode.value if isinstance(cfg.auth_mode, LLMAuthMode) else cfg.auth_mode
         return (
+            auth_mode,
             cfg.api_key,
             cls._normalize_base_url(cfg.api_base),
             cfg.verify_ssl,
@@ -315,7 +665,9 @@ class AnthropicModelClient(BaseModelClient):
         if not api_base:
             return None
         b = api_base.rstrip("/")
-        if b.endswith("/v1"):
+        if b.endswith("/v1/messages"):
+            b = b[:-12]
+        elif b.endswith("/v1"):
             b = b[:-3]
         return b or None
 
@@ -352,7 +704,7 @@ class AnthropicModelClient(BaseModelClient):
 
     def _build_async_anthropic_client(self, timeout: Optional[float] = None) -> "anthropic.AsyncAnthropic":
         """Build a fresh ``AsyncAnthropic`` client with its own httpx connection pool."""
-        from anthropic import AsyncAnthropic
+        from anthropic import AsyncAnthropic, DefaultAsyncHttpxClient
 
         ssl_verify, ssl_cert = self.model_client_config.verify_ssl, self.model_client_config.ssl_cert
         verify = SslUtils.create_strict_ssl_context(ssl_cert) if ssl_verify else ssl_verify
@@ -362,10 +714,12 @@ class AnthropicModelClient(BaseModelClient):
         # 60s to keep connections warm across typical inter-request gaps while
         # staying at/under common upstream/LB idle timeouts (avoids reusing a
         # server-closed "dead" connection).
-        http_client = httpx.AsyncClient(
+        # Use the SDK helper so 0.x (httpx) and 1.x (httpx2) both type-check.
+        http_pkg = _anthropic_sdk_httpx_module()
+        http_client = DefaultAsyncHttpxClient(
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
             verify=verify,
-            limits=httpx.Limits(
+            limits=http_pkg.Limits(
                 max_connections=100,
                 max_keepalive_connections=20,
                 keepalive_expiry=60.0,
@@ -448,6 +802,11 @@ class AnthropicModelClient(BaseModelClient):
             stream: bool,
             **kwargs,
     ) -> dict:
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
+
         openai_params = super()._build_request_params(
             messages=messages,
             tools=tools,
@@ -459,11 +818,27 @@ class AnthropicModelClient(BaseModelClient):
             stream=stream,
             **kwargs,
         )
+        apply_reasoning_plan(
+            openai_params,
+            resolve_reasoning_plan(
+                self.model_client_config,
+                self.model_config,
+                request_model=model,
+                explicit_kwargs=reasoning_kwargs,
+            ),
+            override=is_reasoning_config_intent(explicit_reasoning),
+        )
 
         oai_messages: List[dict] = openai_params.get("messages") or []
         oai_tools: Optional[List[dict]] = openai_params.get("tools")
+        _copy_preserved_blocks_to_converted_messages(messages, oai_messages)
 
-        system_blocks, anthropic_messages = _convert_message_schemas(oai_messages)
+        system_blocks, anthropic_messages = _convert_message_schemas(
+            oai_messages,
+            allow_mid_conversation_system=_supports_mid_conversation_system(
+                openai_params.get("model")
+            ),
+        )
         anthropic_tools = _convert_tool_schemas(oai_tools)
 
         _apply_static_cache_breakpoints(system_blocks, anthropic_tools)
@@ -483,23 +858,102 @@ class AnthropicModelClient(BaseModelClient):
             params["system"] = system_blocks
         if anthropic_tools:
             params["tools"] = anthropic_tools
-        # Anthropic rejects temperature and top_p together (400 invalid_request
-        # for models such as Claude Haiku 4.5). Both carry non-None defaults in
-        # ModelRequestConfig, so we cannot rely on the caller to unset one:
-        # prefer temperature and only forward top_p when temperature is absent.
+
+        # Forward Anthropic-native controls that the common OpenAI-shaped
+        # builder intentionally treats as extras. Sampling keys (temperature /
+        # top_p / top_k) must not go here: anthropic>=1.0 removed them from
+        # messages.create/stream and they must travel via extra_body.
+        for key in (
+                "thinking", "output_config", "metadata", "service_tier",
+        ):
+            if key in openai_params:
+                params[key] = openai_params[key]
+
+        # Manual thinking.budget_tokens shares the response ceiling with the
+        # final answer. Official Anthropic and compatible gateways require
+        # max_tokens > budget_tokens; raise the ceiling instead of silently
+        # shrinking the requested thinking depth.
+        thinking_cfg = params.get("thinking")
+        if isinstance(thinking_cfg, Mapping):
+            budget = thinking_cfg.get("budget_tokens")
+            if isinstance(budget, int) and params["max_tokens"] <= budget:
+                llm_logger.debug(
+                    "Anthropic: raising max_tokens from %s to %s so it exceeds "
+                    "thinking.budget_tokens.",
+                    params["max_tokens"],
+                    budget + 1024,
+                )
+                params["max_tokens"] = budget + 1024
+
+        # Compatible gateways may add fields that are not keyword parameters
+        # in the Anthropic SDK. Send them through extra_body so the SDK merges
+        # them into JSON instead of raising TypeError before the HTTP request.
+        extra_body = copy.deepcopy(openai_params.get("extra_body") or {})
+        for key in (
+                "reasoning_effort", "thinking_budget", "thinking_strategy",
+                "enable_thinking",
+        ):
+            if key in openai_params:
+                extra_body[key] = openai_params[key]
+
+        anthropic_tool_choice = _convert_tool_choice(openai_params.get("tool_choice"))
+        if anthropic_tool_choice is not None:
+            params["tool_choice"] = anthropic_tool_choice
+
+        # ModelRequestConfig carries OpenAI-oriented defaults. Treat those as
+        # "unset" for Anthropic unless the caller explicitly configured them;
+        # current Claude families reject non-default sampling with HTTP 400.
+        # anthropic 0.x still accepts temperature= kwargs; 1.x only extra_body.
+        # extra_body works on both (merged into request JSON).
+        temperature_explicit = temperature is not None or "temperature" in self.model_config.model_fields_set
+        top_p_explicit = top_p is not None or "top_p" in self.model_config.model_fields_set
         temperature = openai_params.get("temperature")
         top_p = openai_params.get("top_p")
-        if temperature is not None:
-            params["temperature"] = temperature
-            if top_p is not None:
+        thinking_payload = params.get("thinking")
+        thinking_type = (
+            (thinking_payload or {}).get("type")
+            if isinstance(thinking_payload, Mapping)
+            else None
+        )
+        sampling_forbidden = _model_forbids_custom_sampling(params["model"])
+        thinking_restricts_sampling = thinking_type in {"enabled", "adaptive"}
+        sampling_allowed = not (sampling_forbidden or thinking_restricts_sampling)
+
+        if not sampling_allowed:
+            if temperature_explicit or top_p_explicit or openai_params.get("top_k") is not None:
                 llm_logger.debug(
-                    "Anthropic: dropping top_p because temperature is set "
-                    "(the API forbids specifying both)."
+                    "Anthropic: dropping sampling overrides that are incompatible "
+                    "with this model/thinking mode."
                 )
-        elif top_p is not None and top_p != 1.0:
-            # top_p=1.0 is the default (no nucleus truncation); skip it so we
-            # send the API only meaningful overrides.
-            params["top_p"] = top_p
+        else:
+            if temperature_explicit and temperature is not None:
+                extra_body["temperature"] = temperature
+                if top_p_explicit and top_p is not None:
+                    llm_logger.debug(
+                        "Anthropic: dropping top_p because temperature is set "
+                        "(the API forbids specifying both)."
+                    )
+            elif top_p_explicit and top_p is not None and top_p != 1.0:
+                # top_p=1.0 is the default (no nucleus truncation); skip it so we
+                # send the API only meaningful overrides.
+                extra_body["top_p"] = top_p
+            if "top_k" in openai_params and openai_params.get("top_k") is not None:
+                extra_body["top_k"] = openai_params["top_k"]
+
+        if extra_body:
+            params["extra_body"] = extra_body
+        for key in ("temperature", "top_p", "top_k"):
+            params.pop(key, None)
+
+        reasoning_controls = reasoning_request_controls(params)
+        if reasoning_controls:
+            logger.info(
+                "Resolved Anthropic-compatible reasoning request controls: "
+                "model=%s provider=%s controls=%s",
+                params.get("model"),
+                self.model_client_config.client_provider,
+                reasoning_controls,
+            )
         if openai_params.get("stop"):
             stop_val = openai_params["stop"]
             params["stop_sequences"] = stop_val if isinstance(stop_val, list) else [stop_val]
@@ -556,8 +1010,8 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 messages=params.get("messages"),
                 tools=params.get("tools"),
-                temperature=params.get("temperature"),
-                top_p=params.get("top_p"),
+                temperature=_sampling_from_anthropic_params(params, "temperature"),
+                top_p=_sampling_from_anthropic_params(params, "top_p"),
                 max_tokens=params.get("max_tokens"),
             )
 
@@ -664,8 +1118,8 @@ class AnthropicModelClient(BaseModelClient):
                 model_provider=self.model_client_config.client_provider,
                 messages=params.get("messages"),
                 tools=params.get("tools"),
-                temperature=params.get("temperature"),
-                top_p=params.get("top_p"),
+                temperature=_sampling_from_anthropic_params(params, "temperature"),
+                top_p=_sampling_from_anthropic_params(params, "top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=True,
             )
@@ -679,9 +1133,13 @@ class AnthropicModelClient(BaseModelClient):
 
             # Accumulator state across the stream
             current_text = ""
-            tool_use_acc: dict[int, dict] = {}      # index -> {id, name, args_str}
+            # Ordered content-block state. Besides assembling tool arguments it
+            # retains thinking signatures so the next agent iteration can replay
+            # the assistant turn exactly as Anthropic returned it.
+            tool_use_acc: dict[int, dict] = {}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
+            accumulated_for_parser = ""
 
             async with async_client.messages.stream(**params) as response_stream:
                 async for event in response_stream:
@@ -694,6 +1152,26 @@ class AnthropicModelClient(BaseModelClient):
                         final_stop_reason = chunk.finish_reason
                     if chunk.content:
                         current_text += chunk.content
+                        if output_parser:
+                            accumulated_for_parser += str(chunk.content)
+                            try:
+                                parsed = await output_parser.parse(
+                                    accumulated_for_parser
+                                )
+                                if parsed is not None:
+                                    chunk = chunk.model_copy(
+                                        update={"parser_content": parsed}
+                                    )
+                                    accumulated_for_parser = ""
+                            except Exception as exc:
+                                llm_logger.debug(
+                                    "Anthropic stream parser attempt error.",
+                                    event_type=LogEventType.LLM_CALL_ERROR,
+                                    model_name=params.get("model"),
+                                    model_provider=self.model_client_config.client_provider,
+                                    is_stream=True,
+                                    exception=str(exc),
+                                )
                     await trigger(
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
@@ -750,13 +1228,23 @@ class AnthropicModelClient(BaseModelClient):
         """Convert an Anthropic ``Message`` response into ``AssistantMessage``."""
         content_blocks = list(getattr(response, "content", []) or [])
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
+        replay_blocks: List[dict] = []
         tool_calls: List[ToolCall] = []
         for idx, block in enumerate(content_blocks):
             btype = getattr(block, "type", None)
+            replay_block = _sanitize_replay_block(block)
+            if replay_block is not None:
+                replay_blocks.append(replay_block)
             if btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
+            elif btype == "thinking":
+                reasoning_parts.append(getattr(block, "thinking", "") or "")
+            elif btype == "redacted_thinking":
+                # The encrypted data is retained in metadata for replay, but it
+                # has no displayable reasoning text.
+                continue
             elif btype == "tool_use":
-                import json
                 input_obj = getattr(block, "input", None) or {}
                 args_str = json.dumps(input_obj) if not isinstance(input_obj, str) else input_obj
                 tool_calls.append(ToolCall(
@@ -766,10 +1254,20 @@ class AnthropicModelClient(BaseModelClient):
                     arguments=args_str,
                     index=idx,
                 ))
-            # thinking / redacted_thinking blocks: ignored for now -- could be
-            # surfaced as reasoning_content if/when OJ wants to display them.
 
         content = "".join(text_parts)
+        reasoning_content = "".join(reasoning_parts) or None
+        if reasoning_content is None:
+            # A few Anthropic-compatible gateways expose an OpenAI-style extra
+            # response field. It is safe to normalize for display, but it must
+            # never replace signed Anthropic thinking blocks during replay.
+            extra_reasoning = getattr(response, "reasoning_content", None)
+            if extra_reasoning is None:
+                model_extra = getattr(response, "model_extra", None)
+                if isinstance(model_extra, Mapping):
+                    extra_reasoning = model_extra.get("reasoning_content")
+            if isinstance(extra_reasoning, str) and extra_reasoning:
+                reasoning_content = extra_reasoning
 
         usage_metadata = self._usage_from_anthropic(getattr(response, "usage", None))
 
@@ -792,12 +1290,30 @@ class AnthropicModelClient(BaseModelClient):
             "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
         )
 
+        provider_metadata_candidates = (
+            ("stop_reason", getattr(response, "stop_reason", None)),
+            ("stop_sequence", getattr(response, "stop_sequence", None)),
+        )
+        provider_metadata = {
+            key: value
+            for key, value in provider_metadata_candidates
+            if isinstance(value, (str, int, float, bool)) and value != ""
+        }
+
         return AssistantMessage(
             content=content,
             tool_calls=tool_calls if tool_calls else None,
             usage_metadata=usage_metadata,
             finish_reason=finish_reason,
             parser_content=parser_content,
+            reasoning_content=reasoning_content,
+            metadata=(
+                {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: replay_blocks}
+                if replay_blocks else {}
+            ),
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=provider_metadata,
         )
 
     def _usage_from_anthropic(self, usage: Any) -> Optional[UsageMetadata]:
@@ -812,7 +1328,8 @@ class AnthropicModelClient(BaseModelClient):
         u = usage.model_dump() if hasattr(usage, "model_dump") else dict(usage.__dict__)
         uncached = int(u.get("input_tokens") or 0)
         cache_read = int(u.get("cache_read_input_tokens") or 0)
-        cache_write = int(u.get("cache_creation_input_tokens") or 0)
+        cache_write_raw = u.get("cache_creation_input_tokens")
+        cache_write = int(cache_write_raw or 0)
         output = int(u.get("output_tokens") or 0)
         total_input = uncached + cache_read + cache_write
 
@@ -821,12 +1338,26 @@ class AnthropicModelClient(BaseModelClient):
         # is available, leave zeros -- the postrun script applies pricing.
         input_cost, output_cost, total_cost = self._extract_cost_info(usage)
 
+        # ``cache_write`` is a subset of the uncached/miss portion for the
+        # canonical usage contract.  It must therefore be included in miss,
+        # while remaining separately exposed as an overlap diagnostic.
+        cache_miss = uncached + cache_write
+
         return UsageMetadata(
             model_name=self.model_config.model_name,
             input_tokens=total_input,
             output_tokens=output,
             total_tokens=total_input + output,
             cache_tokens=cache_read,
+            cache_read_tokens=cache_read,
+            cache_miss_tokens=cache_miss,
+            cache_write_tokens=cache_write,
+            cache_status="observed",
+            cache_source="provider_usage",
+            cache_authoritative=True,
+            cache_creation_input_tokens=(
+                cache_write if cache_write_raw is not None else None
+            ),
             input_cost=input_cost,
             output_cost=output_cost,
             total_cost=total_cost,
@@ -860,16 +1391,44 @@ class AnthropicModelClient(BaseModelClient):
                 tool_calls=None,
                 usage_metadata=usage_metadata,
                 finish_reason="null",
+                response_id=str(getattr(msg, "id", "") or "") or None,
+                response_model=str(getattr(msg, "model", "") or "") or None,
             )
 
         if etype == "content_block_start":
             block = getattr(event, "content_block", None)
             idx = getattr(event, "index", None)
-            if block is not None and getattr(block, "type", None) == "tool_use" and idx is not None:
+            if block is None or idx is None:
+                return None
+            block_type = getattr(block, "type", None)
+            if block_type == "tool_use":
                 tool_use_acc[idx] = {
+                    "type": "tool_use",
                     "id": getattr(block, "id", "") or "",
                     "name": getattr(block, "name", "") or "",
+                    "input": getattr(block, "input", None) or {},
                     "args_str": "",
+                }
+            elif block_type == "thinking":
+                tool_use_acc[idx] = {
+                    "type": "thinking",
+                    "thinking": getattr(block, "thinking", "") or "",
+                    "signature": getattr(block, "signature", "") or "",
+                }
+            elif block_type == "redacted_thinking":
+                tool_use_acc[idx] = {
+                    "type": "redacted_thinking",
+                    "data": getattr(block, "data", "") or "",
+                }
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            elif block_type == "text":
+                tool_use_acc[idx] = {
+                    "type": "text",
+                    "text": getattr(block, "text", "") or "",
                 }
             return None
 
@@ -883,14 +1442,48 @@ class AnthropicModelClient(BaseModelClient):
                 text = getattr(delta, "text", "") or ""
                 if not text:
                     return None
+                if idx is not None:
+                    state = tool_use_acc.setdefault(idx, {"type": "text", "text": ""})
+                    state["text"] = (state.get("text") or "") + text
                 return AssistantMessageChunk(
                     content=text,
                     reasoning_content=None,
+                    metadata=_stream_blocks_metadata(tool_use_acc),
                     tool_calls=None,
                     usage_metadata=None,
                     finish_reason="null",
                 )
-            if dtype == "input_json_delta" and idx is not None and idx in tool_use_acc:
+            if dtype == "thinking_delta":
+                thinking = getattr(delta, "thinking", "") or ""
+                if not thinking:
+                    return None
+                if idx is not None:
+                    state = tool_use_acc.setdefault(
+                        idx, {"type": "thinking", "thinking": "", "signature": ""}
+                    )
+                    state["thinking"] = (state.get("thinking") or "") + thinking
+                return AssistantMessageChunk(
+                    content="",
+                    reasoning_content=thinking,
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    tool_calls=None,
+                    usage_metadata=None,
+                    finish_reason="null",
+                )
+            if dtype == "signature_delta":
+                signature = getattr(delta, "signature", "") or ""
+                if idx is None or not signature:
+                    return None
+                state = tool_use_acc.setdefault(
+                    idx, {"type": "thinking", "thinking": "", "signature": ""}
+                )
+                state["signature"] = (state.get("signature") or "") + signature
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            if self._is_tool_input_json_delta(dtype, idx, tool_use_acc):
                 tool_use_acc[idx]["args_str"] += getattr(delta, "partial_json", "") or ""
                 return None
             return None
@@ -899,17 +1492,29 @@ class AnthropicModelClient(BaseModelClient):
             idx = getattr(event, "index", None)
             if idx is None or idx not in tool_use_acc:
                 return None
-            tu = tool_use_acc.pop(idx)
+            block = tool_use_acc[idx]
+            if block.get("type") != "tool_use":
+                return AssistantMessageChunk(
+                    content="",
+                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    finish_reason="null",
+                )
+            args_str = block.get("args_str") or "{}"
+            try:
+                block["input"] = json.loads(args_str)
+            except (TypeError, ValueError):
+                block["input"] = {"_raw_arguments": args_str}
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
                 tool_calls=[ToolCall(
-                    id=tu["id"],
+                    id=block["id"],
                     type="function",
-                    name=tu["name"],
-                    arguments=tu["args_str"] or "{}",
+                    name=block["name"],
+                    arguments=args_str,
                     index=idx,
                 )],
+                metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=None,
                 finish_reason="null",
             )
@@ -930,14 +1535,31 @@ class AnthropicModelClient(BaseModelClient):
                 content="",
                 reasoning_content=None,
                 tool_calls=None,
+                metadata=_stream_blocks_metadata(tool_use_acc),
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
+                provider_metadata=(
+                    {"stop_reason": str(stop_reason)} if stop_reason else {}
+                ),
             )
 
         if etype == "message_stop":
             return None
 
         return None
+
+    @staticmethod
+    def _is_tool_input_json_delta(
+            dtype: str,
+            idx: Optional[int],
+            tool_use_acc: Mapping[int, dict],
+    ) -> bool:
+        return (
+            dtype == "input_json_delta"
+            and idx is not None
+            and idx in tool_use_acc
+            and tool_use_acc[idx].get("type") == "tool_use"
+        )
 
     # ------------------------------------------------------------------
     # unsupported media methods (mirror OpenAI client's stub style)

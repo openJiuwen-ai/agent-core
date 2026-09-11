@@ -18,7 +18,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
+from typing import Callable, Dict, Any, AsyncIterator, List, Optional, Tuple
 
 import pdfplumber
 
@@ -378,7 +378,7 @@ class ReadFileTool(Tool):
         operation: SysOperation,
         language: str = "cn",
         agent_id: Optional[str] = None,
-        enable_image_multimodal: bool = True,
+        enable_image_multimodal: bool | Callable[[], bool] = True,
     ):
         super().__init__(
             build_tool_card(
@@ -390,7 +390,26 @@ class ReadFileTool(Tool):
             )
         )
         self.operation = operation
-        self.enable_image_multimodal = enable_image_multimodal
+        self._enable_image_multimodal = enable_image_multimodal
+
+    @property
+    def enable_image_multimodal(self) -> bool:
+        """Return the current native-image policy.
+
+        Auto mode is represented by a callable so a long-lived tool can pick
+        up a completed capability probe or a main-model change without being
+        rebuilt.
+        """
+        if callable(self._enable_image_multimodal):
+            return bool(self._enable_image_multimodal())
+        return self._enable_image_multimodal
+
+    @enable_image_multimodal.setter
+    def enable_image_multimodal(
+        self,
+        value: bool | Callable[[], bool],
+    ) -> None:
+        self._enable_image_multimodal = value
 
     # ------------------------------------------------------------------
     # File-type predicates

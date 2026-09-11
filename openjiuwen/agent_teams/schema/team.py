@@ -250,6 +250,22 @@ class BridgeMemberSpec(TeamMemberSpec):
     """
 
 
+class ExternalCliModelConfig(BaseModel):
+    """Model endpoint configuration for SDK-backed external CLI agents."""
+
+    provider: str | None = Field(default=None, min_length=1)
+    """Logical provider name used by the target CLI runtime."""
+
+    model: str | None = Field(default=None, min_length=1)
+    """Model name passed to the target CLI runtime."""
+
+    api_base: str | None = Field(default=None, min_length=1)
+    """Base URL for the target model API."""
+
+    api_key: str | None = Field(default=None, min_length=1)
+    """API key injected into the target CLI subprocess environment."""
+
+
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
 
@@ -260,7 +276,7 @@ class ExternalCliAgentSpec(BaseModel):
     name (each member still gets its own subprocess and team-join identity).
     """
 
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(populate_by_name=True, protected_namespaces=())
 
     cli_agent: str
     """External agent kind identifier (``"claude"`` / ``"codex"`` /
@@ -306,17 +322,19 @@ class ExternalCliAgentSpec(BaseModel):
     mcp_default_tools_approval_mode: Literal["auto", "prompt", "writes", "approve"] | None = None
     """Optional Codex approval policy for tools exposed by the injected MCP server.
 
-    ``None`` preserves the user's Codex configuration. Headless trusted-server
-    scenarios may opt into ``"approve"`` without changing approval behavior for
-    shell commands, other MCP servers, or non-Codex backends.
+    ``None`` uses ``"approve"`` for the injected team MCP server so its tools
+    remain available when Codex auto-review is unsupported by the active model
+    provider. Explicit values override that default without changing approval
+    behavior for shell commands, other MCP servers, or non-Codex backends.
     """
 
     codex_bypass_approvals_and_sandbox: bool = False
     """Run a Codex member with no approval prompts and no SDK sandbox.
 
-    This is an explicit high-risk opt-in for externally isolated, headless
-    environments. It is valid only for ``cli_agent="codex"`` and never becomes
-    the framework default.
+    Codex members enable this by default, matching the Claude member's
+    ``bypassPermissions`` behavior. Set it explicitly to ``False`` to restore
+    Codex approval prompts and its SDK sandbox. This option is valid only for
+    ``cli_agent="codex"``.
     """
 
     codex_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
@@ -334,6 +352,16 @@ class ExternalCliAgentSpec(BaseModel):
     replayed because they may already have produced external side effects.
     """
 
+    claude_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Claude turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK message (assistant /
+    user tool results / system) refreshes the timer; a turn whose message
+    stream stalls past the ceiling is interrupted and finalized as a
+    ``network_timeout`` failure so the member settles back to READY instead
+    of hanging forever.
+    """
+
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
     """Launch argv for the team MCP stdio server registered with the CLI.
     Defaults to the ``openjiuwen-team-mcp`` console-script entry."""
@@ -341,6 +369,14 @@ class ExternalCliAgentSpec(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     """Extra environment variables for the CLI subprocess, merged over the
     inherited process env (the team-join descriptor is injected separately)."""
+
+    external_model_config: ExternalCliModelConfig | None = Field(default=None, alias="model_config")
+    """Optional model endpoint configuration for SDK-backed external CLI agents.
+
+    The public YAML key is ``model_config``. The Python attribute is named
+    ``external_model_config`` to avoid colliding with Pydantic's class-level
+    ``model_config`` setting.
+    """
 
     ssh_transport: SshTransportConfig | None = None
     """Optional ssh endpoint used to launch this CLI on a remote host.
@@ -354,6 +390,11 @@ class ExternalCliAgentSpec(BaseModel):
     @model_validator(mode="after")
     def _validate_backend_launch_override(self) -> "ExternalCliAgentSpec":
         """Keep SDK binary selection separate from adapter argv overrides."""
+        if (
+            self.cli_agent == "codex"
+            and "codex_bypass_approvals_and_sandbox" not in self.model_fields_set
+        ):
+            self.codex_bypass_approvals_and_sandbox = True
         if self.cli_agent == "codex" and self.command is not None:
             raise ValueError(
                 "Codex SDK config does not support command; use cli_path to select a custom executable",
@@ -374,6 +415,10 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
+            raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
+        if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
+            raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
 
 
@@ -439,6 +484,16 @@ class TeamSpec(BaseModel):
     """Transport used by an external CLI member's MCP client."""
     workspace: Optional[dict[str, Any]] = None
     """Shared workspace config mirrored from ``TeamAgentSpec`` for runtime-only paths."""
+    evolution_enabled: bool = True
+    """Self-evolution coverage switch — mirrors ``TeamAgentSpec.evolution_enabled``
+    so spawn-time assembly reads the same switch from the runtime spec."""
+    member_workspace_prefix: bool = True
+    """Dynamic-only switch for member workspace isolation (block C).
+
+    Mirrors ``TeamAgentSpec.member_workspace_prefix`` so paths that only see a
+    ``TeamRuntimeContext`` / ``TeamSpec`` resolve the same real-directory
+    shape as in-process members.
+    """
 
 
 class TeamRuntimeContext(BaseModel):
@@ -468,10 +523,23 @@ class TeamRuntimeContext(BaseModel):
     Delivered ONLY to this member, as part of its identity, and never surfaces
     in ``list_members`` or peers' rosters."""
     team_spec: Optional[TeamSpec] = None
+    team_desc: Optional[str] = None
+    """Team-level description (DB ``team_info.desc``), resolved at spawn time.
+
+    ``build_team`` inserts the ``team_info`` row (with ``desc``) only after
+    the leader calls the tool, so this is empty on the leader's first spawn
+    and populated once the team row exists (later member spawns / session
+    recovery). Fed into ``WorkspaceAssembler.assemble`` so ``team_card.md``
+    can be seeded; an evolved file is never overwritten (write-side guard).
+    """
+    team_prompt: Optional[str] = None
+    """Team-level prompt (DB ``team_info.prompt``), same lifecycle as ``team_desc``."""
     messager_config: Optional[MessagerTransportConfig] = None
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    fallback_member_model: Optional[TeamModelConfig] = None
+    """TeamModelConfig reserved for native external-CLI authentication fallback."""
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     fork_source: Optional[str] = None
@@ -506,6 +574,7 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",
     "TeamCompletionSnapshot",

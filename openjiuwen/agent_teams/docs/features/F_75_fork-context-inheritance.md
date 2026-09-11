@@ -25,29 +25,33 @@
 ### D2 CheckpointTool — 命名快照
 
 `checkpoint(name="code-ready")` 保存当前 `len(messages)` 到共享字典 `_named_checkpoints`。
-存储的是位置索引，不绑定语义方向 — 由 `spawn_teammate` 的 `fork` / `compact` 参数决定消费方式。
+存储的是位置索引，不绑定语义方向 — 由 `spawn_teammate` 的 `fork` / `fork_mode` 参数决定消费方式。
 字典挂载在 leader 的 `TeamAgent` 上，`inprocess_spawn` 中通过 `share_checkpoints_with()` 共享给 teammate，并通过 `TeamBackend.set_store_checkpoint_fn()` 注册回调，确保任意成员打的快照对 leader 可见。
 
 外部成员（MCP / CLI）排除 `checkpoint` 工具 — 无 `DeepAgent`，快照无意义。`create_team_tools` 在 `external/client.py:221` 和 `sdk_mcp.py:97` 传入 `exclude_tools={"checkpoint"}`。
 
 ### D3 Fork Compaction — 上下文压缩
 
-`compact_context(agent, split_at=N)` 在 fork 注入后将 checkpoint 之前的消息通过一次模型调用压缩为摘要，之后的全量保留。
+`compact_context(agent, split_at=N, direction="before"|"after")` 在 fork 注入后将一侧消息通过一次模型调用压缩为摘要，另一侧全量保留。`direction="before"`（默认）压缩 checkpoint 之前、保留之后；`direction="after"` 保留之前、压缩之后。`direction="after"` 时保留头会扩展过 checkpoint 调用结果块，避免保留头以悬空工具调用结尾（会被上下文 rail 标记为"中断"）。
 选用子代理的 `deep_config.model.invoke()` 做压缩，消息刚注入、KV cache 热，只多消耗约 500 输出 token。
 
 压缩通过 `context_engine.get_context()` → `set_messages()` 直接替换上下文，不重新创建 session。压缩在 `inprocess_spawn` 中、`Runner.run_agent_team` 之前完成，对子代理透明。
 
 ### D4 Fork 语义
 
-仅保留三个有实用价值的组合：
+`spawn_teammate` 用 `fork`（`true` | `"ckpt-name"`）+ `fork_mode` 表达消费方式，五种模式：
 
-| fork | compact | 行为 |
-|------|---------|------|
-| `true` | — | 全量注入 |
-| `"ckpt"` | false | 截断到 ckpt 之前 |
-| `"ckpt"` | true | ckpt 为分界：之前压缩为摘要，之后全量保留 |
+| fork | fork_mode | 行为 |
+|------|-----------|------|
+| `true` | `full`（默认） | 全量注入 |
+| `"ckpt"` | `before`（默认） | 保留 checkpoint 之前的消息 |
+| `"ckpt"` | `after` | 保留从 checkpoint 起的消息 |
+| `"ckpt"` | `keep_before_compact_after` | 保留前，把之后压缩为摘要 |
+| `"ckpt"` | `keep_after_compact_before` | 保留后，把之前压缩为摘要 |
 
-其他组合由系统内置 `FullCompactProcessor` 自动兜底。
+compact 两种模式捕获全量源上下文，由 `compact_context` 按 `direction` 裁剪（`keep_before_compact_after`→`after`、`keep_after_compact_before`→`before`），使 split 索引仍与注入上下文对齐。
+未传 `fork_mode` 时：`fork=true` 默认 `full`，命名 fork 默认 `before`（保持首版截断行为）。
+live fork 传非 `full` 模式 → warning 忽略按 `full` 处理；未知 `fork_mode` → 回退 `full`。
 
 ### D5 封装约定
 
@@ -62,7 +66,7 @@ fork 代码需要访问几个 "protected" 属性（`_native`、`_named_checkpoin
 ### D6 能力开关 `TeamAgentSpec.enable_fork`（默认关）
 
 fork 首版把三个表面都无条件打开了：`checkpoint` 进 `SHARED_TOOLS`（每个成员都看得到），
-`spawn_teammate` 的 schema 硬编码 `fork` / `fork_source` / `compact`，描述里常驻一整节 fork 文档。
+`spawn_teammate` 的 schema 硬编码 `fork` / `fork_source` / `fork_mode`，描述里常驻一整节 fork 文档。
 这与同仓其余可选能力的做法相反——`swarmflow`（`enable_swarmflow`）、`spawn_human_agent`
 （`enable_hitt`）、`spawn_bridge_agent`（`enable_bridge`）、`spawn_external_cli`
 （`external_cli_agents` 非空）全都有 spec 级 capability ceiling。fork 也应如此：
@@ -75,7 +79,7 @@ fork 首版把三个表面都无条件打开了：`checkpoint` 进 `SHARED_TOOLS
 | 表面 | 门控点 |
 |---|---|
 | `checkpoint` 工具注册 | `tool_factory` 减法链 `allowed - {"checkpoint"}` |
-| `spawn_teammate` 的 `fork`/`fork_source`/`compact` 属性 | `SpawnTeammateTool.__init__` 按 `fork_enabled` 拼 `properties` |
+| `spawn_teammate` 的 `fork`/`fork_source`/`fork_mode` 属性 | `SpawnTeammateTool.__init__` 按 `fork_enabled` 拼 `properties` |
 | 描述里的「上下文继承（Fork）」整节 | 同一构造传 `omit={"fork_usage"}`，槽收敛为空串 |
 
 **三者必须同源**：schema 有参数而描述不提，LLM 不知道怎么用；描述讲了而 schema 没有，
@@ -111,14 +115,15 @@ capability 默认关是本仓一贯的 fail-safe 取向，且 fork 合入仅一�
 
 fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅标记意图，实际上下文注入发生在成员初始化完成的异步时刻。
 对非法组合打 warning 并降级：
-- `compact=true` 未配合 checkpoint fork → 忽略 compact
-- checkpoint 不存在 → 回退为全量
+- live fork（`fork=true`）传非 `full` 的 `fork_mode` → 忽略，按 `full` 注入
+- 命名 fork 的 checkpoint 不存在（或 `fork_source` 与其创建者不符）→ 回退为全量，并给 leader 发一条含可用快照名的消息
+- 未知 `fork_mode` → 回退为全量
 
 ## 拒绝的方案
 
-- **`since_checkpoint` 独立增量模式**：仅取 checkpoint 之后的消息缺少文件原文作依据，信息不完整；与 compact 组合语义重叠。已砍掉，从 API 移除。
-- **`fork=true + compact=true`**：全量上下文无需主动压缩，超出限制时 `FullCompactProcessor` 兜底。保留增加 API 复杂度无收益。
-- **`fork="ckpt"` 时 compact 截断后再压缩**：截断后再压缩全部语义不清，不如 `compact=true` 统一为 "全量注入 + ckpt 分界"。
+- **`since_checkpoint` 独立增量模式**：仅取 checkpoint 之后的消息缺少文件原文作依据，信息不完整；与 compact 组合语义重叠。首版从 API 移除。**后续 5 模式扩展（`fork_mode`）部分复活了 keep-after 语义**（`after` / `keep_after_compact_before`）——区别在于它们是完整继承上下文的一种取舍形态，而非独立的增量模式。
+- **`fork=true + compact=true`**：全量上下文无需主动压缩，超出限制时 `FullCompactProcessor` 兜底。保留增加 API 复杂度无收益。**5 模式扩展后由 `fork_mode` 统一表达**，live fork 传非 `full` 模式会被忽略。
+- **`fork="ckpt"` 时 compact 截断后再压缩**：截断后再压缩全部语义不清，不如 `compact=true` 统一为 "全量注入 + ckpt 分界"。**`keep_before_compact_after` 是这条思路的一种显式形态**（保留前 + 压缩后），经 `fork_mode` 明确表达。
 - **第三方 CLI 成员 fork**：外部 CLI 对话存于外进程，无 `DeepAgent` / `ContextEngine`，无法取或注入上下文。永久不做。
 - **直接访问 protected 成员**：`_native` / `_react_agent` / `_named_checkpoints` 等多处 external access 违反 `G.CLS.11`。已通过 D5 的封装约定解决。
 - **fork 无条件开放**（首版做法）：见 D6。可选能力常驻每个成员的工具列表与描述，与同仓四个 capability ceiling 的做法相反。
@@ -127,8 +132,8 @@ fork 决策在 `_on_teammate_created` 中执行 — `spawn_teammate` 工具仅�
 
 ## 验证
 
-- `test_fork.py`（35 passed）：覆盖 `ForkContext.from_agent`（全量 / 截断 / 边界 / SystemMessage 剥离 / roundtrip），`CheckpointTool`（invoke / map_result），`TeamBackend` fork 方法（mark→consume / 无回调 / 回调写入 / fallback），`SpawnTeammateTool` fork 参数（fork / fork_source / compact / 无 fork 不标记），`compact_context`（分段替换 / split_at=0 跳过 / ≥len 跳过）。
-- `test_fork.py::TestOnTeammateCreatedFork`（10 cases，装配路径）：覆盖 `TeamAgent._on_teammate_created` 的 fork 解析——live fork（字符串 / 布尔）/ 命名 checkpoint 截断 / checkpoint 缺失回退 / compact split / compact 无命名降级 / 无 fork / `fork_source` 可解析与不可解析 / `fork_source` 指向 leader。这组用例是两次运行时 crash（`'NoneType' object has no attribute 'messages'`）的回归护栏：修复前 live fork 与 checkpoint 截断两条路径均抛 `AttributeError`，修复后全绿。
+- `test_fork.py`（35 passed）：覆盖 `ForkContext.from_agent`（全量 / 截断 / `keep="after"` + 孤儿 ToolMessage 剔除 / 边界 / SystemMessage 剥离 / roundtrip），`CheckpointTool`（invoke / map_result），`TeamBackend` fork 方法（mark→consume / 无回调 / 回调写入 / fallback），`SpawnTeammateTool` fork 参数（fork / fork_source / fork_mode / 无 fork 不标记），`compact_context`（分段替换 / split_at=0 跳过 / ≥len 跳过 / `direction="after"` 反向压缩 + 保留头扩展）。
+- `test_fork.py::TestOnTeammateCreatedFork`（10 cases，装配路径）：覆盖 `TeamAgent._on_teammate_created` 的 fork 解析——live fork（字符串 / 布尔）/ 命名 checkpoint 截断 / `fork_mode` 5 模式派发 / checkpoint 缺失回退 / live fork 非 `full` 忽略 / 无 fork / `fork_source` 可解析与不可解析 / `fork_source` 指向 leader。这组用例是两次运行时 crash（`'NoneType' object has no attribute 'messages'`）的回归护栏：修复前 live fork 与 checkpoint 截断两条路径均抛 `AttributeError`，修复后全绿。
 - `test_mcp_server.py`（8 passed）：验证外部 MCP 成员排除 `checkpoint` 工具。
 - `test_fork.py` 的 capability gate 组（13 cases）：`enable_fork=False` × (cn/en) × (leader/teammate) 下 `checkpoint` 不注册、`spawn_teammate` 无 fork 属性、描述里不含 "fork" 字样且无残留 `{{`；`enable_fork=True` 下三者齐备；`CheckpointTool.invoke` 与 `SpawnTeammateTool.invoke`（三组 fork 参数）在关闭时拒绝并给出 `enable_fork` 指引，且拒绝时**不写成员行**；不传 fork 参数的普通 spawn 不受影响。
 - 全量 `tests/unit_tests/agent_teams/` 0 新增失败。

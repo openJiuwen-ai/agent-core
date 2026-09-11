@@ -22,6 +22,9 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.schema.team import ModelPoolEntry
+    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
+    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -109,13 +112,21 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        model_pool_provider: Callable[[], list["ModelPoolEntry"]] | None = None,
+        current_model_name: str | None = None,
+        current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
         enable_fork: bool = False,
+        evolution_enabled: bool = True,
+        member_workspace_prefix: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
+        on_member_started: Callable[[str], Awaitable[None]] | None = None,
+        on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
+        on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -143,6 +154,14 @@ class TeamBackend:
                 ``build_team`` as ``{model_name, model_index}`` so the
                 assignment is auditable and survives full-restart
                 recovery via positional lookup against the live pool.
+            model_pool_provider: Returns the current team model pool for
+                validating external CLI fallback choices. The callback keeps
+                runtime pool updates visible without copying credentials into
+                the backend.
+            current_model_name: Name of the model currently driving this
+                member, used to prioritize an allocatable fallback.
+            current_model_provider: Provider of the current member model,
+                used to derive its model API protocol.
             enable_hitt: Spec-level HITT capability ceiling. When
                 False, every human-agent spawn path returns failure;
                 when True, the runtime instance flag (mutated by
@@ -188,6 +207,16 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            on_member_started: Optional async callback that launches the agent
+                process for one member name. Supplied by the hosting
+                ``TeamAgent`` (leader side only) and consumed by
+                ``autostart_unstarted``; leaving it None turns every
+                auto-start into a no-op, which is what an external
+                (out-of-process) backend wants — it has no process to spawn.
+            on_member_restarted: Optional async callback that replaces a dead
+                member runtime. Used after an atomic ERROR→RESTARTING claim.
+            on_member_stopped: Optional async callback that removes a dead
+                member's stale runtime handle after ERROR→SHUTDOWN settles.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -199,6 +228,10 @@ class TeamBackend:
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
+        # B-class overlay: the backend does not hold its own cache —
+        # ``workspace_cache`` delegates to the team workspace manager, which
+        # owns the single resident instance attached at assembly.
+        self._workspace_manager: "TeamWorkspaceManager | None" = None
         # Lazily-resolved leader name for members that were not handed one at
         # construction. The leader is fixed for a team's life, so the DB row is
         # queried once and cached. See ``resolve_leader_member_name``.
@@ -208,6 +241,9 @@ class TeamBackend:
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
+        self._model_pool_provider = model_pool_provider
+        self.current_model_name = str(current_model_name or "").strip() or None
+        self.current_model_provider = str(current_model_provider or "").strip() or None
         self.leader_allocation = leader_allocation
         # Leader's private prompt (LeaderSpec.prompt via ctx.prompt). Persisted
         # on the leader's DB row at build_team so cold-recovery, which rebuilds
@@ -234,6 +270,18 @@ class TeamBackend:
         # flag, mirroring the ``enable_hitt`` pattern.
         self._spec_enable_task_verification: bool = enable_task_verification
         self._enable_task_verification: bool = enable_task_verification
+        # Evolution-mechanism master switch (TeamAgentSpec.evolution_enabled),
+        # immutable from spec: off means the write side never writes workspace
+        # files and the manager carries no cache (the read side falls back to
+        # framework / DB). No runtime override — unlike enable_hitt, build_team
+        # cannot flip it.
+        self._spec_evolution_enabled: bool = evolution_enabled
+        # Dynamic-member workspace isolation switch (mirrors
+        # ``TeamAgentSpec.member_workspace_prefix``). Spawn-time workspace
+        # setup reads it so dynamic members get the same real-directory
+        # shape (``team#member`` vs plain ``member``) as the in-process
+        # ``prepare_member_workspace`` path.
+        self._member_workspace_prefix: bool = member_workspace_prefix
         # True once build_team took over a team that already existed rather
         # than creating one, so the tool result can say which it was.
         self._team_taken_over: bool = False
@@ -247,6 +295,11 @@ class TeamBackend:
         self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
+        # Spawns one member's agent process. The single injection point for
+        # every auto-start path that goes through ``autostart_unstarted``.
+        self._on_member_started = on_member_started
+        self._on_member_restarted = on_member_restarted
+        self._on_member_stopped = on_member_stopped
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -321,6 +374,12 @@ class TeamBackend:
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
+    def get_model_pool(self) -> list["ModelPoolEntry"]:
+        """Return a snapshot of the current team model pool."""
+        if self._model_pool_provider is None:
+            return []
+        return list(self._model_pool_provider())
+
     def register_cleanup_path(self, path: Optional[str]) -> None:
         """Register a filesystem path to remove on ``clean_team``.
 
@@ -368,18 +427,18 @@ class TeamBackend:
         fork_value,
         *,
         fork_source: str | None = None,
-        compact: bool = False,
+        fork_mode: str = "before",
     ) -> None:
         self._pending_forks[member] = {
             "fork": fork_value,
             "since": None,
             "source": fork_source,
-            "compact": compact,
+            "fork_mode": fork_mode,
         }
         team_logger.debug(
             "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "compact=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, compact,
+            "fork_mode=%s team_name=%s pending_keys=%s",
+            member, fork_value, fork_source, fork_mode,
             self.team_name, list(self._pending_forks.keys()),
         )
 
@@ -492,16 +551,39 @@ class TeamBackend:
 
     # ------------------------------------------------------------------
 
+    def _cleanup_member_workspace_links(self) -> None:
+        """Detach member links and release dynamic real dirs (block C).
+
+        Called before ``_remove_cleanup_paths``: a junction must never be
+        descended by ``shutil.rmtree``, and the external dynamic real dirs
+        under ``.agent_teams/`` would otherwise accumulate across team
+        cleanups. Fail-soft: an ``OSError`` is logged and skipped.
+        """
+        try:
+            from openjiuwen.agent_teams.team_workspace.binder import MemberWorkspaceBinder
+
+            MemberWorkspaceBinder().cleanup_team(self.team_name)
+        except OSError as exc:
+            team_logger.error(f"Failed to clean member workspace links for {self.team_name}: {exc}")
+
     async def _remove_cleanup_paths(self) -> None:
         """Remove every registered cleanup path with ``shutil.rmtree``.
 
         Sorts paths by depth (deepest first) so that a parent directory
         and its descendants both get removed cleanly even if the caller
-        registered overlapping entries.  Failures are logged and do not
-        abort the overall cleanup.
+        registered overlapping entries.  A registered path that is a
+        directory link (symlink / Windows junction) is unlinked only —
+        ``shutil.rmtree`` would descend a junction and delete the target
+        contents (a shared member workspace outside the team tree).
+        Failures are logged and do not abort the overall cleanup.
         """
         if not self._cleanup_paths:
             return
+
+        from openjiuwen.agent_teams.team_workspace.dir_links import (
+            is_dir_link,
+            remove_dir_link,
+        )
 
         ordered = sorted(
             self._cleanup_paths,
@@ -510,6 +592,16 @@ class TeamBackend:
         )
         for raw in ordered:
             target = Path(raw)
+            if is_dir_link(target):
+                # Unlink only — never rmtree a link (junction descent would
+                # delete the target's shared contents).
+                try:
+                    remove_dir_link(target)
+                except OSError as exc:
+                    team_logger.error(f"Failed to remove team directory link {target}: {exc}")
+                    continue
+                team_logger.info(f"Removed team directory link: {target}")
+                continue
             if not target.is_dir():
                 continue
             try:
@@ -530,6 +622,7 @@ class TeamBackend:
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
         cli_agent: Optional[str] = None,
@@ -554,6 +647,8 @@ class TeamBackend:
                 can refresh in-place via the live session pool. ``None``
                 when the team is not configured with a pool, in which
                 case the member uses its per-agent default model.
+            fallback_allocation: Pool allocation reserved for an external CLI
+                member when its native authentication is unavailable.
             role: ``TeamRole`` enum value persisted on the member row.
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
@@ -586,10 +681,54 @@ class TeamBackend:
 
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
+            fallback_model_ref=(fallback_allocation.to_db_ref() if fallback_allocation is not None else None),
             cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
         )
+
+        # Resolve the latest identity from the evolvable md before writing the
+        # db row. ``prepare_member_workspace`` builds the in-team root first
+        # (link for dynamic/predefined, in-team real dir for external_cli/leader)
+        # so the md write below lands through that path — ``write_member_identity``
+        # only writes/protects the B-class md and primes the shared cache, never
+        # creating the workspace directory. Idempotent: a leader whose root was
+        # already built by its own ``setup_agent`` re-runs ``prepare_member_workspace``
+        # harmlessly (binder reuse). With the evolution switch off (or no cache),
+        # the spec baseline value stands and the db row is written unchanged.
+        # This closes the first-roster race: by the time the leader renders the
+        # roster, the cache already carries the evolved value and the db row is an
+        # evolved-value snapshot, not the spec baseline.
+        desc_to_write, prompt_to_write = desc, prompt
+        if self._spec_evolution_enabled and self.workspace_cache is not None:
+            from openjiuwen.agent_teams.team_workspace.binder import (
+                prepare_member_workspace,
+            )
+
+            prepare_member_workspace(
+                team_name=self.team_name,
+                member_name=member_name,
+                role=role,
+                leader_member_name=self.leader_member_name,
+                predefined_members={
+                    m.member_name for m in self.predefined_members
+                },
+                member_workspace_prefix=self._member_workspace_prefix,
+            )
+            from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+            resolved_desc, resolved_prompt = WorkspaceAssembler(
+                cache=self.workspace_cache
+            ).write_member_identity(
+                team_name=self.team_name,
+                member_name=member_name,
+                member_desc=desc,
+                member_prompt=prompt,
+            )
+            if resolved_desc is not None:
+                desc_to_write = resolved_desc
+            if resolved_prompt is not None:
+                prompt_to_write = resolved_prompt
 
         success = await self.db.member.create_member(
             member_name=member_name,
@@ -598,10 +737,10 @@ class TeamBackend:
             agent_card=agent_card.model_dump_json(),
             status=status,
             role=role.value,
-            desc=desc,
+            desc=desc_to_write,
             execution_status=execution_status,
             mode=mode.value,
-            prompt=prompt,
+            prompt=prompt_to_write,
             options=options,
         )
         if not success:
@@ -663,6 +802,30 @@ class TeamBackend:
             started.append(member.member_name)
         return started
 
+    async def autostart_unstarted(self) -> list[str]:
+        """Start every UNSTARTED member using the injected spawn callback.
+
+        The shared entry point for the auto-start funnel: work that is about
+        to be handed to a member — a message, a freshly created task — must
+        not land on a member whose agent process was never launched. Callers
+        state the intent ("make sure the roster is up") without each carrying
+        its own spawn callback.
+
+        Leader-only and callback-gated, so a teammate backend or an external
+        out-of-process backend answers with an empty list instead of trying to
+        spawn something it cannot own. Concurrency is still settled one level
+        down by ``startup_member``'s UNSTARTED→STARTING CAS, which makes
+        repeated calls idempotent: whoever gets there second finds nothing in
+        UNSTARTED and does nothing.
+
+        Returns:
+            The member names started by this call; empty when there was
+            nothing to start or this backend does not own spawning.
+        """
+        if not self.is_leader or self._on_member_started is None:
+            return []
+        return await self.startup(on_created=self._on_member_started)
+
     async def startup_member(
         self,
         member_name: str,
@@ -699,6 +862,47 @@ class TeamBackend:
             raise
 
         return True
+
+    async def recover_member(self, member_name: str) -> bool:
+        """Restart one failed member after atomically claiming recovery.
+
+        Only ERROR members are eligible. The ERROR→RESTARTING CAS prevents a
+        direct message, scheduler handoff, and cold recovery from launching
+        duplicate runtimes. A failed restart returns the member to ERROR so a
+        later explicit nudge can try again.
+
+        Args:
+            member_name: The failed member to restart.
+
+        Returns:
+            True when this call restarted the member, otherwise False.
+        """
+        if not self.is_leader or self._on_member_restarted is None:
+            return False
+
+        transitioned = await self.db.member.try_transition_member_status(
+            member_name,
+            self.team_name,
+            MemberStatus.ERROR,
+            MemberStatus.RESTARTING,
+        )
+        if not transitioned:
+            return False
+
+        try:
+            restarted = await self._on_member_restarted(member_name)
+        except Exception as exc:
+            team_logger.error("Failed to recover member {}: {}", member_name, exc)
+            restarted = False
+
+        if not restarted:
+            await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.ERROR,
+            )
+        return restarted
 
     async def approve_plan(
         self,
@@ -891,6 +1095,26 @@ class TeamBackend:
                       member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
                 )
 
+        # ERROR means the member runtime has already failed and cannot consume
+        # a mailbox request or shutdown event. Settle it directly; the CAS also
+        # arbitrates against a concurrent ERROR→RESTARTING recovery claim.
+        if current_status == MemberStatus.ERROR:
+            transitioned = await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.ERROR,
+                MemberStatus.SHUTDOWN,
+            )
+            if not transitioned:
+                return MemberOpResult.fail(f"Member {member_name} lifecycle changed while shutting down")
+            if self._on_member_stopped is not None:
+                try:
+                    await self._on_member_stopped(member_name)
+                except Exception as exc:
+                    team_logger.warning("Failed to clean stale runtime for member {}: {}", member_name, exc)
+            team_logger.info("Shutdown failed member {} directly", member_name)
+            return MemberOpResult.success()
+
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
             MEMBER_TRANSITIONS,
@@ -1059,6 +1283,11 @@ class TeamBackend:
             except Exception as e:
                 team_logger.error(f"on_team_cleaned callback failed for team {self.team_name}: {e}")
 
+        # Block C: detach member links and release the team's dynamic real
+        # dirs under ``.agent_teams/`` before any rmtree — a junction must
+        # never be descended, and the external dirs must not accumulate.
+        self._cleanup_member_workspace_links()
+
         # Remove registered filesystem paths for the team.  TeamAgent
         # registers actual resolved workspace/output paths, not the whole
         # team_home parent: team_home contains per-session state such as
@@ -1107,6 +1336,7 @@ class TeamBackend:
         success = await self.db.force_delete_team_session(self.team_name)
 
         try:
+            self._cleanup_member_workspace_links()
             await self._remove_cleanup_paths()
         except Exception as e:
             team_logger.error("Failed to remove cleanup paths for {}: {}", self.team_name, e)
@@ -1125,7 +1355,69 @@ class TeamBackend:
         Returns:
             TeamMember info or None
         """
-        return await self.db.member.get_member(member_name, self.team_name)
+        member = await self.db.member.get_member(member_name, self.team_name)
+        return self._overlay_member(member)
+
+    @property
+    def workspace_cache(self) -> "WorkspaceCache | None":
+        """The resident per-team evolvable-workspace cache (A/B/C classes).
+
+        Delegates to the team workspace manager — the manager owns
+        the single resident instance attached at assembly. ``None`` until
+        assembly attaches a cache to the manager. Assembly points (rail
+        factories, tool factory) read it to bind loader closures; the B-class
+        overlay reads it on ``get_member`` / ``list_members`` /
+        ``get_team_info``.
+        """
+        if self._workspace_manager is None:
+            return None
+        return self._workspace_manager.workspace_cache
+
+    def attach_workspace_manager(self, manager: "TeamWorkspaceManager | None") -> None:
+        """Point backend cache reads at the team workspace manager.
+
+        Assembly-time, once: the manager owns the resident ``WorkspaceCache``
+        (single source of truth); the backend only holds the manager
+        reference, so A/B-class reads always see the same instance every other
+        consumer uses. ``display_name`` never rides the overlay — it is not
+        file-evolvable and always falls back to the DB column.
+        """
+        self._workspace_manager = manager
+
+    def _write_team_identity(self, team_name: str, team_desc: Optional[str]) -> None:
+        """Write the team-level identity files (team_card.md, team_prompt.md).
+
+        Called right after the team DB row is created (``build_team``) or
+        taken over (``_reattach_team``): the ``desc`` value comes from that
+        row. ``team_prompt`` is a write-only column today (``build_team`` has
+        no prompt argument), so None is passed and ``write_team_prompt(None)``
+        is a no-op. Idempotent and evolution-safe (``_evolved_body``).
+
+        Skipped when the evolution mechanism is off
+        (``_spec_evolution_enabled`` is False) — no file is written and no
+        cache is primed.
+        """
+        if not self._spec_evolution_enabled:
+            return
+        from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+        WorkspaceAssembler(cache=self.workspace_cache).write_team_identity(
+            team_name=team_name,
+            team_desc=team_desc,
+            team_prompt=None,
+        )
+
+    def _overlay_member(self, member: Optional[TeamMember]) -> Optional[TeamMember]:
+        """Overlay evolved B-class file values onto a member row in place."""
+        if member is None or self.workspace_cache is None:
+            return member
+        desc = self.workspace_cache.get_member_field(member.member_name, "desc")
+        if desc is not None:
+            member.desc = desc
+        prompt = self.workspace_cache.get_member_field(member.member_name, "prompt")
+        if prompt is not None:
+            member.prompt = prompt
+        return member
 
     async def member_exists(self, member_name: str) -> bool:
         """Check whether a member exists without loading its full row.
@@ -1169,7 +1461,7 @@ class TeamBackend:
             List of TeamMember info
         """
         members = await self.db.member.get_team_members(self.team_name)
-        return [member for member in members if member.member_name != self.member_name]
+        return [self._overlay_member(m) for m in members if m.member_name != self.member_name]
 
     async def list_member_roster(self) -> List[MemberRosterEntry]:
         """List the roster (name / display name / status) excluding self.
@@ -1196,7 +1488,15 @@ class TeamBackend:
         Returns:
             Team information
         """
-        return await self.db.team.get_team(self.team_name)
+        team = await self.db.team.get_team(self.team_name)
+        if team is not None and self.workspace_cache is not None:
+            desc = self.workspace_cache.get_team_field("desc")
+            if desc is not None:
+                team.desc = desc
+            prompt = self.workspace_cache.get_team_field("prompt")
+            if prompt is not None:
+                team.prompt = prompt
+        return team
 
     async def is_team_completed(self) -> Optional[TeamCompletionSnapshot]:
         """Evaluate whether the whole team has reached a completed state.
@@ -1238,25 +1538,171 @@ class TeamBackend:
         return TeamCompletionSnapshot(member_count=len(members), task_count=len(tasks))
 
     async def get_team_updated_at(self) -> int:
-        """Probe ``team_info.updated_at`` for change detection.
+        """Probe ``max(team_info.updated_at, md updated_at)`` for change detection.
 
-        Cheap single-column SELECT used by prompt-section caches to
-        decide whether to refetch full team metadata.
+        Cheap single-column SELECT overlaid with the team-level
+        ``team_card.md`` / ``team_prompt.md`` mtime (resident cache) so a
+        hand-evolved team_card (``updated_at`` advanced) re-delivers the team
+        info block without a DB mutation. Mirrors
+        :meth:`get_members_max_updated_at`'s md overlay; the DB column is
+        still the floor — a ``build_team`` / team mutation advances it on its
+        own. When the evolution mechanism is off (no cache), the overlay is
+        skipped and this is the plain DB column.
 
         Returns:
             Last update timestamp (ms), or ``0`` when missing.
         """
-        return await self.db.team.get_team_updated_at(self.team_name)
+        db_ts = await self.db.team.get_team_updated_at(self.team_name)
+        cache = self.workspace_cache
+        if cache is None:
+            return db_ts
+        md_max = max(
+            cache.get_team_updated_at("desc"),
+            cache.get_team_updated_at("prompt"),
+        )
+        return max(db_ts, md_max)
 
-    async def get_members_max_updated_at(self) -> int:
-        """Probe MAX(``team_member.updated_at``) for the team.
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Probe the team_card ``updated_at`` plus its presence flag.
+
+        Counterpart of :meth:`get_team_updated_at` narrowed to the team_card
+        md file (the only team B-class file whose body enters the team-info
+        block; ``team_prompt`` is a write-only placeholder whose body never
+        renders). Also surfaces whether the frontmatter carried an explicit
+        ``updated_at`` integer so the team-info re-announce path can treat
+        ``present=False`` (a blank field — the evolution party edited the
+        ``team_card.md`` body without stamping it) as an explicit "must
+        update" signal, symmetric with :meth:`get_member_updated_at_state`.
+
+        When the cache is absent (evolution off / single-agent) the md probe
+        has nothing to read, so the DB column is probed instead and surfaced
+        with ``present=True``: the team-info re-announce path then compares
+        the DB timestamp wall-clock (a ``build_team`` / team mutation moves
+        it and re-delivers), preserving the pre-evolution behaviour. Evolution
+        on stays md-only (the DB column is shadowed by ``get_team_info``'s md
+        overlay, so a DB-only change shows nothing new to announce).
 
         Returns:
-            Largest member update timestamp (ms), or ``0`` when no
-            members exist.  Status / execution_status updates do not
-            bump this value -- only roster mutations do.
+            ``(updated_at_ms, present)`` — ``(db_ts, True)`` when the cache is
+            absent (evolution off; DB column drives the probe), the md pair
+            otherwise.
         """
-        return await self.db.member.get_members_max_updated_at(self.team_name)
+        cache = self.workspace_cache
+        if cache is None:
+            db_ts = await self.db.team.get_team_updated_at(self.team_name)
+            return (db_ts, True)
+        return cache.get_team_updated_at_state("desc")
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """Stamp ``ts`` into ``team_card.md``'s ``updated_at`` (meta only).
+
+        Thin forward to the workspace cache, which owns all md-file IO. Called
+        by the team-info re-announce path right after a "must update" decision
+        so the comparison baseline and the file's ``updated_at`` share one
+        timestamp (next probe is stable, no re-fire). No-op when the cache is
+        absent (evolution off / single-agent). Symmetric with
+        :meth:`stamp_member_prompt_updated_at`.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return
+        cache.stamp_team_updated_at("desc", ts)
+
+    async def get_member_updated_at(self, member_name: str, field: str) -> int:
+        """Probe one member's md ``updated_at`` for change detection.
+
+        The identity body's prompt mtime probe. The md ``updated_at`` is the
+        frontmatter field that moves when the member's ``member_prompt.md``
+        (or ``card.md``) is re-written — the evolution party's hand-edit. It
+        reads from the resident workspace cache, so the probe never touches
+        disk on a warmed cache and ``0`` means "no md file / evolution off".
+        Single-member single-field counterpart of
+        :meth:`get_members_max_updated_at` (which is the team-wide MAX the
+        roster probe uses). ``field`` is ``"desc"`` or ``"prompt"``.
+
+        Returns:
+            Last md update timestamp (ms), or ``0`` when the cache is absent
+            or the md file is missing.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return 0
+        return cache.get_member_updated_at(member_name, field)
+
+    async def get_member_updated_at_state(
+        self, member_name: str, field: str
+    ) -> tuple[int, bool]:
+        """Probe one member's md ``updated_at`` plus its presence flag.
+
+        Counterpart of :meth:`get_member_updated_at` that also returns whether
+        the frontmatter carried an explicit ``updated_at`` integer. The
+        identity-body re-announce path treats ``present=False`` (a blank
+        field) as an explicit "must update" signal distinct from a missing
+        file's ``(0, True)``. ``field`` is ``"desc"`` or ``"prompt"``.
+
+        Returns:
+            ``(updated_at_ms, present)`` — ``(0, True)`` when the cache is
+            absent or the md file is missing (no "must update" signal).
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return (0, True)
+        return cache.get_member_updated_at_state(member_name, field)
+
+    async def stamp_member_prompt_updated_at(
+        self, member_name: str, ts: int
+    ) -> None:
+        """Stamp ``ts`` into ``member_prompt.md``'s ``updated_at`` (meta only).
+
+        Thin forward to the workspace cache, which owns all md-file IO. Called
+        by the identity-body re-announce path right after a "must update"
+        decision so the comparison baseline and the file's ``updated_at``
+        share one timestamp (next probe is stable, no re-fire). No-op when
+        the cache is absent (evolution off / single-agent).
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return
+        cache.stamp_member_prompt_updated_at(member_name, ts)
+
+    async def get_members_max_updated_at(self) -> int:
+        """Probe ``max(DB updated_at, max(md updated_at))`` for the team.
+
+        The roster re-delivery probe. DB ``updated_at`` moves on roster
+        mutations (member added / removed); the md ``updated_at`` moves when
+        a member's ``card.md`` / ``member_prompt.md`` (or team-level
+        ``team_card.md`` / ``team_prompt.md``) is written at spawn — which
+        for predefined members happens *after* their DB row (build_team
+        writes the row, the symlink + identity write happens later during
+        spawn). Overlaying the md value lets the probe advance past the DB
+        timestamp so the roster is re-delivered with the evolved desc.
+
+        md files are read once per file via the resident cache (lazy first
+        read, dict hit after); the probe never touches the disk on a warmed
+        cache. When the evolution mechanism is off (no cache), the overlay
+        is skipped — there are no md files to read.
+
+        Returns:
+            Largest timestamp (ms), or ``0`` when no members exist.
+        """
+        db_max = await self.db.member.get_members_max_updated_at(self.team_name)
+        cache = self.workspace_cache
+        if cache is None:
+            return db_max
+        md_max = 0
+        rows = await self.db.member.get_member_roster(self.team_name)
+        for name, _display, _status in rows:
+            md_max = max(
+                md_max,
+                cache.get_member_updated_at(name, "desc"),
+                cache.get_member_updated_at(name, "prompt"),
+            )
+        md_max = max(
+            md_max,
+            cache.get_team_updated_at("desc"),
+            cache.get_team_updated_at("prompt"),
+        )
+        return max(db_max, md_max)
 
     async def cancel_task(self, task_id: str) -> bool:
         """Cancel a task and notify assignee if claimed
@@ -1380,6 +1826,11 @@ class TeamBackend:
             self._enable_task_verification,
         )
 
+        # The team row already exists — write its identity files (idempotent:
+        # evolved files are never overwritten). ``desc`` lives on the row;
+        # ``prompt`` is the write-only column.
+        self._write_team_identity(self.team_name, getattr(existing, "desc", None))
+
         if self._on_team_built is not None:
             try:
                 await self._on_team_built()
@@ -1491,6 +1942,11 @@ class TeamBackend:
 
         if not success:
             raise RuntimeError(f"Failed to create team {team_name}")
+
+        # Write the team-level identity files (team_card.md, team_prompt.md)
+        # now that the team row exists — their values come from this row's
+        # desc (the prompt column is currently write-only, see build_team).
+        self._write_team_identity(team_name, desc)
 
         # Register leader as a member — starts busy/running immediately
         leader_card_id = f"{team_name}_{leader_member_name}"
@@ -1827,10 +2283,10 @@ class TeamBackend:
         confused about whether its team exists, which the refusal corrects.
 
         Both conditions are required. ``_history_restored`` alone is not
-        enough: a recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path in ``CoordinationKernel.start`` calls
-        ``clean_team``) has no team row left and genuinely does need to build
-        one. The team row is what says a team is there to be rejoined.
+        enough: a recovered leader whose team was disbanded (its own
+        ``clean_team``, or the operator's ``delete_agent_team``) has no team
+        row left and genuinely does need to build one. The team row is what
+        says a team is there to be rejoined.
 
         Returns:
             True when the leader is already attached, with history, to a team
@@ -2080,6 +2536,8 @@ class TeamBackend:
         desc: str = "",
         prompt: str,
         model_name: Optional[str] = None,
+        allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -2099,8 +2557,13 @@ class TeamBackend:
                 Optional; defaults to empty.
             prompt: Private system prompt the CLI adopts to act as this
                 member. Required.
-            model_name: Ignored for external-CLI members (the model lives in
-                the external CLI); accepted for signature symmetry.
+            model_name: Optional model-name hint; passed to the pool allocator
+                to select a matching model endpoint.
+            allocation: Optional pool allocation for this member; persisted as a
+                ``{model_name, model_index}`` reference so credentials
+                refreshes propagate without re-spawning.
+            fallback_allocation: Required fallback allocation used only when
+                the native CLI reports an authentication failure.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown or the
@@ -2141,6 +2604,8 @@ class TeamBackend:
             mode=self.teammate_mode,
             role=TeamRole.EXTERNAL_CLI,
             cli_agent=cli_agent,
+            allocation=allocation,
+            fallback_allocation=fallback_allocation,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

@@ -197,6 +197,7 @@ def resolve_deep_agent_parts(
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
+    enable_subagent_runtime: bool = False,
     add_general_purpose_agent: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | Workspace] = None,
@@ -257,10 +258,6 @@ def resolve_deep_agent_parts(
             tool_instances.append(tool)
             normalized_tools.append(tool.card)
             existing_tool_names.add(tool.card.name)
-
-    effective_enable_read_image_multimodal = (
-        False if vision_tools_enabled else enable_read_image_multimodal
-    )
 
     if not workspace:
         workspace_obj = Workspace(root_path="./", language=resolved_language)
@@ -333,8 +330,9 @@ def resolve_deep_agent_parts(
         prompt_mode=prompt_mode,
         vision_model_config=vision_model_config,
         audio_model_config=audio_model_config,
-        enable_read_image_multimodal=effective_enable_read_image_multimodal,
+        enable_read_image_multimodal=enable_read_image_multimodal,
         enable_async_subagent=enable_async_subagent,
+        enable_subagent_runtime=enable_subagent_runtime,
         add_general_purpose_agent=add_general_purpose_agent,
         default_mode=default_mode,
         parallel_tool_calls=parallel_tool_calls,
@@ -398,7 +396,10 @@ def resolve_deep_agent_parts(
         (TaskPlanningRail, enable_task_planning, _make_task_planning_rail),
         (SkillUseRail, bool(skills) or config.enable_skill_discovery, _make_skill_rail),
         (SubagentRail, bool(effective_subagents),
-         lambda: SubagentRail(enable_async_subagent=enable_async_subagent)),
+         lambda: SubagentRail(
+             enable_async_subagent=enable_async_subagent,
+             enable_subagent_runtime=enable_subagent_runtime,
+         )),
         (ToolCallResilienceRail, config.enable_tool_resilience_rail, lambda: ToolCallResilienceRail()),
     ]
     for rail_cls, should_add, make_rail in default_rails:
@@ -463,6 +464,7 @@ def create_deep_agent(
     rails: Optional[List[AgentRail]] = None,
     enable_task_loop: bool = False,
     enable_async_subagent: bool = False,
+    enable_subagent_runtime: bool = False,
     add_general_purpose_agent: bool = False,
     max_iterations: int = 15,
     workspace: Optional[str | Workspace] = None,
@@ -557,6 +559,7 @@ def create_deep_agent(
         rails=rails,
         enable_task_loop=enable_task_loop,
         enable_async_subagent=enable_async_subagent,
+        enable_subagent_runtime=enable_subagent_runtime,
         add_general_purpose_agent=add_general_purpose_agent,
         max_iterations=max_iterations,
         workspace=workspace,

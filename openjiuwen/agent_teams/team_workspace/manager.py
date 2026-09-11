@@ -6,11 +6,15 @@
 
 Handles locking, versioning, sync, and conflict detection for the team
 shared workspace directory. File I/O is delegated to SysOperation tools
-via the .team/ symlink mount — this module manages only metadata and
-version control.
+against absolute paths under the team workspace (its ``artifacts/<date>/
+chat-<n>/outputs/`` subtree for projectless members, the user project for
+members bound to one) — this module manages only metadata and version
+control. The legacy ``.team/`` symlink mount is no longer the access path;
+``mount_into_workspace`` / ``mount_worktree`` are retained only as opt-in
+symlink convenience for worktree-isolated code teams.
 
 Two operating modes:
-- LOCAL: single _team_workspace/ directory, symlink mount, in-memory locks.
+- LOCAL: single _team_workspace/ directory, in-memory locks.
 - DISTRIBUTED: per-node clone, git push/pull sync, leader-coordinated locks
   (Phase 3).
 """
@@ -38,8 +42,9 @@ from openjiuwen.agent_teams.team_workspace.models import (
     WorkspaceFileLock,
     WorkspaceMode,
 )
-from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
+from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
 
 try:
     import winerror
@@ -62,7 +67,9 @@ _MOUNT_MERGE_SKIP_NAMES = frozenset(
 class TeamWorkspaceManager:
     """Manages team shared workspace metadata and version control.
 
-    File I/O is handled by standard SysOperation tools via .team/ mount.
+    File I/O is handled by standard SysOperation tools against absolute paths
+    under the team workspace (the shared outputs directory for projectless
+    members, the user project for members bound to one).
     This manager handles locking, versioning, sync, and conflict detection.
 
     Operates in two modes:
@@ -87,6 +94,10 @@ class TeamWorkspaceManager:
         self.team_name = team_name
         self.mode = mode
         self.publish_event = publish_event
+        # The resident evolvable-workspace cache, attached once at assembly.
+        # Every read-side consumer (rails, backend delegation, worker backend,
+        # tiny agent, scheduler) takes the same instance through this property.
+        self._workspace_cache: WorkspaceCache | None = None
 
         # Local lock state (LOCAL mode, or leader's authority in DISTRIBUTED)
         self._locks: dict[str, WorkspaceFileLock] = {}
@@ -98,9 +109,30 @@ class TeamWorkspaceManager:
         self._node_id = node_id
         self._pending_lock_requests: dict[str, asyncio.Future[WorkspaceLockResponseEvent]] = {}
 
+    @property
+    def workspace_cache(self) -> WorkspaceCache | None:
+        """The resident evolvable-workspace cache.
+
+        One instance per manager, built explicitly at assembly time
+        (``AgentConfigurator._assemble_member_workspace`` — it owns the full
+        member roster) and attached here once; every read-side consumer
+        (rails, worker backend, tiny agent, scheduler) and the team backend's
+        B-class overlay take the same instance through this property. ``None``
+        until assembly attaches it.
+        """
+        return self._workspace_cache
+
+    def attach_workspace_cache(self, cache: WorkspaceCache) -> None:
+        """Attach the assembled evolvable-workspace cache (spawn-time, once)."""
+        self._workspace_cache = cache
+
     # ── Initialization ───────────────────────────────────────
 
-    async def initialize(self, *, remote_url: str | None = None) -> None:
+    async def initialize(
+        self,
+        *,
+        remote_url: str | None = None,
+    ) -> None:
         """Initialize workspace directory, Skill visibility metadata, and git repo.
 
         When ``config.version_control`` is False, only the workspace, the
@@ -264,7 +296,6 @@ class TeamWorkspaceManager:
         if result.returncode != 0:
             error_output = result.stderr.strip() or result.stdout.strip()
             raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
-
 
     @staticmethod
     def _is_directory_link(path: str) -> bool:

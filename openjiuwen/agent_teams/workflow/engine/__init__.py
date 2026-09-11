@@ -38,8 +38,10 @@ from .primitives import (
     phase,
     pipeline,
     pmap,
+    verify,
     workflow,
 )
+from .verify import Reviewer, VerifyResult, VerifyVote, settle_verify_tally
 from .progress import (
     PhasePlan,
     ProgressKind,
@@ -74,6 +76,12 @@ __all__ = [
     "budget",
     "compact",
     "flatten_filter",
+    # verify primitive
+    "verify",
+    "Reviewer",
+    "VerifyResult",
+    "VerifyVote",
+    "settle_verify_tally",
     # backends
     "AgentBackend",
     "AgentResult",

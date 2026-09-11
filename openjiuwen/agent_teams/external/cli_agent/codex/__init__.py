@@ -4,7 +4,8 @@
 """Codex SDK backend for external CLI team members."""
 
 from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
+    CodexSdkRuntime,
     build_codex_runtime,
 )
 
-__all__ = ["build_codex_runtime"]
+__all__ = ["CodexSdkRuntime", "build_codex_runtime"]

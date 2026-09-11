@@ -229,7 +229,11 @@ class TeamHarness:
         """
         card = self._native.card if self._native is not None else None
         if team_session is not None and hasattr(team_session, "create_agent_session"):
-            return team_session.create_agent_session(card=card, share_stream_writer=False)
+            return team_session.create_agent_session(
+                card=card,
+                share_stream_writer=False,
+                member_name=self._member_name,
+            )
         from openjiuwen.core.session.agent import create_agent_session
 
         return create_agent_session(card=card)

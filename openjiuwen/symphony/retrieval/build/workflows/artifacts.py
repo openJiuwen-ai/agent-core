@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from enum import IntFlag
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Sequence
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Sequence
 
 if TYPE_CHECKING:
     from openai import OpenAI
@@ -16,6 +16,7 @@ else:
 
 from openjiuwen.symphony.retrieval.build.models import CatalogRecord
 from openjiuwen.symphony.retrieval.build.tree.root_categories import RootCategoryInput, resolve_tree_root_categories
+from openjiuwen.symphony.retrieval.build.workflows.tree_text import slug_term, unique_child_cid
 
 
 class BuildMethod(IntFlag):
@@ -251,6 +252,15 @@ def write_catalog(records: Sequence[CatalogRecord], path: Path) -> None:
 
 
 def build_fallback_tree_nodes(*, aggregate_dir: Path) -> List[Dict[str, object]]:
+    descriptions = {path.name: path.name for path in aggregate_dir.iterdir() if path.is_dir()}
+    return build_fallback_tree_nodes_from_records(descriptions)
+
+
+def build_fallback_tree_nodes_from_records(
+    descriptions_by_worker_id: Mapping[str, str],
+) -> List[Dict[str, object]]:
+    """Build stable fallback leaves without treating dots in IDs as hierarchy."""
+
     nodes: List[Dict[str, object]] = [
         {
             "cid": "Skills",
@@ -258,13 +268,16 @@ def build_fallback_tree_nodes(*, aggregate_dir: Path) -> List[Dict[str, object]]
             "description": "Fallback skill index built without LLM tree generation.",
         }
     ]
-    for skill_dir in sorted(path for path in aggregate_dir.iterdir() if path.is_dir()):
-        worker_id = skill_dir.name
+    used_cids = {"Skills"}
+    for worker_id in sorted(str(value) for value in descriptions_by_worker_id):
+        segment = slug_term(worker_id, fallback="skill")
+        cid = unique_child_cid(parent="Skills", segment=segment, used=used_cids)
+        used_cids.add(cid)
         nodes.append(
             {
-                "cid": f"Skills.{worker_id}",
+                "cid": cid,
                 "type": "leaf",
-                "description": worker_id,
+                "description": str(descriptions_by_worker_id.get(worker_id) or worker_id),
                 "worker_id": worker_id,
             }
         )
@@ -323,6 +336,7 @@ __all__ = [
     "ResolvedBuildConfig",
     "build_catalog_records_from_nodes",
     "build_fallback_tree_nodes",
+    "build_fallback_tree_nodes_from_records",
     "build_retrieval_text",
     "can_build_tree_with_llm",
     "compact_text",

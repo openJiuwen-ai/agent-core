@@ -137,7 +137,12 @@ def build_coding_memory_section(language="cn", read_only=False, memory_dir="codi
     read-only rules and does not change by run mode.
     """
     tpl = CODING_MEMORY_PROMPT_CN if language == "cn" else CODING_MEMORY_PROMPT_EN
-    return PromptSection(name=SectionName.MEMORY, content={language: tpl.format(memory_dir=memory_dir)}, priority=85)
+    return PromptSection(
+        name=SectionName.MEMORY,
+        content={language: tpl.format(memory_dir=memory_dir)},
+        priority=85,
+        category="memory",
+    )
 
 
 __all__ = [

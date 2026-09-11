@@ -233,6 +233,112 @@ def test_format_completed_uses_per_run_completion_ctx():
     assert "2 phases, 2 agents" not in out_b
 
 
+def _overrun_observer(events: list[Any]) -> Any:
+    """Fake observer: folds nothing, just replays raw events + a stub run."""
+    from openjiuwen.agent_teams.workflow.schema import WorkflowRun
+
+    class _Obs:
+        def __init__(self) -> None:
+            self.events = events
+            self.run = WorkflowRun(name="wf", status="completed")
+
+    return _Obs()
+
+
+def test_format_completed_appends_overrun_block_when_run_finished_past_ceiling():
+    """A completed run whose ledger blew the per-run ceiling gets redesign feedback."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=120_000,
+            budget={"total": None, "spent": 120_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 120_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="draft",
+            label="b",
+            tokens=195_000,
+            budget={"total": None, "spent": 315_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 315_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_overrun1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 完成]" in out
+    assert "[Swarmflow 超预算完成]" in out
+    assert "spent=315000/90000" in out
+    # Phase ranking is cost-ordered: draft(195000) beats research(120000).
+    assert "draft(195000), research(120000)" in out
+    assert "重新设计工作流" in out
+    assert "wf_overrun1" in out
+
+
+def test_format_completed_no_overrun_block_when_within_ceiling():
+    """A completed run inside its ceiling reports plain success, no overrun text."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=40_000,
+            budget={"total": None, "spent": 40_000, "remaining": None, "exhausted": False},
+            workflow_budget={"total": 90_000, "spent": 40_000, "remaining": 50_000, "exhausted": False},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_within1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 完成]" in out
+    assert "超预算" not in out
+
+
+def test_format_completed_overrun_block_reports_session_scope_with_run_contrast():
+    """Session-scope overrun wins the report and carries the per-run contrast."""
+    from openjiuwen.agent_teams.workflow.engine.progress import (
+        ProgressKind,
+        WorkflowProgressEvent,
+    )
+
+    events = [
+        WorkflowProgressEvent(
+            kind=ProgressKind.AGENT_COMPLETED,
+            phase="research",
+            label="a",
+            tokens=500_000,
+            budget={"total": 400_000, "spent": 500_000, "remaining": 0, "exhausted": True},
+            workflow_budget={"total": 90_000, "spent": 500_000, "remaining": 0, "exhausted": True},
+        ),
+        WorkflowProgressEvent(kind=ProgressKind.WORKFLOW_COMPLETED),
+    ]
+    tool = _tool(_FakeHarness())
+    out = tool.format_completed_injection(
+        "ok", run_id="wf_session1", completion_ctx={"observer": _overrun_observer(events)}
+    )
+    assert "[Swarmflow 超预算完成]" in out
+    assert "session（会话总额）" in out
+    assert "spent=500000/400000" in out
+    assert "Run 级对照：spent=500000/90000" in out
+    assert "请求上调预算" in out
+
+
 def test_swarmflow_tool_requires_a_script_source():
     """No script source at all fails fast at the tool boundary."""
     tool = _tool(_FakeHarness(), language="en")
@@ -242,12 +348,16 @@ def test_swarmflow_tool_requires_a_script_source():
 
 
 def test_swarmflow_tool_rejects_unsupported_sources():
-    """name / resume_id are on the surface but not wired to execution yet."""
+    """name is on the surface but not wired to execution yet.
+
+    (resume_id alone is no longer "not supported yet": resume_id+action is the
+    control entry, and resume_id without action fails with its own message —
+    covered in test_swarmflow_invoke_control.py.)
+    """
     tool = _tool(_FakeHarness())
-    for src in ("name", "resume_id"):
-        out = asyncio.run(tool.invoke({src: "x"}))
-        assert out.success is False
-        assert "not supported yet" in (out.error or ""), (src, out.error)
+    out = asyncio.run(tool.invoke({"name": "x"}))
+    assert out.success is False
+    assert "not supported yet" in (out.error or "")
 
 
 def test_swarmflow_tool_launches_inline_script(tmp_path):

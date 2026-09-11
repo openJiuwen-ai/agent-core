@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import uuid
 from enum import Enum
-from typing import Optional, Union, Any, Self
+from typing import Optional, Union, Any, Self, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -19,9 +19,53 @@ class ProviderType(str, Enum):
     SiliconFlow = "SiliconFlow"
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"
+    Moonshot = "Moonshot"
+    MiniMax = "MiniMax"
+    ModelArts = "ModelArts"
+    VolcEngine = "VolcEngine"
+    Qianfan = "Qianfan"
+    Zhipu = "Zhipu"
+    MiMo = "MiMo"
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
+
+
+class LLMApiMode(str, Enum):
+    ChatCompletions = "chat_completions"
+    Responses = "responses"
+    AnthropicMessages = "anthropic_messages"
+
+
+class LLMAuthMode(str, Enum):
+    ApiKey = "api_key"
+    NoneAuth = "none"
+    CustomHeaders = "custom_headers"
+    OpenAIAccountOAuth = "openai_account_oauth"
+
+
+class KVCacheExtensionConfig(BaseModel):
+    mode: Literal["none", "release", "affinity"] = "none"
+    release_endpoint: str = "/release_kv_cache"
+    session_field: str = "cache_salt"
+    enable_cache_sharing_field: str = "cache_sharing"
+    affinity_field: str = "agent_hint"
+
+
+class LLMExtensionsConfig(BaseModel):
+    prompt_cache: dict[str, Any] = Field(default_factory=dict)
+    kv_cache: KVCacheExtensionConfig = Field(default_factory=KVCacheExtensionConfig)
+    response_fields: dict[str, Any] = Field(default_factory=dict)
+    request_extra_body: dict[str, Any] = Field(default_factory=dict)
+
+
+class ReasoningConfig(BaseModel):
+    """Provider-neutral reasoning/thinking request intent."""
+
+    mode: Literal["auto", "enabled", "disabled"] = Field(default="auto")
+    effort: Optional[str] = Field(default=None)
+    budget_tokens: Optional[int] = Field(default=None, ge=0)
+    model_config = {"extra": "forbid"}
 
 
 _TOP_LEVEL_API_KEY_PROVIDERS = {
@@ -31,9 +75,20 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.SiliconFlow.value,
     ProviderType.DashScope.value,
     ProviderType.DeepSeek.value,
+    ProviderType.Moonshot.value,
+    ProviderType.MiniMax.value,
+    ProviderType.ModelArts.value,
+    ProviderType.VolcEngine.value,
+    ProviderType.Qianfan.value,
+    ProviderType.Zhipu.value,
+    ProviderType.MiMo.value,
     ProviderType.InferenceAffinity.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
+_DEFAULT_API_BASE_BY_ENDPOINT_PROFILE = {
+    "ollama": "http://localhost:11434/v1",
+    "lmstudio": "http://localhost:1234/v1",
+}
 
 
 class ModelClientConfig(BaseModel):
@@ -82,7 +137,14 @@ class ModelClientConfig(BaseModel):
         default=None,
         description="Developer-provided headers merged per LLM call"
     )
-    model_config = {"extra": "allow"}  # Allow extra fields injected by core/provider (e.g. default headers)
+    api_mode: Optional[LLMApiMode] = Field(default=None, description="LLM API mode")
+    auth_mode: LLMAuthMode = Field(default=LLMAuthMode.ApiKey, description="LLM authentication mode")
+    endpoint_profile: Optional[str] = Field(default=None, description="OpenAI-compatible endpoint profile name")
+    extensions: LLMExtensionsConfig = Field(default_factory=LLMExtensionsConfig)
+    legacy_client_provider: Optional[str] = Field(default=None, description="Original provider before normalization")
+    model_config = {
+        "extra": "allow",
+    }
 
     @model_validator(mode='after')
     def validate_client_provider(self) -> Self:
@@ -123,7 +185,17 @@ class ModelClientConfig(BaseModel):
             )
 
     def _validate_top_level_provider_config(self, provider: str) -> None:
-        if provider in _TOP_LEVEL_API_KEY_PROVIDERS and not str(self.api_key or "").strip():
+        if not str(self.api_base or "").strip() and self.endpoint_profile:
+            default_api_base = _DEFAULT_API_BASE_BY_ENDPOINT_PROFILE.get(
+                str(self.endpoint_profile).strip().lower()
+            )
+            if default_api_base:
+                self.api_base = default_api_base
+        if self.auth_mode != LLMAuthMode.ApiKey.value and self.auth_mode != LLMAuthMode.ApiKey:
+            requires_api_key = False
+        else:
+            requires_api_key = provider in _TOP_LEVEL_API_KEY_PROVIDERS
+        if requires_api_key and not str(self.api_key or "").strip():
             raise build_error(
                 StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                 error_msg=f"api_key is required for provider {provider}."
@@ -138,8 +210,18 @@ class ModelClientConfig(BaseModel):
 class ModelRequestConfig(BaseModel):
     """Model config"""
     model_name: str = Field(default="", alias="model", description="Model name, e.g. gpt-4")
-    temperature: float = Field(default=0.95, description="Temperature parameter, controlling the randomness of outputs")
-    top_p: float = Field(default=0.1, description="Top-p sampling parameter")
+    temperature: Optional[float] = Field(
+        default=None, description="Temperature parameter, controlling the randomness of outputs"
+    )
+    top_p: Optional[float] = Field(default=None, description="Top-p sampling parameter")
     max_tokens: Optional[int] = Field(default=None, description="Maximum number of tokens to generate")
     stop: Union[Optional[str], None] = Field(default=None, description="Stop sequence")
+    context_window: Optional[int] = Field(
+        default=None,
+        description="Maximum context window supported by the model, in tokens; internal context metadata",
+    )
+    reasoning: Optional[Union[ReasoningConfig, dict[str, Any]]] = Field(
+        default=None,
+        description="Provider-neutral reasoning/thinking request intent. Legacy raw reasoning dicts remain accepted.",
+    )
     model_config = {"extra": "allow", "populate_by_name": True}

@@ -170,6 +170,80 @@ async def test_skill_rail_all_mode_loads_skills_on_before_invoke(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_skill_rail_finds_skills_filed_under_grouping_dirs(tmp_path: Path):
+    """A grouping directory is walked through, not reported as a skill.
+
+    Skill libraries are commonly filed by vendor or team
+    (``skills/lark/lark-doc/SKILL.md``). A one-level scan saw only ``lark``,
+    which holds no SKILL.md, and reported nothing.
+    """
+    skills_root = tmp_path / "skills"
+    _write_skill(skills_root / "lark", "lark-doc", "Edit Feishu docs")
+    _write_skill(skills_root / "lark" / "deep", "lark-base", "Query Feishu Base")
+    _write_skill(skills_root, "invoice-parser", "Parse invoice pdf files")
+
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=True,
+    )
+
+    await skill_rail.before_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    assert _sorted_skill_names(skill_rail.skills) == [
+        "invoice-parser",
+        "lark-base",
+        "lark-doc",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_does_not_promote_skills_nested_inside_a_skill(tmp_path: Path):
+    """A skill's own subdirectories stay private to it.
+
+    Once a directory has a SKILL.md it *is* the skill, and what it keeps
+    inside is detail its author discloses through its own content (skill_tool
+    lists nested skills when the parent is opened) — not a top-level entry the
+    model sees before having read the parent.
+    """
+    skills_root = tmp_path / "skills"
+    parent = _write_skill(skills_root, "writing", "Write documents")
+    _write_skill(parent, "designer", "Internal sub-step of writing")
+
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=True,
+    )
+
+    await skill_rail.before_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    assert _sorted_skill_names(skill_rail.skills) == ["writing"]
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_scan_survives_a_symlink_cycle(tmp_path: Path):
+    """Sharing one library by symlink must not send the walk into a loop."""
+    skills_root = tmp_path / "skills"
+    group = skills_root / "group"
+    _write_skill(group, "shared", "A shared skill")
+    try:
+        (group / "loop").symlink_to(skills_root, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unavailable on this platform")
+
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=True,
+    )
+
+    await skill_rail.before_invoke(AgentCallbackContext(agent=None, inputs=None, session=None))
+
+    assert _sorted_skill_names(skill_rail.skills) == ["shared"]
+
+
+@pytest.mark.asyncio
 async def test_skill_rail_all_mode_injects_skill_prompt(tmp_path: Path):
     """All mode should add skills section to builder before model call."""
     skills_root = tmp_path / "skills"

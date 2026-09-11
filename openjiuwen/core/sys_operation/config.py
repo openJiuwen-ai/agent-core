@@ -35,8 +35,9 @@ class LocalWorkConfig(BaseModel):
 
     dangerous_patterns: Optional[List[str]] = Field(
         default=None,
-        description="List of regex patterns for dangerous commands to block. "
-                    "If None, uses built-in default patterns.")
+        description="Optional host hook: regexes that Local execute_cmd hard-blocks. "
+                    "None means no Local table (Engine builtin_rules owns overlapping policy). "
+                    "A non-None list replaces the table entirely.")
 
 
 class ContainerScope(str, Enum):

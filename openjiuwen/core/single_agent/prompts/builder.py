@@ -1,6 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Section-based system prompt builder."""
+
 from __future__ import annotations
 
 from typing import Dict, List, Optional
@@ -26,10 +27,14 @@ class PromptSection:
         name: str,
         content: Dict[str, str],
         priority: int = 100,
+        category: Optional[str] = None,
+        carrier: str = "system_message",
     ):
         self.name = name
         self.content: Dict[str, str] = dict(content)
         self.priority = priority
+        self.category = category
+        self.carrier = carrier
 
     def render(self, language: str = "cn") -> str:
         if language in self.content:

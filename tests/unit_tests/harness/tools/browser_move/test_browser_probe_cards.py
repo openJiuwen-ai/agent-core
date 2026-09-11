@@ -5,13 +5,22 @@
 from __future__ import annotations
 
 import asyncio
+import shutil
+import subprocess
 from pathlib import Path
 from unittest.mock import AsyncMock
+
+import pytest
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
+    build_browser_state_metadata_js,
     build_card_probe_js,
+    build_interactive_probe_js,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
+    builtin_site_profiles,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import (
     BrowserAgentRuntime,
@@ -58,6 +67,14 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
     assert "price" in js
     assert "rating" in js
     assert "author" in js
+    assert "likes" in js
+    assert "favorites" in js
+    assert "comments" in js
+    assert "shop" in js
+    assert "duration" in js
+    assert "high_temperature" in js
+    assert "low_temperature" in js
+    assert "sort_state" in js
     assert "source" in js
     assert "summary" in js
     assert "primary_link" in js
@@ -69,6 +86,25 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
     assert "visible" in js
     assert "enabled" in js
     assert "generation_id" in js
+
+
+def test_generated_probe_scripts_parse_as_javascript(tmp_path: Path) -> None:
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed; skipping generated JavaScript parse test")
+
+    scripts = (
+        build_browser_state_metadata_js(),
+        build_interactive_probe_js(),
+        build_card_probe_js(),
+    )
+    for index, script in enumerate(scripts):
+        runner = tmp_path / f"parse_probe_{index}.js"
+        runner.write_text(
+            f"const probe = ({script});\nif (typeof probe !== 'function') process.exit(2);\n",
+            encoding="utf-8",
+        )
+        subprocess.run([node, str(runner)], check=True, capture_output=True, text=True)
 
 
 def test_build_card_probe_js_embeds_generation_and_validates_clickability() -> None:
@@ -86,6 +122,35 @@ def test_build_card_probe_js_embeds_generation_and_validates_clickability() -> N
     assert "title: selectorDescriptor(title.selector_hint)" in js
     assert "price: selectorDescriptor(price.selector_hint)" in js
     assert "generation_id: generationId" in js
+    assert "region: semantics.region" in js
+    assert "kind: semantics.kind" in js
+    assert "is_ad: semantics.is_ad" in js
+    assert "result_index: isMainResult ? resultIndex : null" in js
+
+
+def test_build_card_probe_js_prefers_taobao_product_ancestor_links() -> None:
+    js = build_card_probe_js(
+        generation_id="g12",
+        site_profiles=builtin_site_profiles(),
+    )
+
+    assert "root.closest('a[href]')" in js
+    assert '"id": "taobao_marketplace"' in js
+    assert "isProfilePreferredPrimaryHref" in js
+    assert "isProfileExcludedPrimaryHref" in js
+    assert "siteDetailLink" in js
+
+
+def test_build_card_probe_js_prefers_and_deduplicates_ctrip_hotel_detail_links() -> None:
+    js = build_card_probe_js(
+        generation_id="g13",
+        site_profiles=builtin_site_profiles(),
+    )
+
+    assert '"id": "ctrip_hotels"' in js
+    assert '"query_id_params": ["hotelId", "hotelid"]' in js
+    assert "siteDetailLink" in js
+    assert "profileDetailLinks.has(detailLink.key)" in js
 
 
 def test_build_card_probe_js_clamps_max_cards() -> None:
@@ -125,7 +190,7 @@ def test_browser_probe_cards_tool_invokes_runtime_api() -> None:
     )
 
     runtime.probe_cards.assert_called_once_with(
-        max_cards=50,
+        max_cards=20,
         viewport_only=False,
         include_buttons=True,
         query="attic",
@@ -181,6 +246,12 @@ def test_runtime_probe_cards_uses_code_executor_and_parses_json() -> None:
     assert result["ok"] is True
     assert result["url"] == "https://books.toscrape.com/"
     assert result["cards"][0]["title"] == "Book"
+    assert result["cards"][0]["field_status"]["title"] == "present"
+    assert result["cards"][0]["field_status"]["rating"] == "missing"
+    assert result["cards"][0]["field_provenance"]["title"]["generation_id"] == "g0"
+    assert "id" not in result["cards"][0]
+    assert "selector_hint" not in result["cards"][0]
+    assert result["audit"]["raw_size_bytes"] > 0
 
 
 def test_runtime_probe_cards_handles_missing_code_executor() -> None:

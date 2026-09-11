@@ -15,23 +15,23 @@ from openjiuwen.core.session.stream.base import (
 from openjiuwen.core.single_agent.schema.agent_card import (
     AgentCard,
 )
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
     TaskRuntime,
 )
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     ExtensionBuildArtifact,
     OptimizationTask,
     StageResult,
 )
-from openjiuwen.rsi.auto_harness.stages.base import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.base import (
     scope_output_event_stage,
 )
-from openjiuwen.rsi.auto_harness.stages.verify import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.verify import (
     ExtendVerifyStage,
     _build_ext_acceptance_fix_prompt,
     _build_ext_acceptance_test_prompt,
@@ -178,21 +178,21 @@ async def test_verify_ext_loads_generated_runtime_extension(
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._install_extension_dependencies",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._install_extension_dependencies",
             new_callable=AsyncMock,
             return_value=(True, ""),
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._check_ruff",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._check_ruff",
             new_callable=AsyncMock,
             return_value=[],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._check_imports",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._check_imports",
             return_value=[],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._run_agent_generated_ext_acceptance",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._run_agent_generated_ext_acceptance",
             new=_acceptance_success,
         ),
     ):
@@ -212,7 +212,7 @@ async def test_verify_ext_loads_generated_runtime_extension(
 async def test_verify_ext_fails_when_manifest_missing(
     tmp_path: Path,
 ):
-    from openjiuwen.rsi.auto_harness.infra.runtime_extension_static_checks import (
+    from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_static_checks import (
         ExtStaticCheckResult,
     )
 
@@ -232,12 +232,12 @@ async def test_verify_ext_fails_when_manifest_missing(
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._install_extension_dependencies",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._install_extension_dependencies",
             new_callable=AsyncMock,
             return_value=(True, ""),
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify.run_static_checks_against_runtime",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify.run_static_checks_against_runtime",
             new_callable=AsyncMock,
             return_value=static_result,
         ),
@@ -309,17 +309,17 @@ async def test_verify_ext_repairs_manifest_schema_failure(
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._install_extension_dependencies",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._install_extension_dependencies",
             new_callable=AsyncMock,
             return_value=(True, ""),
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._check_ruff",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._check_ruff",
             new_callable=AsyncMock,
             return_value=[],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._run_agent_generated_ext_acceptance",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._run_agent_generated_ext_acceptance",
             new=_acceptance_success,
         ),
     ):
@@ -458,7 +458,7 @@ async def test_verify_ext_reuses_generated_test_after_fix(
         return run_results.pop(0)
 
     with patch(
-        "openjiuwen.rsi.auto_harness.stages.verify._run_pytest_file",
+        "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._run_pytest_file",
         new=_fake_run_pytest_file,
     ):
         items = [

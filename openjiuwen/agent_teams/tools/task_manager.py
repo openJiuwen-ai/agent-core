@@ -20,7 +20,7 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.schema.events import (
     EventMessage,
     TaskCancelledEvent,
@@ -138,7 +138,7 @@ class TeamTaskManager:
         self.team_name = team_name
         self.member_name = member_name
         self.messager = messager
-        self.plans_dir = Path(plans_dir) if plans_dir else team_home(team_name) / "team-workspace" / "plans"
+        self.plans_dir = Path(plans_dir) if plans_dir else team_workspace_dir(team_name) / "plans"
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
@@ -1671,21 +1671,26 @@ class TeamTaskManager:
         return TaskOpResult.success()
 
     async def reassign(self, task_id: str, new_assignee: str) -> TaskOpResult:
-        """Hand an in-progress task from its current owner to another member.
+        """Hand an owned task from its current owner to another member.
 
-        Atomic assignee swap — the task stays IN_PROGRESS throughout and never
-        bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes idle
-        teammates and there is no claimable-pool window to race into. Fires
-        exactly two targeted events: ``TASK_REVOKED`` tells the former owner
-        to steer off the now-foreign task, ``TASK_CLAIMED`` tells the new
-        owner to pick it up. The former owner's other claims and in-flight
-        round stay intact — this touches only the one task.
+        Atomic assignee swap — **the task keeps whatever status it had** and
+        never bounces through PENDING, so no spurious ``TASK_RELEASED`` wakes
+        idle teammates and there is no claimable-pool window to race into.
+        Works across ``TASK_REASSIGNABLE_STATUSES``: an assigned-but-not-yet-
+        started task (``PENDING`` / ``BLOCKED`` — the scheduled mode's resting
+        state) is in fact the cheapest thing to hand over, since no reasoning
+        is in flight to discard. Fires exactly two targeted events:
+        ``TASK_REVOKED`` tells the former owner to steer off the now-foreign
+        task, ``TASK_CLAIMED`` tells the new owner it is theirs. The former
+        owner's other claims and in-flight round stay intact — this touches
+        only the one task.
 
         The new member is validated *before* the swap so a bad target never
         disturbs the task.
 
         Args:
-            task_id: Task to reassign (must be IN_PROGRESS).
+            task_id: Task to reassign (status must be in
+                ``TASK_REASSIGNABLE_STATUSES``).
             new_assignee: Member to hand the task to.
 
         Returns:
@@ -1706,7 +1711,8 @@ class TeamTaskManager:
         swapped = await self.db.task.reassign_task(task_id, old_assignee, new_assignee)
         if not swapped:
             return TaskOpResult.fail(
-                f"Task {task_id} could not be reassigned; it is no longer claimed by {old_assignee}"
+                f"Task {task_id} could not be reassigned; it is either no longer held by "
+                f"{old_assignee}, or its status ({task.status}) does not allow handing it over"
             )
 
         await self._publish_task_event(

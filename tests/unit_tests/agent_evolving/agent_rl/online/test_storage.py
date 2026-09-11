@@ -37,7 +37,6 @@ async def test_inmemory_trajectory_store_status_flow():
     await store.save_sample(_sample("s2"))
 
     assert await store.get_pending_count("online") == 2
-    assert await store.get_users_above_threshold(2) == ["online"]
 
     samples = await store.fetch_and_mark_training("online", 2)
     assert [sample["sample_id"] for sample in samples] == ["s1", "s2"]
@@ -59,7 +58,6 @@ async def test_redis_trajectory_store_status_flow():
     await store.save_sample(_sample("s2"))
 
     assert await store.get_pending_count("online") == 2
-    assert await store.get_users_above_threshold(2) == ["online"]
 
     samples = await store.fetch_and_mark_training("online", 2)
     assert [sample["sample_id"] for sample in samples] == ["s1", "s2"]
@@ -125,7 +123,7 @@ async def test_redis_trajectory_store_update_status_tolerates_missing_payload():
     await store.save_sample(_sample("s1"))
     await store.fetch_and_mark_training("online", 1)
 
-    await redis.hdel("rl:traj:s1", "sample_json")
+    await redis.hdel("rl:v1:traj:s1", "sample_json")
     await store.mark_trained(["s1"])
 
     stats = await store.stats()

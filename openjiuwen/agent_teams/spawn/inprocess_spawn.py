@@ -62,6 +62,12 @@ async def inprocess_spawn(
     )
 
     teammate = _TeamAgent(card)
+    # Share the leader's team-level workspace manager BEFORE configure: the
+    # teammate's setup_infra must not create its own manager, and its
+    # _assemble_member_workspace reuse check then hits the leader's already
+    # built cache — no re-scan of the team-workspace md files.
+    # Injected at TeamAgent construction time so it cannot race configure.
+    team_agent.share_workspace_cache_with(teammate)
     teammate.configure(spec, ctx)
     kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
 
@@ -94,13 +100,15 @@ async def inprocess_spawn(
             "[fork] %d messages injected into %s",
             len(fork_from.messages), ctx.member_name,
         )
-        # Compaction: compress older messages before the split point.
+        # Compaction: compress the side opposite ``compact_direction`` at the
+        # split point.
         if fork_from.compact_split is not None:
             from openjiuwen.agent_teams.fork_compact import compact_context
 
             await compact_context(
                 native, split_at=fork_from.compact_split,
                 session_id=session_id,
+                direction=fork_from.compact_direction,
             )
     else:
         team_logger.debug(

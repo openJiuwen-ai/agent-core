@@ -12,12 +12,14 @@ from openjiuwen.agent_teams.tools.member_options import (
     TeamMemberOptions,
     build_member_options,
     dump_member_options,
+    get_member_fallback_model_ref,
     get_member_model_ref,
     get_member_options,
     get_member_permissions_override,
     get_member_worktree,
     load_member_options,
     merge_legacy_member_options,
+    promote_member_fallback_model,
     set_member_permissions_override,
     set_member_worktree_options,
 )
@@ -101,6 +103,32 @@ def test_build_member_options_with_model_ref():
     parsed = load_member_options(result)
     assert parsed.model_ref is not None
     assert parsed.model_ref.model_name == "gpt-4"
+
+
+def test_build_member_options_with_fallback_model_ref():
+    """Fallback model refs round-trip through the member options JSON."""
+    result = build_member_options(
+        fallback_model_ref={"model_name": "fallback", "model_index": 2},
+    )
+    ref = get_member_fallback_model_ref(SimpleNamespace(options=result))
+    assert ref is not None
+    assert ref.model_name == "fallback"
+    assert ref.model_index == 2
+
+
+def test_promote_member_fallback_model_preserves_other_options():
+    """Promotion makes fallback active without dropping unrelated member options."""
+    raw = build_member_options(
+        fallback_model_ref={"model_name": "fallback", "model_index": 1},
+        cli_agent="codex",
+        permissions_override={"bash": "deny"},
+    )
+    promoted = load_member_options(promote_member_fallback_model(raw))
+    assert promoted.model_ref is not None
+    assert promoted.model_ref.model_name == "fallback"
+    assert promoted.fallback_model_ref is not None
+    assert promoted.cli_agent == "codex"
+    assert promoted.permissions_override == {"bash": "deny"}
 
 
 def test_build_member_options_with_permissions_override():

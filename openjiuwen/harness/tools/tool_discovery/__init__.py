@@ -2,10 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 from openjiuwen.harness.tools.tool_discovery.bm25 import BM25ToolIndex
+from openjiuwen.harness.tools.tool_discovery.tool_call import ToolCallTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import ToolSearchTool
 
 
 __all__ = [
     "BM25ToolIndex",
+    "ToolCallTool",
     "ToolSearchTool",
 ]

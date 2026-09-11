@@ -42,3 +42,7 @@ spawn_teammate(name="dev-2", fork="code-ready", fork_source="understander", ...)
 ## Notify the Leader
 
 Saving a checkpoint **automatically notifies the leader** — the runtime publishes a framework event and the leader's context receives an announcement-only note with the exact name (no reply is expected). You do **not** need to send a separate `send_message` to report the name; if you want the leader to understand the snapshot's purpose, describe it in the `description` parameter (it is carried with the announcement). The leader can call `list_checkpoints` at any time to see the authoritative list — never expect the leader to guess the name you chose.
+
+## Fork Modes
+
+When the leader forks from your checkpoint, `spawn_teammate(fork="<name>", fork_mode=...)` decides what is inherited: `before` (default, keeps the analysis up to the checkpoint), `after`, `keep_before_compact_after`, or `keep_after_compact_before`. The snapshot itself is always just a position marker — the mode is chosen by the leader at fork time, not baked into the checkpoint.

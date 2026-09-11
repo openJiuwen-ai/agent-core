@@ -2211,13 +2211,28 @@ def _external_backend() -> MagicMock:
     backend = MagicMock()
     backend.team_name = "test-team"
     backend.get_team_updated_at = AsyncMock(return_value=1)
+    # Team-info re-announce probe (present-aware). ``(1, True)`` mirrors a
+    # stable timestamp: present=True takes the wall-clock branch, so the first
+    # probe (baseline empty) advances to ``get_team_info`` and later probes
+    # against baseline=1 stay quiet. Symmetric with the member pair below.
+    backend.get_team_updated_at_state = AsyncMock(return_value=(1, True))
+    backend.stamp_team_card_updated_at = AsyncMock(return_value=None)
     backend.get_members_max_updated_at = AsyncMock(return_value=1)
+    # External backend serves no real member_prompt.md, so the probe reports 0
+    # (missing file / evolution off) -- matching real WorkspaceCache behaviour.
+    backend.get_member_updated_at = AsyncMock(return_value=0)
+    # Single-member mtime probe + stamper the identity-body first-emit path
+    # calls (records member_prompt_mtime). ``(0, True)`` mirrors a missing
+    # file: no "must update" signal, so the re-announce path does not fire.
+    backend.get_member_updated_at_state = AsyncMock(return_value=(0, True))
+    backend.stamp_member_prompt_updated_at = AsyncMock(return_value=None)
     backend.get_member = AsyncMock(
         return_value=SimpleNamespace(
             member_name="claude-1",
             display_name="Claude One",
             desc="",
             role=TeamRole.TEAMMATE.value,
+            prompt="",
         )
     )
     backend.get_team_info = AsyncMock(
@@ -2371,7 +2386,7 @@ async def test_external_member_context_refresh_survives_build_failure():
     backend = _external_backend()
     runtime = _external_runtime(backend)
     _, host, handler = _make_external_member_context_handler(harness=runtime, backend=backend)
-    backend.get_team_updated_at.side_effect = RuntimeError("db unavailable")
+    backend.get_team_updated_at_state.side_effect = RuntimeError("db unavailable")
     event = EventMessage.from_event(
         MemberShutdownEvent(
             team_name="test-team",
@@ -2467,12 +2482,20 @@ async def test_external_member_cancel_self_does_not_steer_team_context():
     host.deliver_input.assert_not_awaited()
 
 
+@pytest.mark.parametrize("lifecycle", ["temporary", "persistent"])
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_leader_auto_cleans_after_all_teammates_shutdown():
-    """Teams should clean once every non-leader member is SHUTDOWN."""
+async def test_leader_never_auto_cleans_after_all_teammates_shutdown(lifecycle):
+    """An empty roster is a state, not a request to disband.
+
+    A leader that shut its last teammate down is indistinguishable from one
+    between two waves of members, so this used to destroy live teams (and
+    rmtree their workspaces). Disbanding is explicit: the temporary leader's
+    ``clean_team`` tool, or the operator's ``delete_agent_team``. The leader
+    does not even go look at the roster for this.
+    """
     backend, handler = _make_member_status_handler(
-        "temporary",
+        lifecycle,
         [
             SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
             SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
@@ -2490,60 +2513,8 @@ async def test_leader_auto_cleans_after_all_teammates_shutdown():
     )
     await handler.on_member_event(event)
 
-    backend.clean_team.assert_awaited_once_with()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_persistent_leader_does_not_auto_clean_after_teammate_shutdown():
-    """A partially shut down persistent team must not clean early."""
-    backend, handler = _make_member_status_handler(
-        "persistent",
-        [
-            SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
-            SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
-            SimpleNamespace(member_name="code-reviewer", status=MemberStatus.READY.value),
-        ],
-    )
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="dev-code",
-            old_status=MemberStatus.SHUTDOWN_REQUESTED.value,
-            new_status=MemberStatus.SHUTDOWN.value,
-        )
-    )
-    await handler.on_member_event(event)
-
-    backend.list_members.assert_awaited_once_with()
+    backend.list_members.assert_not_awaited()
     backend.clean_team.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level1
-async def test_persistent_leader_auto_cleans_after_all_teammates_shutdown():
-    """A persistent team disband request should still clean once all members shut down."""
-    backend, handler = _make_member_status_handler(
-        "persistent",
-        [
-            SimpleNamespace(member_name="leader-1", status=MemberStatus.READY.value),
-            SimpleNamespace(member_name="dev-code", status=MemberStatus.SHUTDOWN.value),
-            SimpleNamespace(member_name="code-reviewer", status=MemberStatus.SHUTDOWN.value),
-        ],
-    )
-
-    event = EventMessage.from_event(
-        MemberStatusChangedEvent(
-            team_name="test-team",
-            member_name="code-reviewer",
-            old_status=MemberStatus.SHUTDOWN_REQUESTED.value,
-            new_status=MemberStatus.SHUTDOWN.value,
-        )
-    )
-    await handler.on_member_event(event)
-
-    backend.clean_team.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio

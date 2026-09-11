@@ -1,15 +1,21 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-from unittest.mock import AsyncMock, patch
+import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import (
+    AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
+    UsageMetadata,
+    UserMessage,
 )
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, LLMApiMode
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
@@ -26,6 +32,11 @@ def _make_client() -> OpenAIModelClient:
     )
     request_config = ModelRequestConfig(model="MiniMax-M3")
     return OpenAIModelClient(request_config, client_config)
+
+
+class _UpperParser:
+    async def parse(self, content: str) -> str:
+        return content.upper()
 
 
 class _Obj:
@@ -89,6 +100,53 @@ def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
             }
         },
     )
+
+
+@pytest.mark.asyncio
+async def test_stream_parser_preserves_response_facts_through_usage_terminal() -> None:
+    client = _make_client()
+    parsed_chunks = [
+        AssistantMessageChunk(
+            content="answer",
+            metadata={"source": "provider"},
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+        AssistantMessageChunk(
+            content="",
+            usage_metadata=UsageMetadata(input_tokens=2, output_tokens=1, total_tokens=3),
+            finish_reason="stop",
+            response_id="resp-actual",
+            response_model="model-actual",
+            provider_metadata={"service_tier": "priority"},
+        ),
+    ]
+    client._parse_stream_chunk = MagicMock(side_effect=parsed_chunks)
+
+    class _Parser:
+        async def parse(self, content):
+            return {"parsed": content}
+
+    async def _raw_stream():
+        yield object()
+        yield object()
+
+    actual = [
+        chunk
+        async for chunk in client._astream_with_parser(_raw_stream(), _Parser())
+    ]
+
+    assert actual[0].metadata == {"source": "provider"}
+    assert actual[0].parser_content == {"parsed": "answer"}
+    assert actual[0].response_id == "resp-actual"
+    assert actual[0].response_model == "model-actual"
+    assert actual[0].provider_metadata == {"service_tier": "priority"}
+    assert actual[1].usage_metadata.total_tokens == 3
+    assert actual[1].finish_reason == "stop"
+    assert actual[1].response_id == "resp-actual"
+    assert actual[1].response_model == "model-actual"
+    assert actual[1].provider_metadata == {"service_tier": "priority"}
 
 
 class TestApplyModelSpecificParams:
@@ -316,7 +374,7 @@ class TestApplyModelSpecificParams:
         assert "extra_body" not in params
 
 
-class TestDisabledThinkingCompatibility:
+class TestDisabledThinkingIntent:
     @staticmethod
     def _disabled_request_kwargs() -> dict:
         return {
@@ -335,79 +393,6 @@ class TestDisabledThinkingCompatibility:
             },
             "reasoning_effort": "off",
         }
-
-    @pytest.mark.asyncio
-    async def test_invoke_retries_without_disabled_thinking_on_1210_and_caches_by_model(self):
-        client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _response("fallback"),
-            _response("cached"),
-            _response("other"),
-        )
-
-        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            result = await client.invoke("hello", **self._disabled_request_kwargs())
-            cached_result = await client.invoke("hello again", **self._disabled_request_kwargs())
-            other_result = await client.invoke(
-                "hello other",
-                model="other-model",
-                **self._disabled_request_kwargs(),
-            )
-
-        assert result.content == "fallback"
-        assert cached_result.content == "cached"
-        assert other_result.content == "other"
-        assert sdk_client.chat.completions.create.call_count == 4
-
-        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
-        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
-        cached_call = sdk_client.chat.completions.create.call_args_list[2].kwargs
-        other_model_call = sdk_client.chat.completions.create.call_args_list[3].kwargs
-
-        assert first_call["extra_body"] == {
-            "routing": "blue",
-            "thinking": {"type": "disabled"},
-        }
-        assert first_call["enable_thinking"] is False
-        assert first_call["chat_template_kwargs"]["enable_thinking"] is False
-        assert first_call["reasoning"]["enabled"] is False
-        assert first_call["reasoning_effort"] == "off"
-
-        for call in (retry_call, cached_call):
-            assert call["model"] == "MiniMax-M3"
-            assert call["extra_body"] == {"routing": "blue"}
-            assert "enable_thinking" not in call
-            assert call["chat_template_kwargs"] == {"template": "keep"}
-            assert call["reasoning"] == {"budget": 32}
-            assert "reasoning_effort" not in call
-
-        assert other_model_call["model"] == "other-model"
-        assert other_model_call["extra_body"] == {
-            "routing": "blue",
-            "thinking": {"type": "disabled"},
-        }
-        assert other_model_call["enable_thinking"] is False
-
-    @pytest.mark.asyncio
-    async def test_stream_retries_without_disabled_thinking_on_1210(self):
-        client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _stream_response("a", "b"),
-        )
-
-        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            chunks = [chunk.content async for chunk in client.stream("hello", **self._disabled_request_kwargs())]
-
-        assert chunks == ["a", "b"]
-        assert sdk_client.chat.completions.create.call_count == 2
-        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
-        assert retry_call["extra_body"] == {"routing": "blue"}
-        assert "enable_thinking" not in retry_call
-        assert retry_call["chat_template_kwargs"] == {"template": "keep"}
-        assert retry_call["reasoning"] == {"budget": 32}
-        assert "reasoning_effort" not in retry_call
 
     @pytest.mark.asyncio
     async def test_supported_disabled_thinking_request_is_sent_once_unchanged(self):
@@ -429,72 +414,289 @@ class TestDisabledThinkingCompatibility:
         assert sent_call["reasoning"]["enabled"] is False
         assert sent_call["reasoning_effort"] == "off"
 
-    @pytest.mark.parametrize(
-        ("request_kwargs", "error"),
-        [
-            (
-                {"extra_body": {"routing": "blue"}},
-                _unsupported_disabled_thinking_error(),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Unauthorized",
-                    status_code=401,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Rate limited",
-                    status_code=429,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                TimeoutError("timed out"),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError(
-                    "Server error",
-                    status_code=500,
-                    body={"error": {"code": "1210", "message": "不支持关闭思考"}},
-                ),
-            ),
-            (
-                _disabled_request_kwargs.__func__(),
-                _OpenAIStyleError("Bad request: invalid temperature", status_code=400),
-            ),
-        ],
-    )
     @pytest.mark.asyncio
-    async def test_non_compatibility_errors_do_not_retry(self, request_kwargs, error):
+    async def test_rejected_disable_is_not_silently_retried_with_model_defaults(self):
         client = _make_client()
-        sdk_client = _mock_sdk_client(error)
+        sdk_client = _mock_sdk_client(_unsupported_disabled_thinking_error())
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
             with pytest.raises(BaseError):
-                await client.invoke("hello", **request_kwargs)
+                await client.invoke("hello", **self._disabled_request_kwargs())
 
         assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_fallback_failure_is_not_retried_again(self):
+    async def test_stream_rejected_disable_is_not_silently_retried(self):
         client = _make_client()
-        sdk_client = _mock_sdk_client(
-            _unsupported_disabled_thinking_error(),
-            _OpenAIStyleError("fallback failed", status_code=400),
-        )
+        sdk_client = _mock_sdk_client(_unsupported_disabled_thinking_error())
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            with pytest.raises(BaseError) as exc_info:
-                await client.invoke("hello", **self._disabled_request_kwargs())
+            with pytest.raises(BaseError):
+                _ = [chunk async for chunk in client.stream("hello", **self._disabled_request_kwargs())]
 
-        assert "fallback failed" in str(exc_info.value)
-        assert sdk_client.chat.completions.create.call_count == 2
+        assert sdk_client.chat.completions.create.call_count == 1
+
+
+def _build_messages_params(model: str, messages: list, *, endpoint_profile: str | None = "vllm") -> dict:
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile=endpoint_profile,
+        api_key="sk-test-key",
+        api_base="https://example.invalid/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model=model), client_config)
+    return client._build_request_params(
+        messages=messages,
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=model,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+
+def test_unset_sampling_params_are_omitted_from_chat_request():
+    params = _build_messages_params(
+        "gpt-4o-mini",
+        [{"role": "user", "content": "hello"}],
+    )
+
+    assert "temperature" not in params
+    assert "top_p" not in params
+
+
+def test_configured_sampling_params_are_forwarded_on_chat_request():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.invalid/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(
+        ModelRequestConfig(model="gpt-4o-mini", temperature=0.2, top_p=0.8),
+        client_config,
+    )
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+    assert params["temperature"] == 0.2
+    assert params["top_p"] == 0.8
+
+
+def test_deepseek_model_name_adds_empty_reasoning_content_without_profile():
+    params = _build_messages_params(
+        "DeepSeek-V4-Pro",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+
+    assert params["messages"][1]["reasoning_content"] == ""
+
+
+def test_non_deepseek_model_does_not_add_reasoning_content():
+    params = _build_messages_params(
+        "GLM-5.2",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ],
+    )
+
+    assert "reasoning_content" not in params["messages"][1]
+
+
+def test_deepseek_model_keeps_existing_reasoning_content():
+    params = _build_messages_params(
+        "deepseek-v4-pro",
+        [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi", "reasoning_content": "real thinking"},
+        ],
+    )
+
+    assert params["messages"][1]["reasoning_content"] == "real thinking"
+
+
+def test_openai_none_auth_uses_placeholder_sdk_key():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="ollama",
+        api_base="http://localhost:11434/v1",
+        auth_mode=LLMAuthMode.NoneAuth,
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen2.5:7b"), client_config)
+
+    assert client._resolved_api_key() == "EMPTY"
+
+
+def test_dashscope_profile_converts_text_and_reference_images_for_generation():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="dashscope",
+        api_key="sk-test-key",
+        api_base="https://dashscope.aliyuncs.com",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="wan2.6-image"), client_config)
+
+    content = client._dashscope_image_content([
+        UserMessage(content=[
+            {"text": "turn this into watercolor"},
+            {"image": "https://example.test/source.png"},
+            {"image_url": {"url": "https://example.test/ref.png"}},
+        ])
+    ])
+
+    assert content == [
+        {"text": "turn this into watercolor"},
+        {"image": "https://example.test/source.png"},
+        {"image": "https://example.test/ref.png"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        [{"text": "prompt", "extra": "ignored"}],
+        [{"text": "prompt"}, {"image": "https://example.test/a.png", "extra": "ignored"}],
+        [{"text": "prompt"}, {"image_url": {"url": ""}}],
+        [{"text": "prompt"}, {"type": "image", "image": "https://example.test/a.png"}],
+    ],
+)
+def test_dashscope_profile_rejects_invalid_image_generation_content(content):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._dashscope_image_content([UserMessage(content=content)])
+
+
+@pytest.mark.parametrize(
+    ("voice", "language_type"),
+    [
+        ("UnknownVoice", "Auto"),
+        ("Cherry", "UnknownLanguage"),
+    ],
+)
+def test_dashscope_profile_rejects_invalid_speech_params(voice, language_type):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._validate_dashscope_speech_params(
+            voice=voice,
+            language_type=language_type,
+        )
+
+
+@pytest.mark.parametrize(
+    ("img_url", "size", "resolution"),
+    [
+        ("https://example.test/a.png", "1280*720", None),
+        (None, None, "720P"),
+    ],
+)
+def test_dashscope_profile_rejects_mismatched_video_size_params(img_url, size, resolution):
+    with pytest.raises(BaseError):
+        OpenAIModelClient._validate_dashscope_video_params(
+            img_url=img_url,
+            size=size,
+            resolution=resolution,
+        )
+
+
+def test_openrouter_profile_adds_prompt_cache_markers_on_openai_client():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        endpoint_profile="openrouter",
+        api_key="sk-test-key",
+        api_base="https://openrouter.ai/api/v1",
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="anthropic/claude-sonnet-4"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+    )
+
+    assert params["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
+    assert params["tools"][0]["cache_control"] == {"type": "ephemeral"}
+
+
+def test_kv_release_fields_move_to_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_key="sk-test-key",
+        api_base="https://example.test/v1",
+        extensions={"kv_cache": {"mode": "release"}},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="session-1",
+        enable_cache_sharing=True,
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["cache_salt"] == "session-1"
+    assert params["extra_body"]["cache_sharing"] is True
+    assert "cache_salt" not in params
+
+
+def test_kv_affinity_agent_hint_moves_to_extra_body_for_openai_sdk():
+    client_config = ModelClientConfig(
+        client_provider="OpenAI",
+        api_base="https://example.test/v1",
+        auth_mode=LLMAuthMode.CustomHeaders,
+        extensions={"kv_cache": {"mode": "affinity"}},
+        verify_ssl=False,
+    )
+    client = OpenAIModelClient(ModelRequestConfig(model="qwen"), client_config)
+
+    params = client._build_request_params(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        temperature=None,
+        top_p=None,
+        model=None,
+        stop=None,
+        max_tokens=None,
+        stream=False,
+        session_id="child",
+        parent_session_id="parent",
+    )
+    client._move_openai_extra_body_extensions(params)
+
+    assert params["extra_body"]["agent_hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+    }
+    assert "agent_hint" not in params
 
 
 class _Delta:
@@ -534,6 +736,217 @@ class TestExtractReasoningContent:
         delta = _Delta()
         assert OpenAIModelClient._extract_reasoning_content(delta) is None
 
+    def test_falls_back_to_reasoning_token_text(self):
+        delta = _Delta(reasoning_token_text="gateway think")
+        assert OpenAIModelClient._extract_reasoning_content(delta) == "gateway think"
+
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_parse_response_preserves_additive_provider_facts():
+    response = _Obj(
+        id="resp-1",
+        model="returned-model",
+        system_fingerprint="fp-1",
+        service_tier="default",
+        prompt_token_ids=[1, 2],
+        usage=_Obj(
+            prompt_tokens=3,
+            completion_tokens=2,
+            total_tokens=5,
+            input_tokens_details=_Obj(
+                cached_tokens=1,
+                cache_creation_tokens=1,
+            ),
+        ),
+        choices=[
+            _Obj(
+                message=_Obj(content="answer"),
+                finish_reason="stop",
+                token_ids=[3, 4],
+                logprobs=None,
+            )
+        ],
+    )
+
+    message = await _make_client()._parse_response(response, None)
+
+    assert message.response_id == "resp-1"
+    assert message.response_model == "returned-model"
+    assert message.provider_metadata == {
+        "system_fingerprint": "fp-1",
+        "service_tier": "default",
+    }
+    assert message.prompt_token_ids == [1, 2]
+    assert message.completion_token_ids == [3, 4]
+    assert message.usage_metadata.cache_tokens == 1
+    assert message.usage_metadata.cache_creation_input_tokens == 1
+
+
+class TestOpenAIResponsesApiKeyMode:
+    """OpenAIModelClient with api_mode=responses talks to /responses."""
+
+    @staticmethod
+    def _make_responses_client() -> OpenAIModelClient:
+        client_config = ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test-key",
+            api_base="https://api.openai.com/v1",
+            api_mode=LLMApiMode.Responses,
+            timeout=60.0,
+            verify_ssl=False,
+        )
+        request_config = ModelRequestConfig(model="gpt-5.4-mini", temperature=0.2, top_p=0.1)
+        return OpenAIModelClient(request_config, client_config)
+
+    @staticmethod
+    def _responses_stream_body() -> bytes:
+        return (
+            "event: response.output_text.delta\n"
+            'data: {"delta":"ok"}\n\n'
+            "event: response.completed\n"
+            'data: {"response":{"id":"resp-1","model":"gpt-returned","status":"completed",'
+            '"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3,'
+            '"input_tokens_details":{"cache_creation_tokens":1}}}}\n\n'
+        ).encode()
+
+    def test_uses_responses_api_detects_api_mode(self):
+        assert self._make_responses_client()._uses_responses_api() is True
+        assert _make_client()._uses_responses_api() is False
+
+    @pytest.mark.asyncio
+    async def test_invoke_routes_to_responses_endpoint_with_api_key(self):
+        import httpx
+
+        seen_request = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_request["headers"] = request.headers
+            seen_request["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            response = await client.invoke("hello", session_id="session-1", custom_headers={"X-Request": "v"})
+
+        assert seen_request["headers"]["Authorization"] == "Bearer sk-test-key"
+        assert seen_request["headers"]["X-Request"] == "v"
+        assert seen_request["body"]["model"] == "gpt-5.4-mini"
+        assert seen_request["body"]["stream"] is True
+        assert response.content == "ok"
+        assert response.response_id == "resp-1"
+        assert response.usage_metadata.total_tokens == 3
+        assert response.usage_metadata.cache_creation_input_tokens == 1
+
+    @pytest.mark.asyncio
+    async def test_invoke_does_not_send_sampling_params_by_default(self):
+        import httpx
+
+        seen_body = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_body.update(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                content=(
+                    "event: response.output_text.delta\n"
+                    'data: {"delta":"ok"}\n\n'
+                    "event: response.completed\n"
+                    'data: {"response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                ).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            await client.invoke("hello", temperature=0.3, top_p=0.9)
+
+        assert "temperature" not in seen_body
+        assert "top_p" not in seen_body
+
+    @pytest.mark.asyncio
+    async def test_stream_routes_to_responses_endpoint_with_api_key(self):
+        import httpx
+
+        seen_request = {}
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_request["headers"] = request.headers
+            seen_request["body"] = json.loads(request.content.decode())
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        assert seen_request["headers"]["Authorization"] == "Bearer sk-test-key"
+        assert seen_request["body"]["model"] == "gpt-5.4-mini"
+        assert seen_request["body"]["stream"] is True
+        assert "".join(chunk.content for chunk in chunks) == "ok"
+        assert chunks[-1].usage_metadata.total_tokens == 3
+
+    @pytest.mark.asyncio
+    async def test_stream_routes_to_responses_endpoint_with_output_parser(self):
+        import httpx
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=(
+                    "event: response.output_text.delta\n"
+                    'data: {"delta":"ok"}\n\n'
+                    "event: response.completed\n"
+                    'data: {"response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n'
+                ).encode(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            chunks = [chunk async for chunk in client.stream("hello", output_parser=_UpperParser())]
+
+        assert "".join(chunk.content for chunk in chunks) == "ok"
+        assert any(chunk.parser_content == "OK" for chunk in chunks)
+
+    @pytest.mark.asyncio
+    async def test_invoke_wraps_responses_transport_error(self):
+        import httpx
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(401, json={"error": {"message": "bad key"}})
+
+        client = self._make_responses_client()
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            with pytest.raises(BaseError):
+                await client.invoke("hello")

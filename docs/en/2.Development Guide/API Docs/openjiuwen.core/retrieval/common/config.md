@@ -93,6 +93,6 @@ Reranker configuration class, defining reranker-related configuration parameters
 * **model_name**(str): Model name (accessible via alias "model"). Default: "".
 * **timeout**(float): Request timeout in seconds. Default: 10.
 * **temperature**(float): Temperature parameter. Default: 0.95.
-* **top_p**(float): Top-p sampling parameter. Default: 0.1.
+* **top_p**(float): Top-p sampling parameter. Default: 0.95.
 * **yes_no_ids**(tuple[int, int], optional): Token IDs for "yes" and "no" (e.g., `(123, 456)`). Default: None.
 * **extra_body**(dict): Special keyword arguments (e.g., `{"custom_param": "value"}`). Default: {}.

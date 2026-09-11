@@ -1,0 +1,33 @@
+{
+  "name": "openjiuwen_deepagent_evobench",
+  "version": "0.1.0",
+  "engine": "openjiuwen-deepagent",
+  "engine_revision": "repository-head",
+  "system_prompt": "system_prompt.md",
+  "max_steps": 120,
+  "rollout_wall_clock_seconds": 3600,
+  "command_timeout_seconds": 600,
+  "model_transport_retries": 2,
+  "tool_loop_compaction": {
+    "enabled": true,
+    "consecutive_threshold": 4,
+    "bailout_threshold": 3
+  },
+  "submission_checkpoint": {
+    "enabled": false,
+    "instruction": "",
+    "max_revisions": 1,
+    "max_collected_evidence_items": 96,
+    "max_collected_evidence_chars": 256000,
+    "max_tool_result_chars": 8000,
+    "max_audit_evidence_items": 48,
+    "max_audit_evidence_chars": 64000,
+    "max_task_chars": 10000,
+    "max_draft_chars": 12000,
+    "max_ground_count": 12,
+    "max_audit_prompt_chars": 96000,
+    "audit_timeout_seconds": 180,
+    "max_audit_retries": 1,
+    "max_rechecks": 1
+  }
+}

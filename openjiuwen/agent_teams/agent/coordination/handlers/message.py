@@ -30,10 +30,13 @@ from openjiuwen.agent_teams.i18n import reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
     INBOUND_TYPE_DIRECT,
+    render_event,
     render_inbound,
 )
 from openjiuwen.agent_teams.message_template import ExpandedMessage, expand_message
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, bind_template_loader
 from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent, TeamEvent
+from openjiuwen.agent_teams.schema.external_runtime_reliability import ExternalRuntimeFailure
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.timefmt import format_time_context
@@ -241,6 +244,20 @@ class MessageHandler(BaseCoordinationHandler):
                         )
                         interrupted = True
                         break
+                    # An external_runtime_failed JSON message is rendered as a
+                    # <team-event> and never falls through to plain
+                    # member-message rendering, so the leader sees a
+                    # structured failure cue instead of raw JSON.
+                    failure_text = self._render_external_runtime_failed(msg)
+                    if failure_text is not None:
+                        team_logger.info(
+                            "[{}] delivering external runtime failure message {}",
+                            member_name,
+                            msg.message_id,
+                        )
+                        await self._round.deliver_input(failure_text, use_steer=use_steer)
+                        delivered.append(msg)
+                        continue
                     expanded = await self._expand(msg)
                     if is_bridge:
                         text = await self._bridge_deliverable_for(member_name, msg, expanded=expanded)
@@ -268,6 +285,21 @@ class MessageHandler(BaseCoordinationHandler):
             return team_spec.language
         return "cn"
 
+    @property
+    def _template_loader(self) -> TemplateLoader:
+        """The per-team A-class loader, bound once from the backend's cache.
+
+        Lazy: the first access snapshots
+        ``_infra.team_backend.workspace_cache`` into a loader closure so
+        scheduler_* deliveries read evolved workspace templates. Bound once
+        per handler life via the ``_template_loader_cache`` instance field.
+        """
+        loader = self._template_loader_cache
+        if loader is None:
+            loader = bind_template_loader(self._infra)
+            self._template_loader_cache = loader
+        return loader
+
     async def _expand(self, msg: Any) -> ExpandedMessage:
         """Render a message row's delivery text (F_63 two-phase templating).
 
@@ -290,6 +322,7 @@ class MessageHandler(BaseCoordinationHandler):
             task_getter=_get_task,
             member_getter=_get_member,
             language=self._language(),
+            loader=self._template_loader,
         )
 
     async def _bridge_deliverable_for(self, member_name: str, msg: Any, *, expanded: ExpandedMessage) -> str:
@@ -592,3 +625,63 @@ class MessageHandler(BaseCoordinationHandler):
         if isinstance(data, dict) and data.get("type") == "tool_approval_result":
             return data
         return None
+
+    @staticmethod
+    def _render_external_runtime_failed(msg: Any) -> str | None:
+        """Render an ``external_runtime_failed`` JSON message as a team-event.
+
+        Returns the rendered ``<team-event kind="external-runtime-failed">``
+        block if ``msg`` is a ``protocol="json"`` message carrying a valid
+        :class:`ExternalRuntimeFailure` payload, or ``None`` otherwise (so the
+        caller falls through to plain rendering). Validates the payload before
+        rendering so the leader never sees raw or malformed JSON.
+        """
+        if msg.protocol != "json" or not msg.content:
+            return None
+        try:
+            data = json.loads(msg.content)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(data, dict) or data.get("type") != "external_runtime_failed":
+            return None
+        try:
+            failure = ExternalRuntimeFailure.model_validate(data)
+        except Exception:  # noqa: BLE001 - malformed payload must not crash delivery
+            team_logger.warning(
+                "[external-runtime] failed to validate external_runtime_failed message {}; skipping",
+                getattr(msg, "message_id", "?"),
+            )
+            return None
+        phase_key = failure.phase
+        if failure.phase == "turn" and failure.reason.http_status is not None:
+            phase_key = "turn_http"
+        phase_guidance = t(f"reliability.external_runtime_phase.{phase_key}")
+        user_action_key = "required" if failure.user_action_required else "not_identified"
+        user_action_guidance = t(f"reliability.user_action.{user_action_key}")
+        empty_field = "<none>"
+        cli_path_diagnostic = (
+            t("reliability.external_runtime_cli_path", cli_path=failure.cli_path)
+            if failure.cli_path
+            else ""
+        )
+        body = t(
+            "reliability.external_runtime_failed",
+            member_name=failure.member_name,
+            agent_kind=failure.agent_kind,
+            model=failure.model or "<unknown>",
+            phase=failure.phase,
+            category=failure.category,
+            summary=failure.summary,
+            reason_message=failure.reason.message,
+            suggested_action=failure.suggested_action,
+            user_action_required=failure.user_action_required,
+            failure_id=failure.failure_id,
+            round_id=failure.round_id if failure.round_id is not None else empty_field,
+            http_status=failure.reason.http_status if failure.reason.http_status is not None else empty_field,
+            sdk_error_type=failure.reason.sdk_error_type or empty_field,
+            sdk_error_code=failure.reason.sdk_error_code or empty_field,
+            cli_path_diagnostic=cli_path_diagnostic,
+            phase_guidance=phase_guidance,
+            user_action_guidance=user_action_guidance,
+        )
+        return render_event(kind="external-runtime-failed", body=body)

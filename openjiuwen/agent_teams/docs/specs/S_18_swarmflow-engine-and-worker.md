@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-08-04 |
-| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md` |
+| 最近一次修订日期 | 2026-08-28 |
+| 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md` |
 
 ## 范围 / 边界
 
@@ -36,7 +36,7 @@
   `agent()` 的 option 集合包含 `label` / `phase` / `schema` / `model` /
   `timeout` / `isolation`。`isolation` 当前只允许 `None` 或 `"worktree"`；
   engine 只校验与透传，具体隔离语义由 backend 实现。
-- **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。
+- **可观测性**：`Runtime` 有两个 sink。`log_sink: Callable[[str], None]`（诊断文本，默认 no-op）；`progress_sink: Callable[[WorkflowProgressEvent], None]`（结构化进度，默认 no-op）。`phase()`/`log()`/`agent()` 起止发 `WorkflowProgressEvent`；引擎不读 wall-clock（保持 resume 确定性），事件**无时间戳**——消费方在 agent_teams 层补时。`WORKFLOW_STARTED` 事件额外携带 `script_path`（`run_workflow(path)` 的绝对脚本路径，供嵌入层冷启动恢复 advisory 用，见 `F_110`；其它 kind 一律 None）。
 - **嵌套 workflow 的深度守卫是 per-task，不是全局**：`workflow()` 递归封顶用 `primitives._wf_depth`（contextvar，`_MAX_WORKFLOW_DEPTH=1`），非共享 `Runtime` 计数器。
   - contextvar 随 asyncio Task 拷贝：`parallel`/`pipeline` 各分支继承父深度 → **同层并发 `workflow()` 全部放行**
   - 真递归（子流 `run()` 内再调 `workflow()`，同一 Task）→ 返回 `None` + progress `LOG`（`[wf] nested workflow depth > 1 not allowed; skipping`）
@@ -61,6 +61,27 @@
 - **`BudgetExhausted` 是 `BaseException`**（与 `WorkflowAborted` 同理由：能被 `except Exception` 吞掉的天花板不叫天花板，须穿透 `parallel` / `pipeline` 分支体）。但语义相反——abort 可恢复（resume 重跑），exhausted 是**终态**（重跑只会撞同一个 gate），故 `SwarmflowTool.run_background` 单独捕获它转成 `BackendError`，让 async-tool runtime 注入 leader 读得到的失败；直接放 `BaseException` 上去会静默杀掉 task。
 - **允许小幅越界**：一次调用的用量只有返回后才入账，最后那次可以把 `spent` 顶过 `total`；`remaining()` 因此 clamp 到 0，不返回负数。要不越界就得预知成本——不可能。
 - **作用域是 leader，不是 run**：账本由 `agent_configurator` 在 `role==LEADER and enable_swarmflow` 时建一个，经 `inject_team_handles(SWARMFLOW_BUDGET)` → `TeamToolRail` → `create_team_tools` → `SwarmflowTool` → `run_swarmflow(budget=)` 下发（与 `swarmflow_concurrency` 完全平行的链路）。并发 run 抽同一个池，对齐工具描述里 `spent()`「跨主循环 + 所有工作流共享」的语义。配置入口是 `TeamAgentSpec.swarmflow_budget: int | None`（build 期校验 `>= 1`，与 `validate_swarmflow_concurrency` 同层）；**不是 `swarmflow()` 工具入参**——花钱上限是部署方的决定，不该由 leader 每次现编。
+
+### 双层 Budget 与 run_id 隔离（`F_87`）
+
+- **两层账本分立**：`Runtime.budget`（session/leader 级，跨 run 共享）之外，run 启动时按脚本
+  `META["workflow_token_limit"]` 建 per-run `BudgetLedger` 存 `Runtime.workflow_budget`。
+  `SwarmflowBudgetRail` 在 `after_model_call` 记账时，`workflow_budget` 非 None 则同时往
+  `self._budget.add(tokens)` 与 `self._wf_budget.add(tokens)` 各记一笔；`workflow_budget=None`
+  时退化为纯 session 级（向后兼容未配 `workflow_token_limit` 的脚本）。
+- **leader / TinyAgent 的 token 只算 session，不算 workflow**：leader 与判断意图的 TinyAgent
+  不属于某次 run 的 worker 群，其消耗进 session 账本但不进 per-run 账本——避免一次 run 的撞顶
+  被 leader 自身开销提前触发。`agent_configurator` 在 `enable_swarmflow` 时给 leader 挂
+  `SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None)`（per-run 账本由引擎在 run 启动时注入）。
+- **`BudgetExhausted.scope`**：`scope="workflow"`（per-run 账本撞顶）= 可重试，改脚本或调高
+  `workflow_token_limit` 后同 run_id relaunch；`scope="session"`（leader/session 账本撞顶）=
+  终端，需新建 session 或调高 `swarmflow_budget`。
+- **缓存命中必须重建花费**：`journal.get_cached(ks, sig, run_id)` 命中后，用记录里的 `tokens`
+  字段调 `rt.workflow_budget.add(cached_tokens)` 把当初那笔消耗加回本次 run 的 per-run 账本——
+  否则撞顶检测会把命中缓存当"免费"而失灵。
+- **`run_id` 进 journal 查询，不进 journal 路径**：journal 落盘路径仍由
+  `(team, session, workflow_name)` 决定（不变量），多 run 同名脚本共享同一 journal 文件；
+  `run_id` 只参与记录级的命中判定（`get_cached` 第三参数）。旧 run（无 run_id 字段）自然失效。
 - **Progress 可观测（结果回路与终态）**：
   - per-agent `tokens`：`AgentResult.tokens` → `_BackendCallResult.tokens` → `_emit_agent_completed` / `_emit_agent_failed`（cache-hit 时 `tokens=None`，budget 快照仍带）
   - `budget`：`_budget_snapshot(rt.budget)` → `{total, spent, remaining, scope="leader", exhausted}`
@@ -124,6 +145,50 @@ journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把�
 
 详见 `F_38`(路径接线)、`F_40`(落盘顺序 / WAL / 原子 / 异步)。
 
+### Run 级记录与可恢复性（`F_87` / `F_88`）
+
+journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记录，key 形如
+`__run__:{type}:{run_id}`，复用同一 journal 文件 + WAL 机制：
+
+- **`get_cached(ks, sig, run_id)`**：命中条件从 `(ks, sig)` 升级为 `(ks, sig, run_id)` 三元组。
+  旧 run（无 run_id 字段）自然失效——`run_id=None` 与新 run 的非空 run_id 比对为不等。命中后
+  用记录里的 `tokens` 字段重建 per-run 花费（见双层 Budget 节）。
+- **`find_run_record(run_id, record_type)`**：查某 run 是否有某类记录（当前 `seal` / `pause`）。
+- **`write_run_record(run_id, record_type, payload)`**：写 run 级记录，落 WAL + 刷进 `prior`
+  使同 run 查询可见。
+- **seal 记录**：run 终态时 `_write_seal_record(rt, terminal_status)` 写
+  `__run__:seal:{run_id}`（`terminal_status` = `completed` / `stopped`）。sealed run 不可 resume。
+- **pause 记录**：可恢复中断时 `_write_pause_record(rt, pause_reason)` 写
+  `__run__:pause:{run_id}`（`pause_reason` = `paused` / `early_return` /
+  `workflow_budget_exhausted`）。pause 记录的 run 可同 run_id resume。
+- **args 记录**（`F_110`）：首跑 `run_workflow` 时若 `args is not None` 且 `run_id` 非空写
+  `__run__:args:{run_id}`（payload `{"args": <string>}`）；冷启动 resume 无 args 时
+  `find_run_record(run_id, "args")` 读回。保证 resume 重放与首跑同路径（缓存命中），不退化全量重跑。
+
+事件语义对齐（`F_88`）：
+
+| 场景 | 事件 | status | 记录 | 可恢复 |
+|---|---|---|---|---|
+| 正常完成 | `WORKFLOW_COMPLETED` | completed | seal(completed) | 否（终态） |
+| workflow 级 budget 撞顶 | `WORKFLOW_FAILED` | failed | pause(workflow_budget_exhausted) | 是（改脚本重试） |
+| session 级 budget 撞顶 | `WORKFLOW_STOPPED` | stopped | seal(stopped) | 否（终端） |
+| early_return（改脚本重跑） | `WORKFLOW_PAUSED` | paused | pause(early_return) | 是 |
+| pause/resume | `WORKFLOW_PAUSED` | paused | pause(paused) | 是 |
+| stop | `WORKFLOW_STOPPED` | stopped | seal(stopped) | 否 |
+
+- **CancelledError seal 兜底**：stop 落在 LLM 调用中途时 `WorkflowAborted` checkpoint 来不及触发，
+  `_exec_loaded` 的 `except asyncio.CancelledError` 检查 `rt.abort_event.reason == "stop"`，若然则
+  `task.uncancel()` 后补写 seal 再 raise——保证 stop 永远落 seal。
+- **seal guard**：`SwarmflowTool._seal_guard(script_path, resume_id)` 在 invoke 时若 `resume_id`
+  指向已 seal 的 run（`find_run_record(resume_id, "seal")` 命中），清空 `resume_id` → 强制
+  `new_swarmflow_run_id()`。best-effort，journal 读取失败只 debug log，不阻塞。
+- **`relaunch_kind`**：`WorkflowProgressTeamEvent.relaunch_kind: "relaunch" | "resume" | None`，
+  由 `SwarmflowTool._publish` 从 inputs 透传。`"relaunch"`（脚本编辑重跑，存在 resume_id 时
+  invoke 设置）= 整体替换 phase/agent 树；`"resume"`（pause→resume，`relaunch` 设置）= 增量合并；
+  `None` = 全新 launch。
+- **`swarmflow_human_reply_topic(session_id, team_name, run_id)`**：human session 真人回复走专用
+  topic（run-scoped，避免与 leader team-event 订阅竞态）。
+
 ## 并发治理（`F_47` / `S_21`）
 
 单 Leader 实例内一个 `ConcurrencyGovernor`（与 `AsyncToolRuntime` 同作用域），三层 cap：
@@ -139,7 +204,7 @@ journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把�
 - engine：`Runtime.agent_gate`（`AgentAdmission` 协议）；Swarmflow 注入 `RunAgentAdmission`（先 L2 后 L3）。
   **未注入时 back-compat**：`primitives._resolve_agent_gate(rt)` 惰性构造 `SemaphoreAdmission(rt.make_cap())`
   赋回 `rt.agent_gate`，等价旧 `Runtime.sem`（`MockBackend` / `preprocess_swarmflow` / 旧测试不受影响）。
-- **resume（`F_43`）**：`_relaunch` 复用 inputs 内 ticket/gate，**不**二次 admit。注：`run_background.finally`
+- **resume（`F_43`）**：`relaunch` 复用 inputs 内 ticket/gate，**不**二次 admit。注：`run_background.finally`
   对 `WorkflowAborted→CancelledError` 也会 release（pause 退出即释 L1）；resume 复用同 ticket 但不重新 admit，
   故 resume 期间不占 L1 槽（详见 `S_21` 错误语义）。
 - **`run_id`**：进程内身份 + Leader 播报 + worker 命名前缀；**不改变** journal 路径（仍
@@ -170,16 +235,22 @@ async_tool_runtime.cancel(task_id)`。
    human 还 cancel `_pending_human` 在等真人的 future）。abort_all 在 controller 协程内**完整**执行，
    故必须排在 cancel 之前，否则顶层 cancel 解栈时 session supervisor 泄漏。
 
-**resume 契约**：`controller.resume()` → `SwarmflowTool._relaunch(inputs, session_id)`（新 task_id +
+**resume 契约**：`controller.resume()` → `SwarmflowTool.relaunch(inputs, session_id)`（新 task_id +
 `launch_async_tool(同一 inputs)`，绕过 `invoke`）。journal 路径由 `(team,session,name)` 唯一决定 →
 命中 pause 前完成的 agent、断点后 live。SwarmflowTool 把 engine 抛的 `WorkflowAborted` 转
 `CancelledError`，让 async-tool runtime 静默取消（不注入完成）。human turn 的 `correlation_id` 跨
 resume 稳定，真人回复仍能匹配重跑的那轮。**resume 必须恢复 `session_id` contextvar**：relaunch 由
 外部协程（controller）驱动、不在 leader round 上下文里，而 `launch_async_tool` 的新 task 在
 `create_task` 时继承当前 context；故 `run_background` 捕获 `session_id` 一次（贯穿 `_publish` topic
-/ `run_swarmflow` / relaunch 闭包），`_relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
+/ `run_swarmflow` / relaunch 闭包），`relaunch` 在 launch 前 `set_session_id(原 session)`、`finally`
 复位。缺这一步 resume 会解析到空 session → 用错 journal 路径（不命中缓存、全部重跑）+ 进度事件发到
 错 topic（外部 monitor/drain 收不到）。
+
+**stop 契约（`F_110`）**：`controller.stop(run_id: str | None = None)`。单值语义不变（active →
+`_abort_one(reason="stop")` 写 seal 断根、paused → 丢复活票）。`run_id=None` 全量遍历两个注册表：
+`_active` 逐个 abort+pop（写 seal）、`_paused` 逐个 pop 且**不补 seal**（pause 记录已在 journal，
+冷启动仍可 `resume_id` 命中缓存前缀续跑）。stop 与 pause/resume 同 `_lock` 互斥；`_paused` 的清理
+是"丢票保账本"，对应嵌入层"切换/断连清扫不终止意图"的语义。
 
 **接线**：`team_runner.run_agent_team_streaming(background_task_controller=)` →
 `TeamAgent.set_background_task_controller` → `TeamHarness`（存 `_bg_controller`，`start` 跨 native
@@ -209,6 +280,12 @@ rebuild 回灌）→ `NativeHarness.background_task_controller`；SwarmflowTool 
    - 入向：`interact_agent_team(HumanAgentMessage(target="swarmflow:<corr>"))` → `swarmflow_human_reply_topic` → `submit_human_reply`
    - human base spec 经 `SWARMFLOW_HUMAN_BASE_SPEC` 注入。详见 `F_37`。
 10. **run 收口**：`run_workflow` finally 调 `backend.aclose()` 释放本 run 开过的所有会话。
+11. **fork 原语（`F_81`）**：`AgentSession.fork(fork_mode=, keep_rounds=, label=, phase=, instructions=, options=)` 派生独立分支，五种 `fork_mode`（`full` / `before` / `after` / `keep_before_compact_after` / `keep_after_compact_before`）逐字对齐团队 fork。`keep_rounds` 为**轮数**（每次 `send()` 计一轮）：**`full` 之外必填**（缺省抛 `WorkflowError`）；**越界**（> 实际轮数）告警 + 回退全量。eager 捕获——`fork()` 调用时刻冻结父上下文，之后父自由 `send` 不影响子；子可链式再 `fork`。`human_session` 拒绝。fork turn 的 `node_type="agent_session_fork"`。
+    - 引擎层只做镜像继承 + `backend.capture_fork` 委托 + 存不透明 `fork_data`（铁律 1：engine 不碰业务符号）；backend 负责轮数→消息索引换算、捕获/注入/双向压缩、child session_id 派生。
+    - **`_member_name` + `ensure_member_name`（D9）**：`AgentSession` 在首次 `send`（无论 cache-hit/miss）经 `backend.ensure_member_name(kind, opts)` 预留 member name（不建 avatar / 不调 LLM / 不计 spawn）；`_sid` 保持"已建 avatar"语义（只 miss 时设）。`fork()` 用 `_member_name` 定位父恢复路径（而非 `_sid`），故 fully-hit resume 也能 fork。cache-hit 首轮也命名使 `_counter` 由 session 访问顺序决定、跨 resume 稳定（修复 counter 漂移）。
+    - 后端捕获路径（`AvatarSessionManager.capture_fork`）：父 live → `ForkContext.from_agent`（含 ToolMessage）；父未重建（fully-hit resume）→ 构造一个**独立** Session（`create_agent_session(session_id=固定id, card=AgentCard(id=f"{team_name}_{member_name}"))`，card.id 带 team 前缀以匹配真实 agent_id；非"绑定"父 live session，仅复用其分桶键）+ `pre_run` 从 checkpointer 恢复 `state["context"]`（含 ToolMessage，无需重建父 avatar，见 D6）；两者都无 → 返 `None`，引擎镜像兜底（缺 ToolMessage）。
+    - **链式 fork 约束（D10）**：不要 fork 一个未 send 过的 fork 子会话（其 `_member_name` 为 None，会镜像兜底）；想基于父早期状态派生，直接用父的 `fork_mode` + `keep_rounds`。
+12. **前置底座：avatar 固定 session_id（`F_81` / F_37 决策 3）**：avatar child session 绑定稳定派生 id `{team}/{workflow}/{member}`（`_derive_avatar_session_id`），经 `harness.start(team_session=...)` → `create_agent_session(session_id=...)` 继承。这让已在代码里的 `pre_run` + checkpoint 恢复机制生效——同进程 resume 能按稳定 id 恢复 `state["context"]`（含 ToolMessage），是 fork 捕获完整上下文与部分-hit 续跑的共同底座。**仅同进程恢复（InMemory store）**；跨进程/重启的持久化 checkpointer 装配不做（`set_default_checkpointer` 进程级全局副作用大），列为遗留。
 
 ## 结构化输出工具协议（`StructuredOutputTool`）
 

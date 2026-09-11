@@ -24,6 +24,7 @@ from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatibl
 from openjiuwen.agent_evolving.trajectory.spans import (
     attributes_from_map,
     normalize_span,
+    write_llm_exchange,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 
@@ -194,19 +195,16 @@ class TrajectoryExtractor:
             messages = params.get("messages") or []
             if isinstance(messages, Mapping):
                 messages = [messages]
-            for message_index, value in enumerate(messages):
-                message = _message(value, "user")
-                if message is None:
-                    continue
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.role"] = message.get("role", "")
-                attrs[f"{semconv.GEN_AI_PROMPT}.{message_index}.content"] = message.get("content", "")
+            prompts = [
+                message for message in (_message(value, "user") for value in messages)
+                if message is not None
+            ]
             response = _extract_outputs(span)
             response_message = _message(response)
-            if response_message is not None:
-                attrs[f"{semconv.GEN_AI_COMPLETION}.0.role"] = response_message.get("role", "assistant")
-                attrs[f"{semconv.GEN_AI_COMPLETION}.0.content"] = response_message.get("content", "")
-                if response_message.get("tool_calls") is not None:
-                    attrs[semconv.GEN_AI_TOOL_CALLS] = response_message["tool_calls"]
+            completions = [] if response_message is None else [response_message]
+            attrs.update(write_llm_exchange(prompts, completions))
+            if response_message is not None and response_message.get("tool_calls") is not None:
+                attrs[semconv.GEN_AI_TOOL_CALLS] = response_message["tool_calls"]
             tools = params.get("tools")
             if tools:
                 attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = to_json_compatible(tools)

@@ -8,6 +8,8 @@ from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
 
+pytest.importorskip("elasticsearch")
+
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.store.base_vector_store import (
     CollectionSchema,

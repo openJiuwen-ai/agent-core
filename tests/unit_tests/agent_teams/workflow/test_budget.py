@@ -11,7 +11,9 @@ response and force-finishing the round that crosses the ceiling.
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -29,6 +31,7 @@ from openjiuwen.agent_teams.workflow.engine import run_workflow, runner
 from openjiuwen.agent_teams.workflow.engine import primitives as _p
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
+from openjiuwen.agent_teams.workflow.engine.journal import Journal
 from openjiuwen.agent_teams.workflow.engine.progress import ProgressKind
 from openjiuwen.agent_teams.workflow.engine.runtime import Runtime
 from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
@@ -51,7 +54,12 @@ async def run(args):
 _POLLING_SCRIPT = '''
 from swarmflow import agent, budget
 
-META = {"name": "poll", "description": "wind down on remaining()", "phases": []}
+META = {
+    "name": "poll",
+    "description": "wind down on remaining()",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
 
 async def run(args):
     done = 0
@@ -59,6 +67,42 @@ async def run(args):
         await agent("task", label="a")
         done += 1
     return {"done": done, "spent": budget.spent(), "remaining": budget.remaining()}
+'''
+
+# Declares a per-run ceiling; pairs with _DualLedgerBackend below to exercise
+# the per-run gate + the ``<journal>.budget`` sidecar lifecycle.
+_LIMIT_SCRIPT = '''
+from swarmflow import agent
+
+META = {
+    "name": "limit",
+    "description": "declared per-run ceiling",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
+
+async def run(args):
+    for i in range(5):
+        await agent(f"task {i}", label=f"a{i}")
+    return "done"
+'''
+
+# The "redesigned" relaunch: same META name (same journal stem), fewer and
+# differently-keyed calls, so nothing replays from run 1's cache.
+_REDESIGNED_SCRIPT = '''
+from swarmflow import agent
+
+META = {
+    "name": "limit",
+    "description": "declared per-run ceiling",
+    "phases": [],
+    "workflow_token_limit": 100,
+}
+
+async def run(args):
+    for i in range(2):
+        await agent(f"cheap {i}", label=f"b{i}")
+    return "done"
 '''
 
 
@@ -79,6 +123,23 @@ class _FixedCostBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         self.calls += 1
         self.budget.add(self._cost)
+        return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
+
+
+class _DualLedgerBackend(_FixedCostBackend):
+    """Also bills the per-run ledger, like the real backend fanning rails out to both.
+
+    The base class only bills the session ledger, which is enough for the
+    session-gate tests; exercising the per-run gate (and its sidecar) needs a
+    backend that reports each call to ``workflow_budget`` too — exactly what
+    ``AgentBackend.bind_workflow_budget`` documents as the real backends' job.
+    """
+
+    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+        self.calls += 1
+        self.budget.add(self._cost)
+        if self.workflow_budget is not None:
+            self.workflow_budget.add(self._cost)
         return AgentResult(text=f"ran {opts.get('label')}", tokens=self._cost)
 
 
@@ -148,8 +209,13 @@ def test_run_without_a_budget_is_unbounded(tmp_path):
 
 
 def test_script_can_wind_down_on_remaining_before_the_gate_fires(tmp_path):
-    """A script polling remaining() finishes normally — the gate is only a backstop."""
-    backend = _FixedCostBackend(cost=20)
+    """A script polling remaining() finishes normally — the gate is only a backstop.
+
+    ``budget.*`` reads the per-run ledger, so the script declares its
+    ``workflow_token_limit`` and the backend must report each call to that
+    ledger (``_DualLedgerBackend``) — only production rails bill both.
+    """
+    backend = _DualLedgerBackend(cost=20)
     result = asyncio.run(
         run_workflow(
             _write(tmp_path, _POLLING_SCRIPT),
@@ -175,6 +241,115 @@ def test_mock_backend_bills_the_ledger(tmp_path):
     ledger = BudgetLedger(total=1_000_000)
     asyncio.run(run_workflow(_write(tmp_path, _SCRIPT), budget=ledger))
     assert ledger.spent > 0
+
+
+# ---------------------------------------------------------------- journal seal / resume
+
+
+def _seal_record(journal_path: str, run_id: str) -> dict | None:
+    """Load the journal and find the seal record for ``run_id``."""
+    j = asyncio.run(Journal.load(journal_path, wal_path=f"{journal_path}.wal"))
+    return j.find_run_record(run_id, "seal")
+
+
+def _pause_record(journal_path: str, run_id: str) -> dict | None:
+    """Load the journal and find the pause record for ``run_id``."""
+    j = asyncio.run(Journal.load(journal_path, wal_path=f"{journal_path}.wal"))
+    return j.find_run_record(run_id, "pause")
+
+
+def test_completed_run_writes_a_seal_record(tmp_path):
+    """A run that finishes normally writes a seal record (terminal_status=completed)."""
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+
+    backend = _DualLedgerBackend(cost=10)  # 5 x 10 = 50, under the 100 ceiling
+    run_id = "run-A"
+    asyncio.run(run_workflow(str(script), backend=backend, journal_path=journal, run_id=run_id))
+
+    seal = _seal_record(journal, run_id)
+    assert seal is not None
+    assert seal["terminal_status"] == "completed"
+    assert seal["final_spent"] == 50
+
+
+def test_workflow_budget_hit_writes_pause_and_resume_rebills(tmp_path):
+    """A workflow (per-run) ceiling hit is a pause, not a terminal seal.
+
+    Run 1 hits the per-run limit (scope="workflow") → pause record (not seal),
+    resumable by editing the script. Run 2 resumes the SAME run_id with a cheaper
+    script: the changed prompts miss the cache and rebill from zero, so the
+    redesigned script completes instead of re-hitting the stale tally.
+    """
+    journal = str(tmp_path / "j.jsonl")
+    expensive = tmp_path / "expensive.py"
+    expensive.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+    cheap = tmp_path / "cheap.py"
+    cheap.write_text(_REDESIGNED_SCRIPT, encoding="utf-8")
+    run_id = "run-1"
+
+    # Run 1: calls 1-4 land (120 >= 100), call 5 is refused by the gate.
+    backend = _DualLedgerBackend(cost=30)
+    with pytest.raises(BudgetExhausted):
+        asyncio.run(run_workflow(str(expensive), backend=backend, journal_path=journal, run_id=run_id))
+    assert backend.calls == 4
+    assert _pause_record(journal, run_id) is not None          # workflow hit → pause
+    assert _pause_record(journal, run_id)["pause_reason"] == "workflow_budget_exhausted"
+    assert _seal_record(journal, run_id) is None               # NOT sealed
+
+    # Run 2 (same run_id, cheaper script): prompts changed → cache miss → rebill from zero.
+    backend2 = _DualLedgerBackend(cost=30)
+    asyncio.run(run_workflow(str(cheap), backend=backend2, journal_path=journal, resume=journal, run_id=run_id))
+    assert backend2.calls == 2  # both miss, rebilled from zero (60 < 100 → completes)
+    assert _seal_record(journal, run_id) is not None           # completed → seal
+
+
+def test_session_budget_hit_writes_seal(tmp_path):
+    """A session (team-wide) ceiling hit is terminal: seal, not pause.
+
+    The session ceiling cannot be recovered by editing the script, so the run is
+    sealed (terminal) rather than pausable.
+    """
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")  # has workflow_token_limit=100
+    run_id = "run-s"
+
+    # Session ledger already exhausted → the very first gate raises scope="session".
+    session_ledger = BudgetLedger(total=100, spent=100)
+    backend = _DualLedgerBackend(cost=30)
+    with pytest.raises(BudgetExhausted):
+        asyncio.run(run_workflow(
+            str(script), backend=backend, journal_path=journal, budget=session_ledger, run_id=run_id,
+        ))
+    assert _seal_record(journal, run_id) is not None           # session hit → seal
+    assert _pause_record(journal, run_id) is None              # NOT pausable
+
+
+def test_resume_rebuilds_spent_from_cache_hits(tmp_path):
+    """Same run_id resume re-bills the per-run ledger by replaying cache hits.
+
+    Run 1 completes 5 agents (cost=10 each, spent=50). Run 2 with the SAME
+    run_id replays all 5 as cache hits — each adds its stored token back, so the
+    ledger is rebuilt to spent=50 without a single backend call, not restored
+    from a stale snapshot (there is none).
+    """
+    journal = str(tmp_path / "j.jsonl")
+    script = tmp_path / "flow.py"
+    script.write_text(_LIMIT_SCRIPT, encoding="utf-8")
+    run_id = "run-R"
+
+    backend1 = _DualLedgerBackend(cost=10)  # 5 x 10 = 50
+    asyncio.run(run_workflow(str(script), backend=backend1, journal_path=journal, run_id=run_id))
+    assert backend1.calls == 5
+
+    # Run 2, same run_id → every agent is a cache hit, rebilled from its record.
+    backend2 = _DualLedgerBackend(cost=10)
+    asyncio.run(run_workflow(str(script), backend=backend2, journal_path=journal, resume=journal, run_id=run_id))
+    assert backend2.calls == 0  # all 5 replayed from cache
+    seal = _seal_record(journal, run_id)
+    assert seal["final_spent"] == 50  # rebuilt 5 x 10 from cache-hit tokens
 
 
 # ---------------------------------------------------------------- rail
@@ -368,26 +543,62 @@ class _Loaded:
 
 
 @pytest.mark.asyncio
-async def test_budget_exhausted_emits_workflow_failed_with_budget(monkeypatch):
-    led = BudgetLedger(total=500000, spent=500000)  # exhausted
+async def test_session_budget_exhausted_emits_stopped_with_budget(monkeypatch):
+    led = BudgetLedger(total=500000, spent=500000)  # exhausted session ledger
     sink = _Sink()
     rt = Runtime(backend=None, journal=None, budget=led)
     rt.progress_sink = sink
 
     async def boom(loaded, args):
-        raise BudgetExhausted("token budget exhausted: 500000/500000")
+        raise BudgetExhausted("session token budget exhausted: 500000/500000")
 
     monkeypatch.setattr(runner, "_invoke_loaded", boom)
     with pytest.raises(BudgetExhausted):
         await runner._exec_loaded(_Loaded(), rt)
 
-    failed = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_FAILED]
-    assert len(failed) == 1
-    ev = failed[0]
+    # Session ceiling hit is STOPPED (not recoverable by script edit).
+    stopped = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_STOPPED]
+    assert len(stopped) == 1
+    ev = stopped[0]
     assert ev.budget is not None
     assert ev.budget["exhausted"] is True
     assert ev.budget["spent"] == 500000
     assert ev.budget["remaining"] == 0
+    assert ev.budget_exhausted_scope == "session"
+
+
+@pytest.mark.asyncio
+async def test_dry_ledger_with_normal_return_is_a_failure(monkeypatch):
+    """A force-finished run must not report WORKFLOW_COMPLETED.
+
+    The rail drains a ledger by force-finishing in-flight agents, so the script
+    can simply return — no entry gate ever fires (the last agent blew the
+    ceiling and there is no next ``agent()`` to stop). Such a return is an
+    overrun, not a completion: it must surface as WORKFLOW_FAILED with the
+    exhausted scope, exactly like the gate path, or the UI shows "workflow
+    completed" over a truncated run.
+    """
+    wf_led = BudgetLedger(total=500, spent=600)  # dry per-run ledger
+    sink = _Sink()
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(),
+                 workflow_budget=wf_led)
+    rt.progress_sink = sink
+
+    async def partial(loaded, args):
+        return "partial (force-finished) result"
+
+    monkeypatch.setattr(runner, "_invoke_loaded", partial)
+    with pytest.raises(BudgetExhausted) as ei:
+        await runner._exec_loaded(_Loaded(), rt)
+
+    assert ei.value.scope == "workflow"
+    kinds = [e.kind for e in sink.events]
+    assert ProgressKind.WORKFLOW_COMPLETED not in kinds
+    failed = [e for e in sink.events if e.kind == ProgressKind.WORKFLOW_FAILED]
+    assert len(failed) == 1
+    assert failed[0].budget_exhausted_scope == "workflow"
+    assert failed[0].workflow_budget is not None
+    assert failed[0].workflow_budget["exhausted"] is True
 
 
 # ---------------------------------------------------------------------------

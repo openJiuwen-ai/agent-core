@@ -18,8 +18,9 @@ import pytest
 import yaml
 
 from openjiuwen.core.foundation.llm import AssistantMessage, BaseModelClient
-from openjiuwen.rsi.config import MemberOptimizerConfig
-from openjiuwen.rsi.member_optimizer.action_executor import (
+from openjiuwen.rsi.harness_rsi.config import MemberOptimizerConfig
+from openjiuwen.rsi.harness_rsi.member_optimizer import action_planner as action_planner_module
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
     MemberActionExecutor,
     _normalize_skill_frontmatter_name,
     _runtime_contract_projection,
@@ -27,50 +28,50 @@ from openjiuwen.rsi.member_optimizer.action_executor import (
     _validate_generated_action_resources,
     _validate_generated_skill_contract,
 )
-from openjiuwen.rsi.member_optimizer.action_groups import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     build_action_waves,
     build_role_subwaves,
     filter_action_definitions,
     load_action_definitions,
     validate_action_policy,
 )
-from openjiuwen.rsi.member_optimizer.action_planner import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
     MemberActionPlanner,
-    _adapt_surface_for_activation_phase,
+    MemberActionPlannerAgent,
     _bind_immutable_hypotheses,
     _validate_action_issue_attribution,
 )
-from openjiuwen.rsi.member_optimizer.agents.factory import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     _failure_signature_values,
     _mechanism_type_values,
     _optimization_surface_values,
     load_member_optimizer_model,
 )
-from openjiuwen.rsi.member_optimizer.agents.output import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.agents.output import (
     extract_agent_text,
     invoke_member_optimizer_agent_structured,
     parse_json_object_response,
     parse_yaml_or_json_object_response,
 )
-from openjiuwen.rsi.member_optimizer.hypothesis import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
     compile_optimization_hypotheses,
     load_optimization_hypotheses,
 )
-from openjiuwen.rsi.member_optimizer.lever import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.lever import (
     available_surfaces_for_lever,
     target_ref_lever,
 )
-from openjiuwen.rsi.member_optimizer.loader import EvalRef
-from openjiuwen.rsi.member_optimizer.member_selector import MemberSelector
-from openjiuwen.rsi.member_optimizer.optimizer import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.loader import EvalRef
+from openjiuwen.rsi.harness_rsi.member_optimizer.member_selector import MemberSelector
+from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
     MemberOptimizer,
     _find_reusable_pending_optimization,
 )
-from openjiuwen.rsi.member_optimizer.path_layout import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.path_layout import (
     MemberOptimizerPathLayout,
 )
-from openjiuwen.rsi.member_optimizer.role_attributor import RoleAttributor
-from openjiuwen.rsi.member_optimizer.schema import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.role_attributor import RoleAttributor
+from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
     MechanismAttributionReport,
     MemberActionExecutionResult,
     MemberOptimizationAction,
@@ -81,17 +82,17 @@ from openjiuwen.rsi.member_optimizer.schema import (
     RoleIssueAttribution,
     RoleMechanismAttribution,
 )
-from openjiuwen.rsi.member_optimizer.verification import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
     HarnessChangeVerifier,
     _validate_package_python_source,
     scan_skill_directory,
 )
-from openjiuwen.rsi.member_optimizer.worktree_coordinator import (
+from openjiuwen.rsi.harness_rsi.member_optimizer.worktree_coordinator import (
     MemberWorktreeCoordinator,
     integration_worktree_path,
     role_worktree_path,
 )
-from openjiuwen.rsi.schema import ActionDefinition, TeamIssue
+from openjiuwen.rsi.harness_rsi.schema import ActionDefinition, TeamIssue
 
 
 def test_lever_policy_does_not_recast_configuration_as_instruction() -> None:
@@ -99,6 +100,11 @@ def test_lever_policy_does_not_recast_configuration_as_instruction() -> None:
 
     assert lever == "configuration"
     assert available_surfaces_for_lever(lever, ["prompt", "skill", "tool"]) == []
+
+
+def test_execution_budget_has_an_explicit_configuration_lever() -> None:
+    assert target_ref_lever("member_harness.solver.execution_budget") == "configuration"
+    assert target_ref_lever("member_harness.solver.rail") == "control"
 
 
 def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
@@ -110,8 +116,138 @@ def test_instruction_lever_exposes_only_instruction_surfaces() -> None:
     ) == ["prompt_section", "skill"]
 
 
+def test_sibling_generation_prompt_treats_prior_proposals_as_pre_execution_plans() -> None:
+    message = MemberActionPlannerAgent._build_user_message(
+        targets=[],
+        role_attribution_report=RoleAttributionReport(),
+        mechanism_attribution_report=MechanismAttributionReport(),
+        action_definitions=[],
+        optimization_experience={
+            "sibling_generation": {
+                "candidate_id": "candidate_beta",
+                "generation_index": 2,
+                "candidate_count": 3,
+                "prior_proposals": [
+                    {
+                        "candidate_id": "candidate_alpha",
+                        "plan_id": "plan_alpha",
+                        "proposal_summary": "Modify an existing prompt section.",
+                        "candidate_score": 0.9,
+                        "outcome": "accepted",
+                        "actions": [
+                            {
+                                "action_group": "prompt",
+                                "operation": "modify",
+                                "target_path": "prompt_sections/files/checkpoint.md",
+                                "expected_effect": "Require a bounded decision checkpoint.",
+                                "status": "succeeded",
+                                "verifier_result": "passed",
+                                "constraints": {
+                                    "lever_decision": {
+                                        "selected_lever": "instruction",
+                                        "selected_surface": "prompt_section",
+                                    }
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+
+    assert "## Sibling Candidate Generation (Pre-Execution Plans Only)" in message
+    assert '"candidate_id": "candidate_beta"' in message
+    assert '"generation_index": 2' in message
+    assert "it is not a quality prediction" in message
+    assert "Modify an existing prompt section." in message
+    assert "Require a bounded decision checkpoint." in message
+    assert '"selected_lever": "instruction"' in message
+    assert "not execution feedback" in message
+    assert "Never cross levers just to manufacture" in message
+
+
+def test_improver_policy_prompt_is_frozen_and_strips_training_evidence() -> None:
+    message = MemberActionPlannerAgent._build_user_message(
+        targets=[],
+        role_attribution_report=RoleAttributionReport(),
+        mechanism_attribution_report=MechanismAttributionReport(),
+        action_definitions=[],
+        optimization_experience={
+            "improver_policy": {
+                "version_id": "I_1",
+                "policy_digest": "sha256:policy",
+                "generation_directives": {
+                    "require_unique_candidate_fingerprint": True,
+                },
+                "budget_policy": {"top_m": 2},
+                "training_evidence": {"candidate_score": 1.0},
+            }
+        },
+    )
+
+    assert "## Frozen Improver Policy" in message
+    assert '"version_id": "I_1"' in message
+    assert '"require_unique_candidate_fingerprint": true' in message
+    assert "pre-execution policy" in message
+    assert "sibling execution feedback" in message
+    assert "training_evidence" not in message
+    assert "candidate_score" not in message
+    assert "candidate_score" not in message
+    assert '"outcome": "accepted"' not in message
+    assert "verifier_result" not in message
+    assert '"status": "succeeded"' not in message
+    assert "## Optimization Experience" not in message
+    assert "## Rejected Capability History" not in message
+
+
+@pytest.mark.asyncio
+async def test_sibling_candidates_use_isolated_planner_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_ids: list[str] = []
+
+    monkeypatch.setattr(
+        action_planner_module,
+        "create_action_planning_agent",
+        lambda **kwargs: object(),
+    )
+
+    async def fake_invoke(**kwargs):  # type: ignore[no-untyped-def]
+        session_ids.append(str(kwargs["session_id"]))
+        return {}
+
+    monkeypatch.setattr(
+        action_planner_module,
+        "invoke_member_optimizer_agent_structured",
+        fake_invoke,
+    )
+    planner = MemberActionPlannerAgent(model_config_ref="unused")
+    common = {
+        "targets": [],
+        "role_attribution_report": RoleAttributionReport(),
+        "mechanism_attribution_report": MechanismAttributionReport(),
+        "action_definitions": [],
+    }
+
+    await planner.create_plan(
+        **common,
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/alpha"}},
+    )
+    await planner.create_plan(
+        **common,
+        optimization_experience={"sibling_generation": {"candidate_id": "candidate/beta"}},
+    )
+    await planner.create_plan(**common)
+
+    assert len(set(session_ids)) == 3
+    assert session_ids[0].startswith("member_action_planner_candidate_alpha_")
+    assert session_ids[1].startswith("member_action_planner_candidate_beta_")
+    assert session_ids[2] == "member_action_planner"
+
+
 def test_member_optimizer_package_exports_only_facade_and_schema() -> None:
-    from openjiuwen.rsi import member_optimizer
+    from openjiuwen.rsi.harness_rsi import member_optimizer
 
     assert "MemberOptimizer" in member_optimizer.__all__
     assert "MemberOptimizationArtifact" in member_optimizer.__all__
@@ -209,6 +345,105 @@ def test_action_issue_attribution_rejects_combining_independent_issues() -> None
     ]
 
 
+def test_action_bundle_accepts_three_connected_actions_for_one_issue() -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "implement",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "register",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": ["implement"],
+            },
+            {
+                "action_id": "route",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": ["register"],
+            },
+        ]
+    }
+
+    assert _validate_action_bundle_cohesion(plan_data) == []
+
+
+def test_action_bundle_rejects_more_than_three_actions_for_one_issue() -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": f"action_{index}",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_tool_activation"],
+                "depends_on": [f"action_{index - 1}"] if index else [],
+            }
+            for index in range(4)
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("at most 3 associated actions" in error for error in errors)
+
+
+def test_action_bundle_rejects_cross_issue_dependency() -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "formula_fix",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_formula"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "payment_fix",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_payment"],
+                "depends_on": ["formula_fix"],
+            },
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("depends on unrelated action formula_fix" in error for error in errors)
+
+
+def test_action_bundle_rejects_disconnected_changes_for_one_issue() -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import _validate_action_bundle_cohesion
+
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "tool_add",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_activation"],
+                "depends_on": [],
+            },
+            {
+                "action_id": "unrelated_prompt",
+                "role": "solver",
+                "attributed_issue_ids": ["issue_activation"],
+                "depends_on": [],
+            },
+        ]
+    }
+
+    errors = _validate_action_bundle_cohesion(plan_data)
+
+    assert any("not one connected dependency bundle" in error for error in errors)
+
+
 def test_skill_frontmatter_normalization_repairs_plain_scalar_colon() -> None:
     content = """---
 name: generated-name
@@ -284,7 +519,7 @@ def test_find_reusable_pending_optimization_matches_identical_inputs(tmp_path: P
 
 def test_member_optimizer_attribution_taxonomy_excludes_rail() -> None:
     """Member optimization may use existing rails, but cannot attribute to rail."""
-    from openjiuwen.rsi.member_optimizer.mechanism_attributor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.mechanism_attributor import (
         FAILURE_SIGNATURE_VALUES,
         MECHANISM_TYPE_VALUES,
         OPTIMIZATION_SURFACE_VALUES,
@@ -299,7 +534,7 @@ def test_member_optimizer_attribution_taxonomy_excludes_rail() -> None:
 
 
 def test_member_optimizer_agent_profiles_are_declared() -> None:
-    from openjiuwen.rsi.member_optimizer.agents.profiles import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
         ACTION_EXECUTION,
         ACTION_PLANNING,
         MECHANISM_ATTRIBUTION,
@@ -321,7 +556,7 @@ def test_member_optimizer_agent_profiles_are_declared() -> None:
 
 
 def test_member_optimizer_agent_factory_renders_planner_prompt(monkeypatch, tmp_path: Path) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
 
     model_path = _write_model_config(tmp_path / "model.yaml")
     captured: dict[str, object] = {}
@@ -366,8 +601,8 @@ def test_member_optimizer_agent_factory_uses_external_skill_roots(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
-    from openjiuwen.rsi.member_optimizer.agents.profiles import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
         MemberOptimizerAgentProfile,
     )
 
@@ -412,7 +647,7 @@ def test_action_execution_agent_does_not_mount_filesystem_write_tools(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.agents import factory
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents import factory
 
     model_path = _write_model_config(tmp_path / "model.yaml")
     captured: dict[str, object] = {}
@@ -624,7 +859,7 @@ def test_role_attributor_does_not_map_team_alias_to_business_member(tmp_path: Pa
 
 def test_resolve_team_issues_only_returns_member_harness_targets() -> None:
     """MemberOptimizer only consumes analyzer issues targeted at member_harness."""
-    from openjiuwen.rsi.member_optimizer.loader import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.loader import (
         AnalysisRef,
         resolve_team_issues,
     )
@@ -1138,7 +1373,7 @@ def test_member_selector_no_targets_low_confidence() -> None:
 
 def test_member_action_planner_returns_empty_plan_for_insufficient_role_evidence_only() -> None:
     """Planner must not turn insufficient evidence into a direct file modification."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1242,7 +1477,7 @@ def test_member_selector_records_insufficient_evidence_as_deferred_contract_issu
 
 def test_member_action_planner_rejects_specific_workflow_in_soul_md() -> None:
     """Concrete workflow/checklist repairs must use prompt sections, not soul.md."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1326,7 +1561,7 @@ def test_member_action_planner_rejects_specific_workflow_in_soul_md() -> None:
 
 def test_member_action_planner_accepts_specific_workflow_prompt_section() -> None:
     """Specific workflow repairs can be planned as mounted prompt sections."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1429,7 +1664,7 @@ def test_member_action_planner_accepts_specific_workflow_prompt_section() -> Non
 
 def test_member_action_planner_rejects_prompt_when_surface_is_skill() -> None:
     """A workflow failure can still require a skill optimization surface."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1521,7 +1756,7 @@ def test_member_action_planner_rejects_prompt_when_surface_is_skill() -> None:
 
 def test_member_action_planner_replans_when_action_surface_mismatches_diagnosis() -> None:
     """Planner should repair semantic surface mismatches instead of aborting immediately."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         MemberActionPlanner,
     )
 
@@ -1671,7 +1906,7 @@ def test_member_optimizer_allocates_next_version(tmp_path: Path) -> None:
     output_dir.mkdir(parents=True)
     (output_dir / "member_optimization_001").mkdir()
 
-    from openjiuwen.rsi.member_optimizer.optimizer import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
         _allocate_optimization_dir,
     )
 
@@ -1689,7 +1924,7 @@ def test_member_optimizer_allocates_starts_at_001(tmp_path: Path) -> None:
     output_dir = tmp_path / "member_optimizations"
     output_dir.mkdir(parents=True)
 
-    from openjiuwen.rsi.member_optimizer.optimizer import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import (
         _allocate_optimization_dir,
     )
 
@@ -1885,7 +2120,7 @@ def test_member_optimizer_worktree_forbidden_paths(tmp_path: Path) -> None:
 
 def test_schema_dataclasses_are_frozen() -> None:
     """All schema dataclasses must be immutable (frozen=True)."""
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         MemberOptimizationArtifact,
     )
 
@@ -2194,14 +2429,14 @@ def test_action_config_cannot_expand_current_policy() -> None:
 
     filtered = filter_action_definitions(definitions)
 
-    assert [definition.name for definition in filtered] == ["prompt_modify"]
+    assert [definition.name for definition in filtered] == ["prompt_modify", "skill_search"]
 
 
 def test_action_definition_loader_filters_config_policy(action_group_yaml: Path) -> None:
     """Action config loading keeps only current Auto Harness-compatible actions."""
     definitions = load_action_definitions([str(action_group_yaml)])
 
-    assert [definition.name for definition in definitions] == ["prompt_modify"]
+    assert [definition.name for definition in definitions] == ["prompt_modify", "skill_search"]
 
 
 def test_action_definition_loader_tolerates_missing_config(tmp_path: Path) -> None:
@@ -2226,7 +2461,11 @@ def test_action_definition_loader_resolves_builtin_group_names() -> None:
         ("tool", "modify"),
         ("tool", "remove"),
     }
-    assert load_action_definitions(["rail"]) == []
+    assert {(item.group, item.operation) for item in load_action_definitions(["rail"])} == {
+        ("rail", "add"),
+        ("rail", "modify"),
+        ("rail", "remove"),
+    }
 
 
 def _write_model_config(path: Path) -> Path:
@@ -2302,10 +2541,10 @@ def test_member_optimizer_model_config_rejects_invalid_refs(tmp_path: Path) -> N
 
 
 def test_member_verifier_repairability_accepts_only_worktree_failures() -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2330,10 +2569,10 @@ def test_member_verifier_repairability_accepts_only_worktree_failures() -> None:
 def test_member_verifier_repairability_rejects_unrepairable_or_unknown_failures(
     failed_check_name: str,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2348,10 +2587,10 @@ def test_member_verifier_repairability_rejects_unrepairable_or_unknown_failures(
 
 
 def test_member_verifier_repairability_rejects_mixed_failures() -> None:
-    from openjiuwen.rsi.member_optimizer.schema import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         VerificationCheck,
     )
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         _role_is_repairable,
     )
 
@@ -2672,6 +2911,108 @@ def test_member_optimizer_full_pipeline_fake_agents_closes_loop(
         assert refs_path.name == "candidate_harness_refs.yaml"
         assert current_refs["last_attempt"]["published_roles"] == ["explainer"]
     assert "diagnostician" in current_refs["harness_refs"]
+
+
+def test_member_optimizer_publish_rejects_partially_executed_role(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.optimizer import _PublishRequest
+    from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
+        MemberSelectionReport,
+        MemberVerificationResult,
+        RoleVerificationResult,
+    )
+
+    output_root = tmp_path / "member_optimizations"
+    run_dir = output_root / "member_optimization_001"
+    run_dir.mkdir(parents=True)
+    layout = MemberOptimizerPathLayout.from_output_root(output_root)
+    source_harness = two_role_harness_dir / "explainer"
+    harness_refs_path = tmp_path / "harness_refs.yaml"
+    harness_refs_path.write_text(
+        yaml.safe_dump({"harness_refs": {"explainer": str(source_harness)}}),
+        encoding="utf-8",
+    )
+    integration = integration_worktree_path(layout.worktrees_dir(run_dir.name), "explainer")
+    shutil.copytree(source_harness, integration)
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(source_harness),
+        attributed_issue_ids=["issue_activation"],
+    )
+    first = MemberOptimizationAction(
+        action_id="implement",
+        role="explainer",
+        action_group="tool",
+        operation="add",
+        action_type="tool_add",
+        target_path="tools/check.py",
+        attributed_issue_ids=["issue_activation"],
+    )
+    second = MemberOptimizationAction(
+        action_id="route",
+        role="explainer",
+        action_group="prompt",
+        operation="modify",
+        action_type="prompt_modify",
+        target_path="identity.md",
+        attributed_issue_ids=["issue_activation"],
+        depends_on=["implement"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="partial_plan",
+        targets=[target],
+        actions=[first, second],
+        action_waves=[["implement"], ["route"]],
+    )
+    execution_results = [
+        MemberActionExecutionResult(
+            action_id="implement",
+            role="explainer",
+            status="succeeded",
+            merge_status="merged",
+        ),
+        MemberActionExecutionResult(
+            action_id="route",
+            role="explainer",
+            status="failed",
+            error="routing edit failed",
+        ),
+    ]
+    verification_result = MemberVerificationResult(
+        status="passed",
+        checked_roles=["explainer"],
+        role_results={"explainer": RoleVerificationResult(role="explainer", status="passed")},
+    )
+
+    artifact = MemberOptimizer(MemberOptimizerConfig(model_config_ref="unused"))._publish(
+        _PublishRequest(
+            run_dir=run_dir,
+            path_layout=layout,
+            output_root=output_root,
+            selection_report=MemberSelectionReport(targets=[target]),
+            plan=plan,
+            execution_results=execution_results,
+            verification_result=verification_result,
+            eval_ref_path="eval_ref.yaml",
+            analysis_result_path="analysis_ref.yaml",
+            harness_refs_path=str(harness_refs_path),
+            role_attr_path="role_attribution.yaml",
+            mechanism_attr_path="mechanism_attribution.yaml",
+            selection_path="member_selection.yaml",
+            plan_path="plan.yaml",
+            execution_result_path="execution_results.json",
+            verification_path="verification.json",
+            fix_result_path="fix_result.json",
+            defer_publish=True,
+        )
+    )
+
+    assert artifact.status == "failed"
+    assert artifact.published_roles == []
+    assert "route: execution status='failed'" in artifact.role_results["explainer"].error
+    assert not layout.candidate_harness_dir(run_dir.name, "explainer").exists()
 
 
 def test_member_optimizer_rejects_invalid_llm_plan_without_aborting_run(
@@ -3232,7 +3573,7 @@ def test_member_executor_default_agent_fails_success_without_real_declared_chang
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer import action_executor as action_executor_module
+    from openjiuwen.rsi.harness_rsi.member_optimizer import action_executor as action_executor_module
 
     class NoopDeepAgent:
         async def invoke(self, inputs, session=None):  # type: ignore[no-untyped-def]
@@ -3266,7 +3607,7 @@ def test_member_executor_default_agent_fails_success_without_real_declared_chang
     assert payload["changed_files"] == []
 
 
-def test_member_executor_scaffolds_prompt_section_when_agent_writes_no_files(
+def test_member_executor_rejects_prompt_add_when_agent_writes_no_files(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
@@ -3308,19 +3649,12 @@ def test_member_executor_scaffolds_prompt_section_when_agent_writes_no_files(
         )
     )
 
-    assert results[0].status == "succeeded"
+    assert results[0].status == "failed"
     integration = integration_worktree_path(run_dir / "wt", "explainer")
-    section_path = integration / "prompt_sections" / "files" / "slide_labeling_rules.md"
-    assert "Always assign every slide" in section_path.read_text(encoding="utf-8")
-    manifest = yaml.safe_load((integration / "prompt_sections" / "sections.yaml").read_text(encoding="utf-8"))
-    assert {
-        "name": "slide_labeling_rules",
-        "file": "prompt_sections/files/slide_labeling_rules.md",
-        "priority": 30,
-    } in manifest["sections"]
+    assert not (integration / "prompt_sections" / "files" / "slide_labeling_rules.md").exists()
 
 
-def test_member_executor_scaffolds_skill_when_agent_writes_no_files(
+def test_member_executor_rejects_skill_add_when_agent_writes_no_files(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
@@ -3362,13 +3696,9 @@ def test_member_executor_scaffolds_skill_when_agent_writes_no_files(
         )
     )
 
-    assert results[0].status == "succeeded"
+    assert results[0].status == "failed"
     integration = integration_worktree_path(run_dir / "wt", "explainer")
-    skill_path = integration / "skills" / "visual_design_spec" / "SKILL.md"
-    skill_text = skill_path.read_text(encoding="utf-8")
-    assert "name: visual_design_spec" in skill_text
-    registry = yaml.safe_load((integration / "skills" / "skills.yaml").read_text(encoding="utf-8"))
-    assert "skills/visual_design_spec" in registry["skills"]
+    assert not (integration / "skills" / "visual_design_spec" / "SKILL.md").exists()
 
 
 def test_member_executor_rejects_file_written_without_final_file_writes_json(
@@ -3459,7 +3789,7 @@ and checked assertions as evidence.
 
 
 def test_action_executor_accepts_complete_skill_as_structured_file_write() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3495,7 +3825,7 @@ def test_action_executor_writes_complete_skill_from_one_model_call(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3555,7 +3885,7 @@ def test_action_executor_retries_malformed_complete_skill_response(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3610,7 +3940,7 @@ def test_action_executor_does_not_publish_invalid_assembled_skill(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3663,7 +3993,7 @@ def test_action_executor_does_not_publish_invalid_assembled_skill(
 
 
 def test_action_execution_prompt_requires_native_complete_skill_artifact() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3709,7 +4039,7 @@ def test_action_execution_prompt_requires_native_complete_skill_artifact() -> No
 
 
 def test_action_execution_projects_only_public_runtime_contract() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -3951,11 +4281,28 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                             "forbidden_behavior": ["Treat __iter__ alone as sufficient."],
                             "attribution": {
                                 "target_ref": "member_harness.solver.skill",
+                                "evidence_status": "confirmed",
+                                "hypothesis_assessment": [
+                                    {
+                                        "hypothesis_id": "h_direct_protocol",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    }
+                                ],
                                 "general_mechanism": (
                                     "A directly requested stateful protocol must implement and "
                                     "probe its direct operation."
                                 ),
                                 "critical_mistake": ("Do not substitute a returned iterator for direct __next__."),
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["verifier:FAIL_TO_PASS:test_next"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": [],
+                                    "counterfactual_prediction": (
+                                        "direct next succeeds before and after iterator initialization"
+                                    ),
+                                    "sufficiency_status": "task_sufficient",
+                                },
                             },
                         },
                     }
@@ -4000,6 +4347,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
+    observations = hypotheses[0]["authoritative_observations"]["metadata"]["attribution"]
+    assert observations["causal_coverage"]["sufficiency_status"] == "task_sufficient"
+    assert observations["causal_coverage"]["counterfactual_prediction"].startswith("direct next succeeds")
+    assert "causal_coverage" not in hypotheses[0]["decisive_probe"]
     assert hypotheses[0]["public_trigger"] == [
         {
             "case_id": "case_pydicom",
@@ -4018,6 +4369,171 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
     )
     with pytest.raises(ValueError, match="content digest mismatch"):
         load_optimization_hypotheses(hypothesis_path)
+
+
+@pytest.mark.parametrize(
+    ("attribution", "affected_cases"),
+    [
+        ({"evidence_status": "confirmed"}, ["case_1"]),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "insufficient"}, ["case_1"]),
+        ({"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"}, []),
+        (
+            {
+                "target_ref": "member_harness.solver.prompt",
+                "evidence_status": "supported_hypothesis",
+                "hypothesis_assessment": [{"hypothesis_id": "h1", "status": "unresolved"}],
+            },
+            ["case_1"],
+        ),
+    ],
+)
+def test_optimization_hypothesis_preserves_diagnosis_without_legacy_reaudit(
+    tmp_path: Path,
+    attribution: dict[str, object],
+    affected_cases: list[str],
+) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "execution",
+                        "severity": "high",
+                        "summary": "The task failed.",
+                        "affected_cases": affected_cases,
+                        "evidence": [],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Change the harness.",
+                        "metadata": {"attribution": attribution},
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Do the task."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["authoritative_observations"]["metadata"]["attribution"] == attribution
+    assert hypotheses[0]["target_case_ids"] == affected_cases
+    expected_deficiency = "harness_deficiency" if attribution.get("target_ref") else "insufficient_evidence"
+    assert hypotheses[0]["deficiency_class"] == expected_deficiency
+
+
+def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alternative(tmp_path: Path) -> None:
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_local",
+                        "category": "decision",
+                        "severity": "medium",
+                        "summary": "An observed decision causes the failed requirement.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed discriminator before selecting the value.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "hypothesis_assessment": [
+                                    {
+                                        "hypothesis_id": "h1",
+                                        "status": "supported",
+                                        "verification_status": "verified",
+                                    },
+                                    {"hypothesis_id": "h2", "status": "unresolved"},
+                                ],
+                                "general_mechanism": "Select values only after observing their source provenance.",
+                                "causal_coverage": {
+                                    "explained_requirement_ids": ["criterion:value"],
+                                    "residual_requirement_ids": [],
+                                    "unexplained_observations": ["one alternative remains unresolved"],
+                                    "counterfactual_prediction": "the selected value matches the observed source",
+                                    "sufficiency_status": "local_contributor",
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    hypothesis_path = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Select the documented value."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["source_issue_id"] == "issue_local"
+
+
+@pytest.mark.parametrize(
+    ("verification_status", "expected_count"),
+    [(None, 1), ("unresolved", 1), ("verified", 1)],
+)
+def test_supported_diagnosis_does_not_require_a_second_verifier(
+    tmp_path: Path,
+    verification_status: str | None,
+    expected_count: int,
+) -> None:
+    assessment = {"hypothesis_id": "h1", "status": "supported"}
+    if verification_status is not None:
+        assessment["verification_status"] = verification_status
+    analysis_ref = tmp_path / "analysis_ref.yaml"
+    analysis_ref.write_text(
+        yaml.safe_dump(
+            {
+                "issues": [
+                    {
+                        "issue_id": "issue_1",
+                        "category": "decision",
+                        "severity": "high",
+                        "summary": "An observed routing decision caused the failed behavior.",
+                        "affected_cases": ["case_1"],
+                        "evidence": [{"case_id": "case_1", "step_pointer": "step_2"}],
+                        "optimization_target": "member_harness",
+                        "recommendation": "Use the observed routing discriminator.",
+                        "metadata": {
+                            "attribution": {
+                                "target_ref": "member_harness.solver.prompt",
+                                "evidence_status": "supported_hypothesis",
+                                "selected_hypothesis_id": "h1",
+                                "hypothesis_assessment": [assessment],
+                            }
+                        },
+                    }
+                ]
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    output = compile_optimization_hypotheses(
+        analysis_ref_path=str(analysis_ref),
+        cases=[{"case_id": "case_1", "input": "Route this request."}],
+        output_path=tmp_path / "optimization_hypotheses.yaml",
+    )
+
+    assert len(load_optimization_hypotheses(output)) == expected_count
 
 
 def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None:
@@ -4048,6 +4564,41 @@ def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None
     action = plan_data["actions"][0]
     assert action["expected_effect"] == "Implement stateful direct __next__ semantics."
     assert action["constraints"]["optimization_contracts"] == hypotheses
+
+
+def test_planner_binding_uses_behavior_contract_not_retired_search_state() -> None:
+    plan_data = {
+        "actions": [
+            {
+                "action_id": "a1",
+                "attributed_issue_ids": ["issue_protocol"],
+                "constraints": {},
+            }
+        ]
+    }
+    hypotheses = [
+        {
+            "hypothesis_id": "hyp_protocol",
+            "content_sha256": "abc123",
+            "source_issue_id": "issue_protocol",
+            "required_behavior": "Use the supported direct-call mechanism.",
+            "hypothesis_assessment": [
+                {"hypothesis_id": "h_supported", "status": "supported"},
+                {"hypothesis_id": "h_falsified", "status": "falsified"},
+            ],
+            "supported_causal_hypothesis_ids": ["h_supported"],
+            "falsified_causal_hypothesis_ids": ["h_falsified"],
+        }
+    ]
+
+    _bind_immutable_hypotheses(plan_data, hypotheses)
+
+    constraints = plan_data["actions"][0]["constraints"]
+    contract = constraints["optimization_contracts"][0]
+    assert contract["source_issue_id"] == "issue_protocol"
+    assert contract["required_behavior"] == "Use the supported direct-call mechanism."
+    assert "source_causal_hypothesis_ids" not in constraints
+    assert "hypothesis_assessment" not in contract
     assert plan_data["metadata"]["semantic_authority"] == ("immutable_optimization_hypotheses")
 
 
@@ -4226,111 +4777,6 @@ def test_skill_trigger_description_prefers_causal_trigger_over_task_symptom() ->
     )
 
 
-def test_post_diagnosis_contract_is_deferred_to_runtime_control() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["skill"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="reasoning_policy",
-        failure_signature="stops after diagnosis",
-        confidence=0.9,
-        optimization_surface="skill",
-    )
-
-    targets, report, adaptations = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "post_diagnosis"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == ("control")
-    assert adaptations[0]["reason"] == (
-        "required_action_is_not_knowable_at_task_start_and_must_not_be_recast_as_static_instruction"
-    )
-
-
-def test_post_diagnosis_prompt_contract_is_deferred_to_runtime_control() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["prompt_section"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="instruction",
-        failure_signature="diagnosed_but_did_not_edit",
-        confidence=0.9,
-        optimization_surface="prompt_section",
-    )
-
-    targets, report, _ = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "post_diagnosis"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == "control"
-
-
-def test_investigation_prompt_contract_routes_as_skill() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["prompt_section"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="instruction",
-        failure_signature="wrong_output_channel_hypothesis",
-        confidence=0.9,
-        optimization_surface="prompt_section",
-    )
-
-    targets, report, adaptations = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "during_investigation"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["skill"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == "skill"
-    assert adaptations[0]["reason"] == (
-        "investigation_method_requires_task_relevant_routing_instead_of_global_static_prompt_injection"
-    )
-
-
 def test_generated_skill_contract_accepts_bold_capsule_labels() -> None:
     content = """## Decision Capsule
 - **Invariant:** direct operation semantics must hold
@@ -4430,7 +4876,7 @@ description: A structurally valid but empty skill.
 
 
 def test_action_execution_prompt_requires_safe_mountable_tool_contract() -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -4531,7 +4977,7 @@ def _safe_payload_tool_source() -> str:
 def test_action_executor_retries_tool_generation_after_safety_validation_error(
     tmp_path: Path,
 ) -> None:
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -4916,9 +5362,53 @@ def test_member_executor_rejects_illegal_action_before_execution(
     assert not (role_worktree_path(run_dir / "wt", "explainer") / "waves").exists()
 
 
+def test_member_executor_executes_package_local_rail_action(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    action = MemberOptimizationAction(
+        action_id="rail_explainer_001",
+        role="explainer",
+        action_group="rail",
+        operation="add",
+        action_type="rail_guard",
+        target_path="rails/conflict_marker_guard.py",
+        declared_write_paths=["rails/conflict_marker_guard.py", "rails/rails.yaml"],
+        description="Add conflict marker guard.",
+        constraints={"class_name": "ConflictMarkerGuardRail"},
+    )
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(two_role_harness_dir / "explainer"),
+        attributed_issue_ids=["issue_001"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="plan_rail",
+        targets=[target],
+        actions=[action],
+        action_waves=[[action.action_id]],
+    )
+
+    results = asyncio.run(
+        MemberActionExecutor(executor_agent=_RailShortManifestExecutorAgent()).execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    assert results[0].status == "succeeded"
+    assert "rails/conflict_marker_guard.py" in results[0].changed_files
+    manifest = Path(results[0].worktree_path) / "rails" / "rails.yaml"
+    assert yaml.safe_load(manifest.read_text(encoding="utf-8"))["rails"][0]["file"] == (
+        "rails/conflict_marker_guard.py"
+    )
+
+
 def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> None:
     """Repair agent receives bounded file content for directly failed files."""
-    from openjiuwen.rsi.member_optimizer.verification import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.verification import (
         HarnessRepairAgent,
     )
 
@@ -4949,7 +5439,7 @@ def test_member_repair_prompt_includes_failed_file_contents(tmp_path: Path) -> N
 
 def test_member_executor_agent_includes_declared_file_contents_in_prompt(tmp_path: Path) -> None:
     """Executor must give the model current file contents before asking for replacement content."""
-    from openjiuwen.rsi.member_optimizer.action_executor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_executor import (
         MemberActionExecutorAgent,
     )
 
@@ -5051,6 +5541,174 @@ def test_member_executor_merges_successful_non_overlapping_action_when_peer_fail
     assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
         encoding="utf-8"
     ) == "# bash-only solver\n"
+
+
+def test_member_executor_does_not_merge_partial_same_issue_bundle(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    source_harness = two_role_harness_dir / "explainer"
+    original_identity = (source_harness / "identity.md").read_text(encoding="utf-8")
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(source_harness),
+        attributed_issue_ids=["issue_activation"],
+        confidence=0.9,
+    )
+    prompt_action = MemberOptimizationAction(
+        action_id="act_prompt",
+        role="explainer",
+        action_group="prompt",
+        operation="modify",
+        action_type="prompt_refinement",
+        target_path="identity.md",
+        declared_write_paths=["identity.md"],
+        attributed_issue_ids=["issue_activation"],
+    )
+    failed_action = MemberOptimizationAction(
+        action_id="act_config",
+        role="explainer",
+        action_group="skill",
+        operation="modify",
+        action_type="skill_refinement",
+        target_path="skills/activation/SKILL.md",
+        declared_write_paths=["skills/activation/SKILL.md", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_activation"],
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="plan_atomic_bundle",
+        targets=[target],
+        actions=[prompt_action, failed_action],
+        action_waves=[["act_prompt", "act_config"]],
+    )
+    executor = MemberActionExecutor(executor_agent=_MixedSubwaveExecutorAgent())
+
+    results = asyncio.run(
+        executor.execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    by_id = {result.action_id: result for result in results}
+    assert by_id["act_config"].status == "failed"
+    assert by_id["act_prompt"].status == "failed"
+    assert by_id["act_prompt"].merge_status == "not_merged"
+    assert "atomic action bundle peer failed" in by_id["act_prompt"].error
+    assert (integration_worktree_path(run_dir / "wt", "explainer") / "identity.md").read_text(
+        encoding="utf-8"
+    ) == original_identity
+
+
+def test_role_execution_contract_accepts_successful_fallback_branch() -> None:
+    from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import role_execution_errors
+
+    target = MemberOptimizationTarget(
+        role="solver",
+        harness_ref_path="solver",
+        attributed_issue_ids=["issue_skill"],
+    )
+    search = MemberOptimizationAction(
+        action_id="search",
+        role="solver",
+        action_group="skill",
+        operation="search",
+        action_type="skill_search",
+        target_path="skills/",
+        attributed_issue_ids=["issue_skill"],
+    )
+    fallback = MemberOptimizationAction(
+        action_id="fallback",
+        role="solver",
+        action_group="skill",
+        operation="add",
+        action_type="skill_add",
+        target_path="skills/local/SKILL.md",
+        attributed_issue_ids=["issue_skill"],
+        depends_on=["search"],
+        run_if="dependency_failed",
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="fallback_plan",
+        targets=[target],
+        actions=[search, fallback],
+        action_waves=[["search"], ["fallback"]],
+    )
+    results = [
+        MemberActionExecutionResult(
+            action_id="search",
+            role="solver",
+            status="failed",
+            error="no external candidate",
+        ),
+        MemberActionExecutionResult(
+            action_id="fallback",
+            role="solver",
+            status="succeeded",
+            merge_status="merged",
+        ),
+    ]
+
+    assert role_execution_errors(plan, results, "solver") == []
+
+
+def test_member_executor_runs_local_add_fallback_when_skill_search_is_unavailable(
+    tmp_path: Path,
+    two_role_harness_dir: Path,
+) -> None:
+    run_dir = tmp_path / "member_optimization_001"
+    target = MemberOptimizationTarget(
+        role="explainer",
+        harness_ref_path=str(two_role_harness_dir / "explainer"),
+        attributed_issue_ids=["issue_001"],
+    )
+    search = MemberOptimizationAction(
+        action_id="search",
+        role="explainer",
+        action_group="skill",
+        operation="search",
+        action_type="skill_search",
+        target_path="skills/",
+        candidate_query="preserve analyze fix",
+        declared_write_paths=["skills", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_001"],
+    )
+    fallback = MemberOptimizationAction(
+        action_id="fallback",
+        role="explainer",
+        action_group="skill",
+        operation="add",
+        action_type="skill_add",
+        target_path="skills/preserve_analyze_fix/SKILL.md",
+        declared_write_paths=["skills/preserve_analyze_fix/SKILL.md", "skills/skills.yaml"],
+        attributed_issue_ids=["issue_001"],
+        depends_on=["search"],
+        run_if="dependency_failed",
+    )
+    plan = MemberOptimizationPlan(
+        plan_id="fallback_plan",
+        targets=[target],
+        actions=[search, fallback],
+        action_waves=[["search", "fallback"]],
+    )
+
+    results = asyncio.run(
+        MemberActionExecutor(executor_agent=_SkillWritingExecutorAgent()).execute(
+            plan=plan,
+            output_dir=str(run_dir),
+            model_config_ref="unused-by-fake",
+        )
+    )
+
+    by_id = {result.action_id: result for result in results}
+    assert by_id["search"].status == "failed"
+    assert by_id["fallback"].status == "succeeded"
+    assert by_id["fallback"].merge_status == "merged"
+    assert (
+        integration_worktree_path(run_dir / "wt", "explainer") / "skills" / "preserve_analyze_fix" / "SKILL.md"
+    ).is_file()
 
 
 def test_member_verifier_fails_role_when_planned_action_failed(
@@ -5948,129 +6606,9 @@ def test_member_action_planner_reports_the_latest_action_budget_error() -> None:
         )
 
 
-@pytest.mark.parametrize(
-    "failure_class",
-    ["late_skill_activation", "execution_convergence_failure"],
-)
-def test_planner_turns_unapplied_skill_into_execution_checkpoint(
-    failure_class: str,
-) -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import (
-        _adapt_recovery_surface_from_history,
-    )
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_owner"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_owner",
-                role="solver",
-                harness_ref_path="solver",
-                confidence=0.9,
-                evidence=[{"case_id": "marshmallow__marshmallow-1359"}],
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="issue_owner",
-                    role="solver",
-                    mechanism_type="workflow",
-                    failure_signature="root_owner_not_applied",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                    rationale="The owner chain was understood but no edit was produced.",
-                )
-            ]
-        }
-    )
-
-    targets, mechanisms, adaptations = _adapt_recovery_surface_from_history(
-        targets=[target],
-        role_report=role_report,
-        mechanism_report=mechanism_report,
-        rejected_capabilities=[
-            {
-                "role": "solver",
-                "action_group": "skill",
-                "runtime_name": "owner_chain",
-                "target_case_ids": ["marshmallow__marshmallow-1359"],
-                "failure_class": failure_class,
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert mechanisms.role_mechanisms["solver"][0].optimization_surface == "control"
-    assert adaptations[0]["failure_class"] == failure_class
-
-
-def test_planner_keeps_skill_surface_after_semantic_replay_failure() -> None:
-    from openjiuwen.rsi.member_optimizer.action_planner import (
-        _adapt_recovery_surface_from_history,
-    )
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_iterator"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_iterator",
-                role="solver",
-                harness_ref_path="solver",
-                confidence=0.9,
-                evidence=[{"case_id": "pydicom__pydicom-1139"}],
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="issue_iterator",
-                    role="solver",
-                    mechanism_type="skill",
-                    failure_signature="stateful_next_contract_missing",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                )
-            ]
-        }
-    )
-
-    targets, mechanisms, adaptations = _adapt_recovery_surface_from_history(
-        targets=[target],
-        role_report=role_report,
-        mechanism_report=mechanism_report,
-        rejected_capabilities=[
-            {
-                "role": "solver",
-                "action_group": "skill",
-                "target_case_ids": ["pydicom__pydicom-1139"],
-                "failure_class": "semantic_non_reproduction",
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["skill"]
-    assert mechanisms.role_mechanisms["solver"][0].optimization_surface == "skill"
-    assert adaptations == []
-
-
 def test_member_action_planner_rejects_action_removed_from_run_contract() -> None:
     """A model cannot reintroduce skill/search after one-action filtering removes it."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -6113,7 +6651,7 @@ def test_member_action_planner_rejects_action_removed_from_run_contract() -> Non
 
 def test_member_action_planner_rejects_action_when_run_contract_is_empty() -> None:
     """An explicitly empty run contract must fail closed for model actions."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -6147,7 +6685,7 @@ def test_member_action_planner_rejects_action_when_run_contract_is_empty() -> No
 
 def test_member_action_planner_rejects_empty_plan_for_actionable_surface() -> None:
     """Selected roles with a supported diagnosed surface need executable actions."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 
@@ -6363,7 +6901,7 @@ def test_member_action_planner_hard_limits_prompt_surface() -> None:
 
 def test_role_attribution_matches_stable_member_alias() -> None:
     """Analyzer display names should resolve through persisted member identity aliases."""
-    from openjiuwen.rsi.member_optimizer.role_attributor import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.role_attributor import (
         _match_target_member,
     )
 
@@ -6393,7 +6931,7 @@ def test_role_attribution_matches_stable_member_alias() -> None:
 
 def test_member_action_planner_rejects_duplicate_add_target(tmp_path: Path) -> None:
     """An existing Prompt/Skill/Tool must be modified rather than added again."""
-    from openjiuwen.rsi.member_optimizer.action_planner import (
+    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
         _validate_plan,
     )
 

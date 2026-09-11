@@ -23,10 +23,14 @@ class RailBatchIngestor:
         pending_judge_store: Any,
         judge_dispatcher: Any,
         default_user_id: str = "",
+        fixed_user_id: str = "",
+        fixed_model_id: str = "",
     ) -> None:
         self._pending_judge_store = pending_judge_store
         self._judge_dispatcher = judge_dispatcher
         self._default_user_id = default_user_id
+        self._fixed_user_id = fixed_user_id
+        self._fixed_model_id = fixed_model_id
 
     async def ingest_rail_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("protocol_version") != "rail-v1":
@@ -54,7 +58,13 @@ class RailBatchIngestor:
                     first_error = "samples must contain only objects"
                 continue
             try:
-                normalized = self._normalize_rail_sample(payload, sample, default_user_id=self._default_user_id)
+                normalized = self._normalize_rail_sample(
+                    payload,
+                    sample,
+                    default_user_id=self._default_user_id,
+                    fixed_user_id=self._fixed_user_id,
+                    fixed_model_id=self._fixed_model_id,
+                )
             except Exception as exc:
                 rejected += 1
                 if first_error is None:
@@ -87,6 +97,8 @@ class RailBatchIngestor:
         sample: dict[str, Any],
         *,
         default_user_id: str = "",
+        fixed_user_id: str = "",
+        fixed_model_id: str = "",
     ) -> dict[str, Any]:
         session_id = str(sample.get("session_id") or payload.get("session_id") or "")
         trajectory_id = str(sample.get("trajectory_id") or payload.get("trajectory_id") or "")
@@ -122,7 +134,8 @@ class RailBatchIngestor:
                 raise ValueError("response_mask must align with response_tokens")
             response_mask = [int(value) for value in response_mask]
         user_id = str(
-            sample.get("user_id")
+            fixed_user_id
+            or sample.get("user_id")
             or payload.get("user_id")
             or payload.get("tenant_id")
             or sample.get("tenant_id")
@@ -140,7 +153,7 @@ class RailBatchIngestor:
             turn_num=turn_num,
             mode="rail-v1",
             io_mode="rail",
-            model=sample.get("model_id") or payload.get("model_id"),
+            model=fixed_model_id or sample.get("model_id") or payload.get("model_id"),
             messages=messages,
             tools=tools,
             assistant_message=response,

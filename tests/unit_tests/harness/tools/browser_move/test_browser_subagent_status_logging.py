@@ -4,12 +4,22 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import importlib.util
+import json
 import logging
 from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+from openjiuwen.core.common.logging.browser_context import (
+    reset_browser_agent_log_context,
+    set_browser_agent_log_context,
+)
+from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
+    write_browser_agent_audit_artifact,
+)
 
 _STATUS_LOGGING_PATH = (
     Path(__file__).resolve().parents[5]
@@ -52,6 +62,55 @@ class FakeAgent:
 
 def _run(coro: Any) -> Any:
     return asyncio.run(coro)
+
+
+def test_raw_browser_observation_is_written_only_to_audit_artifact(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    log_path = tmp_path / "browser_agent.log"
+    monkeypatch.setenv("OPENJIUWEN_BROWSER_AGENT_LOG_FILE", str(log_path))
+    monkeypatch.setenv("OPENJIUWEN_BROWSER_AGENT_AUDIT_RAW", "1")
+    token = set_browser_agent_log_context(True)
+    try:
+        audit = write_browser_agent_audit_artifact(
+            "card_probe",
+            {"cards": [{"title": "private raw card"}]},
+        )
+    finally:
+        reset_browser_agent_log_context(token)
+        browser_logger = logging.getLogger("openjiuwen.browser_agent")
+        for handler in list(browser_logger.handlers):
+            if getattr(handler, "baseFilename", None) == str(log_path):
+                browser_logger.removeHandler(handler)
+                handler.close()
+
+    artifacts = list((tmp_path / "browser_agent_audit").glob("card_probe_*.json.gz"))
+    assert audit["stored"] is True
+    assert len(artifacts) == 1
+    with gzip.open(artifacts[0], mode="rt", encoding="utf-8") as stream:
+        stored = json.load(stream)
+    assert "private raw card" in stored["raw"]
+
+
+def test_raw_browser_observation_audit_is_disabled_by_default(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    log_path = tmp_path / "browser_agent.log"
+    monkeypatch.setenv("OPENJIUWEN_BROWSER_AGENT_LOG_FILE", str(log_path))
+    monkeypatch.delenv("OPENJIUWEN_BROWSER_AGENT_AUDIT_RAW", raising=False)
+    token = set_browser_agent_log_context(True)
+    try:
+        audit = write_browser_agent_audit_artifact(
+            "card_probe",
+            {"cards": [{"title": "private raw card"}]},
+        )
+    finally:
+        reset_browser_agent_log_context(token)
+
+    assert audit["stored"] is False
+    assert not (tmp_path / "browser_agent_audit").exists()
 
 
 def test_status_logger_summarizes_batch_args_without_values() -> None:

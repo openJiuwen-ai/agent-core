@@ -20,15 +20,61 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
     from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
     from openjiuwen.agent_teams.team_context import TeamContextTracker
     from openjiuwen.agent_teams.tools.team import TeamBackend
+
+
+_JIUWEN_EXTERNAL_PROVIDER = "jiuwen"
+
+
+def _external_cli_provider_name(client_config: Any) -> str:
+    """Resolve the CLI-side provider identity for a model client config.
+
+    Codex-style CLI runtimes gate server-side behaviors (remote compaction,
+    request-body compression) on the provider *name* matching their official
+    endpoint ("OpenAI"). A pool entry's ``client_provider`` is only the wire
+    protocol label — mostly "OpenAI" for OpenAI-compatible gateways — so
+    passing it through verbatim makes every external gateway look official and
+    breaks the gated protocols against endpoints that do not implement them.
+
+    Every explicitly configured external endpoint is exposed to the CLI under
+    the stable ``jiuwen`` provider identity. The raw ``client_provider``
+    survives only when no api_base is configured, which is the official-endpoint
+    case where the name remains accurate.
+    """
+    api_base = str(getattr(client_config, "api_base", "") or "").strip()
+    if api_base:
+        return _JIUWEN_EXTERNAL_PROVIDER
+    return str(getattr(client_config, "client_provider", "") or "").strip()
+
+
+def _team_model_config_to_external(
+    member_model: Any,
+) -> Optional[ExternalCliModelConfig]:
+    """Convert a pool-allocated TeamModelConfig to ExternalCliModelConfig."""
+    client_config = getattr(member_model, "model_client_config", None)
+    request_config = getattr(member_model, "model_request_config", None)
+    if client_config is None:
+        return None
+    provider = _external_cli_provider_name(client_config)
+    model = ""
+    if request_config is not None:
+        model = str(getattr(request_config, "model_name", "") or getattr(request_config, "model", "") or "")
+    return ExternalCliModelConfig(
+        provider=provider or None,
+        model=model or None,
+        api_base=str(getattr(client_config, "api_base", "") or "") or None,
+        api_key=str(getattr(client_config, "api_key", "") or "") or None,
+    )
 
 
 async def _build_member_system_prompt(
@@ -37,6 +83,7 @@ async def _build_member_system_prompt(
     member_name: str | None,
     *,
     hitt_enabled: bool,
+    ws_cache: Any = None,
 ) -> str | None:
     """Build the external CLI member's system prompt from team-rail sections.
 
@@ -51,11 +98,17 @@ async def _build_member_system_prompt(
         ctx: The external CLI member's runtime context (role / desc / language).
         member_name: The member's semantic identifier.
         hitt_enabled: Effective HITT flag for the team instance.
+        ws_cache: Optional team workspace cache. When the teammate shares the
+            leader's cache (``share_workspace_cache_with``), pass it here so
+            ``build_team_member_system_prompt`` reads evolved A-class templates
+            (teammate_policy, etc.) through the cache-bound loader instead of
+            the framework default. ``None`` keeps the framework read-only path.
 
     Returns:
         The rendered system prompt, or ``None`` when no section had content.
     """
     from openjiuwen.agent_teams.agent.agent_configurator import _resolve_team_mode
+    from openjiuwen.agent_teams.prompts.loader import make_template_loader
 
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     prompt = build_team_member_system_prompt(
@@ -71,6 +124,7 @@ async def _build_member_system_prompt(
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
+        loader=make_template_loader(ws_cache),
     )
     return prompt or None
 
@@ -85,11 +139,12 @@ def _build_team_context_tracker(
     """Build the tracker feeding team state into this CLI member's messages.
 
     An external CLI has no rail, so the runtime folds the tracker's output into
-    the next message it sends. Unlike an in-process member, an external CLI has
-    no ``.team/{team}`` mount in its cwd (``setup_agent`` short-circuits before
-    ``mount_into_workspace`` is ever called), so the agent-relative mount string
-    would be a path the member cannot reach. We therefore expose only the
-    shared workspace's absolute path — the member writes there directly.
+    the next message it sends. Unlike an in-process member, an external CLI
+    never has the team workspace mounted into its cwd (``setup_agent``
+    short-circuits before ``mount_into_workspace`` is ever called), so any
+    agent-relative mount string would be a path the member cannot reach. We
+    therefore expose only the shared workspace's absolute path — the member
+    writes there directly.
 
     Args:
         team_backend: The external member's own TeamBackend.
@@ -112,8 +167,8 @@ def _build_team_context_tracker(
         role=ctx.role,
         display_name=ctx.display_name or "",
         member_prompt=ctx.prompt or "",
-        team_workspace_mount=None,
         team_workspace_path=_team_workspace_path(spec, team_name) if workspace_enabled else None,
+        team_outputs_dir=_build_context_team_outputs_dir(spec),
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         language=language,
     )
@@ -144,7 +199,7 @@ def _team_workspace_path(spec: "TeamAgentSpec", team_name: str) -> str:
     workspace = spec.workspace
     if workspace is not None and workspace.root_path:
         return workspace.root_path
-    return str(team_home(team_name) / "team-workspace")
+    return str(team_workspace_dir(team_name))
 
 
 def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
@@ -152,6 +207,13 @@ def _build_context_project_dir(spec: "TeamAgentSpec") -> str | None:
     if build_context is None:
         return None
     return _path_value(getattr(build_context, "project_dir", None))
+
+
+def _build_context_team_outputs_dir(spec: "TeamAgentSpec") -> str | None:
+    build_context = spec.build_context
+    if build_context is None:
+        return None
+    return _path_value(getattr(build_context, "team_outputs_dir", None))
 
 
 def _resolve_external_paths(
@@ -176,6 +238,7 @@ def _resolve_external_paths(
 
 async def external_cli_spawn(
     *,
+    team_agent: "TeamAgent",
     spec: "TeamAgentSpec",
     ctx: "TeamRuntimeContext",
     hitt_enabled: bool,
@@ -186,6 +249,7 @@ async def external_cli_spawn(
     """Launch the CLI for ``ctx.cli_agent`` and run it as a team member.
 
     Args:
+        team_agent: The leader TeamAgent that owns the team spec.
         spec: Team spec used to configure this external member shell.
         ctx: Runtime context for the external CLI member.
         hitt_enabled: Effective HITT flag from the caller's team instance.
@@ -214,22 +278,63 @@ async def external_cli_spawn(
     backend = backend_for(ctx.cli_agent) if ctx.cli_agent else None
     # Build the member's system prompt from the team-rail sections (the same
     # sections an in-process member gets), excluding the other DeepAgent rails.
+    # The leader's workspace cache is already built at this point (leader has
+    # configured), so we can bind it into the loader — evolved A-class
+    # templates (teammate_policy, ...) reach the CLI member's system prompt.
+    leader_workspace_cache = team_agent.team_backend.workspace_cache if team_agent.team_backend is not None else None
     system_prompt = await _build_member_system_prompt(
         spec,
         ctx,
         member_name,
         hitt_enabled=hitt_enabled,
+        ws_cache=leader_workspace_cache,
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    # The member was registered through ``spawn_external_cli_agent`` which
-    # already validated a matching entry exists; fall back to defaults if it
-    # is somehow absent so the launch still produces a usable runtime.
     cli_cfg = None
     for entry in spec.external_cli_agents:
         if entry.cli_agent == ctx.cli_agent:
             cli_cfg = entry
             break
+
+    # When the pool allocator assigned a model to this member, convert it to
+    # an ExternalCliModelConfig, filtering by provider compatibility: Claude
+    # needs Anthropic, Codex needs OpenAI-compatible. Falls back to the static
+    # spec config when no pool allocation or no provider match exists.
+    external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
+    fallback_external_model_config = None
+    if ctx.member_model is not None:
+        pool_model_config = _team_model_config_to_external(ctx.member_model)
+        if pool_model_config is not None:
+            team_logger.info(
+                "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
+                ctx.member_name,
+                pool_model_config.provider,
+                pool_model_config.model,
+                pool_model_config.api_base,
+            )
+            external_model_config = pool_model_config
+        else:
+            team_logger.info(
+                "[external-cli] member {} pool model conversion returned None; falling back to static config",
+                ctx.member_name,
+            )
+    else:
+        team_logger.info(
+            "[external-cli] member {} no pool model assigned; using static config",
+            ctx.member_name,
+        )
+    if ctx.fallback_member_model is not None:
+        fallback_external_model_config = _team_model_config_to_external(ctx.fallback_member_model)
+
+    async def promote_fallback_model() -> bool:
+        """Persist the fallback model as this member's active model."""
+        if teammate_backend is None:
+            return False
+        return await teammate_backend.db.member.promote_member_fallback_model(
+            ctx.member_name or "",
+            team_name,
+        )
 
     if cli_cfg is not None:
         cwd, add_dirs = _resolve_external_paths(
@@ -250,6 +355,10 @@ async def external_cli_spawn(
             codex_bypass_approvals_and_sandbox=cli_cfg.codex_bypass_approvals_and_sandbox,
             codex_turn_idle_timeout_s=cli_cfg.codex_turn_idle_timeout_s,
             codex_turn_idle_retries=cli_cfg.codex_turn_idle_retries,
+            claude_turn_idle_timeout_s=cli_cfg.claude_turn_idle_timeout_s,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             mcp_server_command=tuple(cli_cfg.mcp_server_command),
             system_prompt=system_prompt,
             extra_env=cli_cfg.env or None,
@@ -268,14 +377,34 @@ async def external_cli_spawn(
             ctx,
             cwd=cwd,
             add_dirs=add_dirs,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             system_prompt=system_prompt,
             resume_external_backend=resume_external_backend,
             member_agent_id=card.id,
         )
 
     teammate = _TeamAgent(card)
+    # Same team-level cache sharing as inprocess_spawn: the CLI
+    # member's TeamAgent runs in-process, so it must reuse the leader's built
+    # workspace cache instead of re-scanning the team-workspace md files.
+    # Injection must precede configure (see inprocess_spawn for the ordering
+    # rationale).
+    team_agent.share_workspace_cache_with(teammate)
+    team_logger.info(
+        "[external-cli] about to configure teammate {} member_runtime={} type={}",
+        member_name,
+        runtime is not None,
+        type(runtime).__name__ if runtime is not None else "None",
+    )
     teammate.configure(spec, ctx, member_runtime=runtime)
     teammate_backend = teammate.team_backend
+    team_logger.info(
+        "[external-cli] after configure teammate {} teammate_backend={}",
+        member_name,
+        teammate_backend is not None,
+    )
     runtime.bind_team_context_tracker(
         _build_team_context_tracker(
             teammate_backend,
@@ -286,6 +415,7 @@ async def external_cli_spawn(
         ),
     )
     from openjiuwen.agent_teams.external.cli_agent.claude import ClaudeSdkRuntime
+    from openjiuwen.agent_teams.external.cli_agent.codex import CodexSdkRuntime
 
     if isinstance(runtime, ClaudeSdkRuntime) and teammate_backend is not None:
         runtime.bind_team_tools(
@@ -299,6 +429,18 @@ async def external_cli_spawn(
             messager=teammate.infra.messager,
             team_name=team_name,
             team_permissions_enabled=spec.enable_permissions,
+        )
+
+    # Inject the reliability delivery surface (failed message to the
+    # leader mailbox + member ERROR status) for Claude/Codex SDK runtimes only.
+    if isinstance(runtime, (ClaudeSdkRuntime, CodexSdkRuntime)) and teammate_backend is not None:
+        leader_name = await teammate_backend.resolve_leader_member_name()
+        runtime.bind_reliability_context(
+            session_id=session_id or "",
+            team_backend=teammate_backend,
+            leader_name=leader_name,
+            update_status_cb=teammate.update_status,
+            messager=teammate.infra.messager,
         )
 
     base_query = initial_message or ""

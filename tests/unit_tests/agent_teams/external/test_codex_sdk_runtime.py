@@ -15,6 +15,7 @@ import pytest
 from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
     CodexSdkRuntime,
     _json_arguments,
+    _resume_thread_with_model,
     _start_thread_with_raw_events,
     _tool_result,
 )
@@ -589,8 +590,7 @@ async def test_codex_sdk_runtime_keeps_sdk_response_as_separate_summary():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_native_model_request_sets_exact_llm_span_timing(
-):
+async def test_codex_native_model_request_sets_exact_llm_span_timing():
     exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
     from openjiuwen.agent_teams.observability import (
         ObservabilityConfig,
@@ -598,6 +598,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         shutdown_observability,
     )
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
+
     exporter = exporter_module.InMemorySpanExporter()
     init_observability(
         ObservabilityConfig(
@@ -637,6 +638,7 @@ async def test_codex_native_model_request_sets_exact_llm_span_timing(
         clear_team_span()
 
         end_ns = time.time_ns()
+
         async def deliver_native_span():
             await asyncio.sleep(0)
             bridge.record_native_model_span(
@@ -703,10 +705,13 @@ async def test_codex_native_mode_preserves_exact_unpaired_span():
             get_or_create_team_span,
         )
 
-        assert get_or_create_team_span(
-            "team",
-            get_tracer("codex-unpaired-observation-test"),
-        ) is not None
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-unpaired-observation-test"),
+            )
+            is not None
+        )
         bridge = CodexSpanBridge(
             member_name="developer",
             member_agent_id="team_developer",
@@ -733,9 +738,7 @@ async def test_codex_native_mode_preserves_exact_unpaired_span():
         )
         bridge.finish_turn(status="completed")
 
-        llm_span = next(
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
-        )
+        llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
         assert llm_span.attributes["codex.observation.granularity"] == "native_sampling_span"
         assert llm_span.attributes["codex.model.call.observed"] is True
         assert llm_span.attributes["codex.model.call.paired"] is False
@@ -771,10 +774,13 @@ async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing(
             get_or_create_team_span,
         )
 
-        assert get_or_create_team_span(
-            "team",
-            get_tracer("codex-missing-native-export-test"),
-        ) is not None
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-missing-native-export-test"),
+            )
+            is not None
+        )
         bridge = CodexSpanBridge(
             member_name="developer",
             member_agent_id="team_developer",
@@ -791,9 +797,7 @@ async def test_codex_turn_does_not_infer_llm_call_when_native_export_is_missing(
 
         spans = list(exporter.get_finished_spans())
         assert not [span for span in spans if span.name == "llm.call"]
-        turn_span = next(
-            span for span in spans if span.name == "agent.developer.codex_turn.1"
-        )
+        turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
         assert turn_span.attributes["codex.native.model_span_count"] == 0
     finally:
         shutdown_observability()
@@ -808,7 +812,7 @@ async def test_codex_thread_start_uses_low_level_raw_event_compatibility():
     class _LowLevelClient:
         async def thread_start(self, params):
             requests.append(params)
-            return SimpleNamespace(thread=SimpleNamespace(id="thread-raw"))
+            return SimpleNamespace(thread=SimpleNamespace(id="thread-raw"), model="gpt-effective")
 
     class _HighLevelClient:
         def __init__(self):
@@ -827,19 +831,62 @@ async def test_codex_thread_start_uses_low_level_raw_event_compatibility():
         AsyncThread=lambda owner, thread_id: SimpleNamespace(owner=owner, id=thread_id),
     )
 
-    thread = await _start_thread_with_raw_events(
+    activation = await _start_thread_with_raw_events(
         client=client,
         sdk=sdk,
         options={"cwd": "/workspace", "ephemeral": False},
     )
 
     assert client.initialized is True
-    assert thread.id == "thread-raw"
+    assert activation.thread.id == "thread-raw"
+    assert activation.model == "gpt-effective"
     assert requests[0]["experimentalRawEvents"] is True
     assert requests[0]["cwd"] == "/workspace"
     assert requests[0]["ephemeral"] is False
     assert requests[0]["approvalPolicy"] == "on-request"
     assert requests[0]["approvalsReviewer"] == "auto_review"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_thread_resume_retains_effective_model():
+    pytest.importorskip("openai_codex")
+    from openai_codex.generated.v2_all import ThreadResumeParams
+
+    requests: list[tuple[str, object]] = []
+
+    class _LowLevelClient:
+        async def thread_resume(self, thread_id: str, params: object) -> object:
+            requests.append((thread_id, params))
+            return SimpleNamespace(thread=SimpleNamespace(id=thread_id), model="gpt-effective")
+
+    class _HighLevelClient:
+        def __init__(self):
+            self._client = _LowLevelClient()
+
+        async def _ensure_initialized(self) -> None:
+            pass
+
+        async def thread_resume(self, thread_id: str, **options: object) -> object:
+            raise AssertionError("the public resume method must not be used")
+
+    client = _HighLevelClient()
+    sdk = SimpleNamespace(
+        AsyncThread=lambda owner, thread_id: SimpleNamespace(owner=owner, id=thread_id),
+    )
+
+    activation = await _resume_thread_with_model(
+        client=client,
+        sdk=sdk,
+        thread_id="thread-existing",
+        options={"model": "gpt-requested", "cwd": "/workspace"},
+    )
+
+    assert activation.thread.id == "thread-existing"
+    assert activation.model == "gpt-effective"
+    assert requests[0][0] == "thread-existing"
+    assert getattr(requests[0][1], "model", None) == "gpt-requested"
+    assert isinstance(requests[0][1], ThreadResumeParams)
 
 
 @pytest.mark.parametrize(
@@ -898,6 +945,239 @@ def test_codex_sdk_runtime_joins_text_block_tool_results():
     )
 
     assert _tool_result(item) == "first\nsecond"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_maps_sub_agent_items_to_tool_chunks():
+    """Sub-agent collaboration items become visible tool_call / tool_result chunks.
+
+    The parent thread reports spawn / interaction as collabAgentToolCall items
+    and sub-agent lifecycle as subAgentActivity items; without the mapping a
+    sub-agent's activity would be invisible on the team stream.
+    """
+    spawn = SimpleNamespace(
+        type="collabAgentToolCall",
+        id="collab-1",
+        tool="spawnAgent",
+        status="inProgress",
+        prompt="fix the failing tests",
+        model="gpt-5",
+        reasoning_effort=None,
+        sender_thread_id="thread-parent",
+        receiver_thread_ids=[],
+        agents_states={},
+    )
+    spawned = SimpleNamespace(
+        type="collabAgentToolCall",
+        id="collab-1",
+        tool="spawnAgent",
+        status="completed",
+        prompt="fix the failing tests",
+        model="gpt-5",
+        reasoning_effort=None,
+        sender_thread_id="thread-parent",
+        receiver_thread_ids=["thread-child"],
+        agents_states={"thread-child": {"status": "Running", "message": None}},
+    )
+    activity = SimpleNamespace(
+        type="subAgentActivity",
+        id="sub-1",
+        kind="started",
+        agent_path="/root/coder",
+        agent_thread_id="thread-child",
+    )
+    turn = [
+        _item_notification("item/started", spawn),
+        _item_notification("item/completed", spawned),
+        _item_notification("item/completed", activity),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
+    thread = _FakeThread("thread-developer", [turn])
+    runtime, _ = _runtime(thread=thread)
+
+    await _start(runtime)
+    chunks = [chunk async for chunk in runtime._drive({"query": "delegate"})]
+
+    assert [chunk.type for chunk in chunks] == ["tool_call", "tool_result", "tool_result"]
+    call = chunks[0].payload
+    assert call["name"] == "collab_spawn_agent"
+    assert json.loads(call["arguments"])["prompt"] == "fix the failing tests"
+    assert json.loads(call["arguments"])["status"] == "inProgress"
+    # Empty collab fields (no receivers yet on spawn start) are dropped.
+    assert "receiver_thread_ids" not in json.loads(call["arguments"])
+    spawn_result = chunks[1].payload
+    assert json.loads(spawn_result["result"])["status"] == "completed"
+    assert json.loads(spawn_result["result"])["agents_states"]["thread-child"]["status"] == "Running"
+    activity_result = chunks[2].payload
+    assert activity_result["tool_name"] == "sub_agent_activity"
+    assert json.loads(activity_result["result"])["kind"] == "started"
+    assert json.loads(activity_result["result"])["agent_path"] == "/root/coder"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_drops_empty_collab_wait_fields():
+    """A wait collab call carries no prompt / model / receivers — keep its card minimal."""
+    wait = SimpleNamespace(
+        type="collabAgentToolCall",
+        id="collab-wait",
+        tool="wait",
+        status="inProgress",
+        prompt=None,
+        model=None,
+        reasoning_effort=None,
+        sender_thread_id="thread-parent",
+        receiver_thread_ids=[],
+        agents_states={},
+    )
+    turn = [
+        _item_notification("item/started", wait),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
+    thread = _FakeThread("thread-developer", [turn])
+    runtime, _ = _runtime(thread=thread)
+
+    await _start(runtime)
+    chunks = [chunk async for chunk in runtime._drive({"query": "wait"})]
+
+    assert [chunk.type for chunk in chunks] == ["tool_call"]
+    assert chunks[0].payload["name"] == "collab_wait"
+    assert json.loads(chunks[0].payload["arguments"]) == {"status": "inProgress"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_maps_builtin_tool_items_to_tool_chunks():
+    """webSearch / imageGeneration / sleep items map to tool_call / tool_result."""
+    search = SimpleNamespace(
+        type="webSearch",
+        id="web-1",
+        query="openai codex sdk",
+        action=None,
+    )
+    image = SimpleNamespace(
+        type="imageGeneration",
+        id="img-1",
+        status="completed",
+        result="generated",
+        revised_prompt="a cat",
+        saved_path=None,
+    )
+    sleep = SimpleNamespace(
+        type="sleep",
+        id="sleep-1",
+        duration_ms=5000,
+    )
+    turn = [
+        _item_notification("item/completed", search),
+        _item_notification("item/completed", image),
+        _item_notification("item/started", sleep),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
+    thread = _FakeThread("thread-developer", [turn])
+    runtime, _ = _runtime(thread=thread)
+
+    await _start(runtime)
+    chunks = [chunk async for chunk in runtime._drive({"query": "search"})]
+
+    assert [chunk.type for chunk in chunks] == ["tool_result", "tool_result", "tool_call"]
+    assert chunks[0].payload["tool_name"] == "web_search"
+    assert json.loads(chunks[0].payload["result"])["detail"] == "openai codex sdk"
+    assert chunks[1].payload["tool_name"] == "image_generation"
+    assert json.loads(chunks[1].payload["result"])["status"] == "completed"
+    assert json.loads(chunks[1].payload["result"])["result"] == "generated"
+    assert chunks[2].payload["name"] == "sleep"
+    assert json.loads(chunks[2].payload["arguments"]) == {"duration_ms": 5000}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_maps_context_compaction_to_compression_state():
+    """A completed contextCompaction item becomes a native compression_state chunk.
+
+    The chunk shape mirrors what an in-process member emits
+    (``ContextCompressionState``), so the frontend renders one uniform
+    compaction signal; statistics Codex does not expose stay absent.
+    """
+    compaction = SimpleNamespace(type="contextCompaction", id="compact-1")
+    turn = [
+        _item_notification("item/completed", compaction),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
+    thread = _FakeThread("thread-developer", [turn])
+    runtime, _ = _runtime(thread=thread)
+
+    await _start(runtime)
+    chunks = [chunk async for chunk in runtime._drive({"query": "work"})]
+
+    assert [chunk.type for chunk in chunks] == ["context.compression_state"]
+    payload = chunks[0].payload
+    assert payload["operation_id"] == "compact-1"
+    assert payload["status"] == "completed"
+    assert payload["phase"] == "active_compress"
+    assert payload["processor"] == "codex_native"
+    # Codex reports no before/after statistics — nothing is fabricated.
+    assert "before" not in payload
+    assert "saved" not in payload
+    assert "compact_summary" not in payload
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_codex_sdk_runtime_marks_context_compaction_on_turn_span():
+    """A completed contextCompaction item stamps the trace turn span.
+
+    Both the span event (OTel-native backends) and the attribute mirror
+    (OTLP UIs such as Langfuse drop span events) must be present.
+    """
+    exporter_module = pytest.importorskip("opentelemetry.sdk.trace.export.in_memory_span_exporter")
+    from openjiuwen.agent_teams.observability import (
+        ObservabilityConfig,
+        init_observability,
+        shutdown_observability,
+    )
+
+    exporter = exporter_module.InMemorySpanExporter()
+    init_observability(
+        ObservabilityConfig(
+            enabled=True,
+            service_name="codex-compaction-trace-test",
+            sample_rate=1.0,
+        ),
+        span_exporter_override=exporter,
+    )
+    try:
+        from openjiuwen.agent_teams.observability.setup import get_tracer
+        from openjiuwen.agent_teams.observability.span_context import (
+            get_or_create_team_span,
+        )
+
+        assert (
+            get_or_create_team_span(
+                "team",
+                get_tracer("codex-compaction-trace-test"),
+            )
+            is not None
+        )
+        compaction = SimpleNamespace(type="contextCompaction", id="compact-1")
+        turn = [
+            _item_notification("item/completed", compaction),
+            _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+        ]
+        thread = _FakeThread("thread-developer", [turn])
+        runtime, _ = _runtime(thread=thread)
+
+        await _start(runtime)
+        _ = [chunk async for chunk in runtime._drive({"query": "work"})]
+
+        spans = list(exporter.get_finished_spans())
+        turn_span = next(span for span in spans if span.name == "agent.developer.codex_turn.1")
+        assert turn_span.attributes["codex.context_compacted"] is True
+        event_names = [event.name for event in turn_span.events]
+        assert "codex.context_compacted" in event_names
+    finally:
+        shutdown_observability()
 
 
 @pytest.mark.asyncio
@@ -989,23 +1269,31 @@ async def test_codex_sdk_runtime_does_not_rewrite_restored_thread_id():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_strict_resume_rejects_missing_member_checkpoint():
+async def test_codex_sdk_runtime_recovery_starts_thread_without_saved_checkpoint():
     thread = _FakeThread("thread-new", [[]])
     runtime, client = _runtime(thread=thread)
     runtime._resume_external_backend = True
 
-    with pytest.raises(RuntimeError, match="strict resume forbids"):
-        await _start(runtime)
+    await _start(runtime)
 
-    assert client.start_calls == []
+    assert client.start_calls == [
+        {
+            "config": {"model_reasoning_summary": "detailed"},
+            "cwd": "/workspace",
+            "developer_instructions": "role prompt",
+            "ephemeral": False,
+            "experimental_raw_events": True,
+        }
+    ]
     assert client.resume_calls == []
+    assert runtime._test_member_session.state == _saved_state("thread-new")
 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_ignores_other_backend_checkpoint_on_strict_resume():
+async def test_codex_sdk_runtime_recovery_starts_thread_for_other_backend_checkpoint():
     thread = _FakeThread("thread-new", [[]])
-    runtime, _ = _runtime(
+    runtime, client = _runtime(
         thread=thread,
         member_state={
             "external_runtime": {
@@ -1016,8 +1304,11 @@ async def test_codex_sdk_runtime_ignores_other_backend_checkpoint_on_strict_resu
     )
     runtime._resume_external_backend = True
 
-    with pytest.raises(RuntimeError, match="strict resume forbids"):
-        await _start(runtime)
+    await _start(runtime)
+
+    assert client.resume_calls == []
+    assert len(client.start_calls) == 1
+    assert runtime._test_member_session.state == _saved_state("thread-new")
 
 
 @pytest.mark.asyncio
@@ -1071,16 +1362,29 @@ async def test_codex_sdk_runtime_does_not_queue_unrelated_steer_errors():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_sdk_runtime_reports_non_retryable_sdk_errors():
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_codex_sdk_runtime_non_retryable_error_does_not_raise_without_reliability_ctx():
+    """A non-retryable error no longer raises from _notification_chunks.
+
+    Failure classification lives in ``_handle_failure_notification`` (which
+    records a pending candidate and finalizes on the terminal state), not in
+    ``_notification_chunks``. Without a reliability context injected — the
+    common test path — the turn simply ends; the failure path itself is
+    covered by ``test_codex_runtime_reliability``.
+    """
     error = SimpleNamespace(message="boom")
-    turn = [_notification("error", error=error, will_retry=False)]
+    turn = [
+        _notification("error", error=error, will_retry=False),
+        _notification("turn/completed", turn=SimpleNamespace(status="completed")),
+    ]
     thread = _FakeThread("thread-developer", [turn])
     runtime, _ = _runtime(thread=thread)
     await _start(runtime)
 
-    with pytest.raises(RuntimeError, match="codex SDK turn failed"):
-        async for _ in runtime._drive({"query": "fail"}):
-            pass
+    # No RuntimeError: the error is classified, not raised.
+    chunks = [chunk async for chunk in runtime._drive({"query": "fail"})]
+    assert chunks == []
 
 
 @pytest.mark.asyncio

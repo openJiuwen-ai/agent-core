@@ -18,6 +18,12 @@ from typing import (
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.agent_teams.schema.external_runtime_reliability import (
+    ExternalRuntimeAgentKind,
+    ExternalRuntimeFailureCategory,
+    ExternalRuntimeFailureReason,
+    ExternalRuntimePhase,
+)
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 
 
@@ -120,6 +126,9 @@ class TeamEvent:
 
     # Reliability events
     ANOMALY_DETECTED = "anomaly_detected"
+    # A Claude/Codex SDK runtime is auto-retrying (e.g. Codex will_retry=True).
+    # Non-persistent progress signal; final failure reuses MESSAGE + mailbox.
+    EXTERNAL_RUNTIME_RETRYING = "external_runtime_retrying"
 
     # Messaging events
     MESSAGE = "message"
@@ -432,8 +441,23 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     run_id: Optional[str] = Field(
         default=None, description="Unique run identifier, set by SwarmflowTool for all events of one run"
     )
+    relaunch_kind: Optional[str] = Field(
+        default=None,
+        description=(
+            "How this run's launch differs from a fresh one: 'resume' (normal "
+            "pause→resume, the tree continues) or 'relaunch' (script-edit re-run "
+            "under the same run_id, the phase/agent structure is reset). None on "
+            "a fresh launch."
+        ),
+    )
     workflow_name: Optional[str] = Field(default=None, description="The swarmflow script's META name")
     description: Optional[str] = Field(default=None, description="The swarmflow script's META description")
+    script_path: Optional[str] = Field(
+        default=None,
+        description="Absolute path of the script driving this run, on workflow_started. The "
+                    "embedder's snapshot reads it here so a cold-start resume can relaunch "
+                    "through resume_id + script_path.",
+    )
     phase: Optional[str] = Field(default=None, description="Current phase title, when applicable")
     label: Optional[str] = Field(default=None, description="Agent call label, on agent_* kinds")
     prompt: Optional[str] = Field(default=None, description="Rendered agent prompt, on agent_started")
@@ -465,6 +489,21 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     tokens: Optional[int] = Field(default=None, description="Per-agent token usage from the result loop.")
     budget: Optional[dict] = Field(
         default=None, description="Leader shared-pool snapshot {total,spent,remaining,scope,exhausted}."
+    )
+    workflow_budget: Optional[dict] = Field(
+        default=None,
+        description=(
+            "Per-run ledger snapshot (same shape as budget, scope=workflow); "
+            "None when the script declares no workflow_token_limit."
+        ),
+    )
+    budget_exhausted_scope: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which ledger actually triggered the workflow_failed: 'session' "
+            "or 'workflow'; None on non-budget failures. Frontend uses this "
+            "(not error-text matching) to decide the exhausted layer."
+        ),
     )
     phase_type: Optional[str] = Field(default=None, description='"child" for nested-workflow child phase declarations.')
     nested_phase: Optional[str] = Field(
@@ -532,6 +571,32 @@ class AnomalyDetectedEvent(BaseEventMessage):
     peer_member: Optional[str] = Field(default=None, description="Peer member for team-level anomalies")
 
 
+class ExternalRuntimeRetryingEvent(BaseEventMessage):
+    """Published when a Claude/Codex SDK runtime is auto-retrying.
+
+    Member-scoped: ``member_name`` (from BaseEventMessage) is the retrying
+    member. Non-persistent progress signal — it does not end the current
+    round and does not change the member's final status. Carried across
+    processes so the leader's :class:`ExternalRuntimeHandler` can surface the
+    retry progress. ``agent_kind`` / ``phase`` / ``category`` are the string
+    values from ``external_runtime`` so this schema stays independent of the
+    external runtime package.
+    """
+
+    agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the retry")
+    model: str = Field(default="", description="Effective model confirmed by the CLI or SDK, if known")
+    phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
+    category: ExternalRuntimeFailureCategory = Field(..., description="Failure category of the retrying error")
+    summary: str = Field(..., description="One-line description for human/LLM")
+    reason: ExternalRuntimeFailureReason = Field(
+        default_factory=ExternalRuntimeFailureReason,
+        description="Structured reason snapshot",
+    )
+    attempt: Optional[int] = Field(default=None, description="Retry attempt number, if known")
+    max_attempts: Optional[int] = Field(default=None, description="Max retry attempts, if known")
+    round_id: Optional[int] = Field(default=None, description="Member round id, None for startup")
+
+
 _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model class
     TeamEvent.CREATED: TeamCreatedEvent,
     TeamEvent.CLEANED: TeamCleanedEvent,
@@ -572,6 +637,7 @@ _EVENT_TYPE_MAP: Dict[str, Type[BaseEventMessage]] = {  # event_type -> model cl
     TeamEvent.WORKSPACE_LOCK_REQUEST: WorkspaceLockRequestEvent,
     TeamEvent.WORKSPACE_LOCK_RESPONSE: WorkspaceLockResponseEvent,
     TeamEvent.ANOMALY_DETECTED: AnomalyDetectedEvent,
+    TeamEvent.EXTERNAL_RUNTIME_RETRYING: ExternalRuntimeRetryingEvent,
 }
 
 _EVENT_CLASS_MAP: Dict[Type[BaseEventMessage], str] = {  # model class -> event_type

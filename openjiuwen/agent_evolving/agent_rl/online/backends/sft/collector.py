@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from openjiuwen.agent_evolving.agent_rl.online.core.interaction import TokenInTokenOutRecord
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import iter_spans
 from openjiuwen.agent_evolving.trajectory.team import span_category
@@ -20,35 +19,6 @@ class SFTTrajectoryCollector:
 
     def __init__(self, *, converter: Optional[SFTRawTrajectoryConverter] = None) -> None:
         self.converter = converter or SFTRawTrajectoryConverter()
-
-    @staticmethod
-    def collect_llm_interaction(
-        record: TokenInTokenOutRecord,
-        *,
-        step: Any,
-        turn_id: int,
-        tenant_id: str | None,
-        lora_meta: Optional[dict[str, Any]] = None,
-    ) -> None:
-        if step is None:
-            return
-        meta = getattr(step, "meta", None)
-        if not isinstance(meta, dict):
-            step.meta = {}
-            meta = step.meta
-        meta.update({
-            "turn_id": turn_id,
-            "source": "sft_online",
-            "tenant_id": tenant_id,
-            "prompt_str": record.prompt_str,
-            "llm_str": record.llm_str,
-        })
-        if record.prompt_ids is not None:
-            meta["prompt_ids"] = record.prompt_ids
-        if record.llm_ids is not None:
-            meta["completion_token_ids"] = record.llm_ids
-        if lora_meta:
-            meta.update(lora_meta)
 
     def build_raw_batch(
         self,

@@ -11,6 +11,7 @@ concurrently never report the same one).
 """
 
 import asyncio
+from collections.abc import AsyncIterator
 
 import pytest
 
@@ -22,7 +23,14 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
+from openjiuwen.core.foundation.llm.call_scope import (
+    LlmObservationSuppression,
+    expects_unified_llm_completion,
+    get_current_llm_call_id,
+    is_llm_observation_suppressed,
+)
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 def _build_model() -> Model:
@@ -40,6 +48,16 @@ def _build_model() -> Model:
     )
 
 
+def test_observation_suppression_is_nested_and_restored() -> None:
+    assert not is_llm_observation_suppressed()
+    with LlmObservationSuppression():
+        assert is_llm_observation_suppressed()
+        with LlmObservationSuppression():
+            assert is_llm_observation_suppressed()
+        assert is_llm_observation_suppressed()
+    assert not is_llm_observation_suppressed()
+
+
 @pytest.mark.asyncio
 async def test_invoke_binds_a_call_id_and_restores_the_previous_one():
     """invoke runs inside a scope; the caller's context is left as it was."""
@@ -47,15 +65,18 @@ async def test_invoke_binds_a_call_id_and_restores_the_previous_one():
 
     async def fake_invoke(**kwargs):
         seen.append(get_current_llm_call_id())
+        assert expects_unified_llm_completion()
         return AssistantMessage(content="ok")
 
     model = _build_model()
     model._client.invoke = fake_invoke
 
     assert get_current_llm_call_id() == ""
+    assert not expects_unified_llm_completion()
     await model.invoke(messages=[])
     await model.invoke(messages=[])
     assert get_current_llm_call_id() == "", "the scope must not leak past the call"
+    assert not expects_unified_llm_completion(), "the lifecycle bit must not leak"
 
     assert len(seen) == 2
     assert all(seen), "every invoke must run under a call id"
@@ -76,10 +97,12 @@ async def test_stream_keeps_one_call_id_across_per_frame_task_hops():
     async def fake_stream(**kwargs):
         for content in ("a", "b", "c"):
             seen.append(get_current_llm_call_id())
+            assert expects_unified_llm_completion()
             yield AssistantMessageChunk(content=content)
         # The client triggers LLM_OUTPUT after its last frame; that trigger
         # must still see the id, so record the frame raising StopAsyncIteration.
         seen.append(get_current_llm_call_id())
+        assert expects_unified_llm_completion()
 
     model = _build_model()
     model._client.stream = fake_stream
@@ -91,6 +114,7 @@ async def test_stream_keeps_one_call_id_across_per_frame_task_hops():
     assert all(seen), "every stream frame must run under a call id"
     assert len(set(seen)) == 1, f"one stream must report one id, got {set(seen)}"
     assert get_current_llm_call_id() == "", "the scope must not leak past the stream"
+    assert not expects_unified_llm_completion(), "the lifecycle bit must not leak"
 
 
 @pytest.mark.asyncio
@@ -131,3 +155,88 @@ async def test_concurrent_streams_get_distinct_call_ids():
     assert len(set(seen["first"])) == 1
     assert len(set(seen["second"])) == 1
     assert seen["first"][0] != seen["second"][0], "concurrent streams must not share an id"
+
+
+@pytest.mark.asyncio
+async def test_stream_completed_event_carries_the_fully_accumulated_message():
+    completed: list[AssistantMessage] = []
+
+    async def capture(*args, **kwargs):
+        completed.append(kwargs["result"])
+
+    async def fake_stream(**kwargs):
+        yield AssistantMessageChunk(
+            content="hel",
+            reasoning_content="thi",
+            response_id="resp-1",
+        )
+        yield AssistantMessageChunk(
+            content="lo",
+            reasoning_content="nk",
+            finish_reason="stop",
+            response_model="provider-model",
+            completion_token_ids=[3, 4],
+            provider_metadata={"status": "completed"},
+        )
+
+    framework = Runner.callback_framework
+    framework.register_sync(
+        LLMCallEvents.LLM_STREAM_COMPLETED,
+        capture,
+        namespace="test-model-stream-completed",
+    )
+    model = _build_model()
+    model._client.stream = fake_stream
+    try:
+        received = [chunk.content async for chunk in model.stream(messages=[])]
+    finally:
+        framework.unregister_sync(LLMCallEvents.LLM_STREAM_COMPLETED, capture)
+
+    assert received == ["hel", "lo"]
+    assert len(completed) == 1
+    message = completed[0]
+    assert type(message) is AssistantMessage
+    assert message.content == "hello"
+    assert message.reasoning_content == "think"
+    assert message.finish_reason == "stop"
+    assert message.response_id == "resp-1"
+    assert message.response_model == "provider-model"
+    assert message.completion_token_ids == [3, 4]
+    assert message.provider_metadata == {"status": "completed"}
+
+
+@pytest.mark.parametrize(
+    "parser_content",
+    [False, 0, "", [], {}],
+    ids=["false", "zero", "empty-string", "empty-list", "empty-dict"],
+)
+@pytest.mark.asyncio
+async def test_stream_completed_event_preserves_falsy_parser_content(
+    parser_content: object,
+) -> None:
+    completed: list[AssistantMessage] = []
+
+    async def capture(*args: object, **kwargs: object) -> None:
+        completed.append(kwargs["result"])
+
+    async def fake_stream(**kwargs: object) -> AsyncIterator[AssistantMessageChunk]:
+        yield AssistantMessageChunk(content="first")
+        yield AssistantMessageChunk(content="second", parser_content=parser_content)
+
+    framework = Runner.callback_framework
+    framework.register_sync(
+        LLMCallEvents.LLM_STREAM_COMPLETED,
+        capture,
+        namespace="test-model-stream-falsy-parser",
+    )
+    model = _build_model()
+    model._client.stream = fake_stream
+    try:
+        received = [chunk.content async for chunk in model.stream(messages=[])]
+    finally:
+        framework.unregister_sync(LLMCallEvents.LLM_STREAM_COMPLETED, capture)
+
+    assert received == ["first", "second"]
+    assert len(completed) == 1
+    assert type(completed[0].parser_content) is type(parser_content)
+    assert completed[0].parser_content == parser_content

@@ -73,6 +73,7 @@ _MANUAL_OVERRIDES_RAW = {
     "AGENT_RL_PROXY_SERVER_START_FAILED": "FrameworkError",
     "AGENT_RL_PROCESSOR_NOT_FOUND": "ValidationError",
     "AGENT_RL_REWARD_NOT_FOUND": "ValidationError",
+    "AGENT_RL_TRAINING_RUN_NOT_FOUND": "ValidationError",
     "COMMON_ENCRYPTION_ERROR": "CryptError",
     "COMMON_DECRYPTION_ERROR": "CryptError",
     "DEEPAGENT_LOAD_AGENT_TEMPLATE_ERROR": "AgentError",

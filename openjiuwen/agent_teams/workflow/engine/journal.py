@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import aiofiles
 
@@ -47,7 +47,11 @@ def _program_order(ks: str) -> list[int]:
     execution order.
     """
     coords: list[int] = []
-    for seg in json.loads(ks):
+    try:
+        segs = json.loads(ks)
+    except (json.JSONDecodeError, TypeError):
+        return coords  # unparseable key → stable-ish at front; should not happen
+    for seg in segs:
         for item in seg[1:]:  # drop kind (seg[0]); keep ordinal + integer sub-indices
             if isinstance(item, int):
                 coords.append(item)
@@ -117,12 +121,20 @@ class Journal:
         # loop stays free while one append runs.
         self._wal_lock = asyncio.Lock()
 
+    @property
+    def wal_path(self) -> str | None:
+        """WAL path this journal persists to; ``None`` means durability is off."""
+        return self._wal_path
+
     @staticmethod
     def _parse_records(text: str) -> "list[dict]":
         """Parse JSONL into records, tolerating a torn trailing line.
 
         A crash mid WAL-append can leave a partial final record; that line fails to
         parse and is skipped — its call simply re-executes on the next run.
+        Accepts both call records (keyed by structural path) and run-level
+        records (``pause`` / ``seal``), which carry a synthetic key of the form
+        ``__run__:{type}:{run_id}`` so they round-trip through ``load``.
         """
         records: list[dict] = []
         for line in text.splitlines():
@@ -155,9 +167,42 @@ class Journal:
                     prior[rec["key"]] = rec  # last record wins (WAL overlays journal)
         return cls(prior, wal_path=wal_path)
 
-    def get_cached(self, ks: str, sig: str) -> dict | None:
+    def get_cached(self, ks: str, sig: str, run_id: str | None = None) -> dict | None:
+        """Return the cached record if both ``sig`` and ``run_id`` match.
+
+        ``run_id`` is an independent isolation key (NOT folded into the sig hash):
+        two runs of the same script with the same prompt produce the same ``sig``,
+        but a record written under ``run_id="A"`` must not be served to
+        ``run_id="B"``. A legacy record with no ``run_id`` field (``None``) never
+        matches a run that carries a non-``None`` ``run_id`` — it naturally misses
+        without error.
+
+        When ``run_id`` is ``None`` (the caller omits it), the old sig-only
+        behaviour holds for back-compat (e.g. callers not yet threaded through).
+        """
         rec = self.prior.get(ks)
-        return rec if rec is not None and rec.get("sig") == sig else None
+        if rec is None or rec.get("sig") != sig:
+            return None
+        # run_id isolation: a non-None query run_id must equal the record's
+        # run_id. A record missing run_id (None) and a non-None query miss.
+        if run_id is not None and rec.get("run_id") != run_id:
+            return None
+        return rec
+
+    def find_run_record(self, run_id: str, record_type: str) -> dict | None:
+        """Find the latest record of ``record_type`` (``"pause"`` / ``"seal"``) for ``run_id``.
+
+        Used to recover budget state on resume (pause record) or detect a
+        terminal prior run (seal record → force a fresh run_id on relaunch).
+        Returns the last match in insertion order (WAL overlay semantics: a
+        later record of the same type supersedes an earlier one). ``None`` when
+        no such record exists (first run, or a different run_id).
+        """
+        found = None
+        for rec in self.prior.values():
+            if rec.get("run_id") == run_id and rec.get("type") == record_type:
+                found = rec  # last one wins (dict iteration = insertion order)
+        return found
 
     async def use(self, ks: str, record: dict) -> None:
         """Record a used result, durably appending FRESH ones to the WAL first.
@@ -170,6 +215,25 @@ class Journal:
         if self.prior.get(ks) is not record:
             await self._append_wal(record)
         self.used[ks] = record
+
+    async def write_run_record(self, run_id: str, record_type: str, payload: dict) -> None:
+        """Write a run-level record (``pause`` / ``seal``) to the journal + WAL.
+
+        Unlike call records, these carry no structural call path — they are a
+        run-wide snapshot keyed by a synthetic path ``[["__run__", ord,
+        record_type, run_id]]``. A high ordinal (``sys.maxsize``) sorts them after every call
+        in program order, so they land at the tail of a saved journal exactly
+        where a terminal/mid-run snapshot belongs. ``payload`` is merged onto the
+        ``type`` / ``run_id`` envelope before persistence.
+        """
+        import sys
+        ks = key_str([["__run__", sys.maxsize, record_type, run_id]])
+        rec = {"key": ks, "type": record_type, "run_id": run_id, **payload}
+        await self._append_wal(rec)
+        self.used[ks] = rec
+        # Also surface in ``prior`` so same-run lookups (find_run_record) see it
+        # without a reload — matching how cache-hit call records live in both.
+        self.prior[ks] = rec
 
     async def _append_wal(self, record: dict) -> None:
         """Durably append one fresh record to the WAL (crash-safe checkpoint).

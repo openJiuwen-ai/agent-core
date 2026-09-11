@@ -81,6 +81,12 @@ TeamAgent 依赖**。详见 `docs/features/F_35`（起步版）、`F_41`（统�
 + `launch_async_tool(...)`（透传 `format_completed` / `format_failed` 给 `async_tool_runtime.launch`）
 + `stop()` 调 `cancel_all()`。
 
+**AgentTemplate 快照**：`DeepAgentSpec.agent_template_spec` 是可序列化的普通映射。
+`NativeHarness._prepare()` 初始化基础 rails 后将其还原为 `AgentTemplateSpec`，再经
+`DeepAgent.load_agent_template_spec()` 挂载；同一 harness 只加载一次，新建 harness 从其 spec
+快照重新加载。基础 rails 必须先初始化，因为模板 Skill 绑定并 reload 已存在的
+`SkillUseRail`；整个 prepare 仍发生在任何模型调用之前。见 `S_23` / `F_81`。
+
 **工具拿 harness 的方式**：照 `sessions_spawn` 形状——`AsyncTool` 持 `parent_agent`，由
 `TeamToolRail.init(agent)` 的 `agent`(NativeHarness) 在装配期注入（invoke 时 harness 早已 start）。
 

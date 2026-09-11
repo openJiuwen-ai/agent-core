@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.harness.prompts import resolve_language
 from openjiuwen.harness.prompts.sections import SectionName
@@ -20,20 +20,18 @@ if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
 
 
-def build_team_plan_mode_prompt_template(language: str) -> str:
-    """Load the team.plan prompt template from ``prompts/<lang>``."""
+def get_team_plan_mode_prompt(
+    language: str,
+    *,
+    loader: TemplateLoader = load_template,
+) -> str:
+    """Return the team.plan leader prompt template.
+
+    Lazy: the template is read through ``loader``
+    on every call so an evolved workspace file takes effect after a restart.
+    """
     resolved_language = resolve_language(language)
-    return str(load_template("team_plan_mode", resolved_language).content).strip()
-
-
-TEAM_PLAN_MODE_PROMPT_CN = build_team_plan_mode_prompt_template("cn")
-TEAM_PLAN_MODE_PROMPT_EN = build_team_plan_mode_prompt_template("en")
-
-
-def get_team_plan_mode_prompt(language: str) -> str:
-    """Return the team.plan leader prompt template."""
-    resolved_language = resolve_language(language)
-    return TEAM_PLAN_MODE_PROMPT_EN if resolved_language == "en" else TEAM_PLAN_MODE_PROMPT_CN
+    return str(loader("team_plan_mode", resolved_language).content).strip()
 
 
 def _build_enter_plan_mode_status(
@@ -85,9 +83,10 @@ def build_team_plan_mode_prompt(
     *,
     enter_plan_mode_status: str,
     plan_file_info: str,
+    loader: TemplateLoader = load_template,
 ) -> str:
     """Render the team.plan prompt from the markdown template."""
-    return get_team_plan_mode_prompt(language).format(
+    return get_team_plan_mode_prompt(language, loader=loader).format(
         enter_plan_mode_status=enter_plan_mode_status,
         plan_file_info=plan_file_info,
     )
@@ -98,6 +97,7 @@ def build_team_plan_mode_section(
     language: str,
     agent: "DeepAgent",
     session: "Session",
+    loader: TemplateLoader = load_template,
 ) -> PromptSection:
     """Build the team.plan MODE_INSTRUCTIONS section for a Leader."""
     resolved_language = resolve_language(language)
@@ -105,6 +105,7 @@ def build_team_plan_mode_section(
         resolved_language,
         enter_plan_mode_status=_build_enter_plan_mode_status(agent, session, resolved_language),
         plan_file_info=_build_plan_file_info(agent, session, resolved_language),
+        loader=loader,
     )
     return PromptSection(
         name=SectionName.MODE_INSTRUCTIONS,
@@ -114,10 +115,7 @@ def build_team_plan_mode_section(
 
 
 __all__ = [
-    "TEAM_PLAN_MODE_PROMPT_CN",
-    "TEAM_PLAN_MODE_PROMPT_EN",
     "build_team_plan_mode_prompt",
-    "build_team_plan_mode_prompt_template",
     "build_team_plan_mode_section",
     "get_team_plan_mode_prompt",
 ]

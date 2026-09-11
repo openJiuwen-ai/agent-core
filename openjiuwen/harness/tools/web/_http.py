@@ -129,6 +129,7 @@ async def request(
     json_body: dict[str, Any] | None = None,
     timeout_seconds: float,
     max_bytes: int | None = None,
+    proxy_url: str | None = None,
 ) -> tuple[int, dict[str, str], bytes, str, bool]:
     """Perform an HTTP request, retrying without env proxies on a proxy error.
 
@@ -140,12 +141,15 @@ async def request(
         json_body: Optional JSON request body (POST).
         timeout_seconds: Total timeout budget; also used for the read phase.
         max_bytes: Optional byte ceiling for the response body.
+        proxy_url: Optional task-scoped proxy.  When omitted, the existing
+            WEB_PROXY_URL/FREE_SEARCH_PROXY_URL environment configuration is
+            used.
 
     Returns:
         A tuple of (status, headers, body bytes, final URL, truncated flag).
     """
     method_up = method.upper()
-    proxy = _resolve_proxy(url)
+    proxy = _resolve_proxy(url, proxy_url)
     explicit_proxy = proxy is not None
     proxy_auth: aiohttp.BasicAuth | None = None
     if proxy is not None:

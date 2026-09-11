@@ -27,8 +27,9 @@ from openjiuwen.agent_teams.tools.database import (
 )
 from openjiuwen.agent_teams.tools import locales as team_locales
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
+from openjiuwen.agent_teams.tools.member_options import get_member_fallback_model_ref
 from openjiuwen.agent_teams.tools.tool_member import ListCheckpointsTool
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, TeamRole
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ModelPoolEntry, TeamRole
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.team_tools import (
     ApprovePlanTool,
@@ -280,9 +281,9 @@ class TestBuildTeamTool:
     async def test_recovered_leader_may_rebuild_a_disbanded_team(self, agent_team_without_team, t, db, message_bus):
         """The refusal keys on the team row, not on the recovery alone.
 
-        A recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path calls clean_team) has no team left and
-        genuinely needs to build one.
+        A recovered leader whose team was disbanded (its own clean_team, or
+        the operator's delete_agent_team) has no team left and genuinely
+        needs to build one.
         """
         args = {
             "display_name": "My Team",
@@ -558,7 +559,13 @@ class TestSpawnTools:
         """A cli_agent absent from external_cli_agents is rejected (capability ceiling)."""
         tool = SpawnExternalCliTool(agent_team, t)
         result = await tool.invoke(
-            {"member_name": "cli-2", "display_name": "CLI Two", "prompt": "worker", "cli_agent": "claude"}
+            {
+                "member_name": "cli-2",
+                "display_name": "CLI Two",
+                "prompt": "worker",
+                "cli_agent": "claude",
+                "fallback_model_name": "claude-fallback",
+            }
         )
         assert result.success is False
         assert "not declared" in (result.error or "")
@@ -576,14 +583,309 @@ class TestSpawnTools:
             messager=message_bus,
             external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
         )
-        tool = SpawnExternalCliTool(team, t)
+        fallback_allocation = AsyncMock()
+        fallback_allocation.to_db_ref = lambda: {"model_name": "claude-fallback", "model_index": 0}
+        tool = SpawnExternalCliTool(
+            team,
+            t,
+            model_config_allocator=lambda model_name, **kwargs: fallback_allocation,
+        )
         result = await tool.invoke(
-            {"member_name": "claude-1", "display_name": "Claude One", "prompt": "reviewer", "cli_agent": "claude"}
+            {
+                "member_name": "claude-1",
+                "display_name": "Claude One",
+                "prompt": "reviewer",
+                "cli_agent": "claude",
+                "fallback_model_name": "claude-fallback",
+            }
         )
         assert result.success is True, result.error
         assert result.data["role_type"] == "external_cli"
         assert result.data["cli_agent"] == "claude"
         assert await team.is_external_cli_agent("claude-1")
+
+
+def test_external_cli_schema_requires_fallback_and_restricts_model_override(agent_team, t):
+    """The tool requires fallback and forbids inferred model overrides."""
+    tool = SpawnExternalCliTool(agent_team, t)
+    assert "fallback_model_name" in tool.card.input_params["required"]
+    fallback_schema = tool.card.input_params["properties"]["fallback_model_name"]
+    assert fallback_schema["anyOf"] == [{"type": "string", "minLength": 1}, {"type": "null"}]
+    assert "model_name" not in tool.card.input_params["required"]
+    model_description = tool.card.input_params["properties"]["model_name"]["description"]
+    assert "仅当用户明确指定" in model_description
+    assert "你不得自行选择、推断或补全" in model_description
+    assert "必须省略" in model_description
+    fallback_description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    assert "必须从团队模型池中选择" in fallback_description
+    assert "支持的模型调用协议选择兼容模型" in fallback_description
+    assert "该第三方 Agent" in fallback_description
+    assert "运行时明确报告的认证失败" in fallback_description
+    assert "没有兼容模型时允许为 null" in fallback_description
+    assert "当前模型在模型池中且协议兼容时，优先选择" in fallback_description
+    assert "当前模型不在模型池中或协议不兼容时，再选择其他兼容模型" in fallback_description
+    assert "当前模型在模型池中且协议兼容时优先选择当前模型" in tool.card.description
+    for description in (model_description, fallback_description):
+        assert "Claude" not in description
+        assert "Codex" not in description
+
+    english_tool = SpawnExternalCliTool(agent_team, make_translator("en"))
+    english_fallback_description = english_tool.card.input_params["properties"]["fallback_model_name"]["description"]
+    assert "Prefer the current model when it is present in the pool" in english_fallback_description
+    assert "current model is absent from the pool" in english_fallback_description
+    assert "prefer the current model when it is present in the pool" in english_tool.card.description
+
+
+def test_external_cli_schema_exposes_safe_model_protocol_catalog(db, message_bus, t):
+    """The tool exposes model names and protocols without endpoint secrets."""
+    entries = [
+        ModelPoolEntry(
+            model_name="deepseek-v4-flash",
+            api_key="secret-openai",
+            api_base_url="https://openai.example/v1",
+            api_provider="DeepSeek",
+        ),
+        ModelPoolEntry(
+            model_name="claude-fallback",
+            api_key="secret-anthropic",
+            api_base_url="https://anthropic.example/v1",
+            api_provider="Anthropic",
+        ),
+    ]
+    team = TeamBackend(
+        team_name="ext_cli_catalog_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: entries,
+        current_model_name="deepseek-v4-flash",
+        current_model_provider="DeepSeek",
+        external_cli_agents=[
+            ExternalCliAgentSpec(cli_agent="claude"),
+            ExternalCliAgentSpec(cli_agent="codex"),
+        ],
+    )
+
+    tool = SpawnExternalCliTool(team, t)
+    description = tool.card.input_params["properties"]["fallback_model_name"]["description"]
+
+    assert '"model_name": "deepseek-v4-flash", "protocol": "OpenAI"' in description
+    assert '"model_name": "claude-fallback", "protocol": "Anthropic"' in description
+    assert "secret-openai" not in description
+    assert "secret-anthropic" not in description
+    assert "openai.example" not in description
+    assert "anthropic.example" not in description
+
+
+@pytest.mark.asyncio
+async def test_external_cli_requires_current_model_when_present_and_compatible(db, message_bus, t):
+    """A compatible current model in the pool has strict fallback priority."""
+    await db.team.create_team(
+        team_name="ext_cli_current_priority_team",
+        display_name="Ext Current Priority",
+        leader_member_name="leader1",
+    )
+    entries = [
+        ModelPoolEntry(
+            model_name="leader-model",
+            api_key="secret",
+            api_base_url="https://leader.example/v1",
+            api_provider="OpenAI",
+        ),
+        ModelPoolEntry(
+            model_name="other-model",
+            api_key="secret",
+            api_base_url="https://other.example/v1",
+            api_provider="OpenAI",
+        ),
+    ]
+    team = TeamBackend(
+        team_name="ext_cli_current_priority_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: entries,
+        current_model_name="leader-model",
+        current_model_provider="OpenAI",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: AsyncMock())
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-priority",
+            "display_name": "Codex Priority",
+            "prompt": "writer",
+            "cli_agent": "codex",
+            "fallback_model_name": "other-model",
+        }
+    )
+
+    assert result.success is False
+    assert "must use current model 'leader-model'" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_allows_other_model_when_current_model_is_not_in_pool(db, message_bus, t):
+    """A per-agent current model outside the pool does not block fallback."""
+    await db.team.create_team(
+        team_name="ext_cli_current_outside_pool_team",
+        display_name="Ext Current Outside Pool",
+        leader_member_name="leader1",
+    )
+    fallback_entry = ModelPoolEntry(
+        model_name="pool-fallback",
+        api_key="secret",
+        api_base_url="https://fallback.example/v1",
+        api_provider="OpenAI",
+    )
+    fallback_allocation = AsyncMock()
+    fallback_allocation.to_db_ref = lambda: {"model_name": "pool-fallback", "model_index": 0}
+    team = TeamBackend(
+        team_name="ext_cli_current_outside_pool_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [fallback_entry],
+        current_model_name="per-agent-model",
+        current_model_provider="OpenAI",
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="codex")],
+    )
+    tool = SpawnExternalCliTool(
+        team,
+        t,
+        model_config_allocator=lambda model_name, **kwargs: fallback_allocation,
+    )
+
+    result = await tool.invoke(
+        {
+            "member_name": "codex-pool-fallback",
+            "display_name": "Codex Pool Fallback",
+            "prompt": "writer",
+            "cli_agent": "codex",
+            "fallback_model_name": "pool-fallback",
+        }
+    )
+
+    assert result.success is True, result.error
+
+
+@pytest.mark.asyncio
+async def test_external_cli_native_mode_allows_null_without_compatible_fallback(db, message_bus, t):
+    """Null explicitly selects native mode when no compatible fallback exists."""
+    await db.team.create_team(
+        team_name="ext_cli_native_team",
+        display_name="Ext Native",
+        leader_member_name="leader1",
+    )
+    incompatible_entry = ModelPoolEntry(
+        model_name="openai-only-model",
+        api_key="secret",
+        api_base_url="https://openai.example/v1",
+        api_provider="OpenAI",
+    )
+    team = TeamBackend(
+        team_name="ext_cli_native_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [incompatible_entry],
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+    tool = SpawnExternalCliTool(
+        team,
+        t,
+        model_config_allocator=lambda model_name, **kwargs: None,
+    )
+    result = await tool.invoke(
+        {
+            "member_name": "claude-native",
+            "display_name": "Claude Native",
+            "prompt": "reviewer",
+            "cli_agent": "claude",
+            "fallback_model_name": None,
+        }
+    )
+    assert result.success is True, result.error
+    member = await team.get_member("claude-native")
+    assert member is not None
+    assert get_member_fallback_model_ref(member) is None
+
+
+@pytest.mark.asyncio
+async def test_external_cli_rejects_null_when_compatible_fallback_exists(db, message_bus, t):
+    """Null cannot bypass an available protocol-compatible fallback."""
+    await db.team.create_team(
+        team_name="ext_cli_required_fallback_team",
+        display_name="Ext Required Fallback",
+        leader_member_name="leader1",
+    )
+    compatible_entry = ModelPoolEntry(
+        model_name="claude-fallback",
+        api_key="secret",
+        api_base_url="https://anthropic.example/v1",
+        api_provider="Anthropic",
+    )
+    team = TeamBackend(
+        team_name="ext_cli_required_fallback_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [compatible_entry],
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+
+    result = await tool.invoke(
+        {
+            "member_name": "claude-required",
+            "display_name": "Claude Required",
+            "prompt": "reviewer",
+            "cli_agent": "claude",
+            "fallback_model_name": None,
+        }
+    )
+
+    assert result.success is False
+    assert "claude-fallback" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_external_cli_rejects_unavailable_fallback_name(db, message_bus, t):
+    """An invented fallback name fails instead of silently selecting native mode."""
+    await db.team.create_team(
+        team_name="ext_cli_invalid_fallback_team",
+        display_name="Ext Invalid Fallback",
+        leader_member_name="leader1",
+    )
+    team = TeamBackend(
+        team_name="ext_cli_invalid_fallback_team",
+        member_name="leader1",
+        is_leader=True,
+        db=db,
+        messager=message_bus,
+        model_pool_provider=lambda: [],
+        external_cli_agents=[ExternalCliAgentSpec(cli_agent="claude")],
+    )
+    tool = SpawnExternalCliTool(team, t, model_config_allocator=lambda model_name, **kwargs: None)
+
+    result = await tool.invoke(
+        {
+            "member_name": "claude-invalid",
+            "display_name": "Claude Invalid",
+            "prompt": "reviewer",
+            "cli_agent": "claude",
+            "fallback_model_name": "invented-model",
+        }
+    )
+
+    assert result.success is False
+    assert "use null" in (result.error or "")
 
 
 class TestSpawnToolCapabilityGate:
@@ -1663,8 +1965,13 @@ class TestSendMessageTool:
         assert tool.card.id == "team.send_message"
         props = tool.card.input_params["properties"]
         assert "to" in props
+        assert "targets" in props
+        assert props["to"]["type"] == "string"
+        assert props["targets"]["type"] == "array"
+        assert "anyOf" not in props["to"]
         assert "content" in props
         assert "summary" in props
+        assert tool.card.input_params["required"] == ["content"]
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -1747,7 +2054,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hello"})
+        result = await tool.invoke({"targets": ["m1", "m2"], "content": "Hello"})
 
         assert result.success is True
         assert result.data["type"] == "multicast"
@@ -1770,7 +2077,7 @@ class TestSendMessageTool:
         )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "ghost"], "content": "Hello"})
+        result = await tool.invoke({"targets": ["m1", "ghost"], "content": "Hello"})
 
         assert result.success is False
         assert "Multicast partially failed" in result.error
@@ -1784,7 +2091,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_all_fail(self, agent_team, t):
         """All targets unknown -> success=False, delivered empty"""
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["ghost1", "ghost2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["ghost1", "ghost2"], "content": "Hi"})
 
         assert result.success is False
         assert result.data["delivered"] == []
@@ -1808,7 +2115,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m1", "m2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "m1", "m2"], "content": "Hi"})
 
         assert result.success is True
         assert result.data["delivered"] == ["m1", "m2"]
@@ -1818,7 +2125,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_rejects_wildcard(self, agent_team, t):
         """Mixing '*' inside a multicast list is rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": ["m1", "*"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "*"], "content": "Hi"})
 
         assert result.success is False
         assert "broadcast" in result.error
@@ -1828,7 +2135,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_rejects_user(self, agent_team, t):
         """Mixing 'user' inside a multicast list is rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": ["m1", "user"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "user"], "content": "Hi"})
 
         assert result.success is False
         assert "user" in result.error
@@ -1838,7 +2145,7 @@ class TestSendMessageTool:
     async def test_invoke_multicast_empty_list(self, agent_team, t):
         """Empty list rejected"""
         tool = SendMessageTool(agent_team.message_manager, t)
-        result = await tool.invoke({"to": [], "content": "Hi"})
+        result = await tool.invoke({"targets": [], "content": "Hi"})
 
         assert result.success is False
         assert "at least one" in result.error
@@ -1862,7 +2169,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1"], "content": "Hi"})
 
         assert result.success is True
         assert result.data["type"] == "multicast"
@@ -1886,7 +2193,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "  ", ""], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "  ", ""], "content": "Hi"})
 
         assert result.success is True
         assert result.data["delivered"] == ["m1"]
@@ -1908,7 +2215,7 @@ class TestSendMessageTool:
             )
 
         tool = SendMessageTool(agent_team.message_manager, t, team=agent_team)
-        result = await tool.invoke({"to": ["m1", "m2"], "content": "Hi"})
+        result = await tool.invoke({"targets": ["m1", "m2"], "content": "Hi"})
 
         assert result.success is False
         assert "broadcast" in result.error
@@ -1923,6 +2230,57 @@ class TestSendMessageTool:
 
         assert result.success is False
         assert "string" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_legacy_array_in_to(self, agent_team, t):
+        """Multicast arrays use the dedicated targets field."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": ["m1"], "content": "Hi"})
+
+        assert result.success is False
+        assert "targets" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_json_encoded_targets_in_to(self, agent_team, t):
+        """A JSON array string receives field-level correction instead of member lookup."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": '["m1","m2"]', "content": "Hi"})
+
+        assert result.success is False
+        assert "targets" in result.error
+        assert "not found" not in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_string_targets(self, agent_team, t):
+        """The multicast field accepts only a native string array."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"targets": '["m1"]', "content": "Hi"})
+
+        assert result.success is False
+        assert "array of strings" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_rejects_both_recipient_fields(self, agent_team, t):
+        """The separated recipient fields are mutually exclusive."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"to": "m1", "targets": ["m2"], "content": "Hi"})
+
+        assert result.success is False
+        assert "exactly one" in result.error
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_invoke_requires_one_recipient_field(self, agent_team, t):
+        """One separated recipient field must be present."""
+        tool = SendMessageTool(agent_team.message_manager, t)
+        result = await tool.invoke({"content": "Hi"})
+
+        assert result.success is False
+        assert "required" in result.error
 
     @pytest.mark.asyncio
     @pytest.mark.level1

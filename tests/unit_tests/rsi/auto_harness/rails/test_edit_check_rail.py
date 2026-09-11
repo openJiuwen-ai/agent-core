@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 from openjiuwen.core.single_agent.rail.base import (
     ToolCallInputs,
 )
-from openjiuwen.rsi.auto_harness.rails.edit_safety_rail import (
+from openjiuwen.rsi.harness_rsi.auto_harness.rails.edit_safety_rail import (
     EditSafetyRail,
 )
 
@@ -43,7 +43,7 @@ class TestEditSafetyRail(IsolatedAsyncioTestCase):
             inputs=ToolCallInputs(
                 tool_name="write_file",
                 tool_args={
-                    "file_path": "openjiuwen/rsi/auto_harness/schema.py",
+                    "file_path": "openjiuwen/rsi/harness_rsi/auto_harness/schema.py",
                 },
             ),
         )
@@ -52,7 +52,7 @@ class TestEditSafetyRail(IsolatedAsyncioTestCase):
 
         assert ctx.extra["_skip_tool"] is True
         assert "Out-of-scope edit blocked" in ctx.inputs.tool_result["error"]
-        assert "openjiuwen/rsi/auto_harness/schema.py" in ctx.inputs.tool_result["error"]
+        assert "openjiuwen/rsi/harness_rsi/auto_harness/schema.py" in ctx.inputs.tool_result["error"]
 
     async def test_allows_in_scope_write(self):
         rail = EditSafetyRail()

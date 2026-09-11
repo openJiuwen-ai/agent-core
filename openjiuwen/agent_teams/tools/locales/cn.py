@@ -88,9 +88,12 @@ STRINGS: dict[str, str] = {
         "上下文来源成员名。不填默认从 leader 取。填某 teammate 名（如 'understander'）"
         "则从该成员取上下文。该成员必须已通过 spawn_teammate 拉起来，且为 in-process 模式"
     ),
-    "spawn_teammate.compact": (
-        "启用上下文压缩。checkpoint 之前的旧消息压缩为摘要，"
-        "checkpoint 之后的分析全量保留。仅配合 checkpoint fork 使用"
+    "spawn_teammate.fork_mode": (
+        "保留 checkpoint 的哪一侧。可选值：'full'（源成员全部上下文，fork=true 时的默认）、"
+        "'before'（checkpoint 之前的消息，命名 fork 时的默认）、"
+        "'after'（从 checkpoint 起的消息）、"
+        "'keep_before_compact_after'（保留前、把后压缩为摘要）、"
+        "'keep_after_compact_before'（保留后、把前压缩为摘要）。仅配合命名 checkpoint fork 使用"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/cn/member/spawn_human_agent.md
@@ -170,6 +173,19 @@ STRINGS: dict[str, str] = {
         "要拉起的第三方 CLI agent 类型标识，如 'claude'（claudecode）或 'codex'。"
         "取值必须命中 spec.external_cli_agents 中预先声明的某条静态配置——"
         "具体启动命令、工作目录、MCP 注入等都在那条配置里，本字段只负责按名引用"
+    ),
+    "spawn_external_cli.model_name": (
+        "可选。仅当用户明确指定该第三方 Agent 使用的模型名称时填写。"
+        "你不得自行选择、推断或补全；用户未明确指定时必须省略，使该 Agent 使用其自身默认模型"
+    ),
+    "spawn_external_cli.fallback_model_name": (
+        "必填，但在没有兼容模型时允许为 null。存在兼容模型时，必须从团队模型池中选择，并根据"
+        "该第三方 Agent 支持的模型调用协议选择兼容模型。当前模型在模型池中且协议兼容时，优先选择"
+        "当前模型；当前模型不在模型池中或协议不兼容时，再选择其他兼容模型；不得随意填写不存在或"
+        "不兼容的模型。"
+        "该第三方 Agent 使用自身默认模型但认证不可用时，将使用此模型自动回退；"
+        "仅对运行时明确报告的认证失败生效。只有团队模型池中不存在兼容模型时才能传 null，"
+        "此时仍可使用其自身默认模型，但不启用自动回退"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
@@ -279,20 +295,23 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/cn/message/send_message.md
     "send_message.to": (
-        '收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
-        '填成员名数组（如 ["m1","m2"]）多播——同一份内容分别发给每个成员，'
-        "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用，"
-        '禁止与 "*"/"user" 混用；'
+        '单个收件人：填 member_name（如 "backend-dev-1"）发送点对点 DM/私聊，仅你与该成员可见；'
         '填 "user"（仅 teammate 用于回复用户，leader 调用会被拒绝）；'
         '填 "*" 广播到团队频道 channel，所有成员可见——一次广播会唤醒每一个成员各跑一轮 '
-        "LLM 交互，开销与团队规模成正比，仅用于全员必须知晓的公告，务必慎用"
+        "LLM 交互，开销与团队规模成正比，仅用于全员必须知晓的公告，务必慎用。"
+        "多播不要填写本字段，改用 targets"
+    ),
+    "send_message.targets": (
+        '多播收件人数组（如 ["m1","m2"]）：同一份内容分别发给每个成员，'
+        "开销随接收人数线性增长，同等规模下比广播更贵，仅在必要时使用；"
+        '禁止包含 "*" 或 "user"。不能与 to 同时填写'
     ),
     "send_message.content": "消息内容，应包含明确的行动指引或信息",
     "send_message.summary": "5-10 词摘要，用于消息预览和日志",
     "send_message.error_leader_to_user": "Leader 不能 send_message 给 'user'。请直接用普通回复输出给用户。",
     "send_message.error_content_too_long": (
         "'content' 过长（{actual} 字符，上限 {limit}）：这个体量的内容是产物，不是消息。"
-        "先用 write_file 把正文写到团队共享工作空间 .team/ 下的文件，再重发本消息，"
+        "先用 write_file 把正文写到团队共享产物目录（见团队信息块「团队共享工作空间」的最终产物目录）下的文件，再重发本消息，"
         "content 里只写文件路径加一两句摘要。不要为了绕过本限制而把正文拆成多条消息。"
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
@@ -331,9 +350,11 @@ STRINGS: dict[str, str] = {
         "接口已就位、执行推进中——当前请改用 script_path。"
     ),
     "swarmflow.resume_id": (
-        "要续跑的上次运行 run_id。内容未变的 agent() 调用（prompt + opts + schema 一致）瞬时返回缓存结果，"
-        "只有改动 / 新增的调用重跑（上游变更级联失效下游）；同脚本 + 同 args → 全缓存命中。"
-        "接口已就位、执行推进中——当前请改用 script_path。"
+        "要续跑 / 控制的上次运行 run_id。单独传用于断点续跑（内容未变的 agent() 调用瞬时复用缓存）；"
+        "配合 action 参数控制正在运行的工作流——action='pause' 暂停、'resume' 恢复、'stop' 停止（不停 session）。"
+    ),
+    "swarmflow.action": (
+        "对已有运行的控制动作：'pause' 暂停、'resume' 恢复、'stop' 停止（需同时传 resume_id）。"
     ),
     "swarmflow.args": (
         "传给脚本 async def run(args) 的可选参数，作为**字符串**原样传入（如研究问题、目标路径）。"

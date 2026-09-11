@@ -287,6 +287,8 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
+        await self._auto_start_members()
+
         briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
@@ -294,6 +296,34 @@ class TaskCreateTool(TeamTool):
             success=True,
             data={"tasks": briefs, "count": len(briefs)},
         )
+
+    async def _auto_start_members(self) -> None:
+        """Bring unstarted members up now that the board has work on it.
+
+        Under autonomous dispatch, work reaches members two ways: a message
+        the leader writes, and a task it puts on the board. Only the first
+        used to start anybody, so a leader that created tasks and then never
+        broadcast left the whole roster parked at UNSTARTED — with nothing
+        subscribed, the TaskCreatedEvent went out to nobody, and the
+        leader-side stale-pending sweep could not recover it either (that
+        sweep requires at least one READY member). Members are started here
+        for the same reason the message path starts them: an unstarted member
+        cannot be handed anything.
+
+        Every unstarted member is started, not just the assignees — an
+        unassigned task goes to the shared claim pool, where any member may
+        turn out to be the claimant. Best-effort: the tasks are already
+        committed, so a spawn failure is logged and left to the leader's
+        round-idle reconcile rather than turned into a tool failure that
+        would invite the model to create the tasks a second time.
+        """
+        try:
+            started = await self.agent_team.autostart_unstarted()
+        except Exception as e:
+            team_logger.error("create_task failed to auto-start members: {}", e, exc_info=True)
+            return
+        if started:
+            team_logger.info(f"Auto-started members: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
@@ -754,12 +784,14 @@ class UpdateTaskTool(TeamTool):
             if content:
                 updated.append("content")
 
-        # Assign task to member. When the task is already claimed by a
-        # different member, treat this as a leader-driven reassignment:
-        # reset the task back to PENDING and hand it to the new member. The
-        # former assignee is told via a targeted TASK_REVOKED event (not a
-        # member-wide cancel), so only this one task moves — its other
-        # claims and in-flight round survive. Same-member is idempotent.
+        # Assign task to member. When the task is already owned by a
+        # different member, treat this as a leader-driven reassignment: the
+        # assignee is swapped in place and the status is preserved, so an
+        # assigned-but-not-yet-started task (the scheduled mode's resting
+        # state) stays waiting for its owner rather than being started or
+        # released. The former assignee is told via a targeted TASK_REVOKED
+        # event (not a member-wide cancel), so only this one task moves — its
+        # other claims and in-flight round survive. Same-member is idempotent.
         if assignee:
             # One active task per member: reject before any state change so a
             # rejected assign never disturbs the current owner or this task.

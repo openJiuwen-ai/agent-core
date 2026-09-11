@@ -29,20 +29,55 @@ _BLOCKER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ),
     ("access_denied", re.compile(r"access denied|forbidden|访问被拒绝", re.IGNORECASE)),
 )
-_CARD_FIELD_NAMES = (
+_CARD_SEMANTIC_FIELD_NAMES = (
+    "region",
+    "kind",
+    "result_index",
+    "is_ad",
+)
+CARD_EVIDENCE_FIELDS = (
     "title",
     "price",
     "rating",
+    "product_rating",
+    "shop_rating",
     "review_count",
     "availability",
     "author",
+    "likes",
+    "favorites",
+    "comments",
+    "shop",
+    "duration",
+    "high_temperature",
+    "low_temperature",
+    "sort_state",
     "source",
     "summary",
     "primary_link",
     "href",
 )
-_MAX_PUBLIC_INTERACTIVES = 40
-_MAX_PUBLIC_CARDS = 20
+_READ_ONLY_CARD_TARGET_FIELDS = frozenset(
+    {
+        "rating",
+        "product_rating",
+        "shop_rating",
+        "author",
+        "likes",
+        "favorites",
+        "comments",
+        "shop",
+        "duration",
+        "high_temperature",
+        "low_temperature",
+        "sort_state",
+    }
+)
+_DEFAULT_CARD_FIELDS = frozenset(
+    {"title", "price", "rating", "source", "summary", "primary_link", "href"}
+)
+_MAX_PUBLIC_INTERACTIVES = 20
+_MAX_PUBLIC_CARDS = 8
 _MAX_TARGET_HISTORY = 1024
 
 
@@ -72,10 +107,16 @@ class BrowserTarget:
     role: str = ""
     name: str = ""
     text: str = ""
+    region: str = ""
+    kind: str = ""
     visible: bool = True
     enabled: bool = True
     actionable: bool = False
     clickable: bool = False
+    extractable: bool = False
+    field_name: str = ""
+    selected: bool = False
+    selected_source: str = ""
 
     @property
     def generation_id(self) -> str:
@@ -88,16 +129,31 @@ class BrowserTarget:
             "target_id": self.target_id,
             "generation_id": self.generation_id,
         }
-        if self.ref:
-            result["ref"] = self.ref
         if self.href:
             result["href"] = self.href
         if self.role:
             result["role"] = self.role
         if self.text:
             result["text"] = _compact_text(self.text, 80)
+        if self.region:
+            result["region"] = self.region
+        if self.kind:
+            result["kind"] = self.kind
+        if self.field_name:
+            result["field"] = self.field_name
+        result["match_count"] = 1
+        result["visible"] = self.visible
+        result["enabled"] = self.enabled
+        result["actionable"] = self.actionable
         if self.clickable:
             result["clickable"] = True
+        if self.extractable:
+            result["extractable"] = True
+            result["read_only"] = True
+        if self.selected:
+            result["selected"] = True
+            if self.selected_source:
+                result["selected_source"] = self.selected_source
         return result
 
 
@@ -115,6 +171,7 @@ class BrowserPageState:
         self.url = ""
         self.title = ""
         self.field_coverage: set[str] = set()
+        self.requested_fields: set[str] = set()
         self.blockers: set[str] = set()
         self.reference_generations: Dict[str, int] = {}
         self.selector_generations: Dict[str, int] = {}
@@ -199,6 +256,11 @@ class BrowserPageState:
                 card["primary_link_target_id"] = primary_link_target.target_id
                 compact_card["primary_link_target_id"] = primary_link_target.target_id
 
+            field_targets = self._register_card_field_targets(card)
+            if field_targets:
+                card["field_targets"] = field_targets
+                compact_card["field_targets"] = field_targets
+
             compact_controls: list[Dict[str, Any]] = []
             for child_key in ("buttons", "controls", "actions"):
                 children = card.get(child_key)
@@ -216,11 +278,7 @@ class BrowserPageState:
                         child["generation_id"] = self.generation_id
                         compact_controls.append(child_target.compact_index())
 
-            for field_name in _CARD_FIELD_NAMES:
-                field_value = card.get(field_name)
-                if field_value not in (None, "", [], {}):
-                    self.field_coverage.add(field_name)
-                    compact_card[field_name] = _compact_text(field_value)
+            compact_card.update(self._compact_card_fields(card))
             if compact_card.get("primary_link") and not compact_card.get("href"):
                 compact_card["href"] = compact_card["primary_link"]
             if compact_controls:
@@ -228,6 +286,56 @@ class BrowserPageState:
             if len(compact_card) > 1:
                 self._cards.append(compact_card)
         self._update_blockers(payload, cards)
+
+    def _compact_card_fields(self, card: Mapping[str, Any]) -> Dict[str, Any]:
+        statuses_value = card.get("field_status")
+        statuses = statuses_value if isinstance(statuses_value, Mapping) else {}
+        visible_fields = _DEFAULT_CARD_FIELDS | self.requested_fields
+        compact: Dict[str, Any] = {}
+        for field_name in _CARD_SEMANTIC_FIELD_NAMES + CARD_EVIDENCE_FIELDS:
+            if field_name in CARD_EVIDENCE_FIELDS and field_name not in visible_fields:
+                continue
+            field_value = card.get(field_name)
+            if field_value in (None, "", [], {}):
+                continue
+            if field_name in CARD_EVIDENCE_FIELDS and statuses.get(field_name, "present") == "present":
+                self.field_coverage.add(field_name)
+            compact[field_name] = (
+                field_value if isinstance(field_value, (bool, int, float)) else _compact_text(field_value)
+            )
+        missing_fields = sorted(
+            field_name
+            for field_name in CARD_EVIDENCE_FIELDS
+            if field_name in visible_fields and statuses.get(field_name) in {"missing", "unknown"}
+        )
+        compact_statuses = {
+            field_name: str(statuses[field_name])
+            for field_name in CARD_EVIDENCE_FIELDS
+            if field_name in visible_fields and statuses.get(field_name) in {"present", "missing", "unknown"}
+        }
+        if compact_statuses:
+            compact["field_status"] = compact_statuses
+        provenance_value = card.get("field_provenance")
+        if isinstance(provenance_value, Mapping):
+            compact_provenance: Dict[str, Dict[str, Any]] = {}
+            for field_name in CARD_EVIDENCE_FIELDS:
+                if field_name not in visible_fields:
+                    continue
+                item = provenance_value.get(field_name)
+                if not isinstance(item, Mapping):
+                    continue
+                projected = {
+                    key: (_compact_text(value, 240) if isinstance(value, str) else value)
+                    for key, value in item.items()
+                    if key in {"selector", "raw_text", "generation_id", "source"} and value not in (None, "", [], {})
+                }
+                if projected:
+                    compact_provenance[field_name] = projected
+            if compact_provenance:
+                compact["field_provenance"] = compact_provenance
+        if missing_fields:
+            compact["missing_fields"] = missing_fields
+        return compact
 
     def register_ax_snapshot(self, value: Any) -> tuple[str, ...]:
         """Register native Playwright refs without translating them in the model."""
@@ -292,6 +400,15 @@ class BrowserPageState:
             if normalized:
                 self.field_coverage.add(normalized)
 
+    def set_requested_fields(self, fields: Iterable[str]) -> None:
+        """Set task-scoped fields used to keep model-facing cards compact."""
+
+        self.requested_fields = {
+            str(field_name or "").strip()
+            for field_name in fields
+            if str(field_name or "").strip()
+        }
+
     def resolve_target(
         self,
         *,
@@ -349,6 +466,124 @@ class BrowserPageState:
             self.selector_generations[normalized_selector] = self.generation
         return None
 
+    def refresh_target_id(self, target_id: str) -> str:
+        """Map a stale Probe target to one unique equivalent current target.
+
+        Native AX refs intentionally remain generation-local. Probe targets may
+        be refreshed only from runtime-owned identity, never from model-authored
+        CSS reconstruction.
+        """
+
+        normalized_target_id = str(target_id or "").strip()
+        target = self._targets.get(normalized_target_id)
+        if target is None:
+            raise ValueError(f"Unknown PageState target_id: {normalized_target_id}")
+        if target.generation == self.generation:
+            return target.target_id
+        if target.source == "ax":
+            raise ValueError(
+                f"Stale AX target_id {target.target_id} belongs to {target.generation_id}; "
+                "capture the current page snapshot again."
+            )
+
+        current_targets = [
+            candidate
+            for candidate in self._targets.values()
+            if candidate.generation == self.generation and candidate.source == target.source
+        ]
+        candidates = self._equivalent_current_targets(target, current_targets)
+        if len(candidates) != 1:
+            reason = "not found" if not candidates else f"ambiguous ({len(candidates)} matches)"
+            raise ValueError(
+                f"Stale target_id {target.target_id} cannot be safely refreshed in "
+                f"{self.generation_id}: {reason}. Probe the current page again."
+            )
+        return candidates[0].target_id
+
+    def get_target(self, target_id: str) -> Optional[BrowserTarget]:
+        """Return an internal target, including stale history, for runtime recovery."""
+        return self._targets.get(str(target_id or "").strip())
+
+    def rebind_target(
+        self,
+        target_id: str,
+        *,
+        visible: bool,
+        enabled: bool,
+        actionable: bool,
+    ) -> str:
+        """Rebind a stale runtime-owned locator after unique DOM validation."""
+        stale = self.get_target(target_id)
+        if stale is None:
+            raise ValueError(f"Unknown PageState target_id: {target_id}")
+        if stale.generation == self.generation:
+            return stale.target_id
+        if stale.source == "ax" or not (stale.selector or stale.href):
+            raise ValueError(f"Stale target_id {stale.target_id} has no refreshable runtime identity.")
+        target = self._new_target(
+            source=stale.source,
+            locator=dict(stale.locator),
+            selector=stale.selector,
+            href=stale.href,
+            role=stale.role,
+            name=stale.name,
+            text=stale.text,
+            region=stale.region,
+            kind=stale.kind,
+            visible=bool(visible),
+            enabled=bool(enabled),
+            actionable=bool(actionable),
+            clickable=bool(stale.clickable and actionable),
+            extractable=stale.extractable,
+            field_name=stale.field_name,
+        )
+        if target.selector:
+            self.selector_generations[target.selector] = self.generation
+            self._selector_targets[(self.generation, target.selector)] = target.target_id
+        return target.target_id
+
+    def recovery_candidates(self, target_id: str, *, limit: int = 5) -> list[Dict[str, Any]]:
+        """Return compact current-generation candidates for a stale target error."""
+        stale = self.get_target(target_id)
+        if stale is None:
+            return []
+        current_targets = [target for target in self._targets.values() if target.generation == self.generation]
+        return [
+            candidate.compact_index()
+            for candidate in self._equivalent_current_targets(stale, current_targets)[: max(1, int(limit))]
+        ]
+
+    @staticmethod
+    def _equivalent_current_targets(
+        stale: BrowserTarget,
+        current_targets: list[BrowserTarget],
+    ) -> list[BrowserTarget]:
+        if stale.selector:
+            selector_matches = [target for target in current_targets if target.selector == stale.selector]
+            if selector_matches:
+                return selector_matches
+        if stale.href:
+            href_matches = [target for target in current_targets if target.href == stale.href]
+            if href_matches:
+                return href_matches
+
+        stale_name = _compact_text(stale.name or stale.text, 160).lower()
+        if not stale_name or not (stale.kind or stale.role):
+            return []
+        matches: list[BrowserTarget] = []
+        for target in current_targets:
+            target_name = _compact_text(target.name or target.text, 160).lower()
+            if target_name != stale_name:
+                continue
+            if stale.kind and target.kind != stale.kind:
+                continue
+            if stale.role and target.role != stale.role:
+                continue
+            if stale.region and target.region != stale.region:
+                continue
+            matches.append(target)
+        return matches
+
     def update_target_locator(self, target_id: str, locator: Mapping[str, str]) -> None:
         """Replace a current target's internal locator after runtime resolution."""
         target = self._targets.get(str(target_id or "").strip())
@@ -379,6 +614,18 @@ class BrowserPageState:
             "blockers": sorted(self.blockers),
         }
 
+    def export_summary(self) -> Dict[str, Any]:
+        """Return PageState identity without duplicating cards or interactives."""
+
+        return {
+            "page_id": self.page_id,
+            "generation_id": self.generation_id,
+            "url": self.url,
+            "title": self.title,
+            "field_coverage": sorted(self.field_coverage),
+            "blockers": sorted(self.blockers),
+        }
+
     def _register_probe_target(
         self,
         item: Dict[str, Any],
@@ -402,7 +649,14 @@ class BrowserPageState:
         if selector:
             existing_id = self._selector_targets.get((self.generation, selector))
             if existing_id and existing_id in self._targets:
-                return self._targets[existing_id]
+                existing = self._targets[existing_id]
+                existing.visible = bool(item.get("visible", True))
+                existing.enabled = bool(item.get("enabled", not item.get("disabled", False)))
+                existing.actionable = bool(item.get("actionable", False))
+                existing.clickable = bool(item.get("clickable", False))
+                existing.selected = bool(item.get("selected", False))
+                existing.selected_source = str(item.get("selected_source") or "")[:40]
+                return existing
 
         target = self._new_target(
             source=source,
@@ -412,10 +666,14 @@ class BrowserPageState:
             role=str(item.get("role") or "").strip(),
             name=str(item.get("accessible_name") or item.get("name") or "").strip(),
             text=str(item.get("text") or item.get("title") or "").strip(),
+            region=str(item.get("region") or "").strip(),
+            kind=str(item.get("kind") or "").strip(),
             visible=bool(item.get("visible", True)),
             enabled=bool(item.get("enabled", not item.get("disabled", False))),
             actionable=bool(item.get("actionable", False)),
             clickable=bool(item.get("clickable", False)),
+            selected=bool(item.get("selected", False)),
+            selected_source=str(item.get("selected_source") or "")[:40],
         )
         if selector:
             self.selector_generations[selector] = self.generation
@@ -442,6 +700,8 @@ class BrowserPageState:
                 "primary_link": href,
                 "role": "link",
                 "text": card.get("title") or "",
+                "region": card.get("region") or "",
+                "kind": card.get("kind") or "",
                 "visible": True,
                 "enabled": True,
                 "actionable": True,
@@ -452,6 +712,53 @@ class BrowserPageState:
         if selector:
             self.selector_primary_links[selector] = (self.generation, href)
         return target
+
+    def _register_card_field_targets(self, card: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
+        statuses = card.get("field_status")
+        field_status = statuses if isinstance(statuses, Mapping) else {}
+        provenance = card.get("field_provenance")
+        field_provenance = provenance if isinstance(provenance, Mapping) else {}
+        selector_metadata = card.get("selector_metadata")
+        selector_metadata = selector_metadata if isinstance(selector_metadata, Mapping) else {}
+        registered: Dict[str, Dict[str, Any]] = {}
+        for field_name in _READ_ONLY_CARD_TARGET_FIELDS:
+            if field_name not in self.requested_fields:
+                continue
+            if field_status.get(field_name) != "present":
+                continue
+            provenance_entry = field_provenance.get(field_name)
+            provenance_entry = provenance_entry if isinstance(provenance_entry, Mapping) else {}
+            selector = str(
+                provenance_entry.get("selector")
+                or card.get(f"{field_name}_selector_hint")
+                or (card.get("rating_selector_hint") if field_name in {"product_rating", "shop_rating"} else "")
+                or ""
+            ).strip()
+            metadata_entry = selector_metadata.get(field_name)
+            if not isinstance(metadata_entry, Mapping) and field_name in {"product_rating", "shop_rating"}:
+                metadata_entry = selector_metadata.get("rating")
+            metadata_entry = metadata_entry if isinstance(metadata_entry, Mapping) else {}
+            if not selector or metadata_entry.get("match_count") != 1 or metadata_entry.get("visible") is not True:
+                continue
+            target = self._new_target(
+                source="card_field",
+                locator={"selector": selector},
+                selector=selector,
+                role="text",
+                text=str(card.get(field_name) or provenance_entry.get("raw_text") or ""),
+                region=str(card.get("region") or ""),
+                kind="detail_field",
+                visible=True,
+                enabled=True,
+                actionable=False,
+                clickable=False,
+                extractable=True,
+                field_name=field_name,
+            )
+            self.selector_generations[selector] = self.generation
+            self._selector_targets[(self.generation, selector)] = target.target_id
+            registered[field_name] = target.compact_index()
+        return registered
 
     def _new_target(self, *, source: str, locator: Dict[str, str], **kwargs: Any) -> BrowserTarget:
         self._target_counter += 1

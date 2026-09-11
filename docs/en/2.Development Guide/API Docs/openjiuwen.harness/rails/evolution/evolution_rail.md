@@ -6,10 +6,10 @@ subscription, draining, quality gating, scope-local clean windows, and suppressi
 ## Construction
 
 ```python
-from openjiuwen.agent_evolving.trajectory import TrajectorySpanProcessor
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
 from openjiuwen.harness.rails import EvolutionRail, EvolutionTriggerPoint
 
-processor = TrajectorySpanProcessor()
+processor = get_trajectory_span_processor()
 
 rail = EvolutionRail(
     evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
@@ -20,8 +20,9 @@ rail = EvolutionRail(
 )
 ```
 
-The processor must already be registered with the active OpenTelemetry provider. All Rails in one runtime should
-share the same processor object.
+Acquire Agent or Team observability before construction. The demand coordinator registers this process-wide
+processor with the active OpenTelemetry provider. All Rails in one runtime must reuse this object rather than
+constructing another `TrajectorySpanProcessor`.
 
 ## Collection lifecycle
 

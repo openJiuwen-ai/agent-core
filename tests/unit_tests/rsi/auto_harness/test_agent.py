@@ -37,7 +37,7 @@ from openjiuwen.harness.tools import (
     WebFetchWebpageTool,
     WebFreeSearchTool,
 )
-from openjiuwen.rsi.auto_harness.agents import (
+from openjiuwen.rsi.harness_rsi.auto_harness.agents import (
     create_activate_guide_agent,
     create_assess_agent,
     create_auto_harness_agent,
@@ -49,10 +49,10 @@ from openjiuwen.rsi.auto_harness.agents import (
     create_pr_draft_agent,
     create_select_pipeline_agent,
 )
-from openjiuwen.rsi.auto_harness.rails.context_rail import (
+from openjiuwen.rsi.harness_rsi.auto_harness.rails.context_rail import (
     AutoHarnessContextRail,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
 )
 
@@ -79,7 +79,7 @@ def test_create_auto_harness_agent_includes_tool_tracker():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(
@@ -124,7 +124,7 @@ def test_create_auto_harness_agent_honors_workspace_override():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(
@@ -150,7 +150,7 @@ def test_create_commit_agent_only_exposes_commit_skills():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_commit_agent(
@@ -210,7 +210,7 @@ def test_create_assess_agent_includes_tool_tracker():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_assess_agent(
@@ -239,7 +239,7 @@ def test_create_assess_agent_includes_web_research_tools():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_assess_agent(
@@ -260,7 +260,7 @@ def test_create_learnings_agent_formats_prompt_without_tools():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_learnings_agent(
@@ -285,7 +285,7 @@ def test_create_plan_agent_uses_plan_skill():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_plan_agent(
@@ -307,7 +307,7 @@ def test_create_select_pipeline_agent_uses_selector_skill():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_select_pipeline_agent(
@@ -329,7 +329,7 @@ def test_create_pr_draft_agent_uses_communicate_skill_only():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_pr_draft_agent(
@@ -358,7 +358,7 @@ def test_create_pr_draft_agent_system_prompt_contains_pr_template():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_pr_draft_agent(
@@ -383,7 +383,7 @@ def test_create_auto_harness_agent_no_tool_tracker_without_injection():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(
@@ -408,7 +408,7 @@ def test_auto_harness_agents_use_configured_completion_timeout():
     )
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_auto_harness_agent(config)
@@ -435,7 +435,7 @@ def test_create_assess_agent_no_tool_tracker_without_injection():
         return object()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
         side_effect=_fake_create_deep_agent,
     ):
         create_assess_agent(

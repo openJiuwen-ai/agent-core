@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.session_budget import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.session_budget import (
     SessionBudgetController,
 )
 

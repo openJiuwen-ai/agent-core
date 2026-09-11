@@ -17,9 +17,14 @@ from openjiuwen.agent_teams.schema.status import (
     MemberMode,
     MemberStatus,
 )
-from openjiuwen.agent_teams.tools.database.engine import DbSessions, get_current_time
+from openjiuwen.agent_teams.tools.database.engine import (
+    DbSessions,
+    get_current_time,
+    retry_on_locked,
+)
 from openjiuwen.agent_teams.tools.member_options import (
     MemberWorktreeOptions,
+    promote_member_fallback_model,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
@@ -76,7 +81,8 @@ class MemberDao:
                 path. HITT callers must pass
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
             options: JSON object for extensible member configuration.
-                Current shape: ``{"model_ref": {...}, "cli_agent": "...",
+                Current shape: ``{"model_ref": {...},
+                "fallback_model_ref": {...}, "cli_agent": "...",
                 "worktree": {...}, "permissions_override": {...}}``.
         """
         async with self._sessions.write() as session:
@@ -327,23 +333,36 @@ class MemberDao:
         transition was illegal.
         """
         valid_from = _valid_predecessor_values(MemberStatus(status), MEMBER_TRANSITIONS)
-        async with self._sessions.write() as session:
-            result = await session.execute(
-                update(TeamMember)
-                .where(
-                    TeamMember.member_name == member_name,
-                    TeamMember.team_name == team_name,
-                    TeamMember.status.in_(valid_from),
-                )
-                .values(status=status)
-            )
-            if result.rowcount == 1:
-                await session.commit()
-                team_logger.debug("Member %s status updated to %s", member_name, status)
-                return True
 
-            await self._log_member_update_rejection(session, member_name, team_name, TeamMember.status, status)
-            return False
+        async def _op() -> bool:
+            async with self._sessions.write() as session:
+                result = await session.execute(
+                    update(TeamMember)
+                    .where(
+                        TeamMember.member_name == member_name,
+                        TeamMember.team_name == team_name,
+                        TeamMember.status.in_(valid_from),
+                    )
+                    .values(status=status)
+                )
+                if result.rowcount == 1:
+                    await session.commit()
+                    team_logger.debug("Member %s status updated to %s", member_name, status)
+                    return True
+
+                await self._log_member_update_rejection(
+                    session, member_name, team_name, TeamMember.status, status
+                )
+                return False
+
+        # Status writes sit on the hot path of every kernel.start / spawn
+        # transition; a transient SQLite file-lock wait or a temporarily
+        # exhausted write pool must retry, not crash the member.
+        return await retry_on_locked(
+            _op,
+            on_locked_result=False,
+            label=f"update_member_status {member_name}",
+        )
 
     async def _log_member_update_rejection(
         self,
@@ -482,5 +501,29 @@ class MemberDao:
                 isolation=isolation,
                 worktree_path=worktree_path,
             )
+            await session.commit()
+            return True
+
+    async def promote_member_fallback_model(
+        self,
+        member_name: str,
+        team_name: str,
+    ) -> bool:
+        """Promote the persisted fallback model to the active model reference."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member is None:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            promoted = promote_member_fallback_model(member.options)
+            if promoted == member.options:
+                return False
+            member.options = promoted
             await session.commit()
             return True

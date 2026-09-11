@@ -20,10 +20,9 @@ from openjiuwen.core.foundation.kv_cache import (
     KVCacheAffinityConfig,
     KVCacheIdentity,
 )
-from openjiuwen.core.foundation.llm.model_clients.ascend_affinity_model_client import (
-    AscendAffinityModelClient,
-)
+from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
@@ -35,6 +34,19 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCa
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
 
+def _affinity_client() -> OpenAIModelClient:
+    return OpenAIModelClient(
+        model_config=ModelRequestConfig(model="test-model"),
+        model_client_config=ModelClientConfig(
+            client_provider=ProviderType.OpenAI,
+            auth_mode=LLMAuthMode.CustomHeaders,
+            api_base="https://example.test",
+            extensions={"kv_cache": {"mode": "affinity"}},
+            verify_ssl=False,
+        ),
+    )
+
+
 class _CapturingModel:
     def __init__(self, *, supports: bool, events: list[str]) -> None:
         self._supports = supports
@@ -43,15 +55,7 @@ class _CapturingModel:
         self.evict_calls: list[dict[str, Any]] = []
         self.offload_calls: list[dict[str, Any]] = []
         self.prefetch_calls: list[dict[str, Any]] = []
-        self.client = AscendAffinityModelClient(
-            model_config=ModelRequestConfig(model="test-model"),
-            model_client_config=ModelClientConfig(
-                client_provider=ProviderType.AscendAffinity,
-                api_key="test-key",
-                api_base="https://example.test",
-                verify_ssl=False,
-            ),
-        )
+        self.client = _affinity_client()
 
     def supports_kv_cache_release(self) -> bool:
         return False

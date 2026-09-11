@@ -4,16 +4,20 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from openjiuwen.core.context_engine.base import ContextWindow, ContextWindowChange
+from openjiuwen.core.context_engine.context.context import SessionModelContext
+from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.foundation.kv_cache import (
     KV_CACHE_EPHEMERAL_TAIL_METADATA,
     KVCacheAffinityConfig,
 )
+from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -21,6 +25,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind, PromptAttachmentManager
 
 
 class _FakeAffinityLLM:
@@ -151,6 +156,40 @@ def _ctx(agent: ReActAgent, session: Session, context: _FakeContext) -> AgentCal
     )
 
 
+def test_usage_attribution_supports_lightweight_session_and_context() -> None:
+    agent = _agent()
+    session = SimpleNamespace(session_id=lambda: "session-id")
+    context = SimpleNamespace(session_id=lambda: "context-id")
+    callback_context = SimpleNamespace(
+        session=session,
+        context=context,
+        context_usage_attribution={},
+    )
+
+    attribution = agent._context_usage_attribution(callback_context, session)
+
+    assert attribution["execution_session_id"] == "session-id"
+    assert attribution["context_owner_id"] == "kv_affinity_agent|session-id|context-id"
+
+
+def test_usage_attribution_falls_back_to_context_session_id() -> None:
+    agent = _agent()
+    session = SimpleNamespace()
+    context = SimpleNamespace(session_id=lambda: "context-session-id")
+    callback_context = SimpleNamespace(
+        session=session,
+        context=context,
+        context_usage_attribution={},
+    )
+
+    attribution = agent._context_usage_attribution(callback_context, session)
+
+    assert attribution["execution_session_id"] == "context-session-id"
+    assert attribution["context_owner_id"] == (
+        "kv_affinity_agent|context-session-id|context-session-id"
+    )
+
+
 @pytest.mark.asyncio
 async def test_append_only_context_window_does_not_evict_kvc() -> None:
     session = Session(session_id="sess_main")
@@ -180,6 +219,64 @@ async def test_affinity_invoke_adds_session_agent_hint_kwargs() -> None:
     assert result.content == "ok"
     assert llm.invoke_kwargs["session_id"] == "sess_affinity"
     assert llm.invoke_kwargs["parent_session_id"] == "sess_affinity"
+
+
+@pytest.mark.asyncio
+async def test_react_agent_projects_only_prompt_attachments_for_system_role_provider() -> None:
+    session = Session(session_id="sess_attachment")
+    manager = PromptAttachmentManager(language="en")
+    await manager.add_section(
+        session_id="sess_attachment",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="test",
+        content="dynamic context",
+    )
+    context = SessionModelContext(
+        "ctx_attachment",
+        "sess_attachment",
+        ContextEngineConfig(),
+        history_messages=[UserMessage(content="real user query")],
+        processors=[],
+    )
+    llm = _FakeAffinityLLM()
+    llm.model_client_config = ModelClientConfig(
+        client_provider=ProviderType.DashScope,
+        api_key="test-key",
+        api_base="https://example.test/v1",
+    )
+    agent = _agent()
+    agent.set_llm(llm)
+    agent.prompt_attachment_manager = manager
+
+    context_callback = _ctx(
+        agent,
+        session,
+        context,
+    )
+    await agent._railed_model_call(context_callback)
+
+    sent_messages = context_callback.inputs.messages
+    assert isinstance(sent_messages[0], SystemMessage)
+    attachment_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, SystemMessage)
+        and message.content.endswith("dynamic context\n</system-reminder>")
+    )
+    query_index = next(
+        index
+        for index, message in enumerate(sent_messages)
+        if isinstance(message, UserMessage) and message.content == "real user query"
+    )
+    assert attachment_index > query_index
+    assert all(message.content != "real user query" for message in sent_messages if isinstance(message, SystemMessage))
+
+    history_messages = context.get_messages()
+    assert any(
+        isinstance(message, UserMessage) and "dynamic context" in message.content
+        for message in history_messages
+    )
 
 
 @pytest.mark.asyncio

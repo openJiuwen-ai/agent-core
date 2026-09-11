@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 
@@ -110,3 +109,27 @@ async def test_index_fallback_can_be_built_from_cached_tool_infos_for_isolated_r
     assert [item["name"] for item in matches] == ["cron_create_job"]
     assert rail._tool_search_index is not None
     assert rail._tool_search_index.document_count == 1
+
+
+@pytest.mark.asyncio
+async def test_index_rebuilds_when_deferred_parameters_change_without_registry_revision():
+    card = _deferred("calendar_create", "Create a calendar event")
+    registry = _Registry([card])
+    rail = ProgressiveToolRail(
+        DeepAgentConfig(progressive_tool_enabled=True, language="cn")
+    )
+    agent = _agent(registry)
+
+    rail.init(agent)
+    rail.finalize_startup(agent)
+    initial_index = rail._tool_search_index
+
+    await rail._search_tools("calendar", limit=5)
+    assert rail._tool_search_index is initial_index
+
+    card.input_params["properties"]["starts_at"] = {"type": "string"}
+    matches = await rail._search_tools("starts_at", limit=5)
+
+    assert rail._tool_search_index is not initial_index
+    assert rail._tool_search_index.source_fingerprint != initial_index.source_fingerprint
+    assert [item["name"] for item in matches] == ["calendar_create"]

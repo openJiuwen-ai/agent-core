@@ -39,7 +39,8 @@ from .backends import AgentBackend, AgentResult, MockBackend
 from .errors import LintError, MetaError, SchemaError, WorkflowError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
-from .primitives import AgentSession, HumanSession
+from .primitives import AgentSession, HumanSession, verify
+from .verify import Reviewer, VerifyResult, VerifyVote
 from .runner import run_workflow
 from .runtime import Runtime
 
@@ -141,6 +142,10 @@ def log(message: Any) -> None:
 async def workflow(name_or_path: str, args: Any = None) -> Any:
     """Run another workflow inline (one level). Delegates to the current provider."""
     return await current_provider().workflow(name_or_path, args)
+
+
+# ``verify`` is re-exported directly (not a provider seam): it composes
+# ``agent()``, which already routes through the provider — so no Provider.verify.
 
 
 def agent_session(
@@ -262,6 +267,10 @@ __all__ = [
     "phase",
     "log",
     "workflow",
+    "verify",
+    "Reviewer",
+    "VerifyResult",
+    "VerifyVote",
     "budget",
     "compact",
     "flatten_filter",

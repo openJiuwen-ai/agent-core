@@ -49,7 +49,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from openjiuwen.agent_teams.prompts.loader import load_template
+from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
 from openjiuwen.agent_teams.prompts.messages import build_identity_text
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
@@ -73,6 +73,23 @@ class TeamSectionName:
     LIFECYCLE = "team_lifecycle"
     EXTRA = "team_extra"
     INBOUND_TAGS = "team_inbound_tags"
+
+
+# Single source of truth for system-prompt section ordering. Section builders
+# read this when constructing PromptSections; ``priority`` is a render-side
+# ordering constant only — the workspace assembler no longer stamps it into
+# A-class md frontmatter, so there is no on-disk copy to drift from.
+SECTION_PRIORITY: dict[str, int] = {
+    TeamSectionName.IDENTITY: 10,
+    TeamSectionName.ROLE: 11,
+    TeamSectionName.HITT: 12,
+    TeamSectionName.BRIDGE: 12,
+    TeamSectionName.WORKFLOW: 13,
+    TeamSectionName.LIFECYCLE: 14,
+    TeamSectionName.DISPATCH: 15,
+    TeamSectionName.EXTRA: 17,
+    TeamSectionName.INBOUND_TAGS: 18,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -184,7 +201,7 @@ def build_team_identity_section(
     return PromptSection(
         name=TeamSectionName.IDENTITY,
         content={language: body},
-        priority=10,
+        priority=SECTION_PRIORITY[TeamSectionName.IDENTITY],
     )
 
 
@@ -192,6 +209,7 @@ def build_leader_bootstrap_section(
     *,
     swarmflow_enabled: bool,
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> PromptSection:
     """Build the leader's only system-prompt team section (F_76).
 
@@ -217,8 +235,8 @@ def build_leader_bootstrap_section(
     """
     mechanism = ""
     if swarmflow_enabled:
-        mechanism = "\n" + load_template("leader_swarmflow", language).content.strip() + "\n"
-    body = load_template("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
+        mechanism = "\n" + loader("leader_swarmflow", language).content.strip() + "\n"
+    body = loader("leader_bootstrap", language).format({"collaboration_mechanism": mechanism}).content.strip()
     return PromptSection(
         name=TeamSectionName.BOOTSTRAP,
         content={language: f"{body}\n"},
@@ -232,6 +250,7 @@ def build_team_role_section(
     teammate_mode: str = "build_mode",
     workspace_prompt_variant: Literal["native", "external"] = "native",
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> PromptSection:
     """Build the role policy + execution mode section.
 
@@ -272,7 +291,7 @@ def build_team_role_section(
         policy_name = "teammate_policy_external"
     else:
         policy_name = "teammate_policy"
-    role_text = load_template(policy_name, language).content.strip()
+    role_text = loader(policy_name, language).content.strip()
 
     # The execution mode describes how a member plans and completes work it
     # took on itself. An avatar never does — it acts only on its controller's
@@ -290,7 +309,7 @@ def build_team_role_section(
     return PromptSection(
         name=TeamSectionName.ROLE,
         content={language: body},
-        priority=11,
+        priority=SECTION_PRIORITY[TeamSectionName.ROLE],
     )
 
 
@@ -306,6 +325,7 @@ def build_team_workflow_section(
     role: TeamRole,
     team_mode: str = "default",
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the workflow section (LEADER only).
 
@@ -322,12 +342,12 @@ def build_team_workflow_section(
         return None
     labels = _labels_for(language)
     template_name = _WORKFLOW_TEMPLATES.get(team_mode, "leader_workflow")
-    workflow_text = load_template(template_name, language).content.strip()
+    workflow_text = loader(template_name, language).content.strip()
     body = f"{labels['workflow_heading']}\n\n{workflow_text}\n"
     return PromptSection(
         name=TeamSectionName.WORKFLOW,
         content={language: body},
-        priority=13,
+        priority=SECTION_PRIORITY[TeamSectionName.WORKFLOW],
     )
 
 
@@ -348,6 +368,7 @@ def build_team_dispatch_section(
     role: TeamRole,
     dispatch_mode: str = "autonomous",
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the task-dispatch section (LEADER + TEAMMATE).
 
@@ -371,12 +392,12 @@ def build_team_dispatch_section(
         return None
     mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
     labels = _labels_for(language)
-    dispatch_text = load_template(f"dispatch_{mode}_{slug}", language).content.strip()
+    dispatch_text = loader(f"dispatch_{mode}_{slug}", language).content.strip()
     body = f"{labels['dispatch_heading']}\n\n{dispatch_text}\n"
     return PromptSection(
         name=TeamSectionName.DISPATCH,
         content={language: body},
-        priority=15,
+        priority=SECTION_PRIORITY[TeamSectionName.DISPATCH],
     )
 
 
@@ -385,6 +406,7 @@ def build_team_task_state_section(
     role: TeamRole,
     dispatch_mode: str = "autonomous",
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the task state-machine section (LEADER only).
 
@@ -416,7 +438,7 @@ def build_team_task_state_section(
         return None
     mode = dispatch_mode if dispatch_mode in _DISPATCH_MODES else "autonomous"
     labels = _labels_for(language)
-    state_text = load_template(f"task_state_{mode}", language).content.strip()
+    state_text = loader(f"task_state_{mode}", language).content.strip()
     body = f"{labels['task_state_heading']}\n\n{state_text}\n"
     return PromptSection(
         name=TeamSectionName.TASK_STATE,
@@ -430,6 +452,7 @@ def build_team_lifecycle_section(
     role: TeamRole,
     lifecycle: str,
     language: str = "cn",
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the team lifecycle section (LEADER only).
 
@@ -446,12 +469,12 @@ def build_team_lifecycle_section(
         return None
     labels = _labels_for(language)
     template_name = "lifecycle_persistent" if lifecycle == "persistent" else "lifecycle_temporary"
-    lifecycle_text = load_template(template_name, language).content.strip()
+    lifecycle_text = loader(template_name, language).content.strip()
     body = f"{labels['lifecycle_heading']}\n\n{lifecycle_text}\n"
     return PromptSection(
         name=TeamSectionName.LIFECYCLE,
         content={language: body},
-        priority=14,
+        priority=SECTION_PRIORITY[TeamSectionName.LIFECYCLE],
     )
 
 
@@ -473,11 +496,15 @@ def build_team_extra_section(
     return PromptSection(
         name=TeamSectionName.EXTRA,
         content={language: f"{base_prompt.strip()}\n"},
-        priority=17,
+        priority=SECTION_PRIORITY[TeamSectionName.EXTRA],
     )
 
 
-def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
+def build_team_inbound_tags_section(
+    *,
+    language: str = "cn",
+    loader: TemplateLoader = load_template,
+) -> PromptSection:
     """Build the static notice explaining inbound message XML tags (§5.2).
 
     Explains the ``<team-inbound>`` / ``<team-note>`` / ``<team-event>`` tag
@@ -493,13 +520,13 @@ def build_team_inbound_tags_section(*, language: str = "cn") -> PromptSection:
     """
     del language  # content carries both languages; selection happens at render
     content = {
-        "cn": load_template("inbound_tags", "cn").content,
-        "en": load_template("inbound_tags", "en").content,
+        "cn": loader("inbound_tags", "cn").content,
+        "en": loader("inbound_tags", "en").content,
     }
     return PromptSection(
         name=TeamSectionName.INBOUND_TAGS,
         content=content,
-        priority=18,
+        priority=SECTION_PRIORITY[TeamSectionName.INBOUND_TAGS],
     )
 
 
@@ -533,6 +560,7 @@ def _hitt_contract_body(
     self_member_name: str | None,
     expose_human_agents_to_teammates: bool,
     language: str,
+    loader: TemplateLoader = load_template,
 ) -> str | None:
     """Render the HITT collaboration-contract markdown (rules only).
 
@@ -545,7 +573,7 @@ def _hitt_contract_body(
     template_name = _hitt_template_name(role, expose_human_agents_to_teammates)
     if template_name is None:
         return None
-    template = load_template(template_name, language)
+    template = loader(template_name, language)
     if role == TeamRole.HUMAN_AGENT:
         self_line = _self_member_line(self_member_name, language)
         return template.format({"self_line": self_line}).content
@@ -559,6 +587,7 @@ def build_team_hitt_section(
     language: str = "cn",
     self_member_name: str | None = None,
     expose_human_agents_to_teammates: bool = False,
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the HITT collaboration-contract section (rules only).
 
@@ -586,13 +615,13 @@ def build_team_hitt_section(
     """
     if not hitt_enabled:
         return None
-    body = _hitt_contract_body(role, self_member_name, expose_human_agents_to_teammates, language)
+    body = _hitt_contract_body(role, self_member_name, expose_human_agents_to_teammates, language, loader=loader)
     if body is None:
         return None
     return PromptSection(
         name=TeamSectionName.HITT,
         content={language: body},
-        priority=12,
+        priority=SECTION_PRIORITY[TeamSectionName.HITT],
     )
 
 
@@ -601,6 +630,7 @@ def build_team_bridge_section(
     role: TeamRole,
     language: str = "cn",
     self_member_name: str | None = None,
+    loader: TemplateLoader = load_template,
 ) -> Optional[PromptSection]:
     """Build the Bridge Agent self-contract section (BRIDGE_AGENT only).
 
@@ -622,11 +652,11 @@ def build_team_bridge_section(
     if role != TeamRole.BRIDGE_AGENT:
         return None
     self_line = _self_member_line(self_member_name, language)
-    body = load_template("bridge_agent", language).format({"self_line": self_line}).content
+    body = loader("bridge_agent", language).format({"self_line": self_line}).content
     return PromptSection(
         name=TeamSectionName.BRIDGE,
         content={language: body},
-        priority=12,
+        priority=SECTION_PRIORITY[TeamSectionName.BRIDGE],
     )
 
 
@@ -647,6 +677,7 @@ def build_team_static_sections(
     expose_human_agents_to_teammates: bool = False,
     include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    loader: TemplateLoader = load_template,
 ) -> list[PromptSection]:
     """Build the never-changing team sections for one member.
 
@@ -707,6 +738,7 @@ def build_team_static_sections(
             teammate_mode=teammate_mode,
             workspace_prompt_variant=workspace_prompt_variant,
             language=language,
+            loader=loader,
         ),
         build_team_hitt_section(
             role=role,
@@ -714,31 +746,37 @@ def build_team_static_sections(
             language=language,
             self_member_name=member_name,
             expose_human_agents_to_teammates=expose_human_agents_to_teammates,
+            loader=loader,
         ),
         build_team_bridge_section(
             role=role,
             language=language,
             self_member_name=member_name,
+            loader=loader,
         ),
         build_team_workflow_section(
             role=role,
             team_mode=team_mode,
             language=language,
+            loader=loader,
         ),
         build_team_dispatch_section(
             role=role,
             dispatch_mode=dispatch_mode,
             language=language,
+            loader=loader,
         ),
         build_team_task_state_section(
             role=role,
             dispatch_mode=dispatch_mode,
             language=language,
+            loader=loader,
         ),
         build_team_lifecycle_section(
             role=role,
             lifecycle=lifecycle,
             language=language,
+            loader=loader,
         ),
         build_team_extra_section(
             base_prompt=base_prompt,
@@ -750,7 +788,7 @@ def build_team_static_sections(
     # messages, framework events and team-state updates as <team-inbound> /
     # <team-event> / <team-context> XML, so the inbound tag notice is always
     # included.
-    sections.append(build_team_inbound_tags_section(language=language))
+    sections.append(build_team_inbound_tags_section(language=language, loader=loader))
     return sections
 
 
@@ -762,6 +800,7 @@ def build_leader_policy_disclosure(
     dispatch_mode: str = "autonomous",
     language: str = "cn",
     hitt_enabled: bool = False,
+    loader: TemplateLoader = load_template,
 ) -> str:
     """Render the leader's collaboration policy for the ``build_team`` result.
 
@@ -806,6 +845,7 @@ def build_leader_policy_disclosure(
         language=language,
         hitt_enabled=hitt_enabled,
         include_member_specific=False,
+        loader=loader,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:
@@ -829,6 +869,7 @@ def build_team_member_system_prompt(
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    loader: TemplateLoader = load_template,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
 
@@ -864,6 +905,7 @@ def build_team_member_system_prompt(
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
         include_member_specific=True,
         workspace_prompt_variant=workspace_prompt_variant,
+        loader=loader,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:

@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/team_workspace/` |
-| 最近一次修订日期 | 2026-08-12 |
-| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` |
+| 最近一次修订日期 | 2026-09-01 |
+| 关联 feature | `F_69_cwd-workspace-project-root-separation.md` · `F_79_team-scoped-skill-library-and-visibility.md` · `F_85_block-c-member-directory-linker.md` · `F_89_team-shared-deliverables-outputs.md` |
 
 ## 范围 / 边界
 
@@ -27,7 +27,7 @@
 
 - **不管代码隔离**。每个成员各自的 git worktree 由 `WorktreeManager`（`openjiuwen.harness.tools.worktree`）独立负责；workspace 是产物协同区，worktree 是源码工作树，二者磁盘路径不相交。
 - **不管文件 I/O 实现**。`read_file` / `write_file` / `glob` 等读写动作走标准 SysOperation 工具，命中 `.team/` 前缀时被 `TeamWorkspaceRail` 拦截、加上锁与版本策略。manager 自身不做内容读写。
-- **不管成员私有 workspace**。成员私有目录是 `team_home(team_name)/workspaces/{member}_workspace/` 或 `independent_member_workspace(member)`，由 `agent_configurator.setup_agent` 处理；workspace manager 只把团队共享区**挂载**进成员 workspace。
+- **不管成员私有 workspace 的拓扑**。成员私有目录由 `agent_configurator.setup_agent` 经 Block C 成员目录链接器装配（`team_workspace/binder.py::prepare_member_workspace`）：是否 link 出去按**成员 role 白名单**判定——只有 `TEAMMATE` 与 `HUMAN_AGENT` 走 dynamic（真实目录扁平化到 `.agent_teams/<team>#<member>/` 并 link），`LEADER`（含按名判定的 leader）留 team 内真实目录，`predefined` 走 `.agent_teams/<member>`（跨 team 共享）+ link，其余 role（`EXTERNAL_CLI`、`BRIDGE_AGENT`、`WORKER`、未知）一律退回 team 内真实目录不 link 出去。外部 CLI 成员另有 `setup_agent` 的 `member_runtime is not None` 提前返回，根本不触达装配段。team 内 `workspaces/{member}_workspace` 是透明 link（建不出则退回 team 内真实目录）。对 A/B 代码与 workspace manager 而言 `team_member_workspace_dir` 依然有效——manager 只把团队共享区**挂载**进成员 workspace（见 [[F_85]]）。
 - **不管 Skill 实体**。Skill 实体唯一存放于 `paths.global_skills_dir()`，团队共享工作区**没有** `skills/` 节点。本子系统只负责在 workspace 根播种团队那份可见性声明文件；声明的语义、合成与授权归 `agent_teams/skill/visibility.py` 与 `rails/team_skill_use_rail.py`（见 [[F_79]]）。
 - **不管多 team 全局协调**。一份 `TeamWorkspaceManager` 只服务一个 team_name；跨 team 的状态在 runtime pool 层。
 
@@ -36,6 +36,13 @@
 1. **Workspace 与 worktree 路径不相交**。Workspace 路径由 `paths.team_home(team_name) / "team-workspace"` 派生（或 config 显式指定 `root_path`）；worktree 路径由 `WorktreeManager.config` 决定。两者不能互相覆盖也不能互为子目录。`.team` 符号链接挂在**成员 workspace** 里（`mount_into_workspace`）——worktree 隔离只移动 cwd、不移动 workspace（[[F_69]]），所以挂载点跟着 workspace 走。`mount_into_worktree` 目前无调用方。
 2. **`paths.py` 是路径布局唯一真相源**。Workspace 的默认根、artifact 子目录、挂载点都从 `team_home(team_name)` 推出；`agent_configurator.create_workspace_manager` 不绕开 `team_home`。Config 的 `root_path` 是用户覆盖入口，不是新增散落硬编码的理由。
 3. **挂载点统一为 `.team/{team_name}/`，且它保留**。成员 workspace 通过 `mount_into_workspace(workspace_root)` 在 `workspace_root/.team/{team_name}` 上建符号链接。`TeamWorkspaceRail` 与 prompts 中宣告的挂载路径必须严格一致；rail 解析 `.team/` 前缀时既兼容 hub 布局（`.team/{team_name}/...`）也兼容 legacy 布局（`.team/...`），但**新代码只生成 hub 布局**。**挂载点服务的是团队产物协同，不服务 Skill**——[[F_79]] 拆掉的是 `skills/` 视图目录，不是这个挂载点；不要因为"团队不再分发 Skill"就把 `.team` 一起删掉。同理 `_mount_directory` 的 symlink → junction → copytree 三级降级保留：受限运行时下**产物**仍必须到达 agent。
+
+> **2026-09-01 修订（[[F_89]] / [[S_26]]）**：`.team/` 挂载点**不再作为产物访问路径**。
+> 团队最终产物改为按绝对路径写入 `team-workspace/artifacts/<YYYY-MM-DD>/chat-<n>/outputs/`
+> （无 project_dir 的成员），`TeamWorkspaceRail` 改拦 outputs 绝对前缀，提示词与
+> 工具描述的 `.team/` 相对路径全部改为指向团队信息块的「最终产物目录」绝对路径。
+> `mount_into_workspace` / `mount_worktree` 保留为可选 symlink 便利（worktree 代码型 team 遗留），
+> 模型不再引用 `.team`。详情见 [[F_89]]、[[S_26]]。
 4. **Windows 兜底用 junction，不静默忽略**。`os.symlink` 在 Windows 因权限失败时退到 `mklink /J`；junction 创建失败抛 `OSError`，不允许 catch-all 当成功处理。
 5. **文件锁是单一权威，按文件路径粒度**。LOCAL 模式：`TeamWorkspaceManager._locks` 是唯一权威。DISTRIBUTED 模式：leader 节点是唯一权威，远端通过 `WorkspaceLockRequestEvent` 走 messager 请求 leader 决议。同一文件不存在两个并发持锁人。
 6. **过期锁自动回收，可重入刷新**。`WorkspaceFileLock.is_expired()` 由 `acquired_at + timeout_seconds` 与当前时间判定。`acquire_lock` 遇到他人过期锁直接覆盖；遇到自己持的锁刷新时间，不算冲突。
@@ -229,12 +236,12 @@ Skill 实体不在上面这棵树里，它在 `paths.global_skills_dir()`（默�
 两份文档由 `skill/visibility.py::compose_skill_visibility` 合成后喂给
 `rails/team_skill_use_rail.py::TeamSkillUseRail`。见 [[F_79]]。
 
-成员若在独立 workspace 模式（`stable_base=True`），`independent_member_workspace(member)` 通过符号链接被纳入 `team_home(team_name)/workspaces/{member}_workspace`；`.team` 挂载点不变。符号链接建不出来时（受限运行时）成员留在自己的独立 workspace 里跑，声明文件跟着它走——`workspace_layout.ensure_team_member_workspace_link` 已不再整份 copytree 成员 workspace（[[F_79]] D6）。
+成员 workspace 的装配由 Block C 成员目录链接器完成（[[F_85]]）：是否 link 出去按**成员 role 白名单**判定——只有 `TEAMMATE` 与 `HUMAN_AGENT` 走 dynamic，真实目录落盘在 `.agent_teams/<team>#<member>/`（per-team 隔离）并在 `workspaces/{member}_workspace` 建 link 指过去；leader 留在 team 内、predefined 落到 `.agent_teams/<member>`（跨 team 共享）+ link；其余 role（`EXTERNAL_CLI` 等）退回 team 内真实目录不 link 出去。外部 CLI 成员另有 `setup_agent` 的 `member_runtime is not None` 提前返回，不触达装配段。`.team` 挂载点不变。link 建不出来时（受限运行时）真实目录**退回 team 内**，`team_member_workspace_dir` 仍然有效。`workspace_layout.ensure_team_member_workspace_link` 保留给 WORKER（swarmflow）调用点使用，不参与 Block C 装配（其行为保持 [[F_79]] D6：不再整份 copytree 成员 workspace）。
 
 ## 与其它 spec 的关系
 
 - **S_01 public-api-and-spec-flow**：`TeamWorkspaceConfig` 通过 `TeamAgentSpec.workspace` 进入装配蓝图，遵循 Spec → build → Runtime 单向流；workspace 不回写 spec。
-- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_mount` / `team_workspace_path` 把挂载点注入 system prompt——agent 侧不重复声明挂载格式。
+- **S_02 team-agent-architecture**：`TeamWorkspaceManager` 落在 `agent/infra.py` 的 `TeamInfra` 上（per-process 共享）；`TeamWorkspaceRail` 由 `agent/agent_configurator.py` 装到 DeepAgent；prompts/sections 通过 `team_workspace_path` / `team_outputs_dir` 把工作空间路径与最终产物目录注入 system prompt（`.team` 挂载点已废止，见 [[F_89]] / [[S_26]]）——agent 侧不重复声明路径格式。
 - **S_06 runtime-pool-dispatch**：workspace 的物理目录创建发生在 manager `activate` 路径（spec → blueprint → `create_workspace_manager`）；pool entry 复活时复用既有目录，不重新 init。
 - **S_08 team-tools-contract**：`WorkspaceMetaTool` 是团队工具的一员，ToolCard id `team.workspace_meta` 遵循 `team.{name}` 前缀约定；其描述文本走 `tools/locales/descs/<lang>/workspace/workspace_meta.md`，不在代码里写长文案。
 - **Worktree 子系统（`harness.tools.worktree`）**：路径不相交是不变量 1。`mount_into_worktree` 是 worktree → workspace 的单向挂载入口，不存在反向 mount；worktree 改动不通过 workspace 的 git 历史走，二者各自独立。

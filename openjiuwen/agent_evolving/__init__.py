@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# ruff: noqa: I001
 """
 Self-evolving training and evaluation framework.
 
@@ -43,6 +44,7 @@ from openjiuwen.agent_evolving.optimizer import (
     BaseOptimizer,
     TextualParameter,
     InstructionOptimizer,
+    MetisContextEvolveOptimizer,
 )
 from openjiuwen.agent_evolving.optimizer.skill_call import SkillExperienceOptimizer
 
@@ -56,7 +58,7 @@ from openjiuwen.agent_evolving.trajectory import Trajectory
 from openjiuwen.agent_evolving.updater import Updater, SingleDimUpdater, MultiDimUpdater
 
 # agent_rl
-from openjiuwen.agent_evolving.agent_rl import (
+from openjiuwen.agent_evolving.agent_rl import (  # pylint: disable=no-name-in-module
     RLConfig,
     OfflineRLOptimizer,
     OnlineRLOptimizer,
@@ -106,6 +108,7 @@ __all__ = [
     "BaseOptimizer",
     "TextualParameter",
     "InstructionOptimizer",
+    "MetisContextEvolveOptimizer",
     "SkillExperienceOptimizer",
     "Trainer",
     "Progress",

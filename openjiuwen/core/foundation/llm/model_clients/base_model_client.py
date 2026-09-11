@@ -23,6 +23,7 @@ from openjiuwen.core.common.logging import (
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
 )
@@ -146,6 +147,147 @@ class BaseModelClient(ABC):
         return 0
 
     @staticmethod
+    def _cache_usage_metadata(obj: Any) -> dict[str, Any]:
+        """Normalize cache read/miss/write fields while preserving zero values.
+
+        The legacy ``cache_tokens`` field is retained as a compatibility read
+        value, but it is not authoritative because providers disagree on
+        whether it represents cache hits or cache writes.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int | None:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value) if value.is_integer() else None
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith(("+", "-")):
+                    digits = text[1:]
+                else:
+                    digits = text
+                if digits.isdigit():
+                    return int(text)
+            return None
+
+        def _first(paths: tuple[tuple[str, ...], ...]) -> int | None:
+            for path in paths:
+                value = _to_int(_get_path(obj, path))
+                if value is not None:
+                    return value
+            return None
+
+        read_tokens = _first(
+            (
+                ("prompt_tokens_details", "cached_tokens"),
+                ("promptTokensDetails", "cachedTokens"),
+                ("input_tokens_details", "cached_tokens"),
+                ("input_token_details", "cached_tokens"),
+                ("inputTokensDetails", "cachedTokens"),
+                ("inputTokenDetails", "cachedTokens"),
+                ("usageMetadata", "cachedContentTokenCount"),
+                ("usage_metadata", "cached_content_token_count"),
+                ("prompt_cache_hit_tokens",),
+                ("cache_read_input_tokens",),
+                ("cachedContentTokenCount",),
+                ("cached_content_token_count",),
+                ("cache_read_tokens",),
+                ("cached_tokens",),
+                ("cache_hit_tokens",),
+                ("cached_input_tokens",),
+                ("prompt_cache_tokens",),
+                ("prompt_cached_tokens",),
+            )
+        )
+        legacy_read_tokens = _first((("cache_tokens",),))
+        legacy_read = read_tokens is None and legacy_read_tokens is not None
+        if read_tokens is None:
+            read_tokens = legacy_read_tokens
+        miss_tokens = _first(
+            (
+                ("prompt_cache_miss_tokens",),
+                ("cache_miss_tokens",),
+                ("cache_miss_input_tokens",),
+                ("uncached_tokens",),
+            )
+        )
+        write_tokens = _first(
+            (
+                ("cache_write_tokens",),
+                ("cache_creation_input_tokens",),
+                ("cache_creation_tokens",),
+            )
+        )
+        has_cache_usage = any(value is not None for value in (read_tokens, miss_tokens, write_tokens))
+        return {
+            "cache_read_tokens": read_tokens,
+            "cache_miss_tokens": miss_tokens,
+            "cache_write_tokens": write_tokens,
+            "cache_status": "observed" if has_cache_usage else None,
+            "cache_source": "provider_usage" if has_cache_usage else None,
+            # ``cache_tokens`` is retained as a compatibility read value, but
+            # providers disagree on whether it means cache hits or writes.
+            "cache_authoritative": has_cache_usage and not legacy_read,
+        }
+
+    @staticmethod
+    def _extract_cache_creation_tokens(obj: Any) -> int | None:
+        """Extract cache-write tokens only when the provider exposes them."""
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        paths = (
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("input_token_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+        )
+        fields = (
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        values = (_get_path(obj, path) for path in paths)
+        for value in (*values, *(_get_value(obj, field) for field in fields)):
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
     def _extract_reasoning_tokens(obj: Any) -> int:
         """Extract reasoning/thinking token count from provider usage metadata.
 
@@ -255,7 +397,12 @@ class BaseModelClient(ABC):
         """Validate configuration parameters (subclasses can optionally override)"""
         client_name = self._get_client_name()
 
-        if not self.model_client_config.api_key:
+        auth_mode = getattr(
+            self.model_client_config,
+            "auth_mode",
+            LLMAuthMode.ApiKey.value,
+        )
+        if auth_mode in (LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value) and not self.model_client_config.api_key:
             raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
                               error_msg=f"model client config api_key is required for {client_name}.")
         if not self.model_client_config.api_base:
@@ -433,11 +580,28 @@ class BaseModelClient(ABC):
 
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
-        internal_params = {"parser", "output_parser"}
+        internal_params = {
+            "parser",
+            "output_parser",
+            "request_purpose",
+            "context_operation_id",
+        }
 
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude={
+                "model_name",
+                "model",
+                "temperature",
+                "top_p",
+                "max_tokens",
+                "stop",
+                # Context metadata is consumed by the context engine and must
+                # never be sent as a provider SDK request parameter.
+                "context_window",
+                # Provider-neutral intent; resolved into wire controls separately.
+                "reasoning",
+            },
             exclude_none=True
         )
         params.update(extra_params)

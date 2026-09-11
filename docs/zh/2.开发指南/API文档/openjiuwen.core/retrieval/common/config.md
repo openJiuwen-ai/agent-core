@@ -93,6 +93,6 @@
 * **model_name**(str)：模型名称（可通过alias "model"访问）。默认值：""。
 * **timeout**(float)：请求超时时间（秒）。默认值：10。
 * **temperature**(float)：温度参数。默认值：0.95。
-* **top_p**(float)：Top-p采样参数。默认值：0.1。
+* **top_p**(float)：Top-p采样参数。默认值：0.95。
 * **yes_no_ids**(tuple[int, int], 可选)："yes"和"no"的token ID（比如 `(123, 456)`）。默认值：None。
 * **extra_body**(dict)：特殊关键字参数（比如 `{"custom_param": "value"}`）。默认值：{}。

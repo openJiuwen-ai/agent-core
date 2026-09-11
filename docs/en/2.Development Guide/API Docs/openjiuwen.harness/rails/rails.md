@@ -22,7 +22,9 @@ Built-in guardrails that hook into the `DeepAgent` lifecycle. Rails are register
 | `AskUserRail` | Pauses the loop to ask the user a clarifying question (interrupt). |
 | `ConfirmInterruptRail` | Requires user confirmation before executing sensitive operations. |
 | `TeamSkillCreateRail` | Auto-detects multi-agent collaboration patterns and suggests team skill creation. |
+| `TeamSkillEvolutionRail` | Evolves existing team skills using aggregated team trajectories and approval-governed experience records. |
 | `TeamSkillRail` | Compatibility alias for `TeamSkillEvolutionRail`; evolves existing team skills using aggregated team trajectories and approval-governed experience records. |
+| `TrajectoryRail` | Archives one canonical trajectory for each completed Agent invoke. |
 
 ## Rail Lifecycle
 
@@ -49,7 +51,10 @@ Prefer configuration helpers to wire shared review dependencies:
 
 - `configure_skill_evolution(...)` for regular skill evolution.
 - `configure_skill_evolution(..., team=True)` for team/swarm evolution.
+- `configure_skill_evolution_runtime(...)` for an Agent that is already initialized.
+- `unconfigure_skill_evolution(...)` to remove the configured evolution stack.
 
 - See [`skill_evolution_rail`](./evolution/skill_evolution_rail.md) for regular `SkillEvolutionRail`.
 - See [`team_skill_evolution_rail`](./evolution/team_skill_evolution_rail.md) for `TeamSkillCreateRail`, `TeamSkillEvolutionRail`, and the `TeamSkillRail` compatibility alias.
+- See [`trajectory_rail`](./evolution/trajectory_rail.md) for per-invoke canonical trajectory archival.
 - Evolution host events are buffered as `OutputSchema` objects. The canonical drain API is `drain_pending_host_events()`; `drain_pending_approval_events()` is a compatibility wrapper.

@@ -17,7 +17,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
@@ -27,16 +27,32 @@ from openjiuwen.agent_teams.external.cli_agent.codex import build_codex_runtime
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
 from openjiuwen.agent_teams.external.cli_agent.transport.local import LocalTransport
-from openjiuwen.agent_teams.external.descriptor import TeamJoinDescriptor
+from openjiuwen.agent_teams.external.descriptor import OPENJIUWEN_HOME_ENV, TeamJoinDescriptor
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase, ExternalCliRuntime, ReinvokeCliRuntime
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
-from openjiuwen.agent_teams.paths import team_home
+from openjiuwen.agent_teams.paths import get_openjiuwen_home, team_workspace_dir
 from openjiuwen.agent_teams.schema.ssh_transport import SshTransportConfig
-from openjiuwen.agent_teams.schema.team import TeamRuntimeContext
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRuntimeContext
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
+
+
+def _with_home_env(env: dict[str, str]) -> dict[str, str]:
+    """Ensure the runtime home travels into the CLI subprocess.
+
+    The host platform configures the home via ``configure_openjiuwen_home``
+    (a process-global module variable), which does not cross process
+    boundaries. A spawned CLI (and the MCP server it in turn spawns) would
+    otherwise resolve the default ``~/.openjiuwen`` and miss session spill
+    files written under the configured root. Propagate the resolved home as
+    ``OPENJIUWEN_HOME`` so :func:`get_openjiuwen_home` (env fallback) and
+    Codex's ``mcp_servers.<key>.env_vars`` allow-list (which carries it one
+    hop further into the MCP server) keep the paths aligned.
+    """
+    env.setdefault(OPENJIUWEN_HOME_ENV, str(get_openjiuwen_home()))
+    return env
 
 
 def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
@@ -76,7 +92,7 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
             workspace_config = candidate_workspace
     workspace_path = None
     if workspace_config is not None:
-        workspace_path = workspace_config.root_path or str(team_home(team_name) / "team-workspace")
+        workspace_path = workspace_config.root_path or str(team_workspace_dir(team_name))
 
     return TeamJoinDescriptor(
         session_id=session_id,
@@ -171,9 +187,13 @@ async def build_cli_runtime(
     mcp_server_name: str = "openjiuwen-team",
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     mcp_default_tools_approval_mode: str | None = None,
-    codex_bypass_approvals_and_sandbox: bool = False,
+    codex_bypass_approvals_and_sandbox: bool = True,
     codex_turn_idle_timeout_s: float | None = None,
     codex_turn_idle_retries: int | None = None,
+    claude_turn_idle_timeout_s: float | None = None,
+    external_model_config: ExternalCliModelConfig | None = None,
+    fallback_external_model_config: ExternalCliModelConfig | None = None,
+    promote_fallback_model: Callable[[], Awaitable[bool]] | None = None,
     system_prompt: str | None = None,
     extra_env: dict[str, str] | None = None,
     ssh_transport: SshTransportConfig | None = None,
@@ -210,12 +230,20 @@ async def build_cli_runtime(
         mcp_server_command: Launch argv for the team MCP stdio server.
         mcp_default_tools_approval_mode: Optional Codex-only approval policy
             scoped to tools from the injected team MCP server.
-        codex_bypass_approvals_and_sandbox: Explicit high-risk Codex-only mode
-            that disables approval prompts and the SDK sandbox.
+        codex_bypass_approvals_and_sandbox: Codex-only switch that disables
+            approval prompts and the SDK sandbox by default. Set to ``False``
+            to restore Codex approval and sandbox handling.
         codex_turn_idle_timeout_s: Optional Codex-only inactivity ceiling for
             one SDK turn. Every received SDK notification refreshes it.
         codex_turn_idle_retries: Optional number of same-thread retries when a
             stalled turn emitted no SDK notifications and was interrupted.
+        claude_turn_idle_timeout_s: Optional Claude-only inactivity ceiling for
+            one SDK turn. Every received SDK message refreshes it.
+        external_model_config: Optional model endpoint config translated into
+            backend-specific SDK options.
+        fallback_external_model_config: Optional endpoint used only after an
+            explicit native authentication failure.
+        promote_fallback_model: Callback persisting the fallback as active.
         system_prompt: The member's team-rail system prompt. Claude receives it
             through SDK options, Codex through SDK thread options, and other CLIs
             may receive it as a launch arg.
@@ -256,11 +284,21 @@ async def build_cli_runtime(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="Claude SDK members do not support command_override; configure cli_path instead",
             )
+        if codex_turn_idle_timeout_s is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_timeout_s is only supported for Codex SDK members",
+            )
+        if codex_turn_idle_retries is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="codex_turn_idle_retries is only supported for Codex SDK members",
+            )
         if ssh_transport is None:
             base_env = strip_parent_claude_env(dict(os.environ))
         else:
             base_env = {}
-        env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+        env = _with_home_env({**base_env, **(extra_env or {}), **descriptor.to_env()})
         team_logger.info(
             "[external-cli] preparing claude member {} cwd={} cli_path_configured={} inject_mcp={} "
             "mcp_server_name={} mcp_server_command={} team_join_env_present={} ssh_transport_configured={}",
@@ -273,12 +311,15 @@ async def build_cli_runtime(
             "OPENJIUWEN_TEAM_JOIN" in env,
             ssh_transport is not None,
         )
-        return build_claude_runtime(
+        return await build_claude_runtime(
             member_name=ctx.member_name or "",
             cwd=cwd,
             add_dirs=add_dirs,
             env=env,
             cli_path=cli_path,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             inject_mcp=inject_mcp,
             mcp_server_name=mcp_server_name,
             mcp_server_command=mcp_server_command,
@@ -290,6 +331,7 @@ async def build_cli_runtime(
             team_context_tracker=team_context_tracker,
             team_name=descriptor.team_name,
             role=ctx.role.value,
+            turn_idle_timeout_s=claude_turn_idle_timeout_s,
         )
     if ctx.cli_agent == "codex":
         if command_override is not None:
@@ -297,12 +339,17 @@ async def build_cli_runtime(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="Codex SDK members do not support command_override; configure cli_path instead",
             )
+        if claude_turn_idle_timeout_s is not None:
+            raise_error(
+                StatusCode.AGENT_TEAM_CONFIG_INVALID,
+                reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
+            )
         if ssh_transport is not None:
             raise_error(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="ssh transport is not yet supported for Codex SDK members",
             )
-        env = {**dict(os.environ), **(extra_env or {}), **descriptor.to_env()}
+        env = _with_home_env({**dict(os.environ), **(extra_env or {}), **descriptor.to_env()})
         team_logger.info(
             "[external-cli] preparing codex member {} cwd={} cli_path_configured={} codex_bin_configured={} "
             "inject_mcp={} mcp_server_name={} mcp_server_command={} team_join_env_present={}",
@@ -340,6 +387,9 @@ async def build_cli_runtime(
             bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
             system_prompt=system_prompt,
             codex_bin=cli_path or codex_bin,
+            external_model_config=external_model_config,
+            fallback_external_model_config=fallback_external_model_config,
+            promote_fallback_model=promote_fallback_model,
             resume_external_backend=resume_external_backend,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
             turn_idle_retries=codex_turn_idle_retries,
@@ -361,6 +411,11 @@ async def build_cli_runtime(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="cli_path is only supported for Claude and Codex SDK members",
         )
+    if claude_turn_idle_timeout_s is not None:
+        raise_error(
+            StatusCode.AGENT_TEAM_CONFIG_INVALID,
+            reason="claude_turn_idle_timeout_s is only supported for Claude SDK members",
+        )
 
     adapter: CliAgentAdapter = build_adapter(ctx.cli_agent, command_override=command_override)
     # Start from the inherited environment minus any parent agent-session
@@ -372,7 +427,7 @@ async def build_cli_runtime(
         for key, value in os.environ.items()
         if not any(key.startswith(prefix) for prefix in adapter.env_strip_prefixes)
     }
-    env = {**base_env, **(extra_env or {}), **descriptor.to_env()}
+    env = _with_home_env({**base_env, **(extra_env or {}), **descriptor.to_env()})
 
     # System prompt as a launch arg. CLIs without a flag return [] here and get
     # the prompt prepended to their first user message by the caller instead.

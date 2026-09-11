@@ -9,7 +9,7 @@ import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ModelContext
+from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
@@ -49,8 +49,8 @@ class TestModelContext:
         config = ContextEngineConfig(
             default_window_message_num=window_message_limit,
             default_window_round_num=dialogue_round,
-            max_context_message_num=max_context_message_num,
-            enable_reload=enable_reload,
+        max_context_message_num=max_context_message_num,
+        enable_reload=enable_reload,
             enable_tiktoken_counter=enable_tiktoken_counter,
         )
         context_engine = ContextEngine(config)
@@ -422,13 +422,40 @@ class TestModelContext:
         assert ContextUtils.has_valid_usage_metadata(assistant) is False
 
     @pytest.mark.asyncio
-    async def test_appending_tail_keeps_assistant_usage_valid(self):
+    async def test_statistic_uses_input_tokens_not_total_tokens(self):
+        assistant = AssistantMessage(
+            content="answer",
+            usage_metadata=UsageMetadata(input_tokens=37, output_tokens=100, total_tokens=137),
+        )
+        context = await self.create_context([UserMessage(content="question"), assistant])
+
+        assert context.statistic().total_tokens == 37
+
+    @pytest.mark.asyncio
+    async def test_context_window_statistic_does_not_double_count_tools(self):
+        assistant = AssistantMessage(
+            content="answer",
+            usage_metadata=UsageMetadata(input_tokens=100, output_tokens=20, total_tokens=120),
+        )
+        context = await self.create_context([UserMessage(content="question"), assistant])
+        window = ContextWindow(
+            context_messages=[UserMessage(content="question"), assistant],
+            tools=[ToolInfo(name="read_file", description="read", parameters={})],
+        )
+
+        stat = context._stat_context_window(window)
+
+        assert stat.total_tokens == 100
+        assert stat.tool_tokens > 0
+
+    @pytest.mark.asyncio
+    async def test_appending_tail_invalidates_assistant_usage(self):
         assistant = AssistantMessage(content="answer", usage_metadata=UsageMetadata(total_tokens=100))
         context = await self.create_context([UserMessage(content="question"), assistant])
 
         await context.add_messages(UserMessage(content="next question"))
 
-        assert ContextUtils.has_valid_usage_metadata(assistant) is True
+        assert ContextUtils.has_valid_usage_metadata(assistant) is False
 
     @pytest.mark.asyncio
     async def test_removing_messages_invalidates_retained_assistant_usage(self):

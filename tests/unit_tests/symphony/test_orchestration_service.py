@@ -21,7 +21,7 @@ from openjiuwen.symphony import (
     SymphonyRuntime,
 )
 from openjiuwen.symphony.orchestration.artifacts import load_graph_artifacts
-from openjiuwen.symphony.orchestration.execution_graph import build_execution_graph
+from openjiuwen.symphony.orchestration.planned_graph import build_planned_graph
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
 from openjiuwen.symphony.orchestration.graph.matcher.ontology import OntologyMatcher
 from openjiuwen.symphony.orchestration.graph.models import GraphDiagnostic, LLMMatch
@@ -114,6 +114,31 @@ class _PlanLLM:
                 )
             )
         return SimpleNamespace(content=json.dumps({"status": "no_plan", "steps": []}))
+
+
+class _FailingFastPlanLLM(_PlanLLM):
+    async def invoke(self, messages, **kwargs):
+        del kwargs
+        payload = json.loads(messages[-1]["content"])
+        if "candidates" in payload:
+            return SimpleNamespace(
+                content=json.dumps(
+                    {
+                        "matches": [
+                            {"id": item["id"], "direction": "forward", "confidence": 0.9, "accepted": True}
+                            for item in payload["candidates"]
+                        ]
+                    }
+                )
+            )
+        return SimpleNamespace(
+            content=json.dumps(
+                {
+                    "status": "ready",
+                    "steps": [{"skill_id": "unknown-capability"}],
+                }
+            )
+        )
 
 
 @pytest.mark.asyncio
@@ -326,7 +351,18 @@ async def test_dynamic_overlay_respects_config(
     result = await service.plan("query", dynamic_overlay=overlay)
 
     assert captured == [overlay if enabled else {}]
-    assert result["dynamic_graph_enabled"] is enabled
+    assert result == {
+        "planned_graph": {
+            "graph": {
+                "id": result["planned_graph"]["graph"]["id"],
+                "type": "planned_graph",
+                "directed": True,
+                "metadata": {"status": "no_plan"},
+                "nodes": {},
+                "edges": [],
+            }
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -353,8 +389,8 @@ async def test_dynamic_graph_enabled_reports_config_without_overlay(
 
     result = await service.plan("query")
 
-    assert result["dynamic_graph_enabled"] is True
-    assert result["dynamic_overlay_used"] is False
+    assert set(result) == {"planned_graph"}
+    assert result["planned_graph"]["graph"]["metadata"] == {"status": "no_plan"}
 
 
 class _MixedPlanLLM:
@@ -418,34 +454,16 @@ async def test_mixed_capability_types_survive_plan_projection(tmp_path: Path, mo
 
     result = await service.plan("skill:query must stay", candidate_ids=["extract"])
 
-    steps = result["recommended_plans"][0]["steps"]
-    assert [(item["capability_id"], item["capability_type"]) for item in steps] == [
-        ("extract", "skill"),
-        ("summarize", "agent"),
-    ]
-    assert [(item["capability_id"], item["capability_type"]) for item in result["execution_graph"]["nodes"]] == [
-        ("extract", "skill"),
-        ("summarize", "agent"),
-    ]
-    assert result["query"] == "skill:query must stay"
-
-
-def test_generalize_only_normalizes_explicit_id_fields() -> None:
-    from openjiuwen.symphony.orchestration.service import _generalize_public_fields
-
-    result = _generalize_public_fields(
-        {
-            "skill_id": "skill:extract",
-            "query": "skill:query must stay",
-            "reason": "capability:reason must stay",
-        }
-    )
-
-    assert result == {
-        "capability_id": "extract",
-        "query": "skill:query must stay",
-        "reason": "capability:reason must stay",
+    assert set(result) == {"planned_graph"}
+    graph = result["planned_graph"]["graph"]
+    assert graph["nodes"] == {
+        "extract": {"label": "extract", "metadata": {"type": "skill"}},
+        "summarize": {"label": "summarize", "metadata": {"type": "agent"}},
     }
+    assert graph["edges"] == [
+        {"source": "extract", "target": "summarize", "relation": "can_feed"},
+    ]
+    assert {"execution_graph", "plans", "recommended_plans", "query"}.isdisjoint(result)
 
 
 @pytest.mark.asyncio
@@ -607,7 +625,7 @@ async def test_graph_config_drives_default_matcher_candidates_and_progress(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_execution_graph_fallback_normalizes_prefixed_edge_endpoints(tmp_path: Path) -> None:
+async def test_planned_graph_is_minimal_and_never_falls_back_to_static_edges(tmp_path: Path) -> None:
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
         capability_provider=_inventory,
@@ -616,8 +634,10 @@ async def test_execution_graph_fallback_normalizes_prefixed_edge_endpoints(tmp_p
     await service.build()
     artifacts = load_graph_artifacts(tmp_path)
 
-    execution_graph = build_execution_graph(
+    planned_graph = build_planned_graph(
         {
+            "plan_id": "plan-1",
+            "status": "ready",
             "recommended_plans": [
                 {
                     "steps": [{"skill_id": "extract"}, {"skill_id": "summarize"}],
@@ -628,9 +648,118 @@ async def test_execution_graph_fallback_normalizes_prefixed_edge_endpoints(tmp_p
         artifacts,
     )
 
-    assert [(edge["source"], edge["target"]) for edge in execution_graph["edges"]] == [
-        ("capability:extract", "capability:summarize")
-    ]
+    assert planned_graph == {
+        "graph": {
+            "id": "plan-1",
+            "type": "planned_graph",
+            "directed": True,
+            "metadata": {"status": "ready"},
+            "nodes": {
+                "extract": {"label": "extract", "metadata": {"type": "skill"}},
+                "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+            },
+            "edges": [],
+        }
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "reason", "missing_inputs", "expected_metadata"),
+    [
+        ("ready", "", [], {"status": "ready"}),
+        (
+            "needs_input",
+            "A source document is required.",
+            [{"name": "source_document", "reason": "required"}],
+            {
+                "status": "needs_input",
+                "reason": "A source document is required.",
+                "missing_inputs": ["source_document"],
+            },
+        ),
+        ("no_plan", "No capability applies.", [], {"status": "no_plan", "reason": "No capability applies."}),
+    ],
+)
+async def test_planned_graph_covers_all_public_statuses(
+    tmp_path: Path,
+    status: str,
+    reason: str,
+    missing_inputs: list[dict[str, str]],
+    expected_metadata: dict[str, object],
+) -> None:
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+    )
+    await service.build()
+    artifacts = load_graph_artifacts(tmp_path)
+
+    planned_graph = build_planned_graph(
+        {
+            "plan_id": f"plan-{status}",
+            "status": status,
+            "reason": reason,
+            "recommended_plans": [
+                {
+                    "status": status,
+                    "reason": reason,
+                    "steps": [],
+                    "missing_inputs": missing_inputs,
+                    "can_feed_edges": [],
+                }
+            ],
+        },
+        artifacts,
+    )
+
+    graph = planned_graph["graph"]
+    assert graph["metadata"] == expected_metadata
+    assert graph["nodes"] == {}
+    assert graph["edges"] == []
+
+
+@pytest.mark.asyncio
+async def test_planned_graph_rejects_edge_endpoints_outside_selected_nodes(tmp_path: Path) -> None:
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_PlanLLM(),
+    )
+    await service.build()
+    artifacts = load_graph_artifacts(tmp_path)
+
+    with pytest.raises(ValueError, match="selected capability nodes.*target='summarize'"):
+        build_planned_graph(
+            {
+                "plan_id": "plan-invalid-edge",
+                "status": "ready",
+                "recommended_plans": [
+                    {
+                        "steps": [{"skill_id": "extract"}],
+                        "can_feed_edges": [
+                            {"source_id": "capability:extract", "target_id": "skill:summarize"}
+                        ],
+                    }
+                ],
+            },
+            artifacts,
+        )
+
+
+@pytest.mark.asyncio
+async def test_service_rejects_fast_planner_failure_instead_of_projecting_no_plan(tmp_path: Path) -> None:
+    service = OrchestrationService(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=_FailingFastPlanLLM(),
+        config=OrchestrationConfig(mode="fast"),
+    )
+    await service.build()
+
+    with pytest.raises(ValueError, match="Fast planner selected unknown skill IDs"):
+        await service.plan("extract and summarize")
 
 
 @pytest.mark.asyncio

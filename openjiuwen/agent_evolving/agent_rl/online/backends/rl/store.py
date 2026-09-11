@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from .._inmemory_queue import InMemoryStatusQueue
@@ -18,6 +19,14 @@ class InMemoryTrajectoryStore:
 
     async def save_sample(self, sample: dict[str, Any], *, user_id: str = "online") -> None:
         await self._queue.save(sample, user_id=user_id)
+
+    async def save_samples_once(
+        self,
+        samples: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+    ) -> set[str]:
+        return await self._queue.save_once(samples, user_id=user_id)
 
     async def get_pending_count(self, user_id: str) -> int:
         return await self._queue.pending_count(user_id)

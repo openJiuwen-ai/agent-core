@@ -4,6 +4,9 @@ import os
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+pytest.importorskip("botocore")
+
 from botocore.exceptions import ClientError
 
 from openjiuwen.core.foundation.store.object.aioboto_storage_client import AioBotoClient

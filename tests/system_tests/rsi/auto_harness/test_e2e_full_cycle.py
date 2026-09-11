@@ -28,10 +28,10 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     OptimizationTask,
     TaskStatus,
@@ -173,7 +173,7 @@ class TestAutoHarnessE2EFullCycle(
         config = self._make_config()
 
         # 创建真实 DeepAgent
-        from openjiuwen.rsi.auto_harness.agents import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.agents import (
             create_auto_harness_agent,
         )
 

@@ -22,6 +22,7 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness.prompts import resolve_language as _resolve_language
 from openjiuwen.core.session.agent_team import Session as AgentTeamSession
 
 if TYPE_CHECKING:
@@ -176,24 +177,42 @@ class CoordinationKernel:
         if host.role == TeamRole.LEADER and infra.team_backend:
             existing = await infra.team_backend.db.team.get_team(infra.team_backend.team_name)
             if existing is not None:
+                # A team row that is still there is a team to rejoin, whatever
+                # its roster looks like. "Every teammate is SHUTDOWN" used to be
+                # read here as an unfinished disband and answered with
+                # clean_team, but that state is also what a leader between two
+                # rounds of members looks like, so the inference destroyed live
+                # teams. Disbanding is an explicit act: the temporary leader's
+                # clean_team tool, or the operator's delete_agent_team.
                 team_row_present = True
-                non_leader_members = await infra.team_backend.list_member_roster()
-                if non_leader_members and all(m.status == MemberStatus.SHUTDOWN.value for m in non_leader_members):
-                    team_logger.warning(
-                        "[{}] team {} found with all teammates in SHUTDOWN — finalizing prior incomplete cleanup",
-                        member_name,
-                        infra.team_backend.team_name,
-                    )
-                    await infra.team_backend.clean_team()
-                    team_row_present = False
-                else:
-                    await host.recover_team()
+                await host.recover_team()
 
         if infra.workspace_manager and not infra.workspace_initialized:
             spec = blueprint.spec if blueprint else None
             remote_url = spec.workspace.remote_url if spec and spec.workspace else None
             await infra.workspace_manager.initialize(remote_url=remote_url)
             infra.workspace_initialized = True
+
+        # Seed the team-workspace framework baselines (system prompt templates
+        # + tool descriptions). These are static framework-source copies that
+        # do not depend on the team DB row or on the workspace manager, so they
+        # are written here on start — idempotently (evolved files are never
+        # overwritten; missing ones are seeded; framework upgrades land).
+        # Writing at ``coordination.start`` (before the first tool call) lets
+        # the read-side cache serve every member that runs in this process.
+        # Skipped when the evolution mechanism is off — no file, no cache prime.
+        team_name = host.team_name
+        evolution_enabled = blueprint.spec.evolution_enabled if blueprint and blueprint.spec else True
+        if team_name and evolution_enabled:
+            config_language = blueprint.spec.language if blueprint and blueprint.spec else None
+            resolved_language = _resolve_language(config_language)
+            from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+            cache = infra.workspace_manager.workspace_cache if infra.workspace_manager else None
+            WorkspaceAssembler(cache=cache).write_system_and_tool_prompts(
+                team_name=team_name,
+                language=resolved_language,
+            )
 
         # Wire up the team memory toolkit once the harness and workspace
         # are ready. init_toolkit is idempotent; calling it on every start
@@ -342,9 +361,9 @@ class CoordinationKernel:
         # team_member status update is owned by ``TeamRuntimeManager.finalize_member``
         # so persistence-layer status (lives across restarts) stays decoupled
         # from kernel runtime teardown (volatile). External stop_coordination
-        # from leader path must not silently mark teammates SHUTDOWN — that
-        # would trip the kernel.start ``all-SHUTDOWN -> clean_team`` guard and
-        # delete a team that should be recoverable.
+        # from leader path must not silently mark teammates SHUTDOWN — that is
+        # permanent departure, while stopping a team leaves it recoverable;
+        # ``STOPPED`` is the status that says so.
         self._lifecycle_state = "paused"
 
     async def _mark_live_teammates(self, target_status: MemberStatus) -> None:

@@ -46,6 +46,7 @@ from .errors import BudgetExhausted, WorkflowAborted, WorkflowError
 from .journal import call_signature, key_str
 from .progress import ProgressKind, WorkflowProgressEvent
 from .schema import coerce, resolve_schema
+from .verify import Reviewer, SCORE_SCHEMA, VERDICT_SCHEMA, VerifyResult, VerifyVote, settle_verify_tally
 
 if TYPE_CHECKING:
     from pydantic import BaseModel
@@ -189,25 +190,48 @@ def _outcome_from_result(raw_text: str | None, result: Any) -> str | None:
 
 
 def _check_abort(rt) -> None:
-    """Raise ``WorkflowAborted`` when an external pause signal is set.
+    """Raise ``WorkflowAborted`` when an external pause/stop signal is set.
 
     Called twice per ``agent()`` / session ``send()``: an entry gate (before the
     concurrency permit / backend) stops a queued call; a pre-journal guard (after
     the backend succeeds, before ``journal.use``) ensures a call that finished
     inside the pause window does NOT persist to the WAL — so a resume reruns it.
-    A ``None`` event disables both checks (the back-compat default).
+    The raised ``WorkflowAborted`` carries the signal's ``reason`` (``"pause"``
+    vs ``"stop"``) so the caller can tell a resumable pause from a terminal stop.
+    A ``None`` signal disables both checks (the back-compat default).
     """
     ev = rt.abort_event
     if ev is not None and ev.is_set():
-        raise WorkflowAborted()
+        raise WorkflowAborted(reason=ev.reason)
+
+
+def _top_phases(rt) -> list[tuple[str, int]] | None:
+    """Top-3 author phases by per-phase token consumption, or ``None`` when empty.
+
+    Reads the per-run ledger's ``phase_tokens`` tally (accumulated by the emit
+    hooks below), so an exhausted run can tell the leader which phases burned
+    the most tokens — the data the leader needs to redesign a workflow that
+    keeps hitting its ceiling.
+    """
+    acc = rt.workflow_budget.phase_tokens
+    if not acc:
+        return None
+    return sorted(acc.items(), key=lambda kv: kv[1], reverse=True)[:3]
 
 
 def _check_budget(rt) -> None:
-    """Raise ``BudgetExhausted`` when the run has burned its token ceiling.
+    """Raise ``BudgetExhausted`` when either ledger has hit its ceiling.
 
-    The run's hard ceiling, checked once per ``agent()`` / session ``send()``,
-    at the entry gate only: a call already paid for must reach its journal
-    record, or a resume would rerun (and re-pay for) it.
+    Two ceilings, checked once per ``agent()`` / session ``send()``, at the
+    entry gate only: a call already paid for must reach its journal record, or
+    a resume would rerun (and re-pay for) it.
+
+    Order-sensitive — **session first**: when both ledgers are dry, the
+    terminal (not retryable) session reason wins. Relaunching after a session
+    exhaustion hits the same gate immediately, so reporting ``"workflow"``
+    would mislead the leader into "redesign the workflow" when raising the
+    ceiling is the only way forward. A session still holding headroom never
+    masks a per-run (workflow) exhaustion — that check still runs right after.
 
     This gate alone cannot hold the line — one agent's own loop can burn the
     whole budget long before it returns here. It is the backend's rails that
@@ -215,7 +239,17 @@ def _check_budget(rt) -> None:
     """
     if rt.budget.exhausted:
         raise BudgetExhausted(
-            f"token budget exhausted: {rt.budget.spent}/{rt.budget.total}"
+            f"session token budget exhausted: {rt.budget.spent}/{rt.budget.total}",
+            scope="session", spent=rt.budget.spent, total=rt.budget.total,
+            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+            top_phases=_top_phases(rt),
+        )
+    if rt.workflow_budget.exhausted:
+        raise BudgetExhausted(
+            f"workflow token budget exhausted: {rt.workflow_budget.spent}/{rt.workflow_budget.total}",
+            scope="workflow", spent=rt.workflow_budget.spent, total=rt.workflow_budget.total,
+            workflow_spent=rt.workflow_budget.spent, workflow_total=rt.workflow_budget.total,
+            top_phases=_top_phases(rt),
         )
 
 
@@ -253,15 +287,37 @@ def _deepest_branch_i(path: tuple) -> int | None:
     return i
 
 
-def _budget_snapshot(ledger) -> dict:
-    """Freeze a ``BudgetLedger`` into the wire shape ``{total, spent, remaining, scope, exhausted}``."""
+def _budget_snapshot(ledger, scope: str = "session") -> dict:
+    """Freeze a ``BudgetLedger`` into the wire shape ``{total, spent, remaining, scope, exhausted}``.
+
+    ``scope`` is ``"session"`` for the team-wide ledger (``rt.budget``) or
+    ``"workflow"`` for the per-run ledger (``rt.workflow_budget``). Kept as a
+    parameter so emit sites can tag which ledger a snapshot came from; the
+    snapshot is a point-in-time observation under concurrency, not a strong
+    consistency guarantee.
+    """
     return {
         "total": ledger.total,
         "spent": ledger.spent,
         "remaining": ledger.remaining(),
-        "scope": "leader",
+        "scope": scope,
         "exhausted": ledger.exhausted,
     }
+
+
+def _wf_budget_snapshot(rt) -> dict | None:
+    """Snapshot the per-run ledger, always — even when it has no ceiling set.
+
+    A script that does not declare ``workflow_token_limit`` gets an unbounded
+    per-run ledger (``total=None``); its snapshot still reports ``spent`` so a
+    frontend can render an "unbounded" run-budget badge with live consumption
+    (the TUI's own formatter ignores snapshots without a numeric ``total``,
+    so this changes nothing for it).
+    """
+    wb = rt.workflow_budget
+    if wb is None:
+        return None
+    return _budget_snapshot(wb, scope="workflow")
 
 
 def _resolved_nested_phase(explicit: str | None = None) -> str | None:
@@ -291,6 +347,11 @@ def _emit_agent_started(
     correlation_id: str | None = None,
     nested_phase: str | None = None,
 ) -> None:
+    rt.current_agent = {
+        "agent_id": agent_id,
+        "label": opts.get("label"),
+        "started_spent": rt.workflow_budget.spent,
+    }
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_STARTED,
@@ -318,6 +379,8 @@ def _emit_agent_completed(
     ``budget_snapshot``: frozen ``_budget_snapshot(rt.budget)`` at emit time.
     ``nested_phase``: defaults to ``_wf_display_name`` when inside a sub-workflow.
     """
+    rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
+    rt.current_agent = None
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_COMPLETED,
@@ -327,6 +390,7 @@ def _emit_agent_completed(
             agent_id=agent_id,
             tokens=tokens,
             budget=budget_snapshot,
+            workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
         )
     )
@@ -337,6 +401,8 @@ def _emit_agent_failed(
     tokens: int | None = None, budget_snapshot: dict | None = None,
     nested_phase: str | None = None,
 ) -> None:
+    rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
+    rt.current_agent = None
     rt.progress_sink(
         WorkflowProgressEvent(
             kind=ProgressKind.AGENT_FAILED,
@@ -346,6 +412,7 @@ def _emit_agent_failed(
             agent_id=agent_id,
             tokens=tokens,
             budget=budget_snapshot,
+            workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
         )
     )
@@ -462,19 +529,28 @@ async def agent(
 
     _emit_agent_started(rt, opts, prompt, node_type="agent", agent_id=ks)
 
-    cached = rt.journal.get_cached(ks, sig)
+    cached = rt.journal.get_cached(ks, sig, rt.run_id)
     if cached is not None:  # resume hit — no semaphore, no backend
+        rt.log_sink(f"[wf] agent {opts.get('label') or 'agent'!r} key={ks} CACHE_HIT sig={sig[:12]}")
         await rt.journal.use(ks, cached)
         result = _rehydrate(cached, model_cls)
         # Prefer stored raw_text; if absent (old journal), fall back to
         # preamble + structured data via _preview()
         outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+        # Re-bill the per-run ledger from the record's stored tokens so a
+        # resume rebuilds spent by replaying cache hits — the run's tally is
+        # recomputed agent-by-agent, not restored from a stale snapshot.
+        cached_tokens = cached.get("tokens")
+        if isinstance(cached_tokens, int) and cached_tokens > 0:
+            rt.workflow_budget.add(cached_tokens)
         _emit_agent_completed(
             rt, opts, outcome_text, agent_id=ks,
-            tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+            tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+            budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
 
+    rt.log_sink(f"[wf] agent {opts.get('label') or 'agent'!r} key={ks} CACHE_MISS sig={sig[:12]} (live run)")
     _check_abort(rt)  # entry gate: a paused run starts no new agent()
     _check_budget(rt)  # entry gate: a run out of tokens starts no new agent()
 
@@ -518,6 +594,8 @@ async def agent(
                 result=call_result.result,
                 model=model_cls,
                 raw_text=call_result.raw_text,
+                run_id=rt.run_id,
+                tokens=call_result.tokens,
             )
         ),
     )
@@ -625,6 +703,8 @@ class _JournalRecordInput:
     result: Any
     model: Any
     raw_text: str | None = None
+    run_id: str | None = None
+    tokens: int | None = None
 
 
 def _make_record(spec: _JournalRecordInput) -> dict:
@@ -639,12 +719,172 @@ def _make_record(spec: _JournalRecordInput) -> dict:
     return {
         "key": spec.key,
         "sig": spec.sig,
+        "run_id": spec.run_id,
+        "tokens": spec.tokens,
         "label": spec.opts.get("label"),
         "phase": spec.opts.get("phase"),
         "kind": kind,
         "result": payload,
         "raw_text": spec.raw_text,
     }
+
+
+# ─────────────────────────── verify ───────────────────────────
+def _reviewer_call(
+    i: int,
+    reviewer: Reviewer,
+    *,
+    base: str,
+    phase: str | None,  # pylint: disable=huawei-redefined-outer-name
+    options: dict | None,
+):
+    """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
+
+    A verdict reviewer votes against ``VERDICT_SCHEMA`` (pass/fail + feedback),
+    a score reviewer against ``SCORE_SCHEMA`` (0-1 + feedback). Reviewer-level
+    options override the ``verify()``-level ones. The thunk is meant for
+    :func:`parallel`, which gives each reviewer its own structural journal key.
+    """
+    schema = VERDICT_SCHEMA if reviewer.kind == "verdict" else SCORE_SCHEMA
+    rlabel = reviewer.label or f"{base}-{i}"
+    merged = {**(options or {}), **(reviewer.options or {})} or None
+
+    async def _call():
+        return await agent(
+            reviewer.prompt,
+            label=rlabel,
+            phase=phase,
+            schema=schema,
+            options=merged,
+        )
+
+    return _call
+
+
+def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[VerifyVote], dict]:
+    """Fold each reviewer's raw vote (or ``None`` when it did not vote) into votes + a tally.
+
+    A ``None`` raw (``agent()`` failed / skipped) marks the reviewer as
+    not-voted: it contributes its pool's *total* but not its *voted* count, so
+    ``settle_verify_tally`` yields undecided rather than a silent pass.
+    """
+    votes: list[VerifyVote] = []
+    verdict_total = verdict_voted = verdict_fail = 0
+    score_total = score_voted = 0
+    score_sum = 0.0
+
+    for reviewer, raw in zip(reviewers, raws):
+        if reviewer.kind == "verdict":
+            verdict_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="verdict"))
+                continue
+            decision = raw.get("decision")
+            fail = decision == "fail"
+            if decision in ("pass", "fail"):
+                verdict_voted += 1
+                if fail:
+                    verdict_fail += 1
+                decision_pass = not fail
+            else:
+                decision_pass = None  # malformed decision: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="verdict", decision=decision_pass, feedback=raw.get("feedback", "")))
+        else:
+            score_total += 1
+            if raw is None:
+                votes.append(VerifyVote(kind="score"))
+                continue
+            score = raw.get("score")
+            if isinstance(score, (int, float)):
+                score_voted += 1
+                score_sum += float(score)
+            else:
+                score = None  # malformed score: not counted, vote reads undecided
+            votes.append(VerifyVote(kind="score", score=score, feedback=raw.get("feedback", "")))
+
+    tally = {
+        "verdict_total": verdict_total,
+        "verdict_voted": verdict_voted,
+        "verdict_fail_count": verdict_fail,
+        "score_count": score_total,
+        "score_voted": score_voted,
+        "score_avg": (score_sum / score_voted) if score_voted else None,
+    }
+    return votes, tally
+
+
+def _aggregate_feedback(reviewers: Sequence[Reviewer], votes: Sequence[VerifyVote]) -> str:
+    """Join every reviewer's non-empty feedback into an attributed block for rework.
+
+    Mirrors the scheduled ``format_fail_feedback`` shape (``- reviewer: text``),
+    attributing each line by the reviewer's label (falling back to its kind).
+    """
+    lines = []
+    for reviewer, vote in zip(reviewers, votes):
+        fb = (vote.feedback or "").strip()
+        if not fb:
+            continue
+        name = reviewer.label or reviewer.kind
+        lines.append(f"- {name}: {fb}")
+    return "\n".join(lines)
+
+
+async def verify(
+    reviewers: Sequence[Reviewer],
+    *,
+    threshold: float = 0.85,
+    label: str | None = None,
+    phase: str | None = None,  # pylint: disable=huawei-redefined-outer-name
+    options: dict | None = None,
+) -> VerifyResult:
+    """Run one review round over ``reviewers`` and return a structured verdict.
+
+    Each reviewer is a single structured ``agent()`` call fanned out via
+    :func:`parallel` (each vote gets its own journal key, so resume replays the
+    reviewer calls). Votes are folded by :func:`_collect` and judged by
+    ``settle_verify_tally``.
+
+    This is a **single-shot** round: it does not wait on or drive a rework loop.
+    A reviewer whose ``agent()`` returned ``None`` counts as not-voted, so the
+    round returns ``verdict=None`` (undecided) unless every reviewer of every
+    pool has voted. An empty ``reviewers`` list is rejected.
+
+    Args:
+        reviewers: The reviewers to run. Must be non-empty.
+        threshold: Minimum average score for the score pool to pass.
+        label: Base label for reviewer progress events (fallback name prefix).
+        phase: Phase attributed to every reviewer ``agent()`` call.
+        options: Default ``options`` bag applied to every reviewer (reviewer-level
+            options take precedence).
+
+    Returns:
+        A ``VerifyResult`` with the round verdict, per-reviewer votes and the
+        aggregated review feedback.
+
+    Raises:
+        WorkflowError: If ``reviewers`` is empty.
+    """
+    rt = _rt.get()
+    reviewers = list(reviewers)
+    if not reviewers:
+        raise WorkflowError("verify() requires at least one reviewer")
+    base = label or "verify"
+
+    _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
+    raws = await parallel(
+        [_reviewer_call(i, r, base=base, phase=phase, options=options) for i, r in enumerate(reviewers)]
+    )
+
+    votes, tally = _collect(reviewers, raws)
+    verdict = settle_verify_tally(tally, threshold)
+    result = VerifyResult(
+        verdict=verdict,
+        votes=votes,
+        feedback=_aggregate_feedback(reviewers, votes),
+        passed=verdict == "pass",
+    )
+    _emit_log(rt, f"verify: verdict={verdict} (threshold={threshold})")
+    return result
 
 
 # ─────────────────────── stateful sessions ───────────────────────
@@ -701,7 +941,7 @@ class AgentSession:
 
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
-        "_history", "_sid", "_in_flight",
+        "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
     )
 
     def __init__(
@@ -713,6 +953,8 @@ class AgentSession:
         options: dict | None = None,
         _human: bool = False,
         _node_type: str = "agent_session",
+        _fork_data: dict | None = None,
+        _history: list[dict] | None = None,
     ) -> None:
         self._label = label
         self._phase = phase
@@ -720,9 +962,11 @@ class AgentSession:
         self._options = dict(options or {})
         self._human = _human
         self._node_type = _node_type
-        self._history: list[dict] = []
+        self._history: list[dict] = list(_history) if _history else []
         self._sid: str | None = None
+        self._member_name: str | None = None
         self._in_flight = False
+        self._fork_data = _fork_data
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -781,18 +1025,34 @@ class AgentSession:
                 correlation_id=correlation_id,
             )
 
-            cached = rt.journal.get_cached(ks, sig)
+            # Reserve the member identity on the FIRST turn regardless of cache
+            # hit, so a fully-hit resume still knows this session's member name
+            # (fork() needs it to locate the parent's persisted context). Only
+            # runs once — no avatar, no LLM, no spawn/budget slot.
+            if self._member_name is None and not self._human:
+                await self._ensure_member_name(rt, opts)
+
+            cached = rt.journal.get_cached(ks, sig, rt.run_id)
             if cached is not None:  # resume hit — no backend, no harness, no person
+                rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_HIT sig={sig[:12]}")
                 await rt.journal.use(ks, cached)
                 result = _rehydrate(cached, model_cls)
                 self._append_history(prompt, result, model_cls)
                 outcome_text = _outcome_from_result(cached.get("raw_text"), result)
+                cached_tokens = cached.get("tokens")
+                if isinstance(cached_tokens, int) and cached_tokens > 0:
+                    rt.workflow_budget.add(cached_tokens)
                 _emit_agent_completed(
                     rt, opts, outcome_text, agent_id=ks,
-                    tokens=None, budget_snapshot=_budget_snapshot(rt.budget),
+                    tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+                    budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
 
+            rt.log_sink(
+                f"[wf] session {opts.get('label') or 'session'!r} key={ks} CACHE_MISS "
+                f"sig={sig[:12]} (live run, history_len={len(self._history)})"
+            )
             _check_abort(rt)  # entry gate: a paused run starts no new turn
             _check_budget(rt)  # entry gate: a run out of tokens starts no new turn
 
@@ -829,6 +1089,8 @@ class AgentSession:
                         result=result,
                         model=model_cls,
                         raw_text=call_result.raw_text,
+                        run_id=rt.run_id,
+                        tokens=call_result.tokens,
                     )
                 ),
             )
@@ -849,6 +1111,64 @@ class AgentSession:
         rt = _rt.get()
         sid, self._sid = self._sid, None
         await rt.backend.close_session(sid)
+
+    async def fork(
+        self,
+        *,
+        fork_mode: str = "full",
+        keep_rounds: int | None = None,
+        label: str | None = None,
+        phase: str | None = None,  # pylint: disable=huawei-redefined-outer-name
+        instructions: str | None = None,
+        options: dict | None = None,
+    ) -> "AgentSession":
+        """Fork this session into a fresh, independent session (context inherited).
+
+        The five ``fork_mode`` values mirror the team fork modes (``full`` /
+        ``before`` / ``after`` / ``keep_before_compact_after`` /
+        ``keep_after_compact_before``); ``keep_rounds`` is the split point in
+        **rounds** (each prior ``send()`` is one round) for the truncating /
+        compacting modes. Every mode but ``full`` requires ``keep_rounds`` —
+        omitting it raises (there is no truncation without a split point).
+        ``keep_rounds`` beyond the parent's actual round count is not an error;
+        the backend warns and silently falls back to a full-context fork (the
+        team fork's "wrong name → full" guard). The parent context is captured
+        **eagerly** here (the fork point), so later ``send()``s on this session
+        do not affect the child.
+
+        The child inherits this session's ``_history`` mirror (resume-signature
+        consistency) and, when the backend returns a ``fork_data`` snapshot, a
+        full context including ToolMessage. A fork of a ``human_session`` is
+        rejected. The child is ``_node_type="agent_session_fork"`` when the
+        parent has history (so a fork turn is observable as a branch), else a
+        plain ``agent_session`` (a parent that never sent has nothing to
+        inherit).
+        """
+        if self._human:
+            raise WorkflowError("fork() is only supported on agent_session")
+        if fork_mode != "full" and keep_rounds is None:
+            raise WorkflowError(
+                "fork() requires keep_rounds unless fork_mode='full'"
+                f" (fork_mode={fork_mode!r} has no split point without it)"
+            )
+        fork_data = None
+        if self._member_name is not None:
+            rt = _rt.get()
+            fork_data = await rt.backend.capture_fork(
+                self._member_name,
+                keep_rounds=keep_rounds,
+                fork_mode=fork_mode,
+            )
+        return AgentSession(
+            label=label if label is not None else self._label,
+            phase=phase if phase is not None else self._phase,
+            instructions=instructions if instructions is not None else self._instructions,
+            options={**self._options, **(options or {})},
+            _human=False,
+            _node_type="agent_session_fork" if self._history else "agent_session",
+            _history=[dict(m) for m in self._history],
+            _fork_data=fork_data,
+        )
 
     async def _drive(self, rt, req: _TurnRequest):
         """Open the session lazily, then run one turn through the retry helper.
@@ -898,16 +1218,38 @@ class AgentSession:
         phase_seg = f"{phase}#{disambig}" if disambig else phase
         return f"{phase_seg}:{label}:{turn}"
 
+    async def _ensure_member_name(self, rt, opts) -> None:
+        """Reserve this session's member identity (once), no avatar built.
+
+        Runs on the first turn regardless of cache hit so a fully-hit resume
+        still knows the member name ``fork()`` needs to locate the parent's
+        persisted context. Pure in-process backend bookkeeping (a counter
+        increment) — no harness, no LLM, no spawn/budget slot.
+        """
+        if self._member_name is not None:
+            return
+        self._member_name = await rt.backend.ensure_member_name(
+            kind="agent",
+            opts=opts,
+        )
+
     async def _ensure_open(self, rt, opts) -> None:
         """Open the backend session on the first real turn (one avatar per session)."""
         if self._sid is not None:
             return
         if not self._human:
             rt.spawn_count += 1  # the avatar is this session's one spawned agent
+        # Reuse the identity already reserved on the first turn (cache-hit or
+        # miss) so we never re-mint a name and drift the counter across a resume.
+        if not self._human:
+            await self._ensure_member_name(rt, opts)
+        rt.log_sink(f"[wf] session {opts.get('label') or 'session'!r} opening backend session (avatar (re)created)")
         self._sid = await rt.backend.open_session(
             kind="human" if self._human else "agent",
             instructions=self._instructions,
             opts=opts,
+            fork_data=self._fork_data,
+            member_name=self._member_name,
         )
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:
@@ -1099,7 +1441,13 @@ def log(message: Any) -> None:
 
 
 class _Budget:
-    """Reads the active run's ledger via the contextvar — importable & run-agnostic.
+    """Reads the active run's **workflow-level** ledger via the contextvar.
+
+    Importable & run-agnostic: the public ``budget`` name in scripts now reports
+    the per-run budget (``rt.workflow_budget``, sourced from
+    ``META.workflow_token_limit``) — not the session-wide ledger — so a script
+    polling ``budget.remaining()`` sees exactly what "this run" has left before
+    its own ceiling, which is the ceiling the engine enforces for the run.
 
     Live rather than end-of-call: the ledger is written by the backend as each
     model call returns, so a script polling ``remaining()`` sees the burn of
@@ -1108,15 +1456,15 @@ class _Budget:
 
     @property
     def total(self) -> int | None:
-        return _rt.get().budget.total
+        return _rt.get().workflow_budget.total
 
     @staticmethod
     def spent() -> int:
-        return _rt.get().budget.spent
+        return _rt.get().workflow_budget.spent
 
     @staticmethod
     def remaining() -> int | None:
-        return _rt.get().budget.remaining()
+        return _rt.get().workflow_budget.remaining()
 
 
 #: Importable singleton: `from swarmflow import budget` then `budget.spent()`.

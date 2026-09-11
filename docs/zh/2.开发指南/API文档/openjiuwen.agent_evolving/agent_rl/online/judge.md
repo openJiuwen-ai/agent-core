@@ -1,6 +1,6 @@
 # openjiuwen.agent_evolving.agent_rl.online.judge
 
-LLM-as-a-Judge 奖励评分器。沿四个维度（任务完成度、响应质量、工具使用、连贯性，各 0-10 分）对智能体单轮响应评分，归一化为 `[-1, 1]` 奖励，支持多投票平均与重试逻辑。是 gateway 轨迹流水线（延迟 judge 流）消费的奖励来源。
+LLM-as-a-Judge 奖励评分器。沿四个维度（任务完成度、响应质量、工具使用、连贯性，各 0-10 分）对智能体单轮响应评分，归一化为 `[0, 1]` 奖励，支持多投票平均与重试逻辑。是 RL Service capture 流水线（延迟 judge 流）消费的奖励来源。
 
 模块内部分三层：`scoring.py`（纯 prompt/解析/归一化，无 I/O）→ `evaluator.py`（异步 HTTP 投票引擎）→ `judge_scorer.py`（高层客户端适配器）；`judge_server.py` 为可选独立 FastAPI 服务。
 
@@ -53,7 +53,7 @@ def parse_judge_scores(content: str, *, raise_on_error: bool = True) -> Optional
 def normalize_overall_score(overall: float) -> float
 ```
 
-将原始 0-10 分映射到 `[-1, 1]`，公式为 `(overall - 5.0) / 5.0`。
+将原始 0-10 分映射到 `[0, 1]`，公式为 `overall / 10.0`。
 
 **参数**：
 
@@ -61,7 +61,7 @@ def normalize_overall_score(overall: float) -> float
 
 **返回**：
 
-`float`，归一化后的 `[-1, 1]` 奖励。
+`float`，归一化后的 `[0, 1]` 奖励。
 
 ## class openjiuwen.agent_evolving.agent_rl.online.judge.evaluator.JudgeEvaluatorConfig
 
@@ -108,7 +108,7 @@ async def evaluate_judge_scores(*, client: httpx.AsyncClient, config: JudgeEvalu
 
 ```python
 {
-    "score": float,           # 归一化后 [-1, 1]
+    "score": float,           # 归一化后 [0, 1]
     "overall_raw": float,      # 平均原始 0-10 分
     "votes": list[float],      # 各投票的 overall 值
     "details": dict | list,    # num_votes==1 时为单个投票字典，否则为列表
@@ -249,9 +249,7 @@ def main() -> None
 
 ## 被使用情况
 
-- [bootstrap.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/app/bootstrap.py)：当 `config.judge_url` 设置时构造 `JudgeScorer` 并注入 `trajectory_runtime.set_judge_scorer(judge_scorer)`。这是 `JudgeScorer` 唯一的生产构造点。
-- [persistence.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/persistence.py)：`set_judge_scorer` 将其传入新的 `JudgeDispatcher`。
-- [judge_dispatcher.py](file:///Users/dongdong/Desktop/project/agent-core/openjiuwen/agent_evolving/agent_rl/online/gateway/trajectory/judge_dispatcher.py)：`_finalize_sample` 中调用 `await self._judge_scorer.score(...)`（异常回退 `{"score": 0.0, ...}`）。这是 `JudgeScorer.score` 唯一的生产调用点。
-- [test_gateway_support.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/test_gateway_support.py)：测试 `JudgeScorer._parse_scores` 与 `finish_reason=="length"` 重试路径。
-- [test_processor_components.py](file:///Users/dongdong/Desktop/project/agent-core/tests/unit_tests/agent_evolving/agent_rl/online/gateway/test_processor_components.py)：定义 duck-typed `_FakeJudgeScorer` 验证 `.score(...)` 接口。
-- 注意：`judge_server.py` 的 `create_app`/`main`/`JudgeConfig`/`ScoreRequest`/`ScoreResponse` **未被任何模块导入**。launcher 以原始 vLLM 进程启动 judge，而非此 FastAPI 服务；该模块为可选独立服务（`python -m judge.judge_server ...`）。
+- `service.py` 根据 RL Service 配置构造 `JudgeScorer`，并注入 `CapturePipeline`。
+- `capture_pipeline.py` 在原子发布完整 delayed-feedback turn 时调用 `JudgeScorer.score(...)`。
+- `test_gateway_support.py` 覆盖分数解析和 `finish_reason=="length"` 重试路径。
+- `test_capture_pipeline.py` 覆盖 scorer 接口、原子发布以及 Judge 失败处理。

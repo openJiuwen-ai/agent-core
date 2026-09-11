@@ -785,7 +785,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 @dataclass(frozen=True)
 class _E2E2Package:
-    """E2E 2: new ``manifest.json`` Plugin package (``packageType=plugin``).
+    """E2E 2: new ``manifest.json`` Plugin package (``package_type=plugin``).
 
     Shape aligned with ``test_reference/my_plugin/wellness-life-steward``
     (never loaded directly): stub tool/rail (``tools[].file`` /
@@ -805,7 +805,7 @@ def _write_e2e2_plugin_manifest_package(tmp_path: Path) -> _E2E2Package:
     _write_json(
         package / "manifest.json",
         {
-            "packageType": "plugin",
+            "package_type": "plugin",
             "id": f"e2e2_new_plugin_{tmp_path.name}",
             "name": "e2e2 new plugin manifest mini",
             "description": "E2E 2 mini plugin manifest package.",
@@ -832,11 +832,11 @@ def _write_e2e2_plugin_manifest_package(tmp_path: Path) -> _E2E2Package:
 
 @dataclass(frozen=True)
 class _E2E3Package:
-    """E2E 3: new ``manifest.json`` AgentTemplate package (``packageType=agent_template``).
+    """E2E 3: new ``manifest.json`` AgentTemplate package (``package_type=agent_template``).
 
     Shape aligned with ``test_reference/my_expert/workplace-slim-coach``
     (never loaded directly): root persona/tool/rail/skill + one direct
-    ``.subagent.json`` child (own ``agentCard`` + model, no grandchildren),
+    ``.subagent.json`` child (own runtime ``agent_card`` + model, no grandchildren),
     and a mock MCP entry.
     """
 
@@ -860,8 +860,9 @@ def _write_e2e3_agent_template_package(
     (persona_dir / "identity.md").write_text(f"# Identity\n\n{identity_marker}\n", encoding="utf-8")
 
     manifest: dict[str, Any] = {
-        "packageType": "agent_template",
-        "agentCard": {"name": "e2e3_root_template", "description": "E2E 3 root agent template."},
+        "package_type": "agent_template",
+        "name": "e2e3_root_template",
+        "description": "E2E 3 root agent template.",
         "persona": {"dir": "persona"},
         "tools": [{"file": _package_relative(package, fixture.tool_path), "class": _FROM_SPEC_TOOL_CLASS}],
         "rails": [{"file": _package_relative(package, fixture.rail_path), "class": "FromSpecStaticRail"}],
@@ -888,8 +889,8 @@ def _write_e2e3_agent_template_package(
         _write_json(
             child_dir / ".subagent.json",
             {
-                "agentName": _E2E3_CHILD_AGENT_NAME,
-                "displayDescription": {"en": "E2E 3 direct child specialist subagent."},
+                "agent_name": _E2E3_CHILD_AGENT_NAME,
+                "display_description": {"en": "E2E 3 direct child specialist subagent."},
                 "model": {"file": "model.json"},
                 "tools": [
                     {
@@ -1369,7 +1370,7 @@ class TestExtensionLoadE2E:
     """E2E 1-4 from the ``plugin-agent-template-hotload`` plan.
 
     E2E1: legacy ``harness_config.yaml`` Plugin (package-relative imports).
-    E2E2: new ``manifest.json`` Plugin (``packageType=plugin``).
+    E2E2: new ``manifest.json`` Plugin (``package_type=plugin``).
     E2E3: new ``manifest.json`` AgentTemplate (root + one direct subagent).
     E2E4: AgentTemplate load fails mid-batch -> all partial binds roll back.
 

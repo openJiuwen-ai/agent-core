@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import AnthropicModelClient
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 
 
 def _build_mock_anthropic_response(text: str = "ok") -> MagicMock:
@@ -136,6 +137,21 @@ class TestAcloseConnections:
         assert client.close.call_count == 0
         assert AnthropicModelClient.connection_key(cfg) in AnthropicModelClient._client_cache
 
+    def test_connection_key_includes_auth_mode(self):
+        api_key_cfg = self._cfg("https://api.anthropic.com")
+        custom_headers_cfg = ModelClientConfig(
+            client_provider=ProviderType.Anthropic,
+            api_key="sk-ant",
+            api_base="https://api.anthropic.com",
+            auth_mode=LLMAuthMode.CustomHeaders,
+            verify_ssl=False,
+        )
+
+        assert (
+            AnthropicModelClient.connection_key(api_key_cfg)
+            != AnthropicModelClient.connection_key(custom_headers_cfg)
+        )
+
 
 class TestFallbackClient:
     @pytest.mark.asyncio
@@ -157,3 +173,26 @@ class TestFallbackClient:
         assert len(built) == 2
         assert all(mc.close.call_count == 1 for mc in built)
         assert AnthropicModelClient._client_cache == {}
+
+
+class TestSdkHttpClientBinding:
+    @pytest.mark.asyncio
+    async def test_build_uses_sdk_default_async_httpx_client(self):
+        from anthropic import DefaultAsyncHttpxClient
+
+        from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
+            _anthropic_sdk_httpx_module,
+        )
+
+        model = _make_model()
+        sdk_client = model._client._build_async_anthropic_client()
+        try:
+            inner = sdk_client._client
+            assert isinstance(inner, DefaultAsyncHttpxClient)
+            expected_async_client = _anthropic_sdk_httpx_module().AsyncClient
+            assert isinstance(inner, expected_async_client)
+            limits = getattr(inner, "_limits", None)
+            if limits is not None:
+                assert limits.keepalive_expiry == 60.0
+        finally:
+            await sdk_client.close()

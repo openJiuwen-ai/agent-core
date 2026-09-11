@@ -4,8 +4,9 @@
 
 """Workspace metadata tool for lock management and version history.
 
-File I/O goes through standard read_file/write_file/glob via the .team/
-mount point. This tool ONLY handles lock management and version history
+File I/O goes through standard read_file/write_file/glob against absolute
+paths under the team workspace (the shared outputs directory for projectless
+members). This tool ONLY handles lock management and version history
 queries that have no filesystem equivalent.
 """
 
@@ -25,9 +26,10 @@ if TYPE_CHECKING:
 class WorkspaceMetaTool(TeamTool):
     """Workspace metadata operations (lock management and version history).
 
-    File I/O goes through standard read_file/write_file/glob via the .team/
-    mount point. This tool ONLY handles lock management and version history
-    queries that have no filesystem equivalent.
+    File I/O goes through standard read_file/write_file/glob against absolute
+    paths under the team workspace (the shared outputs directory for
+    projectless members). This tool ONLY handles lock management and version
+    history queries that have no filesystem equivalent.
     """
 
     def __init__(self, workspace: TeamWorkspaceManager, t: Translator):

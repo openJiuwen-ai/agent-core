@@ -67,7 +67,6 @@ class TeamToolRail(DeepAgentRail):
         lifecycle: str = "temporary",
         team_mode: str = "default",
         language: str = "cn",
-        on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
         model_config_allocator: Optional[Callable[[Optional[str]], Optional["Allocation"]]] = None,
         exclude_tools: Optional[Set[str]] = None,
         workspace_manager: Optional["TeamWorkspaceManager"] = None,
@@ -90,7 +89,6 @@ class TeamToolRail(DeepAgentRail):
         self._lifecycle = lifecycle
         self._team_mode = team_mode
         self._language = language
-        self._on_teammate_created = on_teammate_created
         self._model_config_allocator = model_config_allocator
         self._exclude_tools = exclude_tools
         self._workspace_manager = workspace_manager
@@ -117,6 +115,14 @@ class TeamToolRail(DeepAgentRail):
             return
         super().init(agent)
 
+        # Tool descriptions consult the team's evolved ``prompts/tool/``
+        # files via the resident ``WorkspaceCache``. The cache is read off
+        # the team backend (which delegates to the workspace manager) — the
+        # single source every other consumer uses, so no separate cache
+        # argument is threaded into ``create_team_tools``. When evolution is
+        # disabled the assembler built
+        # an empty cache, so every description falls back to the framework
+        # default — no extra gate needed here.
         tools: list[Tool] = create_team_tools(
             role=self._role,
             agent_team=self._team_backend,
@@ -124,7 +130,6 @@ class TeamToolRail(DeepAgentRail):
             dispatch_mode=self._dispatch_mode,
             lifecycle=self._lifecycle,
             team_mode=self._team_mode,
-            on_teammate_created=self._on_teammate_created,
             model_config_allocator=self._model_config_allocator,
             exclude_tools=self._exclude_tools,
             lang=self._language,
@@ -143,7 +148,13 @@ class TeamToolRail(DeepAgentRail):
             from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
             from openjiuwen.agent_teams.tools.locales import make_translator
 
-            ws_t = make_translator(self._language)
+            # The workspace-meta tool takes the backend's cache (delegating
+            # to the manager) so its description resolves evolved values
+            # (None keeps the framework default).
+            ws_t = make_translator(
+                self._language,
+                ws_cache=self._team_backend.workspace_cache,
+            )
             tools.append(WorkspaceMetaTool(self._workspace_manager, ws_t))
 
         # Register through the unified ``add_ability`` entry point. It qualifies

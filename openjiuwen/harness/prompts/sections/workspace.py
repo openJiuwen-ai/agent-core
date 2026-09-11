@@ -207,4 +207,5 @@ async def build_workspace_section(
         name=SectionName.WORKSPACE,
         content={language: content},
         priority=70,
+        category="memory",
     )

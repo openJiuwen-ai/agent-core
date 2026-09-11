@@ -150,6 +150,7 @@ def _apply_env_overrides(cfg) -> None:
         ("ONLINE_RL_ROLLOUT_MAX_NUM_BATCHED_TOKENS", (("actor_rollout_ref", "rollout", "max_num_batched_tokens"),)),
     ]
     float_overrides = [
+        ("ONLINE_RL_ACTOR_LEARNING_RATE", (("actor_rollout_ref", "actor", "optim", "lr"),)),
         ("ONLINE_RL_ROLLOUT_GPU_MEMORY_UTILIZATION", (("actor_rollout_ref", "rollout", "gpu_memory_utilization"),)),
     ]
 

@@ -231,3 +231,106 @@ def test_finalize_keeps_wal_if_saved_journal_missing_a_used_record(tmp_path):
 
     asyncio.run(_run())
     assert wal.exists()
+
+
+# ---------------------------------------------------------------------------
+# run_id isolation — cache hit requires sig AND run_id match
+# ---------------------------------------------------------------------------
+
+def _rec_with_run_id(path: list, sig: str, run_id: str, result=None) -> dict:
+    """Record carrying an explicit ``run_id`` field (the new isolation key)."""
+    ks = key_str(path)
+    return {"key": ks, "sig": sig, "run_id": run_id, "kind": "dict", "result": result or {"v": ks}}
+
+
+def test_get_cached_requires_run_id_match():
+    """Same key + sig but different run_id → cache miss (no cross-run bleed)."""
+    j = Journal()
+    rec_a = _rec_with_run_id([["call", 0]], "s", "run-A")
+    j.prior[rec_a["key"]] = rec_a
+    # Run B reuses the same key + sig — must NOT hit A's record.
+    assert j.get_cached(rec_a["key"], "s", "run-B") is None
+    # Same run_id hits.
+    assert j.get_cached(rec_a["key"], "s", "run-A") is rec_a
+
+
+def test_get_cached_old_record_without_run_id_naturally_misses():
+    """A legacy record (no run_id field) does not match a run with a run_id set."""
+    j = Journal()
+    legacy = _rec([["call", 0]])  # no run_id field
+    j.prior[legacy["key"]] = legacy
+    # New run carries run_id → legacy (run_id=None) must not hit.
+    assert j.get_cached(legacy["key"], "s", "run-new") is None
+
+
+def test_get_cached_run_id_optional_backcompat():
+    """When run_id is None (caller omits it), the old sig-only behaviour holds."""
+    j = Journal()
+    rec = _rec([["call", 0]])  # no run_id field
+    j.prior[rec["key"]] = rec
+    # Caller passes no run_id (or None) → sig-only match, back-compat path.
+    assert j.get_cached(rec["key"], "s") is rec
+    assert j.get_cached(rec["key"], "s", None) is rec
+
+
+# ---------------------------------------------------------------------------
+# run-level pause/seal records — written to journal, recovered by run_id
+# ---------------------------------------------------------------------------
+
+async def _write_pause(j: Journal, run_id: str, spent: int, phase_tokens: dict) -> None:
+    await j.write_run_record(run_id, "pause", {
+        "spent": spent, "phase_tokens": phase_tokens,
+        "budget_snapshot": None, "pause_reason": "paused",
+    })
+
+
+def test_write_run_record_persists_pause_and_finds_by_run_id():
+    """A pause record is written to the journal and found by run_id + type."""
+    j = Journal()
+    asyncio.run(_write_pause(j, "run-A", spent=1000, phase_tokens={"p1": 1000}))
+    rec = j.find_run_record("run-A", "pause")
+    assert rec is not None
+    assert rec["spent"] == 1000
+    assert rec["phase_tokens"] == {"p1": 1000}
+    assert rec["pause_reason"] == "paused"
+
+
+def test_find_run_record_misses_other_run_id():
+    """find_run_record returns None for a run_id with no such record."""
+    j = Journal()
+    asyncio.run(_write_pause(j, "run-A", spent=1000, phase_tokens={}))
+    assert j.find_run_record("run-B", "pause") is None
+    # seal not written for A either
+    assert j.find_run_record("run-A", "seal") is None
+
+
+def test_pause_record_survives_save_and_reload(tmp_path):
+    """A pause record round-trips through save → load (find_run_record recovers)."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _write():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]])  # a call record
+        await _write_pause(j, "run-A", spent=500, phase_tokens={"p": 500})
+        await j.save(str(journal))
+
+    asyncio.run(_write())
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    rec = loaded.find_run_record("run-A", "pause")
+    assert rec is not None
+    assert rec["spent"] == 500
+    # call record also recovered
+    assert loaded.get_cached(key_str([["call", 0]]), "s") is not None
+
+
+def test_seal_record_written_on_terminal():
+    """A seal record is written and findable — relaunch detects terminal via this."""
+    j = Journal()
+    asyncio.run(j.write_run_record("run-A", "seal", {"terminal_status": "completed", "final_spent": 2000}))
+    rec = j.find_run_record("run-A", "seal")
+    assert rec is not None
+    assert rec["terminal_status"] == "completed"
+    assert rec["final_spent"] == 2000
+

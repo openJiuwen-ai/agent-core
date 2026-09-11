@@ -15,7 +15,10 @@ from openjiuwen.agent_evolving.trajectory.messages import (
     trajectory_to_messages,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -47,18 +50,15 @@ def _llm_span(
     prompt: list[dict],
     completion: dict | None = None,
 ) -> dict:
-    attributes: dict = {}
-    for index, message in enumerate(prompt):
-        for field, value in message.items():
-            attributes[f"{semconv.GEN_AI_PROMPT}.{index}.{field}"] = (
-                json.dumps(value, ensure_ascii=False) if field == "tool_calls" else value
-            )
-    if completion is not None:
-        for field, value in completion.items():
-            if field == "tool_calls":
-                attributes[semconv.GEN_AI_TOOL_CALLS] = json.dumps(value, ensure_ascii=False)
-            else:
-                attributes[f"{semconv.GEN_AI_COMPLETION}.0.{field}"] = value
+    attributes: dict = write_llm_exchange(
+        prompt,
+        [] if completion is None else [completion],
+    )
+    if completion is not None and completion.get("tool_calls") is not None:
+        attributes[semconv.GEN_AI_TOOL_CALLS] = json.dumps(
+            completion["tool_calls"],
+            ensure_ascii=False,
+        )
     return _span(span_id, start=start, attributes=attributes)
 
 

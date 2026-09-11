@@ -100,6 +100,14 @@ from openjiuwen.harness.prompts.tools.session_tools import (
     SessionsListMetadataProvider,
     SessionsSpawnMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.subagent_tools import (
+    SubagentCloseMetadataProvider,
+    SubagentListMetadataProvider,
+    SubagentResumeMetadataProvider,
+    SubagentSendInputMetadataProvider,
+    SubagentSpawnMetadataProvider,
+    SubagentWaitMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.skill_tool import (
     SkillToolMetadataProvider,
 )
@@ -108,6 +116,9 @@ from openjiuwen.harness.prompts.tools.task_tool import (
 )
 from openjiuwen.harness.prompts.tools.tool_search import (
     ToolSearchMetadataProvider,
+)
+from openjiuwen.harness.prompts.tools.tool_call import (
+    ToolCallMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.todo import (
     TodoCreateMetadataProvider,
@@ -155,9 +166,16 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     GrepMetadataProvider(),
     ListSkillMetadataProvider(),
     ToolSearchMetadataProvider(),
+    ToolCallMetadataProvider(),
     SessionsListMetadataProvider(),
     SessionsSpawnMetadataProvider(),
     SessionsCancelMetadataProvider(),
+    SubagentSpawnMetadataProvider(),
+    SubagentWaitMetadataProvider(),
+    SubagentListMetadataProvider(),
+    SubagentSendInputMetadataProvider(),
+    SubagentCloseMetadataProvider(),
+    SubagentResumeMetadataProvider(),
     SkillToolMetadataProvider(),
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
@@ -316,4 +334,5 @@ def build_tools_section(
         name=SectionName.TOOLS,
         content={language: content},
         priority=40,
+        category="tools",
     )

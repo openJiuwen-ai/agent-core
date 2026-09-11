@@ -92,7 +92,10 @@ def test_native_workspace_axis_skipped_without_root(tmp_path: Path, caplog: pyte
             "workspace": {"read": "allow", "write": "allow", "exec": "ask"},
         },
     }
-    with caplog.at_level(logging.WARNING, logger="openjiuwen.harness.security.file_guard"):
+    with caplog.at_level(
+        logging.WARNING,
+        logger="openjiuwen.harness.security.permission_engine.fileguard.file_guard",
+    ):
         effective = normalize_path_guard_config(cfg, workspace_root=None)
     assert effective.mode == "native"
     assert effective.paths == ()

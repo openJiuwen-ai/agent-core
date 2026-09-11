@@ -113,6 +113,49 @@ def test_run_with_mock_backend_and_progress_events(tmp_path):
     assert started and started[0].phase == "Greet" and started[0].prompt == "say hi"
 
 
+def test_workflow_started_carries_script_path(tmp_path):
+    """WORKFLOW_STARTED carries the absolute script path for cold-start resume advisory."""
+    script = _write(tmp_path, "metaonly.py", 'META = {"name": "m", "description": "d"}\nasync def run(args):\n    return 1\n')
+    events: list[WorkflowProgressEvent] = []
+
+    asyncio.run(
+        run_workflow(str(script), backend=MockBackend(), progress_sink=events.append)
+    )
+
+    started = events[0]
+    assert started.kind == ProgressKind.WORKFLOW_STARTED
+    assert started.script_path == str(script)
+
+
+_ARGS_ECHO_SCRIPT = '''
+META = {"name": "argsecho", "description": "echo args", "phases": []}
+
+async def run(args):
+    return args
+'''
+
+
+def test_cold_start_resume_recovers_args(tmp_path):
+    """A cold-start resume recovers the launch args from the run-level journal record."""
+    script = _write(tmp_path, "argsecho.py", _ARGS_ECHO_SCRIPT)
+    journal_path = str(tmp_path / "journal.jsonl")
+
+    first = asyncio.run(run_workflow(
+        str(script), backend=MockBackend(), args="hello",
+        run_id="wf_args1", journal_path=journal_path, resume=journal_path,
+    ))
+    assert first == "hello"
+
+    # Second run omits args (mirrors the advisory template: resume_id + script_path).
+    second = asyncio.run(run_workflow(
+        str(script), backend=MockBackend(), args=None,
+        run_id="wf_args1", journal_path=journal_path, resume=journal_path,
+    ))
+    assert second == "hello"  # recovered from __run__:args, not run with None
+
+
+
+
 _FOR_LOOP_SAME_LABEL_SCRIPT = '''
 from swarmflow import agent, parallel
 

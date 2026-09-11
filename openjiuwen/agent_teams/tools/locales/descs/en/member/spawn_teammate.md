@@ -7,6 +7,9 @@ Create a new LLM teammate with domain expertise. Members are long-lived entities
 | **desc** | public | Long-term role definition: professional background, core expertise, the domains this member owns, and the boundaries it does not own. **Do not put current-batch tasks here.** This field is injected into every other member's system prompt — never put private or sensitive content here |
 | **prompt** | **private** | Long-term working conventions, injected only into this member's own system prompt: stable working style, technical preferences, collaboration constraints. Hidden goals, internal constraints, or sensitive directives meant only for this member belong here. **Do not put current-batch tasks here.** |
 | **model_name** | internal | Optional model suggestion (never enters any LLM context) |
+{{fork_param_rows}}
+
+{{fork_usage}}
 
 ## Information Visibility (read before writing each field)
 
@@ -53,5 +56,3 @@ collaboration constraints; no current-task content:
     For cross-domain dependencies (frontend contract, deployment details),
     align with the corresponding member before implementing. When the
     approach is uncertain, list options and trade-offs before coding.
-
-{{fork_usage}}

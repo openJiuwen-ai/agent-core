@@ -180,7 +180,7 @@ class TestTeamDatabaseInit:
                         (task_id, "team", "t", "c", status),
                     )
 
-                _ensure_dynamic_table_indexes(conn)
+                _ensure_dynamic_table_indexes(conn, ["team_task_legacy"], {"team_task_legacy"})
 
                 columns = {col["name"] for col in inspect(conn).get_columns("team_task_legacy")}
                 statuses = {
@@ -225,7 +225,7 @@ class TestTeamDatabaseInit:
                     "VALUES ('t1', 'team', 't', 'c', 'pending')"
                 )
 
-                _ensure_dynamic_table_indexes(conn)
+                _ensure_dynamic_table_indexes(conn, ["team_task_prevote"], {"team_task_prevote"})
 
                 columns = {col["name"] for col in inspect(conn).get_columns("team_task_prevote")}
                 row = conn.exec_driver_sql(
@@ -3628,7 +3628,7 @@ async def test_dynamic_index_migration_rewrites_legacy_message_table(db):
         for col in legacy_cols:
             await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
 
-        await conn.run_sync(_ensure_dynamic_table_indexes)
+        await conn.run_sync(_ensure_dynamic_table_indexes, ["team_message_legacy00"], {"team_message_legacy00"})
 
         names = set(
             (
@@ -3682,7 +3682,7 @@ async def test_dynamic_index_migration_rewrites_legacy_task_table(db):
         for col in ("team_name", "status", "assignee", "updated_at"):
             await conn.exec_driver_sql(f"CREATE INDEX ix_{table}_{col} ON {table} ({col})")
 
-        await conn.run_sync(_ensure_dynamic_table_indexes)
+        await conn.run_sync(_ensure_dynamic_table_indexes, ["team_task_legacy00"], {"team_task_legacy00"})
 
         names = set(
             (

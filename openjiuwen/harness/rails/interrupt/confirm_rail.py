@@ -18,9 +18,10 @@ class ConfirmPayload(BaseModel):
     approved: bool
     feedback: str = Field(default="")
     auto_confirm: bool = Field(default=False)
-    persist_allow: bool = Field(
-        default=False,
+    persist_allow: Optional[bool] = Field(
+        default=None,
         description="Whether to persist the allow rule to disk. "
+        "None with auto_confirm=True means legacy permanent remember. "
         "auto_confirm=True + persist_allow=False means session-only remember.",
     )
 

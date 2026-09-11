@@ -97,6 +97,14 @@ def _parent_model(context: Any) -> Any:
 class ProgressiveToolInput(ConstructionInput):
     """Construction inputs for progressive tool disclosure."""
 
+    search_limit: int = param_field(
+        default=5,
+        description=(
+            "Server-side maximum number of matching tools returned by tool_search "
+            "(capped at 20; not exposed to the model)."
+        ),
+    )
+
 
 def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> ProgressiveToolRail:
     """Build ProgressiveToolRail from extras model + workspace/language."""
@@ -108,6 +116,7 @@ def _build_progressive_tool_rail(params: dict[str, Any], context: Any) -> Progre
         language=getattr(context, "language", None) or "cn",
     )
     config.progressive_tool_enabled = True
+    config.tool_search_limit = p.get("search_limit", 5)
     return ProgressiveToolRail(config)
 
 
@@ -453,21 +462,21 @@ def build_general_purpose_subagent(factory_kwargs: dict[str, Any], context: Any)
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_EXPLORE,
-    description="Read-only exploration sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Read-only exploration sub-agent (core.subagent.*; no observability rail).",
     input_model=SubAgentInput,
     builder=build_explore_subagent,
 )
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_PLAN,
-    description="Planning sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Planning sub-agent (core.subagent.*; no observability rail).",
     input_model=SubAgentInput,
     builder=build_plan_subagent,
 )
 harness_element(
     kind=ElementKind.SUBAGENT,
     name=SUBAGENT_BROWSER,
-    description="Browser automation sub-agent (core.subagent.*; no ObservabilityRail).",
+    description="Browser automation sub-agent (core.subagent.*; no observability rail).",
     input_model=BrowserSubAgentInput,
     builder=build_browser_subagent,
 )

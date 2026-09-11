@@ -11,6 +11,7 @@ import pytest
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
+from openjiuwen.core.single_agent.interrupt.exception import ToolInterruptException
 from openjiuwen.core.single_agent.interrupt.handler import ResumeContext, ToolInterruptHandler
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
 from openjiuwen.core.single_agent.interrupt.state import (
@@ -150,3 +151,25 @@ async def test_mixed_resume_input_exposes_generic_and_dedicated_keys():
     assert seen_extra[EVOLUTION_RESUME_USER_INPUT_KEY] == user_input
     assert RESUME_USER_INPUT_KEY not in final_extra
     assert EVOLUTION_RESUME_USER_INPUT_KEY not in final_extra
+
+
+def test_wrapped_interrupt_stores_outer_call_and_keeps_inner_request_id():
+    handler = ToolInterruptHandler(agent=object())
+    outer_call = _tool_call(call_id="wrapper-call", name="tool_call")
+    inner_call = _tool_call(call_id="wrapper-call:target", name="demo_tool")
+    request = _request("Approve wrapped tool?")
+    interrupt = ToolInterruptException(request=request, tool_call=inner_call)
+
+    state, payloads = handler.build_interrupt_state(
+        results=[(interrupt, None)],
+        tool_calls=[outer_call],
+        ai_message=AssistantMessage(content="", tool_calls=[outer_call]),
+        iteration=0,
+    )
+
+    assert state is not None
+    assert set(state.interrupted_tools) == {"wrapper-call"}
+    entry = state.interrupted_tools["wrapper-call"]
+    assert entry.tool_call == outer_call
+    assert entry.interrupt_requests == {"wrapper-call:target": request}
+    assert payloads[0][0] == "wrapper-call:target"

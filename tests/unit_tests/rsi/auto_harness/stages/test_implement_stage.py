@@ -10,24 +10,24 @@ from unittest import IsolatedAsyncioTestCase
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
     TaskRuntime,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     Experience,
     ExperienceType,
     OptimizationTask,
     StageResult,
 )
-from openjiuwen.rsi.auto_harness.stages.implement import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.implement import (
     MetaImplementStage,
     _build_prompt_debug_stats,
     _extract_repo_edit_candidates,
     run_implement_stream,
 )
-from openjiuwen.rsi.auto_harness.stages.verify import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.verify import (
     _iter_ci_gate_messages,
     _start_fix_loop,
 )

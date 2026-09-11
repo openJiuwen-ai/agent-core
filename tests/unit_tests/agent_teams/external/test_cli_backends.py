@@ -70,6 +70,29 @@ def test_sdk_static_config_rejects_empty_paths():
         ExternalCliAgentSpec(cli_agent="codex", codex_bin="")
 
 
+def test_sdk_static_config_accepts_model_config_alias():
+    config = ExternalCliAgentSpec(
+        cli_agent="claude",
+        model_config={
+            "provider": "anthropic",
+            "model": "claude-sonnet-test",
+            "api_base": "https://gateway.example",
+            "api_key": "sk-test",
+        },
+    )
+
+    assert config.external_model_config is not None
+    assert config.external_model_config.provider == "anthropic"
+    assert config.external_model_config.model == "claude-sonnet-test"
+    assert config.model_dump(by_alias=True)["model_config"]["api_base"] == "https://gateway.example"
+
+    with pytest.raises(ValidationError, match="model_config is only valid"):
+        ExternalCliAgentSpec(
+            cli_agent="generic",
+            model_config={"model": "some-model"},
+        )
+
+
 def test_mcp_approval_mode_is_explicit_and_codex_only():
     config = ExternalCliAgentSpec(
         cli_agent="codex",
@@ -84,12 +107,17 @@ def test_mcp_approval_mode_is_explicit_and_codex_only():
         )
 
 
-def test_full_access_bypass_is_explicit_and_codex_only():
-    config = ExternalCliAgentSpec(
+def test_full_access_bypass_defaults_for_codex_and_can_be_disabled():
+    default_config = ExternalCliAgentSpec(cli_agent="codex")
+    disabled_config = ExternalCliAgentSpec(
         cli_agent="codex",
-        codex_bypass_approvals_and_sandbox=True,
+        codex_bypass_approvals_and_sandbox=False,
     )
-    assert config.codex_bypass_approvals_and_sandbox
+    claude_config = ExternalCliAgentSpec(cli_agent="claude")
+
+    assert default_config.codex_bypass_approvals_and_sandbox
+    assert not disabled_config.codex_bypass_approvals_and_sandbox
+    assert not claude_config.codex_bypass_approvals_and_sandbox
 
     with pytest.raises(ValidationError, match="codex_bypass_approvals_and_sandbox is only valid"):
         ExternalCliAgentSpec(
@@ -115,6 +143,20 @@ def test_codex_turn_stall_policy_is_validated_and_codex_only():
 
     with pytest.raises(ValidationError, match="codex_turn_idle_retries is only valid"):
         ExternalCliAgentSpec(cli_agent="generic", codex_turn_idle_retries=1)
+
+
+def test_claude_turn_stall_policy_is_validated_and_claude_only():
+    config = ExternalCliAgentSpec(
+        cli_agent="claude",
+        claude_turn_idle_timeout_s=45.0,
+    )
+    assert config.claude_turn_idle_timeout_s == 45.0
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        ExternalCliAgentSpec(cli_agent="claude", claude_turn_idle_timeout_s=0)
+
+    with pytest.raises(ValidationError, match="claude_turn_idle_timeout_s is only valid"):
+        ExternalCliAgentSpec(cli_agent="codex", claude_turn_idle_timeout_s=45.0)
 
 
 def test_unknown_backend_returns_none():

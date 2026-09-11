@@ -3,15 +3,19 @@ import importlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from openjiuwen.symphony import (
     ArtifactSpec,
     Fingerprint,
+    FingerprintService,
     OrchestrationConfig,
     OrchestrationService,
     ParameterSpec,
+    SkillGraphUpdater,
+    SymphonyGraphEngine,
     SymphonyRuntime,
 )
 from openjiuwen.symphony.orchestration.graph.build import GraphBuildPipeline
@@ -128,6 +132,22 @@ def _inventory() -> list[Fingerprint]:
     ]
 
 
+def test_runtime_wires_internal_fingerprint_service(tmp_path: Path) -> None:
+    fingerprint_service = cast(FingerprintService, SimpleNamespace())
+
+    runtime = SymphonyRuntime(
+        graph_artifact_root=tmp_path,
+        capability_provider=_inventory,
+        model=None,
+        fingerprint_service=fingerprint_service,
+    )
+
+    assert isinstance(runtime.graph_engine, SymphonyGraphEngine)
+    assert isinstance(runtime.graph_engine, SkillGraphUpdater)
+    assert not isinstance(runtime.orchestration, SkillGraphUpdater)
+    assert runtime.orchestration.fingerprint_service is fingerprint_service
+
+
 def test_exact_io_candidate_and_graph_materialization() -> None:
     registry = SkillRegistry(skills={item.id: item for item in _inventory()})
     candidates = CandidateGenerator().generate(registry)
@@ -151,7 +171,7 @@ async def test_graph_builder_materializes_accepted_exact_io() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["fast", "beam"])
-async def test_service_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) -> None:
+async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) -> None:
     events: list[dict] = []
     service = OrchestrationService(
         graph_artifact_root=tmp_path,
@@ -159,9 +179,10 @@ async def test_service_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) ->
         model=_FakeLLM(),
         config=OrchestrationConfig(mode=mode, max_depth=2),
     )
+    graph_engine = SymphonyGraphEngine(service)
 
-    built = await service.build(progress_callback=events.append)
-    result = await service.plan(
+    built = await graph_engine.build(progress_callback=events.append)
+    result = await graph_engine.plan(
         "extract and summarize",
         candidate_ids=["extract"],
         progress_callback=events.append,
@@ -169,9 +190,20 @@ async def test_service_build_and_plan_fast_or_beam(tmp_path: Path, mode: str) ->
     )
 
     assert built.version
-    assert result["language"] == "en"
-    assert result["execution_graph"]["nodes"]
-    assert result["capability_retrieval"]["candidate_ids"] == ["extract"]
+    assert set(result) == {"planned_graph"}
+    graph = result["planned_graph"]["graph"]
+    assert graph["id"]
+    assert graph["type"] == "planned_graph"
+    assert graph["directed"] is True
+    assert graph["metadata"]["status"] == "ready"
+    assert set(graph["metadata"]).issubset({"status", "reason", "missing_inputs"})
+    assert graph["nodes"] == {
+        "extract": {"label": "extract", "metadata": {"type": "skill"}},
+        "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+    }
+    assert graph["edges"] == [
+        {"source": "extract", "target": "summarize", "relation": "can_feed"},
+    ]
     assert events
 
 
@@ -295,6 +327,8 @@ def test_runtime_exposes_orchestration_and_package_has_no_jiuwenswarm_dependency
         capability_provider=_inventory,
         model=_FakeLLM(),
     )
+    assert isinstance(runtime.graph_engine, SymphonyGraphEngine)
+    assert not isinstance(runtime.orchestration, SkillGraphUpdater)
     assert runtime.orchestration.graph_artifact_root == tmp_path
 
     package_root = Path(importlib.import_module("openjiuwen.symphony").__file__).parent

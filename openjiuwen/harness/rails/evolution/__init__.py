@@ -22,6 +22,7 @@ from openjiuwen.harness.rails.evolution.context_evolution_rail import (
     ContextEvolutionRail,
     SummarizeTrajectoriesInput,
 )
+from openjiuwen.harness.rails.evolution.context_evolve_rail import ContextEvolveRail
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionHostEventMeta,
     EvolutionRequestResult,
@@ -33,6 +34,10 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionTriggerPoint,
     PreparedEvolutionInput,
 )
+from openjiuwen.harness.rails.evolution.member_skill_evolution_rail import (
+    MemberSkillEvolutionRail,
+)
+from openjiuwen.harness.rails.evolution.metis_context_evolve_rail import MetisContextEvolveRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -41,9 +46,6 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
     remove_evolution_review_agent_config,
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
-from openjiuwen.harness.rails.evolution.member_skill_evolution_rail import (
-    MemberSkillEvolutionRail,
-)
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
 from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
     MergedMemoryItem,
@@ -79,9 +81,11 @@ __all__ = [
     "build_evolution_progress_event",
     "build_evolve_review_command_prompt",
     "ContextEvolutionRail",
+    "ContextEvolveRail",
     "MergedMemoryItem",
     "MergedRetrieveResult",
     "SummarizeTrajectoriesInput",
+    "MetisContextEvolveRail",
     "TeamContextEvolutionRail",
     "TeamInsightBuffer",
     "TeamInsightEntry",

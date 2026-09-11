@@ -13,6 +13,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.rails.subagent.subagent_rail import SubagentRail
 from openjiuwen.harness.rails.subagent.session_rail import SessionRail
+from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.schema.config import SubAgentConfig
 
 _TASK_SYSTEM_PROMPT = "openjiuwen.harness.prompts.sections.task_tool.build_task_system_prompt"
@@ -108,7 +109,10 @@ class TestSubagentRail:
         rail.tools = None
         rail.uninit(mock_agent)
 
-        mock_logger.info.assert_called_once_with("[SubagentRail] Unregistered sync task tools")
+        mock_logger.info.assert_called_once_with(
+            "[SubagentRail] Unregistered %s tools",
+            "sync task",
+        )
 
     @staticmethod
     @patch("openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool")
@@ -573,6 +577,219 @@ class TestSubagentRailAsyncMode:
             await rail.before_model_call(ctx)
 
             system_prompt_builder.remove_section.assert_called_once()
+
+
+class TestSubagentRailRuntimeMode:
+    """Test cases for SubagentRail with enable_subagent_runtime=True."""
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools")
+    def test_runtime_init_registers_subagent_tools(mock_build_subagent_tools):
+        mock_tool = _make_tool_mock()
+        mock_tool.card.name = "subagent_spawn"
+        mock_build_subagent_tools.return_value = [mock_tool]
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
+        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail(enable_subagent_runtime=True, enable_async_subagent=True)
+        rail.init(mock_agent)
+
+        mock_build_subagent_tools.assert_called_once()
+        mock_agent.ability_manager.add_ability.assert_called_once_with(mock_tool.card, mock_tool)
+        mock_agent.set_session_toolkit.assert_not_called()
+
+    @staticmethod
+    def test_runtime_init_routes_sync_overrides_to_task_tool() -> None:
+        runtime_tool = _make_tool_mock()
+        runtime_tool.card.name = "subagent_spawn"
+        task_tool = _make_tool_mock()
+        task_tool.card.name = "task_tool"
+        browser = SubAgentConfig(
+            agent_card=AgentCard(name="browser_agent", description="Browser"),
+            system_prompt="Browser prompt",
+        )
+        researcher = SubAgentConfig(
+            agent_card=AgentCard(name="research_agent", description="Research"),
+            system_prompt="Research prompt",
+        )
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock(language="cn")
+        mock_agent.deep_config.subagents = [browser, researcher]
+        mock_agent.ability_manager = Mock()
+        rail = SubagentRail(
+            enable_subagent_runtime=True,
+            synchronous_subagent_types={"browser_agent"},
+        )
+
+        with patch(
+            "openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools",
+            return_value=[runtime_tool],
+        ) as build_runtime, patch(
+            "openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool",
+            return_value=[task_tool],
+        ) as build_sync:
+            rail.init(mock_agent)
+
+        runtime_kwargs = build_runtime.call_args.kwargs
+        sync_kwargs = build_sync.call_args.kwargs
+        assert runtime_kwargs["allowed_subagent_types"] == frozenset({"research_agent"})
+        assert "research_agent" in runtime_kwargs["available_agents"]
+        assert "browser_agent" not in runtime_kwargs["available_agents"]
+        assert sync_kwargs["allowed_subagent_types"] == frozenset({"browser_agent"})
+        assert "browser_agent" in sync_kwargs["available_agents"]
+        assert "research_agent" not in sync_kwargs["available_agents"]
+        assert rail.tools == [runtime_tool, task_tool]
+        assert mock_agent.ability_manager.add_ability.call_count == 2
+
+    @staticmethod
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools")
+    async def test_runtime_before_model_call_injects_subagent_tools_section(
+        mock_build_subagent_tools,
+    ) -> None:
+        mock_tool = _make_tool_mock()
+        mock_tool.card.name = "subagent_spawn"
+        mock_build_subagent_tools.return_value = [mock_tool]
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
+        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail(enable_subagent_runtime=True)
+        rail.init(mock_agent)
+
+        ctx = Mock()
+        await rail.before_model_call(ctx)
+
+        mock_agent.system_prompt_builder.add_section.assert_called_once()
+        section = mock_agent.system_prompt_builder.add_section.call_args[0][0]
+        assert section.name == SectionName.SUBAGENT_TOOLS
+
+    @staticmethod
+    @pytest.mark.asyncio
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools")
+    async def test_runtime_before_model_call_appends_task_prompt_extension(
+        mock_build_subagent_tools,
+    ) -> None:
+        mock_tool = _make_tool_mock()
+        mock_tool.card.name = "subagent_spawn"
+        mock_build_subagent_tools.return_value = [mock_tool]
+        system_prompt_builder = Mock(language="en")
+        mock_agent = Mock(
+            deep_config=Mock(subagents=[_minimal_subagent_spec()]),
+            ability_manager=Mock(),
+            system_prompt_builder=system_prompt_builder,
+        )
+        extension = Mock(return_value="## Browser Agent\nDelegate browser work.")
+        rail = SubagentRail(
+            enable_subagent_runtime=True,
+            task_prompt_extension=extension,
+        )
+        rail.init(mock_agent)
+        ctx = Mock()
+
+        await rail.before_model_call(ctx)
+
+        extension.assert_called_once_with(ctx, "en")
+        section = system_prompt_builder.add_section.call_args.args[0]
+        assert section.name == SectionName.SUBAGENT_TOOLS
+        assert "subagent_spawn" in section.content["en"]
+        assert "## Browser Agent" in section.content["en"]
+        assert "Delegate browser work." in section.content["en"]
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_runtime_sync_override_injects_separate_prompt_sections() -> None:
+        runtime_tool = _make_tool_mock()
+        runtime_tool.card.name = "subagent_spawn"
+        task_tool = _make_tool_mock()
+        task_tool.card.name = "task_tool"
+        system_prompt_builder = Mock(language="en")
+        browser = SubAgentConfig(
+            agent_card=AgentCard(name="browser_agent", description="Browser"),
+            system_prompt="Browser prompt",
+        )
+        researcher = SubAgentConfig(
+            agent_card=AgentCard(name="research_agent", description="Research"),
+            system_prompt="Research prompt",
+        )
+        mock_agent = Mock(
+            deep_config=Mock(subagents=[browser, researcher]),
+            ability_manager=Mock(),
+            system_prompt_builder=system_prompt_builder,
+        )
+        extension = Mock(return_value="## Browser Route\nUse task_tool now.")
+        rail = SubagentRail(
+            enable_subagent_runtime=True,
+            task_prompt_extension=extension,
+            synchronous_subagent_types={"browser_agent"},
+        )
+
+        with patch(
+            "openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools",
+            return_value=[runtime_tool],
+        ), patch(
+            "openjiuwen.harness.rails.subagent.subagent_rail.create_task_tool",
+            return_value=[task_tool],
+        ):
+            rail.init(mock_agent)
+
+        ctx = Mock()
+        await rail.before_model_call(ctx)
+
+        sections = {
+            call.args[0].name: call.args[0]
+            for call in system_prompt_builder.add_section.call_args_list
+        }
+        assert SectionName.SUBAGENT_TOOLS in sections
+        assert SectionName.TASK_TOOL in sections
+        assert "## Browser Route" not in sections[SectionName.SUBAGENT_TOOLS].content["en"]
+        assert "## Browser Route" in sections[SectionName.TASK_TOOL].content["en"]
+        extension.assert_called_once_with(ctx, "en")
+
+    @staticmethod
+    @patch("openjiuwen.harness.rails.subagent.subagent_rail.build_subagent_tools")
+    def test_runtime_refresh_available_agents_updates_subagent_spawn_description(
+        mock_build_subagent_tools,
+    ) -> None:
+        tool = _make_tool_mock()
+        tool.card.name = "subagent_spawn"
+        tool.card.id = "subagent_spawn"
+        tool.card.description = "old description"
+        mock_build_subagent_tools.return_value = [tool]
+
+        mock_agent = Mock()
+        mock_agent.system_prompt_builder = Mock()
+        mock_agent.system_prompt_builder.language = "cn"
+        mock_agent.deep_config.subagents = [_minimal_subagent_spec()]
+        mock_agent.ability_manager = Mock()
+
+        rail = SubagentRail(enable_subagent_runtime=True)
+        rail.init(mock_agent)
+        mock_agent.deep_config.subagents = [
+            _minimal_subagent_spec(),
+            SubAgentConfig(
+                agent_card=AgentCard(
+                    name="evolution_reviewer",
+                    description="Restricted evolution review agent",
+                ),
+                system_prompt="Review prompt",
+            ),
+        ]
+
+        original_tool = rail.tools[0]
+        rail.refresh_available_agents(mock_agent)
+
+        assert mock_build_subagent_tools.call_count == 1
+        mock_agent.ability_manager.remove.assert_not_called()
+        assert rail.tools == [original_tool]
+        assert "evolution_reviewer" in tool.card.description
 
 
 class TestSessionRailShim:

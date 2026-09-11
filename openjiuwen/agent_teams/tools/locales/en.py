@@ -110,10 +110,14 @@ STRINGS: dict[str, str] = {
         "Set to a teammate name (e.g. 'understander') to fork from that member. "
         "The source member must already be spawned and running in-process"
     ),
-    "spawn_teammate.compact": (
-        "Compact the inherited context before injection. Messages before "
-        "the checkpoint are compressed into a summary; messages after "
-        "are kept verbatim. Only effective with a named checkpoint fork"
+    "spawn_teammate.fork_mode": (
+        "Which side of the checkpoint to keep. Options: 'full' (the source's "
+        "whole context, default for fork=true), 'before' (messages before the "
+        "checkpoint, default for a named fork), 'after' (messages from the "
+        "checkpoint onward), 'keep_before_compact_after' (keep before, compress "
+        "after into a summary), 'keep_after_compact_before' (keep after verbatim, "
+        "compress before into a summary). Only effective with a named "
+        "checkpoint fork"
     ),
     # ===== spawn_human_agent ===================================================
     # spawn_human_agent._desc lives in descs/en/member/spawn_human_agent.md
@@ -221,6 +225,21 @@ STRINGS: dict[str, str] = {
         "in spec.external_cli_agents — the launch command, working directory "
         "and MCP injection all live in that entry; this field only references "
         "it by name"
+    ),
+    "spawn_external_cli.model_name": (
+        "Optional. Set only when the user explicitly specifies the model for this third-party agent. "
+        "You must not choose, infer, or auto-fill it. Omit it when the user has not explicitly specified "
+        "a model so the agent uses its own default model"
+    ),
+    "spawn_external_cli.fallback_model_name": (
+        "Required, but may be null when no compatible model exists. When a compatible model is available, "
+        "select it from the team model pool according to the model API protocol supported by this third-party "
+        "agent. Prefer the current model when it is present in the pool and its protocol is compatible; when the "
+        "current model is absent from the pool or its protocol is incompatible, select another compatible model. "
+        "Never invent an unavailable or incompatible model. It is used for automatic fallback "
+        "when the agent uses its own default model but authentication is unavailable. It applies only to "
+        "authentication failures explicitly reported by the runtime. Use null only when the team model pool has "
+        "no compatible model; the agent can then use its own default model without automatic fallback"
     ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/member/shutdown_member.md
@@ -398,16 +417,19 @@ STRINGS: dict[str, str] = {
     # ===== send_message ========================================================
     # send_message._desc lives in descs/en/message/send_message.md
     "send_message.to": (
-        'Recipient: member_name for a point-to-point DM (e.g. "backend-dev-1"), '
+        'Single recipient: member_name for a point-to-point DM (e.g. "backend-dev-1"), '
         "visible only to you and that member; "
-        'array of member names (e.g. ["m1","m2"]) for multicast — same content sent '
-        "as separate messages to each member, cost is linear in recipient count and "
-        "MORE expensive than broadcast for the same audience, use only when truly needed "
-        'and cannot mix with "*"/"user"; '
         '"user" (teammates only, to reply to the user; leader calls are rejected); '
         '"*" to broadcast on the team channel, visible to all members — one broadcast '
         "wakes every member for a full LLM turn, so cost scales linearly with team size; "
-        "reserve it for announcements everyone must see and use it sparingly"
+        "reserve it for announcements everyone must see and use it sparingly. "
+        "For multicast, leave this field unset and use targets"
+    ),
+    "send_message.targets": (
+        'Multicast recipient array (e.g. ["m1","m2"]): the same content is sent as '
+        "separate messages to each member; cost grows linearly with recipient count and "
+        'is higher than broadcast for the same audience. Cannot contain "*" or "user". '
+        "Do not provide together with to"
     ),
     "send_message.content": "Message content with clear action guidance or information",
     "send_message.summary": "5-10 word summary for message preview and logging",
@@ -416,10 +438,11 @@ STRINGS: dict[str, str] = {
     ),
     "send_message.error_content_too_long": (
         "'content' is too long ({actual} chars, limit {limit}): a body this size is an "
-        "artifact, not a message. Write it to a file under the shared team workspace "
-        ".team/ with write_file, then resend this message carrying only the file path "
-        "plus a one- or two-sentence summary. Do not split the body across several "
-        "messages to get around this limit."
+        "artifact, not a message. Write it to a file under the shared team deliverables "
+        "directory (see the \"Final deliverables directory\" under \"Team Shared Workspace\" "
+        "in the team info block) with write_file, then resend this message carrying only "
+        "the file path plus a one- or two-sentence summary. Do not split the body across "
+        "several messages to get around this limit."
     ),
     # ===== send_message_scheduled (scheduled-mode member variant) ==============
     # send_message_scheduled._desc lives in descs/en/message/send_message_scheduled.md
@@ -465,10 +488,15 @@ STRINGS: dict[str, str] = {
         "Interface is in place; execution is coming — use script_path for now."
     ),
     "swarmflow.resume_id": (
-        "The run_id of a prior run to resume. Unchanged agent() calls (same prompt + opts + schema) return "
-        "their cached results instantly; only edited / new calls re-run (an upstream change cascades to "
-        "invalidate downstream); same script + same args → full cache hit. Interface is in place; execution "
-        "is coming — use script_path for now."
+        "The run_id of a prior run to resume or control. Passed alone it resumes: unchanged agent() calls "
+        "(same prompt + opts + schema) return their cached results instantly; only edited / new calls re-run "
+        "(an upstream change cascades to invalidate downstream); same script + same args → full cache hit. "
+        "Combined with the action param it controls a live run — action='pause' pauses, 'resume' resumes, "
+        "'stop' stops (keeps the session alive)."
+    ),
+    "swarmflow.action": (
+        "Control action on an existing run: 'pause' to pause, 'resume' to resume, 'stop' to stop "
+        "(requires resume_id to be passed as well)."
     ),
     "swarmflow.args": (
         "Optional argument passed to the script's async def run(args), as a **string** verbatim (e.g. a "

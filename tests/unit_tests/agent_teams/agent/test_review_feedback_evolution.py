@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -16,7 +16,6 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.agent_teams.agent.scheduling.review_feedback_evolution import (
-    GLOBAL_EVOLUTION_EVENTS,
     SKILL_CREATION_EVENTS,
     ReviewFeedbackEvolutionCoordinator,
 )
@@ -34,23 +33,28 @@ class _AttributionLLM:
         return {"content": json.dumps(payload)}
 
 
-class _TrajectoryRegistry:
-    def __init__(self, trajectory) -> None:
-        self.trajectory = trajectory
-        self.calls: list[dict] = []
-
-    def get_trajectory(self, **kwargs):
-        self.calls.append(kwargs)
-        return self.trajectory
-
-
-def _trajectory(skill_md: str | None):
-    spans = []
+def _trajectory(skill_md: str | None, *, member_id: str = "worker-1"):
+    spans = [
+        {
+            "traceId": "trace-1",
+            "spanId": "team-1",
+            "name": "team.run",
+            "attributes": attributes_from_map({semconv.AT_TEAM_ID: "team-1"}),
+        },
+        {
+            "traceId": "trace-1",
+            "spanId": "member-1",
+            "parentSpanId": "team-1",
+            "name": "member.run",
+            "attributes": attributes_from_map({semconv.AT_MEMBER_ID: member_id}),
+        },
+    ]
     if skill_md is not None:
         spans.append(
             {
                 "traceId": "trace-1",
                 "spanId": "tool-1",
+                "parentSpanId": "member-1",
                 "name": "tool.read_file",
                 "attributes": attributes_from_map(
                     {
@@ -65,11 +69,7 @@ def _trajectory(skill_md: str | None):
         {
             "resourceSpans": [
                 {
-                    "resource": {
-                        "attributes": attributes_from_map(
-                            {TRAJECTORY_ID: "trace-1", SESSION_ID: "sess-1"}
-                        )
-                    },
+                    "resource": {"attributes": attributes_from_map({TRAJECTORY_ID: "trace-1", SESSION_ID: "sess-1"})},
                     "scopeSpans": [{"scope": {}, "spans": spans}],
                 }
             ]
@@ -77,7 +77,7 @@ def _trajectory(skill_md: str | None):
     )
 
 
-def _rail(tmp_path, llm):
+def _rail(tmp_path, llm, trajectory):
     skill_dir = tmp_path / "xlsx"
     skill_dir.mkdir(exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -88,6 +88,7 @@ def _rail(tmp_path, llm):
         evolution_store=EvolutionStore(str(tmp_path)),
         evolver=SimpleNamespace(llm=llm, model="test-model"),
         auto_save=False,
+        get_trajectory=Mock(return_value=trajectory),
         evolve_from_external_signals=AsyncMock(
             return_value=SimpleNamespace(
                 skill_name="xlsx",
@@ -104,30 +105,25 @@ def _coordinator(
     tmp_path,
     llm,
     trajectory,
-    member_rail=None,
     creation_rail=None,
     event_sink=None,
     enabled=True,
 ):
-    global_rail = _rail(tmp_path, llm)
-    member = member_rail or _rail(tmp_path, llm)
-    registry = _TrajectoryRegistry(trajectory)
+    team_rail = _rail(tmp_path, llm, trajectory)
     coordinator = ReviewFeedbackEvolutionCoordinator(
         session_id="sess-1",
         team_id="team-1",
-        trajectory_registry=registry,
-        global_rail_provider=lambda: global_rail,
-        member_rail_provider=lambda _assignee, _global: member,
+        team_rail_provider=lambda: team_rail,
         skill_create_rail_provider=lambda: creation_rail,
         event_sink=event_sink,
         enabled=enabled,
         min_confidence=0.7,
     )
-    return coordinator, global_rail, member, registry
+    return coordinator, team_rail
 
 
 @pytest.mark.asyncio
-async def test_failed_review_evolves_member_then_promotes_global(tmp_path):
+async def test_failed_review_is_retained_until_team_evolution(tmp_path):
     llm = _AttributionLLM(
         {
             "classification": "skill_issue",
@@ -140,7 +136,7 @@ async def test_failed_review_evolves_member_then_promotes_global(tmp_path):
         }
     )
     skill_md = str(tmp_path / "xlsx" / "SKILL.md")
-    coordinator, global_rail, member_rail, registry = _coordinator(
+    coordinator, team_rail = _coordinator(
         tmp_path=tmp_path,
         llm=llm,
         trajectory=_trajectory(skill_md),
@@ -156,18 +152,59 @@ async def test_failed_review_evolves_member_then_promotes_global(tmp_path):
         }
     )
 
-    member_rail.evolve_from_external_signals.assert_awaited_once()
-    assert member_rail.evolve_from_external_signals.await_args.kwargs["requires_approval"] is False
+    team_rail.evolve_from_external_signals.assert_not_awaited()
     assert await coordinator.on_team_completed() is True
-    global_rail.evolve_from_external_signals.assert_awaited_once()
-    global_call = global_rail.evolve_from_external_signals.await_args.kwargs
-    assert global_call["requires_approval"] is True
-    assert "task=task-1" in global_call["user_query"]
+    team_rail.evolve_from_external_signals.assert_awaited_once()
+    team_call = team_rail.evolve_from_external_signals.await_args.kwargs
+    assert team_call["requires_approval"] is True
+    assert "task=task-1" in team_call["user_query"]
     assert await coordinator.on_team_completed() is False
-    assert registry.calls == [
-        {"team_id": "team-1", "session_id": "sess-1", "filter_collaborative": False},
-        {"team_id": "team-1", "session_id": "sess-1", "filter_collaborative": False},
-    ]
+    assert team_rail.get_trajectory.call_count == 2
+    assert team_rail.get_trajectory.call_args.kwargs == {
+        "session_id": "sess-1",
+        "team_id": "team-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_multiple_task_observations_share_one_terminal_team_evolution(tmp_path):
+    llm = _AttributionLLM(
+        {
+            "classification": "skill_issue",
+            "skill_name": "xlsx",
+            "target": "body",
+            "reason": "validation guidance is incomplete",
+            "reusable_guidance": "Reopen and validate before delivery.",
+            "is_reusable": True,
+            "confidence": 0.93,
+        }
+    )
+    skill_md = str(tmp_path / "xlsx" / "SKILL.md")
+    trajectory = _trajectory(skill_md)
+    coordinator, team_rail = _coordinator(
+        tmp_path=tmp_path,
+        llm=llm,
+        trajectory=trajectory,
+    )
+
+    for task_id in ("task-1", "task-2"):
+        await coordinator(
+            {
+                "task_id": task_id,
+                "review_round": 1,
+                "task_title": "Create workbook",
+                "assignee": "worker-1",
+                "feedback": f"{task_id} workbook was not validated.",
+            }
+        )
+
+    team_rail.evolve_from_external_signals.assert_not_awaited()
+    assert await coordinator.on_team_completed() is True
+    team_rail.evolve_from_external_signals.assert_awaited_once()
+    team_call = team_rail.evolve_from_external_signals.await_args.kwargs
+    assert len(team_call["signals"]) == 2
+    assert "task=task-1" in team_call["user_query"]
+    assert "task=task-2" in team_call["user_query"]
 
 
 @pytest.mark.asyncio
@@ -183,7 +220,7 @@ async def test_unread_skill_never_evolves(tmp_path):
             "confidence": 0.99,
         }
     )
-    coordinator, global_rail, member_rail, _ = _coordinator(
+    coordinator, team_rail = _coordinator(
         tmp_path=tmp_path,
         llm=llm,
         trajectory=_trajectory(None),
@@ -198,8 +235,7 @@ async def test_unread_skill_never_evolves(tmp_path):
         }
     )
 
-    member_rail.evolve_from_external_signals.assert_not_awaited()
-    global_rail.evolve_from_external_signals.assert_not_awaited()
+    team_rail.evolve_from_external_signals.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -224,10 +260,10 @@ async def test_matching_repeated_pattern_routes_creation_and_events(tmp_path):
     async def event_sink(group, events):
         delivered.append((group, list(events)))
 
-    coordinator, global_rail, member_rail, _ = _coordinator(
+    coordinator, team_rail = _coordinator(
         tmp_path=tmp_path,
         llm=llm,
-        trajectory=_trajectory(None),
+        trajectory=_trajectory(None, member_id="worker-a"),
         creation_rail=creation_rail,
         event_sink=event_sink,
     )
@@ -236,7 +272,7 @@ async def test_matching_repeated_pattern_routes_creation_and_events(tmp_path):
             {
                 "task_id": task_id,
                 "review_round": 1,
-                "assignee": f"worker-{task_id[-1]}",
+                "assignee": "worker-a",
                 "feedback": "The release plan omitted recovery policy.",
             }
         )
@@ -246,42 +282,16 @@ async def test_matching_repeated_pattern_routes_creation_and_events(tmp_path):
     evidence = creation_rail.propose_from_external_evidence.await_args.kwargs["evidence"]
     assert len(evidence) == 2
     assert delivered == [(SKILL_CREATION_EVENTS, [{"approval": True}])]
-    member_rail.evolve_from_external_signals.assert_not_awaited()
-    global_rail.evolve_from_external_signals.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_global_pending_events_use_injected_sink(tmp_path):
-    llm = _AttributionLLM({})
-    delivered: list[tuple[str, list]] = []
-
-    async def event_sink(group, events):
-        delivered.append((group, list(events)))
-
-    coordinator, global_rail, _, _ = _coordinator(
-        tmp_path=tmp_path,
-        llm=llm,
-        trajectory=_trajectory(None),
-        event_sink=event_sink,
-    )
-    global_rail.drain_pending_approval_events = AsyncMock(
-        return_value=[{"event_type": "chat.delta"}]
-    )
-
-    await coordinator._push_pending_events(global_rail)
-
-    assert delivered == [(GLOBAL_EVOLUTION_EVENTS, [{"event_type": "chat.delta"}])]
+    team_rail.evolve_from_external_signals.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_disabled_coordinator_does_not_resolve_rails(tmp_path):
-    global_provider = AsyncMock()
+    team_provider = AsyncMock()
     coordinator = ReviewFeedbackEvolutionCoordinator(
         session_id="sess-1",
         team_id="team-1",
-        trajectory_registry=None,
-        global_rail_provider=global_provider,
-        member_rail_provider=lambda _assignee, _global: None,
+        team_rail_provider=team_provider,
         enabled=False,
     )
 
@@ -294,4 +304,4 @@ async def test_disabled_coordinator_does_not_resolve_rails(tmp_path):
         }
     )
 
-    global_provider.assert_not_called()
+    team_provider.assert_not_called()

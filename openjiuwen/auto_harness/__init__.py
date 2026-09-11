@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Compatibility exports for AutoHarness after its move into RSI."""
 
-from openjiuwen.rsi.auto_harness import (
+from openjiuwen.rsi.harness_rsi.auto_harness import (
     PIPELINE_PREFERENCE_AUTO,
     AutoHarnessConfig,
     AutoHarnessOrchestrator,

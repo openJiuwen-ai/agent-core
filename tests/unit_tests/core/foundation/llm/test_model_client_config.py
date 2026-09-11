@@ -7,8 +7,15 @@ from pydantic import ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import BaseModelClient
-from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ProviderType
+from openjiuwen.core.foundation.llm import AnthropicModelClient, BaseModelClient, init_model
+from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
+    LLMApiMode,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ProviderType,
+)
+from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo
 
 
 class _TempMockClient(BaseModelClient):
@@ -95,6 +102,47 @@ def test_model_client_config_requires_api_key_for_non_openai_account_provider():
     assert "api_key is required for provider OpenAI" in str(error.value)
 
 
+def test_model_client_config_allows_openai_without_api_key_for_none_auth():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_base="http://localhost:11434/v1",
+        auth_mode=LLMAuthMode.NoneAuth,
+        endpoint_profile="ollama",
+    )
+
+    assert cfg.client_provider == ProviderType.OpenAI
+    assert cfg.auth_mode == LLMAuthMode.NoneAuth.value
+    assert cfg.api_key == ""
+
+
+def test_model_client_config_fills_local_profile_default_api_base():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        auth_mode=LLMAuthMode.NoneAuth,
+        endpoint_profile="ollama",
+    )
+
+    assert cfg.api_base == "http://localhost:11434/v1"
+
+
+def test_anthropic_model_client_is_exported_from_llm_package():
+    assert AnthropicModelClient.__name__ == "AnthropicModelClient"
+
+
+def test_model_client_config_allows_openai_responses_oauth_without_api_key():
+    cfg = ModelClientConfig(
+        client_provider=ProviderType.OpenAI,
+        api_base="https://chatgpt.com/backend-api/codex",
+        api_mode=LLMApiMode.Responses,
+        auth_mode=LLMAuthMode.OpenAIAccountOAuth,
+    )
+
+    assert cfg.client_provider == ProviderType.OpenAI
+    assert cfg.api_mode == LLMApiMode.Responses.value
+    assert cfg.auth_mode == LLMAuthMode.OpenAIAccountOAuth.value
+    assert cfg.api_key == ""
+
+
 def test_model_client_config_requires_api_base_for_top_level_provider():
     with pytest.raises(BaseError) as error:
         ModelClientConfig(
@@ -179,6 +227,37 @@ def test_model_client_config_timeout_must_be_positive():
             timeout=0,
         )
     assert error.value.errors()[0]["type"] == "greater_than"
+
+
+def test_model_request_config_sampling_defaults_are_unset():
+    cfg = ModelRequestConfig(model="gpt-4o-mini")
+
+    assert cfg.temperature is None
+    assert cfg.top_p is None
+    assert "temperature" not in cfg.model_fields_set
+    assert "top_p" not in cfg.model_fields_set
+
+
+def test_base_model_info_sampling_defaults_are_unset():
+    info = BaseModelInfo(api_base="https://example.test")
+
+    assert info.temperature is None
+    assert info.top_p is None
+    assert "temperature" not in info.model_fields_set
+    assert "top_p" not in info.model_fields_set
+
+
+def test_init_model_does_not_configure_sampling_by_default():
+    model = init_model(
+        provider="OpenAI",
+        model_name="gpt-4o-mini",
+        api_key="sk-test",
+        api_base="https://example.test",
+        verify_ssl=False,
+    )
+
+    assert model.model_config.temperature is None
+    assert model.model_config.top_p is None
 
 
 def test_model_client_config_accepts_custom_headers():

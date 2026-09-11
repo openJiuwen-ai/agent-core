@@ -7,14 +7,14 @@ from __future__ import annotations
 import tempfile
 from unittest import IsolatedAsyncioTestCase
 
-from openjiuwen.rsi.auto_harness.experience.experience_store import (
+from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
     ExperienceStore,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     Experience,
     ExperienceType,
 )
-from openjiuwen.rsi.auto_harness.tools.experience_search_tool import (
+from openjiuwen.rsi.harness_rsi.auto_harness.tools.experience_search_tool import (
     ExperienceSearchTool,
 )
 

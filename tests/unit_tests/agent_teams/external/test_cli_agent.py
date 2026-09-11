@@ -62,7 +62,7 @@ def test_codex_mcp_config_overrides_use_sdk_config_shape():
     # Hyphen in the server name is normalised to an underscore for the TOML key.
     assert 'mcp_servers.openjiuwen_team.command="openjiuwen-team-mcp"' == overrides[0]
     assert 'mcp_servers.openjiuwen_team.args=["--flag"]' == overrides[1]
-    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN"]' in overrides
+    assert 'mcp_servers.openjiuwen_team.env_vars=["OPENJIUWEN_TEAM_JOIN", "OPENJIUWEN_HOME"]' in overrides
     assert "mcp_servers.openjiuwen_team.startup_timeout_sec=120" in overrides
     assert "mcp_servers.openjiuwen_team.required=true" in overrides
     assert 'mcp_servers.openjiuwen_team.default_tools_approval_mode="approve"' in overrides

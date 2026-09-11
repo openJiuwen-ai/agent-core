@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from openjiuwen.core.context_engine.processor.forked.support.context_debug import (
     CONTEXT_DEBUG_DIR_ENV,
+    write_llm_request_record,
     write_debug_record,
 )
 
@@ -110,3 +111,41 @@ def test_write_debug_record_swallows_filesystem_errors():
             hit=True,
         )
     assert log_path is None
+
+
+def test_write_llm_request_record_persists_exact_payload(tmp_path):
+    log_path = write_llm_request_record(
+        _context(),
+        enabled=True,
+        dump_dir=str(tmp_path),
+        model="qwen-max",
+        provider="dashscope",
+        request_id="request-1",
+        sequence=3,
+        messages=[
+            {"role": "system", "content": "system instructions"},
+            {"role": "user", "content": "the complete user request"},
+        ],
+        tools=[
+            {
+                "type": "function",
+                "name": "read_file",
+                "parameters": {"type": "object"},
+            }
+        ],
+        context_window_tokens=131072,
+        system_message_count=1,
+        context_message_count=1,
+        statistic={"total_tokens": 42},
+        usage_report={"model": "qwen-max"},
+    )
+
+    assert log_path == str(tmp_path / "llm_request.jsonl")
+    record = json.loads((tmp_path / "llm_request.jsonl").read_text(encoding="utf-8"))
+    assert record["event"] == "pre_call"
+    assert record["model"] == "qwen-max"
+    assert record["message_count"] == 2
+    assert record["tool_count"] == 1
+    assert record["messages"][1]["content"] == "the complete user request"
+    assert record["tools"][0]["name"] == "read_file"
+    assert record["statistic"]["total_tokens"] == 42

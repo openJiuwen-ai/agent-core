@@ -24,23 +24,23 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
 )
 from openjiuwen.core.runner import Runner
-from openjiuwen.rsi.auto_harness.contexts import TaskContext, TaskRuntime
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_merger import MergedExtensionError
-from openjiuwen.rsi.auto_harness.orchestrator import AutoHarnessOrchestrator
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extended_evolve_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import TaskContext, TaskRuntime
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_merger import MergedExtensionError
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import AutoHarnessOrchestrator
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extended_evolve_pipeline import (
     _build_merged_verified_task,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
     ExtensionTaskPipeline,
     VerifiedExtensionTask,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     ExtensionDesign,
     OptimizationTask,
     RuntimeExtensionArtifact,
 )
-from openjiuwen.rsi.auto_harness.stages.merge import MergeActivationBlock, MergeSuccessResult
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.merge import MergeActivationBlock, MergeSuccessResult
 
 # ---------------------------------------------------------------------------
 # 配置：本地design产物
@@ -117,7 +117,7 @@ class TestL4ActivateReplay(unittest.IsolatedAsyncioTestCase):
         )
 
     def _build_orch_and_agent(self, config: AutoHarnessConfig):
-        from openjiuwen.rsi.auto_harness.agents import create_auto_harness_agent
+        from openjiuwen.rsi.harness_rsi.auto_harness.agents import create_auto_harness_agent
 
         agent = create_auto_harness_agent(config)
         orch = AutoHarnessOrchestrator(config, agent=agent)

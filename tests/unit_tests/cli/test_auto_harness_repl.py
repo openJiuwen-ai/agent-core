@@ -17,7 +17,7 @@ from rich.console import Console
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.pipelines import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
@@ -100,7 +100,7 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             with patch.dict(
@@ -168,7 +168,7 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             with patch.dict(
@@ -216,7 +216,7 @@ class TestAutoHarnessRepl:
             return mock_orch
 
         with patch(
-            "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+            "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
             side_effect=_capture_create,
         ):
             console = Console(file=open(os.devnull, "w", encoding="utf-8"))

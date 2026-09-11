@@ -26,6 +26,10 @@ from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import SteeringDrainInputs, UserMessageInputs
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY,
+    PromptAttachmentManager,
+)
 from tests.test_logger import logger
 
 # Session id the team-context tests bind their context to.
@@ -94,6 +98,7 @@ class _StubContext:
         self.session = session if session is not None else _StubSession()
         self.context = _StubModelContext(messages)
         self.inputs = None
+        self.extra: dict = {}
 
 
 async def _admit(
@@ -410,14 +415,32 @@ class _StubAgent:
         self.system_prompt_builder = builder
 
 
+class _AttachmentStubAgent(_StubAgent):
+    """Production-shaped stub with the shared attachment manager installed."""
+
+    def __init__(self, builder: SystemPromptBuilder) -> None:
+        super().__init__(builder)
+        self.prompt_attachment_manager = PromptAttachmentManager(language="cn")
+
+
 class _StubMember:
     """Lightweight stand-in for the SQLModel TeamMember row."""
 
-    def __init__(self, member_name: str, display_name: str, desc: str = "", role: str = "teammate") -> None:
+    def __init__(
+        self,
+        member_name: str,
+        display_name: str,
+        desc: str = "",
+        role: str = "teammate",
+        prompt: str = "",
+    ) -> None:
         self.member_name = member_name
         self.display_name = display_name
         self.desc = desc
         self.role = role
+        # Mirrors the overlay-merged ``prompt`` on the real row; empty falls
+        # back to the constructor snapshot in ``_identity_body``.
+        self.prompt = prompt
 
 
 class _StubTeam:
@@ -432,11 +455,13 @@ class _StubTeam:
 class _FakeTeamBackend:
     """In-memory TeamBackend that tracks call counts.
 
-    Mirrors the four TeamBackend methods the team-context tracker consumes:
+    Mirrors the TeamBackend methods the team-context tracker consumes:
     ``get_team_updated_at``, ``get_members_max_updated_at``, ``get_team_info``,
-    ``list_members``. Lets tests assert the probes short-circuit the expensive
-    reads while nothing has changed. ``list_members`` excludes the caller, as
-    the real backend does.
+    ``list_members``, plus the single-member ``get_member_updated_at_state`` /
+    ``stamp_member_prompt_updated_at`` pair the identity-body first-emit path
+    records ``member_prompt_mtime`` through. Lets tests assert the probes
+    short-circuit the expensive reads while nothing has changed.
+    ``list_members`` excludes the caller, as the real backend does.
     """
 
     def __init__(
@@ -473,6 +498,20 @@ class _FakeTeamBackend:
         self.team_mtime_calls += 1
         return self._team_mtime
 
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Team-card mtime probe the team-info block's re-announce records.
+
+        Returns a stable ``(self._team_mtime, True)`` so the re-announce path
+        does not fire between rounds — this fake exercises the rail's delivery
+        plumbing, not the team-card-evolution re-announce semantics. Mirrors
+        :meth:`get_member_updated_at_state` at the team level.
+        """
+        return self._team_mtime, True
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
+
     async def get_members_max_updated_at(self) -> int:
         self.members_mtime_calls += 1
         return self._members_mtime
@@ -490,6 +529,22 @@ class _FakeTeamBackend:
         if self._self_row is not None and self._self_row.member_name == member_name:
             return self._self_row
         return next((m for m in self._members if m.member_name == member_name), None)
+
+    async def get_member_updated_at_state(
+        self, member_name: str, field: str
+    ) -> tuple[int, bool]:
+        """Single-member mtime probe the identity body's first-emit records.
+
+        Returns a stable ``(0, True)`` — mirrors a member with no
+        ``member_prompt.md`` (evolution off), so the re-announce path does
+        not fire. This fake exercises the rail's delivery plumbing, not
+        prompt-evolution semantics.
+        """
+        return 0, True
+
+    async def stamp_member_prompt_updated_at(self, member_name: str, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
 
     def hitt_enabled(self) -> bool:
         """The rail probes this at init to gate the static HITT contract."""
@@ -610,11 +665,67 @@ class TestTeamPolicyRailStaticSections:
 class TestTeamPolicyRailTeamContext:
     """Team state is delivered into the conversation, not the system prompt.
 
-    Two lanes, and neither ever rewrites a message that is already history:
-    state normally rides the input being admitted (``on_user_message``), and
-    when it appears mid tool-loop with no input to ride it is appended at the
-    tail (``before_model_call``).
+    Production uses role=system attachment snapshot/delta history. The legacy
+    no-manager stubs below retain their user-message fallback coverage.
     """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_production_manager_uses_system_history_without_a_second_user_message(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _AttachmentStubAgent(builder)
+        rail = _leader_rail(backend)
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["ship it"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        snapshot = await agent.prompt_attachment_manager.sync_to_context(
+            ctx.context,
+            _SESSION_ID,
+        )
+        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
+            await callback()
+        user_message = UserMessage(content="\n".join(batch))
+        await ctx.context.add_messages(user_message)
+
+        assert batch == ["ship it"]
+        assert ctx.context.messages == [snapshot, user_message]
+        assert isinstance(snapshot, UserMessage)
+        assert snapshot.content.startswith("<system-reminder>\n")
+        assert "以下内容不是用户的意图" in snapshot.content
+        assert snapshot.content.endswith("\n</system-reminder>")
+        assert "<prompt-attachment" not in snapshot.content
+        assert "<team-context>" in snapshot.content
+        assert "member_name: leader1" in snapshot.content
+
+        snapshot_content = snapshot.content
+        await ctx.context.add_messages(AssistantMessage(content="calling tool"))
+        await ctx.context.add_messages(ToolMessage(content="done", tool_call_id="c1"))
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+        await rail.before_model_call(ctx)
+        delta = await agent.prompt_attachment_manager.sync_to_context(
+            ctx.context,
+            _SESSION_ID,
+        )
+        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
+            await callback()
+
+        assert isinstance(delta, UserMessage)
+        assert ctx.context.messages[-2].role == "tool"
+        assert ctx.context.messages[-1] == delta
+        assert "<prompt-attachment" not in delta.content
+        assert delta.content.startswith("<system-reminder>\n")
+        assert delta.content.endswith("\n</system-reminder>")
+        assert "动态上下文已经变化" in delta.content
+        assert "roster-change" in delta.content
+        assert snapshot.content == snapshot_content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
@@ -722,8 +833,8 @@ class TestTeamPolicyRailTeamContext:
         rail = _leader_rail(
             backend,
             member_prompt="",
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(agent)
 
@@ -738,7 +849,7 @@ class TestTeamPolicyRailTeamContext:
         assert second.count("<team-context>") == 1 if isinstance(second, str) else True
         assert second.content.count("<team-context>") == 1
         assert "# 团队信息" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
         assert _team_texts(ctx).count("# 团队信息") == 1
 
     @pytest.mark.asyncio
@@ -903,21 +1014,21 @@ class TestTeamPolicyRailTeamContext:
         )
         rail = _leader_rail(
             backend,
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
         ctx = _StubContext()
         first = await _admit(rail, ctx, "go")
-        assert "`.team/beta/`" in first.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in first.content
         assert "/abs/team-workspace" in first.content
 
         # A renamed team is announced again rather than rewritten in place.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
         second = await _admit(rail, ctx, "next")
         assert "Beta-renamed" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1

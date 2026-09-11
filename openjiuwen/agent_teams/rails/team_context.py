@@ -46,7 +46,6 @@ class TeamHandleKey:
     WORKSPACE_MANAGER = "team.workspace_manager"
     MODEL_ALLOCATOR = "team.model_allocator"
     MESSAGER = "team.messager"
-    ON_TEAMMATE_CREATED = "team.on_teammate_created"
     SWARMFLOW_MODEL_RESOLVER = "team.swarmflow_model_resolver"
     SWARMFLOW_WORKER_BASE_SPEC = "team.swarmflow_worker_base_spec"
     SWARMFLOW_HUMAN_BASE_SPEC = "team.swarmflow_human_base_spec"
@@ -64,7 +63,6 @@ def inject_team_handles(
     workspace_manager: Optional["TeamWorkspaceManager"] = None,
     model_allocator: Optional["ModelAllocator"] = None,
     messager: Optional["Messager"] = None,
-    on_teammate_created: Optional[Callable[[str], Awaitable[None]]] = None,
     swarmflow_model_resolver: Optional[Callable[[str], Any]] = None,
     swarmflow_worker_base_spec: Optional["DeepAgentSpec"] = None,
     swarmflow_human_base_spec: Optional["DeepAgentSpec"] = None,
@@ -85,7 +83,6 @@ def inject_team_handles(
         workspace_manager: The team workspace manager, if any.
         model_allocator: The team model allocator, if any.
         messager: The member's messager, if any.
-        on_teammate_created: The leader's spawn-on-created callback, if any.
         swarmflow_model_resolver: The leader's swarmflow worker-model resolver, if
             any (non-None only for a leader with ``enable_swarmflow``).
         swarmflow_worker_base_spec: The base ``DeepAgentSpec`` swarmflow workers
@@ -109,7 +106,6 @@ def inject_team_handles(
     extras[TeamHandleKey.WORKSPACE_MANAGER] = workspace_manager
     extras[TeamHandleKey.MODEL_ALLOCATOR] = model_allocator
     extras[TeamHandleKey.MESSAGER] = messager
-    extras[TeamHandleKey.ON_TEAMMATE_CREATED] = on_teammate_created
     extras[TeamHandleKey.SWARMFLOW_MODEL_RESOLVER] = swarmflow_model_resolver
     extras[TeamHandleKey.SWARMFLOW_WORKER_BASE_SPEC] = swarmflow_worker_base_spec
     extras[TeamHandleKey.SWARMFLOW_HUMAN_BASE_SPEC] = swarmflow_human_base_spec
@@ -144,11 +140,6 @@ def get_model_allocator(context: Any) -> Optional["ModelAllocator"]:
 def get_messager(context: Any) -> Optional["Messager"]:
     """Return the messager handle, or None."""
     return _get(context, TeamHandleKey.MESSAGER)
-
-
-def get_on_teammate_created(context: Any) -> Optional[Callable[[str], Awaitable[None]]]:
-    """Return the on-teammate-created callback, or None."""
-    return _get(context, TeamHandleKey.ON_TEAMMATE_CREATED)
 
 
 def get_swarmflow_model_resolver(context: Any) -> Optional[Callable[[str], Any]]:
@@ -207,7 +198,6 @@ __all__ = [
     "get_workspace_manager",
     "get_model_allocator",
     "get_messager",
-    "get_on_teammate_created",
     "get_permissions_override",
     "get_swarmflow_model_resolver",
     "get_swarmflow_worker_base_spec",

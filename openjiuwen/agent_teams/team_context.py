@@ -58,6 +58,7 @@ from openjiuwen.agent_teams.inbound_render import (
 )
 from openjiuwen.agent_teams.prompts.messages import (
     build_identity_conversion,
+    build_identity_prompt_delta,
     build_identity_text,
     build_roster_delta_text,
     build_roster_snapshot_text,
@@ -65,6 +66,7 @@ from openjiuwen.agent_teams.prompts.messages import (
     diff_roster,
 )
 from openjiuwen.agent_teams.schema.team import TeamRole
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -78,6 +80,7 @@ _IDENTITY_EMITTED = "identity_emitted"
 _TEAM_INFO_MTIME = "team_info_mtime"
 _ROSTER_MTIME = "roster_mtime"
 _ROSTER = "roster"
+_MEMBER_PROMPT_MTIME = "member_prompt_mtime"
 
 # Stable contract tokens for the <team-event> ``kind`` attribute.
 ROSTER_EVENT_KIND = "roster"
@@ -99,8 +102,11 @@ class TeamContextTracker:
         display_name: This member's human-readable label.
         member_workspace_path: This member's own artifact directory.
         member_prompt: This member's private working agreement.
-        team_workspace_mount: Agent-relative mount of the shared workspace.
         team_workspace_path: Absolute path of the shared workspace.
+        team_outputs_dir: Absolute path of the shared final-deliverables
+            directory, surfaced in the team info body for projectless members
+            only. Members bound to a project pass ``None`` and the bullet is
+            suppressed (they keep deliverables in the project).
         expose_human_agents_to_teammates: Team switch letting teammates see the
             ``[human]`` tag (leaders and human agents always see it).
         language: Rendering language ('cn' or 'en').
@@ -118,8 +124,8 @@ class TeamContextTracker:
         display_name: str = "",
         member_workspace_path: str | None = None,
         member_prompt: str = "",
-        team_workspace_mount: str | None = None,
         team_workspace_path: str | None = None,
+        team_outputs_dir: str | None = None,
         expose_human_agents_to_teammates: bool = False,
         language: str = "cn",
         fork_source: str | None = None,
@@ -130,8 +136,8 @@ class TeamContextTracker:
         self._display_name = display_name
         self._member_workspace_path = member_workspace_path
         self._member_prompt = member_prompt
-        self._team_workspace_mount = team_workspace_mount
         self._team_workspace_path = team_workspace_path
+        self._team_outputs_dir = team_outputs_dir
         self._mark_humans = role in (TeamRole.LEADER, TeamRole.HUMAN_AGENT) or expose_human_agents_to_teammates
         self._language = language
         self._fork_source = fork_source
@@ -238,10 +244,19 @@ class TeamContextTracker:
     # ------------------------------------------------------------------
 
     async def _identity_body(self, baseline: dict[str, Any], updated: dict[str, Any]) -> str | None:
-        """Render the one-shot identity body, or None when already delivered.
+        """Render the identity body, re-announcing only the prompt on change.
 
-        Constant for the lifetime of the member, so it has no probe: the
-        baseline flag alone decides once it has gone out.
+        The constant fields (member_name / display_name / member_workspace_path)
+        are fixed at spawn and never change, so they are delivered exactly once
+        by :func:`build_identity_text` and gated by the ``identity_emitted``
+        flag. The private working agreement (``member_prompt.md``) is the one
+        identity field that *can* be hand-evolved mid-session, and its only
+        model-side channel is this body — so once emitted, the body probes the
+        member_prompt ``updated_at`` and re-announces **only** the prompt
+        subsection (via :func:`build_identity_prompt_delta`) when that mtime
+        moves. The constants are never restated. A backend without the single-
+        member probe (older fakes, evolution off) keeps the one-shot behaviour
+        — ``getattr`` returns ``None`` and nothing is re-announced.
 
         **Waits for the member's own DB row**, because that row is what
         ``display_name`` has to come from. The constructor value is only a
@@ -256,19 +271,71 @@ class TeamContextTracker:
         the constructor values are used as-is.
         """
         if baseline.get(_IDENTITY_EMITTED):
-            return None
+            # Re-announce an evolved prompt without restating the constants.
+            if self._team_backend is None or not self._member_name:
+                return None
+            mtime, present = await self._team_backend.get_member_updated_at_state(
+                self._member_name, "prompt"
+            )
+            if present:
+                # A stamped ``updated_at`` keeps the wall-clock comparison: only
+                # a moved mtime re-fires, and the baseline records the probe
+                # value so a stable file does not loop.
+                if mtime == baseline.get(_MEMBER_PROMPT_MTIME):
+                    return None
+                baseline_mtime = mtime
+            else:
+                # ``present=False`` (a blank ``updated_at`` — the evolution
+                # party edited the body without stamping the field) is an
+                # explicit "must update" signal: re-announce regardless of the
+                # baseline. A single timestamp T is then stamped into the file
+                # (meta only, the evolved body is preserved) and recorded as
+                # the new baseline — both share T, so the next probe reads
+                # ``present=True, mtime=T`` → ``T == baseline`` → no re-fire:
+                # a blank field forces exactly one re-delivery, never a loop.
+                baseline_mtime = get_current_time()
+                await self._team_backend.stamp_member_prompt_updated_at(
+                    self._member_name, baseline_mtime
+                )
+            member = await self._team_backend.get_member(self._member_name)
+            if member is None:
+                return None
+            delta = build_identity_prompt_delta(
+                member_prompt=member.prompt,
+                language=self._language,
+            )
+            if delta is None:
+                return None
+            updated[_MEMBER_PROMPT_MTIME] = baseline_mtime
+            return delta
         display_name = self._display_name
+        # The constructor snapshot is the spec-time DB baseline (pre-evolution).
+        # ``get_member`` returns the overlay-merged row, whose ``prompt`` may
+        # carry an evolved value (``member_prompt.md`` with ``evolved: true``).
+        # Prefer that over the snapshot so an evolved prompt reaches the
+        # identity body instead of being dropped at the last step (F_84 gap #1).
+        # ``display_name`` is read from the same row one line up.
+        member_prompt = self._member_prompt
         if self._team_backend is not None and self._member_name:
             member = await self._team_backend.get_member(self._member_name)
             if member is None:
                 return None
             display_name = member.display_name or ""
+            if member.prompt:
+                member_prompt = member.prompt
         updated[_IDENTITY_EMITTED] = True
+        # Record the prompt mtime so a later hand-evolve moves the probe and the
+        # delta path above re-announces only the prompt subsection.
+        if self._team_backend is not None and self._member_name:
+            mtime, _ = await self._team_backend.get_member_updated_at_state(
+                self._member_name, "prompt"
+            )
+            updated[_MEMBER_PROMPT_MTIME] = mtime
         return build_identity_text(
             member_name=self._member_name,
             display_name=display_name,
             member_workspace_path=self._member_workspace_path,
-            member_prompt=self._member_prompt,
+            member_prompt=member_prompt,
             language=self._language,
             fork_capable=self._fork_capable,
         )
@@ -286,13 +353,44 @@ class TeamContextTracker:
         real one lands moments later: the member is told the same thing twice,
         the first time wrongly. The probe reads 0 while the row is missing, so it
         moves on its own once the team is created.
+
+        Probe + stamp fallback are symmetric with :meth:`_identity_body`: a
+        stamped ``updated_at`` keeps the wall-clock comparison (only a moved
+        mtime re-fires), while a *blank* field (``present=False`` — the
+        evolution party edited ``team_card.md`` without stamping it) is an
+        explicit "must update" signal that re-announces regardless of the
+        baseline and stamps a single timestamp back into the file + baseline
+        in one move (next probe is stable, no re-fire). Without this the
+        member_prompt/roster channels absorb a blank field fine but team_card
+        alone never re-delivered: ``max(db, 0)`` floored on the DB column and
+        never moved, so the evolved team desc never reached any member. The
+        probe source is the team_card md alone (not the ``get_team_updated_at``
+        max that also folds in team_prompt + the DB column): team_prompt's body
+        never enters the block, and the DB column advances on its own via a
+        ``build_team`` mutation which the team_card md probe stays under.
         """
         if self._team_backend is None:
             return None
-        mtime = await self._team_backend.get_team_updated_at()
-        if mtime == baseline.get(_TEAM_INFO_MTIME):
-            return None
-        updated[_TEAM_INFO_MTIME] = mtime
+        mtime, present = await self._team_backend.get_team_updated_at_state()
+        if present:
+            # A stamped ``updated_at`` keeps the wall-clock comparison: only a
+            # moved mtime re-fires, and the baseline records the probe value so
+            # a stable file does not loop.
+            if mtime == baseline.get(_TEAM_INFO_MTIME):
+                return None
+            baseline_mtime = mtime
+        else:
+            # ``present=False`` (a blank ``updated_at`` — the evolution party
+            # edited the ``team_card.md`` body without stamping the field) is an
+            # explicit "must update" signal: re-announce regardless of the
+            # baseline. A single timestamp T is then stamped into the file (meta
+            # only, the evolved body is preserved) and recorded as the new
+            # baseline — both share T, so the next probe reads ``present=True,
+            # mtime=T`` → ``T == baseline`` → no re-fire: a blank field forces
+            # exactly one re-delivery, never a loop.
+            baseline_mtime = get_current_time()
+            await self._team_backend.stamp_team_card_updated_at(baseline_mtime)
+        updated[_TEAM_INFO_MTIME] = baseline_mtime
         info = await self._team_backend.get_team_info()
         if info is None:
             return None
@@ -302,8 +400,8 @@ class TeamContextTracker:
                 "display_name": info.display_name,
                 "desc": info.desc or "",
             },
-            team_workspace_mount=self._team_workspace_mount,
             team_workspace_path=self._team_workspace_path,
+            team_outputs_dir=self._team_outputs_dir,
             language=self._language,
         )
 

@@ -24,4 +24,5 @@ def build_external_memory_section(
         name=SectionName.EXTERNAL_MEMORY,
         content={language: content},
         priority=55,
+        category="memory",
     )

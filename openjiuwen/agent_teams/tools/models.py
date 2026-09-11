@@ -89,6 +89,7 @@ class TeamMember(SQLModel, table=True):
         description=(
             "JSON object for extensible member configuration. "
             "Current shape: {model_ref: {model_name, model_index}, "
+            "fallback_model_ref: {model_name, model_index}, "
             "worktree: {isolation, path}, permissions_override: {bash: deny, ...}}"
         ),
     )

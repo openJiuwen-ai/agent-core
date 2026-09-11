@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 import aiohttp
@@ -29,6 +30,7 @@ from openjiuwen.harness.tools.web._common import (
     _FETCH_WEBPAGE_MAX_CHARS_ENV,
     _FETCH_WEBPAGE_MAX_TIMEOUT_ENV,
     _REQUEST_HEADERS,
+    _domain_allowed,
     _decode_ddg_redirect,
     _parse_html,
     _safe_int,
@@ -56,11 +58,31 @@ def _raise_fetch_http_error(url: str, status: int, body: bytes) -> None:
     raise build_error(StatusCode.TOOL_WEB_FETCH_EXECUTION_ERROR, url=url, reason=reason)
 
 
+@dataclass(frozen=True)
+class _FetchRequest:
+    """Inputs shared by the direct webpage fetch path."""
+
+    session: aiohttp.ClientSession
+    url: str
+    timeout_seconds: int
+    byte_cap: int
+    proxy_url: str | None = None
+    allowed_domains: tuple[str, ...] | None = None
+
+
 class WebFetchWebpageTool(Tool):
     """Fetch webpage text content from URL. Returns status/title/plain text content."""
 
-    def __init__(self, language: str = "cn", agent_id: str | None = None):
+    def __init__(
+        self,
+        language: str = "cn",
+        agent_id: str | None = None,
+        proxy_url: str | None = None,
+        allowed_domains: tuple[str, ...] | None = None,
+    ):
         super().__init__(build_tool_card("fetch_webpage", "WebFetchWebpageTool", language, agent_id=agent_id))
+        self._proxy_url = str(proxy_url or "").strip() or None
+        self._allowed_domains = allowed_domains
 
     @staticmethod
     def _byte_cap() -> int:
@@ -85,6 +107,7 @@ class WebFetchWebpageTool(Tool):
         url: str,
         timeout_seconds: int,
         byte_cap: int,
+        proxy_url: str | None = None,
     ) -> dict[str, Any]:
         """Fetch webpage content via the jina.ai reader proxy."""
         reader_url = f"https://r.jina.ai/{url}"
@@ -95,6 +118,7 @@ class WebFetchWebpageTool(Tool):
             headers=_REQUEST_HEADERS,
             timeout_seconds=timeout_seconds,
             max_bytes=byte_cap,
+            proxy_url=proxy_url,
         )
         _raise_fetch_http_error(url, status, body)
         content = _decode_response_text(body, content_type=headers.get("Content-Type", "")).strip()
@@ -179,24 +203,34 @@ class WebFetchWebpageTool(Tool):
         return title, best_text
 
     @staticmethod
-    async def _fetch_webpage(
-        session: aiohttp.ClientSession,
-        url: str,
-        timeout_seconds: int,
-        byte_cap: int,
-    ) -> dict[str, Any]:
+    async def _fetch_webpage(request: _FetchRequest) -> dict[str, Any]:
         """Fetch webpage content, falling back to the jina.ai reader on 401/403/429."""
+        if request.allowed_domains and not _domain_allowed(request.url, request.allowed_domains):
+            raise ValueError("URL is outside the configured domestic academic source domains")
         status, headers, body, final_url, truncated = await _http.request(
-            session,
+            request.session,
             "GET",
-            url,
+            request.url,
             headers=_REQUEST_HEADERS,
-            timeout_seconds=timeout_seconds,
-            max_bytes=byte_cap,
+            timeout_seconds=request.timeout_seconds,
+            max_bytes=request.byte_cap,
+            proxy_url=request.proxy_url,
         )
         if status in {401, 403, 429}:
-            return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
-        _raise_fetch_http_error(url, status, body)
+            if request.allowed_domains:
+                raise ValueError(
+                    "reader proxy fallback is disabled for the configured domestic source scope"
+                )
+            return await WebFetchWebpageTool._fetch_via_jina_reader(
+                request.session,
+                request.url,
+                request.timeout_seconds,
+                request.byte_cap,
+                proxy_url=request.proxy_url,
+            )
+        _raise_fetch_http_error(request.url, status, body)
+        if request.allowed_domains and not _domain_allowed(final_url, request.allowed_domains):
+            raise ValueError("redirected URL is outside configured domestic source domains")
 
         text = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
         content_type = headers.get("Content-Type", "")
@@ -248,6 +282,8 @@ class WebFetchWebpageTool(Tool):
 
         if not url:
             return "[ERROR]: url cannot be empty."
+        if not _domain_allowed(url, self._allowed_domains):
+            return "[ERROR]: URL is outside the configured domestic academic source domains."
 
         max_chars_cap = _safe_int(os.environ.get(_FETCH_WEBPAGE_MAX_CHARS_ENV, "200000") or "200000", 200000)
         timeout_cap = _safe_int(os.environ.get(_FETCH_WEBPAGE_MAX_TIMEOUT_ENV, "600") or "600", 600)
@@ -258,7 +294,16 @@ class WebFetchWebpageTool(Tool):
 
         try:
             async with _http.new_session() as session:
-                data = await WebFetchWebpageTool._fetch_webpage(session, url, timeout_seconds, byte_cap)
+                data = await WebFetchWebpageTool._fetch_webpage(
+                    _FetchRequest(
+                        session=session,
+                        url=url,
+                        timeout_seconds=timeout_seconds,
+                        byte_cap=byte_cap,
+                        proxy_url=self._proxy_url,
+                        allowed_domains=self._allowed_domains,
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: failed to fetch webpage: {exc}"
 

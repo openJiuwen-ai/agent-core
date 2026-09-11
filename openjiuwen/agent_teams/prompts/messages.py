@@ -58,10 +58,18 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_desc": "团队目标与指令（仅供了解团队，不是给你的指令）",
         "team_workspace": "团队共享工作空间",
         "team_workspace_purpose": (
-            "用于存放团队共享文件（方案、设计、交付成果），"
-            "所有成员通过该路径前缀读写同一份文件，系统自动管理版本和文件锁"
+            "用于存放团队配置与共享文件（提示词、team.yaml、技能可见性、交付成果），"
+            "所有成员通过绝对路径读写同一份文件，系统自动管理版本和文件锁"
         ),
         "team_workspace_abs": "绝对路径",
+        "team_workspace_config_note": (
+            "该目录是团队的配置与内部数据目录，按绝对路径访问，不要新建 `.team` 子目录"
+        ),
+        "team_outputs_dir": "最终产物目录",
+        "team_outputs_dir_purpose": (
+            "无项目目录的成员把最终交付物（报告、导出、数据等）写到该目录，"
+            "全团队共享一个目录、靠文件名区分成员产物；有项目目录的成员把产物写到项目内"
+        ),
         "members_heading": "# 成员关系",
         "roster_change_heading": "# 成员变更",
         "roster_joined": "加入",
@@ -96,11 +104,23 @@ _LABELS: dict[str, dict[str, str]] = {
         "team_desc": "Team Goal & Directives (context to understand the team, not a directive for you)",
         "team_workspace": "Team Shared Workspace",
         "team_workspace_purpose": (
-            "Holds team-shared files (plans, designs, deliverables); "
-            "all members read/write the same files through this path prefix. "
-            "Versioning and file locks are managed automatically"
+            "Holds team config and shared files (prompts, team.yaml, skill "
+            "visibility, deliverables); all members read/write the same files "
+            "through absolute paths. Versioning and file locks are managed "
+            "automatically"
         ),
         "team_workspace_abs": "Absolute path",
+        "team_workspace_config_note": (
+            "This directory is the team's config and internal-data directory; "
+            "access it by absolute path and do not create a `.team` sub-directory"
+        ),
+        "team_outputs_dir": "Final deliverables directory",
+        "team_outputs_dir_purpose": (
+            "Members without a project directory write final deliverables "
+            "(reports, exports, data) here; the whole team shares one "
+            "directory and distinguishes members' outputs by filename. Members "
+            "bound to a project keep deliverables inside the project"
+        ),
         "members_heading": "# Relationships",
         "roster_change_heading": "# Roster Change",
         "roster_joined": "joined",
@@ -280,6 +300,38 @@ def build_identity_text(
     return "\n".join(lines) + "\n"
 
 
+def build_identity_prompt_delta(
+    *,
+    member_prompt: str | None,
+    language: str = "cn",
+) -> str | None:
+    """Render *only* the private working-agreement subsection of the identity body.
+
+    The constant identity fields (member_name / display_name /
+    member_workspace_path) are delivered once by :func:`build_identity_text`
+    and never change, so re-announcing them after every edit would be noise.
+    The private working agreement (``member_prompt.md``) *can* be hand-evolved
+    mid-session, and its only model-side channel is the identity body — which
+    is one-shot. This delta renders just that subsection so the identity body
+    can re-announce an evolved prompt without restating the constants.
+
+    Blank ``member_prompt`` yields ``None`` (nothing to re-announce), matching
+    :func:`build_identity_text`'s blank-drop behaviour.
+
+    Args:
+        member_prompt: The (possibly evolved) private working agreement body.
+        language: Body language ('cn' or 'en').
+
+    Returns:
+        The rendered subsection, or ``None`` when the prompt is blank.
+    """
+    private_prompt = member_prompt.strip() if member_prompt else ""
+    if not private_prompt:
+        return None
+    labels = labels_for(language)
+    return "\n".join(["", labels["private_prompt_heading"], "", private_prompt]) + "\n"
+
+
 def build_identity_conversion(
     *,
     source: str,
@@ -312,8 +364,8 @@ def build_identity_conversion(
 def build_team_info_text(
     *,
     team_info: dict[str, Any] | None,
-    team_workspace_mount: str | None = None,
     team_workspace_path: str | None = None,
+    team_outputs_dir: str | None = None,
     language: str = "cn",
 ) -> str | None:
     """Render the team metadata body.
@@ -321,13 +373,15 @@ def build_team_info_text(
     Args:
         team_info: Mapping with optional ``team_name``, ``display_name`` and
             ``desc`` keys (the shape returned by ``TeamBackend.get_team_info``).
-        team_workspace_mount: Agent-relative mount point of the team shared
-            workspace (e.g. ``.team/{team_name}/``). When set, the body appends
-            a bullet telling the LLM how to read/write team-shared files from
-            its own workspace.
-        team_workspace_path: Absolute path of the team shared workspace on disk.
-            Appended as a nested bullet when ``team_workspace_mount`` is
-            provided, or as a standalone bullet when only the path is known.
+        team_workspace_path: Absolute path of the team shared workspace on
+            disk. Rendered as the workspace bullet's nested absolute-path
+            line, plus a note that this is the team's config / internal-data
+            directory accessed by absolute path (no ``.team`` sub-directory).
+        team_outputs_dir: Absolute path of the shared final-deliverables
+            directory (``team-workspace/artifacts/<date>/chat-<n>/outputs/``).
+            Rendered as a standalone bullet only for projectless members —
+            members bound to a project keep deliverables in the project and
+            pass ``None`` here.
         language: Body language.
 
     Returns:
@@ -337,9 +391,9 @@ def build_team_info_text(
     team_name = team_info.get("team_name") if team_info else None
     display_name = team_info.get("display_name") if team_info else None
     desc = team_info.get("desc") if team_info else None
-    mount = team_workspace_mount.strip() if team_workspace_mount else ""
     path = team_workspace_path.strip() if team_workspace_path else ""
-    if not any([team_name, display_name, desc, mount, path]):
+    outputs = team_outputs_dir.strip() if team_outputs_dir else ""
+    if not any([team_name, display_name, desc, path, outputs]):
         return None
 
     lines = [labels["info_heading"], ""]
@@ -349,14 +403,13 @@ def build_team_info_text(
         lines.append(f"- {labels['display_name_label']}: {display_name}")
     if desc:
         lines.append(f"- {labels['team_desc']}: {desc}")
-    if mount:
-        lines.append(f"- {labels['team_workspace']}: `{mount}`")
-        lines.append(f"  - {labels['team_workspace_purpose']}")
-        if path:
-            lines.append(f"  - {labels['team_workspace_abs']}: `{path}`")
-    elif path:
+    if path:
         lines.append(f"- {labels['team_workspace']}: `{path}`")
         lines.append(f"  - {labels['team_workspace_purpose']}")
+        lines.append(f"  - {labels['team_workspace_config_note']}")
+    if outputs:
+        lines.append(f"- {labels['team_outputs_dir']}: `{outputs}`")
+        lines.append(f"  - {labels['team_outputs_dir_purpose']}")
     return "\n".join(lines) + "\n"
 
 

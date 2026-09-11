@@ -7,15 +7,15 @@ from __future__ import annotations
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import MagicMock
 
-from openjiuwen.rsi.auto_harness.pipelines import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     OptimizationTask,
 )
-from openjiuwen.rsi.auto_harness.stages.select_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.select_pipeline import (
     run_select_pipeline,
 )
 

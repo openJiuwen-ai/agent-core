@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Unit tests for commit scope helpers."""
 
-from openjiuwen.rsi.auto_harness.infra.commit_scope import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.commit_scope import (
     derive_legacy_related_test_files,
     derive_test_files,
     extract_verify_related_files,
@@ -12,7 +12,7 @@ from openjiuwen.rsi.auto_harness.infra.commit_scope import (
 
 
 def test_derive_test_files_for_python_module():
-    result = derive_test_files(["openjiuwen/rsi/auto_harness/schema.py"])
+    result = derive_test_files(["openjiuwen/rsi/harness_rsi/auto_harness/schema.py"])
     assert result == [
         "tests/unit_tests/**/test_schema.py",
         "tests/system_tests/**/test_schema.py",
@@ -22,7 +22,7 @@ def test_derive_test_files_for_python_module():
 def test_derive_test_files_skips_init_and_tests():
     result = derive_test_files(
         [
-            "openjiuwen/rsi/auto_harness/__init__.py",
+            "openjiuwen/rsi/harness_rsi/auto_harness/__init__.py",
             "tests/unit_tests/rsi/auto_harness/test_schema.py",
         ]
     )
@@ -31,11 +31,11 @@ def test_derive_test_files_skips_init_and_tests():
 
 def test_is_derived_test_file_matches_same_basename():
     assert is_derived_test_file(
-        ["openjiuwen/rsi/auto_harness/schema.py"],
+        ["openjiuwen/rsi/harness_rsi/auto_harness/schema.py"],
         "tests/unit_tests/rsi/auto_harness/test_schema.py",
     )
     assert not is_derived_test_file(
-        ["openjiuwen/rsi/auto_harness/schema.py"],
+        ["openjiuwen/rsi/harness_rsi/auto_harness/schema.py"],
         "tests/unit_tests/rsi/auto_harness/test_other.py",
     )
 

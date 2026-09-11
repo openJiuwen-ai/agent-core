@@ -76,6 +76,12 @@ DEFAULT_PLAN_MODE_ALLOWED_TOOLS: tuple[str, ...] = (
     "exit_plan_mode",
     "ask_user",
     "task_tool",
+    "subagent_spawn",
+    "subagent_wait",
+    "subagent_list",
+    "subagent_send_input",
+    "subagent_close",
+    "subagent_resume",
     "read_file",
     "grep",
     "list_files",
@@ -268,6 +274,13 @@ class AgentModeRail(DeepAgentRail):
         if self._owns_task_tool and self._task_tools:
             self._unregister_task_tool(agent)
 
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Stage the current plan-mode attachment before the first user turn."""
+        if self._agent is None or ctx.session is None:
+            return
+        plan_state = self._agent.load_state(ctx.session).plan_mode
+        await self._sync_mode_attachment(ctx, plan_state)
+
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Inject MODE_INSTRUCTIONS and filter hidden tools when in plan mode.
 
@@ -298,16 +311,7 @@ class AgentModeRail(DeepAgentRail):
         if plan_state.mode != "plan":
             # ---- normal mode ----
             self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
-            if self.attachment_manager is not None:
-                writer = self.attachment_manager.bind_context(ctx)
-                try:
-                    await writer.clear_section(SectionName.MODE_INSTRUCTIONS)
-                except ValueError as exc:
-                    logger.warning(
-                        "[AgentModeRail] skip clearing prompt attachment section=%s: %s",
-                        SectionName.MODE_INSTRUCTIONS,
-                        exc,
-                    )
+            await self._sync_mode_attachment(ctx, plan_state)
             self._sync_task_tool_for_model_tool_inputs(ctx)
             if isinstance(ctx.inputs.tools, list):
                 ctx.inputs.tools = [
@@ -331,60 +335,7 @@ class AgentModeRail(DeepAgentRail):
             return
 
         # ---- plan mode ----
-        if self._plan_mode_system_note is not None:
-            # Static path: KV-cache-friendly fixed content
-            section = PromptSection(
-                name=SectionName.MODE_INSTRUCTIONS,
-                content={"en": self._plan_mode_system_note},
-                priority=85,
-            )
-        elif self._plan_mode_attachment_note is not None:
-            section = PromptSection(
-                name=SectionName.MODE_INSTRUCTIONS,
-                content={"en": self._plan_mode_attachment_note},
-                priority=85,
-            )
-        else:
-            # Dynamic path: build from current plan-file state
-            plan_file_path = agent.get_plan_file_path(session)
-            plan_file_path_str = str(plan_file_path) if plan_file_path else ""
-            plan_exists = plan_file_path.exists() if plan_file_path else False
-            section = build_plan_mode_section(
-                language=self.system_prompt_builder.language,
-                plan_file_path=plan_file_path_str,
-                plan_exists=plan_exists,
-                agent=agent,
-                session=session,
-            )
-
-        # 1. Inject MODE_INSTRUCTIONS.
-        # Keep the legacy static system-note behavior for compatibility. Both
-        # the new static attachment note and dynamic plan-file state live in
-        # the tail attachment block so they do not invalidate the system prefix.
-        if self._plan_mode_system_note is not None:
-            self.system_prompt_builder.add_section(section)
-        else:
-            self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
-
-        if self._plan_mode_system_note is None:
-            if self.attachment_manager is not None:
-                writer = self.attachment_manager.bind_context(ctx)
-                try:
-                    await writer.add_from_prompt_section(
-                        prompt_section=section,
-                        kind=PromptAttachmentKind.RUNTIME,
-                        source="agent_core.agent_mode_rail",
-                        language=self.system_prompt_builder.language,
-                        content_kind="text/markdown",
-                    )
-                except ValueError as exc:
-                    logger.warning("[AgentModeRail] skip prompt attachment section=%s: %s", section.name, exc)
-                    if self._plan_mode_attachment_note is not None:
-                        self.system_prompt_builder.add_section(section)
-            elif self._plan_mode_attachment_note is not None:
-                # A real DeepAgent always provides an attachment manager, but
-                # retain the safety instruction for minimal/custom agents.
-                self.system_prompt_builder.add_section(section)
+        await self._sync_mode_attachment(ctx, plan_state)
 
         # 2. Remove Todo/Session sections added by higher-priority rails
         self.system_prompt_builder.remove_section(SectionName.TODO)
@@ -410,6 +361,67 @@ class AgentModeRail(DeepAgentRail):
                 ]
 
         self._sync_task_tool_for_model_tool_inputs(ctx)
+
+    async def _sync_mode_attachment(self, ctx: AgentCallbackContext, plan_state) -> None:
+        """Upsert or clear plan guidance without rewriting the stable system prompt."""
+        agent = self._agent
+        session = ctx.session
+        if agent is None or session is None or self.system_prompt_builder is None:
+            return
+        if plan_state.mode != "plan":
+            if self.attachment_manager is not None:
+                try:
+                    await self.attachment_manager.bind_context(ctx).clear_section(
+                        SectionName.MODE_INSTRUCTIONS
+                    )
+                except ValueError as exc:
+                    logger.warning(
+                        "[AgentModeRail] skip clearing prompt attachment section=%s: %s",
+                        SectionName.MODE_INSTRUCTIONS,
+                        exc,
+                    )
+            return
+
+        content = (
+            self._plan_mode_system_note
+            if self._plan_mode_system_note is not None
+            else self._plan_mode_attachment_note
+        )
+        if content is not None:
+            section = PromptSection(
+                name=SectionName.MODE_INSTRUCTIONS,
+                content={"en": content},
+                priority=85,
+            )
+        else:
+            plan_file_path = agent.get_plan_file_path(session)
+            section = build_plan_mode_section(
+                language=self.system_prompt_builder.language,
+                plan_file_path=str(plan_file_path) if plan_file_path else "",
+                plan_exists=plan_file_path.exists() if plan_file_path else False,
+                agent=agent,
+                session=session,
+            )
+
+        self.system_prompt_builder.remove_section(SectionName.MODE_INSTRUCTIONS)
+        if self.attachment_manager is None:
+            self.system_prompt_builder.add_section(section)
+            return
+        try:
+            await self.attachment_manager.bind_context(ctx).add_from_prompt_section(
+                prompt_section=section,
+                kind=PromptAttachmentKind.RUNTIME,
+                source="agent_core.agent_mode_rail",
+                language=self.system_prompt_builder.language,
+                content_kind="text/markdown",
+            )
+        except ValueError as exc:
+            logger.warning(
+                "[AgentModeRail] skip prompt attachment section=%s: %s",
+                section.name,
+                exc,
+            )
+            self.system_prompt_builder.add_section(section)
 
     def _sync_task_tool_for_model_tool_inputs(self, ctx: AgentCallbackContext) -> None:
         """Sync task_tool visibility in model-visible tools.
@@ -625,12 +637,22 @@ class AgentModeRail(DeepAgentRail):
             for t in tools
         )
 
+    @staticmethod
+    def _subagent_runtime_enabled(agent: "DeepAgent") -> bool:
+        deep_config = getattr(agent, "deep_config", None)
+        return bool(getattr(deep_config, "enable_subagent_runtime", False))
+
     def _register_task_tool(self, agent: "DeepAgent") -> None:
         """Register task_tool if not already present after enter_plan_mode.
 
         Args:
             agent: Parent DeepAgent.
         """
+        if self._subagent_runtime_enabled(agent):
+            logger.info(
+                "[AgentModeRail] subagent runtime enabled, skip dynamic task_tool register",
+            )
+            return
         if self._owns_task_tool:
             return
         existing = self._is_task_tool_registered()

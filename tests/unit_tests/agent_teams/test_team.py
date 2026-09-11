@@ -1045,6 +1045,17 @@ async def test_is_team_completed_member_busy_returns_none(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_member_error_returns_none(agent_team, db):
+    """A preserved ERROR member blocks completion until recovery or shutdown."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.ERROR.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_leader_busy_returns_none(agent_team, db):
     """The leader counts as a member — a busy leader blocks completion."""
@@ -1505,3 +1516,324 @@ async def test_build_team_persists_leader_prompt(db, message_bus):
     assert row is not None
     assert row.prompt == "private working agreement"
     assert row.desc == "public role blurb"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_remove_cleanup_paths_unlinks_dir_link_without_touching_target(db, message_bus, tmp_path):
+    """A registered directory link is unlinked only — never rmtree'd.
+
+    Block C: ``shutil.rmtree`` on a Windows junction would descend and delete
+    the target's shared contents. ``_remove_cleanup_paths`` must detect the
+    link and remove only the link itself.
+    """
+    from openjiuwen.agent_teams.team_workspace.dir_links import (
+        create_dir_link,
+        is_dir_link,
+    )
+
+    backend = TeamBackend(
+        team_name="clean_link_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    target = tmp_path / "shared-asset"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    link = tmp_path / "member_workspace"
+    create_dir_link(target, link)
+    assert is_dir_link(link)
+
+    backend.register_cleanup_path(str(link))
+    await backend._remove_cleanup_paths()
+
+    assert not link.exists(), "link removed"
+    assert (target / "keep.txt").exists(), "target contents preserved"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_remove_cleanup_paths_rmtrees_plain_directory(db, message_bus, tmp_path):
+    """A registered real directory is still rmtree'd."""
+    backend = TeamBackend(
+        team_name="clean_plain_team",
+        member_name="lead",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    plain = tmp_path / "plain-dir"
+    plain.mkdir()
+    (plain / "x.txt").write_text("x", encoding="utf-8")
+    backend.register_cleanup_path(str(plain))
+    await backend._remove_cleanup_paths()
+    assert not plain.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cleanup_member_workspace_links_releases_dynamic_real_dir(db, message_bus, tmp_path):
+    """Team cleanup detaches member links and releases external real dirs.
+
+    Block C P3: without this wiring, dynamic real dirs under ``.agent_teams/``
+    accumulate across team cleanups — only the in-team link would be removed.
+    """
+    from openjiuwen.agent_teams import paths as apaths
+    from openjiuwen.agent_teams.team_workspace.binder import (
+        MEMBER_MODE_DYNAMIC,
+        MemberWorkspaceBinder,
+        TeamMemberBinding,
+    )
+    from openjiuwen.agent_teams.team_workspace.dir_links import is_dir_link
+    from openjiuwen.agent_teams.team_workspace.paths import member_real_dir
+
+    apaths.configure_openjiuwen_home(tmp_path / "oj-home")
+    try:
+        binder = MemberWorkspaceBinder()
+        binder.setup(
+            TeamMemberBinding(team_name="teamA", member_name="memX", mode=MEMBER_MODE_DYNAMIC)
+        )
+        link = apaths.team_member_workspace_dir("teamA", "memX")
+        real = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC)
+        assert is_dir_link(link)
+        assert real.is_dir()
+
+        backend = TeamBackend(
+            team_name="teamA",
+            member_name="lead",
+            db=db,
+            messager=message_bus,
+            is_leader=True,
+        )
+        backend._cleanup_member_workspace_links()
+
+        assert not is_dir_link(link), "link detached"
+        assert not real.exists(), "dynamic real dir released"
+    finally:
+        apaths.reset_openjiuwen_home()
+
+
+# ----------------------------------------------------------------------
+# autostart_unstarted — the shared auto-start funnel
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_starts_every_unstarted_member(db, message_bus):
+    """autostart_unstarted starts the whole UNSTARTED set via the injected callback."""
+    team_id = "autostart_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Autostart Team",
+        leader_member_name="leader1",
+    )
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card1 = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    card2 = AgentCard(name="Dev2", description="dev 2", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card1)
+    await backend.spawn_member(member_name="dev-2", display_name="Dev 2", agent_card=card2)
+
+    started = await backend.autostart_unstarted()
+
+    assert sorted(started) == ["dev-1", "dev-2"]
+    assert sorted(call[0][0] for call in on_created.await_args_list) == ["dev-1", "dev-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_is_idempotent(db, message_bus):
+    """A second call finds nothing UNSTARTED and spawns nobody twice."""
+    team_id = "autostart_idem_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Idem Team",
+        leader_member_name="leader1",
+    )
+    on_created = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_created,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    first = await backend.autostart_unstarted()
+    second = await backend.autostart_unstarted()
+
+    assert first == ["dev-1"]
+    assert second == []
+    on_created.assert_awaited_once_with("dev-1")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_noop_for_teammate(db, message_bus):
+    """A non-leader backend owns no roster and starts nobody."""
+    team_id = "autostart_teammate_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Teammate Team",
+        leader_member_name="leader1",
+    )
+    leader = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await leader.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    on_created = AsyncMock()
+    teammate = TeamBackend(
+        team_name=team_id,
+        member_name="dev-1",
+        db=db,
+        messager=message_bus,
+        is_leader=False,
+        on_member_started=on_created,
+    )
+
+    assert await teammate.autostart_unstarted() == []
+    on_created.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_noop_without_callback(db, message_bus):
+    """No spawn callback means no process to launch — an external backend."""
+    team_id = "autostart_nocb_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="No Callback Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(member_name="dev-1", display_name="Dev 1", agent_card=card)
+
+    assert await backend.autostart_unstarted() == []
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_recover_member_claims_error_before_restart(db, message_bus):
+    """A direct recovery atomically changes ERROR to RESTARTING before spawn."""
+    team_id = "recover_error_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Recover Error Team",
+        leader_member_name="leader1",
+    )
+    on_restarted = AsyncMock(return_value=True)
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_restarted=on_restarted,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    assert await backend.recover_member("dev-1") is True
+    on_restarted.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.RESTARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_recover_member_restores_error_when_restart_fails(db, message_bus):
+    """A failed runtime replacement leaves the member visibly recoverable."""
+    team_id = "recover_error_failure_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Recover Error Failure Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_restarted=AsyncMock(return_value=False),
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    assert await backend.recover_member("dev-1") is False
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.ERROR.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_error_member_settles_without_runtime_event(db, message_bus):
+    """An ERROR member reaches SHUTDOWN without waiting for a dead runtime."""
+    team_id = "shutdown_error_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Shutdown Error Team",
+        leader_member_name="leader1",
+    )
+    on_stopped = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_stopped=on_stopped,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    result = await backend.shutdown_member("dev-1")
+
+    assert result.ok
+    on_stopped.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.SHUTDOWN.value
+    assert await db.message.get_team_messages(team_name=team_id) == []

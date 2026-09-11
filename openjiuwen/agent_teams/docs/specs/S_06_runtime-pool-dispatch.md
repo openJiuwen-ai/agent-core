@@ -47,7 +47,7 @@
 10. **gate 状态机单调**：`InteractGate` 在一个 cycle 内只能 `OPEN → CLOSING → DRAINED`；`reset()` 只在新 cycle 开始时调用，调用前必须确保上一 cycle 的 ticket 不再被持有。
 11. **interact 必经 gate**：`manager.interact` 始终先 `admit` 拿 ticket，后 `consume_done` 释放；ticket 与 gate 的引用绑定，跨 gate 的 ticket 静默忽略，避免误释放。
 12. **finalize 决策权归 manager**：leader run cycle 的 pause vs stop 决策由 `TeamRuntimeManager.finalize` 拥有（`shutdown_requested or lifecycle != "persistent"` → stop+`pool.remove`；否则 pause+`state=PAUSED`）。`CoordinationKernel.finalize_round` 不再做该决策——外部 `stop_team` 不会被 stream finally 路径上的隐式 re-pause 静默盖掉。
-13. **finalize_member 决策权归 manager，且它是 graceful 退场写 `SHUTDOWN` 的那个人**：teammate / human-agent run cycle 的 pause vs stop 由 `TeamRuntimeManager.finalize_member` 拥有。`team_member` 持久化状态属于 `_MEMBER_FINALIZED_STATUSES`（`STOPPED` / `PAUSED` / `SHUTDOWN` —— **不含 `SHUTDOWN_REQUESTED`**）时跳过写状态，只 tear down kernel，避免覆盖 leader 的 `_mark_live_teammates` 标记或 `shutdown_self` 写下的 `SHUTDOWN`。否则按**当前状态**（不是 lifecycle）分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + 写 `SHUTDOWN`；其余 → `pause_coordination` + 写 `READY`。`SHUTDOWN_REQUESTED` **必须**留在 finalized 集之外——它一旦被当成"外部已写好终态"，跑完末轮的成员就永远停在 `SHUTDOWN_REQUESTED`，`clean_team` 的全员 SHUTDOWN 前置条件再也不成立。
+13. **finalize_member 决策权归 manager，且它是 graceful 退场写 `SHUTDOWN` 的那个人**：teammate / human-agent run cycle 的 pause vs stop 由 `TeamRuntimeManager.finalize_member` 拥有。`team_member` 持久化状态属于 `_MEMBER_FINALIZED_STATUSES`（`STOPPED` / `PAUSED` / `SHUTDOWN` / `ERROR` —— **不含 `SHUTDOWN_REQUESTED`**）时跳过写状态，只 tear down kernel，避免覆盖 leader 的 `_mark_live_teammates` 标记、`shutdown_self` 写下的 `SHUTDOWN` 或 runtime failure reporter 写下的 `ERROR`。否则按**当前状态**（不是 lifecycle）分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + 写 `SHUTDOWN`；其余 → `pause_coordination` + 写 `READY`。`SHUTDOWN_REQUESTED` **必须**留在 finalized 集之外——它一旦被当成"外部已写好终态"，跑完末轮的成员就永远停在 `SHUTDOWN_REQUESTED`，`clean_team` 的全员 SHUTDOWN 前置条件再也不成立。
 14. **db_config 单一来源**：`release_session` / `delete_team` 走 `resolve_team_session_release_info` 从 session checkpoint 的任一 team bucket 解析出 `db_config`；不依赖外部传入，避免调用方传错 DB。
 15. **lazy import**：`Runner._get_team_runtime_manager` 通过函数内 import 拉取 `TeamRuntimeManager`，避免子进程 bootstrap（`spawn` 路径）拉链 agent_teams 模块树。
 
@@ -290,12 +290,12 @@ class TeamRuntimeManager:
 | 入口 | 触发条件 | 行为 |
 |---|---|---|
 | `manager.finalize(team_name, session_id)` | leader 路径 `Runner.run_agent_team*` 的 `finally`（在 `_close_team_interact_gate` 之前） | resolve 同 session 的 pool entry；条件 `agent.is_shutdown_requested() or agent.lifecycle != "persistent"` → `await agent.stop_coordination()` + `pool.remove(team_name)`；否则 `await agent.pause_coordination()` + `entry.state = RuntimeState.PAUSED`。entry 不存在 → no-op。 |
-| `manager.finalize_member(agent)` | teammate / human-agent 路径 `Runner.run_agent_team*(member=True)` 的 `finally` | 读 `agent.team_member.status()`；若 ∈ `_MEMBER_FINALIZED_STATUSES` = `{STOPPED, PAUSED, SHUTDOWN}` → 只调 `stop_coordination`，不写状态（外部已写）。否则按**当前状态**分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + `team_member.update_status(SHUTDOWN)`（**跑完末轮的 graceful 退场就是在这里落终态的**）；其余 → `pause_coordination` + `team_member.update_status(READY)`。 |
+| `manager.finalize_member(agent)` | teammate / human-agent 路径 `Runner.run_agent_team*(member=True)` 的 `finally` | 读 `agent.team_member.status()`；若 ∈ `_MEMBER_FINALIZED_STATUSES` = `{STOPPED, PAUSED, SHUTDOWN, ERROR}` → 只调 `stop_coordination`，不写状态（外部生命周期所有者已写）。否则按**当前状态**分流：`SHUTDOWN_REQUESTED` → `stop_coordination` + `team_member.update_status(SHUTDOWN)`（**跑完末轮的 graceful 退场就是在这里落终态的**）；其余 → `pause_coordination` + `team_member.update_status(READY)`。 |
 
 设计意图：
 
 - 决策权回到入口层（Runner finally），coordination kernel 只暴露 idempotent 的 `pause_coordination` / `stop_coordination` 原语，不再通过 `finalize_round` 隐式决定团队去向。这样外部 `stop_team` 永远不会被 stream finally 路径再 pause 回去。
-- `finalize_member` 用 `_MEMBER_FINALIZED_STATUSES` 防止覆盖外部已写的状态（leader 在 stop 路径中调用 `_mark_live_teammates(STOPPED)`，或 teammate 自己 `shutdown_self` 写 `SHUTDOWN`）。
+- `finalize_member` 用 `_MEMBER_FINALIZED_STATUSES` 防止覆盖外部已写的状态（leader 在 stop 路径中调用 `_mark_live_teammates(STOPPED)`、teammate 自己 `shutdown_self` 写 `SHUTDOWN`，或 runtime failure reporter 写 `ERROR`）。
 
 ### `InteractGate`（gate.py）
 

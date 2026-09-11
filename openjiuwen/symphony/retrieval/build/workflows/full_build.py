@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Dict, Sequence
 
@@ -18,6 +19,7 @@ from .artifacts import (
     ResolvedBuildConfig,
     build_catalog_records_from_nodes,
     build_fallback_tree_nodes,
+    build_fallback_tree_nodes_from_records,
     can_build_tree_with_llm,
 )
 
@@ -113,37 +115,46 @@ class _IndexBuildWorkflow:
     ) -> dict:
         if can_build_tree_with_llm(self._config):
             LOGGER.info(
-                "tree llm runtime | workers=%s | timeout_seconds=%s | classify_batch_cap=%s",
-                self._config.tree_max_workers,
+                "tree llm runtime | method=%s | timeout_seconds=%s",
+                "one-shot" if self._item_type == "skill" else "recursive",
                 self._config.tree_timeout_seconds,
-                self._config.tree_classify_batch_cap,
             )
             with timer.phase("build_tree_llm"):
                 from openjiuwen.symphony.retrieval.build.workflows import index_builder as public_module
 
-                return public_module.build_tree(
-                    skills_dir=aggregate_dir,
-                    output_path=tree_output_path,
-                    config=DynamicTreeConfig(
-                        branching_factor=self._config.tree_branching_factor,
-                        max_depth=self._config.tree_max_depth,
-                        root_categories=normalize_root_categories(self._config.tree_root_categories),
-                    ),
-                    manager_config=_tree_manager_config(self._config),
-                    client=self._config.llm_openai_client,
-                    model=self._config.llm_model,
-                    api_key=self._config.tree_llm_api_key,
-                    base_url=self._config.tree_llm_base_url,
-                    llm_seed=self._config.llm_seed,
-                    max_workers=self._config.tree_max_workers,
-                    verbose=False,
-                    show_tree=False,
-                    display_skills_dir=(
-                        self._infer_display_skills_dir(resolved_item_paths) if pre_scanned_skills is None else None
-                    ),
-                    item_type=self._item_type,
-                    skill_entries=(list(pre_scanned_skills.values()) if pre_scanned_skills is not None else None),
-                )
+                try:
+                    if self._item_type == "skill":
+                        return self._build_one_shot_tree(aggregate_dir, pre_scanned_skills)
+                    return public_module.build_tree(
+                        skills_dir=aggregate_dir,
+                        output_path=tree_output_path,
+                        config=DynamicTreeConfig(
+                            branching_factor=self._config.tree_branching_factor,
+                            max_depth=self._config.tree_max_depth,
+                            root_categories=normalize_root_categories(self._config.tree_root_categories),
+                        ),
+                        manager_config=_tree_manager_config(self._config),
+                        client=self._config.llm_openai_client,
+                        model=self._config.llm_model,
+                        api_key=self._config.tree_llm_api_key,
+                        base_url=self._config.tree_llm_base_url,
+                        llm_seed=self._config.llm_seed,
+                        max_workers=self._config.tree_max_workers,
+                        verbose=False,
+                        show_tree=False,
+                        display_skills_dir=(
+                            self._infer_display_skills_dir(resolved_item_paths) if pre_scanned_skills is None else None
+                        ),
+                        item_type=self._item_type,
+                        skill_entries=(list(pre_scanned_skills.values()) if pre_scanned_skills is not None else None),
+                    )
+                except Exception:
+                    if not self._config.allow_fallback_tree:
+                        raise
+                    LOGGER.warning(
+                        "build fallback: tree -> fallback_tree | reason=tree llm failed",
+                        exc_info=True,
+                    )
 
         if not self._config.allow_fallback_tree:
             raise ValueError("Tree build requested but no LLM capability is configured and fallback is disabled")
@@ -152,6 +163,61 @@ class _IndexBuildWorkflow:
             if pre_scanned_skills is None:
                 return {"nodes": build_fallback_tree_nodes(aggregate_dir=aggregate_dir)}
             return {"nodes": self._fallback_tree_nodes_from_scanned(pre_scanned_skills)}
+
+    def _build_one_shot_tree(self, aggregate_dir: Path, pre_scanned_skills: Dict[str, dict] | None) -> dict:
+        from openjiuwen.symphony.retrieval.build.tree.one_shot import (
+            OneShotSkill,
+            OneShotSkillTreeBuilder,
+            OneShotTreeBuildConfig,
+        )
+
+        entries = (
+            list(pre_scanned_skills.values())
+            if pre_scanned_skills is not None
+            else create_scanner("skill", aggregate_dir).to_dict_list()
+        )
+        skills = [
+            OneShotSkill(
+                name=item.get("name") or item["id"],
+                description=item.get("description") or "",
+                worker_id=item["id"],
+                skill_path=item.get("path") or "",
+            )
+            for item in entries
+        ]
+        with ExitStack() as stack:
+            client = self._config.llm_openai_client
+            if client is None:
+                from openai import OpenAI
+
+                client = stack.enter_context(
+                    OpenAI(
+                        api_key=self._config.tree_llm_api_key,
+                        base_url=self._config.tree_llm_base_url or None,
+                        max_retries=0,
+                    )
+                )
+            result = OneShotSkillTreeBuilder(
+                client=client,
+                model=self._config.llm_model,
+                config=OneShotTreeBuildConfig(
+                    max_depth=self._config.tree_max_depth,
+                    max_output_tokens=self._config.tree_max_output_tokens or OneShotTreeBuildConfig.max_output_tokens,
+                    timeout_seconds=self._config.tree_timeout_seconds,
+                    seed=self._config.llm_seed,
+                ),
+            ).build(skills)
+        LOGGER.info(
+            "one-shot tree built | skills=%s | llm_calls=%s | prompt_tokens=%s | completion_tokens=%s "
+            "| total_tokens=%s | elapsed_seconds=%.3f",
+            len(skills),
+            result.llm_calls,
+            result.prompt_tokens,
+            result.completion_tokens,
+            result.total_tokens,
+            result.elapsed_seconds,
+        )
+        return result.tree_preset
 
     def _write_outputs(
         self,
@@ -228,24 +294,12 @@ class _IndexBuildWorkflow:
 
     @staticmethod
     def _fallback_tree_nodes_from_scanned(scanned_items: Dict[str, dict]) -> list[dict[str, object]]:
-        nodes: list[dict[str, object]] = [
+        return build_fallback_tree_nodes_from_records(
             {
-                "cid": "Skills",
-                "type": "branch",
-                "description": "Fallback skill index built without LLM tree generation.",
+                str(worker_id): str(item.get("description") or item.get("name") or worker_id)
+                for worker_id, item in scanned_items.items()
             }
-        ]
-        for worker_id in sorted(str(key) for key in scanned_items):
-            item = scanned_items.get(worker_id) or {}
-            nodes.append(
-                {
-                    "cid": f"Skills.{worker_id}",
-                    "type": "leaf",
-                    "description": str(item.get("description") or item.get("name") or worker_id),
-                    "worker_id": worker_id,
-                }
-            )
-        return nodes
+        )
 
 
 def _tree_manager_config(config: ResolvedBuildConfig) -> TreeManagerConfig:

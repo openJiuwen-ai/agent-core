@@ -6,52 +6,52 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.pipelines.base import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.base import (
     PipelineStageMap,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extended_evolve_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extended_evolve_pipeline import (
     ExtendedEvolvePipeline,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_pipeline import (
     MetaEvolvePipeline,
 )
-from openjiuwen.rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.meta_evolve_pipeline.meta_evolve_task_pipeline import (
     PRTaskPipeline,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     StageSlot,
 )
-from openjiuwen.rsi.auto_harness.stages.activate import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.activate import (
     ExtendActivateStage,
 )
-from openjiuwen.rsi.auto_harness.stages.assess import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.assess import (
     AssessStage,
     ExtendAssessStage,
     MetaAssessStage,
 )
-from openjiuwen.rsi.auto_harness.stages.commit import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.commit import (
     CommitStage,
 )
-from openjiuwen.rsi.auto_harness.stages.implement import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.implement import (
     ExtendImplementStage,
     ImplementStage,
     MetaImplementStage,
 )
-from openjiuwen.rsi.auto_harness.stages.learnings import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.learnings import (
     LearningsStage,
 )
-from openjiuwen.rsi.auto_harness.stages.plan import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.plan import (
     ExtendPlanStage,
     MetaPlanStage,
     PlanStage,
 )
-from openjiuwen.rsi.auto_harness.stages.publish_pr import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr import (
     PublishPRStage,
 )
-from openjiuwen.rsi.auto_harness.stages.verify import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.verify import (
     ExtendVerifyStage,
     MetaVerifyStage,
     VerifyStage,

@@ -77,6 +77,10 @@ class ContextProcessorStateRecorder:
     def load_history(self, history: list[dict[str, Any]] | None) -> None:
         self._history = list(history or [])[-self._history_limit:]
 
+    def set_token_counter(self, token_counter: TokenCounter = None) -> None:
+        """Use the active context model's counter for future diagnostics."""
+        self._token_counter = token_counter
+
     async def emit(self, context: Any, state: ContextCompressionState) -> None:
         self._record(state)
         logger.info(
@@ -237,7 +241,7 @@ class ContextProcessorStateRecorder:
             except Exception as exc:
                 logger.debug("token_counter failed while measuring context processor state: %s", exc)
         total_chars = sum(len(str(getattr(message, "content", "") or "")) for message in messages)
-        return math.ceil(total_chars / 4)
+        return math.ceil(total_chars / 3)
 
     def _build_statistic(self, messages: Optional[list[BaseMessage]]) -> ContextStats:
         stat = ContextStats()

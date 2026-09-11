@@ -12,6 +12,7 @@ import httpx
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
     json_safe,
     normalize_assistant_message,
+    normalize_tool_definitions,
 )
 
 
@@ -48,8 +49,9 @@ class SupervisorClient:
         }
         if self.model:
             body["model"] = self.model
-        if tools:
-            body["tools"] = json_safe(tools)
+        normalized_tools = normalize_tool_definitions(tools)
+        if normalized_tools:
+            body["tools"] = normalized_tools
         if metadata:
             body["metadata"] = json_safe(metadata)
         response = await self._client.post(

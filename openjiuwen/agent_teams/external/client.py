@@ -215,6 +215,14 @@ class ExternalTeamClient:
         self._db = db
 
         if self._descriptor.scope == "member":
+            # Build the workspace manager + resident cache BEFORE creating team
+            # tools — ``create_team_tools`` reads ``backend.workspace_cache``
+            # (which delegates to the manager) to bind C-class tool description
+            # translators. Without this, the external member's MCP tools would
+            # fall back to framework defaults and never see evolved values.
+            workspace_tool = self._build_workspace_meta_tool()
+            if workspace_tool is not None:
+                backend.attach_workspace_manager(self._workspace_manager)
             # Same factory, same dispatch mode as an in-process teammate: the
             # tool set an external CLI member sees must match the system prompt
             # it was spawned with.
@@ -226,7 +234,6 @@ class ExternalTeamClient:
                 lang=self._descriptor.language,
                 exclude_tools={"checkpoint"},
             )
-            workspace_tool = self._build_workspace_meta_tool()
             if workspace_tool is not None:
                 real_tools.append(workspace_tool)
             self._tools = {tool.card.name: tool for tool in real_tools}
@@ -263,6 +270,8 @@ class ExternalTeamClient:
 
         from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
         from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
+        from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+        from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
         from openjiuwen.agent_teams.tools.locales import make_translator
 
         self._workspace_manager = TeamWorkspaceManager(
@@ -270,7 +279,25 @@ class ExternalTeamClient:
             workspace_path=workspace_path,
             team_name=self.team_name,
         )
-        return WorkspaceMetaTool(self._workspace_manager, make_translator(self._descriptor.language))
+        # The external client owns its own workspace manager (no TeamBackend
+        # object here), so manager-direct access is the one declared
+        # exception to the "read cache off the backend" contract — the
+        # backend is absent in this path. Build a resident cache so evolved
+        # C-class tool descriptions reach the external member's MCP tools.
+        # The cache is lazy: misses read the evolved md files on disk (the
+        # assembler wrote the baseline at coordination.start, and evolution
+        # party edits land on the same path); the external process never
+        # holds a write-side priming handle, but read-side still works.
+        cache = WorkspaceCache(
+            WorkspaceStore(),
+            self.team_name,
+            language=self._descriptor.language,
+        )
+        self._workspace_manager.attach_workspace_cache(cache)
+        return WorkspaceMetaTool(
+            self._workspace_manager,
+            make_translator(self._descriptor.language, ws_cache=cache),
+        )
 
     async def __aenter__(self) -> "ExternalTeamClient":
         await self.connect()

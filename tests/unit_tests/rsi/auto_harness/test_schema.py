@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     CycleResult,
     Experience,

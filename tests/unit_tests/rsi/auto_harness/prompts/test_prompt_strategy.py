@@ -8,6 +8,7 @@ _PROMPTS_DIR = (
     next(p for p in Path(__file__).resolve().parents if (p / "openjiuwen").is_dir())
     / "openjiuwen"
     / "rsi"
+    / "harness_rsi"
     / "auto_harness"
     / "prompts"
 )
@@ -15,6 +16,7 @@ _SKILLS_DIR = (
     next(p for p in Path(__file__).resolve().parents if (p / "openjiuwen").is_dir())
     / "openjiuwen"
     / "rsi"
+    / "harness_rsi"
     / "auto_harness"
     / "skills"
 )
@@ -80,7 +82,7 @@ def test_assess_and_plan_prompts_define_repo_edit_scope():
         assert "`examples/**`" in content
         assert "`docs/en/`" in content
         assert "`docs/zh/`" in content
-        assert "`openjiuwen/rsi/auto_harness/**`" in content
+        assert "`openjiuwen/rsi/harness_rsi/auto_harness/**`" in content
 
 
 def test_implement_skill_defines_repo_edit_scope():
@@ -93,7 +95,7 @@ def test_implement_skill_defines_repo_edit_scope():
     assert "`examples/**`" in content
     assert "`docs/en/`" in content
     assert "`docs/zh/`" in content
-    assert "`openjiuwen/rsi/auto_harness/**`" in content
+    assert "`openjiuwen/rsi/harness_rsi/auto_harness/**`" in content
     assert "范围冲突" in content
 
 

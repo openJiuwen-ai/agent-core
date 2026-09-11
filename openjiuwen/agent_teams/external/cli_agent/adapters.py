@@ -27,7 +27,7 @@ import uuid
 from dataclasses import dataclass, replace
 from typing import Any
 
-from openjiuwen.agent_teams.external.descriptor import TEAM_JOIN_ENV
+from openjiuwen.agent_teams.external.descriptor import MCP_SERVER_ENV_VARS
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 
@@ -254,7 +254,7 @@ class CliAgentAdapter:
                 argv += ["-c", f"mcp_servers.{key}.args={json.dumps(args)}"]
             argv += [
                 "-c",
-                f"mcp_servers.{key}.env_vars={json.dumps([TEAM_JOIN_ENV])}",
+                f"mcp_servers.{key}.env_vars={json.dumps(MCP_SERVER_ENV_VARS)}",
                 "-c",
                 f"mcp_servers.{key}.startup_timeout_sec={_CODEX_MCP_STARTUP_TIMEOUT_S}",
                 "-c",

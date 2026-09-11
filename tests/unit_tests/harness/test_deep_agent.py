@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
@@ -38,6 +39,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent, _DEFAULT_DIRECT_TOOL_NAMES
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -295,8 +297,9 @@ async def test_ensure_initialized_uses_cached_read_image_multimodal(
 
     await agent.ensure_initialized()
 
-    assert agent.deep_config.enable_read_image_multimodal is True
-    assert rail.enable_read_image_multimodal is True
+    assert agent.deep_config.enable_read_image_multimodal is None
+    assert rail.enable_read_image_multimodal is None
+    assert should_enable_read_image_multimodal(agent) is True
     _mock_image_modality_probe.assert_not_called()
 
 
@@ -359,7 +362,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
     )
 
     assert agent.system_prompt_builder is not None
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     initial_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "initial identity" in initial_prompt
     assert "<prompt-attachment>" not in initial_prompt
@@ -372,7 +374,6 @@ def test_prompt_attachment_reminder_is_not_in_static_system_prompt() -> None:
         )
     )
 
-    assert agent.system_prompt_builder.get_section(SectionName.PROMPT_ATTACHMENTS) is None
     reloaded_prompt = agent._react_agent.config.prompt_template[0]["content"]
     assert "updated identity" in reloaded_prompt
     assert "<prompt-attachment>" not in reloaded_prompt
@@ -519,7 +520,9 @@ async def test_stream_single_round_branch() -> None:
     chunks = [chunk async for chunk in agent.stream("stream_input")]
 
     assert [chunk["chunk"] for chunk in chunks] == [1, 2]
-    assert fake_react.stream_calls[0]["inputs"] == {"query": "stream_input"}
+    assert fake_react.stream_calls[0]["inputs"] == {
+        "query": "stream_input",
+    }
 
 
 @pytest.mark.asyncio
@@ -620,10 +623,10 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
     await context.add_messages(
         [
             UserMessage(content="hello"),
-            AssistantMessage(
-                content="world",
-                usage_metadata=UsageMetadata(total_tokens=250),
-            ),
+                AssistantMessage(
+                    content="world",
+                    usage_metadata=UsageMetadata(input_tokens=250, total_tokens=250),
+                ),
         ]
     )
 
@@ -635,6 +638,25 @@ async def test_get_context_usage_prefers_model_usage_metadata() -> None:
     assert usage["usage_ratio"] == 0.25
     assert usage["usage_percent"] == 25.0
     assert usage["stats"]["total_tokens"] == 250
+
+
+def test_resolve_context_window_prefers_selected_model_override() -> None:
+    agent = DeepAgent.__new__(DeepAgent)
+    agent._react_agent = SimpleNamespace(
+        config=SimpleNamespace(
+            model_name="selected-model",
+            model_config_obj=ModelRequestConfig(
+                model="selected-model",
+                context_window=131072,
+            ),
+            context_engine_config=ContextEngineConfig(
+                model_context_window_tokens_override=65536,
+                model_context_window_tokens={"selected-model": 90000},
+            ),
+        ),
+    )
+
+    assert agent._resolve_context_window_tokens() == 65536
 
 
 @pytest.mark.asyncio
@@ -780,7 +802,7 @@ def test_create_deep_agent_registers_tool_instances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_deep_agent_auto_registers_complete_vision_tools(
+async def test_create_deep_agent_keeps_native_auto_with_complete_vision_tools(
     _mock_image_modality_probe,
 ) -> None:
     agent = create_deep_agent(
@@ -796,9 +818,9 @@ async def test_create_deep_agent_auto_registers_complete_vision_tools(
     try:
         assert agent.ability_manager.get("image_ocr") is not None
         assert agent.ability_manager.get("visual_question_answering") is not None
-        assert agent.deep_config.enable_read_image_multimodal is False
+        assert agent.deep_config.enable_read_image_multimodal is None
         await agent.ensure_initialized()
-        _mock_image_modality_probe.assert_not_called()
+        _mock_image_modality_probe.assert_called_once_with(agent.deep_config.model)
     finally:
         agent.ability_manager.teardown_tools()
 
@@ -1154,6 +1176,17 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     )
 
     assert agent.ability_manager.get("task_tool") is not None
+
+
+def test_refresh_subagent_tool_descriptions_updates_retained_rails() -> None:
+    """Hot reload refreshes dynamic tool names without rebuilding task_tool."""
+    agent = DeepAgent(AgentCard(name="refresh_test"))
+    rail = MagicMock()
+    agent._registered_rails = [rail]
+
+    agent._refresh_subagent_tool_descriptions()
+
+    rail.refresh_available_agents.assert_called_once_with(agent)
 
 
 def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:
@@ -1514,6 +1547,36 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
         is kv_cache_affinity_config
     )
     assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_forks_stateful_observability_rail_per_instance(tmp_path) -> None:
+    template_rail = AgentObservabilityRail()
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        rails=[template_rail],
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[subagent_config],
+    )
+
+    first = parent.create_subagent("reviewer", "sub_session_1")
+    second = parent.create_subagent("reviewer", "sub_session_2")
+    first_rail = next(
+        rail for rail in first.configured_rails()
+        if isinstance(rail, AgentObservabilityRail)
+    )
+    second_rail = next(
+        rail for rail in second.configured_rails()
+        if isinstance(rail, AgentObservabilityRail)
+    )
+
+    assert first_rail is not template_rail
+    assert second_rail is not template_rail
+    assert first_rail is not second_rail
 
 
 def test_create_subagent_can_override_parent_image_multimodal_setting(tmp_path) -> None:

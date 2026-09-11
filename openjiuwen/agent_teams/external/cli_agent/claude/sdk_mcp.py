@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, ContextManager, Protocol
+from typing import TYPE_CHECKING, Any, Callable, ContextManager, Protocol
 
 from openjiuwen.agent_teams.external.cli_agent.claude.options import load_claude_sdk
 from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
@@ -53,7 +53,6 @@ def build_claude_sdk_mcp_tool_set(
     lifecycle: str,
     language: str,
     workspace_manager: "TeamWorkspaceManager | None" = None,
-    on_teammate_created: Callable[[str], Awaitable[None]] | None = None,
     model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     parent_agent: Any = None,
     messager: Any = None,
@@ -77,7 +76,6 @@ def build_claude_sdk_mcp_tool_set(
         lifecycle: Team lifecycle.
         language: Tool description language.
         workspace_manager: Optional shared workspace manager.
-        on_teammate_created: Optional spawn callback for leader tools.
         model_config_allocator: Optional model allocation callback for spawn tools.
         parent_agent: Optional parent agent used by leader-only async tools.
         messager: Optional messager used by leader-only async tools.
@@ -94,13 +92,17 @@ def build_claude_sdk_mcp_tool_set(
     Returns:
         SDK MCP tool set containing the server config and wrapped tools.
     """
+    # external-CLI tool descriptions resolve evolved values through the
+    # backend's cache (it delegates to the workspace manager — the single
+    # source every consumer uses). ``None`` (no manager attached /
+    # evolution disabled) keeps the framework default.
+    workspace_cache = team_backend.workspace_cache
     tools = create_team_tools(
         role=role,
         agent_team=team_backend,
         teammate_mode=teammate_mode,
         dispatch_mode=dispatch_mode,
         lifecycle=lifecycle,
-        on_teammate_created=on_teammate_created,
         model_config_allocator=model_config_allocator,
         lang=language,
         parent_agent=parent_agent,
@@ -115,7 +117,7 @@ def build_claude_sdk_mcp_tool_set(
         team_permissions_enabled=team_permissions_enabled,
     )
     if workspace_manager is not None:
-        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language)))
+        tools.append(WorkspaceMetaTool(workspace_manager, make_translator(language, ws_cache=workspace_cache)))
 
     tools_by_name = {tool.card.name: tool for tool in tools}
     sdk = load_claude_sdk()

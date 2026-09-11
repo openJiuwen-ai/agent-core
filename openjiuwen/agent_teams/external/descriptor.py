@@ -28,6 +28,19 @@ from openjiuwen.core.common.exception.errors import raise_error
 # Single environment variable carrying the JSON-encoded descriptor.
 TEAM_JOIN_ENV = "OPENJIUWEN_TEAM_JOIN"
 
+# Environment variable overriding the runtime home directory. A spawned
+# subprocess (Codex MCP server) cannot inherit the host platform's in-memory
+# ``configure_openjiuwen_home`` override, so the home must travel via env to
+# keep session-file spill/deref paths aligned with the parent.
+OPENJIUWEN_HOME_ENV = "OPENJIUWEN_HOME"
+
+# Environment variables a Codex MCP server subprocess must inherit from its
+# Codex App Server parent. Codex's ``mcp_servers.<key>.env_vars`` is an
+# allow-list — only listed names cross into the MCP server process — so every
+# variable the server needs to reach the shared DB, deref ``#file#`` content,
+# or resolve the session root must appear here.
+MCP_SERVER_ENV_VARS = [TEAM_JOIN_ENV, OPENJIUWEN_HOME_ENV]
+
 
 class TeamJoinDescriptor(BaseModel):
     """Everything an external agent needs to attach to a running team.

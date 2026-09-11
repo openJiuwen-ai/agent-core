@@ -2,7 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import asyncio
 import time
-from typing import Union, List, Optional, AsyncIterator, Type, Dict
+from typing import Union, List, Optional, AsyncIterator
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -20,7 +20,6 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
     VideoGenerationResponse
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
-from openjiuwen.core.foundation.llm.model_clients.inference_affinity_model_client import InferenceAffinityModelClient
 from openjiuwen.core.runner.callback import trigger
 
 
@@ -122,11 +121,17 @@ class Model:
         Returns:
             AssistantMessage
         """
+        from openjiuwen.core.context_engine.context.compression_scope import (
+            stamp_context_compression_model_kwargs,
+        )
+
+        stamp_context_compression_model_kwargs(kwargs)
+
         # Identify this request for the whole callback chain (input event,
         # the client's own LLM_OUTPUT trigger, output event, error event) so
         # observers can attribute what they receive to this call and not to
         # another one running concurrently. See ``call_scope``.
-        with LlmCallScope():
+        with LlmCallScope(unified_completion=True):
             return await self._client.invoke(
                 messages=messages,
                 stop=stop,
@@ -171,6 +176,11 @@ class Model:
         Yields:
             AssistantMessageChunk
         """
+        from openjiuwen.core.context_engine.context.compression_scope import (
+            stamp_context_compression_model_kwargs,
+        )
+
+        stamp_context_compression_model_kwargs(kwargs)
         first_chunk_timeout = self._resolve_stream_timeout("stream_first_chunk_timeout")
         idle_timeout = self._resolve_stream_timeout("stream_idle_timeout")
 
@@ -179,7 +189,7 @@ class Model:
         # below runs in its own ``asyncio.wait_for`` task, and such a task
         # copies the context, so an id bound inside a chunk callback would be
         # gone by the time the next chunk arrives. See ``call_scope``.
-        with LlmCallScope():
+        with LlmCallScope(unified_completion=True):
             stream_iterable = self._client.stream(
                 messages=messages,
                 stop=stop,
@@ -196,6 +206,7 @@ class Model:
             started_at = time.monotonic()
             last_chunk_at = started_at
             chunk_count = 0
+            accumulated_chunk: AssistantMessageChunk | None = None
             effective_model_name = model or getattr(self.model_config, "model_name", None)
 
             while True:
@@ -252,7 +263,29 @@ class Model:
 
                 chunk_count += 1
                 last_chunk_at = time.monotonic()
+                # A client (or an LLM_STREAM_OUTPUT transform callback ahead of
+                # this frame) may yield something other than a message chunk;
+                # only real chunks accumulate into the completed message.
+                if isinstance(chunk, AssistantMessageChunk):
+                    accumulated_chunk = (
+                        accumulated_chunk + chunk
+                        if accumulated_chunk is not None
+                        else chunk
+                    )
                 yield chunk
+
+            completed_message = (
+                AssistantMessage.model_validate(accumulated_chunk.model_dump())
+                if accumulated_chunk is not None
+                else AssistantMessage(content="")
+            )
+            from openjiuwen.core.runner.callback.events import LLMCallEvents
+            await trigger(
+                LLMCallEvents.LLM_STREAM_COMPLETED,
+                result=completed_message,
+                model_config=self.model_config,
+                model_client_config=self.model_client_config,
+            )
 
     async def release(
             self,
@@ -279,6 +312,9 @@ class Model:
 
     def supports_kv_cache_release(self) -> bool:
         """Whether underlying client supports KV cache release."""
+        supports_fn = getattr(self._client, "supports_kv_cache_release", None)
+        if callable(supports_fn):
+            return bool(supports_fn())
         return callable(getattr(self._client, "release", None))
 
     def supports_kv_cache_affinity(self) -> bool:
@@ -303,15 +339,13 @@ class Model:
           - session_id: use session.get_session_id() if provided
           - enable_cache_sharing: follow enable_kv_cache_release
         """
-        if not isinstance(self._client, InferenceAffinityModelClient):
+        build_fn = getattr(self._client, "build_kv_cache_invoke_kwargs", None)
+        if not callable(build_fn):
             return {}
-
-        extra: dict = {}
-        if session is not None and hasattr(session, "get_session_id"):
-            extra["session_id"] = session.get_session_id()
-        if enable_kv_cache_release:
-            extra["enable_cache_sharing"] = True
-        return extra
+        return build_fn(
+            session=session,
+            enable_kv_cache_release=enable_kv_cache_release,
+        )
 
     def build_kv_cache_affinity_invoke_kwargs(
             self,
@@ -565,8 +599,8 @@ def init_model(
         api_key: str,
         api_base: str,
         *,
-        temperature: float = 0.95,
-        top_p: float = 0.1,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: float = 60.0,
         max_retries: int = 3,
