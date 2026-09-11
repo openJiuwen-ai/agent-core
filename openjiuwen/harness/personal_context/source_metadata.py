@@ -101,6 +101,12 @@ def _latest_hash(item: RawChangeItem) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def source_item_version(item: RawChangeItem) -> tuple[str, str]:
+    """Return the exact revision/hash pair persisted for a source item."""
+
+    return _required_text(item.revision_id, name="latest_revision"), _latest_hash(item)
+
+
 def _source_type(item: RawChangeItem, provider: str) -> str:
     resource = item.metadata.get("resource")
     return _required_text(resource if isinstance(resource, str) else provider, name="source_type")
@@ -218,6 +224,7 @@ def upsert_source_metadata(
         existing = read_source_metadata(target)
     previous_title = existing.get("title") if existing is not None else None
     title_value = item.title if isinstance(item.title, str) and item.title.strip() else previous_title or locator
+    revision, content_hash = source_item_version(item)
     metadata = {
         "source_id": source_id,
         "source_type": _source_type(item, provider_value),
@@ -227,8 +234,8 @@ def upsert_source_metadata(
         "service": service_value,
         "first_seen": str(existing["first_seen"]) if existing is not None else observed_value,
         "last_seen": observed_value,
-        "latest_revision": _required_text(item.revision_id, name="latest_revision"),
-        "latest_hash": _latest_hash(item),
+        "latest_revision": revision,
+        "latest_hash": content_hash,
     }
     _atomic_write(target, _render_source_metadata(metadata))
     return source_id
@@ -239,5 +246,6 @@ __all__ = [
     "read_source_detail",
     "read_source_metadata",
     "source_id_for_locator",
+    "source_item_version",
     "upsert_source_metadata",
 ]

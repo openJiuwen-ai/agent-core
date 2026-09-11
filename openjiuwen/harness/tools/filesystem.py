@@ -35,6 +35,11 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 _FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _FILE_EDIT_LOCKS_GUARD = threading.Lock()
 
+# POSIX NAME_MAX / PATH_MAX. Overlong values must not reach Path.resolve()
+# (ENAMETOOLONG aborts the turn instead of returning a tool error).
+_NAME_MAX = 255
+_PATH_MAX = 4096
+
 
 def _get_file_edit_lock(file_path: str) -> asyncio.Lock:
     """Return the process-wide edit transaction lock for a normalized path."""
@@ -347,18 +352,167 @@ class _TokenBudget:
         return self.spent >= self.max_tokens
 
 
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Parse a JSON object, ignoring trailing XML/tool junk after the closing brace."""
+    if not isinstance(text, str):
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    stack = 0
+    in_string = False
+    escape = False
+    end = None
+    for index, char in enumerate(text[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            stack += 1
+        elif char == "}":
+            stack -= 1
+            if stack == 0:
+                end = index + 1
+                break
+    if end is None:
+        return None
+    try:
+        parsed = json.loads(text[start:end])
+    except (TypeError, ValueError):
+        # JSONDecodeError is a ValueError subclass; do not list both (G.ERR.09).
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _overlong_path_error(file_path: str) -> Optional[str]:
+    """Return an error if *file_path* cannot be a real filesystem path."""
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    if len(file_path) > _PATH_MAX:
+        return (
+            f"file_path is too long ({len(file_path)} chars; max {_PATH_MAX}). "
+            "Pass a plain path in `file_path` and the file body in `content`."
+        )
+    normalized = file_path.replace("\\", "/")
+    for part in pathlib.PurePosixPath(normalized).parts:
+        if part in (".", "..", "/"):
+            continue
+        if len(part) > _NAME_MAX:
+            return (
+                f"file_path has a component longer than {_NAME_MAX} characters. "
+                "Pass a plain path in `file_path` and the file body in `content` "
+                "— do not serialize the whole tool-call JSON into `file_path`."
+            )
+    return None
+
+
+def _looks_like_plain_file_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped or stripped.startswith("{"):
+        return False
+    return _overlong_path_error(stripped) is None
+
+
+def _should_prefer_nested_content(nested_content: Any, current_content: Any) -> bool:
+    """Whether nested JSON ``content`` should replace the outer field."""
+    if not isinstance(nested_content, str):
+        return False
+    if not isinstance(current_content, str) or not current_content.strip():
+        return True
+    return len(nested_content) > len(current_content)
+
+
+def _coerce_file_tool_inputs(inputs: Any) -> Dict[str, Any]:
+    """Unwrap nested / stringified write_file payloads into a normal args dict.
+
+    Some models (observed with DeepSeek tool XML) put the entire
+    ``{"file_path": "...", "content": "..."}`` object into ``file_path``.
+    Resolving that blob as a relative path raises ENAMETOOLONG and used to
+    kill the headless turn. Unwrap one level when the nested object has a
+    plain ``file_path``.
+    """
+    if inputs is None:
+        return {}
+    if isinstance(inputs, str):
+        parsed = _extract_json_object(inputs)
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "tool arguments must be an object with file_path "
+                "(and content for write_file)"
+            )
+        inputs = parsed
+    if not isinstance(inputs, dict):
+        raise ValueError("tool arguments must be an object")
+
+    out = dict(inputs)
+    raw_path = out.get("file_path")
+    nested: Optional[Dict[str, Any]] = None
+    if isinstance(raw_path, dict):
+        nested = raw_path
+    elif isinstance(raw_path, str) and raw_path.lstrip().startswith("{"):
+        nested = _extract_json_object(raw_path)
+
+    if isinstance(nested, dict) and _looks_like_plain_file_path(nested.get("file_path")):
+        out["file_path"] = nested["file_path"]
+        if _should_prefer_nested_content(nested.get("content"), out.get("content")):
+            out["content"] = nested["content"]
+        for key in ("old_string", "new_string", "replace_all"):
+            if key in nested and key not in out:
+                out[key] = nested[key]
+        logger.info(
+            "Unwrapped nested JSON payload from file_path into %s",
+            out.get("file_path"),
+        )
+    return out
+
+
 def _resolve_tool_file_path(operation: SysOperation, file_path: str) -> str:
     """Resolve relative tool paths against the configured sys_operation work_dir.
 
     Keeps UNC paths unchanged. Relative paths are only accepted when the operation
     exposes a work_dir; otherwise the caller must still provide an absolute path.
+
+    Overlong or un-statable paths raise ``ValueError`` (not ``OSError``) so
+    callers can return ``ToolOutput(success=False)`` instead of failing the turn.
     """
+    _ = operation
+    if not isinstance(file_path, str) or not file_path:
+        raise ValueError("file_path is required")
+    err = _overlong_path_error(file_path)
+    if err:
+        raise ValueError(err)
+
     expanded = os.path.expanduser(file_path)
     if expanded.startswith("\\\\") or expanded.startswith("//") or os.path.isabs(expanded):
+        err = _overlong_path_error(expanded)
+        if err:
+            raise ValueError(err)
         return expanded
 
     work_dir = get_cwd()
-    return str((pathlib.Path(work_dir).expanduser().resolve() / expanded).resolve())
+    try:
+        resolved = str(
+            (pathlib.Path(work_dir).expanduser().resolve() / expanded).resolve()
+        )
+    except OSError as exc:
+        raise ValueError(
+            f"Invalid file_path ({exc}). Pass a plain path in `file_path` "
+            "and the file body in `content`."
+        ) from exc
+    err = _overlong_path_error(resolved)
+    if err:
+        raise ValueError(err)
+    return resolved
 
 
 def _is_unc_path(path_value: str) -> bool:
@@ -1095,11 +1249,25 @@ class WriteFileTool(Tool):
         return raw.decode(encoding, errors="replace"), encoding
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        try:
+            inputs = _coerce_file_tool_inputs(inputs)
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+
         path: Optional[str] = inputs.get("file_path")
         content = inputs.get("content")
 
         if not path:
             return ToolOutput(success=False, error="file_path is required")
+        if isinstance(path, str) and path.lstrip().startswith("{"):
+            return ToolOutput(
+                success=False,
+                error=(
+                    "file_path looks like a JSON object, not a filesystem path. "
+                    "Call write_file with `file_path` as a plain path string and "
+                    "`content` as a separate string field."
+                ),
+            )
         if content is None:
             return ToolOutput(success=False, error="content is required")
         if not isinstance(content, str):
@@ -1452,6 +1620,10 @@ class EditFileTool(Tool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Serialize the complete read-modify-write transaction per file."""
+        try:
+            inputs = _coerce_file_tool_inputs(inputs)
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
         file_path = inputs.get("file_path")
         if not isinstance(file_path, str) or not file_path.strip():
             return await self._invoke_unlocked(inputs, **kwargs)

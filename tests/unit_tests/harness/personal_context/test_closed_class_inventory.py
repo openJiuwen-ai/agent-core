@@ -22,9 +22,11 @@ EXPECTED_CLASSES = {
     "BrowserBookmarksFetchService",
     "FeishuFetchService",
     "GitHubFetchService",
+    "GitCodeFetchService",
     "LocalFilesFetchService",
     "ToutiaoReaderFetchService",
     "ZhihuReaderFetchService",
+    "RssFeedFetchService",
     "PersonalContextStatus",
     "RawChangeItem",
     "FetchBatch",
@@ -62,7 +64,12 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         for name, method in inspect.getmembers(PersonalContext, inspect.isfunction)
         if not name.startswith("_")
     }
-    synchronous_host_methods = {"remove_fetch_cursor", "restore_fetch_cursor"}
+    synchronous_host_methods = {
+        "remove_fetch_cursor",
+        "restore_fetch_cursor",
+        "remove_fetch_run_history",
+        "restore_fetch_run_history",
+    }
     assert all(
         inspect.iscoroutinefunction(method) == (name not in synchronous_host_methods)
         for name, method in public_methods.items()
@@ -74,6 +81,11 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "get_authorization_status": "(self, provider: 'str') -> 'dict[str, object]'",
         "get_graph": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",
         "get_graph_page": "(self, node_id: 'str') -> 'dict[str, object]'",
+        "get_fetch_run_status": (
+            "(self, service_id: 'str | None' = None, *, run_id: 'str | None' = None) -> 'dict[str, object]'"
+        ),
+        "remove_fetch_run_history": "(self, service_id: 'str') -> 'list[dict[str, object]]'",
+        "restore_fetch_run_history": "(self, service_id: 'str', records: 'list[dict[str, object]]') -> 'None'",
         "get_source": "(self, source_id: 'str') -> 'dict[str, object]'",
         "get_tree": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",
         "remove_fetch_cursor": "(self, service_id: 'str') -> 'bytes | None'",
@@ -88,6 +100,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "start_fetch_service": "(self, service_id: 'str') -> 'None'",
         "stop_agent_use": "(self) -> 'None'",
         "stop_collection": "(self, *, timeout_seconds: 'float' = 30.0) -> 'None'",
+        "stop_fetch_run": "(self, service_id: 'str') -> 'None'",
         "stop_fetch_service": "(self, service_id: 'str', *, timeout_seconds: 'float' = 30.0) -> 'None'",
     }
 

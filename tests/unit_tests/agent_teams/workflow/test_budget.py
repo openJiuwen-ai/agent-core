@@ -677,3 +677,120 @@ async def test_attempt_calls_skipped_branch_keeps_tokens_none():
     out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
     assert out.succeeded is False
     assert out.tokens is None
+    assert out.attempts == 1  # skipped short-circuits on the first attempt
+
+
+# ---------------------------------------------------------------------------
+# _attempt_calls: budget fail-fast (no retry on a drained ledger)
+# ---------------------------------------------------------------------------
+
+
+class _BackendErr(Exception):
+    """Backend error carrying tokens, mirroring BackendError.tokens."""
+
+    def __init__(self, msg: str, tokens: int = 0) -> None:
+        super().__init__(msg)
+        self.tokens = tokens
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_fail_fast_on_workflow_budget_exhaustion():
+    """A failed attempt that drains the per-run ledger must not retry.
+
+    The rail force-finishes the call (not an exception); the backend then raises,
+    and the retry loop sees the ledger dry. A retry could only fail again — the
+    budget never refunds — so the loop short-circuits with the same
+    ``"workflow token budget exhausted: X/Y"`` message the entry gate raises,
+    carrying the real attempt count (1, not retries+1).
+    """
+    calls = 0
+
+    async def make_call():
+        nonlocal calls
+        calls += 1
+        raise _BackendErr("model failed", tokens=40)
+
+    wf_led = BudgetLedger(total=100, spent=100)  # dry per-run ledger
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(), workflow_budget=wf_led)
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+
+    assert calls == 1  # no retry despite rt.retries == 2
+    assert out.succeeded is False
+    assert out.attempts == 1
+    assert out.tokens == 40  # the one burned attempt's cost is attributed
+    assert out.error_detail == "workflow token budget exhausted: 100/100"
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_fail_fast_on_session_budget_exhaustion():
+    """Session ledger dry -> same fail-fast, session-scoped message wins."""
+    calls = 0
+
+    async def make_call():
+        nonlocal calls
+        calls += 1
+        raise _BackendErr("boom", tokens=5)
+
+    sess_led = BudgetLedger(total=500, spent=500)
+    rt = Runtime(backend=None, journal=None, budget=sess_led)
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+
+    assert calls == 1
+    assert out.succeeded is False
+    assert out.attempts == 1
+    assert out.error_detail == "session token budget exhausted: 500/500"
+
+
+@pytest.mark.asyncio
+async def test_attempt_calls_retries_when_budget_still_has_headroom():
+    """A failed attempt on a ledger with headroom still retries to exhaustion.
+
+    Confirms the fail-fast guard does not fire prematurely: only a *drained*
+    ledger short-circuits, not any backend error. Retries run out -> attempts ==
+    retries + 1, and the error_detail is the backend's, not a budget message.
+    """
+    calls = 0
+
+    async def make_call():
+        nonlocal calls
+        calls += 1
+        raise _BackendErr(f"try {calls}")
+
+    rt = Runtime(backend=None, journal=None, budget=BudgetLedger(total=10_000))
+    out = await _p._attempt_calls(rt, {"label": "t"}, None, None, make_call)
+
+    assert calls == 3  # 1 + rt.retries (2)
+    assert out.succeeded is False
+    assert out.attempts == 3
+    assert out.error_detail == "try 3"  # last attempt's error, not a budget msg
+
+
+# ---------------------------------------------------------------------------
+# agent() failure message: actual attempt count (not the static retries+1)
+# ---------------------------------------------------------------------------
+
+def _failure_message(label: str, call_result: _p._BackendCallResult) -> str:
+    """Mirror the inline message builder in ``agent()`` (primitives.py:607-611).
+
+    ``_attempt_calls`` returns the real ``attempts``; ``agent()`` formats it
+    into the AGENT_FAILED text. This re-applies the same 3-line rule so a
+    fail-fast (attempts=1) does not claim 'failed after N attempts'.
+    """
+    msg = f"agent {label!r} failed"
+    if call_result.attempts is not None and call_result.attempts > 1:
+        msg = f"{msg} after {call_result.attempts} attempts"
+    if call_result.error_detail:
+        msg = f"{msg}: {call_result.error_detail}"
+    return msg
+
+
+def test_failure_message_omits_attempts_when_single_attempt():
+    """A budget fail-fast / skip (attempts=1) reads 'failed: <detail>' — no suffix."""
+    r = _p._BackendCallResult(succeeded=False, error_detail="workflow token budget exhausted: 100/100", attempts=1)
+    assert _failure_message("x", r) == "agent 'x' failed: workflow token budget exhausted: 100/100"
+
+
+def test_failure_message_counts_real_attempts_when_retried():
+    """Retries-then-fail surfaces the real count: 'failed after 2 attempts: <detail>'."""
+    r = _p._BackendCallResult(succeeded=False, error_detail="always fails", attempts=2)
+    assert _failure_message("x", r) == "agent 'x' failed after 2 attempts: always fails"

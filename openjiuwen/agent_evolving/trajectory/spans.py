@@ -15,15 +15,13 @@ fallbacks remain explicitly owned by the trajectory package.
 from __future__ import annotations
 
 import json
-import re
-from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Iterator, TypeAlias
 
 from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.extensions.observability import semconv
-
 
 JSONValue: TypeAlias = Any
 Span: TypeAlias = dict[str, Any]
@@ -399,6 +397,31 @@ def merge_spans(base: Any, additions: Iterable[Mapping[str, Any]]) -> Any:
     return _trajectory_from_payload(merge_payloads(payload, extra))
 
 
+def _trim_span_indices(
+    spans: Sequence[Mapping[str, Any]],
+    max_spans: int | None,
+    *,
+    start_time: int | None,
+    end_time: int | None,
+) -> list[int]:
+    """Select positions so equal or repeated span identities remain distinct."""
+
+    selected: list[int] = []
+    for index, span in enumerate(spans):
+        if start_time is not None and _time_value(span, "endTimeUnixNano") < start_time:
+            continue
+        if end_time is not None and _time_value(span, "startTimeUnixNano") > end_time:
+            continue
+        selected.append(index)
+
+    selected.sort(key=lambda index: span_sort_key(spans[index]))
+    if max_spans is not None:
+        if max_spans <= 0:
+            return []
+        selected = selected[-max_spans:]
+    return selected
+
+
 def trim_spans(
     spans: Iterable[Mapping[str, Any]],
     max_spans: int | None = None,
@@ -412,17 +435,9 @@ def trim_spans(
     limit yields an empty list, which is useful for a bounded clean window.
     """
 
-    selected = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
-    if start_time is not None:
-        selected = [span for span in selected if _time_value(span, "endTimeUnixNano") >= start_time]
-    if end_time is not None:
-        selected = [span for span in selected if _time_value(span, "startTimeUnixNano") <= end_time]
-    selected.sort(key=span_sort_key)
-    if max_spans is not None:
-        if max_spans <= 0:
-            return []
-        selected = selected[-max_spans:]
-    return deepcopy(selected)
+    normalized = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
+    selected = _trim_span_indices(normalized, max_spans, start_time=start_time, end_time=end_time)
+    return [normalized[index] for index in selected]
 
 
 def trim_trajectory(
@@ -432,35 +447,29 @@ def trim_trajectory(
     start_time: int | None = None,
     end_time: int | None = None,
 ) -> Any:
-    """Return a new trajectory retaining only the selected span window."""
+    """Return a globally trimmed trajectory preserving original resource/scope groups."""
 
     payload = normalize_otlp(_payload_for(value))
     if max_spans is None and start_time is None and end_time is None:
         return _trajectory_from_payload(payload)
-    selected = trim_spans(
-        list(iter_spans(payload)),
+
+    entries = list(_payload_spans(payload))
+    selected = _trim_span_indices(
+        [span for _, _, _, span in entries],
         max_spans,
         start_time=start_time,
         end_time=end_time,
     )
-    # Keep the first resource/scope metadata while replacing spans with the
-    # selected forest.  Empty spans are valid for a snapshot; resourceSpans is
-    # retained so Trajectory validation still sees a canonical envelope.
     result = deepcopy(payload)
-    locations: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for resource_span in result.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
             scope_span["spans"] = []
-            locations.append((resource_span, scope_span))
-    if not locations:
-        result.setdefault("resourceSpans", []).append({"resource": {}, "scopeSpans": [{"scope": {}, "spans": []}]})
-        locations.append((result["resourceSpans"][0], result["resourceSpans"][0]["scopeSpans"][0]))
-    # Preserve each selected span's original resource/scope when possible.
-    for span in selected:
-        # The detached span does not carry its source location; using the first
-        # scope is deterministic and preserves the canonical envelope.
-        locations[0][1].setdefault("spans", []).append(span)
-    _sort_payload_spans(result)
+
+    # Keep empty groups and their metadata; selected positions identify the original
+    # source even when different groups contain identical trace/span IDs.
+    for index in selected:
+        resource_index, scope_index, _, span = entries[index]
+        result["resourceSpans"][resource_index]["scopeSpans"][scope_index]["spans"].append(span)
     return _trajectory_from_payload(result)
 
 

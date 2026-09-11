@@ -48,7 +48,7 @@ dependencies = [
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
-    "fastmcp>=2.14.2,<3.0",
+    "fastmcp>=2.14.2,<4.0",
     "mcp>=1.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
@@ -75,6 +75,10 @@ dependencies = [
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
     "matplotlib>=3.11.1",
+    # OpenTelemetry SDK is imported unconditionally by openjiuwen.agent_evolving;
+    # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
+    # no longer pulls it, so declare it explicitly to keep imports working.
+    "opentelemetry-sdk>=1.25.0",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
@@ -145,6 +149,7 @@ test = [
     "pytest-mock>=3.14.0",
     "pytest-cov>=7.0.0",
     "coverage>=7.7.1",
+    "fakeredis[lua]==2.34.1",
     "fastapi>=0.115.0",
     "uvicorn>=0.32.0",
     "sse-starlette>=2.1.3",
@@ -239,6 +244,7 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
+select = ["E", "F", "I", "ASYNC"]
 # E203 (whitespace before ':') intentionally allowed everywhere: ``ruff
 # format`` (Black style) inserts a space before ``:`` in slices that contain
 # non-trivial expressions (e.g. ``s[len(prefix) :]``), and Black's official

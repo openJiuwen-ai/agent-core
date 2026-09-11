@@ -13,7 +13,7 @@ from typing import (
 )
 from pydantic import BaseModel
 
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import (
     Model,
     ModelClientConfig,

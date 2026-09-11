@@ -49,7 +49,7 @@ model = Model(
 
 > **Note**
 > - Users need to register accounts on SiliconFlow or OpenAI vendor websites to obtain available model `api_key` and model invocation URL address `api_base`.
-> - `client_provider` currently has built-in support for the `ProviderType` values `OpenAI`, `OpenAIAccount`, `OpenRouter`, `Anthropic`, `SiliconFlow`, `DashScope`, `DeepSeek`, `InferenceAffinity`, `AscendAffinity`, and `IntelliRouter`. Protocol implementations are OpenAI-compatible and Anthropic. `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, `InferenceAffinity`, and `AscendAffinity` are legacy aliases mapped to `endpoint_profile` / `extensions` when a client is created. See [LLM Protocol Consolidation](LLM%20Protocol%20Consolidation.md).
+> - `client_provider` currently has built-in support for the `ProviderType` values `OpenAI`, `OpenAIAccount`, `OpenRouter`, `Anthropic`, `SiliconFlow`, `DashScope`, `DeepSeek`, `AscendAffinity`, and `IntelliRouter`. Protocol implementations are OpenAI-compatible and Anthropic. `DeepSeek`, `OpenRouter`, `SiliconFlow`, `DashScope`, and `AscendAffinity` are aliases mapped to `endpoint_profile` / `extensions` when a client is created. See [LLM Protocol Consolidation](LLM%20Protocol%20Consolidation.md).
 
 ### Sign In with OpenAI Account OAuth
 

@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from openjiuwen.core.common.exception.errors import ValidationError as JiuwenValidationError
-from openjiuwen.harness.personal_context.config import PersonalContextConfig
+from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
 
 
 def _local_service(service_id: str = "notes", *, enabled: bool = True) -> dict:
@@ -46,6 +46,23 @@ def _github_service(token: str = "mock-token") -> dict:
     }
 
 
+def _gitcode_service(
+    pat: str = "mock-pat",
+    *,
+    service_id: str = "gitcode-repo",
+) -> dict:
+    return {
+        "service_id": service_id,
+        "provider": "gitcode",
+        "enabled": True,
+        "interval_seconds": 60,
+        "max_items_per_run": None,
+        "time_range": {"mode": "all"},
+        "source": {"owner": "openJiuwen", "repo": "agent-core"},
+        "credentials": {"pat": pat},
+    }
+
+
 def _bookmark_service(service_id: str = "bookmarks") -> dict:
     service = _local_service(service_id)
     service.update(provider="browser_bookmarks", source={}, credentials={})
@@ -58,6 +75,44 @@ def test_config_normalizes_service_order_and_is_frozen():
     assert [item.service_id for item in config.fetch_services] == ["a", "z"]
     with pytest.raises(PydanticValidationError):
         config.enabled = False
+
+
+def test_directory_capacity_defaults_are_shared_and_serialized():
+    config = PersonalContextConfig.from_dict(_valid_config(_local_service()))
+
+    assert config.max_pages_per_directory == 20
+    assert config.max_subdirectories_per_directory == 20
+    dumped = config.model_dump(mode="json")
+    assert dumped["max_pages_per_directory"] == 20
+    assert dumped["max_subdirectories_per_directory"] == 20
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("max_pages_per_directory", 0),
+        ("max_pages_per_directory", 101),
+        ("max_subdirectories_per_directory", 1),
+        ("max_subdirectories_per_directory", 101),
+        ("max_pages_per_directory", True),
+        ("max_subdirectories_per_directory", 20.0),
+    ],
+)
+def test_directory_capacity_rejects_out_of_range_or_non_strict_values(field: str, value: object):
+    raw = _valid_config(_local_service())
+    raw[field] = value
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(raw)
+
+
+def test_directory_capacity_values_are_independent_shared_config_fields():
+    raw = _valid_config(_local_service())
+    raw.update(max_pages_per_directory=7, max_subdirectories_per_directory=9)
+
+    config = PersonalContextConfig.from_dict(raw)
+
+    assert (config.max_pages_per_directory, config.max_subdirectories_per_directory) == (7, 9)
 
 
 def test_dual_global_switches_default_false_and_serialize_without_legacy_fields():
@@ -211,6 +266,20 @@ def test_config_counts_each_provider_independently():
     assert len(config.fetch_services) == 40
 
 
+def test_config_counts_github_and_gitcode_provider_limits_independently():
+    github_services = []
+    gitcode_services = []
+    for index in range(20):
+        github = _github_service()
+        github["service_id"] = f"github-{index:02d}"
+        github_services.append(github)
+        gitcode_services.append(_gitcode_service(service_id=f"gitcode-{index:02d}"))
+
+    config = PersonalContextConfig.from_dict(_valid_config(*github_services, *gitcode_services))
+
+    assert len(config.fetch_services) == 40
+
+
 def test_service_id_is_bounded_to_128_safe_segment_characters():
     with pytest.raises(JiuwenValidationError):
         PersonalContextConfig.from_dict(_valid_config(_local_service("a" * 129)))
@@ -224,6 +293,7 @@ def test_service_id_is_bounded_to_128_safe_segment_characters():
     [
         ("local_files", {"root_dir": "~/notes"}, {}),
         ("github", {"owner": "openai", "repo": "agent-core"}, {"token": "mock"}),
+        ("gitcode", {"owner": "openJiuwen", "repo": "agent-core"}, {"pat": "mock"}),
         (
             "feishu",
             {"mode": "account", "resources": ["docs"]},
@@ -232,6 +302,7 @@ def test_service_id_is_bounded_to_128_safe_segment_characters():
         ("browser_bookmarks", {}, {}),
         ("zhihu_reader", {"column_url": "https://www.zhihu.com/column/example"}, {}),
         ("toutiao_reader", {"profile_url": "https://www.toutiao.com/c/user/token/example"}, {}),
+        ("rss_feed", {"feed_url": "https://example.com/feed.xml?topic=office"}, {}),
     ],
 )
 def test_config_accepts_the_closed_provider_shapes(provider: str, source: dict, credentials: dict):
@@ -250,6 +321,82 @@ def test_feishu_rejects_embedded_access_tokens():
         source={"mode": "account", "resources": ["docs"]},
         credentials={"access_token": "mock-token"},
     )
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(_valid_config(service))
+
+
+@pytest.mark.parametrize("provider", ["github", "gitcode"])
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"owner": ".", "repo": "agent-core"},
+        {"owner": "..", "repo": "agent-core"},
+        {"owner": "org/name", "repo": "agent-core"},
+        {"owner": "openJiuwen", "repo": "../agent-core"},
+        {"owner": "openJiuwen", "repo": "agent/core"},
+        {"owner": "", "repo": "agent-core"},
+    ],
+)
+def test_repository_providers_require_safe_owner_and_repo_segments(
+    provider: str,
+    source: dict[str, str],
+):
+    service = _github_service() if provider == "github" else _gitcode_service()
+    service["source"] = source
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(_valid_config(service))
+
+
+@pytest.mark.parametrize("provider", ["github", "gitcode"])
+def test_repository_provider_resources_default_to_the_closed_order(provider: str):
+    service = _github_service() if provider == "github" else _gitcode_service()
+
+    config = PersonalContextConfig.from_dict(_valid_config(service))
+
+    assert config.fetch_services[0].source["resources"] == [
+        "readme",
+        "issues",
+        "pull_requests",
+        "commits",
+        "code",
+    ]
+
+
+@pytest.mark.parametrize("provider", ["github", "gitcode"])
+@pytest.mark.parametrize("resources", [[], ["unknown"], ["readme", "unknown"]])
+def test_repository_provider_resources_reject_empty_or_unknown_values(
+    provider: str,
+    resources: list[str],
+):
+    service = _github_service() if provider == "github" else _gitcode_service()
+    service["source"]["resources"] = resources
+
+    with pytest.raises(JiuwenValidationError):
+        PersonalContextConfig.from_dict(_valid_config(service))
+
+
+@pytest.mark.parametrize(
+    ("provider", "credentials"),
+    [
+        ("github", {}),
+        ("github", {"pat": "mock"}),
+        ("github", {"token": ""}),
+        ("github", {"token": "mock", "extra": "value"}),
+        ("gitcode", {}),
+        ("gitcode", {"token": "mock"}),
+        ("gitcode", {"access_token": "mock"}),
+        ("gitcode", {"pat": ""}),
+        ("gitcode", {"pat": "mock", "extra": "value"}),
+    ],
+)
+def test_repository_provider_credentials_have_exact_closed_shapes(
+    provider: str,
+    credentials: dict[str, str],
+):
+    service = _github_service() if provider == "github" else _gitcode_service()
+    service["credentials"] = credentials
 
     with pytest.raises(JiuwenValidationError):
         PersonalContextConfig.from_dict(_valid_config(service))
@@ -280,6 +427,54 @@ def test_source_urls_reject_query_and_fragment_without_leaking_credentials():
     assert "mock-secret" not in error.to_json()
     assert error.__cause__ is None or "mock-secret" not in str(error.__cause__)
     assert error.__context__ is None
+
+
+def test_rss_feed_normalizes_https_url_and_keeps_query():
+    service = PersonalContextFetchServiceConfig(
+        service_id="company-feed",
+        provider="rss_feed",
+        enabled=True,
+        time_range={"mode": "all"},
+        source={"feed_url": "https://example.com/feed.xml?topic=office#ignored"},
+        credentials={},
+    )
+
+    assert service.source == {"feed_url": "https://example.com/feed.xml?topic=office"}
+    assert service.credentials == {}
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        {"feed_url": "http://example.com/feed.xml"},
+        {"feed_url": "https://user:password@example.com/feed.xml"},
+        {"feed_url": "https://example.com:8443/feed.xml"},
+        {"feed_url": ""},
+        {"feed_url": "https://example.com/feed.xml", "extra": True},
+    ],
+)
+def test_rss_feed_rejects_unsafe_or_unknown_source(source: dict[str, object]):
+    with pytest.raises(PydanticValidationError):
+        PersonalContextFetchServiceConfig(
+            service_id="company-feed",
+            provider="rss_feed",
+            enabled=True,
+            time_range={"mode": "all"},
+            source=source,
+            credentials={},
+        )
+
+
+def test_rss_feed_rejects_credentials():
+    with pytest.raises(PydanticValidationError):
+        PersonalContextFetchServiceConfig(
+            service_id="company-feed",
+            provider="rss_feed",
+            enabled=True,
+            time_range={"mode": "all"},
+            source={"feed_url": "https://example.com/feed.xml"},
+            credentials={"token": "must-not-be-stored"},
+        )
 
 
 def test_sensitive_source_path_is_rejected():

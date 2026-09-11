@@ -13,10 +13,7 @@ import pytest
 from openjiuwen.core.context_engine.base import ContextWindow, ContextWindowChange
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.kv_cache import (
-    KV_CACHE_EPHEMERAL_TAIL_METADATA,
-    KVCacheAffinityConfig,
-)
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ProviderType
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, SystemMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
@@ -35,22 +32,16 @@ class _FakeAffinityLLM:
         self.invoke_kwargs: dict[str, Any] | None = None
         self.stream_kwargs: dict[str, Any] | None = None
 
-    def supports_kv_cache_release(self) -> bool:
-        return False
-
     def supports_kv_cache_affinity(self) -> bool:
         return True
 
-    def build_kv_cache_invoke_kwargs(self, **_: Any) -> dict[str, Any]:
-        return {}
-
     def build_kv_cache_affinity_invoke_kwargs(
-            self,
-            *,
-            session_id: str | None = None,
-            parent_session_id: str | None = None,
-            enable_kv_cache_affinity: bool = False,
-            **_: Any,
+        self,
+        *,
+        session_id: str | None = None,
+        parent_session_id: str | None = None,
+        enable_kv_cache_affinity: bool = False,
+        **_: Any,
     ) -> dict[str, Any]:
         if not enable_kv_cache_affinity:
             return {}
@@ -84,11 +75,11 @@ class _FakeNonAffinityLLM(_FakeAffinityLLM):
 
 class _FakeContext:
     def __init__(
-            self,
-            *,
-            window: ContextWindow,
-            change: ContextWindowChange | None = None,
-            session_id: str = "ctx_session",
+        self,
+        *,
+        window: ContextWindow,
+        change: ContextWindowChange | None = None,
+        session_id: str = "ctx_session",
     ) -> None:
         self.window = window
         self.change = change
@@ -112,13 +103,6 @@ def _msg(role: str, content: str) -> BaseMessage:
     if role == "assistant":
         return AssistantMessage(content=content)
     return UserMessage(content=content)
-
-
-def _attachment(content: str = "attachment") -> UserMessage:
-    return UserMessage(
-        content=content,
-        metadata={KV_CACHE_EPHEMERAL_TAIL_METADATA: True},
-    )
 
 
 def _tool(name: str) -> ToolInfo:
@@ -277,93 +261,6 @@ async def test_react_agent_projects_only_prompt_attachments_for_system_role_prov
         isinstance(message, UserMessage) and "dynamic context" in message.content
         for message in history_messages
     )
-
-
-@pytest.mark.asyncio
-async def test_attachment_tail_is_evicted_after_normal_inference() -> None:
-    session = Session(session_id="sess_affinity")
-    context = _FakeContext(
-        window=_window([_msg("user", "q1"), _attachment()]),
-        change=None,
-    )
-    llm = _FakeAffinityLLM()
-    agent = _agent()
-    agent.set_llm(llm)
-
-    result = await agent._railed_model_call(_ctx(agent, session, context))
-
-    assert result.content == "ok"
-    assert llm.evict_calls == []
-    assert llm.invoke_kwargs["kv_action"] == "evict"
-    assert llm.invoke_kwargs["target"] == "messages"
-    assert llm.invoke_kwargs["manage_request"] is False
-    # system + user + attachment; the range is half-open.
-    assert llm.invoke_kwargs["msg_start"] == 2
-    assert llm.invoke_kwargs["msg_end"] == 3
-
-
-@pytest.mark.asyncio
-async def test_displaced_attachment_tail_does_not_send_duplicate_pure_management() -> None:
-    session = Session(session_id="sess_affinity")
-    old_messages = [
-        _msg("system", "system"),
-        _msg("user", "q1"),
-        _attachment("old attachment"),
-    ]
-    new_window = _window([
-        _msg("user", "q1"),
-        _msg("assistant", "a1"),
-        _msg("user", "q2"),
-        _attachment("new attachment"),
-    ])
-    context = _FakeContext(
-        window=new_window,
-        change=ContextWindowChange(
-            old_messages=old_messages,
-            old_tools=[],
-            msg_start=2,
-            msg_end=3,
-        ),
-    )
-    llm = _FakeAffinityLLM()
-    agent = _agent()
-    agent.set_llm(llm)
-
-    await agent._railed_model_call(_ctx(agent, session, context))
-
-    assert llm.evict_calls == []
-    assert llm.invoke_kwargs["manage_request"] is False
-    assert llm.invoke_kwargs["msg_start"] == len(new_window.get_messages()) - 1
-    assert llm.invoke_kwargs["msg_end"] == len(new_window.get_messages())
-
-
-@pytest.mark.asyncio
-async def test_real_body_change_still_sends_pure_management_before_tail_evict() -> None:
-    session = Session(session_id="sess_affinity")
-    old_messages = [
-        _msg("system", "system"),
-        _msg("user", "old q"),
-        _attachment(),
-    ]
-    context = _FakeContext(
-        window=_window([_msg("user", "new q"), _attachment()]),
-        change=ContextWindowChange(
-            old_messages=old_messages,
-            old_tools=[],
-            msg_start=1,
-            msg_end=3,
-        ),
-    )
-    llm = _FakeAffinityLLM()
-    agent = _agent()
-    agent.set_llm(llm)
-
-    await agent._railed_model_call(_ctx(agent, session, context))
-
-    assert len(llm.evict_calls) == 1
-    assert llm.evict_calls[0]["msg_start"] == 1
-    assert llm.evict_calls[0]["msg_end"] == 3
-    assert llm.invoke_kwargs["manage_request"] is False
 
 
 @pytest.mark.asyncio
@@ -533,39 +430,6 @@ async def test_affinity_disabled_does_not_detect_or_evict_or_add_agent_hint_kwar
 
 
 @pytest.mark.asyncio
-async def test_affinity_disabled_attachment_does_not_enable_kvc_behavior() -> None:
-    session = Session(session_id="sess_disabled")
-    context = _FakeContext(
-        window=_window([_msg("user", "query"), _attachment()]),
-        change=ContextWindowChange(
-            old_messages=[_msg("user", "old"), _attachment("old attachment")],
-            old_tools=[],
-            msg_start=0,
-            msg_end=2,
-        ),
-    )
-    llm = _FakeAffinityLLM()
-    agent = _agent(enable_affinity=False)
-    agent.set_llm(llm)
-
-    result = await agent._railed_model_call(_ctx(agent, session, context))
-
-    assert result.content == "ok"
-    assert context.detected_windows == []
-    assert llm.evict_calls == []
-    for key in (
-        "session_id",
-        "parent_session_id",
-        "kv_action",
-        "target",
-        "manage_request",
-        "msg_start",
-        "msg_end",
-    ):
-        assert key not in llm.invoke_kwargs
-
-
-@pytest.mark.asyncio
 async def test_affinity_disabled_does_not_touch_capability_or_lineage() -> None:
     session = MagicMock(spec=Session)
     session.get_session_id.return_value = "sess_disabled"
@@ -579,18 +443,8 @@ async def test_affinity_disabled_does_not_touch_capability_or_lineage() -> None:
         ),
     )
     llm = MagicMock()
-    llm.supports_kv_cache_release.side_effect = AssertionError(
-        "release capability must remain untouched"
-    )
-    llm.supports_kv_cache_affinity.side_effect = AssertionError(
-        "affinity capability must remain untouched"
-    )
-    llm.build_kv_cache_invoke_kwargs.side_effect = AssertionError(
-        "release kwargs must remain untouched"
-    )
-    llm.build_kv_cache_affinity_invoke_kwargs.side_effect = AssertionError(
-        "affinity kwargs must remain untouched"
-    )
+    llm.supports_kv_cache_affinity.side_effect = AssertionError("affinity capability must remain untouched")
+    llm.build_kv_cache_affinity_invoke_kwargs.side_effect = AssertionError("affinity kwargs must remain untouched")
     llm.invoke = AsyncMock(return_value=AssistantMessage(content="ok"))
     agent = _agent(enable_affinity=False)
     agent.set_llm(llm)
@@ -600,9 +454,7 @@ async def test_affinity_disabled_does_not_touch_capability_or_lineage() -> None:
     assert result.content == "ok"
     assert context.detected_windows == []
     session.get_env.assert_not_called()
-    llm.supports_kv_cache_release.assert_not_called()
     llm.supports_kv_cache_affinity.assert_not_called()
-    llm.build_kv_cache_invoke_kwargs.assert_not_called()
     llm.build_kv_cache_affinity_invoke_kwargs.assert_not_called()
     invoke_kwargs = llm.invoke.await_args.kwargs
     assert "session_id" not in invoke_kwargs
@@ -624,11 +476,3 @@ async def test_non_affinity_llm_does_not_detect_or_evict() -> None:
     assert llm.evict_calls == []
     assert "session_id" not in llm.invoke_kwargs
     assert "parent_session_id" not in llm.invoke_kwargs
-
-
-def test_kv_cache_affinity_config_rejects_double_enable() -> None:
-    with pytest.raises(ValueError, match="cannot both be True"):
-        KVCacheAffinityConfig(
-            enable_kv_cache_release=True,
-            enable_kv_cache_affinity=True,
-        )

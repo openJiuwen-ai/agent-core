@@ -38,7 +38,7 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
 - 子代理工具（`SubagentSpawnTool` 等）—— `S_05`。
 - 预设子代理（browser/code/research/verification）—— `S_18`。
 - `SubagentRail` / `SessionRail` —— `S_04`。
-- KVC 亲和（`kv_cache_hooks.py`）—— `S_16`。
+- KVC 亲和（`kv_cache_subagent_lifecycle.py`）—— `S_16`。
 
 ## 不变量
 
@@ -145,6 +145,6 @@ class SubagentStatusKind(str, Enum):
 - 预设子代理（`subagents/`）被 manifest 构建器（`S_12`）注册、被
   `SubagentRail`（`S_04`）挂载。
 - 活动/转录投影喂给宿主 UI —— `S_02` 输出流（`S_15` CLI 消费）。
-- KVC 亲和钩子挂在子代理生命周期 —— `S_16`。
+- KVC 子代理生命周期适配 —— `S_16`。
 - 与 `agent_teams` 的 `F_44`（worker-not-teammate-no-db）同属子代理运行时思想，但实现
   独立（harness 侧不自带 DB，状态走 record 文件）。

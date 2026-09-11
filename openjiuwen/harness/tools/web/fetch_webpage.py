@@ -204,7 +204,13 @@ class WebFetchWebpageTool(Tool):
 
     @staticmethod
     async def _fetch_webpage(request: _FetchRequest) -> dict[str, Any]:
-        """Fetch webpage content, falling back to the jina.ai reader on 401/403/429."""
+        """Fetch webpage content, falling back to the jina.ai reader when the
+        direct GET is blocked or returns a JS-rendered shell.
+
+        Hard blocks (401/403/429) and paywalls (499) go straight to the reader.
+        A 202 soft-block, or an HTML body with no extractable text (a JS shell),
+        also falls back when no restricted domestic source scope is configured.
+        """
         if request.allowed_domains and not _domain_allowed(request.url, request.allowed_domains):
             raise ValueError("URL is outside the configured domestic academic source domains")
         status, headers, body, final_url, truncated = await _http.request(
@@ -216,7 +222,7 @@ class WebFetchWebpageTool(Tool):
             max_bytes=request.byte_cap,
             proxy_url=request.proxy_url,
         )
-        if status in {401, 403, 429}:
+        if status in {202, 401, 403, 429, 499}:
             if request.allowed_domains:
                 raise ValueError(
                     "reader proxy fallback is disabled for the configured domestic source scope"
@@ -238,6 +244,20 @@ class WebFetchWebpageTool(Tool):
 
         if "html" in content_type.lower():
             title, text = WebFetchWebpageTool._extract_main_text_from_html(text)
+            # A JS-rendered page returns an HTML shell with no extractable text;
+            # only fall back when there actually was a body to render.
+            if not title.strip() and not text.strip() and body:
+                if request.allowed_domains:
+                    raise ValueError(
+                        "reader proxy fallback is disabled for the configured domestic source scope"
+                    )
+                return await WebFetchWebpageTool._fetch_via_jina_reader(
+                    request.session,
+                    request.url,
+                    request.timeout_seconds,
+                    request.byte_cap,
+                    proxy_url=request.proxy_url,
+                )
         else:
             text = re.sub(r"\s+", " ", text).strip()
 

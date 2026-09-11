@@ -142,6 +142,18 @@ def zip_bytes(*entries: tuple[str, bytes, int | None]) -> bytes:
     return stream.getvalue()
 
 
+def branch_response(head: str, candidate_time: str = "2026-01-01T00:00:00Z") -> FakeResponse:
+    return FakeResponse(
+        {
+            "name": "main",
+            "commit": {
+                "sha": head,
+                "commit": {"committer": {"date": candidate_time}},
+            },
+        }
+    )
+
+
 async def _no_retry_sleep(_delay: float) -> None:
     return None
 
@@ -215,6 +227,7 @@ async def test_github_archive_retry_extracts_only_successful_download(
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "pushed_at": "2026-01-01T00:00:00Z"})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         archive_url: [FakeResponse({}, status=503), FakeResponse({}, content=archive)],
     }
     FakeSession.requests = []
@@ -254,6 +267,7 @@ async def test_github_fetches_enabled_resources_and_materializes_code(
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "pushed_at": "2026-01-01T00:00:00Z"})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
@@ -262,7 +276,7 @@ async def test_github_fetches_enabled_resources_and_materializes_code(
             FakeResponse([]),
         ],
         "https://api.github.com/repos/acme/demo/pulls": [FakeResponse([])],
-        "https://api.github.com/repos/acme/demo/commits": [FakeResponse([])],
+        "https://api.github.com/repos/acme/demo/commits": [FakeResponse([]) for _ in range(20)],
         f"https://api.github.com/repos/acme/demo/zipball/{head}": [FakeResponse({}, content=archive)],
     }
     FakeSession.timeout_totals = []
@@ -330,6 +344,7 @@ async def test_github_resource_lanes_apply_their_defined_times(
     commit_sha = "b" * 40
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main"})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(commit_sha, recent)],
         "https://api.github.com/repos/acme/demo/issues": [
             FakeResponse(
                 [
@@ -394,6 +409,7 @@ async def test_github_readme_and_code_use_head_commit_time_before_materializatio
         "https://api.github.com/repos/acme/demo": [
             FakeResponse({"default_branch": "main", "sha": head, "head_commit_time": head_time})
         ],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head, head_time)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
@@ -467,12 +483,16 @@ async def test_github_total_limit_selects_latest_across_enabled_resources(
     ]
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main"})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(str(commits[-1]["sha"]), timestamp)],
         "https://api.github.com/repos/acme/demo/readme": [
             FakeResponse({"encoding": "base64", "content": base64.b64encode(b"# Demo").decode()})
         ],
         "https://api.github.com/repos/acme/demo/issues": [FakeResponse(issues)],
         "https://api.github.com/repos/acme/demo/pulls": [FakeResponse(pulls)],
-        "https://api.github.com/repos/acme/demo/commits": [FakeResponse(commits)],
+        "https://api.github.com/repos/acme/demo/commits": [
+            FakeResponse(commits),
+            *[FakeResponse([]) for _ in range(20)],
+        ],
     }
     monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
     provider = GitHubFetchService(
@@ -505,6 +525,7 @@ async def test_github_rejects_unsafe_archive_and_wrong_run_cannot_commit_or_abor
     archive_url = f"https://api.github.com/repos/acme/demo/zipball/{'a' * 40}"
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main", "sha": "a" * 40})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response("a" * 40)],
         archive_url: [FakeResponse({}, content=archive)],
     }
     FakeSession.requests = []
@@ -539,6 +560,7 @@ async def test_github_rejects_casefold_duplicate_archive_paths(tmp_path: Path, m
     )
     FakeSession.responses = {
         "https://api.github.com/repos/acme/demo": [FakeResponse({"default_branch": "main", "sha": head})],
+        "https://api.github.com/repos/acme/demo/branches/main": [branch_response(head)],
         f"https://api.github.com/repos/acme/demo/zipball/{head}": [FakeResponse({}, content=archive)],
     }
     monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
@@ -728,7 +750,8 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
         FakeSession.timeout_totals = []
         monkeypatch.setattr(github_module.aiohttp, "ClientSession", FakeSession)
 
-    install_responses([initial, initial, initial])
+    initial_pages = [initial[index : index + 100] for index in range(0, len(initial), 100)]
+    install_responses([*initial_pages[:2], *initial_pages, *initial_pages])
     service = GitHubFetchService(
         github_config(tmp_path, resources=["issues"], max_items_per_run=100),
         home=tmp_path / "home",
@@ -752,7 +775,7 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
     assert len(cursor["_selection"]["completed"]) == 205
 
     priority_initial = initial
-    install_responses([priority_initial])
+    install_responses([priority_initial[:100], priority_initial[100:200]])
     priority_service = GitHubFetchService(
         github_config(tmp_path, resources=["issues"], max_items_per_run=100),
         home=tmp_path / "priority-home",
@@ -777,7 +800,8 @@ async def test_github_issues_continue_history_and_prioritize_new_changes(
             issue(1001, "2026-01-01T01:00:03Z", title="New B"),
         ]
     )
-    install_responses([changed])
+    changed.sort(key=lambda item: str(item["updated_at"]), reverse=True)
+    install_responses([changed[index : index + 100] for index in range(0, len(changed), 100)])
     second = await _batches(priority_service, run_id="priority-b", cursor=first_cursor)
     second_items = [item for batch in second for item in batch.items]
     assert len(second_items) == 100

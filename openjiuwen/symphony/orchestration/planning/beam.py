@@ -19,6 +19,7 @@ from openjiuwen.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
 )
+from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
 from openjiuwen.symphony.orchestration.planning.models import (
     OrchestrationPlan,
     SearchState,
@@ -29,9 +30,8 @@ from openjiuwen.symphony.orchestration.planning.plan_builder import (
     edge_plan_item,
     state_to_plan,
 )
-from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.planning.runtime import RuntimeEdgeResolver, edge_weight
 from openjiuwen.symphony.orchestration.planning.utils import (
-    eligible_can_feed_edges,
     normalize_known_skill_ids,
     skill_id,
     skill_payload,
@@ -330,6 +330,8 @@ class BidirectionalBeamPlanner:
         max_concurrent_judges: int = DEFAULT_MAX_CONCURRENT_JUDGES,
         progress_callback: BeamProgressCallback | None = None,
         language: str = "cn",
+        dynamic_overlay: dict[str, Any] | None = None,
+        task_cluster_id: str | None = None,
     ) -> None:
         self.artifacts = artifacts
         self.model = model
@@ -345,6 +347,8 @@ class BidirectionalBeamPlanner:
         )
         self.progress_callback = progress_callback
         self.language = language
+        self.dynamic_overlay = dynamic_overlay if isinstance(dynamic_overlay, dict) else {}
+        self.task_cluster_id = task_cluster_id
         self.eligible_edges = self._sorted_eligible_edges()
         self._beam_graph = BeamSearchGraph(self.skill_by_id)
         self.outgoing_edges = build_outgoing_edges(self.eligible_edges)
@@ -448,6 +452,8 @@ class BidirectionalBeamPlanner:
             "llm_call_count": self._llm_call_count + self._final_rerank_call_count,
             "candidate_skill_count": len(unique_skill_ids),
             "candidate_edge_count": len(self.eligible_edges),
+            "dynamic_overlay_used": bool(self._runtime_summary["applied_edges"]),
+            "runtime_scoring_summary": self._runtime_summary,
             "plans": recommended_plans,
             "recommended_plans": recommended_plans,
             "ranking_mode": "bidirectional_beam",
@@ -658,6 +664,8 @@ class BidirectionalBeamPlanner:
                     "source_id": source_id,
                     "target_id": target_id,
                     "confidence": edge.get("confidence"),
+                    "runtime_weight": edge.get("runtime_weight"),
+                    "planner_weight": edge.get("effective_weight"),
                 }
             )
         return output
@@ -1270,7 +1278,7 @@ class BidirectionalBeamPlanner:
     def _state_edge_confidence(self, state: BeamState) -> float:
         if not state.edge_indices:
             return 1.0
-        values = [float(self.eligible_edges[index].get("confidence") or 0.0) for index in state.edge_indices]
+        values = [edge_weight(self.eligible_edges[index]) for index in state.edge_indices]
         return sum(values) / len(values)
 
     @staticmethod
@@ -1290,11 +1298,16 @@ class BidirectionalBeamPlanner:
         }
 
     def _sorted_eligible_edges(self) -> list[dict[str, Any]]:
-        return eligible_can_feed_edges(
-            self.artifacts.graph.get("edges", []),
-            known_skill_ids=set(self.skill_by_id),
-            min_confidence=self.min_edge_confidence,
+        resolver = RuntimeEdgeResolver(
+            self.artifacts,
+            min_edge_confidence=self.min_edge_confidence,
+            candidate_skill_ids=self.candidate_skill_ids,
+            dynamic_overlay=self.dynamic_overlay,
+            task_cluster_id=self.task_cluster_id,
         )
+        output = resolver.resolve()
+        self._runtime_summary = resolver.summary
+        return output
 
     def _plan_payload(self, plan: OrchestrationPlan, *, query: str) -> dict[str, Any]:
         payload = plan.to_dict()

@@ -258,7 +258,7 @@ async def test_rail_is_deep_agent_rail_and_injects_fixed_attachment(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_rail_caps_root_at_3000_and_reports_total_bytes_and_sources_path(tmp_path: Path) -> None:
+async def test_rail_caps_root_at_3000_and_points_to_semantic_root_navigation(tmp_path: Path) -> None:
     _write_runtime_config(tmp_path)
     context_root = tmp_path / "workspace" / "context"
     context_root.mkdir(parents=True)
@@ -274,7 +274,10 @@ async def test_rail_caps_root_at_3000_and_reports_total_bytes_and_sources_path(t
     [item] = await manager.collect_for_session("session-1")
     content = item.content or ""
     assert f"description_size_bytes: `{len(description_text.encode('utf-8'))}`" in content
-    assert f"sources_description_path: `{context_root / 'sources' / 'description.md'}`" in content
+    assert f"context_root: `{context_root}`" in content
+    assert f"description_path: `{context_root / 'description.md'}`" in content
+    assert "sources_description_path" not in content
+    assert "从顶层 description.md 开始，按其中相对链接继续读取" in content
     assert "本次仅载入前 3000 个字符" in content
     assert "中" * 3000 in content
     assert "中" * 3001 not in content

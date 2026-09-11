@@ -17,8 +17,8 @@ import re
 import shutil
 import stat
 import zipfile
-from collections.abc import AsyncIterator, Mapping
-from datetime import datetime
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from datetime import UTC, datetime, timedelta
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -50,7 +50,12 @@ _REQUEST_TIMEOUT_SECONDS = 20 * 60
 _CHUNK_SIZE = 1024 * 1024
 _MAX_CONTENT_CHARS = 2_000_000
 _MAX_JSON_RESPONSE_BYTES = 16 * 1024 * 1024
+_MAX_METADATA_REQUESTS = 100
 _SHA = re.compile(r"^[0-9a-fA-F]{40}$")
+_GITHUB_DATE_FLOOR = datetime(1970, 1, 2, tzinfo=UTC)
+_GITHUB_DATE_CEILING = datetime(2099, 12, 30, tzinfo=UTC)
+
+_MetadataRequest = Callable[..., Awaitable[object | None]]
 
 
 def _fetch_error(message: str, cause: BaseException | None = None) -> BaseError:
@@ -502,6 +507,422 @@ def _github_candidate(
     }
 
 
+def _parse_candidate_time(value: object, *, label: str) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise _fetch_error(f"GitHub {label} candidate has no usable time")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise _fetch_error(f"GitHub {label} candidate has an invalid time", exc) from None
+    if parsed.tzinfo is None:
+        raise _fetch_error(f"GitHub {label} candidate time has no timezone")
+    return parsed.astimezone(UTC)
+
+
+def _format_candidate_time(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _selection_receipts(cursor: Mapping[str, object] | None) -> tuple[Mapping[str, object], ...]:
+    if cursor is None:
+        return ()
+    selection = cursor.get("_selection")
+    if not isinstance(selection, Mapping):
+        return ()
+    completed = selection.get("completed", ())
+    if not isinstance(completed, list):
+        return ()
+    return tuple(receipt for receipt in completed if isinstance(receipt, Mapping))
+
+
+def _known_lane_ids(
+    cursor: Mapping[str, object] | None,
+    *,
+    lane: str,
+) -> set[str]:
+    return {
+        str(receipt.get("stable_id", ""))
+        for receipt in _selection_receipts(cursor)
+        if receipt.get("resource_lane") == lane
+    }
+
+
+def _candidate_priority(candidate: Mapping[str, object], cursor: Mapping[str, object] | None) -> int:
+    receipt_revisions = set()
+    for matched_receipt in _selection_receipts(cursor):
+        if matched_receipt.get("resource_lane") != candidate.get("resource_lane"):
+            continue
+        if matched_receipt.get("stable_id") != candidate.get("stable_id"):
+            continue
+        receipt_revisions.add(str(matched_receipt.get("revision_id", "")))
+    known_revisions = receipt_revisions
+    revision = str(candidate.get("revision_id", ""))
+    changed_revision = bool(known_revisions) and revision not in known_revisions
+    selection = cursor.get("_selection") if isinstance(cursor, Mapping) else None
+    latest = selection.get("latest_seen_time") if isinstance(selection, Mapping) else None
+    newly_visible = latest is None or _parse_candidate_time(
+        candidate.get("candidate_time"), label=str(candidate.get("resource_lane", "resource"))
+    ) > _parse_candidate_time(latest, label="cursor")
+    return 0 if changed_revision or newly_visible else 1
+
+
+def _bounded_lane_candidates(
+    candidates: list[dict[str, object]],
+    *,
+    cursor: dict[str, object] | None,
+    limit: int,
+) -> None:
+    candidates[:] = list(select_latest_candidates(tuple(candidates), cursor, limit))
+
+
+def _lane_can_stop(
+    candidates: list[dict[str, object]],
+    *,
+    cursor: dict[str, object] | None,
+    limit: int,
+    unread_time_upper_bound: datetime,
+    known_ids: set[str],
+    seen_known_ids: set[str],
+) -> bool:
+    selected = select_latest_candidates(tuple(candidates), cursor, limit)
+    if len(selected) < limit:
+        return False
+    nth = selected[-1]
+    nth_time = _parse_candidate_time(nth.get("candidate_time"), label=str(nth.get("resource_lane", "resource")))
+    if unread_time_upper_bound >= nth_time:
+        return False
+    return _candidate_priority(nth, cursor) == 0 or known_ids <= seen_known_ids
+
+
+def _resource_candidate(
+    payload: Mapping[str, object],
+    *,
+    owner: str,
+    repo: str,
+    resource: str,
+    label: str,
+    is_commit: bool,
+    time_range: Mapping[str, object],
+    run_started_at: datetime,
+) -> dict[str, object] | None:
+    identifier = payload.get("sha") if is_commit else payload.get("number")
+    if identifier is None:
+        return None
+    stable_id = f"github:{owner}/{repo}:{label}:{identifier}"
+    candidate_time = _iso_value(payload, commit=is_commit)
+    content = _github_resource_content(payload, stable_id=stable_id, is_commit=is_commit)
+    raw_snapshot = _json_bytes(payload)
+    item = RawChangeItem(
+        logical_id=stable_id,
+        revision_id=_json_digest(payload),
+        operation="upsert",
+        title=str(payload.get("title") or content.splitlines()[0] or stable_id),
+        content=content[:_MAX_CONTENT_CHARS],
+        original_ref=str(payload.get("html_url") or f"https://github.com/{owner}/{repo}"),
+        metadata={
+            "resource": resource,
+            "repository": f"github:{owner}/{repo}",
+            "number": identifier,
+            "updated_at": candidate_time,
+            "content_truncated": len(content) > _MAX_CONTENT_CHARS,
+            "raw_snapshot_omitted": raw_snapshot is None,
+        },
+        raw_snapshot=raw_snapshot,
+    )
+    return _github_candidate(
+        item,
+        lane=label,
+        candidate_time=candidate_time,
+        time_range=time_range,
+        run_started_at=run_started_at,
+    )
+
+
+def _remote_commit_bounds(
+    start: datetime | None,
+    end: datetime | None,
+) -> tuple[datetime | None, datetime | None]:
+    since: datetime | None = None
+    until: datetime | None = None
+    if start is not None:
+        if start > _GITHUB_DATE_CEILING:
+            since = _GITHUB_DATE_CEILING
+        elif start >= _GITHUB_DATE_FLOOR:
+            since = start - timedelta(seconds=1)
+    if end is not None:
+        if end < _GITHUB_DATE_FLOOR:
+            until = _GITHUB_DATE_FLOOR
+        elif end <= _GITHUB_DATE_CEILING:
+            until = end + timedelta(seconds=1)
+    return since, until
+
+
+def _window_contains(candidate_time: datetime, start: datetime | None, end: datetime | None) -> bool:
+    return (start is None or candidate_time >= start) and (end is None or candidate_time < end)
+
+
+async def _discover_resource_list(
+    request_json: _MetadataRequest,
+    *,
+    owner: str,
+    repo: str,
+    token: str,
+    resource: str,
+    endpoint_name: str,
+    label: str,
+    time_range: Mapping[str, object],
+    run_started_at: datetime,
+    cursor: dict[str, object] | None,
+    limit: int,
+) -> list[dict[str, object]]:
+    requires_complete_listing = resource == "pull_requests"
+    candidates: list[dict[str, object]] = []
+    known_ids = _known_lane_ids(
+        cursor,
+        lane=label,
+    )
+    seen_known_ids: set[str] = set()
+    seen_records: set[str] = set()
+    seen_payloads: dict[str, str] = {}
+    page_fingerprints: set[str] = set()
+    previous_time: datetime | None = None
+    endpoint = f"{_API_ROOT}/repos/{owner}/{repo}/{endpoint_name}"
+    lower_bound: datetime | None = None
+    if time_range.get("mode") == "recent":
+        recent_days = time_range.get("recent_days")
+        if isinstance(recent_days, bool) or not isinstance(recent_days, int):
+            raise _fetch_error("GitHub recent time range is invalid")
+        lower_bound = run_started_at.astimezone(UTC) - timedelta(days=recent_days)
+    elif time_range.get("mode") == "fixed":
+        lower_bound = _parse_candidate_time(time_range.get("start_at"), label="fixed range")
+
+    for page in range(1, _MAX_METADATA_REQUESTS + 1):
+        payload = await request_json(
+            endpoint,
+            token,
+            params={
+                "page": page,
+                "per_page": 100,
+                "state": "all",
+                "sort": "updated",
+                "direction": "desc",
+            },
+        )
+        current = _as_list(payload, name=endpoint_name)
+        if len(current) > 100:
+            raise _fetch_error(f"GitHub {endpoint_name} response exceeds requested page size")
+        fingerprint = _json_digest(current)
+        if fingerprint in page_fingerprints:
+            raise _fetch_error(f"GitHub {endpoint_name} pagination repeated a page")
+        page_fingerprints.add(fingerprint)
+        if not current:
+            return candidates
+        advanced = False
+        for item in current:
+            candidate_time = _parse_candidate_time(_iso_value(item), label=label)
+            if not requires_complete_listing:
+                if previous_time is not None and candidate_time > previous_time:
+                    raise _fetch_error(f"GitHub {endpoint_name} response is not ordered by updated time")
+                previous_time = candidate_time
+            identifier = item.get("number")
+            payload_digest = _json_digest(item)
+            record_key = str(identifier) if identifier is not None else payload_digest
+            if record_key in seen_records:
+                if requires_complete_listing and seen_payloads.get(record_key) != payload_digest:
+                    raise _fetch_error(f"GitHub {endpoint_name} payload changed during pagination")
+                continue
+            seen_records.add(record_key)
+            if requires_complete_listing:
+                seen_payloads[record_key] = payload_digest
+            advanced = True
+            if resource == "issues" and "pull_request" in item:
+                continue
+            if identifier is None:
+                continue
+            stable_id = f"github:{owner}/{repo}:{label}:{identifier}"
+            if stable_id in known_ids:
+                seen_known_ids.add(stable_id)
+            candidate = _resource_candidate(
+                item,
+                owner=owner,
+                repo=repo,
+                resource=resource,
+                label=label,
+                is_commit=False,
+                time_range=time_range,
+                run_started_at=run_started_at,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+        _bounded_lane_candidates(candidates, cursor=cursor, limit=limit)
+        if not advanced:
+            raise _fetch_error(f"GitHub {endpoint_name} pagination did not advance")
+        if len(current) < 100:
+            return candidates
+        if requires_complete_listing:
+            continue
+        if lower_bound is not None and previous_time is not None and previous_time < lower_bound:
+            return candidates
+        if previous_time is not None and _lane_can_stop(
+            candidates,
+            cursor=cursor,
+            limit=limit,
+            unread_time_upper_bound=previous_time,
+            known_ids=known_ids,
+            seen_known_ids=seen_known_ids,
+        ):
+            return candidates
+    raise _fetch_error(f"GitHub {endpoint_name} pagination exceeded the metadata request budget")
+
+
+async def _discover_commits(
+    request_json: _MetadataRequest,
+    *,
+    owner: str,
+    repo: str,
+    token: str,
+    head_sha: str,
+    head_time: datetime,
+    time_range: Mapping[str, object],
+    run_started_at: datetime,
+    cursor: dict[str, object] | None,
+    limit: int,
+) -> list[dict[str, object]]:
+    candidates: list[dict[str, object]] = []
+    known_ids = _known_lane_ids(
+        cursor,
+        lane="commit",
+    )
+    seen_known_ids: set[str] = set()
+    observed_revisions: dict[str, str] = {}
+    endpoint = f"{_API_ROOT}/repos/{owner}/{repo}/commits"
+
+    async def scan_window(start: datetime | None, end: datetime | None) -> bool:
+        since, until = _remote_commit_bounds(start, end)
+        base_params: dict[str, object] = {"sha": head_sha, "per_page": 100}
+        if since is not None:
+            base_params["since"] = _format_candidate_time(since)
+        if until is not None:
+            base_params["until"] = _format_candidate_time(until)
+
+        async def read_page(page: int) -> list[dict[str, object]]:
+            payload = await request_json(endpoint, token, params={**base_params, "page": page})
+            current = _as_list(payload, name="commits")
+            if len(current) > 100:
+                raise _fetch_error("GitHub commits response exceeds requested page size")
+            for item in current:
+                candidate_time = _parse_candidate_time(_iso_value(item, commit=True), label="commit")
+                if since is not None and candidate_time < since:
+                    raise _fetch_error("GitHub commit time is outside the requested window")
+                if until is not None and candidate_time > until:
+                    raise _fetch_error("GitHub commit time is outside the requested window")
+            return current
+
+        first = await read_page(1)
+        can_split_window = len(first) == 100 and start is not None and (end is not None)
+        if can_split_window and end - start > timedelta(seconds=1):
+            midpoint = start + (end - start) / 2
+            if await scan_window(midpoint, end):
+                return True
+            return await scan_window(start, midpoint)
+
+        page = 1
+        current = first
+        query_seen: set[str] = set()
+        page_fingerprints: set[str] = set()
+        while True:
+            fingerprint = _json_digest(current)
+            if fingerprint in page_fingerprints:
+                raise _fetch_error("GitHub commits pagination repeated a page")
+            page_fingerprints.add(fingerprint)
+            advanced = False
+            for payload in current:
+                sha = payload.get("sha")
+                if not isinstance(sha, str) or not sha.strip():
+                    raise _fetch_error("GitHub commit response has no SHA")
+                sha = sha.strip()
+                if sha not in query_seen:
+                    query_seen.add(sha)
+                    advanced = True
+                candidate_time = _parse_candidate_time(_iso_value(payload, commit=True), label="commit")
+                if not _window_contains(candidate_time, start, end):
+                    continue
+                revision = _json_digest(payload)
+                previous_revision = observed_revisions.get(sha)
+                if previous_revision is not None:
+                    if previous_revision != revision:
+                        raise _fetch_error("GitHub commit payload changed during discovery")
+                    continue
+                observed_revisions[sha] = revision
+                stable_id = f"github:{owner}/{repo}:commit:{sha}"
+                if stable_id in known_ids:
+                    seen_known_ids.add(stable_id)
+                candidate = _resource_candidate(
+                    payload,
+                    owner=owner,
+                    repo=repo,
+                    resource="commits",
+                    label="commit",
+                    is_commit=True,
+                    time_range=time_range,
+                    run_started_at=run_started_at,
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+            _bounded_lane_candidates(candidates, cursor=cursor, limit=limit)
+            if current and not advanced:
+                raise _fetch_error("GitHub commits pagination did not advance")
+            if len(current) < 100:
+                break
+            page += 1
+            current = await read_page(page)
+
+        if start is None:
+            return True
+        return _lane_can_stop(
+            candidates,
+            cursor=cursor,
+            limit=limit,
+            unread_time_upper_bound=start,
+            known_ids=known_ids,
+            seen_known_ids=seen_known_ids,
+        )
+
+    mode = time_range.get("mode")
+    if mode == "recent":
+        recent_days = time_range.get("recent_days")
+        if isinstance(recent_days, bool) or not isinstance(recent_days, int):
+            raise _fetch_error("GitHub recent time range is invalid")
+        await scan_window(
+            run_started_at.astimezone(UTC) - timedelta(days=recent_days),
+            run_started_at.astimezone(UTC) + timedelta(seconds=1),
+        )
+        return candidates
+    if mode == "fixed":
+        start_at = _parse_candidate_time(time_range.get("start_at"), label="fixed range")
+        end_at = _parse_candidate_time(time_range.get("end_at"), label="fixed range")
+        await scan_window(start_at, end_at)
+        return candidates
+    if mode != "all":
+        raise _fetch_error("GitHub time range is invalid")
+
+    pivot = min(max(head_time, _GITHUB_DATE_FLOOR), _GITHUB_DATE_CEILING)
+    if await scan_window(pivot, None):
+        return candidates
+    upper = pivot
+    span = timedelta(days=1)
+    while upper > _GITHUB_DATE_FLOOR:
+        start = max(_GITHUB_DATE_FLOOR, upper - span)
+        if await scan_window(start, upper):
+            return candidates
+        if start == _GITHUB_DATE_FLOOR:
+            break
+        upper = start
+        span *= 2
+    await scan_window(None, _GITHUB_DATE_FLOOR)
+    return candidates
+
+
 class GitHubFetchService(ContextFetchService):
     """Fetch one GitHub repository and optionally materialize its selected code snapshot."""
 
@@ -525,8 +946,29 @@ class GitHubFetchService(ContextFetchService):
             repo = str(source.get("repo", "")).strip()
             raw_resources = source.get("resources", ())
             resources = [str(item) for item in raw_resources] if isinstance(raw_resources, (list, tuple)) else []
+            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
+            metadata_requests = 0
+
+            async def request_json(
+                url: str,
+                request_token: str,
+                *,
+                params: Mapping[str, object] | None = None,
+                allow_not_found: bool = False,
+            ) -> object | None:
+                nonlocal metadata_requests
+                if metadata_requests >= _MAX_METADATA_REQUESTS:
+                    raise _fetch_error("GitHub metadata request budget exceeded")
+                metadata_requests += 1
+                return await _request_json(
+                    url,
+                    request_token,
+                    params=params,
+                    allow_not_found=allow_not_found,
+                )
+
             metadata = _as_object(
-                await _request_json(f"{_API_ROOT}/repos/{owner}/{repo}", token),
+                await request_json(f"{_API_ROOT}/repos/{owner}/{repo}", token),
                 name="repository metadata",
             )
             default_branch = metadata.get("default_branch")
@@ -535,19 +977,21 @@ class GitHubFetchService(ContextFetchService):
             default_branch = default_branch.strip()
             head_sha = _head_sha(metadata)
             head_time = _head_time(metadata)
-            needs_exact_head = any(resource in resources for resource in ("readme", "code"))
-            code_head_missing = "code" in resources and head_sha is None
-            timed_head_missing = needs_exact_head and head_time is None
-            if code_head_missing or (timed_head_missing and self._config.time_range.get("mode") != "all"):
+            needs_exact_head = any(resource in resources for resource in ("readme", "code", "commits"))
+            if needs_exact_head:
                 branch = _as_object(
-                    await _request_json(
+                    await request_json(
                         f"{_API_ROOT}/repos/{owner}/{repo}/branches/{quote(default_branch, safe='')}",
                         token,
                     ),
                     name="default branch",
                 )
-                head_sha = head_sha or _head_sha(branch)
-                head_time = head_time or _head_time(branch)
+                branch_sha = _head_sha(branch)
+                branch_time = _head_time(branch)
+                head_sha = branch_sha
+                head_time = branch_time
+            if needs_exact_head and head_sha is None:
+                raise _fetch_error("GitHub default branch has no valid head SHA")
             code_head_sha: str | None = None
             if "code" in resources:
                 if head_sha is None:
@@ -556,10 +1000,10 @@ class GitHubFetchService(ContextFetchService):
 
             candidates: list[dict[str, object]] = []
             if "readme" in resources:
-                readme = await _request_json(
+                readme = await request_json(
                     f"{_API_ROOT}/repos/{owner}/{repo}/readme",
                     token,
-                    params={"ref": default_branch},
+                    params={"ref": head_sha},
                     allow_not_found=True,
                 )
                 if readme is not None:
@@ -600,43 +1044,39 @@ class GitHubFetchService(ContextFetchService):
             ):
                 if resource not in resources:
                     continue
-                payloads = await self._list_resource(owner, repo, endpoint, token)
-                for payload in payloads:
-                    if resource == "issues" and "pull_request" in payload:
-                        continue
-                    identifier = payload.get("sha") if is_commit else payload.get("number")
-                    if identifier is None:
-                        continue
-                    stable_id = f"github:{owner}/{repo}:{label}:{identifier}"
-                    updated_at = _iso_value(payload, commit=is_commit)
-                    content = _github_resource_content(payload, stable_id=stable_id, is_commit=is_commit)
-                    raw_snapshot = _json_bytes(payload)
-                    item = RawChangeItem(
-                        logical_id=stable_id,
-                        revision_id=_json_digest(payload),
-                        operation="upsert",
-                        title=str(payload.get("title") or content.splitlines()[0] or stable_id),
-                        content=content[:_MAX_CONTENT_CHARS],
-                        original_ref=str(payload.get("html_url") or f"https://github.com/{owner}/{repo}"),
-                        metadata={
-                            "resource": resource,
-                            "repository": f"github:{owner}/{repo}",
-                            "number": identifier,
-                            "updated_at": updated_at,
-                            "content_truncated": len(content) > _MAX_CONTENT_CHARS,
-                            "raw_snapshot_omitted": raw_snapshot is None,
-                        },
-                        raw_snapshot=raw_snapshot,
+                if is_commit:
+                    if head_sha is None or head_time is None:
+                        raise _fetch_error("GitHub default branch has no usable head metadata")
+                    candidates.extend(
+                        await _discover_commits(
+                            request_json,
+                            owner=owner,
+                            repo=repo,
+                            token=token,
+                            head_sha=head_sha,
+                            head_time=_parse_candidate_time(head_time, label="HEAD"),
+                            time_range=self._config.time_range,
+                            run_started_at=run_started_at,
+                            cursor=cursor,
+                            limit=max_items,
+                        )
                     )
-                    candidate = _github_candidate(
-                        item,
-                        lane=label,
-                        candidate_time=updated_at,
+                    continue
+                candidates.extend(
+                    await _discover_resource_list(
+                        request_json,
+                        owner=owner,
+                        repo=repo,
+                        token=token,
+                        resource=resource,
+                        endpoint_name=endpoint,
+                        label=label,
                         time_range=self._config.time_range,
                         run_started_at=run_started_at,
+                        cursor=cursor,
+                        limit=max_items,
                     )
-                    if candidate is not None:
-                        candidates.append(candidate)
+                )
 
             if code_head_sha is not None:
                 code_path = str(_candidate_path(self._home, self._config.service_id).resolve())
@@ -671,7 +1111,6 @@ class GitHubFetchService(ContextFetchService):
                 if candidate is not None:
                     candidates.append(candidate)
 
-            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
             return select_latest_candidates(tuple(candidates), cursor, max_items)
         except asyncio.CancelledError:
             raise
@@ -726,42 +1165,6 @@ class GitHubFetchService(ContextFetchService):
         except Exception as exc:
             token = str(self._config.credentials.get("token", ""))
             raise _fetch_error(f"GitHub fetch failed: {_safe_detail(exc, token)}", exc) from None
-
-    async def _list_resource(
-        self,
-        owner: str,
-        repo: str,
-        endpoint: str,
-        token: str,
-    ) -> list[dict[str, object]]:
-        result: list[dict[str, object]] = []
-        seen_ids: set[str] = set()
-        for page in range(1, 101):
-            params: dict[str, object] = {"page": page, "per_page": 100}
-            if endpoint != "commits":
-                params.update({"state": "all", "sort": "updated", "direction": "desc"})
-            payload = await _request_json(
-                f"{_API_ROOT}/repos/{owner}/{repo}/{endpoint}",
-                token,
-                params=params,
-            )
-            current = _as_list(payload, name=endpoint)
-            if not current:
-                return result
-            advanced = False
-            for item in current:
-                identifier = item.get("sha") or item.get("number")
-                stable = str(identifier) if identifier is not None else _json_digest(item)
-                if stable in seen_ids:
-                    continue
-                seen_ids.add(stable)
-                result.append(item)
-                advanced = True
-            if not advanced:
-                raise _fetch_error(f"GitHub {endpoint} pagination did not advance")
-            if len(current) != 100:
-                return result
-        raise _fetch_error(f"GitHub {endpoint} pagination exceeded the limit")
 
     async def _materialize_code(self, run_id: str, owner: str, repo: str, head_sha: str, token: str) -> None:
         root = _service_root(self._home, self._config.service_id)

@@ -42,3 +42,8 @@ class SymphonyRuntime:
         self.graph_engine = SymphonyGraphEngine(orchestration_service)
         # Preserve the pre-engine lifecycle/planning entry point only.
         self.orchestration = orchestration_service
+
+    def close(self) -> None:
+        """Drain background graph-observation work owned by this runtime."""
+
+        self.graph_engine.close()
