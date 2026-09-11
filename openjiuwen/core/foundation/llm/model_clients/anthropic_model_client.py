@@ -779,14 +779,14 @@ class AnthropicModelClient(BaseModelClient):
             "stop" if stop_reason in ("end_turn", "stop_sequence", "max_tokens") else (stop_reason or "stop")
         )
 
-        provider_metadata = {
-            key: value
-            for key, value in (
-                ("stop_reason", getattr(response, "stop_reason", None)),
-                ("stop_sequence", getattr(response, "stop_sequence", None)),
-            )
-            if isinstance(value, (str, int, float, bool)) and value != ""
-        }
+        provider_metadata = {}
+        metadata_fields = (
+            ("stop_reason", getattr(response, "stop_reason", None)),
+            ("stop_sequence", getattr(response, "stop_sequence", None)),
+        )
+        for key, value in metadata_fields:
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                provider_metadata[key] = value
 
         return AssistantMessage(
             content=content,

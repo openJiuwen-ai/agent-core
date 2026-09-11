@@ -515,6 +515,7 @@ def _indexed_messages(attributes: Mapping[str, Any], base: str) -> list[dict[str
         )
     return [indexed[index] for index in sorted(indexed)]
 
+
 def _message_list(value: Any) -> list[dict[str, Any]]:
     decoded = _decode_structured_attribute(value)
     if isinstance(decoded, Mapping):
