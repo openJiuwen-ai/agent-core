@@ -100,13 +100,21 @@ class AgentBackend(abc.ABC):
 
     @abc.abstractmethod
     async def run(
-        self, prompt: str, opts: dict, schema_json: dict | None
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
     ) -> AgentResult:
         """Execute one single-shot agent call.
 
         ``schema_json`` is the JSON-Schema dict when structured output was
         requested (pydantic models are already lowered to JSON Schema by the
         engine), else ``None``.
+
+        ``call_key`` is the engine's structural call-path key for this
+        invocation. It is deterministic across replays of the same script
+        (cache hits consume their key slot too), so a backend that derives
+        per-call identity — e.g. worker member names feeding worktree slugs —
+        MUST hash it rather than count invocations: a counter drifts on resume
+        because hit calls never reach the backend. Backends that mint no
+        identity may ignore it.
         """
         raise NotImplementedError
 

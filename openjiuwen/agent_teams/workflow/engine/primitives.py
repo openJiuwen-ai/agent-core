@@ -598,7 +598,7 @@ async def agent(
     async with gate.acquire():
         rt.spawn_count += 1
         call_result = await _call_backend(
-            rt, prompt, opts, json_schema, model_cls
+            rt, prompt, opts, json_schema, model_cls, call_key=ks
         )
 
     if not call_result.succeeded:
@@ -639,11 +639,15 @@ async def agent(
     return call_result.result
 
 
-async def _call_backend(rt, prompt, opts, json_schema, model) -> _BackendCallResult:
-    """Run the single-shot ``agent()`` call (``backend.run``) with retries."""
+async def _call_backend(rt, prompt, opts, json_schema, model, call_key: str | None = None) -> _BackendCallResult:
+    """Run the single-shot ``agent()`` call (``backend.run``) with retries.
+
+    ``call_key`` is the caller's journal key — forwarded so backend-side
+    per-call identity (worker member names) is deterministic across replays.
+    """
     return await _attempt_calls(
         rt, opts, json_schema, model,
-        lambda: rt.backend.run(prompt, opts, json_schema),
+        lambda: rt.backend.run(prompt, opts, json_schema, call_key=call_key),
     )
 
 

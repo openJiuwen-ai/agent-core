@@ -71,14 +71,19 @@ def call_signature(
     before this parameter existed, so worker resume is unaffected. A stateful
     session turn folds its prior turns in, so a changed upstream turn cascades a
     re-run of every turn that depends on it.
+
+    ``isolation`` participates **only when set**: omitting it yields the exact
+    legacy byte sequence (existing caches stay valid), while flipping a call
+    to ``isolation='worktree'`` re-keys it. Without this, editing a script to
+    add isolation to an already-cached call would resume-hit the old record
+    and silently skip the worktree the caller now asked for.
     """
+    identity = {k: opts.get(k) for k in ("label", "phase", "model")}
+    if opts.get("isolation"):
+        identity["isolation"] = opts["isolation"]
     parts = [
         prompt,
-        json.dumps(
-            {k: opts.get(k) for k in ("label", "phase", "model")},
-            sort_keys=True,
-            ensure_ascii=False,
-        ),
+        json.dumps(identity, sort_keys=True, ensure_ascii=False),
         json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
     ]
     if history:
