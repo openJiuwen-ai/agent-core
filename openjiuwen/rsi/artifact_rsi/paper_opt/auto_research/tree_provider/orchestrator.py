@@ -156,6 +156,10 @@ def _root_node_id(task_id: str) -> str:
     return f"artifact:{task_id}:root"
 
 
+_ROOT_BASELINE_SUMMARY = "已上传原始论文，作为任务的基线输入。"
+_ROOT_NO_UPLOAD_SUMMARY = "未上传起始论文，将从零开始撰写。"
+
+
 def _has_paper(run_id: str) -> bool:
     return paper_tex_path(run_id).exists() or paper_output_path(run_id).exists()
 
@@ -501,11 +505,7 @@ class PaperTreeOrchestrator:
             parent_id=None,
             type="root",
             adopted=True,
-            summary=(
-                "Uploaded starting paper staged as the task-local baseline input."
-                if has_upload
-                else "No starting paper; first node writes from scratch."
-            ),
+            summary=_ROOT_BASELINE_SUMMARY if has_upload else _ROOT_NO_UPLOAD_SUMMARY,
             extra={
                 "paper": PaperNodeExtra(
                     logical_kind="root",
@@ -561,6 +561,12 @@ class PaperTreeOrchestrator:
             )
             return
 
+        await self._emit(
+            NodeStageEvent(
+                node_ref=_root_node_id(self.task_id),
+                stage={"id": "score", "name": "正在评估论文"},
+            )
+        )
         try:
             set_usage_node(_root_node_id(self.task_id))
             baseline_score = await score_paper(
@@ -576,6 +582,19 @@ class PaperTreeOrchestrator:
                 tex_path,
                 exc,
             )
+            root = next(
+                (node for node in self.storage.load_tree() if node.node_id == _root_node_id(self.task_id)),
+                None,
+            )
+            if root is not None:
+                root = root.model_copy(
+                    update={
+                        "summary": _ROOT_BASELINE_SUMMARY,
+                        "extra": {"paper": root.extra.get("paper", {})},
+                    }
+                )
+                self.storage.append_node(root)
+                await self._emit(EventNode(node=root))
             return
 
         state.baseline = baseline_score.overall
@@ -597,6 +616,7 @@ class PaperTreeOrchestrator:
                 root = root.model_copy(
                     update={
                         "score": baseline_score.overall,
+                        "summary": _ROOT_BASELINE_SUMMARY,
                         "extra": {"paper": updated_extra.model_dump(mode="json")},
                     }
                 )
