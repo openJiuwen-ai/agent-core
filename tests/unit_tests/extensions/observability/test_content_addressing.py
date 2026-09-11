@@ -69,14 +69,30 @@ def test_changing_an_early_element_forks_the_chain() -> None:
     assert original.seq_hash != forked.seq_hash
 
 
-def test_a_scalar_attribute_is_a_sequence_of_one() -> None:
-    """Scalars go through the same path as arrays, with no special case."""
-    sequence = build_sequence("gen_ai.system_instructions", "you are an agent")
+def test_only_an_array_is_addressed() -> None:
+    """A chain states an array, so nothing else becomes one.
+
+    Addressing a scalar made it indistinguishable from a single-element
+    array, and both rebuild paths then had to guess which they held.
+    """
+    assert build_sequence("gen_ai.system_instructions", "you are an agent") is None
+    assert build_sequence("gen_ai.output.messages", '{"role":"assistant"}') is None
+    assert build_sequence("gen_ai.input.messages", "not json at all") is None
+
+
+def test_a_single_element_array_rebuilds_as_an_array() -> None:
+    """One assistant message is the ordinary case, and it must stay an array.
+
+    A model turn states one message, so this chain is always depth 1. Losing
+    the brackets here left every finished answer unreadable.
+    """
+    value = '[{"role":"assistant","parts":[{"type":"text","content":"hi"}]}]'
+    sequence = build_sequence("gen_ai.output.messages", value)
 
     assert sequence is not None
     assert sequence.depth == 1
     assert sequence.nodes[0].prev_hash is None
-    assert rebuild_value(["you are an agent"]) == "you are an agent"
+    assert json.loads(rebuild_value(split_elements(value))) == json.loads(value)
 
 
 def test_an_empty_value_addresses_nothing() -> None:
@@ -104,9 +120,13 @@ def test_encoding_replaces_restated_attributes_with_references() -> None:
     """The storage path carries references; the sequences state the content."""
     provider = TracerProvider()
     tracer = provider.get_tracer("addressing-test")
+    instructions = '[{"type":"text","content":"be brief"}]'
     span = tracer.start_span("chat model")
     span.set_attribute("gen_ai.input.messages", _messages(4))
-    span.set_attribute("gen_ai.system_instructions", "be brief")
+    span.set_attribute("gen_ai.system_instructions", instructions)
+    # An addressed key whose value is not an array: it stays as it is rather
+    # than becoming a chain that would rebuild as one.
+    span.set_attribute("gen_ai.tool.definitions", "no tools")
     span.set_attribute("gen_ai.request.model", "model-x")
     span.end()
 
@@ -125,6 +145,7 @@ def test_encoding_replaces_restated_attributes_with_references() -> None:
     assert set(by_key) == {"gen_ai.input.messages", "gen_ai.system_instructions"}
     for key, sequence in by_key.items():
         assert parse_sequence_reference(attributes[key]) == (sequence.seq_hash, sequence.depth)
+    assert attributes["gen_ai.tool.definitions"] == "no tools"
     # An attribute that states no restated content is left exactly as it was.
     assert attributes["gen_ai.request.model"] == "model-x"
 

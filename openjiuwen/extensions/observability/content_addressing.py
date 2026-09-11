@@ -126,22 +126,29 @@ def parse_sequence_reference(value: object) -> tuple[str, int] | None:
 def split_elements(value: str) -> list[str]:
     """Split one attribute value into the elements it states.
 
-    A JSON array is its own sequence. Anything else -- an object, a bare
-    string, a value that does not parse -- is a sequence of one, so a caller
-    never has to branch on which shape an attribute happens to carry.
+    Only an array has elements. Anything else -- an object, a bare string, a
+    value that does not parse -- states nothing to address here, and saying
+    so is what keeps a chain unambiguous: every chain is built from an array,
+    so every chain rebuilds into one, whatever its depth.
+
+    Treating a scalar as a sequence of one made it indistinguishable from a
+    single-element array, and left both rebuild paths guessing which they
+    held. A one-message answer -- the ordinary case for an assistant turn --
+    is exactly where that guess went wrong.
 
     Args:
         value: The attribute value as the convention states it.
 
     Returns:
-        Each element serialized compactly, in order.
+        Each element serialized compactly, in order, or nothing at all when
+        the value is not an array.
     """
     try:
         parsed = json.loads(value)
     except (TypeError, ValueError):
-        return [value]
+        return []
     if not isinstance(parsed, list):
-        return [value]
+        return []
     return [
         json.dumps(element, ensure_ascii=False, separators=_COMPACT_SEPARATORS)
         for element in parsed
@@ -157,7 +164,8 @@ def build_sequence(key: str, value: str) -> AddressedSequence | None:
 
     Returns:
         The addressed sequence, or None when the value states nothing to
-        address -- an empty value, or an empty array.
+        address -- an empty value, an empty array, or anything that is not
+        an array at all. A caller that gets None leaves the value as it is.
     """
     if not value:
         return None
@@ -192,11 +200,9 @@ def build_sequence(key: str, value: str) -> AddressedSequence | None:
 def rebuild_value(elements: list[str]) -> str:
     """Return the attribute value a sequence of elements states.
 
-    A sequence of one restates its single element, which is what makes a
-    scalar attribute round-trip through the same path as an array.
+    Always an array: a chain is built from one, so it rebuilds into one at
+    any depth. Nothing here inspects the count.
     """
-    if len(elements) == 1:
-        return elements[0]
     return "[" + ",".join(elements) + "]"
 
 
