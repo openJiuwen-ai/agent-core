@@ -43,6 +43,13 @@ def ensure_org_static_tables(sync_conn) -> None:
     for index in task_table.indexes:
         if index.name in {"ix_org_task_unclaimed_due", "ix_org_task_recreation_request"}:
             index.create(sync_conn, checkfirst=True)
+    # ``create_all`` only creates missing tables, so an index added to an
+    # existing table has to be created explicitly (same reason as the two
+    # org_task indexes above).
+    summary_execution_table = SQLModel.metadata.tables["org_summary_execution"]
+    for index in summary_execution_table.indexes:
+        if index.name == "uq_org_summary_execution_live":
+            index.create(sync_conn, checkfirst=True)
 
 
 def _ensure_org_task_columns(sync_conn) -> None:

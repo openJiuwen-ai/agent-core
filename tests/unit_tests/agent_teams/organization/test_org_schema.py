@@ -1,6 +1,11 @@
 # coding: utf-8
 
 from openjiuwen.agent_teams.organization.schema import (
+    ORG_SUMMARY_CAPABILITY,
+    ORG_SUMMARY_TASK_TYPE,
+    ORG_STATIC_TABLE_NAMES,
+    OrgSummaryExecution,
+    OrgSummaryExecutionStatus,
     OrgTask,
     OrgTaskAggregationConfig,
     OrgTaskAggregationMode,
@@ -20,16 +25,18 @@ def test_default_root_aggregation_is_hierarchical():
     assert config.summary_task_id is None
 
 
-def test_org_task_status_terminal_only_completed_failed():
+def test_org_task_status_includes_waiting_sources_and_terminals():
+    assert OrgTaskStatus.WAITING_SOURCES.value == "WAITING_SOURCES"
     assert ORG_TASK_TERMINAL_STATUS_VALUES == (
         OrgTaskStatus.COMPLETED.value,
         OrgTaskStatus.FAILED.value,
     )
-    assert "WAITING_SOURCES" not in OrgTaskStatus.__members__
+    assert OrgTaskStatus.WAITING_SOURCES.value not in ORG_TASK_TERMINAL_STATUS_VALUES
     assert "CANCELLED" not in OrgTaskStatus.__members__
     assert "EXPIRED" not in OrgTaskStatus.__members__
     assert OrgTaskFailureCode.CANCELLED.value == "CANCELLED"
     assert OrgTaskFailureCode.EXPIRED.value == "EXPIRED"
+    assert OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value == "SUMMARY_PROVISION_FAILED"
 
 
 def test_org_task_legacy_status_failure_codes_shared_mapping():
@@ -67,3 +74,27 @@ def test_org_task_brief_includes_aggregation_and_failure():
     brief = task.brief()
     assert brief["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
     assert brief["failure_code"] == OrgTaskFailureCode.EXECUTION_FAILED
+
+
+def test_summary_execution_model_and_static_table_registration():
+    assert ORG_SUMMARY_TASK_TYPE == "organization.summary"
+    assert ORG_SUMMARY_CAPABILITY == "summary"
+    assert "org_summary_execution" in ORG_STATIC_TABLE_NAMES
+    execution = OrgSummaryExecution(
+        execution_id="exec-1",
+        organization_id="org-1",
+        root_task_id="root-1",
+        summary_task_id="summary-1",
+        summary_team_id=None,
+        status=OrgSummaryExecutionStatus.PROVISIONING,
+        created_at=10,
+    )
+    assert execution.status is OrgSummaryExecutionStatus.PROVISIONING
+    assert set(OrgSummaryExecutionStatus) == {
+        OrgSummaryExecutionStatus.PROVISIONING,
+        OrgSummaryExecutionStatus.WAITING_SOURCES,
+        OrgSummaryExecutionStatus.RUNNING,
+        OrgSummaryExecutionStatus.COMPLETED,
+        OrgSummaryExecutionStatus.FAILED,
+        OrgSummaryExecutionStatus.RELEASED,
+    }

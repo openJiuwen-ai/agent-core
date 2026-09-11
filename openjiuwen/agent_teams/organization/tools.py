@@ -457,10 +457,19 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "delegated_to_team_id": {"type": "string"},
                 "aggregation_mode": {
                     "type": "string",
-                    "enum": [OrgTaskAggregationMode.HIERARCHICAL.value],
+                    "enum": [
+                        OrgTaskAggregationMode.HIERARCHICAL.value,
+                        OrgTaskAggregationMode.SUMMARY_TEAM.value,
+                    ],
                     "description": (
-                        "Root-task aggregation mode. Only HIERARCHICAL is supported; "
-                        "SUMMARY_TEAM is rejected until SummaryTeamFactory lands."
+                        "Root-task aggregation mode. HIERARCHICAL splits work into "
+                        "children resolved upward; SUMMARY_TEAM creates a framework "
+                        "Summary Task and a task-specific Summary Team on demand. "
+                        "An organization may have at most ONE active SUMMARY_TEAM root "
+                        "at a time: creating another is rejected until the current one "
+                        "completes or fails. Only choose SUMMARY_TEAM when the "
+                        "organization's work genuinely needs a unified aggregation, and "
+                        "reuse the existing aggregation instead of starting a second one."
                     ),
                 },
             },
@@ -1007,6 +1016,7 @@ class OrgAttachSummarySourcesTool(_OrgLeaderTool):
         result = await self.manager.attach_summary_sources(
             summary_task_id=inputs.get("summary_task_id", ""),
             source_task_ids=inputs.get("source_task_ids") or [],
+            team_id=self.team_id,
             source_role=inputs.get("source_role"),
             required=inputs.get("required", True),
         )

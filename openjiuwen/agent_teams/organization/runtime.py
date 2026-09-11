@@ -9,8 +9,17 @@ import asyncio
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from openjiuwen.core.common.logging import team_logger
+
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
+    OrgSummaryCompletedEvent,
+    OrgSummaryProvisionedEvent,
+    OrgSummaryProvisionFailedEvent,
+    OrgSummarySourceFailedEvent,
+    OrgSummarySourcesReadyEvent,
+    OrgSummarySourcesUpdatedEvent,
+    OrgSummaryTaskCreatedEvent,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
@@ -26,8 +35,12 @@ from openjiuwen.agent_teams.organization.expert_adapters import (
     ExpertGroupCatalog,
     ExpertTeamLauncher,
 )
+from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.organization.pool import get_process_org_manager, remove_process_org_manager
+from openjiuwen.agent_teams.organization import runtime_prompts as prompts
+from openjiuwen.agent_teams.organization.runtime_summary import OrganizationSummaryMixin
 from openjiuwen.agent_teams.organization.schema import (
+    ORG_SUMMARY_TASK_TYPE,
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     OrganizationSpec,
     OrgTaskFailureCode,
@@ -45,6 +58,8 @@ from openjiuwen.agent_teams.tools.team import TeamBackend
 
 _ORG_OWNER_LIFECYCLE_SECTION = "organization_owner_lifecycle"
 _ORG_COLLABORATION_SECTION = "organization_collaboration"
+# Sentinel team id used to use one org-scoped ORG topic subscription per organization.
+_ORG_SUBSCRIBER_TEAM = "__org__"
 _ORG_OWNER_LIFECYCLE_PROMPT = {
     "cn": (
         "## Team Organization 生命周期约束\n"
@@ -85,12 +100,15 @@ _PARENT_RESUME_TERMINAL_STATUSES = frozenset(
     }
 )
 
+logger = team_logger
+
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.organization.summary import SummaryTeamFactory
     from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 
 
-class OrganizationRuntimeManager:
+class OrganizationRuntimeManager(OrganizationSummaryMixin):
     """Create organizations and bind active leaders without restarting teams."""
 
     def __init__(self, team_runtime_manager: "TeamRuntimeManager") -> None:
@@ -109,6 +127,8 @@ class OrganizationRuntimeManager:
         self._expert_group_catalog: ExpertGroupCatalog | None = None
         self._expert_team_launcher: ExpertTeamLauncher | None = None
         self._expert_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
+        self._summary_team_factory: SummaryTeamFactory | None = None
+        self._summary_team_factory_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
 
     def set_leader_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
         """Set the host-owned path used to run an autonomous leader turn."""
@@ -144,6 +164,33 @@ class OrganizationRuntimeManager:
         """
 
         self._expert_adapter_installer = installer
+
+    def set_summary_team_factory(self, factory: SummaryTeamFactory) -> None:
+        """Set the host adapter that provisions and releases on-demand Summary Teams."""
+
+        self._summary_team_factory = factory
+
+    def set_summary_team_factory_installer(
+        self, installer: Callable[["OrganizationRuntimeManager"], None] | None
+    ) -> None:
+        """Register a host callback that injects the SummaryTeamFactory on first use.
+
+        Mirrors :meth:`set_expert_adapter_installer`.  The installer should be
+        idempotent and must not provision anything itself; it only constructs and
+        ``set_summary_team_factory`` when a summary event first needs it.
+        """
+        self._summary_team_factory_installer = installer
+
+    def _ensure_summary_factory(self) -> SummaryTeamFactory | None:
+        """Lazily run the host installer once the SummaryTeamFactory is still missing."""
+
+        if self._summary_team_factory is not None:
+            return self._summary_team_factory
+        installer = self._summary_team_factory_installer
+        if installer is None:
+            return None
+        installer(self)
+        return self._summary_team_factory
 
     def _ensure_expert_adapters(self) -> None:
         """Lazily run the host installer once Catalog or Launcher is still missing."""
@@ -496,7 +543,7 @@ class OrganizationRuntimeManager:
             "agent_group_name": launched.agent_group_name or group_name,
         }
 
-    async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: Any, session_id: str) -> None:
+    async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: TeamOrganizationManager, session_id: str) -> None:
         backend.org_task_manager = manager.task_pool
         backend.org_message_service = manager.message_service
         self._team_organizations[(session_id, backend.team_name)] = manager.organization_id
@@ -535,7 +582,7 @@ class OrganizationRuntimeManager:
         )
         await self._ensure_unclaimed_service(manager, session_id)
 
-    async def _ensure_unclaimed_service(self, manager: Any, session_id: str) -> None:
+    async def _ensure_unclaimed_service(self, manager: TeamOrganizationManager, session_id: str) -> None:
         key = (session_id, manager.organization_id)
         service = self._unclaimed_services.get(key)
         if service is None:
@@ -706,6 +753,7 @@ class OrganizationRuntimeManager:
         """
 
         await self._resume_claimed_tasks(manager=manager, team_id=team_id, session_id=session_id)
+        await self._resume_summary_executions(manager=manager, session_id=session_id)
         for message in await manager.message_service.list_leader_messages(
             team_id=team_id,
             unread_only=True,
@@ -733,7 +781,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
         )
 
-    async def _resume_claimed_tasks(self, *, manager: Any, team_id: str, session_id: str) -> None:
+    async def _resume_claimed_tasks(self, *, manager: TeamOrganizationManager, team_id: str, session_id: str) -> None:
         """Resume work claimed before a process or harness recovery."""
 
         for task in await manager.task_pool.list_tasks_for_team(team_id, include_open=False):
@@ -748,7 +796,7 @@ class OrganizationRuntimeManager:
     async def _resume_parent_followups(
         self,
         *,
-        manager: Any,
+        manager: TeamOrganizationManager,
         team_id: str,
         session_id: str,
     ) -> None:
@@ -845,7 +893,7 @@ class OrganizationRuntimeManager:
     async def _subscribe_team_events(
         self,
         backend: TeamBackend,
-        manager: Any,
+        manager: TeamOrganizationManager,
         session_id: str,
         *,
         capabilities: set[str],
@@ -854,77 +902,81 @@ class OrganizationRuntimeManager:
         if messager is None:
             return
 
-        async def _on_task_event(message: Any) -> None:
-            event = message.get_payload()
-            if isinstance(event, OrgTaskCreatedEvent):
-                if event.team_id == backend.team_name:
-                    return
-                task = await manager.task_pool.get_task(event.task_id)
-                required = set(task.required_capabilities) if task is not None else set()
-                if not required or not required.issubset(capabilities):
-                    return
-                self._schedule_claim_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    task_id=event.task_id,
-                    organization_id=manager.organization_id,
-                )
+        async def _on_task_created(event: OrgTaskCreatedEvent) -> None:
+            if event.team_id == backend.team_name:
                 return
-            if isinstance(event, OrgTaskClaimedEvent):
-                if event.claimed_by_team_id != backend.team_name:
-                    return
-                self._schedule_claimed_task_execution_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    task_id=event.task_id,
-                    organization_id=manager.organization_id,
-                )
+            task = await manager.task_pool.get_task(event.task_id)
+            required = set(task.required_capabilities) if task is not None else set()
+            if not required or not required.issubset(capabilities):
                 return
-            if isinstance(event, OrgTaskCompletedEvent):
-                # Completion is a second durable opportunity to claim matching
-                # OPEN tasks. Parent-team review wake is driven by
-                # OrgTaskReviewRequestedEvent so it aligns with PENDING review.
-                await self._schedule_matching_open_claims(
+            self._schedule_claim_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                task_id=event.task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_claimed(event: OrgTaskClaimedEvent) -> None:
+            if event.claimed_by_team_id != backend.team_name:
+                return
+            self._schedule_claimed_task_execution_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                task_id=event.task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_completed(event: OrgTaskCompletedEvent) -> None:
+            # Completion is a second durable opportunity to claim matching OPEN
+            # tasks. Parent-team review wake is driven by ReviewRequested.
+            await self._schedule_matching_open_claims(
+                manager=manager,
+                team_id=backend.team_name,
+                session_id=session_id,
+                capabilities=capabilities,
+                completed_task_id=event.task_id,
+            )
+
+        async def _on_task_failed(event: OrgTaskFailedEvent) -> None:
+            task = await manager.task_pool.get_task(event.task_id)
+            if self._is_unclaimed_expiration(task, event):
+                return
+            if task is None:
+                return
+            if task.task_type == ORG_SUMMARY_TASK_TYPE:
+                await self._handle_summary_task_failed(
                     manager=manager,
-                    team_id=backend.team_name,
+                    task_id=event.task_id,
                     session_id=session_id,
-                    capabilities=capabilities,
-                    completed_task_id=event.task_id,
                 )
                 return
-            if isinstance(event, OrgTaskFailedEvent):
-                task = await manager.task_pool.get_task(event.task_id)
-                if self._is_unclaimed_expiration(task, event):
-                    # The durable expiration inbox request also covers root tasks.
-                    return
-                if task is None or not task.parent_task_id:
-                    return
-                if task.created_by.team_id != backend.team_name:
-                    return
-                self._schedule_parent_child_failed_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    child_task_id=event.task_id,
-                    parent_task_id=task.parent_task_id,
-                    organization_id=manager.organization_id,
-                    failure_code=event.failure_code,
-                    failure_reason=event.failure_reason,
-                    repairs_task_id=self._original_repairs_target(task),
-                )
+            if not task.parent_task_id:
                 return
-            if isinstance(event, OrgTaskReviewRequestedEvent):
-                if event.reviewer_team_id != backend.team_name:
-                    return
-                self._schedule_parent_review_turn(
-                    team_id=backend.team_name,
-                    session_id=session_id,
-                    child_task_id=event.task_id,
-                    parent_task_id=event.parent_task_id,
-                    organization_id=manager.organization_id,
-                )
+            if task.created_by.team_id != backend.team_name:
                 return
-            if not isinstance(event, OrgTaskReviewedEvent):
+            self._schedule_parent_child_failed_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                child_task_id=event.task_id,
+                parent_task_id=task.parent_task_id,
+                organization_id=manager.organization_id,
+                failure_code=event.failure_code,
+                failure_reason=event.failure_reason,
+                repairs_task_id=self._original_repairs_target(task),
+            )
+
+        async def _on_task_review_requested(event: OrgTaskReviewRequestedEvent) -> None:
+            if event.reviewer_team_id != backend.team_name:
                 return
+            self._schedule_parent_review_turn(
+                team_id=backend.team_name,
+                session_id=session_id,
+                child_task_id=event.task_id,
+                parent_task_id=event.parent_task_id,
+                organization_id=manager.organization_id,
+            )
+
+        async def _on_task_reviewed(event: OrgTaskReviewedEvent) -> None:
             if event.team_id != backend.team_name:
                 return
             task = await manager.task_pool.get_task(event.task_id)
@@ -957,6 +1009,21 @@ class OrganizationRuntimeManager:
                 parent_task_id=task.parent_task_id,
                 organization_id=manager.organization_id,
             )
+
+        task_handlers = {
+            OrgTaskCreatedEvent: _on_task_created,
+            OrgTaskClaimedEvent: _on_task_claimed,
+            OrgTaskCompletedEvent: _on_task_completed,
+            OrgTaskFailedEvent: _on_task_failed,
+            OrgTaskReviewRequestedEvent: _on_task_review_requested,
+            OrgTaskReviewedEvent: _on_task_reviewed,
+        }
+
+        async def _on_task_event(message: Any) -> None:
+            event = message.get_payload()
+            handler = task_handlers.get(type(event))
+            if handler is not None:
+                await handler(event)
 
         async def _on_inbox_event(message: Any) -> None:
             event_type = getattr(message, "event_type", None)
@@ -992,6 +1059,72 @@ class OrganizationRuntimeManager:
                     organization_id=manager.organization_id,
                 )
 
+        async def _on_summary_task_created(event: OrgSummaryTaskCreatedEvent) -> None:
+            await self._handle_summary_task_created(
+                manager=manager,
+                summary_factory=summary_factory,
+                event=event,
+                session_id=session_id,
+            )
+
+        async def _on_summary_provisioned(event: OrgSummaryProvisionedEvent) -> None:
+            await self._handle_summary_provisioned(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_provision_failed(event: OrgSummaryProvisionFailedEvent) -> None:
+            await self._handle_summary_provision_failed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_sources_updated(event: OrgSummarySourcesUpdatedEvent) -> None:
+            await self._handle_summary_sources_updated(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_sources_ready(event: OrgSummarySourcesReadyEvent) -> None:
+            await self._handle_summary_sources_ready(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_source_failed(event: OrgSummarySourceFailedEvent) -> None:
+            await self._handle_summary_source_failed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        async def _on_summary_completed(event: OrgSummaryCompletedEvent) -> None:
+            await self._handle_summary_completed(
+                manager=manager, event=event, session_id=session_id
+            )
+
+        org_handlers = {
+            OrgSummaryTaskCreatedEvent: _on_summary_task_created,
+            OrgSummaryProvisionedEvent: _on_summary_provisioned,
+            OrgSummaryProvisionFailedEvent: _on_summary_provision_failed,
+            OrgSummarySourcesUpdatedEvent: _on_summary_sources_updated,
+            OrgSummarySourcesReadyEvent: _on_summary_sources_ready,
+            OrgSummarySourceFailedEvent: _on_summary_source_failed,
+            OrgSummaryCompletedEvent: _on_summary_completed,
+        }
+
+        async def _on_org_event(message: Any) -> None:
+            nonlocal summary_factory
+            summary_factory = self._ensure_summary_factory()
+            if summary_factory is None:
+                # Summary lifecycle events need a host factory; without one they
+                # are dropped (the Summary Task row itself still exists).
+                logger.debug(
+                    "org event %s dropped: no summary team factory installed",
+                    getattr(message, "event_type", None),
+                )
+                return
+            event = message.get_payload()
+            handler = org_handlers.get(type(event))
+            if handler is not None:
+                await handler(event)
+
+        summary_factory = None
+
         await self._subscribe_once(
             messager=messager,
             topic=OrgTopic.TASK,
@@ -1007,6 +1140,17 @@ class OrganizationRuntimeManager:
             organization_id=manager.organization_id,
             team_id=backend.team_name,
             handler=_on_inbox_event,
+        )
+        # Summary lifecycle events are published only to the org-scoped ORG topic.
+        # Deduplicate on a sentinel team_id so the subscription exists once per
+        # organization regardless of how many teams share this runtime.
+        await self._subscribe_once(
+            messager=messager,
+            topic=OrgTopic.ORG,
+            session_id=session_id,
+            organization_id=manager.organization_id,
+            team_id=_ORG_SUBSCRIBER_TEAM,
+            handler=_on_org_event,
         )
 
     @staticmethod
@@ -1040,7 +1184,7 @@ class OrganizationRuntimeManager:
     async def _schedule_matching_open_claims(
         self,
         *,
-        manager: Any,
+        manager: TeamOrganizationManager,
         team_id: str,
         session_id: str,
         capabilities: set[str],
@@ -1068,37 +1212,22 @@ class OrganizationRuntimeManager:
         organization_id: str,
         trigger_task_id: str | None = None,
     ) -> None:
-        trigger_context = (
-            f" Task {trigger_task_id} just completed, so re-evaluate this open task now." if trigger_task_id else ""
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.claim_turn(
+                task_id=task_id,
+                organization_id=organization_id,
+                trigger_task_id=trigger_task_id,
+            ),
         )
-        prompt = (
-            f"Organization task {task_id} is available in {organization_id}.{trigger_context} "
-            "Inspect it with org_view_tasks(action='get'). If every required capability is present "
-            "in your team, you MUST call org_claim_task for this task in this turn. Do not leave a "
-            "capability-matched task OPEN merely because another team's artifact is not ready: claim "
-            "it first, prepare any independent work, and use org_view_tasks to wait for dependencies "
-            "before starting dependent validation. When the defined scope has been executed, produce "
-            "one final result or report and call org_update_task(action='complete') in the same "
-            "workflow, including failures and blockers in its output. Do not wait for another team to "
-            "fix a reported issue, and do not create an open-ended sequence of extra verification tasks "
-            "unless the parent task explicitly requests it. Only skip the claim when a required capability "
-            "is actually absent or the claim fails because another team already claimed it."
-        )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_delegated_turn(self, *, team_id: str, session_id: str, task_id: str, organization_id: str) -> None:
-        prompt = (
-            f"Organization task {task_id} in {organization_id} was delegated to your team. "
-            "Inspect it with org_view_tasks(action='get'), then use org_update_task(action='start') "
-            "when you are ready. If an independent part requires another organization team's "
-            "capabilities, keep this parent task assigned to your team and create a focused OPEN child "
-            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, "
-            "acceptance criteria, and only the capabilities it needs; do not set delegated_to_team_id. "
-            "Track children with org_view_child_tasks and do not complete the parent until its direct "
-            "children are completed and accepted. Otherwise execute the task through your team workflow "
-            "and complete it with the resulting output context and output abstract."
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.delegated_turn(task_id=task_id, organization_id=organization_id),
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_leader_message_turn(
         self,
@@ -1113,16 +1242,14 @@ class OrganizationRuntimeManager:
         if message_key in self._scheduled_leader_messages:
             return
         self._scheduled_leader_messages.add(message_key)
-        prompt = (
-            f"Leader message {message_id} arrived in organization {organization_id} "
-            f"from team {from_team_id}. Read it with org_get_leader_message, perform any required "
-            "cross-team coordination or task-pool updates, then call org_ack_leader_message only "
-            "after the message has been handled."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.leader_message_turn(
+                message_id=message_id,
+                from_team_id=from_team_id,
+                organization_id=organization_id,
+            ),
             message_key=message_key,
         )
 
@@ -1134,27 +1261,15 @@ class OrganizationRuntimeManager:
         task_id: str,
         organization_id: str,
     ) -> None:
-        """Continue an automatic claim with a separate execution turn.
-
-        A claim is persisted during a leader's tool call, but that LLM turn can
-        legitimately finish immediately afterwards.  Queue a second turn so a
-        successfully auto-claimed task never remains stranded in ``CLAIMED``.
-        """
-
-        prompt = (
-            f"Your team claimed organization task {task_id} in {organization_id}. "
-            "Inspect it with org_view_tasks(action='get'). If it is still assigned to your team and "
-            "its status is CLAIMED, immediately call org_update_task(action='start'). Then execute the "
-            "defined scope through your Team workflow. If an independent part requires another organization "
-            "team's capabilities, keep this parent task assigned to your team and create a focused OPEN child "
-            f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, acceptance "
-            "criteria, and only the capabilities it needs; do not set delegated_to_team_id. Track children "
-            "with org_view_child_tasks and do not complete the parent until its direct children are completed "
-            "and accepted. When the task is actually complete, submit one concrete result with "
-            "org_update_task(action='complete'). If the task is already IN_PROGRESS or COMPLETED, do not "
-            "duplicate work."
+        """Continue an automatic claim with a separate execution turn."""
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompts.claimed_task_execution_turn(
+                task_id=task_id,
+                organization_id=organization_id,
+            ),
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
     def _schedule_parent_review_turn(
         self,
@@ -1169,21 +1284,14 @@ class OrganizationRuntimeManager:
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
-        prompt = (
-            f"Child organization task {child_task_id} completed in {organization_id}. "
-            f"Inspect its result with org_review_task, then accept or reject it. "
-            f"If accepted, use the child output to continue parent task {parent_task_id}. "
-            "If rejected, create a repair with org_create_task "
-            f"(set repairs_task_id={child_task_id} on the original sibling; never repair-of-repair; "
-            "do not org_delegate_task the rejected child). "
-            "When all direct children are accepted or superseded by an accepted repair, "
-            "complete the parent. For a root task, put the user-facing delivery in "
-            "org_update_task output_context.description and provide output_abstract."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_review_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            ),
             review_key=review_key,
         )
 
@@ -1203,20 +1311,20 @@ class OrganizationRuntimeManager:
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
-        prompt = (
-            f"Child organization task {child_task_id} was reviewed as {review_status} "
-            f"in {organization_id}. Parent task {parent_task_id} cannot advance on that child. "
-            "Read the child result and review verdict/required_changes. "
-            + self._repair_create_instructions(
-                target_id=target_id,
-                report_phrase="defect report",
-                terminal_label="rejected/completed",
-            )
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_repair_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+                review_status=review_status,
+                repair_instructions=prompts.repair_create_instructions(
+                    target_id=target_id,
+                    report_phrase="defect report",
+                    terminal_label="rejected/completed",
+                ),
+            ),
             review_key=review_key,
         )
 
@@ -1232,17 +1340,13 @@ class OrganizationRuntimeManager:
         if review_key in self._scheduled_parent_reviews:
             return
         self._scheduled_parent_reviews.add(review_key)
-        prompt = (
-            f"All direct child tasks for parent organization task {parent_task_id} "
-            f"in {organization_id} are accepted or superseded by an accepted repair. "
-            "Integrate the child outputs and call org_update_task(action='complete') on the "
-            "parent with the final output_context and output_abstract. For a root task, put the "
-            "user-facing delivery in output_context.description."
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_ready_turn(
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+            ),
             review_key=review_key,
         )
 
@@ -1263,47 +1367,22 @@ class OrganizationRuntimeManager:
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
-        prompt = (
-            f"Child organization task {child_task_id} failed in {organization_id} "
-            f"(failure_code={failure_code}, failure_reason={failure_reason}). "
-            f"Parent task {parent_task_id} cannot advance on that child. "
-            "This is not a pending review — do not call org_review_task on the failed child. "
-            + self._repair_create_instructions(
-                target_id=target_id,
-                report_phrase="the failure report",
-                terminal_label="failed",
-            )
-        )
         self._schedule_leader_turn(
             team_id=team_id,
             session_id=session_id,
-            prompt=prompt,
+            prompt=prompts.parent_child_failed_turn(
+                child_task_id=child_task_id,
+                parent_task_id=parent_task_id,
+                organization_id=organization_id,
+                failure_code=failure_code,
+                failure_reason=failure_reason,
+                repair_instructions=prompts.repair_create_instructions(
+                    target_id=target_id,
+                    report_phrase="the failure report",
+                    terminal_label="failed",
+                ),
+            ),
             review_key=review_key,
-        )
-
-    @staticmethod
-    def _repair_create_instructions(
-        *,
-        target_id: str,
-        report_phrase: str,
-        terminal_label: str,
-    ) -> str:
-        """Shared wake guidance for creating a repair sibling of a terminal child."""
-        return (
-            "Create a focused repair task with org_create_task "
-            f"(set repairs_task_id={target_id} pointing at the original sibling, never another "
-            f"repair; include {report_phrase} and acceptance criteria; prefer capabilities that "
-            "match the defect; if the original has retry_limit, do not exceed it). "
-            "If org_create_task fails because retry_limit is reached, do not retry create in a "
-            "loop: call org_update_task(action='failed') on the parent with failure_reason "
-            "explaining that the repair budget is exhausted, so the owning/parent team can "
-            "decide the next step or fail/terminate toward the root. Same team may "
-            "execute the repair; switching teams is optional—only if switching teams, set "
-            "delegated_to_team_id on that new repair (or org_delegate_task the new OPEN repair "
-            "only). Do not call org_delegate_task on the "
-            f"{terminal_label} child, which is terminal. "
-            "Do not leave the parent waiting without creating that repair, and do not silently "
-            f"reopen the {terminal_label} child task."
         )
 
     @staticmethod

@@ -11,6 +11,12 @@ from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgEventMessage,
     OrgLeaderMessageEvent,
+    OrgSummaryCompletedEvent,
+    OrgSummaryProvisionFailedEvent,
+    OrgSummarySourceFailedEvent,
+    OrgSummarySourcesReadyEvent,
+    OrgSummarySourcesUpdatedEvent,
+    OrgSummaryTaskCreatedEvent,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
@@ -20,11 +26,15 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskReviewRequestedEvent,
     OrgTopic,
 )
-from openjiuwen.agent_teams.organization.pool import clear_process_org_managers
+from openjiuwen.agent_teams.organization.pool import clear_process_org_managers, get_process_org_manager
 from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_LEGACY_STATUS_FAILURE_CODES,
+    ORG_SUMMARY_CAPABILITY,
+    ORG_SUMMARY_TASK_TYPE,
     OrgAssignmentType,
+    OrgSummaryExecutionStatus,
+    OrgTaskAggregationConfig,
     OrgTaskAggregationMode,
     OrgTaskCreator,
     OrgTaskEventRecord,
@@ -32,6 +42,10 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskRecord,
     OrgTaskReviewStatus,
     OrgTaskStatus,
+)
+from openjiuwen.agent_teams.organization.summary import (
+    LaunchedSummaryTeam,
+    SummaryTeamSpec,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.organization.tools import (
@@ -98,6 +112,65 @@ class FakeAgent:
         self.member_name = backend.member_name
         self.harness = FakeHarness()
         self.spec = type("Spec", (), {"metadata": {"capabilities": ["analysis"]}})()
+
+
+class FakeSummaryFactory:
+    def __init__(self, *, fail=False, recover_fail=False, release_fail=False) -> None:
+        self.fail = fail
+        self.recover_fail = recover_fail
+        self.release_fail = release_fail
+        self.provision_calls = []
+        self.release_calls = []
+        self.recover_calls = []
+
+    def default_spec(self):
+        return SummaryTeamSpec()
+
+    async def provision(self, *, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
+        if self.fail:
+            raise RuntimeError("no team capacity")
+        self.provision_calls.append(
+            {
+                "organization_id": organization_id,
+                "root_task_id": root_task_id,
+                "summary_task_id": summary_task_id,
+                "owner_team_id": owner_team_id,
+                "session_id": session_id,
+            }
+        )
+        return LaunchedSummaryTeam(
+            team_id="team-summary",
+            leader_id="leader-summary",
+            root_task_id=root_task_id,
+            summary_task_id=summary_task_id,
+            spec=SummaryTeamSpec(),
+        )
+
+    async def recover(self, *, execution_id, organization_id, root_task_id, summary_task_id, owner_team_id, session_id):
+        if self.recover_fail:
+            raise RuntimeError("no team to recover")
+        self.recover_calls.append(
+            {
+                "execution_id": execution_id,
+                "organization_id": organization_id,
+                "root_task_id": root_task_id,
+                "summary_task_id": summary_task_id,
+                "owner_team_id": owner_team_id,
+                "session_id": session_id,
+            }
+        )
+        return LaunchedSummaryTeam(
+            team_id="team-summary",
+            leader_id="leader-summary",
+            root_task_id=root_task_id,
+            summary_task_id=summary_task_id,
+            spec=SummaryTeamSpec(),
+        )
+
+    async def release(self, *, execution_id, summary_team_id, session_id):
+        self.release_calls.append((execution_id, summary_team_id, session_id))
+        if self.release_fail:
+            raise RuntimeError("host failed to stop summary team")
 
 
 @pytest_asyncio.fixture
@@ -251,6 +324,42 @@ async def _emit_team_task_event(agents, session_id: str, org_id: str, event, *, 
     )
     await handler(OrgEventMessage.from_event(event))
     await asyncio.sleep(0)
+
+
+async def _emit_org_event(agents, session_id: str, org_id: str, event):
+    """Deliver a summary lifecycle event over the org-scoped ORG topic.
+
+    The runtime subscribes the org-scoped ORG topic once per organization on
+    the owner's messager with the ``_ORG_SUBSCRIBER_TEAM`` sentinel team id,
+    so the subscription lives on ``team-a`` (the first bound owner).
+    """
+    topic_id = OrgTopic.ORG.build(session_id, org_id)
+    messager = agents["team-a"].team_backend.messager
+    handler = next(handler for topic, handler in messager.subscriptions if topic == topic_id)
+    pending = [OrgEventMessage.from_event(event)]
+    seen = len(messager.published)
+    # Transport delivery is async: handlers re-publish follow-up lifecycle events
+    # (e.g. TaskCreated -> Provisioned) onto the same ORG topic. Drain only the
+    # publishes made during this delivery and re-deliver them, like a real messager.
+    while pending:
+        message = pending.pop(0)
+        await handler(message)
+        while len(messager.published) > seen:
+            published = messager.published[seen]
+            seen += 1
+            if published[0] == topic_id:
+                pending.append(published[1])
+    await asyncio.sleep(0)
+
+
+async def _capture_leader_turns(runtime):
+    turns = []
+
+    def capture_prompt(*, team_id, session_id, prompt, **kwargs):
+        turns.append({"team_id": team_id, "session_id": session_id, "prompt": prompt})
+
+    runtime._schedule_leader_turn = capture_prompt
+    return turns
 
 
 async def _rebind_owner_after_clear(runtime, agents, session_id: str):
@@ -626,12 +735,12 @@ async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_create_task_rejects_summary_team_aggregation(org_manager):
-    manager, _ = org_manager
+async def test_create_task_summary_team_creates_summary_task_and_reads_sources(org_manager):
+    manager, messager = org_manager
     created = await manager.create_task(
-        task_id="root-summary-rejected",
+        task_id="root-summary-auto",
         title="Root with summary team",
-        description="SUMMARY_TEAM is not supported yet.",
+        description="SUMMARY_TEAM auto-creates a framework Summary Task.",
         required_capabilities=["analysis"],
         aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
         created_by=OrgTaskCreator(
@@ -641,9 +750,288 @@ async def test_create_task_rejects_summary_team_aggregation(org_manager):
             team_id="team-a",
         ),
     )
-    assert not created.ok
-    assert "SUMMARY_TEAM aggregation is not supported yet" in created.reason
-    assert await manager.get_task("root-summary-rejected") is None
+    assert created.ok
+    root = created.task
+    assert root.aggregation is not None
+    assert root.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    summary_id = root.aggregation.summary_task_id
+    assert summary_id
+    assert root.aggregation.final_output_task_id == summary_id
+    # The framework-owned Summary Task is created alongside the root.
+    summary = await manager.get_task(summary_id)
+    assert summary is not None
+    assert summary.task_type == ORG_SUMMARY_TASK_TYPE
+    assert summary.parent_task_id is None
+    assert summary.root_task_id == "root-summary-auto"
+    assert summary.status is OrgTaskStatus.WAITING_SOURCES
+    assert summary.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    # The auto-created row emits a SummaryTaskCreated event for the runtime.
+    created_events = [m for _, m in messager.published if m.event_type == OrgEvent.SUMMARY_TASK_CREATED]
+    assert any(m.payload.get("summary_task_id") == summary_id for m in created_events)
+
+    # Once a source completes, binding it to the summary only needs the source
+    # to be COMPLETED; the auto path leaves source binding to the Root Leader.
+    await manager.create_task(
+        task_id="src-auto",
+        title="Source",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1"),
+    )
+    await manager.claim_task(task_id="src-auto", team_id="team-a")
+    await manager.complete_task(task_id="src-auto", team_id="team-a", output_abstract="out")
+    attached = await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-auto"], team_id="team-a")
+    assert attached.ok
+
+
+@pytest.mark.asyncio
+async def test_summary_team_root_cannot_complete_before_final_output(org_manager):
+    """SUMMARY_TEAM root must wait for final_output_task_id (Summary Task) (§4.4.4)."""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    created = await manager.create_task(
+        task_id="root-final-gate",
+        title="Root",
+        description="Gate root completion on Summary Task.",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert created.ok
+    root = created.task
+    summary_id = root.aggregation.summary_task_id
+    assert summary_id
+
+    await manager.claim_task(task_id="root-final-gate", team_id="team-a")
+
+    # Ordinary child work can finish without unlocking the root: the Summary
+    # Task is not a parent_task_id child, so the child-tree gate alone is not enough.
+    child = await manager.create_task(
+        task_id="child-final-gate",
+        parent_task_id="root-final-gate",
+        title="Child",
+        description="Ordinary work slice.",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert child.ok
+    await manager.claim_task(task_id="child-final-gate", team_id="team-a")
+    assert (await manager.complete_task(task_id="child-final-gate", team_id="team-a")).ok
+    assert (
+        await manager.review_task(
+            task_id="child-final-gate",
+            reviewer_team_id="team-a",
+            review_status=OrgTaskReviewStatus.ACCEPTED,
+            verdict="ok",
+        )
+    ).ok
+
+    assert not await manager.can_complete_parent_task(parent_task_id="root-final-gate", team_id="team-a")
+    blocked = await manager.complete_task(task_id="root-final-gate", team_id="team-a")
+    assert not blocked.ok
+    assert "final output task is not completed" in blocked.reason
+    assert summary_id in blocked.reason
+
+    # Complete the framework Summary Task (final_output_task_id), then root may finish.
+    await manager.delegate_task(task_id=summary_id, from_team_id="team-a", to_team_id="team-a")
+    assert (await manager.start_task(task_id=summary_id, team_id="team-a")).ok
+    assert (await manager.complete_task(task_id=summary_id, team_id="team-a", output_abstract="final")).ok
+
+    assert await manager.can_complete_parent_task(parent_task_id="root-final-gate", team_id="team-a")
+    done = await manager.complete_task(task_id="root-final-gate", team_id="team-a", output_abstract="delivered")
+    assert done.ok
+    assert done.task.status is OrgTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_bind_root_summary_team_writes_summary_team_id(org_manager):
+    """provision 后根任务 aggregation.summary_team_id 应被回填 (§4.4.1)."""
+    manager, _messager = org_manager
+    created = await manager.create_task(
+        task_id="root-summary-bind",
+        title="Root",
+        description="SUMMARY_TEAM bind test.",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert created.ok
+    root = created.task
+    assert root.aggregation is not None
+    assert root.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    # Before bind, summary_team_id is None (provision has not written it back).
+    assert root.aggregation.summary_task_id
+    assert root.aggregation.summary_team_id is None
+
+    bound = await manager.bind_root_summary_team(
+        root_task_id="root-summary-bind",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert bound.ok
+    assert bound.task.aggregation.summary_team_id == "org-summary-deadbeef"
+    assert bound.task.aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+    # final_output_task_id and summary_task_id are preserved.
+    assert bound.task.aggregation.summary_task_id == root.aggregation.summary_task_id
+    assert bound.task.aggregation.final_output_task_id == root.aggregation.summary_task_id
+
+    # Idempotent: binding the same team again is a no-op success.
+    again = await manager.bind_root_summary_team(
+        root_task_id="root-summary-bind",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert again.ok
+    assert again.task.aggregation.summary_team_id == "org-summary-deadbeef"
+
+
+@pytest.mark.asyncio
+async def test_bind_root_summary_team_rejects_non_summary_root(org_manager):
+    """非 SUMMARY_TEAM 根任务应拒绝绑定."""
+    manager, _messager = org_manager
+    await manager.create_task(
+        task_id="root-hierarchical",
+        title="Root",
+        description="HIERARCHICAL root.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    bound = await manager.bind_root_summary_team(
+        root_task_id="root-hierarchical",
+        summary_team_id="org-summary-deadbeef",
+    )
+    assert not bound.ok
+    assert "not SUMMARY_TEAM" in bound.reason
+
+
+@pytest.mark.asyncio
+async def test_second_summary_team_root_is_rejected_while_one_is_active(org_manager):
+    """一个组织同时只允许一个 SUMMARY_TEAM 根任务。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_task(
+        task_id="root-a",
+        title="A",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert first.ok
+
+    second = await manager.create_task(
+        task_id="root-b",
+        title="B",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert not second.ok
+    # The reason names the blocking root so the leader can act on it.
+    assert "root-a" in second.reason
+    assert await manager.get_task("root-b") is None
+
+
+@pytest.mark.asyncio
+async def test_summary_team_root_allowed_again_after_terminal(org_manager):
+    """活跃根任务终结后，可以再建一个 SUMMARY_TEAM 根任务。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_task(
+        task_id="root-a",
+        title="A",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert first.ok
+    await manager.claim_task(task_id="root-a", team_id="team-a")
+    # Root complete is gated on the Summary Task; fail/terminate still clears the
+    # active SUMMARY_TEAM slot without requiring final_output (§4.4.4).
+    assert (
+        await manager.fail_task(
+            task_id="root-a",
+            team_id="team-a",
+            failure_code=OrgTaskFailureCode.CANCELLED,
+            failure_reason="abandon first aggregation",
+        )
+    ).ok
+
+    second = await manager.create_task(
+        task_id="root-b",
+        title="B",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert second.ok, second.reason
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_root_does_not_block_summary_team_root(org_manager):
+    """守卫只针对 SUMMARY_TEAM 根任务，普通（HIERARCHICAL）根任务不受影响。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    hierarchical = await manager.create_task(
+        task_id="root-hier",
+        title="H",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert hierarchical.ok
+
+    summary_root = await manager.create_task(
+        task_id="root-sum",
+        title="S",
+        description="d",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=creator,
+    )
+    assert summary_root.ok, summary_root.reason
+
+
+@pytest.mark.asyncio
+async def test_create_summary_task_rejected_when_one_already_exists(org_manager):
+    """org_create_summary_task 这条路径也不能绕过"每组织一个摘要"的约束。"""
+    manager, _ = org_manager
+    creator = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    first = await manager.create_summary_task(
+        task_id="summary-1", title="S", description="d", created_by=creator
+    )
+    assert first.ok
+
+    second = await manager.create_summary_task(
+        task_id="summary-2", title="S2", description="d", created_by=creator
+    )
+    assert not second.ok
+    assert "summary-1" in second.reason
+    assert await manager.get_task("summary-2") is None
 
 
 def test_to_task_normalizes_legacy_terminal_statuses():
@@ -953,11 +1341,14 @@ async def test_org_tasks_require_non_empty_capabilities(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_org_create_task_tool_exposes_hierarchical_aggregation_and_rejects_summary_team(org_manager):
+async def test_org_create_task_tool_exposes_both_aggregation_modes(org_manager):
     manager, _ = org_manager
     tool = OrgCreateTaskTool(manager, team_id="team-a", leader_id="leader-a")
     params = tool.card.input_params["properties"]["aggregation_mode"]
-    assert params["enum"] == [OrgTaskAggregationMode.HIERARCHICAL.value]
+    assert params["enum"] == [
+        OrgTaskAggregationMode.HIERARCHICAL.value,
+        OrgTaskAggregationMode.SUMMARY_TEAM.value,
+    ]
     assert "root_task_id" not in tool.card.input_params["properties"]
 
     created = await tool.invoke(
@@ -972,18 +1363,23 @@ async def test_org_create_task_tool_exposes_hierarchical_aggregation_and_rejects
     assert created.success
     assert created.data["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
 
-    rejected = await tool.invoke(
+    summary_created = await tool.invoke(
         {
             "task_id": "tool-root-summary",
             "title": "Root summary",
-            "description": "Must be rejected.",
+            "description": "SUMMARY_TEAM auto-creates a Summary Task.",
             "required_capabilities": ["analysis"],
             "aggregation_mode": OrgTaskAggregationMode.SUMMARY_TEAM.value,
         }
     )
-    assert not rejected.success
-    assert "SUMMARY_TEAM aggregation is not supported yet" in rejected.error
-    assert await manager.get_task("tool-root-summary") is None
+    assert summary_created.success
+    assert summary_created.data["aggregation_mode"] == OrgTaskAggregationMode.SUMMARY_TEAM
+    root = await manager.get_task("tool-root-summary")
+    assert root is not None
+    assert root.aggregation is not None
+    summary_id = root.aggregation.summary_task_id
+    assert summary_id
+    assert await manager.get_task(summary_id) is not None
 
 
 @pytest.mark.asyncio
@@ -1081,8 +1477,7 @@ async def test_publish_leader_message_event_skips_team_inbox_delivery(org_manage
     leader_topics = [
         topic
         for topic, message in messager.published
-        if message.event_type == OrgEvent.LEADER_MESSAGE
-        and topic == OrgTopic.LEADER.build("session-1", "org-1")
+        if message.event_type == OrgEvent.LEADER_MESSAGE and topic == OrgTopic.LEADER.build("session-1", "org-1")
     ]
     assert leader_topics
 
@@ -1281,11 +1676,13 @@ async def test_organization_events_are_persisted_for_activity_views(org_manager)
 
     assert manager.db.session_local is not None
     async with manager.db.session_local() as session:
-        rows = (await session.execute(
-            select(OrgTaskEventRecord.event_type, OrgTaskEventRecord.task_id).where(
-                OrgTaskEventRecord.organization_id == "org-1"
+        rows = (
+            await session.execute(
+                select(OrgTaskEventRecord.event_type, OrgTaskEventRecord.task_id).where(
+                    OrgTaskEventRecord.organization_id == "org-1"
+                )
             )
-        )).all()
+        ).all()
     assert (OrgEvent.TASK_CREATED, "activity-task") in rows
     assert (OrgEvent.TASK_CLAIMED, "activity-task") in rows
 
@@ -1968,6 +2365,7 @@ async def test_summary_task_sources_read_completed_outputs(org_manager):
     )
     await manager.claim_task(task_id="source-1", team_id="team-finance")
 
+    # Early bind is allowed; the summary is not ready until the source completes.
     early_summary = await manager.create_summary_task(
         task_id="summary-early",
         title="Summary",
@@ -1980,8 +2378,10 @@ async def test_summary_task_sources_read_completed_outputs(org_manager):
             team_id="team-root",
         ),
     )
-    assert not early_summary.ok
-    assert "source task is not completed" in early_summary.reason
+    assert early_summary.ok
+    early_verdict = await manager.evaluate_summary_sources(summary_task_id="summary-early")
+    assert not early_verdict["ready"]
+    assert early_verdict["source_failed"] is None
 
     await manager.complete_task(
         task_id="source-1",
@@ -1989,24 +2389,12 @@ async def test_summary_task_sources_read_completed_outputs(org_manager):
         output_context={"result_uri": "https://example.com/finance.json", "result_type": "report"},
         output_abstract="Revenue is growing.",
     )
-    summary = await manager.create_summary_task(
-        task_id="summary-1",
-        title="Summary",
-        description="Summarize all slices.",
-        source_task_ids=["source-1"],
-        created_by=OrgTaskCreator(
-            creator_type="team_leader",
-            creator_id="leader-root",
-            organization_id="org-1",
-            team_id="team-root",
-        ),
-    )
-    assert summary.ok
+    assert (await manager.evaluate_summary_sources(summary_task_id="summary-early"))["ready"]
 
-    sources = await manager.list_summary_sources(summary_task_id="summary-1")
+    sources = await manager.list_summary_sources(summary_task_id="summary-early")
     assert sources[0].source_task_id == "source-1"
-    inputs = await manager.get_summary_inputs(summary_task_id="summary-1")
-    assert inputs["summary_task"]["task_id"] == "summary-1"
+    inputs = await manager.get_summary_inputs(summary_task_id="summary-early")
+    assert inputs["summary_task"]["task_id"] == "summary-early"
     assert inputs["source_tasks"][0]["task"]["output_abstract"] == "Revenue is growing."
     assert inputs["source_tasks"][0]["task"]["output_context"]["result_uri"] == "https://example.com/finance.json"
 
@@ -2030,9 +2418,7 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     owner_tool_names = set(owner_tools)
     assert {"org_create_organization", "org_invite_team", "org_view_tasks"} <= owner_tool_names
 
-    joined_result = await owner_tools["org_invite_team"].invoke(
-        {"organization_id": "org-active", "team_id": "team-b"}
-    )
+    joined_result = await owner_tools["org_invite_team"].invoke({"organization_id": "org-active", "team_id": "team-b"})
     assert joined_result.success
     assert {leader["team_id"] for leader in joined_result.data["leaders"]} == {"team-a", "team-b"}
     assert agents["team-b"].team_backend.org_task_manager is agents["team-a"].team_backend.org_task_manager
@@ -2084,7 +2470,9 @@ async def test_joined_leader_is_woken_to_consider_open_org_task(active_organizat
 
     runtime._team_runtime_manager.run_organization_turn = run_organization_turn
     topic_id = OrgTopic.TASK.build(session_id, "org-autoclaim")
-    handler = next(handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id)
+    handler = next(
+        handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id
+    )
     await handler(
         OrgEventMessage.from_event(
             OrgTaskCreatedEvent(
@@ -2129,10 +2517,12 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
             organization_id="org-claimed-task",
         ),
     )
-    assert (await manager.claim_task(
-        task_id="claimed-test-task",
-        team_id="team-b",
-    )).ok
+    assert (
+        await manager.claim_task(
+            task_id="claimed-test-task",
+            team_id="team-b",
+        )
+    ).ok
 
     turns = []
 
@@ -2142,7 +2532,9 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
 
     runtime._team_runtime_manager.run_organization_turn = run_organization_turn
     topic_id = OrgTopic.TASK.build(session_id, "org-claimed-task")
-    handler = next(handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id)
+    handler = next(
+        handler for topic, handler in agents["team-b"].team_backend.messager.subscriptions if topic == topic_id
+    )
     await handler(
         OrgEventMessage.from_event(
             OrgTaskClaimedEvent(
@@ -2261,10 +2653,12 @@ async def test_cold_recovered_leader_rebinds_from_persisted_membership(active_or
             organization_id="org-db-rebind",
         ),
     )
-    assert (await manager.claim_task(
-        task_id="claimed-before-recovery",
-        team_id="team-b",
-    )).ok
+    assert (
+        await manager.claim_task(
+            task_id="claimed-before-recovery",
+            team_id="team-b",
+        )
+    ).ok
 
     # Model a process restart: the durable tables remain but the in-memory
     # runtime's membership map is empty and the leader is newly reconstructed.
@@ -2376,7 +2770,6 @@ async def test_recovered_leader_discovers_matching_open_task(active_organization
     assert "MUST call org_claim_task" in turns[0]["inputs"]["query"]
 
 
-
 @pytest.mark.asyncio
 async def test_rebind_resumes_durable_parent_followups(active_organization_runtime):
     """PENDING review, unrepaired FAILED/REJECTED, and completeable parent all rebuild on rebind."""
@@ -2422,9 +2815,7 @@ async def test_rebind_resumes_durable_parent_followups(active_organization_runti
     assert any("org_review_task" in p and "child-pending" in p for p in prompts)
     assert any("child-fail" in p and "failed" in p.lower() and "repairs_task_id=child-fail" in p for p in prompts)
     assert any("child-rej" in p and "REJECTED" in p and "repairs_task_id=child-rej" in p for p in prompts)
-    assert any(
-        "parent-ready" in p and "accepted or superseded" in p and "org_update_task" in p for p in prompts
-    )
+    assert any("parent-ready" in p and "accepted or superseded" in p and "org_update_task" in p for p in prompts)
 
 
 @pytest.mark.asyncio
@@ -2774,3 +3165,1057 @@ async def test_drain_leader_turns_waits_until_running_team_pauses(active_organiz
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
     assert len(sleep_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_summary_sources_ready_only_when_all_required_complete_and_accepted(org_manager):
+    """Sources may be bound early; ready only after every required source completes (§4.4.3)."""
+    manager, _ = org_manager
+    await manager.create_task(
+        task_id="src-1",
+        title="S1",
+        description="d",
+        required_capabilities=["a"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="c", organization_id="org-1"),
+    )
+    await manager.create_task(
+        task_id="src-2",
+        title="S2",
+        description="d",
+        required_capabilities=["a"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="c", organization_id="org-1"),
+    )
+    summary = await manager.create_summary_task(
+        task_id="summary-ready",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader", creator_id="leader-root", organization_id="org-1", team_id="team-root"
+        ),
+    )
+    assert summary.ok
+    # No sources bound yet.
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-ready")
+    assert not verdict["ready"]
+    assert verdict["source_failed"] is None
+
+    # Early bind before sources finish — not ready, and not a failure.
+    attach = await manager.attach_summary_sources(
+        summary_task_id="summary-ready", source_task_ids=["src-1", "src-2"], team_id="team-root"
+    )
+    assert attach.ok
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-ready")
+    assert not verdict["ready"]
+    assert verdict["source_failed"] is None
+    assert "not completed" in verdict["reason"]
+
+    for task_id, team_id in (("src-1", "team-a"), ("src-2", "team-b")):
+        await manager.claim_task(task_id=task_id, team_id=team_id)
+        await manager.complete_task(task_id=task_id, team_id=team_id, output_abstract="out")
+
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-ready")
+    assert verdict["ready"]
+    assert verdict["source_failed"] is None
+
+
+@pytest.mark.asyncio
+async def test_attach_summary_sources_rejects_terminal_summary_task(org_manager):
+    """A finished summary must not silently accept late source bindings.
+
+    Binding after the summary is COMPLETED used to write the rows and return
+    ok=True, but the wake-up was dropped (the execution is terminal), so the
+    caller saw a success that never took effect.
+    """
+    manager, messager = org_manager
+    summary = await manager.create_summary_task(
+        task_id="summary-done",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-root",
+            organization_id="org-1",
+            team_id="team-summary",
+        ),
+    )
+    assert summary.ok
+    # A summary task is born WAITING_SOURCES + UNASSIGNED (unclaimable), so it
+    # reaches a team the way the runtime does it: by delegation.
+    delegated = await manager.delegate_task(
+        task_id="summary-done",
+        from_team_id="team-root",
+        to_team_id="team-summary",
+    )
+    assert delegated.ok
+    completed = await manager.complete_task(task_id="summary-done", team_id="team-summary", output_abstract="empty")
+    assert completed.ok
+    assert completed.task.status is OrgTaskStatus.COMPLETED
+
+    await manager.create_task(
+        task_id="src-late",
+        title="Late source",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1"),
+    )
+    await manager.claim_task(task_id="src-late", team_id="team-a")
+    await manager.complete_task(task_id="src-late", team_id="team-a", output_abstract="out-late")
+
+    published_before = len(messager.published)
+    attach = await manager.attach_summary_sources(summary_task_id="summary-done", source_task_ids=["src-late"], team_id="team-summary")
+    assert not attach.ok
+    assert "terminal" in attach.reason
+    assert "COMPLETED" in attach.reason
+    # Rejected outright: no row written and no SourcesUpdated event emitted.
+    assert await manager.list_summary_sources(summary_task_id="summary-done") == []
+    assert len(messager.published) == published_before
+
+
+@pytest.mark.asyncio
+async def test_attach_summary_sources_requires_root_team(org_manager):
+    """§6.2: only the root task's creator/assignee may bind summary sources."""
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="root-attach-auth",
+        title="Root",
+        description="SUMMARY_TEAM root for attach auth.",
+        required_capabilities=["analysis"],
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert created.ok
+    summary_id = created.task.aggregation.summary_task_id
+    await manager.create_task(
+        task_id="src-attach-auth",
+        title="Source",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1"),
+    )
+    await manager.claim_task(task_id="src-attach-auth", team_id="team-b")
+    await manager.complete_task(task_id="src-attach-auth", team_id="team-b", output_abstract="out")
+
+    denied = await manager.attach_summary_sources(
+        summary_task_id=summary_id,
+        source_task_ids=["src-attach-auth"],
+        team_id="team-b",
+    )
+    assert not denied.ok
+    assert "only the root task's team" in denied.reason
+    assert await manager.list_summary_sources(summary_task_id=summary_id) == []
+
+    allowed = await manager.attach_summary_sources(
+        summary_task_id=summary_id,
+        source_task_ids=["src-attach-auth"],
+        team_id="team-a",
+    )
+    assert allowed.ok
+    assert [s.source_task_id for s in await manager.list_summary_sources(summary_task_id=summary_id)] == [
+        "src-attach-auth"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_summary_execution_lifecycle(org_manager):
+    manager, _ = org_manager
+    execution = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    assert execution.status is OrgSummaryExecutionStatus.PROVISIONING
+    assert execution.summary_team_id is None
+
+    running = await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    assert running is not None
+    assert running.status is OrgSummaryExecutionStatus.RUNNING
+    assert running.summary_team_id == "team-summary"
+
+    listed = await manager.list_summary_executions(root_task_id="root-1")
+    assert [e.execution_id for e in listed] == [execution.execution_id]
+    assert await manager.list_summary_executions(root_task_id="root-nope") == []
+
+    released = await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+        released_at=1234,
+    )
+    assert released is not None and released.released_at == 1234
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_reuses_the_live_row(org_manager):
+    """同一 Summary Task 的第二次创建复用活着的 execution（事件重投不产生重复团队）。"""
+    manager, _ = org_manager
+    first = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    second = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+
+    assert second.execution_id == first.execution_id
+    assert len(await manager.list_summary_executions(summary_task_id="summary-1")) == 1
+
+    # Still reused once the team is bound and running.
+    await manager.update_summary_execution(
+        execution_id=first.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    third = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    assert third.execution_id == first.execution_id
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_after_terminal_starts_fresh(org_manager):
+    """终态 execution 不阻止新建：汇总结束后可以再跑一轮。"""
+    manager, _ = org_manager
+    first = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    await manager.update_summary_execution(
+        execution_id=first.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+    )
+
+    second = await manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-1")
+    assert second.execution_id != first.execution_id
+    assert second.status is OrgSummaryExecutionStatus.PROVISIONING
+    # The terminal row is kept as history.
+    assert len(await manager.list_summary_executions(summary_task_id="summary-1")) == 2
+
+
+@pytest.mark.asyncio
+async def test_release_summary_task_marks_unbound_execution_released(active_organization_runtime):
+    """没绑定团队的 execution 也要被标 RELEASED，否则会永久滞留被重试。"""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-release-unbound"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # PROVISIONING, never bound to a team (provision failed / interrupted).
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    assert execution.summary_team_id is None
+    runtime.set_summary_team_factory(FakeSummaryFactory())
+
+    # The runtime calls this with the TeamOrganizationManager wrapper, not the raw pool.
+    await runtime._release_summary_task(
+        manager=org_manager,
+        summary_task_id=summary_id,
+        session_id=session_id,
+    )
+
+    released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert released.status is OrgSummaryExecutionStatus.RELEASED
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_release_after_failed_cleanup(active_organization_runtime):
+    """After a failed release, resume must retry once the Summary Task is terminal."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-release-retry"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    factory = FakeSummaryFactory(release_fail=True)
+    runtime.set_summary_team_factory(factory)
+
+    await runtime._release_summary_task(
+        manager=org_manager,
+        summary_task_id=summary_id,
+        session_id=session_id,
+    )
+    assert (await manager.list_summary_executions(summary_task_id=summary_id))[0].status is (
+        OrgSummaryExecutionStatus.RUNNING
+    )
+
+    # Terminal Summary Task without going through the event release path again.
+    failed = await manager.fail_summary_task(
+        summary_task_id=summary_id,
+        failure_reason="aggregate aborted",
+    )
+    assert failed.ok
+    # fail_summary_task publishes OrgTaskFailedEvent which may call release again
+    # while release_fail is still True; execution must remain live either way.
+    assert (await manager.list_summary_executions(summary_task_id=summary_id))[0].status is (
+        OrgSummaryExecutionStatus.RUNNING
+    )
+
+    factory.release_fail = False
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+
+    released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert released.status is OrgSummaryExecutionStatus.RELEASED
+    assert len(factory.release_calls) >= 2
+
+
+@pytest.mark.asyncio
+async def test_create_summary_execution_is_atomic_under_concurrency(org_manager):
+    """并发重复事件只能产生一条 live execution（唯一索引兜住读-写竞态）。"""
+    manager, _ = org_manager
+
+    results = await asyncio.gather(
+        *[
+            manager.create_summary_execution(root_task_id="root-1", summary_task_id="summary-race")
+            for _ in range(5)
+        ]
+    )
+
+    # Every caller converges on the same row...
+    assert len({r.execution_id for r in results}) == 1
+    # ...and the table holds exactly one live execution for the task.
+    execs = await manager.list_summary_executions(summary_task_id="summary-race")
+    assert len(execs) == 1
+    assert execs[0].status is OrgSummaryExecutionStatus.PROVISIONING
+
+
+async def _seed_summary_team_org(runtime, agents, session_id: str, org_id: str):
+    """Build org with owner team-a and a bound summary task; return (manager, summary_id)."""
+    manager, _ = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    # Host provision leaves the Summary Team in the runtime pool (PAUSED).  Unit
+    # tests use FakeSummaryFactory, so park a matching agent here before the
+    # OrgSummaryTaskCreatedEvent path tries to _bind_team it.
+    if "team-summary" not in agents:
+        summary_backend = FakeBackend(
+            team_name="team-summary",
+            leader_id="leader-summary",
+            db=agents["team-a"].team_backend.db,
+            messager=agents["team-a"].team_backend.messager,
+        )
+        summary_agent = FakeAgent(summary_backend)
+        summary_agent.spec = type("Spec", (), {"metadata": {"capabilities": [ORG_SUMMARY_CAPABILITY]}})()
+        agents["team-summary"] = summary_agent
+        await runtime._team_runtime_manager.pool.add(
+            ActiveTeam(
+                team_name="team-summary",
+                agent=summary_agent,
+                current_session_id=session_id,
+                state=RuntimeState.PAUSED,
+            )
+        )
+    created = await manager.create_summary_task(
+        task_id="summary-task",
+        title="Aggregate all slices",
+        description="Integrate source outputs into one result.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-team-a",
+            organization_id=org_id,
+            team_id="team-a",
+        ),
+    )
+    assert created.ok
+    # The ORG dispatcher drops summary events until a host factory is injected,
+    # so seed one for tests that exercise the summary lifecycle.
+    runtime.set_summary_team_factory(FakeSummaryFactory())
+    # Resume handlers are invoked by the runtime with the ``TeamOrganizationManager``
+    # wrapper built at bind time (``backend.org_task_manager`` is only the raw
+    # ``OrgTaskManager``), so fetch the wrapper it registered in the process pool.
+    org_manager = get_process_org_manager(
+        organization_id=org_id,
+        db=agents["team-a"].team_backend.db,
+        messager=agents["team-a"].team_backend.messager,
+        session_id=session_id,
+    )
+    return manager, org_manager, "summary-task"
+
+
+async def _seed_summary_team_root(manager, *, org_id: str, root_id: str, summary_id: str):
+    """Insert a SUMMARY_TEAM root row directly (helpers below are summary-task-centric)."""
+    import json
+
+    root_created = await manager.create_task(
+        task_id=root_id,
+        title="Root",
+        description="Root work.",
+        required_capabilities=["coordination"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    assert root_created.ok
+    await manager.claim_task(task_id=root_id, team_id="team-a")
+    async with manager._write() as session:
+        row = await session.get(OrgTaskRecord, root_id)
+        assert row is not None
+        row.aggregation_json = json.dumps(
+            OrgTaskAggregationConfig(
+                mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+                summary_task_id=summary_id,
+                final_output_task_id=summary_id,
+            ).model_dump()
+        )
+        await session.commit()
+    await manager.delegate_task(task_id=summary_id, from_team_id="team-a", to_team_id="team-summary")
+
+@pytest.mark.asyncio
+async def test_summary_task_created_provisions_and_delegates_dynamic_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-provide"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+    turns = await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
+    )
+
+    # Dynamic Summary Team was provisioned with the correct root/summary ids,
+    # the owning team, and session.
+    assert factory.provision_calls == [
+        {
+            "organization_id": org_id,
+            "root_task_id": summary_id,
+            "summary_task_id": summary_id,
+            "owner_team_id": "team-a",
+            "session_id": session_id,
+        }
+    ]
+
+    # The leader is registered with the summary capability so it can use org tools.
+    org = await manager.get_organization()
+    summary_leaders = [leader for leader in org.leaders if leader.team_id == "team-summary"]
+    assert summary_leaders, "summary team leader must be registered"
+    assert summary_leaders[0].capabilities == [ORG_SUMMARY_CAPABILITY]
+
+    # The summary task is delegated to the dynamic team and marks the execution RUNNING.
+    summary_task = await manager.get_task(summary_id)
+    assert summary_task.assignment.team_id == "team-summary"
+    execution = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert execution.status is OrgSummaryExecutionStatus.RUNNING
+    assert execution.summary_team_id == "team-summary"
+
+    # Provision only binds/delegates; the Summary Team stays idle until sources
+    # are ready (OrgSummarySourcesReadyEvent / resume evaluate).
+    assert not turns, "summary turn must not be scheduled before sources are ready"
+
+
+@pytest.mark.asyncio
+async def test_summary_provisioned_wakes_when_sources_already_ready(active_organization_runtime):
+    """If sources raced ahead of provision, OrgSummaryProvisioned still wakes (§4.4.3)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-provide-ready"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    await manager.create_task(
+        task_id="src-ready",
+        title="Slice",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    await manager.claim_task(task_id="src-ready", team_id="team-a")
+    await manager.complete_task(task_id="src-ready", team_id="team-a", output_abstract="out")
+    await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-ready"], team_id="team-a")
+
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+    turns = await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
+    )
+
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-summary"
+    assert summary_id in turns[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_post_provision_bind_failure_releases_launched_team(
+    active_organization_runtime, monkeypatch
+):
+    """Host-activated Summary Team must be released when post-provision bind fails."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-bind-fail"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+
+    async def _boom(**_kwargs):
+        raise RuntimeError("bind failed")
+
+    monkeypatch.setattr(runtime, "_bind_summary_team", _boom)
+    await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
+    )
+
+    assert factory.release_calls, "factory.release must reclaim the launched team"
+    _exec_id, released_team_id, released_session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+    assert released_session == session_id
+
+    execution = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert execution.status is OrgSummaryExecutionStatus.FAILED
+    summary_task = await manager.get_task(summary_id)
+    assert summary_task.status is OrgTaskStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_post_provision_delegate_failure_releases_launched_team(
+    active_organization_runtime, monkeypatch
+):
+    """Failed delegate_task must not publish Provisioned or leave RUNNING (§4.4.1)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-delegate-fail"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+
+    from openjiuwen.agent_teams.organization.task_pool import OrgTaskOpResult
+
+    async def _delegate_fail(**_kwargs):
+        return OrgTaskOpResult(ok=False, reason="task is assigned to another team: team-other")
+
+    monkeypatch.setattr(manager, "delegate_task", _delegate_fail)
+    await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
+    )
+
+    assert factory.release_calls, "factory.release must reclaim the launched team"
+    _exec_id, released_team_id, _session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+
+    execution = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert execution.status is OrgSummaryExecutionStatus.FAILED
+    assert execution.summary_team_id is None
+    summary_task = await manager.get_task(summary_id)
+    assert summary_task.status is OrgTaskStatus.FAILED
+    assert summary_task.assignment.team_id != "team-summary"
+
+
+@pytest.mark.asyncio
+async def test_summary_sources_ready_wakes_running_summary_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-ready-wake"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # Complete one source task so evaluate_summary_sources reports ready.
+    await manager.create_task(
+        task_id="src-a",
+        title="Slice A",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    await manager.claim_task(task_id="src-a", team_id="team-a")
+    await manager.complete_task(task_id="src-a", team_id="team-a", output_abstract="out-a")
+    await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-a"], team_id="team-a")
+
+    # Mark a running dynamic team on the summary execution.
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+
+    turns = await _capture_leader_turns(runtime)
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummarySourcesReadyEvent(organization_id=org_id, team_id=None, summary_task_id=summary_id),
+    )
+
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-summary"
+    assert summary_id in turns[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_summary_team_registration_lets_cold_recovery_rebind_the_org(active_organization_runtime):
+    """Provisioning registers membership and eagerly binds; cold rebind still works.
+
+    ``_complete_summary_provision`` both writes ``OrgLeaderRecord`` and mounts
+    org tools via ``_bind_team`` while the host-activated agent is still pooled.
+    After a process restart the in-memory registry is gone; ``ensure_team_binding``
+    must still resolve the organization from the durable leader row alone.
+    """
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-cold-rebind"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+    await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryTaskCreatedEvent(organization_id=org_id, team_id="team-a", summary_task_id=summary_id),
+    )
+
+    # Eager bind should have landed while the pooled Summary Team was live.
+    assert runtime._team_organizations.get((session_id, "team-summary")) == org_id
+    assert agents["team-summary"].team_backend.org_task_manager is not None
+    assert any(
+        getattr(tool.card, "name", "") == "org_view_tasks" for tool in agents["team-summary"].harness.tools
+    )
+
+    # Simulate a process restart for the dynamic team: the in-memory registry is
+    # gone, the org tables are not.
+    runtime._team_organizations.clear()
+    assert runtime._team_organizations.get((session_id, "team-summary")) is None
+
+    assert await OrgTaskManager.find_organization_ids_for_team(agents["team-a"].team_backend.db, "team-summary") == [
+        org_id
+    ]
+
+    # With state warm again, the ordinary lazy binder converges on the org and
+    # cross-resumes the summary work it never saw an event for.
+    recovered_backend = FakeBackend(
+        team_name="team-summary",
+        leader_id="leader-summary",
+        db=agents["team-a"].team_backend.db,
+        messager=FakeMessager(),
+    )
+    recovered_agent = FakeAgent(recovered_backend)
+    recovered_agent.spec = type("Spec", (), {"metadata": {"capabilities": [ORG_SUMMARY_CAPABILITY]}})()
+    assert await runtime.ensure_team_binding(
+        team_id="team-summary",
+        session_id=session_id,
+        agent=recovered_agent,
+    )
+    assert recovered_backend.org_task_manager is not None
+    assert recovered_backend.org_message_service is not None
+    assert runtime._team_organizations[(session_id, "team-summary")] == org_id
+    assert any(
+        topic == OrgTopic.TASK.build(session_id, org_id) for topic, _handler in recovered_backend.messager.subscriptions
+    )
+
+
+@pytest.mark.asyncio
+async def test_summary_completed_releases_execution_and_wakes_root(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-completed"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    # Inject the host factory so release() is reachable through `_on_org_event`.
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+    turns = await _capture_leader_turns(runtime)
+
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryCompletedEvent(
+            organization_id=org_id, team_id="team-a", root_task_id=summary_id, summary_task_id=summary_id
+        ),
+    )
+
+    # The dynamic team is released (factory.release called) and execution is RELEASED.
+    assert factory.release_calls, "factory.release must be called on summary completion"
+    # release must receive the team id (not the execution id) so the host can
+    # actually stop the dynamic team.
+    _exec_id, released_team_id, _session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+    assert released_team_id != _exec_id
+    released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert released.status is OrgSummaryExecutionStatus.RELEASED
+
+    # The root leader (owner team-a) is woken to inject the summary result.
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-a"
+    assert "summary task" in turns[0]["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_summary_provision_failed_wakes_root_leader(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-failed"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    turns = await _capture_leader_turns(runtime)
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummaryProvisionFailedEvent(
+            organization_id=org_id,
+            team_id="team-a",
+            root_task_id=summary_id,
+            summary_task_id=summary_id,
+            failure_reason="no capacity",
+        ),
+    )
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-a"
+    assert "supplement" in turns[0]["prompt"] or "summary" in turns[0]["prompt"].lower()
+
+
+@pytest.mark.asyncio
+async def test_fail_summary_task_marks_failure_code(active_organization_runtime):
+    """provision 失败时 Summary Task 应落 failure_code=SUMMARY_PROVISION_FAILED (§4.4.3)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-failtask"
+    manager, _org_manager, summary_id = await _seed_summary_team_org(
+        runtime, agents, session_id, org_id
+    )
+    # Before failure the Summary Task is not yet FAILED.
+    task = await manager.get_task(summary_id)
+    assert task is not None
+    assert task.failure_code is None
+
+    result = await manager.fail_summary_task(
+        summary_task_id=summary_id,
+        failure_reason="summary team provision failed: no capacity",
+    )
+    assert result.ok
+    failed = result.task
+    assert failed.status is OrgTaskStatus.FAILED
+    assert failed.failure_code is not None
+    assert str(failed.failure_code) == OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value
+    assert "no capacity" in failed.failure_reason
+
+    # Double-fail on a terminal task is rejected.
+    again = await manager.fail_summary_task(
+        summary_task_id=summary_id,
+        failure_reason="again",
+    )
+    assert not again.ok
+    assert "terminal" in again.reason
+
+
+@pytest.mark.asyncio
+async def test_summary_source_failed_wakes_root_leader(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-src-failed"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    turns = await _capture_leader_turns(runtime)
+    await _emit_org_event(
+        agents,
+        session_id,
+        org_id,
+        OrgSummarySourceFailedEvent(
+            organization_id=org_id,
+            team_id=None,
+            summary_task_id=summary_id,
+            source_task_id="src-x",
+            failure_reason="crashed",
+        ),
+    )
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-a"
+    assert "supplement" in turns[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_early_bound_source_failure_notifies_via_sources_updated(org_manager):
+    """Bind before completion; when the source fails, re-evaluate marks source_failed (§4.4.3)."""
+    manager, messager = org_manager
+    await manager.create_task(
+        task_id="src-early-fail",
+        title="Slice",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="c", organization_id="org-1"),
+    )
+    summary = await manager.create_summary_task(
+        task_id="summary-early-fail",
+        title="Summary",
+        description="Integrate.",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-root",
+            organization_id="org-1",
+            team_id="team-root",
+        ),
+    )
+    assert summary.ok
+    attach = await manager.attach_summary_sources(
+        summary_task_id="summary-early-fail",
+        source_task_ids=["src-early-fail"],
+        team_id="team-root",
+    )
+    assert attach.ok
+    waiting = await manager.evaluate_summary_sources(summary_task_id="summary-early-fail")
+    assert not waiting["ready"]
+    assert waiting["source_failed"] is None
+
+    await manager.claim_task(task_id="src-early-fail", team_id="team-a")
+    failed = await manager.fail_task(
+        task_id="src-early-fail",
+        team_id="team-a",
+        failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+        failure_reason="slice crashed",
+    )
+    assert failed.ok
+
+    updated = [
+        m
+        for _, m in messager.published
+        if m.event_type == OrgEvent.SUMMARY_SOURCES_UPDATED
+        and m.payload.get("summary_task_id") == "summary-early-fail"
+    ]
+    # One from attach, one from fail_task notify.
+    assert len(updated) >= 2
+
+    verdict = await manager.evaluate_summary_sources(summary_task_id="summary-early-fail")
+    assert not verdict["ready"]
+    assert verdict["source_failed"] == "src-early-fail"
+    assert "failed" in verdict["reason"]
+
+
+@pytest.mark.asyncio
+async def test_running_dynamic_summary_team_adds_supplementary_child(active_organization_runtime):
+    """The dynamic Summary Team may create a focused supplementary task under the root (§4.4.3)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-supplement"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # Seed a SUMMARY_TEAM aggregation root directly (create_task rejects SUMMARY_TEAM until MR4 opens).
+    root_id = "root-summary"
+    await _seed_summary_team_root(manager, org_id=org_id, root_id=root_id, summary_id=summary_id)
+
+    summary_leader = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-summary",
+        organization_id=org_id,
+        team_id="team-summary",
+    )
+    result = await manager.create_task(
+        task_id="supplementary-1",
+        parent_task_id=root_id,
+        title="Supplementary",
+        description="Fill a gap in the source material.",
+        required_capabilities=["analysis"],
+        created_by=summary_leader,
+    )
+    assert result.ok
+    supplementary = result.task
+    assert supplementary.parent_task_id == root_id
+    assert supplementary.root_task_id == root_id
+
+
+@pytest.mark.asyncio
+async def test_non_summary_team_cannot_create_supplementary_child(active_organization_runtime):
+    """A team that is not the summary task's assigned team cannot bypass the parent guard."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-guard"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    root_id = "root-guard"
+    await _seed_summary_team_root(manager, org_id=org_id, root_id=root_id, summary_id=summary_id)
+
+    outsider = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-b",
+        organization_id=org_id,
+        team_id="team-b",
+    )
+    blocked = await manager.create_task(
+        task_id="outsider-1",
+        parent_task_id=root_id,
+        title="Outside",
+        description="Should be rejected.",
+        required_capabilities=["analysis"],
+        created_by=outsider,
+    )
+    assert not blocked.ok
+    assert "only the parent task's assigned team" in blocked.reason
+
+
+@pytest.mark.asyncio
+async def test_resume_summary_executions_reschedules_ready_summary(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-resume"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # Complete + attach a source so evaluate_summary_sources is ready.
+    await manager.create_task(
+        task_id="src-c",
+        title="Slice C",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    await manager.claim_task(task_id="src-c", team_id="team-a")
+    await manager.complete_task(task_id="src-c", team_id="team-a", output_abstract="out-c")
+    await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-c"], team_id="team-a")
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+
+    turns = await _capture_leader_turns(runtime)
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-summary"
+    assert summary_id in turns[0]["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_resume_summary_executions_skips_unready_or_released(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-resume-skip"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+
+    # Execution with a summary team but no bound sources -> not ready -> no turn.
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    turns = await _capture_leader_turns(runtime)
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+    assert turns == []
+
+    # A released execution is never rescheduled even when sources are ready.
+    await manager.create_task(
+        task_id="src-d",
+        title="Slice D",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    await manager.claim_task(task_id="src-d", team_id="team-a")
+    await manager.complete_task(task_id="src-d", team_id="team-a", output_abstract="out-d")
+    await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-d"], team_id="team-a")
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RELEASED,
+        released_at=1234,
+    )
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+    assert turns == []
+
+
+@pytest.mark.asyncio
+async def test_resume_summary_executions_reprovisions_unbound_execution(active_organization_runtime):
+    """§8: an interrupted (PROVISIONING) execution re-attaches through factory.recover."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-recover"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+    factory = runtime._summary_team_factory
+    assert factory is not None
+
+    # A completed+attached source makes the summary ready so recovery also reschedules it.
+    await manager.create_task(
+        task_id="src-rec",
+        title="Slice Rec",
+        description="d",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+    )
+    await manager.claim_task(task_id="src-rec", team_id="team-a")
+    await manager.complete_task(task_id="src-rec", team_id="team-a", output_abstract="out-rec")
+    await manager.attach_summary_sources(summary_task_id=summary_id, source_task_ids=["src-rec"], team_id="team-a")
+    # Simulate a crash mid-provision: execution exists in PROVISIONING with no team bound.
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    assert execution.summary_team_id is None
+
+    turns = await _capture_leader_turns(runtime)
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+
+    assert len(factory.recover_calls) == 1
+    recover_call = factory.recover_calls[0]
+    assert recover_call["execution_id"] == execution.execution_id
+    assert recover_call["organization_id"] == org_id
+    assert recover_call["summary_task_id"] == summary_id
+    # The owner team is threaded through so the host can borrow its storage.
+    assert recover_call["owner_team_id"] == "team-a"
+    assert recover_call["session_id"] == session_id
+
+    recovered = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert recovered.status is OrgSummaryExecutionStatus.RUNNING
+    assert recovered.summary_team_id == "team-summary"
+    summary_task = await manager.get_task(summary_id)
+    assert summary_task is not None
+    assert summary_task.assignment.team_id == "team-summary"
+
+    # The READY sources reschedule a turn onto the recovered dynamic team.
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-summary"
+
+
+@pytest.mark.asyncio
+async def test_resume_summary_executions_recover_failure_marks_failed(active_organization_runtime):
+    """§8: a failed recover marks the execution FAILED instead of stalling it."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-recover-fail"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+    runtime.set_summary_team_factory(FakeSummaryFactory(recover_fail=True))
+
+    await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    turns = await _capture_leader_turns(runtime)
+    await runtime._resume_summary_executions(manager=org_manager, session_id=session_id)
+
+    assert turns == []
+    failed = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert failed.status is OrgSummaryExecutionStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_summary_task_failed_releases_team_and_wakes_root(active_organization_runtime):
+    """A failed/cancelled Summary Task releases its dynamic team (§4.4.3 failure path)."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-task-failed"
+    manager, org_manager, summary_id = await _seed_summary_team_org(runtime, agents, session_id, org_id)
+    factory = FakeSummaryFactory()
+    runtime.set_summary_team_factory(factory)
+
+    execution = await manager.create_summary_execution(root_task_id=summary_id, summary_task_id=summary_id)
+    await manager.update_summary_execution(
+        execution_id=execution.execution_id,
+        status=OrgSummaryExecutionStatus.RUNNING,
+        summary_team_id="team-summary",
+    )
+    turns = await _capture_leader_turns(runtime)
+
+    await _emit_team_task_event(
+        agents,
+        session_id,
+        org_id,
+        OrgTaskFailedEvent(
+            organization_id=org_id,
+            team_id="team-summary",
+            task_id=summary_id,
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED.value,
+            failure_reason="summary leader crashed",
+        ),
+    )
+
+    # The dynamic team is released and the execution is no longer stuck in RUNNING.
+    assert factory.release_calls, "factory.release must be called on summary task failure"
+    _exec_id, released_team_id, _session = factory.release_calls[0]
+    assert released_team_id == "team-summary"
+    assert released_team_id != execution.execution_id
+    released = (await manager.list_summary_executions(summary_task_id=summary_id))[0]
+    assert released.status is OrgSummaryExecutionStatus.RELEASED
+
+    # The root leader (owner team-a) is woken to repair or terminate the summary.
+    assert len(turns) == 1
+    assert turns[0]["team_id"] == "team-a"
+    assert "summary" in turns[0]["prompt"].lower()
