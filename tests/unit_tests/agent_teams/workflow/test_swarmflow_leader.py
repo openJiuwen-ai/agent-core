@@ -26,9 +26,22 @@ from openjiuwen.agent_teams.schema.events import (
 )
 from openjiuwen.agent_teams.workflow.engine.progress import PhasePlan
 from openjiuwen.agent_teams.schema.team import TeamRole
-from openjiuwen.agent_teams.i18n import set_language
+from openjiuwen.agent_teams.i18n import get_language, set_language
 from openjiuwen.agent_teams.workflow.concurrency import ConcurrencyGovernor, ConcurrencyLimits
 from openjiuwen.agent_teams.workflow.tool_swarmflow import SwarmflowTool
+
+
+@pytest.fixture(autouse=True)
+def _restore_i18n_language():
+    """set_language mutates process-global state; restore it after each test.
+
+    Without this, the last loop iteration of the per-language test leaves the
+    worker at "en" and later tests (e.g. the team-context roster note) render
+    in the wrong language — the CI failure in test_team_policy_rail.
+    """
+    previous = get_language()
+    yield
+    set_language(previous)
 
 
 class _FakeRound:

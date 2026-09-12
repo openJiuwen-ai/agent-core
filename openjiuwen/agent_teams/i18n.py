@@ -609,22 +609,27 @@ def get_language() -> Language:
     return _current_language
 
 
-def t(key: str, **kwargs: object) -> str:
-    """Resolve a localized string for the current language.
+def t(key: str, lang: str | None = None, **kwargs: object) -> str:
+    """Resolve a localized string.
 
     Args:
         key: Dotted lookup key (e.g. ``"dispatcher.member_online"``).
+        lang: Explicit language override. Renderers that carry their own
+            language (rails, team-context blocks) must pass it: the
+            process-global ``_current_language`` is mutated by unrelated
+            code (``ExternalClient.connect``) and cannot be trusted.
         **kwargs: Values interpolated via ``str.format_map``.
 
     Returns:
-        The localized string for the current language.
+        The localized string for the resolved language.
 
     Raises:
         KeyError: If ``key`` is missing for the active language.
     """
-    table = STRINGS[_current_language]
+    language = lang if lang in STRINGS else _current_language
+    table = STRINGS[language]
     if key not in table:
-        raise KeyError(f"Missing i18n key '{key}' for language '{_current_language}'")
+        raise KeyError(f"Missing i18n key '{key}' for language '{language}'")
     raw = table[key]
     return raw.format_map(kwargs) if kwargs else raw
 
