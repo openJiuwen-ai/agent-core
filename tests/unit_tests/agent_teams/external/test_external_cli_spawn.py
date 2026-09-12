@@ -21,6 +21,7 @@ from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
+from tests.test_logger import logger
 
 # A streaming stand-in CLI: read a line from stdin, echo it, then emit the
 # generic adapter's turn-completion marker. Exercises the real subprocess +
@@ -341,3 +342,85 @@ async def test_build_cli_runtime_codex_rejects_full_command_override():
             )
     finally:
         reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_native_otel_env_points_the_cli_at_the_bridge_receiver(monkeypatch):
+    """Claude Code exports its own spans only when the export env reaches the CLI.
+
+    The bridge turns those native spans into ``llm.call`` spans, so the endpoint
+    it listens on has to be handed to the subprocess, and the source identity
+    has to survive the CLI's user settings.
+    """
+    from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_module
+    from openjiuwen.agent_teams.observability.shared_otlp import OTEL_RESOURCE_SOURCE_ID
+
+    class _Bridge:
+        async def attach_native_trace(self) -> str:
+            return "http://127.0.0.1:45678"
+
+        @staticmethod
+        def native_traceparent() -> str:
+            return "00-trace-span-01"
+
+        @staticmethod
+        def native_source_id() -> str:
+            return "member-source"
+
+    bridge = _Bridge()
+    monkeypatch.setattr(spawn_module, "_build_claude_span_bridge", lambda **_: bridge)
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="claude"),
+            cwd="/workspace",
+            system_prompt="ROLE: isolated developer",
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    config = runtime.harness._config
+    assert config.env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:45678"
+    assert config.env["CLAUDE_CODE_ENABLE_TELEMETRY"] == "1"
+    assert config.env["OTEL_EXPORTER_OTLP_PROTOCOL"] == "grpc"
+    assert config.env["TRACEPARENT"] == "00-trace-span-01"
+    assert f"{OTEL_RESOURCE_SOURCE_ID}=member-source" in config.env["OTEL_RESOURCE_ATTRIBUTES"]
+    # User settings are applied after the process env, so the identity the
+    # receiver filters on must also go through --settings.
+    assert config.settings_env["OTEL_RESOURCE_ATTRIBUTES"] == config.env["OTEL_RESOURCE_ATTRIBUTES"]
+    logger.info("claude native otel env reaches the cli subprocess")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_claude_native_otel_is_skipped_for_ssh_members(monkeypatch):
+    """A loopback receiver is unreachable from the remote host running the CLI."""
+    from openjiuwen.agent_teams.external.cli_agent import spawn as spawn_module
+    from openjiuwen.agent_teams.schema.team import SshTransportConfig
+
+    attached: list[str] = []
+
+    class _Bridge:
+        async def attach_native_trace(self) -> str:
+            attached.append("called")
+            return "http://127.0.0.1:45678"
+
+    monkeypatch.setattr(spawn_module, "_build_claude_span_bridge", lambda **_: _Bridge())
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent="claude"),
+            cwd="/workspace",
+            system_prompt="ROLE: isolated developer",
+            member_agent_id="ext_team_dev-1",
+            ssh_transport=SshTransportConfig(host="remote", user="dev", agent=True),
+        )
+    finally:
+        reset_session_id(token)
+
+    assert attached == []
+    assert "OTEL_EXPORTER_OTLP_ENDPOINT" not in runtime.harness._config.env
+    assert runtime.harness._config.settings_env == {}
+    logger.info("claude native otel stays off for ssh members")

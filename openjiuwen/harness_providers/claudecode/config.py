@@ -71,6 +71,7 @@ class ClaudeCodeHarnessConfig:
     include_partial_messages: bool = True
     max_turns: int | None = None
     settings: str | None = None
+    settings_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     event_buffer_capacity: int = 1024
 
     def __post_init__(self) -> None:
@@ -87,6 +88,10 @@ class ClaudeCodeHarnessConfig:
             raise TypeError("Claude env must be an object")
         if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.env.items()):
             raise TypeError("Claude env must map strings to strings")
+        if not isinstance(self.settings_env, Mapping):
+            raise TypeError("Claude settings_env must be an object")
+        if any(not isinstance(key, str) or not isinstance(value, str) for key, value in self.settings_env.items()):
+            raise TypeError("Claude settings_env must map strings to strings")
         if self.permission_mode not in _PERMISSION_MODES:
             raise ValueError(f"Claude permission_mode must be one of {', '.join(_PERMISSION_MODES)}")
         if self.system_prompt_mode not in ("append", "replace"):

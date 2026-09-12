@@ -306,7 +306,7 @@ async def build_cli_runtime(
                 StatusCode.AGENT_TEAM_CONFIG_INVALID,
                 reason="codex_turn_idle_retries is only supported for Codex SDK members",
             )
-        return _build_claude_member_runtime(
+        return await _build_claude_member_runtime(
             ctx,
             descriptor,
             cwd=cwd,
@@ -510,7 +510,7 @@ def _codex_model(config: ExternalCliModelConfig | None) -> CodexModelConfig | No
     )
 
 
-def _build_claude_member_runtime(
+async def _build_claude_member_runtime(
     ctx: TeamRuntimeContext,
     descriptor: TeamJoinDescriptor,
     *,
@@ -549,6 +549,19 @@ def _build_claude_member_runtime(
         "OPENJIUWEN_TEAM_JOIN" in env,
         ssh_transport is not None,
     )
+    span_bridge = _build_claude_span_bridge(
+        member_name=ctx.member_name or "",
+        member_agent_id=member_agent_id,
+        team_name=descriptor.team_name,
+        session_id=descriptor.session_id,
+        role=ctx.role.value,
+    )
+    settings_env = await _attach_claude_native_otel(
+        span_bridge,
+        env,
+        member_name=ctx.member_name or "",
+        ssh_transport=ssh_transport,
+    )
     fallback_model = None
     if external_model_config is None and fallback_external_model_config is not None:
         fallback_model = _claude_model(fallback_external_model_config)
@@ -559,6 +572,7 @@ def _build_claude_member_runtime(
         cwd=cwd,
         add_dirs=add_dirs,
         env=env,
+        settings_env=settings_env,
         inherit_process_env=False,
         cli_path=cli_path,
         model=_claude_model(external_model_config),
@@ -583,15 +597,7 @@ def _build_claude_member_runtime(
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
     )
-    runtime.bind_span_bridge(
-        _build_claude_span_bridge(
-            member_name=ctx.member_name or "",
-            member_agent_id=member_agent_id,
-            team_name=descriptor.team_name,
-            session_id=descriptor.session_id,
-            role=ctx.role.value,
-        )
-    )
+    runtime.bind_span_bridge(span_bridge)
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime
 
@@ -600,6 +606,81 @@ async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
     """Provide an empty streaming prompt for SDK transport construction."""
     return
     yield {}  # type: ignore[unreachable]
+
+
+_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
+
+
+async def _attach_claude_native_otel(
+    span_bridge: Any,
+    env: dict[str, str],
+    *,
+    member_name: str,
+    ssh_transport: SshTransportConfig | None,
+) -> dict[str, str]:
+    """Point Claude Code's own OTel export at the bridge's loopback receiver.
+
+    Native spans (``claude_code.llm_request`` and the raw API body log events)
+    are what the bridge turns into ``llm.call`` spans. The augmentation is
+    best-effort: a failure to attach only disables it.
+
+    Args:
+        span_bridge: The Claude span bridge, or ``None`` when observability is
+            not initialized.
+        env: Process env for the CLI subprocess, updated in place.
+        member_name: Member the runtime belongs to, for diagnostics.
+        ssh_transport: Set when the CLI runs on a remote host, where a
+            loopback receiver is unreachable.
+
+    Returns:
+        Env that must also win over the CLI's user settings, empty when the
+        native export is not enabled.
+    """
+    if span_bridge is None:
+        return {}
+    if ssh_transport is not None:
+        team_logger.info(
+            "[external-cli] claude native otel disabled for ssh member {}; loopback receiver is local-only",
+            member_name,
+        )
+        return {}
+    try:
+        endpoint = await span_bridge.attach_native_trace()
+    except Exception as exc:  # noqa: BLE001 - observability is optional
+        team_logger.warning("[external-cli] claude native otel disabled for member {}: {}", member_name, exc)
+        return {}
+    if not endpoint:
+        return {}
+    from openjiuwen.agent_teams.observability.shared_otlp import OTEL_RESOURCE_SOURCE_ID
+    from openjiuwen.harness_providers.claudecode.options import claude_otel_env
+
+    team_logger.info(
+        "[external-cli] claude native otel enabled for member {} endpoint={}",
+        member_name,
+        endpoint,
+    )
+    env.update(claude_otel_env(endpoint))
+    # Pin the trace parent explicitly. The SDK injects the ambient OTel context
+    # at connect() time, but member turns run in bare background tasks with no
+    # active span — the CLI would then start its own root trace and the
+    # bridge's trace-id filter would drop every native span.
+    traceparent = span_bridge.native_traceparent()
+    if traceparent:
+        env.setdefault("TRACEPARENT", traceparent)
+    source_id = span_bridge.native_source_id()
+    if not source_id:
+        return {}
+    existing = [
+        item
+        for item in str(env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV) or "").split(",")
+        if item and not item.startswith(f"{OTEL_RESOURCE_SOURCE_ID}=")
+    ]
+    existing.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
+    resource_attributes = ",".join(existing)
+    env[_OTEL_RESOURCE_ATTRIBUTES_ENV] = resource_attributes
+    # The CLI applies user settings after the process env, so the identity the
+    # receiver filters on has to be injected through --settings as well.
+    return {_OTEL_RESOURCE_ATTRIBUTES_ENV: resource_attributes}
 
 
 def _build_claude_span_bridge(
