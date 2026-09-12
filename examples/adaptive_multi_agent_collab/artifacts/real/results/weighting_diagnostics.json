@@ -1,0 +1,500 @@
+{
+  "status": "POST-HOC DIAGNOSTIC OF EXISTING REAL LLM OUTPUTS - NO NEW LLM OR NETWORK CALLS",
+  "run_fingerprint": "57f61469b27a93665079c616bdec3739c2738cb0bf6433fc57657e2ed8e2b459",
+  "source_splits": {
+    "train": 30,
+    "validation": 10,
+    "test": 20
+  },
+  "held_out_decision_opportunities": {
+    "unanimous_terminal_outcomes": 19,
+    "two_vs_one_terminal_outcomes": 1,
+    "three_way_terminal_disagreements": 0,
+    "queries_where_weighting_could_affect_the_prediction": 1,
+    "uniform_accuracy_on_terminal_disagreements": {
+      "correct": 0,
+      "total": 1,
+      "accuracy": 0.0
+    },
+    "learned_accuracy_on_terminal_disagreements": {
+      "correct": 0,
+      "total": 1,
+      "accuracy": 0.0
+    },
+    "predictions_changed_by_learned_w": 0,
+    "changed_decisions_helped": 0,
+    "changed_decisions_hurt": 0,
+    "sole_disagreement": {
+      "example_id": "410f907f817dd7aa8e73291a918d3d86",
+      "initial_answers": [
+        "D",
+        "D",
+        "D"
+      ],
+      "terminal_answers": [
+        "D",
+        "E",
+        "E"
+      ],
+      "gold": "D",
+      "uniform_prediction": "E",
+      "learned_prediction": "E",
+      "learned_weights": [
+        0.002080820268020034,
+        0.00022545015963260084,
+        0.9976937174797058
+      ]
+    }
+  },
+  "agent_2_alignment": {
+    "accuracy": {
+      "train": {
+        "initial": {
+          "correct": 26,
+          "total": 30,
+          "accuracy": 0.8666666666666667
+        },
+        "terminal": {
+          "correct": 27,
+          "total": 30,
+          "accuracy": 0.9
+        }
+      },
+      "validation": {
+        "initial": {
+          "correct": 8,
+          "total": 10,
+          "accuracy": 0.8
+        },
+        "terminal": {
+          "correct": 8,
+          "total": 10,
+          "accuracy": 0.8
+        }
+      },
+      "test": {
+        "initial": {
+          "correct": 18,
+          "total": 20,
+          "accuracy": 0.9
+        },
+        "terminal": {
+          "correct": 18,
+          "total": 20,
+          "accuracy": 0.9
+        }
+      }
+    },
+    "terminal_answer_matches_uniform_prediction": {
+      "train": {
+        "matches": 29,
+        "total": 30
+      },
+      "validation": {
+        "matches": 9,
+        "total": 10
+      },
+      "test": {
+        "matches": 20,
+        "total": 20
+      },
+      "all": {
+        "matches": 58,
+        "total": 60
+      }
+    },
+    "terminal_sole_dissenter": {
+      "train": {
+        "count": 1,
+        "correct": 1
+      },
+      "validation": {
+        "count": 1,
+        "correct": 1
+      },
+      "test": {
+        "count": 0,
+        "correct": 0
+      },
+      "all": {
+        "count": 2,
+        "correct": 2
+      }
+    },
+    "learned_prediction_equals_agent_2_terminal_answer": {
+      "train": {
+        "matches": 30,
+        "total": 30
+      },
+      "validation": {
+        "matches": 10,
+        "total": 10
+      },
+      "test": {
+        "matches": 20,
+        "total": 20
+      },
+      "all": {
+        "matches": 60,
+        "total": 60
+      }
+    },
+    "effective_behavior": "The learned model is decision-equivalent to a static Agent-2 terminal-answer selector on all 60 examples."
+  },
+  "weight_collapse": {
+    "statistics_use_population_standard_deviation": true,
+    "entropy_uses_natural_logarithms": true,
+    "splits": {
+      "train": {
+        "agents": {
+          "0": {
+            "average": 0.0015198143402813003,
+            "minimum": 0.0003701256646309048,
+            "maximum": 0.0020485525019466877,
+            "standard_deviation": 0.0003996469029256712
+          },
+          "1": {
+            "average": 0.0001947541517438367,
+            "minimum": 0.00004693867958849296,
+            "maximum": 0.0003583818906918168,
+            "standard_deviation": 0.00007010563721070623
+          },
+          "2": {
+            "average": 0.9982854266961415,
+            "minimum": 0.9976471066474915,
+            "maximum": 0.9995829463005066,
+            "standard_deviation": 0.00046358876953506563
+          }
+        },
+        "average_maximum_weight": 0.9982854266961415,
+        "average_entropy_nats": 0.013166315247440616,
+        "maximum_weight_above_0_90": 30,
+        "maximum_weight_above_0_95": 30,
+        "maximum_weight_above_0_99": 30,
+        "total": 30
+      },
+      "validation": {
+        "agents": {
+          "0": {
+            "average": 0.001504691399168223,
+            "minimum": 0.0011712689884006977,
+            "maximum": 0.001796650467440486,
+            "standard_deviation": 0.0001876998720742316
+          },
+          "1": {
+            "average": 0.00018322465039091184,
+            "minimum": 0.00013397939619608223,
+            "maximum": 0.0002301722124684602,
+            "standard_deviation": 0.000029043638088669464
+          },
+          "2": {
+            "average": 0.9983120799064636,
+            "minimum": 0.9979731440544128,
+            "maximum": 0.998683512210846,
+            "standard_deviation": 0.00020857721235839112
+          }
+        },
+        "average_maximum_weight": 0.9983120799064636,
+        "average_entropy_nats": 0.013028175274983896,
+        "maximum_weight_above_0_90": 10,
+        "maximum_weight_above_0_95": 10,
+        "maximum_weight_above_0_99": 10,
+        "total": 10
+      },
+      "test": {
+        "agents": {
+          "0": {
+            "average": 0.0015437082562129944,
+            "minimum": 0.001036209287121892,
+            "maximum": 0.002080820268020034,
+            "standard_deviation": 0.00028955511554599675
+          },
+          "1": {
+            "average": 0.00019977567790192553,
+            "minimum": 0.0001346161006949842,
+            "maximum": 0.0002613694523461163,
+            "standard_deviation": 0.000038041839065229254
+          },
+          "2": {
+            "average": 0.9982565253973007,
+            "minimum": 0.9976686835289001,
+            "maximum": 0.998829185962677,
+            "standard_deviation": 0.00032100083534182484
+          }
+        },
+        "average_maximum_weight": 0.9982565253973007,
+        "average_entropy_nats": 0.013406511571924271,
+        "maximum_weight_above_0_90": 20,
+        "maximum_weight_above_0_95": 20,
+        "maximum_weight_above_0_99": 20,
+        "total": 20
+      }
+    },
+    "all_60": {
+      "average_weights": [
+        0.001525259,
+        0.000194506,
+        0.998280287
+      ],
+      "average_entropy_nats": 0.0132234,
+      "agent_2_argmax_count": 60,
+      "maximum_weight_above_0_99": 60,
+      "agent_2_minimum_weight": 0.9976471066474915
+    },
+    "across_query_variation": {
+      "mean_pairwise_l1_distance": {
+        "train": 0.00107399,
+        "validation": 0.000529754,
+        "test": 0.000770881
+      },
+      "mean_l1_distance_from_split_mean": {
+        "train": 0.00077394,
+        "validation": 0.000351191,
+        "test": 0.000544445
+      },
+      "interpretation": "Weights change numerically by small amounts but never change the selected agent or any prediction."
+    },
+    "feature_and_embedding_sensitivity": {
+      "fixed_mean_query_and_common_mean_history": {
+        "weights": [
+          0.00151708,
+          0.000193657,
+          0.9982893
+        ],
+        "mean_absolute_delta_from_full_weights": 0.00020793,
+        "maximum_absolute_delta_from_full_weights": 0.00129366,
+        "agent_2_argmax": 60
+      },
+      "one_hundred_deterministic_cross_example_permutations": {
+        "query_mean_absolute_delta": 0.00022896,
+        "history_bundle_mean_absolute_delta": 0.00015105,
+        "joint_query_history_mean_absolute_delta": 0.00029408,
+        "agent_2_argmax_rate": 1.0
+      },
+      "embedding_permutations": "For all six embedding permutations, the argmax followed the slot receiving the original Agent-2 embedding on every example.",
+      "history_slot_permutations": "With embeddings fixed, all six history-slot permutations retained output slot 2 as argmax on every example.",
+      "equalized_embeddings": {
+        "average_weights": [
+          0.32815,
+          0.32523,
+          0.34662
+        ],
+        "average_maximum_weight": 0.3596
+      },
+      "conclusion": "Query/history features have measurable but decision-irrelevant numerical effects. The explicit trainable Agent-2 identity embedding dominates the selector."
+    },
+    "informative_terminal_disagreements": {
+      "train": {
+        "count": 4,
+        "per_agent_correct_counts": [
+          3,
+          0,
+          4
+        ]
+      },
+      "validation": {
+        "count": 1,
+        "per_agent_correct_counts": [
+          0,
+          0,
+          1
+        ]
+      },
+      "test": {
+        "count": 1,
+        "per_agent_correct_counts": [
+          1,
+          0,
+          0
+        ]
+      }
+    }
+  },
+  "implementation_audit": {
+    "gold_and_correctness_leakage": {
+      "query_encoder_fields": [
+        "question",
+        "A-E labelled option text"
+      ],
+      "history_contains_gold_or_computed_correctness_label": false,
+      "gold_is_used_only_as_the_cross_entropy_target": true,
+      "gold_mutation_probe": {
+        "query_features_unchanged": true,
+        "history_features_unchanged": true,
+        "support_unchanged": true,
+        "target_index_changed": true,
+        "maximum_feature_difference": 0.0
+      }
+    },
+    "split_id_overlap_counts": {
+      "train_validation": 0,
+      "train_test": 0,
+      "validation_test": 0
+    },
+    "checkpoint_selection": {
+      "test_used_for_checkpoint_selection": false,
+      "selection_metric": "validation cross-entropy only",
+      "checkpoint_best_epoch": 200,
+      "training_history_minimum_validation_epoch": 200,
+      "saved_state_reloaded_after_training": true,
+      "evaluation_loads_artifacts_real_checkpoints_weighting_pt": true
+    },
+    "support_and_gradients": {
+      "support_minimum": 0.0,
+      "support_maximum": 1.0,
+      "support_requires_gradient": false,
+      "support_gradient": null,
+      "real_disagreement_probe_embedding_gradient_norm": 0.0073939413,
+      "real_disagreement_probe_first_mlp_weight_gradient_norm": 0.3260400295,
+      "real_disagreement_probe_final_mlp_weight_gradient_norm": 0.189031601
+    },
+    "candidate_order": [
+      "A",
+      "B",
+      "C",
+      "D",
+      "E"
+    ],
+    "candidate_order_consistent_across_support_scores_and_voting": true,
+    "uniform_and_learned_use_the_same_weighted_vote_tie_breaker": true,
+    "held_out_uniform_ties": 0,
+    "held_out_learned_ties": 0,
+    "tie_breaking_explains_identical_predictions": false,
+    "implementation_bug_detected": false
+  },
+  "training_behavior": {
+    "configured_maximum_epoch": 200,
+    "recorded_epochs": 200,
+    "configured_patience": 25,
+    "best_validation_epoch": 200,
+    "validation_new_best_epochs": 200,
+    "final_stale_count": 0,
+    "stopped_because": "maximum epoch reached",
+    "early_stopping_logic_worked_but_was_never_triggered": true,
+    "epoch_1": {
+      "train_loss": 1.0476148128509521,
+      "validation_loss": 1.1608705520629883
+    },
+    "epoch_200": {
+      "train_loss": 1.004848837852478,
+      "validation_loss": 1.1049630641937256
+    },
+    "validation_change_epoch_199_to_200": -0.0000011920928955078125,
+    "validation_improvement_epoch_100_to_200": 0.0002784729,
+    "final_validation_minus_train_gap": 0.10011422634124756,
+    "uniform_vs_learned_cross_entropy": {
+      "train": {
+        "uniform": 1.052731,
+        "learned": 1.004849
+      },
+      "validation": {
+        "uniform": 1.165756,
+        "learned": 1.104963
+      },
+      "test": {
+        "uniform": 0.985295,
+        "learned": 1.004702
+      }
+    },
+    "overfitting_assessment": "There is no classical validation-loss reversal, but the train/validation-selected Agent-2 rule worsens test cross-entropy and fails on the only held-out disagreement. This is small-data selection overfit and non-generalization rather than a rising validation curve.",
+    "random_initialisation_assessment": "No alternate initialisations were run. Given that every informative train and validation disagreement favors Agent 2, Agent 2 is the most likely collapsed identity across seeds, although the exact sharpness and convergence path could vary."
+  },
+  "cross_entropy_scale": {
+    "mathematical_score_bound": {
+      "minimum": 0.0,
+      "maximum": 1.0,
+      "reason": "Each support is in [0,1] and candidate scores are convex weighted sums under positive softmax agent weights."
+    },
+    "observed_maximum_candidate_score": 1.0000001192,
+    "observed_maximum_note": "The tiny excess above 1 is float32 roundoff.",
+    "five_candidate_minimum_expression": "-log(exp(1) / (exp(1) + 4 * exp(0)))",
+    "theoretical_minimum_cross_entropy": 0.904832441554448,
+    "observed_loss_excess_above_theoretical_minimum": {
+      "train": 0.1000163963,
+      "validation": 0.2001306226,
+      "test": 0.0998694112
+    },
+    "interpretation": "These bounded-logit losses cannot approach zero and must not be compared directly with an unconstrained classifier cross-entropy."
+  },
+  "diagnostic_baselines": {
+    "label": "POST-HOC DIAGNOSTIC BASELINES - NOT NEW PRIMARY CLAIMS",
+    "train_only_reliability_weights": {
+      "from_terminal_accuracy": {
+        "train_accuracy_by_agent": [
+          0.8666666666666667,
+          0.7666666666666667,
+          0.9
+        ],
+        "normalised_weights": [
+          0.34210526315789475,
+          0.3026315789473685,
+          0.3552631578947369
+        ]
+      },
+      "from_initial_accuracy": {
+        "train_accuracy_by_agent": [
+          0.8666666666666667,
+          0.8666666666666667,
+          0.8666666666666667
+        ],
+        "normalised_weights": [
+          0.3333333333333333,
+          0.3333333333333333,
+          0.3333333333333333
+        ]
+      },
+      "formula": "w_k = train_accuracy_k / sum_j(train_accuracy_j)",
+      "both_weight_sets_are_applied_to_terminal_answers": true
+    },
+    "correct_counts": {
+      "always_terminal_agent_0": {
+        "train": "26/30",
+        "validation": "7/10",
+        "test": "19/20"
+      },
+      "always_terminal_agent_1": {
+        "train": "23/30",
+        "validation": "7/10",
+        "test": "18/20"
+      },
+      "always_terminal_agent_2": {
+        "train": "27/30",
+        "validation": "8/10",
+        "test": "18/20"
+      },
+      "train_terminal_reliability_weighted_terminal_vote": {
+        "train": "26/30",
+        "validation": "7/10",
+        "test": "18/20"
+      },
+      "train_initial_reliability_weighted_terminal_vote": {
+        "train": "26/30",
+        "validation": "7/10",
+        "test": "18/20"
+      },
+      "uniform_terminal_collaboration": {
+        "train": "26/30",
+        "validation": "7/10",
+        "test": "18/20"
+      },
+      "learned_w": {
+        "train": "27/30",
+        "validation": "8/10",
+        "test": "18/20"
+      }
+    },
+    "held_out_interpretation": "Agent 0 is the strongest terminal agent on test at 19/20. Agent 2 is strongest on train and validation, but only 18/20 on test. Both train-only globally weighted votes remain decision-equivalent to uniform collaboration."
+  },
+  "conclusions": {
+    "principal_reason_no_decisions_changed": "Nineteen of twenty test terminal pools are unanimous. In the sole 2-vs-1 case Agent 2 belongs to the incorrect majority, so both uniform voting and the learned Agent-2 selector choose the same wrong label.",
+    "collapse_classification": "Not an implementation bug. It is expected empirical-risk optimisation under extremely sparse disagreement supervision, amplified by an unregularised identity embedding, and it exhibits small-data selection overfit on the sole held-out disagreement.",
+    "agent_2_is_strongest_held_out_terminal_agent": false,
+    "strongest_held_out_terminal_agent": "Agent 0 (19/20 versus Agent 1 and Agent 2 at 18/20)",
+    "meeting_interpretation": "The pilot shows that the W training path works, but it did not learn useful query-adaptive reliability. It learned a static Agent-2 rule supported by four train and one validation disagreement, then failed to generalise on the single held-out disagreement. The test set contains too few weighting opportunities to claim benefit or harm robustly."
+  },
+  "possible_future_improvements_not_part_of_current_results": [
+    "Use substantially more disagreement-rich training and validation data, stratify validation by terminal disagreement, and repeat across seeds.",
+    "Regularise or constrain the identity embedding, add entropy or load-balancing pressure, and compare against a predeclared static-reliability model.",
+    "Introduce a calibrated score scale or learned temperature and validate it without using held-out test labels, while preserving the existing fixed-support semantics."
+  ]
+}
