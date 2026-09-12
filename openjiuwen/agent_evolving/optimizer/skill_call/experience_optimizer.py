@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -55,7 +56,21 @@ GENERATE_RECORDS_LLM_POLICY = LLMInvokePolicy(
     max_attempts=2,
 )
 _RETRY_PARSE_TIMEOUT_SECS = 20
+_RETRY_PARSE_TIMEOUT_REASONING_SECS = 150
+_RETRY_PARSE_TIMEOUT_ENV = "SKILL_EXPERIENCE_RETRY_PARSE_TIMEOUT_SECS"
+_REASONING_MODEL_MARKERS = (
+    "reasoner",
+    "reasoning",
+    "thinking",
+    "-r1",
+    "r1-",
+    "o1-",
+    "o3-",
+    "qwq",
+)
 _ANALYZER_LOG_MAX_CHARS = 500
+_DETAILS_BLOCK_RE = re.compile(r"<details\b[^>]*>[\s\S]*?</details>", re.IGNORECASE)
+_THINK_BLOCK_RE = re.compile(r"<think\b[^>]*>[\s\S]*?</think>", re.IGNORECASE)
 
 # When the model is deployed on Huawei Cloud ModelArts MaaS, bump max_tokens
 # explicitly to avoid JSON truncation.
@@ -180,6 +195,40 @@ def _preview_section(section: str, preview_chars: int = _SECTION_PREVIEW_CHARS) 
     return f"{heading}\n{body[:preview_chars]}..."
 
 
+def _strip_inline_reasoning(text: str) -> str:
+    """Remove thinking blocks inlined into ``response.content`` before JSON parse."""
+    text = _DETAILS_BLOCK_RE.sub("", text)
+    text = _THINK_BLOCK_RE.sub("", text)
+    return text
+
+
+def _is_reasoning_model(model: str) -> bool:
+    lowered = (model or "").lower()
+    return any(marker in lowered for marker in _REASONING_MODEL_MARKERS)
+
+
+def _resolve_retry_parse_timeout_secs(
+    model: str,
+    override: float | None = None,
+) -> float:
+    """Resolve JSON-repair timeout: constructor > env > reasoning default > 20s."""
+    if override is not None:
+        return float(override)
+    env_raw = (os.getenv(_RETRY_PARSE_TIMEOUT_ENV) or "").strip()
+    if env_raw:
+        try:
+            return float(env_raw)
+        except ValueError:
+            logger.warning(
+                "Invalid %s=%r, falling back to default retry-parse timeout",
+                _RETRY_PARSE_TIMEOUT_ENV,
+                env_raw,
+            )
+    if _is_reasoning_model(model):
+        return float(_RETRY_PARSE_TIMEOUT_REASONING_SECS)
+    return float(_RETRY_PARSE_TIMEOUT_SECS)
+
+
 def _strip_outer_markdown_fence(text: str) -> str:
     """Remove only the outermost markdown code fence, preserving inner fences in JSON strings."""
     stripped = text.strip()
@@ -226,7 +275,7 @@ def _try_parse(text: str) -> Optional[Any]:
 
 def _extract_json(raw: str) -> Optional[Any]:
     """Best-effort JSON extraction from LLM output."""
-    raw = raw.strip()
+    raw = _strip_inline_reasoning(raw).strip()
     if not raw:
         return None
 
@@ -256,7 +305,7 @@ def _extract_json(raw: str) -> Optional[Any]:
 
 def _extract_json_with_error(raw: str) -> tuple[Any, str] | tuple[None, str]:
     """Like _extract_json but also returns the last parse error message."""
-    raw = raw.strip()
+    raw = _strip_inline_reasoning(raw).strip()
     if not raw:
         return None, "empty response"
 
@@ -305,6 +354,7 @@ def _build_context(signals: list, max_chars: int = _CONTEXT_MAX_CHARS) -> str:
 
 def _looks_truncated(text: str) -> bool:
     """Heuristic check: does the LLM output look like it was cut off mid-way?"""
+    text = _strip_inline_reasoning(text)
     opens = text.count("{") + text.count("[")
     closes = text.count("}") + text.count("]")
     return opens > closes + 1
@@ -374,6 +424,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         profile: str = "regular",
         *,
         two_stage: bool = False,
+        retry_parse_timeout_secs: float | None = None,
     ) -> None:
         super().__init__()
         if profile not in {"regular", "team"}:
@@ -384,6 +435,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         self._generate_records_llm_policy = generate_records_llm_policy
         self._profile = profile
         self._two_stage = two_stage
+        self._retry_parse_timeout_secs = retry_parse_timeout_secs
         self._online_contexts: Dict[str, EvolutionContext] = {}
 
     @property
@@ -899,7 +951,10 @@ class SkillExperienceOptimizer(BaseOptimizer):
             max_tokens = _resolve_max_tokens(self._llm)
             invoke_kwargs: dict[str, Any] = {
                 "temperature": 0.1,
-                "timeout": _RETRY_PARSE_TIMEOUT_SECS,
+                "timeout": _resolve_retry_parse_timeout_secs(
+                    self._model,
+                    self._retry_parse_timeout_secs,
+                ),
             }
             if max_tokens is not None:
                 invoke_kwargs["max_tokens"] = max_tokens
