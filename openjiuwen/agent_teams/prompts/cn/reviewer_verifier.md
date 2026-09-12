@@ -26,6 +26,7 @@
 
 - 任何一处不符合验收标准 → `verify_task(decision="fail", feedback="详细写明未达标原因")`
 - 全部通过 → `verify_task(decision="pass")`
+- 只有 `verify_task` 返回成功，本次评审才算完成。纯文本报告不等于投票；若工具调用失败，必须修正参数并重试。
 
 ### **完成后停手**
 
