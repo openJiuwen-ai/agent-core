@@ -594,6 +594,7 @@ async def _build_claude_member_runtime(
         team_context_tracker=team_context_tracker,
         resume_external_backend=resume_external_backend,
         agent_kind="claude",
+        cli_path=cli_path,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
     )
@@ -805,6 +806,7 @@ async def _build_codex_member_runtime(
         team_context_tracker=team_context_tracker,
         resume_external_backend=resume_external_backend,
         agent_kind="codex",
+        cli_path=codex_bin,
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
     )

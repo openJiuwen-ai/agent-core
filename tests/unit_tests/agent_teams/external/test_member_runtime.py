@@ -36,6 +36,7 @@ from openjiuwen.harness_protocol import (
     OutputKind,
     OutputOperation,
     ProviderInteractionRequest,
+    ResumePolicy,
     SendReceipt,
     StateChangedEvent,
     TurnEventKind,
@@ -44,6 +45,7 @@ from openjiuwen.harness_protocol import (
     TurnStatus,
     UnsupportedHarnessCapabilityError,
 )
+from tests.test_logger import logger
 
 
 class _FakeEventCursor:
@@ -688,3 +690,21 @@ async def test_auth_fallback_is_ratified_without_a_promotion_hook_and_declined_o
     declined = await broken_harness.start_contexts[0].interactions.handle(_auth_fallback_request())
     assert declined.status is InteractionResponseStatus.DECLINED
     await failing.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resume_without_a_saved_checkpoint_starts_a_new_session() -> None:
+    """A member that never checkpointed has no resumable target; recovery starts fresh.
+
+    Failing the member outright instead would strand a recoverable roster entry
+    on nothing more than a missing checkpoint.
+    """
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), resume_external_backend=True)
+    await runtime.start(team_session=_FakeTeamSession())
+    started = harness.start_contexts[0]
+    assert started.checkpoint is None
+    assert started.resume_policy is not ResumePolicy.REQUIRE_RESUME
+    await runtime.stop()
+    logger.info("resume without a checkpoint starts a new session")

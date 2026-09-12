@@ -222,6 +222,7 @@ class ExternalHarnessMemberRuntime:
         stop_on_unsupported_force_abort: bool = False,
         resume_external_backend: bool = False,
         agent_kind: str | None = None,
+        cli_path: str | None = None,
         inject_mcp: bool = False,
         mcp_server_name: str = "openjiuwen-team",
     ) -> None:
@@ -230,6 +231,7 @@ class ExternalHarnessMemberRuntime:
         self._team_context_tracker = team_context_tracker
         self._resume_external_backend = resume_external_backend
         self._agent_kind = agent_kind
+        self._cli_path = cli_path
         self.inject_mcp = inject_mcp
         self.mcp_server_name = mcp_server_name
         self._adapter = HarnessIOAdapter(
@@ -340,6 +342,7 @@ class ExternalHarnessMemberRuntime:
             leader_name=leader_name,
             update_status_cb=update_status_cb,
             span_bridge=self._span_bridge,
+            cli_path=self._cli_path,
         )
 
     # ------------------------------------------------------------------
@@ -393,11 +396,12 @@ class ExternalHarnessMemberRuntime:
             capabilities.add(HostCapability.CHECKPOINT_SINK)
         if self._resume_external_backend:
             if checkpoint is None:
-                raise HarnessStateError(
-                    f"cannot resume external member {self._member_name!r} without a saved checkpoint; "
-                    "strict resume forbids starting a replacement session"
+                team_logger.warning(
+                    "[external-cli] member {} has no saved checkpoint; starting a new session",
+                    self._member_name,
                 )
-            resume_policy = ResumePolicy.REQUIRE_RESUME
+            else:
+                resume_policy = ResumePolicy.REQUIRE_RESUME
         elif checkpoint is not None and resume_policy is ResumePolicy.NEW:
             resume_policy = ResumePolicy.RESUME_IF_AVAILABLE
         mcp_servers = tuple(context.mcp_servers) + tuple(self._extra_mcp_servers)
