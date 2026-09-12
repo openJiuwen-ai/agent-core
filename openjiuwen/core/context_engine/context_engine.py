@@ -103,12 +103,18 @@ class ContextEngine:
             context = self._context_pool.get(full_context_id)
             context.set_session_ref(session)
             self._load_state_from_session(context, session, history_messages)
+            # Pool hit used to ignore `processors`, so an empty first create
+            # permanently disabled compressors even after config was written.
+            self._sync_processors_on_hit(context, processors)
             return context
 
-        processor_instances = [
-            self._create_processor(processor_type, processor_config)
-            for processor_type, processor_config in (processors or [])
-        ]
+        processor_instances = self._instantiate_processors(processors or [])
+        context_engine_logger.info(
+            "create context pool_miss session_id=%s context_id=%s processors=%s",
+            session_id,
+            context_id,
+            [processor_type for processor_type, _ in (processors or [])],
+        )
 
         if token_counter is None:
             from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
@@ -359,6 +365,46 @@ class ContextEngine:
             cls._PROCESSOR_MAP[processor_class.processor_type()] = processor_class
             return processor_class
         return register_processor_class
+
+    def _instantiate_processors(
+            self,
+            processors: List[Tuple[str, BaseModel]],
+    ) -> List[ContextProcessor]:
+        return [
+            self._create_processor(processor_type, processor_config)
+            for processor_type, processor_config in processors
+        ]
+
+    def _sync_processors_on_hit(
+            self,
+            context: ModelContext,
+            processors: List[Tuple[str, BaseModel]] = None,
+    ) -> None:
+        """Attach processors on cache hit without resetting compressor state.
+
+        None / empty list leave existing instances unchanged (invoke/uninit
+        must not wipe a live chain). Rebuild when the incoming type sequence
+        differs from the live instances, including empty to non-empty.
+        """
+        if not processors:
+            return
+        get_processors = getattr(context, "get_processors", None)
+        replace_processors = getattr(context, "replace_processors", None)
+        existing = list(get_processors()) if callable(get_processors) else []
+        existing_types = [processor.processor_type() for processor in existing]
+        incoming_types = [processor_type for processor_type, _ in processors]
+        if existing_types == incoming_types:
+            return
+        if not callable(replace_processors):
+            return
+        replace_processors(self._instantiate_processors(processors))
+        context_engine_logger.info(
+            "sync processors on pool hit session_id=%s context_id=%s from=%s to=%s",
+            context.session_id(),
+            context.context_id(),
+            existing_types,
+            incoming_types,
+        )
 
     def _create_processor(self, processor_type: str, config: BaseModel):
         processor_class = self._PROCESSOR_MAP.get(processor_type)

@@ -805,9 +805,12 @@ class DeepAgent(BaseAgent):
         normalized_messages = self._normalize_context_messages(
             messages
         )
+        react_config = getattr(self._react_agent, "_config", None)
+        processors = getattr(react_config, "context_processors", None) or None
         await self._react_agent.context_engine.create_context(
             session=Session(session_id=new_session_id, card=self.card),
             history_messages=normalized_messages,
+            processors=processors,
         )
         return new_session_id
 
