@@ -5,11 +5,20 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from openjiuwen.core.foundation.tool import McpServerConfig, Tool, ToolCard
+import pytest
+from mcp.types import CallToolResult, TextContent
+
+from openjiuwen.core.foundation.llm import ToolMessage
+from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard, Tool, ToolCard
+from openjiuwen.core.foundation.tool.mcp.base import MCPTool, McpToolResult
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
+from openjiuwen.harness.tools.browser_move.clients.stdio_client import BrowserMoveStdioClient
 from openjiuwen.harness.tools.browser_move.playwright_runtime.config import BrowserRunGuardrails
-from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime
+from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime import BrowserAgentRuntime, BrowserRuntimeRail
 from openjiuwen.harness.tools.browser_move.playwright_runtime.runtime_tools import (
     BrowserBatchInteractTool,
     BrowserCancelTool,
@@ -318,6 +327,83 @@ def test_batch_interact_tool_reports_runtime_error() -> None:
     assert result.success is False
     assert result.error == "browser_code_executor_not_ready"
     assert result.data["steps_requested"] == 1
+
+
+@pytest.mark.parametrize(
+    ("is_error", "response_text"),
+    [
+        pytest.param(True, "### Error\nTimeoutError: Timeout 750ms exceeded.", id="playwright-timeout"),
+        pytest.param(True, "Search could not be completed. Please try again.", id="ordinary-error-text"),
+        pytest.param(False, "### Result\nWaited for New results", id="successful-wait"),
+    ],
+)
+def test_single_batch_wait_preserves_mcp_outcome_through_browser_client_and_rail(
+    is_error: bool, response_text: str,
+) -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    client = BrowserMoveStdioClient(runtime.service.mcp_cfg)
+    client._session = SimpleNamespace(
+        call_tool=AsyncMock(
+            return_value=CallToolResult(
+                isError=is_error,
+                content=[TextContent(type="text", text=response_text)],
+            )
+        )
+    )
+    native_tool = MCPTool(
+        client,
+        McpToolCard(
+            name="browser_wait_for",
+            server_name="test",
+            description="Wait for visible text",
+            input_params={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        ),
+    )
+    runtime._get_playwright_mcp_tool = AsyncMock(return_value=native_tool)
+    helper = BrowserBatchInteractTool(runtime)
+    rail = BrowserRuntimeRail(runtime)
+    rail._status_logger = None
+
+    async def exercise():
+        native_result = await native_tool.invoke({"text": "New results"})
+        result = await helper.invoke(
+            {"generation_id": "g0", "steps": [{"op": "wait_for_text", "text": "New results"}]}
+        )
+        inputs = ToolCallInputs(
+            tool_name="browser_batch_interact",
+            tool_result=result,
+            tool_msg=ToolMessage(
+                tool_call_id="wait-results",
+                content=AbilityManager._build_tool_message_content(result),
+            ),
+        )
+        await rail.after_tool_call(AgentCallbackContext(agent=None, inputs=inputs))
+        return native_result, result, inputs
+
+    native_result, result, inputs = _run(exercise())
+    expected_success = not is_error
+    if is_error:
+        assert isinstance(native_result, McpToolResult)
+        assert native_result.success is False
+        assert native_result.data == {"result": response_text}
+        assert native_result.error == response_text
+        assert result.error == response_text
+        assert response_text in inputs.tool_msg.content
+    else:
+        assert native_result == {"result": response_text}
+        assert result.error is None
+    assert result.success is expected_success
+    assert result.data["ok"] is expected_success
+    assert result.data["status"] == ("failed" if is_error else "completed")
+    assert result.data["execution_mode"] == "primitive"
+    assert result.data["steps"][0]["ok"] is expected_success
+    assert result.data["conditions"][0]["ok"] is expected_success
+    assert inputs.tool_result["ok"] is expected_success
+    assert inputs.tool_msg.metadata["success"] is expected_success
+    runtime._get_playwright_mcp_tool.assert_awaited_once_with("browser_wait_for")
+    assert client._session.call_tool.await_count == 2
+    client._session.call_tool.assert_awaited_with("browser_wait_for", arguments={"text": "New results"})
 
 
 def test_batch_interact_schema_supports_single_action_and_exposes_condition_waits() -> None:
