@@ -2,10 +2,12 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import getpass
 import heapq
 import hashlib
 import os
 import pathlib
+import re
 import tempfile
 import time
 from contextlib import asynccontextmanager
@@ -60,11 +62,31 @@ class ReadWriteLockManager:
         return cls.ensure_lock_dir() / f"{digest}.db"
 
     @classmethod
+    def _lock_dir_name(cls) -> str:
+        """Return the per-user directory name for the lock databases."""
+        base = "openjiuwen-fs-rwlocks"
+        getuid = getattr(os, "getuid", None)
+        if getuid is not None:
+            return f"{base}-{getuid()}"
+        # Windows has no getuid; fall back to the login name, sanitized for path use.
+        user = getpass.getuser() or "unknown"
+        return f"{base}-{re.sub(r'[^A-Za-z0-9_.-]', '_', user)}"
+
+    @classmethod
     def ensure_lock_dir(cls) -> pathlib.Path:
         """Create or reuse the machine-local directory for lock databases."""
         if cls._lock_dir is None:
-            cls._lock_dir = pathlib.Path(tempfile.gettempdir()) / "openjiuwen-fs-rwlocks"
+            cls._lock_dir = pathlib.Path(tempfile.gettempdir()) / cls._lock_dir_name()
         cls._lock_dir.mkdir(parents=True, exist_ok=True)
+        # Owner-only: the databases are per-user now, and /tmp is world-readable.
+        try:
+            cls._lock_dir.chmod(0o700)
+        except OSError as exc:
+            sys_operation_logger.warning(
+                "Failed to restrict the read-write lock directory, lock_dir=%s, error=%s",
+                cls._lock_dir,
+                exc,
+            )
         return cls._lock_dir
 
     @classmethod
