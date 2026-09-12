@@ -1,0 +1,221 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""LLM client wrappers for ReflACT target and optimizer roles."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Union
+
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy, invoke_text_with_retry
+from openjiuwen.agent_evolving.skill_train.model_compat import get_reasoning_effort
+from openjiuwen.core.foundation.llm.model import Model
+
+
+def _response_to_text(response: Any) -> str:
+    if hasattr(response, "content"):
+        return str(response.content or "")
+    if isinstance(response, dict):
+        return str(response.get("content", "") or response.get("text", "") or "")
+    return str(response or "")
+
+
+def _effort_kwargs(reasoning_effort: str | None = None) -> Dict[str, Any]:
+    effort = reasoning_effort if reasoning_effort is not None else get_reasoning_effort()
+    if not effort:
+        return {}
+    # OpenAI-compatible chat APIs often accept top-level reasoning_effort;
+    # also nest under extra_body for providers that only read extra_body.
+    return {
+        "reasoning_effort": effort,
+        "extra_body": {"reasoning_effort": effort},
+    }
+
+
+def make_llm_invoke_policy(
+    *,
+    attempt_timeout_secs: float = 120.0,
+    total_budget_secs: float = 600.0,
+    max_attempts: int = 3,
+) -> LLMInvokePolicy:
+    """Build resilience policy for skill_train LLM calls.
+
+    ``max_attempts`` is the total tries including the first call (timeout →
+    retry up to ``max_attempts`` times total).
+    """
+    attempt = max(1.0, float(attempt_timeout_secs))
+    max_attempts = max(1, int(max_attempts))
+    # Always reserve budget for every attempt so timeout retries are not
+    # starved by a too-small total_budget_secs.
+    total = max(float(total_budget_secs), attempt * max_attempts + 30.0)
+    return LLMInvokePolicy(
+        attempt_timeout_secs=attempt,
+        total_budget_secs=total,
+        max_attempts=max_attempts,
+    )
+
+
+@dataclass
+class ChatLLMClient:
+    """Sync-friendly wrapper over agent-core Model + llm_resilience."""
+
+    llm: Model
+    model: str
+    policy: LLMInvokePolicy = field(default_factory=make_llm_invoke_policy)
+
+    def _policy(
+        self,
+        *,
+        retries: int | None = None,
+        timeout: float | int | None = None,
+    ) -> LLMInvokePolicy:
+        # ``retries`` here means total attempts (incl. first), matching chat().
+        max_attempts = retries if retries is not None else self.policy.max_attempts
+        attempt = self.policy.attempt_timeout_secs
+        if timeout is not None and float(timeout) > 0:
+            attempt = max(attempt, float(timeout))
+        return make_llm_invoke_policy(
+            attempt_timeout_secs=attempt,
+            total_budget_secs=self.policy.total_budget_secs,
+            max_attempts=max_attempts,
+        )
+
+    def chat(
+        self,
+        *,
+        system: str,
+        user: str,
+        max_completion_tokens: int = 16384,
+        retries: int = 3,
+        stage: str = "",
+        timeout: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[str, Dict[str, Any]]:
+        """Run a single-turn chat (system + user) and return text plus metadata."""
+        del max_completion_tokens
+        prompt = f"{system.strip()}\n\n{user.strip()}"
+        text = asyncio.run(
+            invoke_text_with_retry(
+                self.llm,
+                self.model,
+                prompt,
+                policy=self._policy(retries=retries, timeout=timeout),
+                **_effort_kwargs(reasoning_effort),
+            )
+        )
+        return text, {"stage": stage}
+
+    def chat_messages(
+        self,
+        messages: List[dict],
+        *,
+        max_completion_tokens: int = 16384,
+        retries: int = 5,
+        stage: str = "target",
+        tools: List[dict] | None = None,
+        tool_choice: Union[str, dict, None] = None,
+        return_message: bool = False,
+        timeout: int | None = None,
+        reasoning_effort: str | None = None,
+    ) -> tuple[Any, Dict[str, Any]]:
+        """Run a chat completion over an explicit message list."""
+        del retries  # chat_messages uses a single invoke; retries belong to chat()/resilience
+        invoke_kwargs: Dict[str, Any] = {"max_tokens": max_completion_tokens}
+        if tools is not None:
+            invoke_kwargs["tools"] = tools
+        if tool_choice is not None:
+            invoke_kwargs["tool_choice"] = tool_choice
+        invoke_kwargs.update(_effort_kwargs(reasoning_effort))
+        effective_timeout = None
+        if timeout is not None and float(timeout) > 0:
+            effective_timeout = max(float(timeout), self.policy.attempt_timeout_secs)
+
+        async def _invoke() -> Any:
+            coro = self.llm.invoke(messages, **invoke_kwargs)
+            if effective_timeout is not None:
+                return await asyncio.wait_for(coro, timeout=effective_timeout)
+            return await coro
+
+        response = asyncio.run(_invoke())
+        if return_message:
+            return response, {"stage": stage}
+        return _response_to_text(response), {"stage": stage}
+
+
+@dataclass
+class _ClientRegistry:
+    optimizer: Optional[ChatLLMClient] = None
+    target: Optional[ChatLLMClient] = None
+
+
+_CLIENTS = _ClientRegistry()
+
+
+def set_optimizer_client(client: ChatLLMClient | None) -> None:
+    """Register the process-wide optimizer-role LLM client."""
+    _CLIENTS.optimizer = client
+
+
+def set_target_client(client: ChatLLMClient | None) -> None:
+    """Register the process-wide target-role LLM client."""
+    _CLIENTS.target = client
+
+
+def get_optimizer_client() -> ChatLLMClient:
+    """Return the configured optimizer client, or raise if unset."""
+    if _CLIENTS.optimizer is None:
+        raise RuntimeError("Optimizer LLM client is not configured")
+    return _CLIENTS.optimizer
+
+
+def get_target_client() -> ChatLLMClient:
+    """Return the configured target client, or raise if unset."""
+    if _CLIENTS.target is None:
+        raise RuntimeError("Target LLM client is not configured")
+    return _CLIENTS.target
+
+
+def chat_optimizer(**kwargs: Any) -> tuple[str, Dict[str, Any]]:
+    """Forward a chat call to the optimizer client."""
+    return get_optimizer_client().chat(**kwargs)
+
+
+def chat_target(**kwargs: Any) -> tuple[str, Dict[str, Any]]:
+    """Forward a chat call to the target client."""
+    return get_target_client().chat(**kwargs)
+
+
+def _forward_target_chat_messages(
+    client: ChatLLMClient,
+    messages: list[dict],
+    call_opts: dict[str, Any],
+) -> tuple[Any, dict]:
+    """Delegate multi-turn target inference to the configured client."""
+    return client.chat_messages(messages, **call_opts)
+
+
+def chat_target_messages(
+    messages: list[dict],
+    max_completion_tokens: int = 16384,
+    retries: int = 5,
+    stage: str = "target",
+    reasoning_effort: str | None = None,
+    *,
+    tools: list[dict] | None = None,
+    tool_choice: str | dict | None = None,
+    return_message: bool = False,
+    timeout: int | None = None,
+) -> tuple[Any, dict]:
+    """Run a target-role chat completion over an explicit message list."""
+    call_opts = {
+        "max_completion_tokens": max_completion_tokens,
+        "retries": retries,
+        "stage": stage,
+        "reasoning_effort": reasoning_effort,
+        "tools": tools,
+        "tool_choice": tool_choice,
+        "return_message": return_message,
+        "timeout": timeout,
+    }
+    return _forward_target_chat_messages(get_target_client(), messages, call_opts)
