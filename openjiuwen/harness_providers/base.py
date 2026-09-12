@@ -98,7 +98,8 @@ class TurnTiming:
     started_at: float = field(default_factory=time.time)
     started_monotonic: float = field(default_factory=time.monotonic)
 
-    def completed_at(self) -> float:
+    @staticmethod
+    def completed_at() -> float:
         """Return the wall-clock completion timestamp."""
         return time.time()
 

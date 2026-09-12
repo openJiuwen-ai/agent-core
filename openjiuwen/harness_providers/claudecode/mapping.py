@@ -281,7 +281,8 @@ class ClaudeTurnAccumulator:
             item_id=call_id,
         )
 
-    def _map_result_observations(self, message: Any) -> list[MappedClaudeEvent]:
+    @staticmethod
+    def _map_result_observations(message: Any) -> list[MappedClaudeEvent]:
         usage = _turn_usage(getattr(message, "usage", None))
         if usage is None:
             return []

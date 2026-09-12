@@ -212,8 +212,6 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         client = self._sdk.ClaudeSDKClient(options=options, transport=transport)
         try:
             await client.connect()
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             error = classify_claude_exception(exc, phase="startup")
             stderr_tail = self._stderr_tail.render()
@@ -288,8 +286,6 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                         category="sdk_error",
                     )
                     return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 if turn.abort_requested:
                     return TurnEventKind.ABORTED, interrupted_result(
@@ -328,6 +324,33 @@ class ClaudeCodeHarness(SerializedTurnHarness):
     # Authentication fallback
     # ------------------------------------------------------------------
 
+    def _fallback_applies(
+        self,
+        error: TurnError | None,
+        fallback: ClaudeModelConfig | None,
+        accumulator: ClaudeTurnAccumulator,
+        turn: PendingTurn,
+    ) -> bool:
+        """Report whether the auth fallback may still replace this turn.
+
+        The fallback is a one-shot early switch: it only makes sense while the
+        turn has produced nothing a caller could already have consumed.
+
+        Args:
+            error: The failure classified so far, when there is one.
+            fallback: The configured fallback endpoint, when there is one.
+            accumulator: Collector holding whatever the turn already emitted.
+            turn: The turn being considered for a restart.
+
+        Returns:
+            True when every precondition for activating the fallback holds.
+        """
+        if error is None or fallback is None:
+            return False
+        if error.category != "auth_required" or self._fallback_activated:
+            return False
+        return not accumulator.emitted_output and not turn.abort_requested
+
     async def _maybe_activate_fallback(
         self,
         error: TurnError | None,
@@ -337,14 +360,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         """Switch to the fallback endpoint once when native auth fails early."""
 
         fallback = self._config.fallback_model
-        if (
-            error is None
-            or error.category != "auth_required"
-            or fallback is None
-            or self._fallback_activated
-            or accumulator.emitted_output
-            or turn.abort_requested
-        ):
+        if not self._fallback_applies(error, fallback, accumulator, turn):
             return False
         context = self._context
         if context is None:

@@ -110,7 +110,7 @@ def _matches(scan: Path, name: str) -> list[Path]:
         if not child.is_symlink() and child.is_dir() and (child / "SKILL.md").is_file():
             try:
                 existing = _name(child)
-            except (ValueError, yaml.YAMLError, UnicodeError):
+            except (ValueError, yaml.YAMLError):
                 pass
         if name.casefold() in {child.name.casefold(), existing.casefold()}:
             matches.append(child)

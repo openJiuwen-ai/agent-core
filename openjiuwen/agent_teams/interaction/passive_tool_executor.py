@@ -117,8 +117,14 @@ class PassiveToolExecutor:
         if tool is not None and hasattr(tool, "map_result"):
             try:
                 return tool.map_result(output)
-            except Exception:
-                pass
+            except Exception as exc:
+                # A tool's own rendering is best-effort: fall back to the plain
+                # text rather than failing the passthrough, but say why.
+                team_logger.warning(
+                    "[passive-human] tool {} failed to render its result: {}",
+                    tool_name,
+                    exc,
+                )
         return str(output)
 
     async def _tools_for(self, sender: str) -> dict[str, Tool]:

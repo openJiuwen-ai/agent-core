@@ -949,10 +949,10 @@ class TeamAgentSpec(BaseModel):
         callers may rely on dynamic
         ``spawn_member(role_type='human_agent', ...)`` after build.
         """
-        _HUMAN_ROLES = (TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN)
+        human_roles = (TeamRole.HUMAN_AGENT, TeamRole.PASSIVE_HUMAN)
         if self.enable_hitt:
             return
-        if not any(m.role_type in _HUMAN_ROLES for m in self.predefined_members):
+        if not any(m.role_type in human_roles for m in self.predefined_members):
             return
 
         from openjiuwen.core.common.exception.codes import StatusCode
@@ -961,7 +961,7 @@ class TeamAgentSpec(BaseModel):
         offenders = [
             m.member_name
             for m in self.predefined_members
-            if m.role_type in _HUMAN_ROLES
+            if m.role_type in human_roles
         ]
         raise_error(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,

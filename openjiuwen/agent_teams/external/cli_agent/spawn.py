@@ -829,12 +829,12 @@ class _CodexObservability:
         self.config_overrides: tuple[str, ...] = ()
         self.env: dict[str, str] = {}
         self.traceparent: str | None = None
-        self._receiver: Any = None
-        self._rollout_reader: Any = None
+        self.receiver: Any = None
+        self.rollout_reader: Any = None
 
     async def aclose(self) -> None:
-        receiver, self._receiver = self._receiver, None
-        reader, self._rollout_reader = self._rollout_reader, None
+        receiver, self.receiver = self.receiver, None
+        reader, self.rollout_reader = self.rollout_reader, None
         for closer in (receiver, reader):
             if closer is None:
                 continue
@@ -887,11 +887,11 @@ async def _start_codex_observability(
     overrides: list[str] = []
     try:
         team_logger.info("[external-cli] starting codex rollout trace reader for member {}", member_name)
-        result._rollout_reader = await CodexRolloutTraceReader.start(span_bridge.record_rollout_event)
+        result.rollout_reader = await CodexRolloutTraceReader.start(span_bridge.record_rollout_event)
         span_bridge.enable_rollout_trace()
         team_logger.info("[external-cli] starting codex native otel receiver for member {}", member_name)
-        result._receiver = await CodexOtelTraceReceiver.start(span_bridge.record_native_model_span)
-        if result._receiver is not None:
+        result.receiver = await CodexOtelTraceReceiver.start(span_bridge.record_native_model_span)
+        if result.receiver is not None:
             span_bridge.enable_native_model_spans()
     except Exception as exc:  # noqa: BLE001 - observability is optional
         team_logger.warning(
@@ -901,9 +901,9 @@ async def _start_codex_observability(
         )
         await result.aclose()
         return result
-    if result._rollout_reader is not None:
-        result.env["CODEX_ROLLOUT_TRACE_ROOT"] = str(result._rollout_reader.root)
-    if result._receiver is not None:
+    if result.rollout_reader is not None:
+        result.env["CODEX_ROLLOUT_TRACE_ROOT"] = str(result.rollout_reader.root)
+    if result.receiver is not None:
         # Codex uses an OTel batch span processor. Keep its delivery interval
         # below the turn-finalization grace period so the native sampling
         # span arrives before the member turn is finalized.
@@ -914,7 +914,7 @@ async def _start_codex_observability(
                 "otel.exporter=none",
                 (
                     "otel.trace_exporter={ otlp-http = { "
-                    f"endpoint = {json.dumps(result._receiver.endpoint)}, "
+                    f"endpoint = {json.dumps(result.receiver.endpoint)}, "
                     'protocol = "binary" } }'
                 ),
                 "otel.metrics_exporter=none",

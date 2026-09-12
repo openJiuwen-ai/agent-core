@@ -309,8 +309,6 @@ class CodexHarness(SerializedTurnHarness):
                         )
                         continue
                     break
-            except asyncio.CancelledError:
-                raise
             except Exception as exc:
                 if turn.abort_requested:
                     return TurnEventKind.ABORTED, interrupted_result(
@@ -438,6 +436,33 @@ class CodexHarness(SerializedTurnHarness):
     # Authentication fallback
     # ------------------------------------------------------------------
 
+    def _fallback_applies(
+        self,
+        error: TurnError | None,
+        fallback: CodexModelConfig | None,
+        accumulator: CodexTurnAccumulator,
+        turn: PendingTurn,
+    ) -> bool:
+        """Report whether the auth fallback may still replace this turn.
+
+        The fallback is a one-shot early switch: it only makes sense while the
+        turn has produced nothing a caller could already have consumed.
+
+        Args:
+            error: The failure classified so far, when there is one.
+            fallback: The configured fallback endpoint, when there is one.
+            accumulator: Collector holding whatever the turn already emitted.
+            turn: The turn being considered for a restart.
+
+        Returns:
+            True when every precondition for activating the fallback holds.
+        """
+        if error is None or fallback is None:
+            return False
+        if error.category != "auth_required" or self._fallback_activated:
+            return False
+        return not accumulator.emitted_output and not turn.abort_requested
+
     async def _maybe_activate_fallback(
         self,
         error: TurnError | None,
@@ -445,14 +470,7 @@ class CodexHarness(SerializedTurnHarness):
         turn: PendingTurn,
     ) -> bool:
         fallback = self._config.fallback_model
-        if (
-            error is None
-            or error.category != "auth_required"
-            or fallback is None
-            or self._fallback_activated
-            or accumulator.emitted_output
-            or turn.abort_requested
-        ):
+        if not self._fallback_applies(error, fallback, accumulator, turn):
             return False
         context = self._context
         if context is None:

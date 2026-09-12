@@ -1185,7 +1185,8 @@ class OtelCallbackHandler:
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "inference")
         span.set_attribute(GEN_AI_REQUEST_STREAM, state.is_streaming)
 
-    def _record_usage_attrs(self, state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
+    @staticmethod
+    def _record_usage_attrs(state: LlmSpanState, usage: Any, *, skip_existing: bool = False) -> None:
         """Record current OpenTelemetry GenAI token and model attributes.
 
         Input/output totals stay as reported by the provider. Cache and
@@ -1982,7 +1983,8 @@ class OtelCallbackHandler:
             return ""
         return str(getattr(model_config, "model", "") or "")
 
-    def _derive_provider_name(self, kwargs: dict[str, Any]) -> str:
+    @staticmethod
+    def _derive_provider_name(kwargs: dict[str, Any]) -> str:
         mcc = kwargs.get("model_client_config")
         if mcc is not None:
             cp = getattr(mcc, "client_provider", None)

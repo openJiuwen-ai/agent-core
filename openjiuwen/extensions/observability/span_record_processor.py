@@ -59,14 +59,16 @@ class _LazyOtlpPayload:
         self._sequences: tuple[AddressedSequence, ...] = ()
         self._lock = threading.Lock()
 
-    def _encode_once(self) -> None:
+    def _encode_once(self) -> bytes:
+        """Encode the span on first access and return its OTLP JSON bytes."""
         if self._encoded is not None:
-            return
+            return self._encoded
         with self._lock:
             if self._encoded is None:
                 encoded, sequences = encode_span_with_addressed_sequences(self._span)
                 self._sequences = sequences
                 self._encoded = encoded
+        return self._encoded
 
     @property
     def raw_json(self) -> bytes:
@@ -75,9 +77,7 @@ class _LazyOtlpPayload:
         The restated GenAI attributes carry references rather than their own
         content; :attr:`sequences` states what they refer to.
         """
-        self._encode_once()
-        assert self._encoded is not None
-        return self._encoded
+        return self._encode_once()
 
     @property
     def sequences(self) -> tuple[AddressedSequence, ...]:
@@ -93,10 +93,9 @@ class _LazyOtlpPayload:
         span. Measuring the reference-carrying bytes instead would let a page
         promise four megabytes and deliver far more.
         """
-        self._encode_once()
-        assert self._encoded is not None
+        encoded = self._encode_once()
         referenced = sum(len(sequence_reference(s.seq_hash, s.depth)) for s in self._sequences)
-        return len(self._encoded) - referenced + sum(s.logical_bytes for s in self._sequences)
+        return len(encoded) - referenced + sum(s.logical_bytes for s in self._sequences)
 
 
 @dataclass(frozen=True, slots=True)

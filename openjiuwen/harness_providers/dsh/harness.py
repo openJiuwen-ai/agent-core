@@ -65,16 +65,28 @@ class DshHarness(SerializedTurnHarness):
     # Provider hooks
     # ------------------------------------------------------------------
 
+    def _needs_host_overlay(self, context: HarnessContext) -> bool:
+        """Report whether this context can only be served through a host overlay.
+
+        Args:
+            context: The harness context about to open a session.
+
+        Returns:
+            True when skills, MCP servers or an injected system prompt require
+            the overlay that a custom launcher would bypass.
+        """
+        if self._config.skills and self._config.profile == "sdk-minimal":
+            return True
+        if context.mcp_servers:
+            return True
+        return bool(context.system_prompt) and self._config.system_prompt_env_var is None
+
     def _validate_context(self, context: HarnessContext) -> None:
         super()._validate_context(context)
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None:
             raise UnsupportedHarnessCapabilityError("the DSH SDK server cannot restore protocol checkpoints")
         mcp_configs(context)
-        if self._config.launch_args_override is not None and (
-            (self._config.skills and self._config.profile == "sdk-minimal")
-            or context.mcp_servers
-            or (context.system_prompt and self._config.system_prompt_env_var is None)
-        ):
+        if self._config.launch_args_override is not None and self._needs_host_overlay(context):
             raise UnsupportedHarnessCapabilityError("DSH host overlays require the standard profile launcher")
 
     async def _open_session(self, context: HarnessContext) -> str | None:

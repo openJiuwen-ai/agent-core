@@ -58,6 +58,17 @@ from openjiuwen.harness_providers.native.harness import (
 _CONTROL_CHUNK = "native_protocol.control"
 
 
+# Output-state fields carried across a checkpoint, in save/restore order.
+_OUTPUT_STATE_FIELDS = (
+    "answer_parts",
+    "reasoning_parts",
+    "final_output",
+    "result_type",
+    "tool_blocks",
+    "tool_messages",
+)
+
+
 class NativeHarnessProtocolAdapter(DeepAgentHarness):
     """Adapt NativeHarness controls while reusing DeepAgent output mapping.
 
@@ -400,9 +411,7 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         state = self._current_output_state
         if state is None:
             return {}
-        return {name: to_json_safe(getattr(state, name)) for name in (
-            "answer_parts", "reasoning_parts", "final_output", "result_type", "tool_blocks", "tool_messages",
-        )}
+        return {name: to_json_safe(getattr(state, name)) for name in _OUTPUT_STATE_FIELDS}
 
     @staticmethod
     def _restore_output_state(state: _TurnState, values: dict[str, Any]) -> None:

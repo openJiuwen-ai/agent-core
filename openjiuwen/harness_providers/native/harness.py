@@ -251,8 +251,6 @@ class DeepAgentHarness(SerializedTurnHarness):
                     member_card_id=agent.card.id,
                 )
                 await agent.load_agent_template_spec(self._agent_template, context=build_context)
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             raise ProviderStartupError(
                 f"DeepAgent harness startup failed: {type(exc).__name__}",
@@ -295,8 +293,6 @@ class DeepAgentHarness(SerializedTurnHarness):
                     break
                 state.pending_interrupts.clear()
                 query = resume_input
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             if not turn.abort_requested:
                 logger.exception("[deepagent] turn %s failed", turn.turn_id)
