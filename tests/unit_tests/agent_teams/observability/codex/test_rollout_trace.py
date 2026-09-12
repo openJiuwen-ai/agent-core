@@ -172,6 +172,68 @@ def test_rollout_reader_removes_only_abandoned_owned_roots(
 
 
 @pytest.mark.level0
+def test_rollout_reader_skips_trace_roots_owned_by_other_accounts(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """The temp root is shared, so the glob also matches other accounts' roots.
+
+    Those must be left alone: the recorded pid belongs to another account's
+    session, so this process cannot tell whether the root is still live.
+    """
+    from openjiuwen.agent_teams.observability.codex import rollout_trace
+
+    if not hasattr(os, "getuid"):
+        pytest.skip("file ownership is not comparable on this platform")
+
+    foreign = tmp_path / "openjiuwen-codex-rollout-foreign"
+    foreign.mkdir()
+    (foreign / ".openjiuwen-owner.json").write_text(
+        json.dumps({"pid": 111}),
+        encoding="utf-8",
+    )
+    old = time.time() - 120
+    os.utime(foreign, (old, old))
+    monkeypatch.setattr(rollout_trace, "_pid_is_running", lambda pid: False)
+    # Stand in for a root created by a different account.
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(foreign).st_uid + 1)
+
+    removed = rollout_trace._cleanup_stale_roots(
+        base_dir=tmp_path,
+        now=time.time(),
+    )
+
+    assert removed == 0
+    assert foreign.exists()
+
+
+@pytest.mark.level0
+def test_rollout_reader_still_removes_own_abandoned_roots(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from openjiuwen.agent_teams.observability.codex import rollout_trace
+
+    owned = tmp_path / "openjiuwen-codex-rollout-owned"
+    owned.mkdir()
+    (owned / ".openjiuwen-owner.json").write_text(
+        json.dumps({"pid": 111}),
+        encoding="utf-8",
+    )
+    old = time.time() - 120
+    os.utime(owned, (old, old))
+    monkeypatch.setattr(rollout_trace, "_pid_is_running", lambda pid: False)
+
+    removed = rollout_trace._cleanup_stale_roots(
+        base_dir=tmp_path,
+        now=time.time(),
+    )
+
+    assert removed == 1
+    assert not owned.exists()
+
+
+@pytest.mark.level0
 def test_rollout_reader_treats_pid_probe_os_error_as_abandoned(
     tmp_path: Path,
     monkeypatch,
