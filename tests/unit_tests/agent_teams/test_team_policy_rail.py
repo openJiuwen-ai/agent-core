@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.prompts import (
     build_team_static_sections,
     build_team_workflow_section,
 )
+from openjiuwen.agent_teams.i18n import get_language, set_language
 from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
@@ -199,7 +200,10 @@ class TestTeamRoleSection:
             assert "early convergence" in leader
             assert "one necessary concise supplement" in leader
             assert "summarize again / report key points again" in leader
-            assert "wait for the framework's convergence input; once received, synthesize to the user exactly once" in leader
+            assert (
+                "wait for the framework's convergence input; once received, synthesize to the user exactly once"
+                in leader
+            )
             assert "debate collaboration (only when truly taskless)" in teammate.lower()
             assert "no in-progress, assigned pending, or claimable work" in teammate
             assert "direct P2P" in teammate
@@ -620,6 +624,16 @@ class TestTeamPolicyRailTeamContext:
     when it appears mid tool-loop with no input to ride it is appended at the
     tail (``before_model_call``).
     """
+
+    @pytest.fixture(autouse=True)
+    def _pin_cn_i18n(self):
+        """Roster notes use process-global i18n; pin cn so xdist workers stay isolated."""
+        previous = get_language()
+        set_language("cn")
+        try:
+            yield
+        finally:
+            set_language(previous)
 
     @pytest.mark.asyncio
     @pytest.mark.level1

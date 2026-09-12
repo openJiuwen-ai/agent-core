@@ -1,0 +1,134 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""TTSE configuration.
+
+A single dataclass that mirrors the constants of the original TTSE
+``config.py`` (paths, bank caps, retrieval/dedup knobs) so a DeepAgent can opt
+into Two-Track Self-Evolution via ``DeepAgentConfig.ttse_config``.
+
+Unlike the file-global constants in the reference, every knob lives here and is
+passed explicitly to :class:`TTSERail`, keeping the feature off by default.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from typing import Optional
+
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
+from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
+    GENERATE_RECORDS_LLM_POLICY,
+)
+from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
+
+
+@dataclass
+class TTSEConfig:
+    """Configuration for the TTSE rail (FACT + TIP dual-track self-evolution).
+
+    Attributes:
+        store_path: JSON path for the shared FACT/TIP bank (created on first write).
+        embedding: Optional embedding provider. When set, dedup uses cosine
+            similarity (semantic). When ``None``, dedup falls back to substring
+            matching. FACT/TIP are disclosed via ``ttse_consult``, not dumped
+            into the system prompt.
+            The same provider is reused by ``ttse_consult`` for BM25+embedding
+            hybrid recall when ``query`` is set; missing/failed embedding
+            degrades to BM25. Callers typically construct
+            ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
+            (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
+            and assign it here; do not put raw url/key strings on TTSEConfig.
+        embedding_max_rps: Max embedding API calls per second (cache misses only).
+            Default ``4.0`` matches ModelArts rate limits. ``<= 0`` disables
+            throttling.
+        dedup_threshold: Cosine threshold above which two rules are treated as
+            duplicates during induction. Ignored when ``embedding`` is None.
+        max_facts / max_tips: Hard caps on bank size (highest-count kept).
+        traj_char_budget: Max chars of trajectory text fed to the induce prompt.
+            ``None`` or ``<= 0`` means no truncation. When set, overflow keeps
+            the tail (actions/observations), not the USER head.
+        inject_enabled: Inject catalog guidance into the system prompt and
+            expose ``ttse_consult``. The category listing is trailed as a
+            prompt attachment; FACT/TIP bodies are not dumped into P:45.
+        evolve_enabled: Run induction after each task to grow the bank.
+        success_threshold: Score >= this counts as success (Slice 3 gating).
+        induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
+        batch_size: Cost-amortization knob. When > 1, per-task observations are
+            buffered and induced together via ONE ``induce_batch`` LLM call every
+            ``batch_size`` tasks (blame/retire still run per failed task). 1 =
+            induce on every task (default, the reference's per-task mode).
+        batch_traj_budget: Per-task trajectory chars kept in the batch buffer.
+            ``None`` or ``<= 0`` means keep the full trajectory from the induce
+            flatten. When set, each task's excerpt is capped before the batch
+            induce call.
+        consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
+        consult_top_k: Default per-track hit count when the tool omits ``top_k``.
+        consult_rrf_k: RRF constant for BM25+embedding fusion (KB hybrid uses 60).
+        detect_min_tool_calls: Min tool calls in the current invoke before
+            reply-delivery detect runs (not session-cumulative).
+        detect_max_output_paths: Cap on extracted write paths fed to the Judge.
+        detect_final_reply_chars: Max chars of final assistant reply fed to Judge.
+        detect_llm_policy: Short policy for the one-shot reply-delivery Judge.
+        dream_enabled: Run periodic Auto-dream bank hygiene.
+        dream_interval: Non-follow-up task iterations between dream attempts.
+        dream_min_hours: Min hours since last successful dream.
+        dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
+        dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates.
+        dream_cluster_min_size: Min cluster size to consider for merge.
+        dream_max_llm_merges: Cap LLM merge calls per dream run.
+        dream_ttl_days: Delete rules not injected for this many days.
+        dream_prune_enabled: Enable TTL prune pass.
+        dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
+        dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
+    """
+
+    store_path: str = ".ttse/bank.json"
+    embedding: Optional[EmbeddingProvider] = None
+    embedding_max_rps: float = 4.0
+    dedup_threshold: float = 0.88
+    max_facts: int = 400
+    max_tips: int = 400
+    traj_char_budget: Optional[int] = None
+    inject_enabled: bool = True
+    evolve_enabled: bool = True
+    success_threshold: float = 0.999
+    induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
+    batch_size: int = 1
+    batch_traj_budget: Optional[int] = None
+    consult_max_chars: int = 8000
+    consult_max_rules: int = 40
+    consult_top_k: int = 8
+    consult_rrf_k: int = 60
+    detect_min_tool_calls: int = 5
+    detect_max_output_paths: int = 20
+    detect_final_reply_chars: int = 1500
+    detect_llm_policy: LLMInvokePolicy = field(
+        default_factory=lambda: LLMInvokePolicy(
+            attempt_timeout_secs=30.0,
+            total_budget_secs=35.0,
+            max_attempts=1,
+        )
+    )
+    # Auto-dream (bank hygiene)
+    dream_enabled: bool = True
+    dream_interval: int = 20
+    dream_min_hours: float = 24.0
+    dream_min_rules: int = 8
+    dream_soft_lo: float = 0.72
+    dream_cluster_min_size: int = 2
+    dream_max_llm_merges: int = 10
+    dream_ttl_days: int = 90
+    dream_prune_enabled: bool = True
+    dream_purge_tips_enabled: bool = True
+    dream_state_path: str = ""
+
+    def resolved_dream_state_path(self) -> str:
+        """Path for dream-state.json (same directory as the bank by default)."""
+        if self.dream_state_path:
+            return self.dream_state_path
+        directory = os.path.dirname(self.store_path) or ".ttse"
+        return os.path.join(directory, "dream-state.json")
+
+
+__all__ = ["TTSEConfig"]
