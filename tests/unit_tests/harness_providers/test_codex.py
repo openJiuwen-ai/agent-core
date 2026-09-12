@@ -721,3 +721,35 @@ def test_error_additional_details_are_kept_and_bounded() -> None:
     assert bounded.message.endswith("...[truncated]")
     assert len(bounded.message) <= 8000 + len("...[truncated]")
     logger.info("codex error details are preserved and bounded")
+
+
+@pytest.mark.asyncio
+async def test_auth_retries_are_reported_before_the_fallback_activates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every auth retry reaches the host as a diagnostic; only then does the fallback run."""
+    sdk, state = _install_fake_sdk(monkeypatch)
+    auth_error = SimpleNamespace(message="unauthorized", codex_error_info=SimpleNamespace(http_status=401))
+    state.scripts.append(
+        [
+            _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
+            _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
+            _notification("error", error=auth_error, will_retry=True, thread_id="t", turn_id="x"),
+        ]
+    )
+    state.scripts.append([_turn_completed("turn-2", _Status.completed)])
+    config = CodexHarnessConfig(
+        inherit_process_env=False,
+        max_will_retry_count=2,
+        fallback_model=CodexModelConfig(model="fallback", provider="deep-seek", api_base="https://x", api_key="k"),
+    )
+    harness = CodexHarness(config)
+    await harness.start(_context())
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+    retrying = [
+        event.event
+        for event in events
+        if isinstance(event.event, DiagnosticEvent) and event.event.data.get("kind") == "retrying"
+    ]
+    assert len(retrying) == 3, "every auth retry must be reported before the fallback"
+    await harness.stop()
+    logger.info("codex auth retries are reported before the fallback")

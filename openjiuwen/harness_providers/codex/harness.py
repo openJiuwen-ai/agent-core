@@ -89,10 +89,6 @@ class _RetryBudgetExceeded(RuntimeError):
         self.error = error
 
 
-class _AuthFallbackRequested(RuntimeError):
-    """The current prompt must be retried on the fallback endpoint."""
-
-
 class CodexHarness(SerializedTurnHarness):
     """Adapt one Codex SDK client and one isolated thread to protocol v1.
 
@@ -307,8 +303,6 @@ class CodexHarness(SerializedTurnHarness):
                         )
                         continue
                     break
-            except _AuthFallbackRequested:
-                continue
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -323,6 +317,9 @@ class CodexHarness(SerializedTurnHarness):
                     )
                 if isinstance(exc, _RetryBudgetExceeded):
                     error = exc.error
+                    if await self._maybe_activate_fallback(error, accumulator, turn):
+                        accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
+                        continue
                 elif isinstance(exc, _TurnIdleTimeout):
                     error = TurnError(
                         message=f"Codex produced no turn events for {self._config.turn_idle_timeout_s:g}s",
@@ -379,10 +376,6 @@ class CodexHarness(SerializedTurnHarness):
                 for mapped in mapped_events:
                     await self._emit(mapped.payload, turn=turn, item_id=mapped.item_id)
                 if retrying is not None:
-                    if retrying.error.category == "auth_required" and await self._maybe_activate_fallback(
-                        retrying.error, accumulator, turn
-                    ):
-                        raise _AuthFallbackRequested()
                     will_retry_count += 1
                     if will_retry_count > self._config.max_will_retry_count:
                         await self._interrupt_handle(handle)
