@@ -211,6 +211,7 @@ def test_config_validation_and_option_rendering() -> None:
         'model_providers.deep-seek.name="deep-seek"',
         'model_providers.deep-seek.base_url="https://x"',
         'model_providers.deep-seek.env_key="OPENJIUWEN_CODEX_API_KEY"',
+        "features.enable_request_compression=false",
     )
     overrides = codex_mcp_config_overrides(
         McpServerConfig(name="openjiuwen-team", transport=McpTransport.STDIO, command=("mcp", "--flag"), env={"A": "1"}),

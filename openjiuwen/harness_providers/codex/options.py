@@ -70,6 +70,14 @@ def codex_model_config_overrides(model: CodexModelConfig) -> tuple[str, ...]:
         overrides.append(f"model_providers.{provider_key}.base_url={json.dumps(model.api_base)}")
     if model.api_key:
         overrides.append(f"model_providers.{provider_key}.env_key={json.dumps(CODEX_API_KEY_ENV)}")
+    # An external model targets a non-OpenAI endpoint, but codex's request
+    # compression decision only checks the provider name and the ambient
+    # ChatGPT login in ~/.codex/auth.json - not the effective base_url. With a
+    # ChatGPT login present and a provider named "OpenAI", codex would
+    # zstd-compress request bodies that the external endpoint cannot decode (it
+    # reports "Failed to parse the request body as JSON"). Disable compression
+    # for external endpoints only; members on the official endpoint keep it.
+    overrides.append("features.enable_request_compression=false")
     return tuple(overrides)
 
 
