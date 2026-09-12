@@ -572,6 +572,15 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
         if self._skip_signal_trigger_this_invoke:
             logger.info("[SkillEvolutionRail] active evolution activity detected, skip passive signal scan")
             return False
+        inputs = getattr(ctx, "inputs", None)
+        result = getattr(inputs, "result", None)
+        if isinstance(result, dict) and result.get("result_type") == "interrupt":
+            logger.info("[SkillEvolutionRail] interrupt/interaction invoke, skip passive signal scan")
+            return False
+        query = getattr(inputs, "query", None)
+        if isinstance(query, str) and _AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG in query:
+            logger.info("[SkillEvolutionRail] follow-up/review invoke, skip passive signal scan")
+            return False
         return True
 
     async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:

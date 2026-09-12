@@ -54,6 +54,7 @@ from openjiuwen.harness.rails.evolution.contracts import (
 )
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import (
+    _AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG,
     _FUZZY_REVIEW_PROMPT_CN,
     _FUZZY_REVIEW_PROMPT_EN,
     _MAX_PROCESSED_SIGNAL_KEYS,
@@ -1063,6 +1064,73 @@ def test_allow_evolution_trigger_allows_normal_invoke(tmp_path):
     )
 
     assert rail._allow_evolution_trigger(None, ctx)
+
+
+def test_allow_evolution_trigger_rejects_interrupt_invoke(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True)
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(
+            query="run",
+            conversation_id="conv-1",
+            result={"result_type": "interrupt", "interrupt_ids": ["id-1"]},
+        ),
+        session=None,
+    )
+
+    assert not rail._allow_evolution_trigger(None, ctx)
+
+
+def test_allow_evolution_trigger_allows_answer_invoke(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True)
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(
+            query="run",
+            conversation_id="conv-1",
+            result={"result_type": "answer", "output": "done"},
+        ),
+        session=None,
+    )
+
+    assert rail._allow_evolution_trigger(None, ctx)
+
+
+def test_allow_evolution_trigger_rejects_evolution_followup_tag(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True)
+    tagged_query = f"<{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>\nreview this\n</{_AUTO_SKILL_EVOLUTION_FOLLOW_UP_TAG}>"
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query=tagged_query, conversation_id="conv-1"),
+        session=None,
+    )
+
+    assert not rail._allow_evolution_trigger(None, ctx)
+
+
+@pytest.mark.asyncio
+async def test_after_invoke_skips_evolution_on_interrupt(tmp_path):
+    rail = _make_rail(tmp_path, signal_trigger=True)
+    rail.run_evolution = AsyncMock()
+    trajectory = _trajectory_with_messages([{"role": "user", "content": "run"}])
+    rail._drain_for_hook = Mock(return_value=(trajectory, trajectory, ()))
+    rail._prepare_evolution_input = AsyncMock(
+        return_value=_prepared_input(trajectory, messages=[{"role": "user", "content": "run"}])
+    )
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(card=SimpleNamespace(id="agent-1")),
+        inputs=InvokeInputs(
+            query="run",
+            conversation_id="conv-1",
+            result={"result_type": "interrupt", "interrupt_ids": ["id-1"]},
+        ),
+        session=None,
+    )
+
+    await rail.before_invoke(ctx)
+    await rail.after_invoke(ctx)
+
+    rail.run_evolution.assert_not_awaited()
 
 
 @pytest.mark.asyncio
