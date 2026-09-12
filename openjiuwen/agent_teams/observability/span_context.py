@@ -18,11 +18,11 @@ from openjiuwen.extensions.observability.span_context import (
     close_current_agent_span,
     flush_child_spans,
     get_active_span_tracker,
+    get_bound_root_span,
     get_current_agent_span,
     get_current_llm_span,
     get_current_session_id,
     get_current_tool_span,
-    get_bound_root_span,
     get_root_span,
     pop_any_tool_span,
     pop_current_llm_span,
@@ -61,20 +61,38 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
         return span
 
     from opentelemetry.trace import SpanKind
+
+    from openjiuwen.agent_teams.context import get_session_id
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_NAME,
+        GEN_AI_CONVERSATION_ID,
+        LANGFUSE_SESSION_ID,
         LANGFUSE_TRACE_NAME,
         LANGFUSE_TRACE_TAGS,
+        OJ_AGENT_MODE,
+        OJ_SESSION_ID,
+        OJ_TEAM_ID,
+        OJ_TEAM_NAME,
+        OJ_TEAM_SESSION_ID,
     )
+
+    session_id = get_session_id() or ""
 
     span = tracer.start_span(name=f"team.{team_name}", kind=SpanKind.SERVER)
     span.set_attribute(AT_TEAM_NAME, team_name)
+    span.set_attribute(OJ_AGENT_MODE, "team")
+    span.set_attribute(OJ_TEAM_ID, team_name)
+    span.set_attribute(OJ_TEAM_NAME, team_name)
+    if session_id:
+        span.set_attribute(OJ_TEAM_SESSION_ID, session_id)
+        span.set_attribute(OJ_SESSION_ID, session_id)
+        span.set_attribute(GEN_AI_CONVERSATION_ID, session_id)
+        span.set_attribute(LANGFUSE_SESSION_ID, session_id)
     span.set_attribute(LANGFUSE_TRACE_NAME, f"team.{team_name}")
     span.set_attribute(LANGFUSE_TRACE_TAGS, [team_name])
     set_root_span(span)
     team_logger.info(
-        "otel: get_or_create_team_span CREATE new team span team_name={} "
-        "trace_id={:032x} span_id={:016x}",
+        "otel: get_or_create_team_span CREATE new team span team_name={} trace_id={:032x} span_id={:016x}",
         team_name,
         span.context.trace_id,
         span.context.span_id,

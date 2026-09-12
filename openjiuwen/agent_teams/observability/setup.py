@@ -11,23 +11,34 @@ from typing import Any
 
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SpanExporter
-
 from opentelemetry.trace import Status, StatusCode
 
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
 from openjiuwen.agent_teams.observability.span_context import finalize_trace, reset_all
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.extensions.observability.span_context import pop_current_llm_span
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.demand import (
+    acquire_observability_demand,
+    release_observability_demand,
+)
 from openjiuwen.extensions.observability.setup import (
     force_flush_provider,
-    get_config as get_shared_config,
     get_observability_runtime,
     get_tracer,
+)
+from openjiuwen.extensions.observability.setup import (
+    get_config as get_shared_config,
+)
+from openjiuwen.extensions.observability.setup import (
     init_observability as init_shared_observability,
+)
+from openjiuwen.extensions.observability.setup import (
     is_initialized as is_shared_observability_initialized,
+)
+from openjiuwen.extensions.observability.setup import (
     shutdown_observability as shutdown_shared_observability,
 )
+from openjiuwen.extensions.observability.span_context import OTEL_LLM_STATE_ATTR, pop_current_llm_span
 
 _MONITOR_TRACER_NAME = "openjiuwen.agent_teams.observability.monitor"
 
@@ -81,6 +92,28 @@ def init_observability(
             raise
         finally:
             _initializing = False
+
+
+def _init_team_runtime(
+    config: ObservabilityConfig,
+    additional_span_processors: Sequence[SpanProcessor],
+) -> None:
+    """Initialize Team observability through the shared runtime."""
+    init_observability(config, additional_span_processors=additional_span_processors)
+
+
+def acquire_observability(config: ObservabilityConfig) -> bool:
+    """Hold Team demand so another subsystem cannot tear down the provider."""
+    return acquire_observability_demand(
+        "team",
+        observability_config=config,
+        initializer=_init_team_runtime,
+    )
+
+
+def release_observability() -> None:
+    """Release Team demand and shut down only when it is the last consumer."""
+    release_observability_demand("team", finalizer=shutdown_observability)
 
 
 def finalize_team_trace(team_name: str) -> None:
@@ -144,7 +177,7 @@ def abort_current_llm_span(error: BaseException | None) -> bool:
     state = None
     try:
         span = pop_current_llm_span()
-        state = getattr(span, "otel_llm_state", None) if span else None
+        state = getattr(span, OTEL_LLM_STATE_ATTR, None) if span else None
 
         if state is None:
             return False

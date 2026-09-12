@@ -10,7 +10,6 @@ Events support scope isolation using colon(:) as separator, e.g., "scope:event_n
 System-level events use "_framework" as default scope.
 """
 
-
 # Default system scope
 DEFAULT_SCOPE = "_framework"
 
@@ -50,6 +49,7 @@ class EventBase:
     Attributes:
         scope: The scope for all events in this class
     """
+
     scope: str = DEFAULT_SCOPE
 
     def __init_subclass__(cls, **kwargs):
@@ -63,7 +63,7 @@ class EventBase:
         """
         super().__init_subclass__(**kwargs)
         for attr_name, attr_value in list(cls.__dict__.items()):
-            if isinstance(attr_value, str) and ':' in attr_value:
+            if isinstance(attr_value, str) and ":" in attr_value:
                 scope, event_name = parse_event_name(attr_value)
                 if scope == DEFAULT_SCOPE and cls.scope != DEFAULT_SCOPE:
                     setattr(cls, attr_name, build_event_name(cls.scope, event_name))
@@ -87,6 +87,7 @@ class AgentEvents(EventBase):
     Attributes:
         AGENT_STARTED: Agent execution started
     """
+
     AGENT_STARTED = EventBase.get_event("agent_started")
     AGENT_INVOKE_INPUT = EventBase.get_event("agent_invoke_input")
     AGENT_INVOKE_OUTPUT = EventBase.get_event("agent_invoke_output")
@@ -104,6 +105,7 @@ class AgentTeamEvents(EventBase):
         AGENT_P2P_RECEIVED: An agent received a call from another agent via P2P
         AGENT_PUBSUB_RECEIVED: An agent received a call from another agent via pubsub
     """
+
     AGENT_P2P_RECEIVED = EventBase.get_event("agent_p2p_received")
     AGENT_PUBSUB_RECEIVED = EventBase.get_event("agent_pubsub_received")
 
@@ -126,6 +128,7 @@ class WorkflowEvents(EventBase):
         WORKFLOW_STREAM_INPUT: Fired before Workflow.stream with call arguments
         WORKFLOW_STREAM_OUTPUT: Fired for each item yielded by Workflow.stream
     """
+
     WORKFLOW_STARTED = EventBase.get_event("workflow_started")
     WORKFLOW_FINISHED = EventBase.get_event("workflow_finished")
     WORKFLOW_ERROR = EventBase.get_event("workflow_error")
@@ -156,9 +159,12 @@ class LLMCallEvents(EventBase):
         LLM_INVOKE_OUTPUT: Fired after BaseModelClient.invoke with the result
         LLM_STREAM_INPUT: Fired before BaseModelClient.stream with call arguments
         LLM_STREAM_OUTPUT: Fired for each item yielded by BaseModelClient.stream
+        LLM_STREAM_COMPLETED: Fired once after Model.stream naturally exhausts,
+            carrying the fully accumulated AssistantMessage
         LLM_INPUT: Fired before LLM request with messages/tools input data
         LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
+
     LLM_CALL_STARTED = EventBase.get_event("llm_call_started")
     LLM_CALL_ERROR = EventBase.get_event("llm_call_error")
     LLM_RESPONSE_RECEIVED = EventBase.get_event("llm_response_received")
@@ -166,6 +172,7 @@ class LLMCallEvents(EventBase):
     LLM_INVOKE_OUTPUT = EventBase.get_event("llm_invoke_output")
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")
     LLM_STREAM_OUTPUT = EventBase.get_event("llm_stream_output")
+    LLM_STREAM_COMPLETED = EventBase.get_event("llm_stream_completed")
     LLM_INPUT = EventBase.get_event("llm_input")
     LLM_OUTPUT = EventBase.get_event("llm_output")
 
@@ -186,6 +193,7 @@ class ToolCallEvents(EventBase):
         TOOL_STREAM_OUTPUT: Fired for each item yielded by Tool.stream
         TOOL_AUTH: Tool authentication event for configuring authentication
     """
+
     TOOL_CALL_STARTED = EventBase.get_event("tool_call_started")
     TOOL_CALL_FINISHED = EventBase.get_event("tool_call_finished")
     TOOL_CALL_ERROR = EventBase.get_event("tool_call_error")
@@ -208,6 +216,7 @@ class ContextEvents(EventBase):
         CONTEXT_RETRIEVED: Context was retrieved from storage
         CONTEXT_CLEARED: Context was cleared
     """
+
     CONTEXT_UPDATED = EventBase.get_event("context_updated")
     CONTEXT_OFFLOADED = EventBase.get_event("context_offloaded")
     CONTEXT_RETRIEVED = EventBase.get_event("context_retrieved")
@@ -222,6 +231,7 @@ class SessionEvents(EventBase):
         SESSION_CREATED: Session was created
         AGENT_SESSION_CREATED: Agent session creation triggered
     """
+
     SESSION_CREATED = EventBase.get_event("session_created")
     AGENT_SESSION_CREATED = EventBase.get_event("agent_session_created")
 
@@ -232,6 +242,7 @@ class RetrievalEvents(EventBase):
     Attributes:
         RETRIEVAL_STARTED: Knowledge retrieval started
     """
+
     RETRIEVAL_STARTED = EventBase.get_event("retrieval_started")
 
 
@@ -245,6 +256,7 @@ class MemoryEvents(EventBase):
         MEMORY_UPDATED: Memory update operation (before)
         MEMORY_DELETED: Memory delete operation (before)
     """
+
     MEMORY_ADDED = EventBase.get_event("memory_added")
     MEMORY_SEARCH_STARTED = EventBase.get_event("memory_search_started")
     MEMORY_SEARCH_FINISHED = EventBase.get_event("memory_search_finished")
@@ -263,6 +275,7 @@ class TaskManagerEvents(EventBase):
         TASK_CANCELLED: Task was cancelled
         TASK_TIMEOUT: Task timed out
     """
+
     TASK_CREATED = EventBase.get_event("task_created")
     TASK_RUNNING = EventBase.get_event("task_running")
     TASK_COMPLETED = EventBase.get_event("task_completed")

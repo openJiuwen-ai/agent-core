@@ -234,6 +234,11 @@ line-ending = "auto"
 docstring-code-format = true
 docstring-code-line-length = "dynamic"
 
+[tool.codespell]
+# Streaming tests chunk "hello" into "hel" + "lo"; these fragments are
+# intentional and must not be "corrected".
+ignore-words-list = "hel,thi"
+
 [tool.pylint.MAIN]
 ignore-paths = ["^(examples|tests)/.*"]
 load-plugins = ["pylint.extensions.bad_builtin"]

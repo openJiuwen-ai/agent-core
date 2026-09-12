@@ -10,12 +10,14 @@ import pytest
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
-from openjiuwen.extensions.observability import semconv
 
 
 def _trajectory() -> Trajectory:
@@ -24,9 +26,7 @@ def _trajectory() -> Trajectory:
             "resourceSpans": [
                 {
                     "resource": {
-                        "attributes": attributes_from_map(
-                            {TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"}
-                        )
+                        "attributes": attributes_from_map({TRAJECTORY_ID: "trajectory-1", SESSION_ID: "session-1"})
                     },
                     "scopeSpans": [{"scope": {"name": "test"}, "spans": []}],
                 }
@@ -49,11 +49,10 @@ def _message_trajectory() -> Trajectory:
             "startTimeUnixNano": "1",
             "endTimeUnixNano": "2",
             "attributes": attributes_from_map(
-                {
-                    f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                    f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-                    f"{semconv.GEN_AI_PROMPT}.0.name": "caller",
-                }
+                write_llm_exchange(
+                    [{"role": "user", "content": "hello", "name": "caller"}],
+                    [],
+                )
             ),
         }
     ]

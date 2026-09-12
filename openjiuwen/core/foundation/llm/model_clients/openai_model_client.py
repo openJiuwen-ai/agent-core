@@ -8,28 +8,26 @@ import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
-    AudioGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import (
-    BaseMessage,
-    AssistantMessage,
-    UsageMetadata,
-    UserMessage
-)
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
     merge_request_headers,
 )
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
+from openjiuwen.core.foundation.llm.schema import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
 from openjiuwen.core.foundation.llm.schema.config import ModelClientConfig, ModelRequestConfig, ProviderType
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -55,6 +53,7 @@ _DEFAULT_MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = (
 
 class OpenAIModelClient(BaseModelClient):
     """OpenAI API client supporting GPT models and OpenAI-compatible services."""
+
     __client_name__ = [ProviderType.OpenAI.value]
     _PROTECTED_HEADERS = PROTECTED_HEADERS
     _MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = _DEFAULT_MODEL_PARAM_RULES
@@ -125,25 +124,25 @@ class OpenAIModelClient(BaseModelClient):
 
     @classmethod
     def _build_request_headers(
-            cls,
-            base_headers: Optional[Mapping[str, Any]],
-            request_headers: Optional[Mapping[str, Any]],
+        cls,
+        base_headers: Optional[Mapping[str, Any]],
+        request_headers: Optional[Mapping[str, Any]],
     ) -> dict[str, str]:
         """Merge request-level headers with prebuilt config-level headers (request wins)."""
         return merge_request_headers(base_headers, request_headers)
 
     def _build_request_params(
-            self,
-            *,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            tools: Union[List[ToolInfo], List[dict], None],
-            temperature: Optional[float],
-            top_p: Optional[float],
-            model: Optional[str],
-            stop: Union[Optional[str], None],
-            max_tokens: Optional[int],
-            stream: bool,
-            **kwargs
+        self,
+        *,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        tools: Union[List[ToolInfo], List[dict], None],
+        temperature: Optional[float],
+        top_p: Optional[float],
+        model: Optional[str],
+        stop: Union[Optional[str], None],
+        max_tokens: Optional[int],
+        stream: bool,
+        **kwargs,
     ) -> dict:
         """
         Build request params with OpenAI-specific adjustments.
@@ -164,7 +163,7 @@ class OpenAIModelClient(BaseModelClient):
             stop=stop,
             max_tokens=max_tokens,
             stream=stream,
-            **kwargs
+            **kwargs,
         )
 
         api_base = (self.model_client_config.api_base or "").lower()
@@ -242,7 +241,7 @@ class OpenAIModelClient(BaseModelClient):
             "Before create openai client, model client config params ready.",
             event_type=LogEventType.LLM_CALL_START,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=self.model_client_config.max_retries,
         )
 
         return AsyncOpenAI(
@@ -250,7 +249,7 @@ class OpenAIModelClient(BaseModelClient):
             base_url=self.model_client_config.api_base,
             http_client=http_client,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=self.model_client_config.max_retries,
         )
 
     @classmethod
@@ -300,21 +299,21 @@ class OpenAIModelClient(BaseModelClient):
             logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
     async def invoke(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AssistantMessage:
         """Async invoke OpenAI API
-        
+
         Args:
             :param output_parser:
             :param model:
@@ -326,7 +325,7 @@ class OpenAIModelClient(BaseModelClient):
             :param max_tokens:
             :param timeout:
             **kwargs: Additional parameters
-            
+
         Returns:
             AssistantMessage: Model response
         """
@@ -343,7 +342,7 @@ class OpenAIModelClient(BaseModelClient):
             stop=stop,
             max_tokens=max_tokens,
             stream=False,
-            **kwargs
+            **kwargs,
         )
 
         effective_headers = self._build_request_headers(
@@ -376,7 +375,8 @@ class OpenAIModelClient(BaseModelClient):
                 max_tokens=params.get("max_tokens"),
                 frequency_penalty=params.get("frequency_penalty"),
                 presence_penalty=params.get("presence_penalty"),
-                stop=params.get("stop"))
+                stop=params.get("stop"),
+            )
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
@@ -398,7 +398,7 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=False,
-                metadata={"response": str(response)}
+                metadata={"response": str(response)},
             )
 
             # Parse response and apply output parser
@@ -408,7 +408,7 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
-                metadata={"output_parser": str(output_parser)}
+                metadata={"output_parser": str(output_parser)},
             )
             assistant_message = await self._parse_response(response, output_parser)
 
@@ -422,7 +422,8 @@ class OpenAIModelClient(BaseModelClient):
                 response=assistant_message.content,
                 reasoning_content=assistant_message.reasoning_content,
                 usage=assistant_message.usage_metadata,
-                tool_calls=assistant_message.tool_calls)
+                tool_calls=assistant_message.tool_calls,
+            )
 
             return assistant_message
 
@@ -432,7 +433,8 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
-                error=e)
+                error=e,
+            )
             llm_logger.error(
                 "OpenAI API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -444,12 +446,9 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=False,
-                exception=str(e)
+                exception=str(e),
             )
-            raise build_error(
-                StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"openAI API async invoke error: {str(e)}"
-            ) from e
+            raise build_error(StatusCode.MODEL_CALL_FAILED, error_msg=f"openAI API async invoke error: {str(e)}") from e
         finally:
             # Only close clients we own (fallback path). Shared/pooled clients
             # are long-lived; closing them on the hot path would tear down the
@@ -458,21 +457,21 @@ class OpenAIModelClient(BaseModelClient):
                 await async_client.close()
 
     async def stream(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Async streaming invoke OpenAI API
-        
+
         Args:
             :param output_parser:
             :param model:
@@ -484,7 +483,7 @@ class OpenAIModelClient(BaseModelClient):
             :param max_tokens:
             :param timeout:
             **kwargs: Additional parameters
-            
+
         Yields:
             AssistantMessageChunk: Streaming response chunk
         """
@@ -501,7 +500,7 @@ class OpenAIModelClient(BaseModelClient):
             stop=stop,
             max_tokens=max_tokens,
             stream=True,
-            **kwargs
+            **kwargs,
         )
 
         # OpenAI-compatible streaming responses only include usage on the final
@@ -542,7 +541,8 @@ class OpenAIModelClient(BaseModelClient):
                 frequency_penalty=params.get("frequency_penalty"),
                 presence_penalty=params.get("presence_penalty"),
                 stop=params.get("stop"),
-                is_stream=True)
+                is_stream=True,
+            )
 
             async_client = self._create_async_openai_client(timeout=timeout)
 
@@ -561,7 +561,8 @@ class OpenAIModelClient(BaseModelClient):
                     await trigger(
                         LLMCallEvents.LLM_RESPONSE_RECEIVED,
                         model_name=params.get("model"),
-                        model_provider=self.model_client_config.client_provider)
+                        model_provider=self.model_client_config.client_provider,
+                    )
                     if final_message:
                         final_message = final_message + parsed_result
                     else:
@@ -574,7 +575,8 @@ class OpenAIModelClient(BaseModelClient):
                         await trigger(
                             LLMCallEvents.LLM_RESPONSE_RECEIVED,
                             model_name=params.get("model"),
-                            model_provider=self.model_client_config.client_provider)
+                            model_provider=self.model_client_config.client_provider,
+                        )
                         if final_message:
                             final_message = final_message + parsed_chunk
                         else:
@@ -592,7 +594,8 @@ class OpenAIModelClient(BaseModelClient):
                 response=final_message.content if final_message else None,
                 reasoning_content=final_message.reasoning_content if final_message else None,
                 usage=final_message.usage_metadata if final_message else None,
-                tool_calls=final_message.tool_calls if final_message else None)
+                tool_calls=final_message.tool_calls if final_message else None,
+            )
 
         except Exception as e:
             # Many stream-layer exceptions (httpx.RemoteProtocolError,
@@ -605,7 +608,8 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                error=e)
+                error=e,
+            )
             llm_logger.error(
                 "OpenAI API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -617,11 +621,10 @@ class OpenAIModelClient(BaseModelClient):
                 top_p=params.get("top_p"),
                 max_tokens=params.get("max_tokens"),
                 is_stream=True,
-                exception=error_detail
+                exception=error_detail,
             )
             raise build_error(
-                StatusCode.MODEL_CALL_FAILED,
-                error_msg=f"openAI API async stream error: {error_detail}"
+                StatusCode.MODEL_CALL_FAILED, error_msg=f"openAI API async stream error: {error_detail}"
             ) from e
         finally:
             # Only close clients we own (fallback path). Shared/pooled clients
@@ -660,17 +663,17 @@ class OpenAIModelClient(BaseModelClient):
         return "\n".join(text_parts)
 
     async def generate_image(
-            self,
-            messages: List[UserMessage],
-            *,
-            model: Optional[str] = None,
-            size: Optional[str] = "1664*928",
-            negative_prompt: Optional[str] = None,
-            n: Optional[int] = 1,
-            prompt_extend: bool = True,
-            watermark: bool = False,
-            seed: int = 0,
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        size: Optional[str] = "1664*928",
+        negative_prompt: Optional[str] = None,
+        n: Optional[int] = 1,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        seed: int = 0,
+        **kwargs,
     ) -> ImageGenerationResponse:
         """Generate image via OpenAI ``images.generate`` API."""
         request_custom_headers = kwargs.pop("custom_headers", None)
@@ -752,41 +755,39 @@ class OpenAIModelClient(BaseModelClient):
         )
 
     async def generate_video(
-            self,
-            messages: List[UserMessage],
-            *,
-            img_url: Optional[str] = None,
-            audio_url: Optional[str] = None,
-            model: Optional[str] = None,
-            size: Optional[str] = None,
-            resolution: Optional[str] = None,
-            duration: Optional[int] = 5,
-            prompt_extend: bool = True,
-            watermark: bool = False,
-            negative_prompt: Optional[str] = None,
-            seed: Optional[int] = None,
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        img_url: Optional[str] = None,
+        audio_url: Optional[str] = None,
+        model: Optional[str] = None,
+        size: Optional[str] = None,
+        resolution: Optional[str] = None,
+        duration: Optional[int] = 5,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        **kwargs,
     ) -> VideoGenerationResponse:
         pass
 
     async def generate_speech(
-            self,
-            messages: List[UserMessage],
-            *,
-            model: Optional[str] = None,
-            voice: Optional[str] = "Cherry",
-            language_type: Optional[str] = "Auto",
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        voice: Optional[str] = "Cherry",
+        language_type: Optional[str] = "Auto",
+        **kwargs,
     ) -> AudioGenerationResponse:
         pass
 
     async def _astream_with_parser(
-            self,
-            response_stream,
-            output_parser: BaseOutputParser
+        self, response_stream, output_parser: BaseOutputParser
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Process streaming response with output parser
-        
+
         Strategy:
         1. Immediately yield each raw chunk, maintaining streaming characteristics (content is incremental)
         2. Accumulate all content
@@ -819,7 +820,7 @@ class OpenAIModelClient(BaseModelClient):
                             model_name=self.model_config.model_name,
                             model_provider=self.model_client_config.client_provider,
                             is_stream=True,
-                            exception=str(e)
+                            exception=str(e),
                         )
                         parser_content = None
 
@@ -852,20 +853,16 @@ class OpenAIModelClient(BaseModelClient):
                 return value
         return None
 
-    async def _parse_response(
-            self,
-            response: Any,
-            parser: Optional[BaseOutputParser] = None
-    ) -> AssistantMessage:
+    async def _parse_response(self, response: Any, parser: Optional[BaseOutputParser] = None) -> AssistantMessage:
         """Parse OpenAI API response
-        
+
         Args:
             response: OpenAI API response object
             parser: Optional output parser, only parses content field
-            
+
         Returns:
             AssistantMessage: Parsed assistant message
-            
+
         Note:
             Non-streaming finish_reason is normalized as follows:
             - If the provider returns a value, it is preserved as-is (e.g. "stop",
@@ -878,16 +875,16 @@ class OpenAIModelClient(BaseModelClient):
 
         # Parse tool_calls
         tool_calls = []
-        if hasattr(message, 'tool_calls') and message.tool_calls:
+        if hasattr(message, "tool_calls") and message.tool_calls:
             for idx, tc in enumerate(message.tool_calls):
-                function_name = getattr(getattr(tc, 'function', None), 'name', None) or ""
-                function_arguments = getattr(getattr(tc, 'function', None), 'arguments', None) or ""
+                function_name = getattr(getattr(tc, "function", None), "name", None) or ""
+                function_arguments = getattr(getattr(tc, "function", None), "arguments", None) or ""
                 tool_call = ToolCall(
-                    id=getattr(tc, 'id', '') or "",
+                    id=getattr(tc, "id", "") or "",
                     type="function",
                     name=function_name,
                     arguments=function_arguments,
-                    index=getattr(tc, 'index', idx)
+                    index=getattr(tc, "index", idx),
                 )
                 tool_calls.append(tool_call)
 
@@ -897,9 +894,9 @@ class OpenAIModelClient(BaseModelClient):
         usage_metadata = None
         if response.usage:
             # Extract basic token information
-            input_tokens = getattr(response.usage, 'prompt_tokens', 0) or 0
-            output_tokens = getattr(response.usage, 'completion_tokens', 0) or 0
-            total_tokens = getattr(response.usage, 'total_tokens', 0) or 0
+            input_tokens = getattr(response.usage, "prompt_tokens", 0) or 0
+            output_tokens = getattr(response.usage, "completion_tokens", 0) or 0
+            total_tokens = getattr(response.usage, "total_tokens", 0) or 0
 
             # Extract cost information if available
             input_cost, output_cost, total_cost = self._extract_cost_info(response.usage)
@@ -910,6 +907,8 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
+                **self._cache_usage_metadata(response.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(response.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -927,7 +926,7 @@ class OpenAIModelClient(BaseModelClient):
             model_name=self.model_config.model_name,
             model_provider=self.model_client_config.client_provider,
             response_content=content,
-            is_stream=False
+            is_stream=False,
         )
         llm_logger.info(
             "Before parse content with parser config.",
@@ -935,7 +934,7 @@ class OpenAIModelClient(BaseModelClient):
             model_name=self.model_config.model_name,
             model_provider=self.model_client_config.client_provider,
             is_stream=False,
-            metadata={"parser": str(parser)}
+            metadata={"parser": str(parser)},
         )
         if parser and content:
             try:
@@ -946,7 +945,7 @@ class OpenAIModelClient(BaseModelClient):
                     model_name=self.model_config.model_name,
                     model_provider=self.model_client_config.client_provider,
                     is_stream=False,
-                    metadata={"parser_content": parser_content}
+                    metadata={"parser_content": parser_content},
                 )
             except Exception as e:
                 llm_logger.warning(
@@ -955,14 +954,14 @@ class OpenAIModelClient(BaseModelClient):
                     model_name=self.model_config.model_name,
                     model_provider=self.model_client_config.client_provider,
                     is_stream=False,
-                    exception=str(e)
+                    exception=str(e),
                 )
                 parser_content = None
-        
-        prompt_token_ids = getattr(response, 'prompt_token_ids', None) or None
-        completion_token_ids = getattr(choice, 'token_ids', None) or None
-        logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
-        finish_reason = getattr(choice, 'finish_reason', None) or None
+
+        prompt_token_ids = getattr(response, "prompt_token_ids", None) or None
+        completion_token_ids = getattr(choice, "token_ids", None) or None
+        logprobs = self._normalize_logprobs(getattr(choice, "logprobs", None))
+        finish_reason = getattr(choice, "finish_reason", None) or None
         if not finish_reason:
             finish_reason = "tool_calls" if tool_calls else "stop"
         return AssistantMessage(
@@ -975,6 +974,9 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(response),
         )
 
     @staticmethod
@@ -985,18 +987,28 @@ class OpenAIModelClient(BaseModelClient):
         """
         if not logprobs_obj:
             return None
-        if hasattr(logprobs_obj, 'model_dump'):
+        if hasattr(logprobs_obj, "model_dump"):
             return logprobs_obj.model_dump()
-        if hasattr(logprobs_obj, '__dict__'):
+        if hasattr(logprobs_obj, "__dict__"):
             return vars(logprobs_obj)
         return logprobs_obj
 
+    @staticmethod
+    def _response_provider_metadata(response: Any) -> dict[str, Any]:
+        """Return a small non-sensitive whitelist from an OpenAI response."""
+        metadata: dict[str, Any] = {}
+        for key in ("system_fingerprint", "service_tier"):
+            value = getattr(response, key, None)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                metadata[key] = value
+        return metadata
+
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
-        
+
         Args:
             chunk: OpenAI streaming response chunk
-            
+
         Returns:
             AssistantMessageChunk or None
         """
@@ -1004,14 +1016,16 @@ class OpenAIModelClient(BaseModelClient):
         # choices. Keep that chunk so usage_metadata can propagate to the final
         # accumulated AssistantMessage.
         usage_metadata = None
-        if hasattr(chunk, 'usage') and chunk.usage:
+        if hasattr(chunk, "usage") and chunk.usage:
             input_cost, output_cost, total_cost = self._extract_cost_info(chunk.usage)
             usage_metadata = UsageMetadata(
                 model_name=self.model_config.model_name,
-                input_tokens=getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
+                input_tokens=getattr(chunk.usage, "prompt_tokens", 0) or 0,
+                output_tokens=getattr(chunk.usage, "completion_tokens", 0) or 0,
+                total_tokens=getattr(chunk.usage, "total_tokens", 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
+                **self._cache_usage_metadata(chunk.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(chunk.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -1020,7 +1034,7 @@ class OpenAIModelClient(BaseModelClient):
 
         # vLLM's return_token_ids streams prompt_token_ids only on the first
         # chunk at the top level; surface it whether or not choices is empty.
-        prompt_token_ids = getattr(chunk, 'prompt_token_ids', None) or None
+        prompt_token_ids = getattr(chunk, "prompt_token_ids", None) or None
 
         if not chunk.choices:
             if usage_metadata or prompt_token_ids:
@@ -1031,6 +1045,9 @@ class OpenAIModelClient(BaseModelClient):
                     usage_metadata=usage_metadata,
                     finish_reason="null",
                     prompt_token_ids=prompt_token_ids,
+                    response_id=str(getattr(chunk, "id", "") or "") or None,
+                    response_model=str(getattr(chunk, "model", "") or "") or None,
+                    provider_metadata=self._response_provider_metadata(chunk),
                 )
             return None
 
@@ -1038,34 +1055,32 @@ class OpenAIModelClient(BaseModelClient):
         delta = choice.delta
 
         # Extract content
-        content = getattr(delta, 'content', None) or ""
+        content = getattr(delta, "content", None) or ""
         reasoning_content = self._extract_reasoning_content(delta)
 
         # Parse tool_calls delta
         tool_calls = []
-        if hasattr(delta, 'tool_calls') and delta.tool_calls:
+        if hasattr(delta, "tool_calls") and delta.tool_calls:
             for tc_delta in delta.tool_calls:
-                if hasattr(tc_delta, 'function') and tc_delta.function:
-                    index = getattr(tc_delta, 'index', None)
-                    function_name = getattr(tc_delta.function, 'name', None) or ""
-                    function_arguments = getattr(tc_delta.function, 'arguments', None) or ""
+                if hasattr(tc_delta, "function") and tc_delta.function:
+                    index = getattr(tc_delta, "index", None)
+                    function_name = getattr(tc_delta.function, "name", None) or ""
+                    function_arguments = getattr(tc_delta.function, "arguments", None) or ""
 
                     tool_call = ToolCall(
-                        id=getattr(tc_delta, 'id', '') or "",
+                        id=getattr(tc_delta, "id", "") or "",
                         type="function",
                         name=function_name,
                         arguments=function_arguments,
-                        index=index
+                        index=index,
                     )
                     tool_calls.append(tool_call)
 
         # vLLM emits delta token IDs and per-chunk logprobs alongside content;
         # accumulate via AssistantMessageChunk.__add__ so the final message
         # carries the full sequences.
-        completion_token_ids = (
-            getattr(choice, 'token_ids', None) or getattr(delta, 'token_ids', None) or None
-        )
-        logprobs = self._normalize_logprobs(getattr(choice, 'logprobs', None))
+        completion_token_ids = getattr(choice, "token_ids", None) or getattr(delta, "token_ids", None) or None
+        logprobs = self._normalize_logprobs(getattr(choice, "logprobs", None))
 
         return AssistantMessageChunk(
             content=content,
@@ -1076,4 +1091,7 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(chunk, "id", "") or "") or None,
+            response_model=str(getattr(chunk, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(chunk),
         )

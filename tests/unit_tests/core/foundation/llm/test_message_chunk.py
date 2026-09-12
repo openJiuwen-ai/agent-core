@@ -6,8 +6,8 @@ import pytest
 from openjiuwen.core.foundation.llm.schema.message_chunk import (
     AssistantMessageChunk,
     ToolMessageChunk,
-    merge_parser_content,
     merge_dicts,
+    merge_parser_content,
     merge_pydantic_models,
 )
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -82,10 +82,7 @@ def test_merge_dicts_list_concat():
 
 def test_merge_dicts_nested():
     """Test merge_dicts with nested dicts."""
-    result = merge_dicts(
-        {"outer": {"inner": "left"}},
-        {"outer": {"inner": "right"}}
-    )
+    result = merge_dicts({"outer": {"inner": "left"}}, {"outer": {"inner": "right"}})
     assert result == {"outer": {"inner": "leftright"}}
 
 
@@ -99,9 +96,7 @@ def test_merge_dicts_overwrite():
 def test_merge_pydantic_models_tool_call():
     """Test merge_pydantic_models with ToolCall."""
     left = ToolCall(id="call_1", type="function", name="func", arguments="{", index=0)
-    right = ToolCall(
-        id="call_1", type="function", name="", arguments='"x": 1}'
-    )
+    right = ToolCall(id="call_1", type="function", name="", arguments='"x": 1}')
     result = merge_pydantic_models(left, right)
     # merge_pydantic_models concatenates same-type fields
     assert result.id == "call_1call_1"
@@ -164,9 +159,7 @@ def test_assistant_add_merges_tool_calls_with_same_id():
         tool_calls=[tc1],
     )
 
-    tc2 = ToolCall(
-        id="call_1", type="function", name="", arguments='"x": 1}'
-    )
+    tc2 = ToolCall(id="call_1", type="function", name="", arguments='"x": 1}')
     chunk2 = AssistantMessageChunk(
         role="assistant",
         content="",
@@ -305,6 +298,41 @@ def test_assistant_add_handles_none_reasoning_content():
 
     result = chunk1 + chunk2
     assert result.reasoning_content == "Some reasoning"
+
+
+@pytest.mark.parametrize(
+    "parser_content",
+    [False, 0, "", [], {}],
+    ids=["false", "zero", "empty-string", "empty-list", "empty-dict"],
+)
+def test_assistant_add_preserves_falsy_parser_content(parser_content: object) -> None:
+    result = AssistantMessageChunk(content="first") + AssistantMessageChunk(
+        content="second", parser_content=parser_content
+    )
+    assert type(result.parser_content) is type(parser_content)
+    assert result.parser_content == parser_content
+
+
+def test_assistant_add_preserves_trace_response_facts() -> None:
+    first = AssistantMessageChunk(
+        content="a",
+        response_id="resp-1",
+        response_model="model-1",
+        provider_metadata={"service_tier": "default", "status": "running"},
+        provider_content="raw-a",
+    )
+    second = AssistantMessageChunk(
+        content="b",
+        provider_metadata={"status": "completed"},
+        provider_content="raw-b",
+    )
+
+    result = first + second
+
+    assert result.response_id == "resp-1"
+    assert result.response_model == "model-1"
+    assert result.provider_metadata == {"service_tier": "default", "status": "completed"}
+    assert result.provider_content == "raw-b"
 
 
 def test_assistant_add_merges_finish_reason():

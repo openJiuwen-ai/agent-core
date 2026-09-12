@@ -25,9 +25,13 @@ from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
+from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
+from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.context_compression_handler import (
+    ContextCompressionObservabilityBridge,
+)
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
@@ -158,6 +162,7 @@ class ObservabilityRuntime:
         self._additional_processor_adapters: list[SafeSpanProcessor] = []
         self._tracker: ActiveSpanTracker | None = None
         self._callback_handler: OtelCallbackHandler | None = None
+        self._context_compression_handler: ContextCompressionObservabilityBridge | None = None
         self._registered_callbacks: list[tuple[str, Any]] = []
         self._callback_framework: Any | None = None
         self._callback_namespace = "extensions.observability"
@@ -186,26 +191,14 @@ class ObservabilityRuntime:
             if self._initializing:
                 raise RuntimeError("observability initialization is already in progress")
             if tracer_provider_override is not None and span_exporter_override is not None:
-                raise ValueError(
-                    "tracer_provider_override and span_exporter_override are mutually exclusive"
-                )
+                raise ValueError("tracer_provider_override and span_exporter_override are mutually exclusive")
             if tracer_provider_override is not None and not isinstance(tracer_provider_override, TracerProvider):
                 raise TypeError("tracer_provider_override must be a TracerProvider")
             if self._provider is not None:
-                if (
-                    tracer_provider_override is not None
-                    and tracer_provider_override is not self._provider
-                ):
-                    raise RuntimeError(
-                        "observability is already initialized with a different tracer provider"
-                    )
-                if (
-                    tracer_provider_override is not None
-                    and owns_provider is not self._owns_provider
-                ):
-                    raise RuntimeError(
-                        "observability provider ownership differs from the active configuration"
-                    )
+                if tracer_provider_override is not None and tracer_provider_override is not self._provider:
+                    raise RuntimeError("observability is already initialized with a different tracer provider")
+                if tracer_provider_override is not None and owns_provider is not self._owns_provider:
+                    raise RuntimeError("observability provider ownership differs from the active configuration")
                 self.add_span_processors(additional_span_processors)
                 return
             effective_owns_provider = tracer_provider_override is None or owns_provider
@@ -229,7 +222,10 @@ class ObservabilityRuntime:
                 provider.add_span_processor(tracker)
 
                 if tracer_provider_override is None:
-                    exporter = span_exporter_override or build_span_exporter(config)
+                    exporter = project_for_backend(
+                        span_exporter_override or build_span_exporter(config),
+                        config.backend,
+                    )
                     if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
                         provider.add_span_processor(SimpleSpanProcessor(exporter))
                     else:
@@ -253,8 +249,12 @@ class ObservabilityRuntime:
                     config,
                     tracer=provider.get_tracer("openjiuwen.extensions.observability"),
                 )
+                context_compression_handler = ContextCompressionObservabilityBridge(
+                    tracer=provider.get_tracer("openjiuwen.extensions.observability.context"),
+                )
                 self._callback_handler = callback_handler
-                self._register_callbacks(self._callback_pairs(callback_handler))
+                self._context_compression_handler = context_compression_handler
+                self._register_callbacks(self._callback_pairs(callback_handler, context_compression_handler))
                 if tracer_provider_override is None:
                     try:
                         trace.set_tracer_provider(provider)
@@ -276,6 +276,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 set_active_span_tracker(None)
                 self._additional_processors.clear()
                 self._additional_processor_adapters.clear()
@@ -352,6 +353,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 if get_active_span_tracker() is tracker:
                     set_active_span_tracker(None)
                 self._additional_processors.clear()
@@ -363,12 +365,25 @@ class ObservabilityRuntime:
             return self._tracker
 
     @staticmethod
-    def _callback_pairs(handler: OtelCallbackHandler) -> list[tuple[str, Any]]:
+    def _callback_pairs(
+        handler: OtelCallbackHandler,
+        context_compression_handler: ContextCompressionObservabilityBridge,
+    ) -> list[tuple[str, Any]]:
         """Return the framework events handled by the common callback rail."""
         return [
             (LLMCallEvents.LLM_INVOKE_INPUT, handler.on_llm_invoke_input),
+            (
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
             (LLMCallEvents.LLM_STREAM_INPUT, handler.on_llm_stream_input),
+            (
+                LLMCallEvents.LLM_STREAM_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
+            (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
+            (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
             (LLMCallEvents.LLM_INVOKE_OUTPUT, handler.on_llm_invoke_output),
             (LLMCallEvents.LLM_OUTPUT, handler.on_llm_output),
             (LLMCallEvents.LLM_CALL_ERROR, handler.on_llm_call_error),
@@ -379,6 +394,10 @@ class ObservabilityRuntime:
             (AgentEvents.AGENT_INVOKE_OUTPUT, handler.on_agent_invoke_output),
             (AgentEvents.AGENT_STREAM_INPUT, handler.on_agent_stream_input),
             (AgentEvents.AGENT_STREAM_OUTPUT, handler.on_agent_stream_output),
+            (
+                ContextEvents.CONTEXT_COMPRESSION_STATE,
+                context_compression_handler.on_context_compression_state,
+            ),
         ]
 
     def _register_callbacks(
@@ -459,11 +478,7 @@ class ObservabilityRuntime:
         tracked_adapters: list[SafeSpanProcessor] | None = None,
     ) -> None:
         registered = self._additional_processors if tracked_processors is None else tracked_processors
-        adapters = (
-            self._additional_processor_adapters
-            if tracked_adapters is None
-            else tracked_adapters
-        )
+        adapters = self._additional_processor_adapters if tracked_adapters is None else tracked_adapters
         for processor in processors:
             if any(existing is processor for existing in registered):
                 continue
