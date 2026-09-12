@@ -271,8 +271,15 @@ def _get_web_proxy_url(configured_proxy: str | None = None) -> str:
 
 
 def _free_search_ssl_verify() -> bool:
-    """Whether to verify TLS certificates (default off for intranet usage)."""
-    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=False)
+    """Whether to verify TLS certificates.
+
+    Verification is on by default: the tools' fetch target is chosen by the
+    model and the response body is injected into the agent's context, so a
+    MITM with a self-signed certificate would be indirect prompt injection.
+    Intranet deployments that terminate TLS with a private CA can set
+    ``FREE_SEARCH_SSL_VERIFY=0`` to opt out.
+    """
+    return _env_flag(_FREE_SEARCH_SSL_VERIFY_ENV, default=True)
 
 
 def _no_proxy_entries() -> list[str]:
