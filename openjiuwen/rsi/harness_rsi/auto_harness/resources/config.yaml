@@ -57,6 +57,11 @@ fix_loop:
   phase1_max_retries: 10        # Phase 1 最大重试次数
   phase2_max_retries: 9         # Phase 2 最大重试次数
 
+best_of_n:
+  enabled: false                # 是否启用 Best-of-N 多尝试修复
+  attempts: 3                   # 独立尝试次数
+  timeout_per_attempt: 600.0    # 每次尝试的超时（秒）
+
 agent:
   implement: 60                 # implement agent max_iterations
   assess: 60                    # assess agent max_iterations
