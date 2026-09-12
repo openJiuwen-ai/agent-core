@@ -30,6 +30,7 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.rg_binary import resolve_rg_binary
 
 
 _FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -2072,6 +2073,71 @@ class GrepTool(Tool):
         was_truncated = len(items) - offset > effective_limit
         return sliced, effective_limit if was_truncated else None
 
+    # Models often pass language extensions (``rs``, ``py``) as ``type``.
+    # ripgrep expects type *names* (``rust``, ``py``). Map common aliases.
+    # ``tsx``/``jsx`` are not built-in rg types; ``ts``/``js`` already cover
+    # ``*.tsx`` / ``*.jsx``.
+    _RG_TYPE_ALIASES: Dict[str, str] = {
+        "rs": "rust",
+        "rust": "rust",
+        "py": "py",
+        "python": "py",
+        "js": "js",
+        "javascript": "js",
+        "jsx": "js",
+        "ts": "ts",
+        "typescript": "ts",
+        "tsx": "ts",
+        "go": "go",
+        "golang": "go",
+        "c": "c",
+        "h": "c",
+        "cpp": "cpp",
+        "cc": "cpp",
+        "cxx": "cpp",
+        "java": "java",
+        "kt": "kotlin",
+        "kotlin": "kotlin",
+        "rb": "ruby",
+        "ruby": "ruby",
+        "php": "php",
+        "swift": "swift",
+        "scala": "scala",
+        "sh": "sh",
+        "bash": "sh",
+        "zsh": "sh",
+        "md": "markdown",
+        "markdown": "markdown",
+        "toml": "toml",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "json": "json",
+        "html": "html",
+        "css": "css",
+        "sql": "sql",
+    }
+
+    @classmethod
+    def _normalize_rg_file_type(cls, file_type: Optional[str]) -> Optional[str]:
+        """Map extension-style type filters to ripgrep ``--type`` names.
+
+        Known aliases are matched case-insensitively (and with an optional
+        leading ``.``). Unknown values are returned unchanged so custom
+        case-sensitive ripgrep types keep working.
+        """
+        if file_type is None:
+            return None
+        raw = str(file_type).strip()
+        if not raw:
+            return None
+        lookup = raw.lower()
+        if lookup.startswith("."):
+            lookup = lookup[1:]
+        mapped = cls._RG_TYPE_ALIASES.get(lookup)
+        if mapped is not None:
+            return mapped
+        return raw
+
     @staticmethod
     def _split_glob_patterns(glob_value: Optional[str]) -> List[str]:
         if not glob_value:
@@ -2105,9 +2171,10 @@ class GrepTool(Tool):
             case_insensitive: bool,
             file_type: Optional[str],
             multiline: bool,
+            rg_path: str = "rg",
     ) -> str:
         parts: List[str] = [
-            "rg",
+            self._shell_quote(rg_path),
             "--hidden",
             "--color=never",
             "--max-columns",
@@ -2250,7 +2317,10 @@ class GrepTool(Tool):
         if multiline:
             return None
 
-        parts: List[str] = ["grep", "-R", "--binary-files=without-match"]
+        # Use POSIX ERE (-E) so patterns with (, |, etc. match rg semantics
+        # better than basic regex. Always pass the pattern via -e and end
+        # options with -- so values like "--config" are never treated as flags.
+        parts: List[str] = ["grep", "-R", "-E", "--binary-files=without-match"]
 
         for directory in self.VCS_DIRECTORIES_TO_EXCLUDE:
             parts.append(f"--exclude-dir={self._shell_quote(directory)}")
@@ -2279,7 +2349,12 @@ class GrepTool(Tool):
         for glob_pattern in self._split_glob_patterns(glob):
             parts.append(f"--include={self._shell_quote(glob_pattern)}")
 
-        parts.extend([self._shell_quote(pattern), self._shell_quote(path)])
+        parts.extend([
+            "-e",
+            self._shell_quote(pattern),
+            "--",
+            self._shell_quote(path),
+        ])
         return " ".join(parts)
 
     @staticmethod
@@ -2404,7 +2479,7 @@ class GrepTool(Tool):
         offset = self._as_int(inputs.get("offset"), 0) or 0
         multiline = self._as_bool(inputs.get("multiline", False))
         glob = inputs.get("glob")
-        file_type = inputs.get("type")
+        file_type = self._normalize_rg_file_type(inputs.get("type"))
 
         has_context_controls = any(
             value is not None for value in [context_before, context_after, context_c, context]
@@ -2415,7 +2490,8 @@ class GrepTool(Tool):
             context_c = None
             context = None
 
-        if shutil.which("rg"):
+        rg_bin = resolve_rg_binary()
+        if rg_bin:
             cmd = self._build_rg_command(
                 pattern=str(pattern),
                 path=path,
@@ -2429,6 +2505,7 @@ class GrepTool(Tool):
                 case_insensitive=ignore_case,
                 file_type=file_type,
                 multiline=multiline,
+                rg_path=rg_bin,
             )
         elif os.name == "nt":
             if file_type:
