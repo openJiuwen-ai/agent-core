@@ -133,7 +133,7 @@ Return the executable instance corresponding to this component. openJiuwen suppo
 ...             return a + b
 ...         if operator == 'multiply':
 ...             return a * b
-...         if operator == 'substract':
+...         if operator == 'subtract':
 ...             return a - b
 ...         return a / b
 >>> 
