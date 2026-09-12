@@ -104,6 +104,11 @@ _OPENAI_EXTRA_BODY_EXTENSION_FIELDS = {
     "cache_salt",
     "cache_sharing",
     "return_token_ids",
+    # Vendor thinking flags must ride in extra_body; OpenAI SDK rejects them
+    # as top-level chat.completions.create kwargs.
+    "enable_thinking",
+    "thinking",
+    "chat_template_kwargs",
 }
 
 
