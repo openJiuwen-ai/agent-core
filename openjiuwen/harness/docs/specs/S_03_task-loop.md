@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/task_loop/`（8 个模块）、`openjiuwen/harness/schema/loop_event.py`、`openjiuwen/harness/schema/stop_condition.py`、`openjiuwen/harness/schema/task.py` |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-12 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -54,6 +54,9 @@
    abort 标志 / 完成承诺；`request_abort()` 置位；`increment_iteration()` 每次 round 递增；
    `add_token_usage(tokens)` 记账。`get_completion_promise_evaluator()` 返回
    completion-promise 求值器（`schema/stop_condition.py` 的 `CompletionPromiseEvaluator`）。
+   `current_iteration` / `token_usage` / `elapsed_seconds` 暴露当前消耗；`budget_limits()`
+   从求值器链聚合 `BudgetLimit`（rounds / tokens / seconds），是预算告警类 rail 读取
+   硬上限的**唯一来源**——rail 不得自带一份并行的上限配置。
 7. `LoopQueues` 只有两个队列：steering（`push_steer` / `drain_steering`）与 follow_up
    （`push_follow_up` / `drain_follow_up` / `has_follow_up`）。
 8. `TaskLoopController` 是 core `Controller` 子类：`submit_round` / `wait_round_completion`
@@ -95,6 +98,9 @@ class LoopCoordinator:
     def current_iteration(self) -> int
     def is_aborted(self) -> bool
     def stop_reason(self) -> Optional[str]
+    def token_usage(self) -> int
+    def elapsed_seconds(self) -> float
+    def budget_limits(self) -> tuple[BudgetLimit, ...]
     def reset(self) -> None
     def increment_iteration(self) -> None
     def add_token_usage(self, tokens: int) -> None
@@ -163,6 +169,15 @@ class TaskLoopController(Controller):
 | `CustomPredicateEvaluator` | 自定义谓词 |
 
 `StopConditionEvaluator` 是 ABC，`StopEvaluationContext` 是求值上下文。
+
+`StopConditionEvaluator.budget()` 返回该求值器强制的硬上限
+`BudgetLimit(kind, limit)`：`MaxRoundsEvaluator` → `rounds`、`TokenBudgetEvaluator` →
+`tokens`、`TimeoutEvaluator` → `seconds`；谓词型求值器（completion-promise / 自定义）
+返回 `None`。`LoopCoordinator.budget_limits()` 即该方法的聚合出口。
+
+`enable_task_loop` 时，`DeepAgent` 仅在调用方**未提供** `TaskCompletionRail` 时才注入默认
+实例；调用方提供的实例（可带 `max_rounds` / `timeout_seconds` / `evaluators`）决定
+`LoopCoordinator` 的预算链。同类型 rail 不并存，避免默认实例覆盖调用方的预算。
 
 ## 与其它 spec 的关系
 

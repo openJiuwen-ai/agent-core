@@ -748,8 +748,12 @@ class DeepAgent(BaseAgent):
         # Auto-inject a default TaskCompletionRail when the outer
         # task loop is enabled.  Users can override it by passing
         # their own TaskCompletionRail via add_rail() or the
-        # factory's rails= argument.
-        if config.enable_task_loop:
+        # factory's rails= argument -- their rail is already queued, so the
+        # default is only appended when none is present (otherwise the two
+        # would coexist and the injected default, queued last, would win).
+        if config.enable_task_loop and not any(
+            isinstance(rail, TaskCompletionRail) for rail in self._pending_rails
+        ):
             self._pending_rails.append(TaskCompletionRail())
 
         if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
