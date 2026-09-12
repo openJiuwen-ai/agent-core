@@ -20,6 +20,8 @@ if TYPE_CHECKING:
         VisionModelConfig,
     )
     from openjiuwen.harness.workspace.workspace import Workspace
+    from openjiuwen.harness.multi_rollout.config import MultiRolloutConfig
+    from openjiuwen.harness.multi_rollout.executor import MultiRolloutExecutor
 
 __all__ = [
     "DeepAgent",
@@ -28,6 +30,8 @@ __all__ = [
     "DeepAgentConfig",
     "AudioModelConfig",
     "VisionModelConfig",
+    "MultiRolloutConfig",
+    "MultiRolloutExecutor",
     "create_deep_agent",
     "Workspace",
 ]
@@ -75,6 +79,16 @@ def __getattr__(name: str) -> Any:
             Workspace,
         )
         return Workspace
+    if name == "MultiRolloutConfig":
+        from openjiuwen.harness.multi_rollout.config import (
+            MultiRolloutConfig,
+        )
+        return MultiRolloutConfig
+    if name == "MultiRolloutExecutor":
+        from openjiuwen.harness.multi_rollout.executor import (
+            MultiRolloutExecutor,
+        )
+        return MultiRolloutExecutor
     raise AttributeError(
         f"module {__name__!r} has no attribute {name!r}"
     )
