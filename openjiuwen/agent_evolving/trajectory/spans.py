@@ -531,12 +531,221 @@ def _message_list(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _structured_parts_text(parts: Any) -> str:
+    """Join the text carried by one message's structured parts."""
+
+    if not isinstance(parts, list):
+        return ""
+    texts: list[str] = []
+    for part in parts:
+        if isinstance(part, Mapping) and isinstance(part.get("content"), str):
+            texts.append(part["content"])
+    return "\n".join(texts)
+
+
+_TRACE_TEXT_LIMIT = 1000
+_MULTIMODAL_LABELS = {
+    "image": "image_content",
+    "image_url": "image_content",
+    "input_image": "image_content",
+    "audio": "audio_content",
+    "input_audio": "audio_content",
+    "video": "video_content",
+    "file": "file_content",
+    "input_file": "file_content",
+}
+
+
+def _trace_safe_value(value: Any) -> Any:
+    """Bound text and replace bulky multimodal payloads before JSON encoding."""
+
+    if isinstance(value, str):
+        return value if len(value) <= _TRACE_TEXT_LIMIT else f"{value[:_TRACE_TEXT_LIMIT]}..."
+    if isinstance(value, Mapping):
+        content_type = str(value.get("type") or "").lower()
+        label = _MULTIMODAL_LABELS.get(content_type)
+        if label:
+            return {"type": content_type, "omitted": label}
+        return {str(key): _trace_safe_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_trace_safe_value(item) for item in value]
+    return to_json_compatible(value)
+
+
+def _tool_calls_from_parts(parts: Any) -> list[dict[str, Any]]:
+    """Rebuild the flat tool-call list from a message's structured parts."""
+
+    if not isinstance(parts, list):
+        return []
+    tool_calls: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, Mapping) or part.get("type") != "tool_call":
+            continue
+        # A call carried whole keeps its own ``type``; one flattened by the
+        # instrumentation has its fields directly on the part.
+        nested = part.get("call")
+        if isinstance(nested, Mapping):
+            tool_calls.append(deepcopy(dict(nested)))
+            continue
+        tool_calls.append(
+            {key: deepcopy(value) for key, value in part.items() if key != "type"}
+        )
+    return tool_calls
+
+
+def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Collapse a structured message onto the flat role/content shape.
+
+    Standard GenAI messages carry their text and their tool calls as ``parts``;
+    every consumer here reads ``content`` and ``tool_calls``. Remaining fields
+    (``name``, ``finish_reason``) pass through untouched.
+    """
+
+    flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
+    if not isinstance(flat.get("content"), str):
+        parts = message.get("parts")
+        contents = [
+            part["content"] for part in parts
+            if isinstance(part, Mapping) and "content" in part
+        ] if isinstance(parts, list) else []
+        if len(contents) == 1 and not isinstance(contents[0], str):
+            # Multimodal content rides in one part and comes back whole.
+            flat["content"] = deepcopy(contents[0])
+        elif contents:
+            flat["content"] = _structured_parts_text(parts)
+    if "tool_calls" not in flat:
+        tool_calls = _tool_calls_from_parts(message.get("parts"))
+        if tool_calls:
+            flat["tool_calls"] = tool_calls
+    flat.setdefault("role", "unknown")
+    return flat
+
+
+def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Render one flat role/content message as a structured GenAI message.
+
+    Text and tool calls become ``parts``; every other field a producer carries
+    (``name``, ``tool_call_id``, ``reasoning_content``, ...) stays alongside
+    them, so the round trip through :func:`_flatten_structured_message` is
+    lossless.
+    """
+
+    parts: list[dict[str, Any]] = []
+    content = message.get("content")
+    if content is not None:
+        # Recorded even when empty: a message that carried an empty content
+        # field is not the same as one that carried none.
+        safe_content = _trace_safe_value(content)
+        part_type = "text" if isinstance(safe_content, str) else "multimodal"
+        parts.append({"type": part_type, "content": safe_content})
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, Mapping):
+                # Carried whole rather than spread: a call has its own ``type``
+                # field, which would otherwise overwrite the part's.
+                parts.append({"type": "tool_call", "call": _trace_safe_value(dict(call))})
+    structured: dict[str, Any] = {
+        "role": str(message.get("role") or "unknown"),
+        "parts": parts,
+    }
+    for field, value in message.items():
+        if field in ("role", "content", "parts", "tool_calls"):
+            continue
+        structured[field] = _trace_safe_value(value)
+    return structured
+
+
+def write_llm_exchange(
+    prompts: Iterable[Mapping[str, Any]] | None,
+    completions: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Render an LLM exchange as the standard GenAI span attributes.
+
+    The inverse of :func:`read_llm_exchange`, for the trajectory producers that
+    build span attribute dictionaries by hand rather than through
+    instrumentation: offline extraction, the RL rail, and legacy conversion.
+
+    Args:
+        prompts: Flat request messages, system turns included.
+        completions: Flat reply messages.
+
+    Returns:
+        The standard attributes to merge into a span's attribute map; keys with
+        nothing to carry are omitted.
+    """
+
+    system_parts: list[dict[str, Any]] = []
+    input_messages: list[dict[str, Any]] = []
+    for message in prompts or []:
+        if not isinstance(message, Mapping):
+            continue
+        if str(message.get("role") or "") == "system":
+            content = message.get("content")
+            if content not in (None, ""):
+                safe_content = _trace_safe_value(content)
+                part_type = "text" if isinstance(safe_content, str) else "multimodal"
+                system_parts.append({"type": part_type, "content": safe_content})
+        input_messages.append(_structure_message(message))
+    output_messages = [
+        _structure_message(message)
+        for message in completions or []
+        if isinstance(message, Mapping)
+    ]
+
+    def encode(value: Any) -> str:
+        return json.dumps(_trace_safe_value(value), ensure_ascii=False, default=str)
+
+    attributes: dict[str, Any] = {}
+    if system_parts:
+        attributes[semconv.GEN_AI_SYSTEM_INSTRUCTIONS] = encode(system_parts)
+    if input_messages:
+        attributes[semconv.GEN_AI_INPUT_MESSAGES] = encode(input_messages)
+        attributes[semconv.OJ_INPUT_MESSAGES_ORDERED] = True
+    if output_messages:
+        attributes[semconv.GEN_AI_OUTPUT_MESSAGES] = encode(output_messages)
+    return attributes
+
+
+def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read the standard input attributes back as one ordered message list.
+
+    ``gen_ai.system_instructions`` holds the instructions given outside the
+    chat history, so it leads; ``gen_ai.input.messages`` follows in order.
+    """
+
+    input_messages = [
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+    ]
+    # New writers retain system messages in the ordered input list. Older
+    # standard spans omit them and need system_instructions prepended.
+    if attrs.get(semconv.OJ_INPUT_MESSAGES_ORDERED) is True:
+        return input_messages
+
+    messages: list[dict[str, Any]] = []
+    system_text = _structured_parts_text(
+        _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
+    )
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.extend(input_messages)
+    return messages
+
+
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached LLM messages, preferring standard attributes over Langfuse mirrors."""
+    """Read detached LLM messages, preferring standard attributes."""
 
     attrs = span_attributes(span)
-    prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
-    completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
+    prompts = _standard_prompt_messages(attrs)
+    completions = [
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+    ]
+    if not prompts:
+        prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
+    if not completions:
+        completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
     if not prompts:
         prompts = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
     if not completions:
@@ -727,6 +936,7 @@ __all__ = [
     "normalize_otlp",
     "normalize_span",
     "read_llm_exchange",
+    "write_llm_exchange",
     "read_llm_messages",
     "read_rl_fields",
     "read_span_error",

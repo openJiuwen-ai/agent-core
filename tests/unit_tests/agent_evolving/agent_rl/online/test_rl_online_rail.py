@@ -15,7 +15,10 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_ID,
     TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, span_attributes
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map, iter_spans, span_attributes,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
@@ -93,10 +96,10 @@ def _span(span_id: int, *, prompt: str = "hi", response: str = "hello") -> dict:
         "attributes": attributes_from_map(
             {
                 semconv.GEN_AI_REQUEST_MODEL: "m1",
-                f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                f"{semconv.GEN_AI_PROMPT}.0.content": prompt,
-                f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                f"{semconv.GEN_AI_COMPLETION}.0.content": response,
+                **write_llm_exchange(
+                    [{"role": "user", "content": prompt}],
+                    [{"role": "assistant", "content": response}],
+                ),
             }
         ),
     }
