@@ -719,7 +719,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         external_paths = getattr(result, "external_paths", None) or []
         if external_paths:
-            parts.append(f"\n\n**外部路径：** `{', '.join(external_paths)}`")
+            parts.append(f"\n\n**路径：** `{', '.join(external_paths)}`")
 
         parts.append(self._build_always_allow_hint(tool_call))
 
