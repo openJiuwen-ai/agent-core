@@ -39,7 +39,11 @@ from openjiuwen.harness_providers.claudecode import (
     ClaudeCodeHarnessProvider,
     ClaudeModelConfig,
 )
-from openjiuwen.harness_providers.claudecode.failure_classifier import classify_result_message
+from openjiuwen.harness_providers.claudecode.failure_classifier import (
+    classify_assistant_error,
+    classify_result_message,
+    merge_pending_error,
+)
 from openjiuwen.harness_providers.claudecode.options import build_claude_session_id
 from tests.test_logger import logger
 
@@ -541,3 +545,50 @@ async def test_stop_closes_client_that_reconnects_after_stop(monkeypatch):
     assert _terminal(await consumer).kind is TurnEventKind.ABORTED
     assert all(client.disconnected for client in state.clients)
     assert not any(client.queries for client in state.clients)
+
+
+@pytest.mark.asyncio
+async def test_bad_request_is_classified_as_request_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HTTP 400 and ``invalid_request`` both name a rejected request, not a generic SDK error."""
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    assert classify_result_message(_result(sdk, is_error=True, api_error_status=400)).category == "request_rejected"
+    assert classify_assistant_error("invalid_request").category == "request_rejected"
+    logger.info("claude bad-request classification maps onto request_rejected")
+
+
+@pytest.mark.asyncio
+async def test_assistant_failure_detail_survives_into_the_turn_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The assistant text blocks carry the cause that ``error`` alone omits."""
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    message = sdk.AssistantMessage(
+        content=[sdk.TextBlock(text="model 'x' is not available on this endpoint")],
+        error="invalid_request",
+    )
+    error = classify_assistant_error("invalid_request", message)
+    assert error.message == "model 'x' is not available on this endpoint"
+    assert error.code == "invalid_request"
+    logger.info("claude assistant failure detail is preserved")
+
+
+@pytest.mark.asyncio
+async def test_uninformative_result_errors_fall_back_to_the_http_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``errors=['unknown']`` says nothing; the status code is then the only fact."""
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    error = classify_result_message(_result(sdk, is_error=True, errors=["unknown"], api_error_status=429))
+    assert error.message == "Claude turn failed: HTTP 429"
+    assert error.category == "rate_limited"
+    logger.info("claude uninformative result errors fall back to the http status")
+
+
+@pytest.mark.asyncio
+async def test_pending_assistant_detail_is_merged_into_the_terminal_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A terminal result keeps the earlier assistant diagnostic instead of dropping it."""
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    message = sdk.AssistantMessage(content=[sdk.TextBlock(text="endpoint rejected the tool schema")], error="invalid_request")
+    pending = classify_assistant_error("invalid_request", message)
+    terminal = classify_result_message(_result(sdk, is_error=True, errors=["unknown"], api_error_status=400))
+    merged = merge_pending_error(pending, terminal)
+    assert "endpoint rejected the tool schema" in merged.message
+    assert "HTTP 400" in merged.message
+    assert merged.category == "request_rejected"
+    logger.info("claude pending assistant detail merges into the terminal error")

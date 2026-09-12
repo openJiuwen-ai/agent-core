@@ -220,7 +220,7 @@ class ClaudeTurnAccumulator:
         )
         error = getattr(message, "error", None)
         if error:
-            self.pending_error = classify_assistant_error(error)
+            self.pending_error = classify_assistant_error(error, message)
             mapped.append(
                 MappedClaudeEvent(
                     DiagnosticEvent(

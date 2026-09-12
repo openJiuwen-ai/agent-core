@@ -19,6 +19,7 @@ from openjiuwen.harness_protocol import TurnError
 from openjiuwen.harness_providers.codex.options import load_codex_sdk
 
 _HTTP_STATUS_CATEGORY: dict[int, str] = {
+    400: "request_rejected",
     401: "auth_required",
     403: "auth_required",
     429: "rate_limited",
@@ -26,6 +27,9 @@ _HTTP_STATUS_CATEGORY: dict[int, str] = {
     529: "server_unavailable",
 }
 _RETRYABLE = frozenset({"rate_limited", "server_unavailable", "network_timeout"})
+# Upper bound for a failure message carried into the turn error. Codex
+# ``additional_details`` can hold a whole request body dump.
+_MAX_FAILURE_DETAIL_CHARS = 8000
 # ``CodexErrorInfoValue`` camelCase identifiers -> shared failure categories.
 _ERROR_INFO_CATEGORY: dict[str, str] = {
     "unauthorized": "auth_required",
@@ -34,7 +38,7 @@ _ERROR_INFO_CATEGORY: dict[str, str] = {
     "serverOverloaded": "server_unavailable",
     "internalServerError": "server_unavailable",
     "contextWindowExceeded": "sdk_error",
-    "badRequest": "sdk_error",
+    "badRequest": "request_rejected",
     "cyberPolicy": "sdk_error",
     "threadRollbackFailed": "sdk_error",
     "sandboxError": "sdk_error",
@@ -123,7 +127,7 @@ def _category_for(error_info: Any, info_value: str) -> str:
 
 def classify_turn_error(turn_error: Any) -> TurnError:
     """Classify a Codex ``TurnCompletedNotification.turn.error``."""
-    message = str(getattr(turn_error, "message", "") or "")
+    message = _codex_error_message(turn_error)
     error_info = getattr(turn_error, "codex_error_info", None)
     http_status = _extract_http_status(error_info)
     category, info_value = classify_codex_error_info(error_info, http_status)
@@ -138,7 +142,7 @@ def classify_error_notification(payload: Any) -> tuple[TurnError, bool]:
     """
     error = getattr(payload, "error", None)
     will_retry = bool(getattr(payload, "will_retry", False))
-    message = str(getattr(error, "message", "") or "")
+    message = _codex_error_message(error)
     error_info = getattr(error, "codex_error_info", None)
     http_status = _extract_http_status(error_info)
     category, info_value = classify_codex_error_info(error_info, http_status)
@@ -184,6 +188,25 @@ def merge_pending_error(pending: TurnError | None, terminal: TurnError | None) -
             provider_data=dict(terminal.provider_data) or dict(pending.provider_data),
         )
     return terminal
+
+
+def _codex_error_message(error: Any) -> str:
+    """Combine the bounded Codex error summary with its extra diagnostics.
+
+    Args:
+        error: A Codex ``TurnError`` or ``ErrorNotification.error`` payload.
+
+    Returns:
+        The summary plus ``additional_details`` when it adds anything, truncated
+        to ``_MAX_FAILURE_DETAIL_CHARS``.
+    """
+    message = str(getattr(error, "message", "") or "").strip()
+    additional_details = str(getattr(error, "additional_details", "") or "").strip()
+    if additional_details and additional_details not in message:
+        message = f"{message}\n{additional_details}" if message else additional_details
+    if len(message) <= _MAX_FAILURE_DETAIL_CHARS:
+        return message
+    return message[:_MAX_FAILURE_DETAIL_CHARS] + "...[truncated]"
 
 
 def _normalize_error_info(error_info: Any) -> str:

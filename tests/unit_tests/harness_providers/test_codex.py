@@ -41,6 +41,12 @@ from openjiuwen.harness_protocol import (
     UserInputResponse,
 )
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexHarnessProvider, CodexModelConfig
+from openjiuwen.harness_providers.codex.failure_classifier import (
+    _ERROR_INFO_CATEGORY,
+    _RETRYABLE,
+    classify_codex_error_info,
+    classify_turn_error,
+)
 from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
@@ -688,3 +694,30 @@ async def test_append_read_failure_closes_codex_client(monkeypatch):
         await harness.start(_context())
     assert state.clients[0].closed
     assert not state.thread_calls
+
+def test_bad_request_is_classified_as_request_rejected() -> None:
+    """A 400 names a rejected request, which needs configuration action, not a retry."""
+    category, _ = classify_codex_error_info(None, 400)
+    assert category == "request_rejected"
+    assert _ERROR_INFO_CATEGORY["badRequest"] == "request_rejected"
+    assert "request_rejected" not in _RETRYABLE
+    logger.info("codex 400 and badRequest map onto request_rejected")
+
+
+def test_error_additional_details_are_kept_and_bounded() -> None:
+    """``message`` is a one-line summary; ``additional_details`` carries the cause."""
+    error = classify_turn_error(
+        SimpleNamespace(
+            message="request failed",
+            additional_details="model 'x' is not served by this endpoint",
+            codex_error_info=None,
+        )
+    )
+    assert error.message == "request failed\nmodel 'x' is not served by this endpoint"
+
+    bounded = classify_turn_error(
+        SimpleNamespace(message="request failed", additional_details="d" * 9000, codex_error_info=None)
+    )
+    assert bounded.message.endswith("...[truncated]")
+    assert len(bounded.message) <= 8000 + len("...[truncated]")
+    logger.info("codex error details are preserved and bounded")
