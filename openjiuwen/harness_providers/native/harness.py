@@ -141,9 +141,19 @@ class _TurnState:
                 )
             )
         if self.answer_parts:
-            blocks.append(ContentBlock(block_id=f"{self.turn_id}:text", kind="text", content="".join(self.answer_parts)))
+            blocks.append(
+                ContentBlock(
+                    block_id=f"{self.turn_id}:text",
+                    kind="text",
+                    content="".join(self.answer_parts),
+                )
+            )
         blocks.extend(self.tool_blocks)
-        assistant = TurnMessage(message_id=f"{self.turn_id}:assistant", role=MessageRole.ASSISTANT, content=tuple(blocks))
+        assistant = TurnMessage(
+            message_id=f"{self.turn_id}:assistant",
+            role=MessageRole.ASSISTANT,
+            content=tuple(blocks),
+        )
         return (assistant, *self.tool_messages)
 
 
@@ -424,7 +434,12 @@ class DeepAgentHarness(SerializedTurnHarness):
             interactive_input.update(interrupt_id, json_value_to_builtin(response.content))
         return interactive_input
 
-    def _build_result(self, turn: PendingTurn, state: _TurnState, timing: TurnTiming) -> tuple[TurnEventKind, TurnResult]:
+    def _build_result(
+        self,
+        turn: PendingTurn,
+        state: _TurnState,
+        timing: TurnTiming,
+    ) -> tuple[TurnEventKind, TurnResult]:
         final_output = state.final_output if state.final_output is not None else "".join(state.answer_parts)
         messages = state.messages()
         if turn.abort_requested:

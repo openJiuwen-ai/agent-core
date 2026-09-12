@@ -23,7 +23,12 @@ def mcp_configs(context: HarnessContext) -> list[dict[str, Any]]:
         names.add(server.name)
         config: dict[str, Any] = {"serverName": server.name, "failOnStartupError": True}
         if server.transport is McpTransport.STDIO:
-            config.update(transport="stdio", command=server.command[0], args=list(server.command[1:]), env=dict(server.env))
+            config.update(
+                transport="stdio",
+                command=server.command[0],
+                args=list(server.command[1:]),
+                env=dict(server.env),
+            )
             if context.cwd:
                 config["cwd"] = context.cwd
         elif server.transport is McpTransport.HTTP:
@@ -34,8 +39,13 @@ def mcp_configs(context: HarnessContext) -> list[dict[str, Any]]:
     return configs
 
 
-def write_overlay(context: HarnessContext, *, include_prompt: bool,
-                  prompt_mode: str = "replace", enable_skill_plugins: bool = False) -> tuple[tempfile.TemporaryDirectory, str, dict[str, str]] | None:
+def write_overlay(
+    context: HarnessContext,
+    *,
+    include_prompt: bool,
+    prompt_mode: str = "replace",
+    enable_skill_plugins: bool = False,
+) -> tuple[tempfile.TemporaryDirectory, str, dict[str, str]] | None:
     """Keep user data in the child environment and register native plugins.
 
     Append mode contributes an independent section and a single interpolation
@@ -79,10 +89,19 @@ def write_overlay(context: HarnessContext, *, include_prompt: bool,
             plugin.chmod(0o600)
             inserts.append(f'    - id: openjiuwen-host-prompt\n      name: {json.dumps(str(plugin))}\n')
         if enable_skill_plugins:
-            for plugin_id, package in [("skill", "skill"), ("skill-filesystem", "skill-filesystem"), ("tool-skill", "tool-skill")]:
+            skill_plugins = [
+                ("skill", "skill"),
+                ("skill-filesystem", "skill-filesystem"),
+                ("tool-skill", "tool-skill"),
+            ]
+            for plugin_id, package in skill_plugins:
                 inserts.append(f'    - id: {plugin_id}\n      name: "@deepseek-ai/dsh-{package}"\n')
         for index in range(len(configs)):
-            inserts.append(f'    - id: openjiuwen-mcp-{index}\n      name: "@deepseek-ai/dsh-mcp-client"\n      config: !!js "JSON.parse(process.env.{variable}).mcps[{index}]"\n')
+            inserts.append(
+                f'    - id: openjiuwen-mcp-{index}\n'
+                f'      name: "@deepseek-ai/dsh-mcp-client"\n'
+                f'      config: !!js "JSON.parse(process.env.{variable}).mcps[{index}]"\n'
+            )
         if inserts:
             rows.extend(['- insert:\n', *inserts])
         path = root / "host.patch.yml"

@@ -248,11 +248,19 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         # accepted input arrives; never replay a failed turn in the background.
         if self._client is None and not turn.abort_requested:
             try:
-                self._client = await self._connect(self._context, model=self._active_model, resume=self._claude_session_id, session_id=None)
+                self._client = await self._connect(
+                    self._context,
+                    model=self._active_model,
+                    resume=self._claude_session_id,
+                    session_id=None,
+                )
             except Exception as exc:
                 if turn.abort_requested:
                     return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
-                error = exc.error if isinstance(exc, ProviderStartupError) else classify_claude_exception(exc, phase="startup")
+                if isinstance(exc, ProviderStartupError):
+                    error = exc.error
+                else:
+                    error = classify_claude_exception(exc, phase="startup")
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
         if turn.abort_requested:
             await self._close_session()
@@ -476,7 +484,8 @@ def _render_questions(questions: list[dict[str, Any]]) -> str:
         if not text:
             continue
         options = question.get("options")
-        labels = [str(item.get("label")) for item in options if isinstance(item, Mapping)] if isinstance(options, list) else []
+        items = options if isinstance(options, list) else []
+        labels = [str(item.get("label")) for item in items if isinstance(item, Mapping)]
         lines.append(f"{text} (options: {', '.join(labels)})" if labels else text)
     return "\n".join(lines) or "The agent is asking for your input."
 

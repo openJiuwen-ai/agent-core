@@ -134,7 +134,11 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         if checkpoint is not None and context.resume_policy is not ResumePolicy.NEW:
             if checkpoint.schema_version != "1":
                 raise HarnessProtocolError("unsupported native checkpoint version")
-            if checkpoint.provider != self.card.name or checkpoint.agent_id != context.agent_id or checkpoint.host_session_id != context.host_session_id:
+            if (
+                checkpoint.provider != self.card.name
+                or checkpoint.agent_id != context.agent_id
+                or checkpoint.host_session_id != context.host_session_id
+            ):
                 raise HarnessProtocolError("native checkpoint scope does not match the context")
             try:
                 snapshot = NativeCheckpoint.model_validate(json_value_to_builtin(checkpoint.data))
@@ -355,7 +359,9 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
         agent = self.native_harness
         if agent is None:
             return self._latest_checkpoint
-        if self.state not in {HarnessState.IDLE, HarnessState.PAUSED} or (self.state is HarnessState.IDLE and self._pending):
+        if self.state not in {HarnessState.IDLE, HarnessState.PAUSED} or (
+            self.state is HarnessState.IDLE and self._pending
+        ):
             raise HarnessStateError("pause the native turn before exporting its checkpoint")
         return await self._capture_checkpoint(paused=self.state is HarnessState.PAUSED)
 

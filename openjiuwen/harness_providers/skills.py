@@ -34,7 +34,8 @@ class SkillSource:
         if self.mode not in {"all", "auto_list"}:
             raise ValueError("skill mode must be all or auto_list")
         if self.enabled_skills is not None:
-            if not isinstance(self.enabled_skills, (list, tuple)) or any(not isinstance(v, str) for v in self.enabled_skills):
+            named = isinstance(self.enabled_skills, (list, tuple))
+            if not named or any(not isinstance(v, str) for v in self.enabled_skills):
                 raise TypeError("enabled_skills must be an array of names")
             object.__setattr__(self, "enabled_skills", tuple(self.enabled_skills))
 

@@ -560,7 +560,8 @@ class ExternalHarnessMemberRuntime:
         """Answer provider extension requests; only ``auth_fallback`` is understood."""
         if request.request_type != _AUTH_FALLBACK_REQUEST:
             return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
-        status = InteractionResponseStatus.COMPLETED if await self._persist_fallback() else InteractionResponseStatus.DECLINED
+        persisted = await self._persist_fallback()
+        status = InteractionResponseStatus.COMPLETED if persisted else InteractionResponseStatus.DECLINED
         return ProviderInteractionResponse(request_id=request.request_id, status=status)
 
     async def _persist_fallback(self) -> bool:
@@ -570,11 +571,15 @@ class ExternalHarnessMemberRuntime:
         try:
             promoted = await promote()
         except Exception:
-            team_logger.exception("[external-cli] member {} failed to persist the authentication fallback", self._member_name)
+            team_logger.exception(
+                "[external-cli] member {} failed to persist the authentication fallback",
+                self._member_name,
+            )
             return False
         if not promoted:
             team_logger.warning(
-                "[external-cli] member {} could not persist the authentication fallback; the provider keeps its native endpoint",
+                "[external-cli] member {} could not persist the authentication fallback; "
+                "the provider keeps its native endpoint",
                 self._member_name,
             )
         return promoted

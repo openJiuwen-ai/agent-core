@@ -201,7 +201,13 @@ class CodexHarness(SerializedTurnHarness):
         )
         return self._thread_id
 
-    async def _connect(self, context: HarnessContext, *, model: CodexModelConfig | None, resume_thread_id: str | None) -> None:
+    async def _connect(
+        self,
+        context: HarnessContext,
+        *,
+        model: CodexModelConfig | None,
+        resume_thread_id: str | None,
+    ) -> None:
         sdk = self._sdk
         cwd = context.cwd or self._config.cwd
         codex_config = build_codex_config(

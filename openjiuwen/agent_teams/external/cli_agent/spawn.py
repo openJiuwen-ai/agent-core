@@ -894,7 +894,11 @@ async def _start_codex_observability(
         if result._receiver is not None:
             span_bridge.enable_native_model_spans()
     except Exception as exc:  # noqa: BLE001 - observability is optional
-        team_logger.warning("[external-cli] codex observability augmentation disabled for member {}: {}", member_name, exc)
+        team_logger.warning(
+            "[external-cli] codex observability augmentation disabled for member {}: {}",
+            member_name,
+            exc,
+        )
         await result.aclose()
         return result
     if result._rollout_reader is not None:

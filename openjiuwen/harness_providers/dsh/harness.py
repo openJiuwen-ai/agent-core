@@ -70,7 +70,11 @@ class DshHarness(SerializedTurnHarness):
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME or context.checkpoint is not None:
             raise UnsupportedHarnessCapabilityError("the DSH SDK server cannot restore protocol checkpoints")
         mcp_configs(context)
-        if self._config.launch_args_override is not None and ((self._config.skills and self._config.profile == "sdk-minimal") or context.mcp_servers or (context.system_prompt and self._config.system_prompt_env_var is None)):
+        if self._config.launch_args_override is not None and (
+            (self._config.skills and self._config.profile == "sdk-minimal")
+            or context.mcp_servers
+            or (context.system_prompt and self._config.system_prompt_env_var is None)
+        ):
             raise UnsupportedHarnessCapabilityError("DSH host overlays require the standard profile launcher")
 
     async def _open_session(self, context: HarnessContext) -> str | None:
@@ -85,9 +89,12 @@ class DshHarness(SerializedTurnHarness):
         options = self._sdk_options(context)
         session_id = f"dsh-{uuid.uuid4().hex}"
         overlay_context = replace(context, cwd=context.cwd or self._config.cwd)
-        overlay = write_overlay(overlay_context, include_prompt=self._config.system_prompt_env_var is None,
-                                prompt_mode=self._config.system_prompt_mode,
-                                enable_skill_plugins=bool(self._config.skills) and self._config.profile == "sdk-minimal")
+        overlay = write_overlay(
+            overlay_context,
+            include_prompt=self._config.system_prompt_env_var is None,
+            prompt_mode=self._config.system_prompt_mode,
+            enable_skill_plugins=bool(self._config.skills) and self._config.profile == "sdk-minimal",
+        )
         if overlay is not None:
             self._overlay, path, env = overlay
             options["env"].update(env)

@@ -300,14 +300,18 @@ class HarnessIOAdapter:
         if self._harness.state is not HarnessState.RUNNING:
             return
         if not self._harness.card.supports(HarnessCapability.PAUSE_RESUME):
-            raise UnsupportedHarnessCapabilityError(f"harness {self._harness.card.name!r} does not support pause/resume")
+            raise UnsupportedHarnessCapabilityError(
+                f"harness {self._harness.card.name!r} does not support pause/resume"
+            )
         await self._harness.pause()
 
     async def resume(self, *, query: Any | None = None) -> None:
         if self._harness.state is not HarnessState.PAUSED and query is None:
             return
         if not self._harness.card.supports(HarnessCapability.PAUSE_RESUME):
-            raise UnsupportedHarnessCapabilityError(f"harness {self._harness.card.name!r} does not support pause/resume")
+            raise UnsupportedHarnessCapabilityError(
+                f"harness {self._harness.card.name!r} does not support pause/resume"
+            )
         external_query = None if query is None else to_harness_input(query)
         await self._harness.resume(query=external_query)
 
@@ -330,7 +334,10 @@ class HarnessIOAdapter:
         if isinstance(request, ProviderInteractionRequest):
             handler = self._provider_interaction_handler
             if handler is None:
-                return ProviderInteractionResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
+                return ProviderInteractionResponse(
+                    request_id=request.request_id,
+                    status=InteractionResponseStatus.DECLINED,
+                )
             return await handler(request)
         if request.request_id in self._pending:
             raise HarnessStateError(f"interaction {request.request_id!r} is already pending")

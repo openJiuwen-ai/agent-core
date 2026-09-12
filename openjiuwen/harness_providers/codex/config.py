@@ -113,7 +113,8 @@ class CodexHarnessConfig:
             raise ValueError("Codex retry counters must be non-negative")
         if self.mcp_startup_timeout_s <= 0 or self.event_buffer_capacity <= 0:
             raise ValueError("Codex mcp_startup_timeout_s and event_buffer_capacity must be positive")
-        if self.mcp_default_tools_approval_mode is not None and self.mcp_default_tools_approval_mode not in _APPROVAL_MODES:
+        approval_mode = self.mcp_default_tools_approval_mode
+        if approval_mode is not None and approval_mode not in _APPROVAL_MODES:
             raise ValueError(f"Codex mcp_default_tools_approval_mode must be one of {', '.join(_APPROVAL_MODES)}")
         if self.model is not None and not isinstance(self.model, CodexModelConfig):
             raise TypeError("Codex model must be a CodexModelConfig")

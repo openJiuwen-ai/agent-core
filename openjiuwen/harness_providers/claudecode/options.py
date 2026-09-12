@@ -28,7 +28,9 @@ def load_claude_sdk() -> Any:
     try:
         import claude_agent_sdk
     except ImportError as exc:
-        raise HarnessError("claude-agent-sdk is required for the Claude Code harness; install the optional SDK") from exc
+        raise HarnessError(
+            "claude-agent-sdk is required for the Claude Code harness; install the optional SDK"
+        ) from exc
     return claude_agent_sdk
 
 
@@ -69,7 +71,10 @@ def build_process_env(config: ClaudeCodeHarnessConfig, context_env: Mapping[str,
     return env
 
 
-def model_settings(model: ClaudeModelConfig | None, settings_env: Mapping[str, str] = MappingProxyType({})) -> str | None:
+def model_settings(
+    model: ClaudeModelConfig | None,
+    settings_env: Mapping[str, str] = MappingProxyType({}),
+) -> str | None:
     """Render the CLI ``--settings`` JSON injecting an external endpoint.
 
     The CLI applies ``~/.claude/settings.json`` after the process env, which
