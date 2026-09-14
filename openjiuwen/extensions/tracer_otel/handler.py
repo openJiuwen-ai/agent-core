@@ -17,6 +17,9 @@ from typing import Any
 
 from dateutil.tz import tzlocal
 
+# P0 perf: cache tzlocal() once at module level
+_CACHED_TZLOCAL = tzlocal()
+
 from opentelemetry import context as otel_context, trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
@@ -246,7 +249,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
             otel_span.set_attribute(OJ_SESSION_ID, session_id)
         otel_span.set_attribute(OJ_INVOKE_ID, agent_span.invoke_id or "")
         otel_span.set_attribute(OJ_PARENT_INVOKE_ID, agent_span.parent_invoke_id or "")
-        start_time = agent_span.start_time or datetime.now(tz=tzlocal()).replace(tzinfo=None)
+        start_time = agent_span.start_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_START_TIME, str(start_time))
         context_token = otel_context.attach(trace.set_span_in_context(otel_span))
         state = OtelSpanState(
@@ -270,7 +273,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
     def _set_end_attrs(self, otel_span: trace.Span, agent_span: TraceAgentSpan) -> None:
         """Set TraceSpan end-time fields as attributes before span closes.
         Uses span values if present, otherwise sets ourselves (matching TraceAgentHandler)."""
-        end_time = agent_span.end_time or datetime.now(tz=tzlocal()).replace(tzinfo=None)
+        end_time = agent_span.end_time or datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         otel_span.set_attribute(OJ_END_TIME, str(end_time))
         if agent_span.elapsed_time is not None:
             otel_span.set_attribute(OJ_ELAPSED_TIME, agent_span.elapsed_time)
@@ -337,6 +340,8 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 parent_ctx=parent_ctx,
                 agent_span=span,
             )
+            if not state.recorded:
+                return
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
             state.span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
@@ -370,7 +375,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
     async def on_llm_request(self, span: TraceAgentSpan, **kwargs):
         try:
             state = self._span_manager.get(span.invoke_id)
-            if state is None:
+            if state is None or not state.recorded:
                 return
             state.span.add_event("llm.request", attributes=kwargs)
         except Exception as exc:
@@ -381,14 +386,15 @@ class OtelAgentHandler(TraceExtAgentHandler):
             state = self._span_manager.get(span.invoke_id)
             if state is None:
                 return
-            if outputs is not None:
-                _, messages = _standard_messages(outputs, default_role="assistant")
-                if messages:
-                    state.span.set_attribute(
-                        GEN_AI_OUTPUT_MESSAGES,
-                        _redacted_json(messages, self._config, field="completions"),
-                    )
-            self._set_end_attrs(state.span, span)
+            if state.recorded:
+                if outputs is not None:
+                    _, messages = _standard_messages(outputs, default_role="assistant")
+                    if messages:
+                        state.span.set_attribute(
+                            GEN_AI_OUTPUT_MESSAGES,
+                            _redacted_json(messages, self._config, field="completions"),
+                        )
+                self._set_end_attrs(state.span, span)
             self._end_and_pop(span.invoke_id)
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_end failed: %s", exc)
@@ -439,9 +445,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         state = self._span_manager.get(span.invoke_id)
         if state is None:
             return
-        if outputs is not None:
-            state.span.set_attribute(OJ_AGENT_OUTPUTS, redact(outputs, self._config))
-        self._set_end_attrs(state.span, span)
+        if state.recorded:
+            if outputs is not None:
+                state.span.set_attribute(OJ_AGENT_OUTPUTS, redact(outputs, self._config))
+            self._set_end_attrs(state.span, span)
         self._end_and_pop(span.invoke_id)
 
     # --- helper: mark error on a non-LLM span and end ---
@@ -614,6 +621,41 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._layer_root_spans: dict[str, OtelSpanState] = {}
         # Mapping 3: node_id → host-component OtelSpanState
         self._component_spans: dict[str, OtelSpanState] = {}
+        # Cached OTel context for multi-round conversations
+        self._cached_root_ctx: otel_context.Context | None = None
+        self._cached_trace_id: str | None = None
+        self._cached_session_id: str | None = None
+
+    def set_trace_id(self, trace_id: str) -> None:
+        if trace_id and trace_id != self._trace_id:
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cleanup_stale_spans()
+        super().set_trace_id(trace_id)
+
+    def set_session_id(self, session_id: str) -> None:
+        if session_id and session_id != self._cached_session_id:
+            self._cached_root_ctx = None
+            self._cached_trace_id = None
+            self._cached_session_id = session_id
+            self._cleanup_stale_spans()
+        super().set_session_id(session_id)
+
+    def _cleanup_stale_spans(self) -> None:
+        for state in list(self._layer_root_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+            except Exception:
+                pass
+        for state in list(self._component_spans.values()):
+            try:
+                state.span.end()
+                self._span_manager.pop(state.invoke_id)
+            except Exception:
+                pass
+        self._layer_root_spans.clear()
+        self._component_spans.clear()
 
     # --- helper: resolve parent context for a new span ---
 
@@ -628,7 +670,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # Check if there is already a root workflow
             existing_root = self._layer_root_spans.get("")
             if existing_root is None:
-                # This is the true root workflow - no parent
+                # This is the first root span for this execution
+                if self._cached_root_ctx is not None:
+                    return self._cached_root_ctx
                 return None
             # Isolate different workflows: clean stale context from another workflow
             current_workflow_id = metadata.get("workflow_id") if metadata else None
@@ -724,7 +768,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         """
         if state.start_time is None:
             return
-        end_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
+        end_time = datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
         state.span.set_attribute(OJ_END_TIME, str(end_time))
         elapsed_ms = (end_time - state.start_time).total_seconds() * 1000
         elapsed_str = f"{elapsed_ms:.0f}ms" if elapsed_ms < 1000 else f"{(elapsed_ms / 1000):.2f}s"
@@ -771,8 +815,25 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 kind=span_kind,
                 context=parent_ctx,
             )
+            # P0 perf: skip all attribute work for non-recording spans
+            if not otel_span.is_recording():
+                start_time = None
+                state = OtelSpanState(
+                    span=otel_span, context_token=None, invoke_id=invoke_id,
+                    start_time=start_time,
+                    workflow_id=metadata.get("workflow_id") if metadata else None,
+                )
+                self._span_manager.push(invoke_id, state)
+                if is_workflow_root:
+                    self._layer_root_spans[parent_node_id] = state
+                    self._layer_root_spans[invoke_id] = state
+                    self._cached_root_ctx = trace.set_span_in_context(otel_span)
+                    self._cached_trace_id = self._trace_id
+                else:
+                    self._component_spans[invoke_id] = state
+                return
             # OTel standard + base attributes
-            start_time = datetime.now(tz=tzlocal()).replace(tzinfo=None)
+            start_time = datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
             otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
             # Workflow events carry no TraceWorkflowSpan, so the session id arrives
             # per-event; fall back to the tracer-injected one for direct callers.
@@ -815,6 +876,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 # Children's parent_node_id will be "" for root workflow,
                 # and the node_id of the host component for sub-workflows.
                 self._layer_root_spans[invoke_id] = state
+                # Cache OTel context for subsequent root spans
+                self._cached_root_ctx = trace.set_span_in_context(otel_span)
+                self._cached_trace_id = self._trace_id
             else:
                 self._component_spans[invoke_id] = state
         except Exception as exc:
@@ -822,25 +886,30 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
     async def on_call_done(self, invoke_id: str, outputs: Any = None, **kwargs):
         try:
-            self._refresh_inputs_attribute(invoke_id)
-            self._flush_buffered_data(invoke_id)
+            state = self._span_manager.get(invoke_id)
+            if state is not None and state.recorded:
+                self._refresh_inputs_attribute(invoke_id)
+                self._flush_buffered_data(invoke_id)
 
             state = self._span_manager.pop(invoke_id)
             if state is None:
                 return
 
-            if outputs is not None:
-                state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
+            if state.recorded:
+                if outputs is not None:
+                    state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
 
-            self._set_workflow_end_attrs(state)
-            state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
-            state.span.set_status(Status(StatusCode.OK))
+                self._set_workflow_end_attrs(state)
+                state.span.set_attribute(OJ_STATUS, NodeStatus.FINISH.value)
+                state.span.set_status(Status(StatusCode.OK))
             state.span.end()
 
-            # Clean up component mappings only (preserve _layer_root_spans for multi-round)
-            for key, val in list(self._component_spans.items()):
-                if val.invoke_id == invoke_id:
-                    self._component_spans.pop(key, None)
+            # Remove from mappings
+            self._layer_root_spans.pop(invoke_id, None)
+            self._component_spans.pop(invoke_id, None)
+            root_state = self._layer_root_spans.get("")
+            if root_state is state:
+                self._layer_root_spans.pop("", None)
         except Exception as exc:
             session_logger.warning("otel workflow handler: on_call_done failed: %s", exc)
 
@@ -858,7 +927,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None:
+            if state is None or not state.recorded:
                 return
             if inputs is not None:
                 # Store reference for on_invoke / on_call_done to re-serialize
@@ -944,7 +1013,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     async def on_post_invoke(self, invoke_id: str, outputs, inputs=None, **kwargs):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None:
+            if state is None or not state.recorded:
                 return
             if outputs is not None:
                 state.span.set_attribute(OJ_WORKFLOW_OUTPUTS, redact(outputs, self._config))
@@ -953,6 +1022,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
 
     async def on_post_stream(self, invoke_id: str, chunk, **kwargs):
         try:
+            state = self._span_manager.get(invoke_id)
+            if state is None or not state.recorded:
+                return
             if isinstance(chunk, dict):
                 self._span_manager.append_stream_output(invoke_id, chunk)
         except Exception as exc:
@@ -972,7 +1044,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
     ):
         try:
             state = self._span_manager.get(invoke_id)
-            if state is None:
+            if state is None or not state.recorded:
                 return
             if inputs is not None:
                 state.span.set_attribute(OJ_INTERACTIVE_INPUTS, redact(inputs, self._config))
