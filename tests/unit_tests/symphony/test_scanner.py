@@ -117,6 +117,23 @@ inputs:
     assert "BODY-ONLY-SECRET" not in serialized_payloads
 
 
+def test_scanner_uses_installed_directory_as_id_when_manifest_name_is_display_label(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "skills"
+    _write_skill(
+        root / "Humanizer-zh-main",
+        "name: humanizer-zh\ndescription: Humanize Chinese text.",
+    )
+
+    result = SkillFolderScanner(root).scan()
+
+    assert len(result.capabilities) == 1
+    capability = result.capabilities[0]
+    assert capability.capability_id == "Humanizer-zh-main"
+    assert capability.name == "humanizer-zh"
+
+
 def test_parser_normalizes_unquoted_yaml_dates_before_json_serialization(tmp_path: Path) -> None:
     root = tmp_path / "skills"
     unquoted_entrypoint = _write_skill(
@@ -363,6 +380,24 @@ def test_scanner_reports_bad_items_and_continues(tmp_path: Path) -> None:
     bad = root / "bad"
     bad.mkdir(parents=True)
     (bad / "SKILL.md").write_text("---\nname: [unterminated\n---\nbody", encoding="utf-8")
+
+    result = SkillFolderScanner(root).scan()
+
+    assert [item.capability_id for item in result] == ["good"]
+    assert any(item.code == "invalid_frontmatter" and item.path == "bad/SKILL.md" for item in result.diagnostics)
+
+
+@pytest.mark.parametrize(
+    "invalid_frontmatter",
+    [
+        "name: first\nname: second",
+        "? [unhashable, key]\n: value",
+    ],
+)
+def test_scanner_rejects_ambiguous_yaml_mapping_keys(tmp_path: Path, invalid_frontmatter: str) -> None:
+    root = tmp_path / "skills"
+    _write_skill(root / "good", "name: good")
+    _write_skill(root / "bad", invalid_frontmatter)
 
     result = SkillFolderScanner(root).scan()
 
