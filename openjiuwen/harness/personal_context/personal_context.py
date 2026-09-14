@@ -449,9 +449,16 @@ class PersonalContext:
                     error=authorization_error,
                 )
 
-    async def authorize_provider(self, provider: str) -> dict[str, object]:
+    async def authorize_provider(
+        self,
+        provider: str,
+        *,
+        reauthorize: bool = False,
+    ) -> dict[str, object]:
         """Begin or reuse user OAuth for a configured provider without exposing tokens."""
 
+        if not isinstance(reauthorize, bool):
+            raise _state_error("reauthorize must be a boolean")
         async with self._state_lock:
             required_scopes = await self._required_authorization_scopes(provider)
             now = asyncio.get_running_loop().time()
@@ -484,7 +491,7 @@ class PersonalContext:
                         challenge=None,
                         error=self._authorization_error,
                     )
-                if set(required_scopes).issubset(granted_scopes):
+                if not reauthorize and set(required_scopes).issubset(granted_scopes):
                     self._authorization_error = None
                     return _authorization_result(
                         required_scopes=required_scopes,
