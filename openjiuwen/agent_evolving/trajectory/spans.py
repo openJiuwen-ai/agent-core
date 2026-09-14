@@ -567,7 +567,9 @@ def _trace_safe_value(value: Any) -> Any:
         if label:
             return {"type": content_type, "omitted": label}
         return {str(key): _trace_safe_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, (set, frozenset)):
+        return [_trace_safe_value(item) for item in sorted(value, key=repr)]
+    if isinstance(value, (list, tuple)):
         return [_trace_safe_value(item) for item in value]
     return to_json_compatible(value)
 
@@ -608,9 +610,9 @@ def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
             part["content"] for part in parts
             if isinstance(part, Mapping) and "content" in part
         ] if isinstance(parts, list) else []
-        if len(contents) == 1 and not isinstance(contents[0], str):
-            # Multimodal content rides in one part and comes back whole.
-            flat["content"] = deepcopy(contents[0])
+        if any(not isinstance(content, str) for content in contents):
+            # Preserve the order and category of mixed text/multimodal parts.
+            flat["content"] = deepcopy(contents[0] if len(contents) == 1 else contents)
         elif contents:
             flat["content"] = _structured_parts_text(parts)
     if "tool_calls" not in flat:

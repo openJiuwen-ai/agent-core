@@ -699,6 +699,7 @@ class CodexSpanBridge:
             input_messages.append({
                 "role": role or "user",
                 "parts": [{"type": "text", "content": content}],
+                **{key: message[key] for key in ("name", "call_id", "tool_call_id") if key in message},
             })
         if system_parts:
             span.set_attribute(GEN_AI_SYSTEM_INSTRUCTIONS, _json_text(system_parts))

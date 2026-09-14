@@ -356,3 +356,29 @@ def test_multimodal_content_is_replaced_with_recognizable_labels() -> None:
             ],
         }
     ]
+
+
+def test_mixed_structured_parts_keep_text_and_multimodal_placeholder_in_order() -> None:
+    span = _span("llm", attrs={
+        semconv.GEN_AI_INPUT_MESSAGES: json.dumps([
+            {"role": "user", "parts": [
+                {"type": "text", "content": "look"},
+                {"type": "image", "content": {"type": "image_url", "omitted": "image_content"}},
+                {"type": "text", "content": "again"},
+            ]},
+        ]),
+    })
+
+    assert read_llm_exchange(span)[0] == [{
+        "role": "user",
+        "content": ["look", {"type": "image_url", "omitted": "image_content"}, "again"],
+    }]
+
+
+def test_trace_safe_set_encoding_is_deterministic() -> None:
+    first = write_llm_exchange([{"role": "user", "content": {"tags": {"z", "a"}}}], [])
+    second = write_llm_exchange([{"role": "user", "content": {"tags": {"a", "z"}}}], [])
+
+    assert first == second
+    messages = json.loads(first[semconv.GEN_AI_INPUT_MESSAGES])
+    assert messages[0]["parts"][0]["content"]["tags"] == ["a", "z"]
