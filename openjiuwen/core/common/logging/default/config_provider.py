@@ -45,6 +45,8 @@ _DEFAULT_ALLOWED_ROOT_KEYS = {
     "structured_output_format",
     "backup_count",
     "max_bytes",
+    "log_date_dirs",
+    "log_date_base",
     "format",
     "log_path",
     "log_file",
@@ -100,7 +102,7 @@ def validate_default_backend_config(logging_config: Dict[str, Any]) -> None:
     if unknown_keys:
         raise build_error(
             StatusCode.COMMON_LOG_CONFIG_INVALID,
-            error_msg=f"default backend config has unsupported keys: {sorted(unknown_keys)}"
+            error_msg=f"default backend config has unsupported keys: {sorted(unknown_keys)}",
         )
 
     loggers_config = logging_config.get("loggers")
@@ -108,22 +110,21 @@ def validate_default_backend_config(logging_config: Dict[str, Any]) -> None:
         return
     if not isinstance(loggers_config, dict):
         raise build_error(
-            StatusCode.COMMON_LOG_CONFIG_INVALID,
-            error_msg="default backend config 'loggers' must be a mapping"
+            StatusCode.COMMON_LOG_CONFIG_INVALID, error_msg="default backend config 'loggers' must be a mapping"
         )
 
     for logger_name, logger_config in loggers_config.items():
         if not isinstance(logger_config, dict):
             raise build_error(
                 StatusCode.COMMON_LOG_CONFIG_INVALID,
-                error_msg=f"default logger config for '{logger_name}' must be a mapping"
+                error_msg=f"default logger config for '{logger_name}' must be a mapping",
             )
 
         unknown_logger_keys = set(logger_config) - _DEFAULT_ALLOWED_LOGGER_KEYS
         if unknown_logger_keys:
             raise build_error(
                 StatusCode.COMMON_LOG_CONFIG_INVALID,
-                error_msg=f"default logger '{logger_name}' has unsupported keys: {sorted(unknown_logger_keys)}"
+                error_msg=f"default logger '{logger_name}' has unsupported keys: {sorted(unknown_logger_keys)}",
             )
 
 
@@ -148,6 +149,7 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
     config = {
         "backend": "default",
         "log_file": _resolve_log_file(log_path, configured_log_file),
+        "log_path": log_path,
         "output": copy.deepcopy(configured_output),
         "level": normalize_log_level(
             logging_config.get("level", DEFAULT_INNER_LOG_CONFIG.get("level", WARNING)), WARNING
@@ -158,6 +160,8 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
         ),
         "backup_count": logging_config.get("backup_count", DEFAULT_INNER_LOG_CONFIG.get("backup_count", 20)),
         "max_bytes": logging_config.get("max_bytes", DEFAULT_INNER_LOG_CONFIG.get("max_bytes", 20971520)),
+        "log_date_dirs": logging_config.get("log_date_dirs", DEFAULT_INNER_LOG_CONFIG.get("log_date_dirs", False)),
+        "log_date_base": logging_config.get("log_date_base", DEFAULT_INNER_LOG_CONFIG.get("log_date_base")),
         "format": logging_config.get(
             "format",
             DEFAULT_INNER_LOG_CONFIG.get(
@@ -192,7 +196,15 @@ def _resolve_log_file(log_path: str, log_file: str) -> str:
     if os.path.isabs(expanded_log_file):
         full_log_file = os.path.abspath(expanded_log_file)
     else:
-        full_log_file = os.path.join(log_path, log_file)
+        norm_file = os.path.normpath(expanded_log_file)
+        norm_base = os.path.normpath(os.path.expanduser(log_path))
+        # 幂等：log_file 已位于 log_path 之下时不再二次拼接。
+        # build_default_logger_config 会对已解析结果重复 resolve，相对
+        # log_path（默认 ./logs/）下会产生 logs/logs 双层目录。
+        if norm_base and (norm_file == norm_base or norm_file.startswith(norm_base + os.sep)):
+            full_log_file = expanded_log_file
+        else:
+            full_log_file = os.path.join(log_path, log_file)
     normalize_and_validate_log_path(full_log_file)
     return full_log_file
 

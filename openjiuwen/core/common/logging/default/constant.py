@@ -8,6 +8,8 @@ DEFAULT_INNER_LOG_CONFIG = {
     "structured_output_format": "json",
     "backup_count": 20,
     "max_bytes": 20971520,
+    "log_date_dirs": False,
+    "log_date_base": None,
     "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
     "log_path": "./logs/",
     "log_file": "run/jiuwen.log",
@@ -21,6 +23,4 @@ DEFAULT_INNER_LOG_CONFIG = {
     "loggers": {},
 }
 
-DEFAULT_LOG_CONFIG = {
-    "logging": DEFAULT_INNER_LOG_CONFIG
-}
+DEFAULT_LOG_CONFIG = {"logging": DEFAULT_INNER_LOG_CONFIG}
