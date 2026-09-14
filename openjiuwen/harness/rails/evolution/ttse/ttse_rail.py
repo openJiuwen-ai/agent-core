@@ -752,8 +752,8 @@ class TTSERail(EvolutionRail):
         return ""
 
     # ------------------------------------------------------------------
-    # Bench export: persist trajectory even when evolve_enabled=False
-    # Need to be deleted before merge into main branch
+    # Opt-in trajectory snapshot for bench post-score induction.
+    # Off by default; does not run unless trajectory_export_enabled is True.
     # ------------------------------------------------------------------
 
     async def _on_after_invoke(
@@ -761,13 +761,15 @@ class TTSERail(EvolutionRail):
         ctx: AgentCallbackContext,
         trajectory: Trajectory | None,
     ) -> None:
-        """Export a JSON snapshot for WorkBuddy Bench post-score TTSE.
+        """Optionally snapshot messages for a later ``ttse-post-score`` step.
 
         ``evolve_enabled=False`` still finalizes the trajectory in the base
-        rail; this hook writes messages/query so a later ``ttse-post-score``
-        step can call ``_run_ttse_induction`` with grader scores.
+        rail. Export is a separate, default-off switch so bench can collect
+        messages without growing the bank during the scored run.
         """
         await super()._on_after_invoke(ctx, trajectory)
+        if not getattr(self._ttse_config, "trajectory_export_enabled", False):
+            return
         await self._export_trajectory_for_bench(ctx, trajectory)
 
     async def _export_trajectory_for_bench(
@@ -775,8 +777,11 @@ class TTSERail(EvolutionRail):
         ctx: AgentCallbackContext,
         trajectory: Trajectory | None = None,
     ) -> None:
-        export_path = (os.environ.get("TTSE_TRAJECTORY_EXPORT_PATH") or "").strip()
+        export_path = str(getattr(self._ttse_config, "trajectory_export_path", "") or "").strip()
         if not export_path:
+            export_path = (os.environ.get("TTSE_TRAJECTORY_EXPORT_PATH") or "").strip()
+        if not export_path:
+            logger.debug("[TTSERail] traj export skipped: no path configured")
             return
         try:
             messages = self._trajectory_to_messages(trajectory) if trajectory is not None else []

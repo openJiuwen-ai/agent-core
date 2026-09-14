@@ -52,6 +52,11 @@ class TTSEConfig:
             expose ``ttse_consult``. The category listing is trailed as a
             prompt attachment; FACT/TIP bodies are not dumped into P:45.
         evolve_enabled: Run induction after each task to grow the bank.
+        trajectory_export_enabled: Opt-in snapshot of invoke messages for bench
+            post-score induction. Default ``False``; production must leave this
+            off. Independent of ``evolve_enabled``.
+        trajectory_export_path: Destination JSON path when export is enabled.
+            Empty falls back to env ``TTSE_TRAJECTORY_EXPORT_PATH``.
         success_threshold: Score >= this counts as success (Slice 3 gating).
         induce_llm_policy: LLM invocation policy for induce/blame/synthesize.
         batch_size: Cost-amortization knob. When > 1, per-task observations are
@@ -92,6 +97,8 @@ class TTSEConfig:
     traj_char_budget: Optional[int] = None
     inject_enabled: bool = True
     evolve_enabled: bool = True
+    trajectory_export_enabled: bool = False
+    trajectory_export_path: str = ""
     success_threshold: float = 0.999
     induce_llm_policy: LLMInvokePolicy = GENERATE_RECORDS_LLM_POLICY
     batch_size: int = 1

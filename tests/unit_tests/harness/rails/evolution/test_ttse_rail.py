@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 import inspect
+import json
 from typing import Callable
 
 import pytest
@@ -1442,3 +1443,61 @@ def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
     cut = messages_to_trajectory_text(messages, budget=40)
     assert "write_file" in cut
     assert "BRIEF_HEAD" not in cut
+
+
+def _export_ctx(query: str = "secret user prompt"):
+    return SimpleNamespace(
+        agent=None,
+        inputs=SimpleNamespace(
+            query=query,
+            messages=[
+                {"role": "user", "content": query},
+                {"role": "assistant", "content": "done"},
+            ],
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_trajectory_export_off_by_default_even_with_env_path(tmp_path, monkeypatch):
+    export_path = tmp_path / "traj.json"
+    monkeypatch.setenv("TTSE_TRAJECTORY_EXPORT_PATH", str(export_path))
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"))
+    assert rail._ttse_config.trajectory_export_enabled is False
+    await rail._on_after_invoke(_export_ctx(), None)
+    assert not export_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_trajectory_export_writes_when_enabled(tmp_path):
+    export_path = tmp_path / "out" / "traj.json"
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        evolve_enabled=False,
+        trajectory_export_enabled=True,
+        trajectory_export_path=str(export_path),
+    )
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=cfg)
+    await rail._on_after_invoke(_export_ctx("q"), None)
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["ttse_task_query"] == "q"
+    assert payload["evolve_enabled"] is False
+    assert payload["messages"][0]["content"] == "q"
+
+
+@pytest.mark.asyncio
+async def test_trajectory_export_uses_env_path_when_enabled_and_config_path_empty(
+    tmp_path, monkeypatch
+):
+    export_path = tmp_path / "from-env.json"
+    monkeypatch.setenv("TTSE_TRAJECTORY_EXPORT_PATH", str(export_path))
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        trajectory_export_enabled=True,
+        trajectory_export_path="",
+    )
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=cfg)
+    await rail._on_after_invoke(_export_ctx("q"), None)
+    assert export_path.exists()
+    payload = json.loads(export_path.read_text(encoding="utf-8"))
+    assert payload["ttse_task_query"] == "q"
