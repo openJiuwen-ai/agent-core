@@ -646,14 +646,14 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             try:
                 state.span.end()
                 self._span_manager.pop(state.invoke_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                session_logger.warning("otel workflow handler: cleanup layer root span failed: %s", exc)
         for state in list(self._component_spans.values()):
             try:
                 state.span.end()
                 self._span_manager.pop(state.invoke_id)
-            except Exception:
-                pass
+            except Exception as exc:
+                session_logger.warning("otel workflow handler: cleanup component span failed: %s", exc)
         self._layer_root_spans.clear()
         self._component_spans.clear()
 
