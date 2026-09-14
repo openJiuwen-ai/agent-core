@@ -25,7 +25,7 @@ def test_org_task_status_terminal_only_completed_failed():
         OrgTaskStatus.COMPLETED.value,
         OrgTaskStatus.FAILED.value,
     )
-    assert "WAITING_SOURCES" not in OrgTaskStatus.__members__
+    assert "WAITING_SOURCES" in OrgTaskStatus.__members__
     assert "CANCELLED" not in OrgTaskStatus.__members__
     assert "EXPIRED" not in OrgTaskStatus.__members__
     assert OrgTaskFailureCode.CANCELLED.value == "CANCELLED"

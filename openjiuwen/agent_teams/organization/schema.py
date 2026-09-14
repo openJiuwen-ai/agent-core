@@ -22,12 +22,15 @@ ORG_STATIC_TABLE_NAMES = (
     "org_task_event",
     "org_task_review",
     "org_task_source",
+    "org_summary_team",
+    "org_summary_execution",
 )
 
 
 class OrgTaskStatus(StrEnum):
     OPEN = "OPEN"
     DELEGATED = "DELEGATED"
+    WAITING_SOURCES = "WAITING_SOURCES"
     CLAIMED = "CLAIMED"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
@@ -146,6 +149,26 @@ class OrgTaskAggregationConfig(BaseModel):
     summary_task_id: str | None = None
     summary_team_id: str | None = None
     final_output_task_id: str | None = None
+    controller_team_id: str | None = None
+    controller_leader_id: str | None = None
+
+
+class OrgSummaryTeamStatus(StrEnum):
+    """Persistent lifecycle states for the single shared summary Team."""
+
+    PROVISIONING = "PROVISIONING"
+    READY = "READY"
+    FAILED = "FAILED"
+
+
+class OrgSummaryExecutionStatus(StrEnum):
+    """Persistent lifecycle states for the current root task summary."""
+
+    PROVISIONING = "PROVISIONING"
+    WAITING_SOURCES = "WAITING_SOURCES"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
 
 
 class OrgTask(BaseModel):
@@ -212,6 +235,25 @@ class OrgTaskSource(BaseModel):
     source_role: str | None = None
     required: bool = True
     created_at: int
+
+
+class OrgSummaryTeam(BaseModel):
+    """The one lazily-created Summary Team owned by an organization."""
+
+    organization_id: str
+    summary_team_id: str | None = None
+    leader_id: str | None = None
+    status: OrgSummaryTeamStatus = OrgSummaryTeamStatus.PROVISIONING
+
+
+class OrgSummaryExecution(BaseModel):
+    """One root task's Summary Team execution, not a Team lifecycle record."""
+
+    execution_id: str
+    root_task_id: str
+    summary_task_id: str
+    summary_team_id: str | None = None
+    status: OrgSummaryExecutionStatus = OrgSummaryExecutionStatus.WAITING_SOURCES
 
 
 class OrgLeaderHandle(BaseModel):
@@ -359,6 +401,32 @@ class OrgTaskSourceRecord(SQLModel, table=True):
     created_at: int
 
 
+class OrgSummaryTeamRecord(SQLModel, table=True):
+    """Durable singleton Summary Team row keyed by organization."""
+
+    __tablename__ = "org_summary_team"
+    organization_id: str = SQLField(primary_key=True)
+    summary_team_id: str | None = SQLField(default=None, index=True)
+    leader_id: str | None = None
+    status: str
+    created_at: int
+    updated_at: int
+
+
+class OrgSummaryExecutionRecord(SQLModel, table=True):
+    """Durable one-per-root Summary Task execution row."""
+
+    __tablename__ = "org_summary_execution"
+    execution_id: str = SQLField(primary_key=True)
+    organization_id: str = SQLField(index=True)
+    root_task_id: str = SQLField(index=True, unique=True)
+    summary_task_id: str = SQLField(index=True, unique=True)
+    summary_team_id: str | None = SQLField(default=None, index=True)
+    status: str
+    created_at: int
+    updated_at: int
+
+
 def default_root_aggregation(task_id: str) -> OrgTaskAggregationConfig:
     """Return the default HIERARCHICAL aggregation config for a root task."""
 
@@ -405,6 +473,12 @@ __all__ = [
     "OrgTaskReview",
     "OrgTaskReviewRecord",
     "OrgTaskReviewStatus",
+    "OrgSummaryExecution",
+    "OrgSummaryExecutionRecord",
+    "OrgSummaryExecutionStatus",
+    "OrgSummaryTeam",
+    "OrgSummaryTeamRecord",
+    "OrgSummaryTeamStatus",
     "OrgTaskSource",
     "OrgTaskSourceRecord",
     "OrgTaskStatus",
