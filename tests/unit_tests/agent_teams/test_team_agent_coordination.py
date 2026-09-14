@@ -33,6 +33,7 @@ from openjiuwen.agent_teams.agent.team_agent import (
     TeamAgent,
 )
 from openjiuwen.agent_teams.external.runtime import CliRuntimeBase
+from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.agent_teams.schema.blueprint import (
     DeepAgentSpec,
@@ -922,6 +923,7 @@ def _interactive_input(tool_call_id: str) -> InteractiveInput:
 def _wire_harness(agent: TeamAgent) -> MagicMock:
     harness = MagicMock()
     harness.send = AsyncMock()
+    harness.state = HarnessState.IDLE
     agent._configurator.resources.harness = harness
     return harness
 
@@ -1120,6 +1122,7 @@ async def test_idle_settle_drops_orphans_when_no_pending_interrupt():
     sc._pending_interrupt_resumes.append(_interactive_input("call-orphan"))
     sc._state.team_member = None  # skip the db-backed shutdown guard
     await sc._on_idle_settled()
+    await sc._drain_task
 
     harness.send.assert_not_called()
     assert sc._pending_interrupt_resumes == []
