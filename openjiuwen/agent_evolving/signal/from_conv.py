@@ -167,6 +167,34 @@ _USER_FEEDBACK_PROMPT_EN = (
     '2) Legacy single: {{"is_feedback": true/false, "excerpt": "str", "skill_name": "str optional"}}\n'
 )
 
+_USER_FEEDBACK_SKILLESS_PROMPT_CN = (
+    "判断「待判定的用户消息」是否包含对 agent 行为的被动纠正或可沉淀的改进反馈。\n"
+    "结合对话上下文中的助手回复理解用户在纠正什么；"
+    "只有当【待判定的用户消息】明确指出 agent 的理解、步骤、顺序、输出内容或工具使用需要调整时，"
+    "才认为是反馈。\n"
+    "不要仅因更早的用户消息含纠正词就判定为反馈。\n"
+    "初始任务描述（助手尚未回复前的用户首条消息）不是反馈。\n\n"
+    f"对话上下文（带角色标识，最近最多 {_USER_FEEDBACK_MAX_TURNS} 轮问答）：\n"
+    "{conversation_context}\n\n"
+    "待判定的用户消息：\n"
+    "{last_user_message}\n\n"
+    '输出 JSON：{{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
+_USER_FEEDBACK_SKILLESS_PROMPT_EN = (
+    "Determine whether the LAST user message (to judge) contains passive corrective feedback "
+    "or reusable improvement guidance about the agent's behavior.\n"
+    "Use the labeled conversation context (including assistant replies) to understand what "
+    "the user is correcting. Only treat it as feedback when the LAST user message clearly "
+    "corrects the agent's understanding, ordering, steps, output content, or tool usage.\n"
+    "Do not treat earlier user messages alone as sufficient evidence of feedback.\n"
+    "The initial task description (before any assistant reply) is not feedback.\n\n"
+    f"Conversation context (role-labeled, up to {_USER_FEEDBACK_MAX_TURNS} recent Q&A turns):\n"
+    "{conversation_context}\n\n"
+    "Last user message (to judge):\n"
+    "{last_user_message}\n\n"
+    'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
+
 
 def _extract_dialog_turns(messages: Sequence[object]) -> List[Tuple[str, str]]:
     """Return ``[(role, content), ...]`` for user/assistant messages with non-empty content."""
@@ -287,8 +315,7 @@ def _build_user_feedback_prompt_inputs(
                 break
 
     context_lines = [
-        _format_feedback_dialog_line(role, content, language=language)
-        for role, content in dialog[start:last_user_idx]
+        _format_feedback_dialog_line(role, content, language=language) for role, content in dialog[start:last_user_idx]
     ]
     conversation_context = "\n".join(context_lines)[:_USER_FEEDBACK_CONTEXT_CHAR_LIMIT]
     if not conversation_context:
@@ -367,7 +394,11 @@ def _normalize_feedback_items(
         return [(default_skill, excerpt[:600])]
     return [(name, excerpt[:600]) for name in candidate_skills]
 
+
 # Tools whose output is fetched content (web pages, files, search results).
+# ``ttse_consult`` returns FACT/TIP text that often mentions 失败/错误 as
+# historical heuristics; keyword-scanning it as a live tool crash is a
+# false positive for both skill evolution and TTSE detect.
 _DATA_FETCH_TOOLS = frozenset(
     {
         "mcp_fetch_webpage",
@@ -385,6 +416,7 @@ _DATA_FETCH_TOOLS = frozenset(
         "get_url",
         "curl",
         "wget",
+        "ttse_consult",
     }
 )
 
@@ -413,6 +445,67 @@ _EXEC_CONTENT_KEYS = (
     "cmd",
     "shell_command",
 )
+
+
+def is_tool_execution_failure(content: str, tool_name: str = "") -> Optional[str]:
+    """Return an excerpt if tool output matches execution-failure rules, else None.
+
+    Shared by ConversationSignalDetector and TTSE success detection so the
+    keyword / data-fetch / schema-dump rules stay single-sourced.
+    """
+    name = (tool_name or "").lower()
+    if name in _DATA_FETCH_TOOLS:
+        return None
+    text = content or ""
+    match = _FAILURE_KEYWORDS.search(text)
+    if not match:
+        return None
+    if _TOOL_SCHEMA_PATTERN.search(text):
+        return None
+    return _extract_around_match(text, match)
+
+
+def detect_tool_error_signals(messages: List[dict]) -> List[EvolutionSignal]:
+    """Scan messages for tool ``execution_failure`` signals.
+
+    Deterministic regex scan over ``role in ("tool", "function")`` messages.
+    Resolves tool names from assistant ``tool_calls`` when the tool message
+    only carries ``tool_call_id``. Does not attribute skills.
+    """
+    signals: List[EvolutionSignal] = []
+    tool_call_id_to_name: Dict[str, str] = {}
+    for msg in messages or []:
+        role = str(_get_field(msg, "role") or "")
+        tool_calls = _get_field(msg, "tool_calls", []) or []
+        if role == "assistant" and tool_calls:
+            for tool_call in tool_calls:
+                tc_id = str(get_tool_call_id(tool_call) or "")
+                tc_name = str(tool_call_name(tool_call) or "")
+                if tc_id and tc_name:
+                    tool_call_id_to_name[tc_id] = tc_name
+            continue
+        if role not in ("tool", "function"):
+            continue
+        tool_name = str(_get_field(msg, "name") or _get_field(msg, "tool_name") or "")
+        tool_call_id = str(_get_field(msg, "tool_call_id", "") or "")
+        if not tool_name and tool_call_id:
+            tool_name = tool_call_id_to_name.get(tool_call_id, "")
+        content = str(_get_field(msg, "content") or "")
+        excerpt = is_tool_execution_failure(content, tool_name)
+        if not excerpt:
+            continue
+        signals.append(
+            make_evolution_signal(
+                signal_type="execution_failure",
+                section="Troubleshooting",
+                excerpt=excerpt,
+                tool_name=tool_name or None,
+                skill_name=None,
+                source="passive_conversation",
+            )
+        )
+    return signals
+
 
 DetectionInput = Union[Trajectory, List[dict]]
 
@@ -446,11 +539,7 @@ class ConversationSignalDetector:
         signal_types: Optional[Set[str]] = None,
     ) -> List[EvolutionSignal]:
         try:
-            messages = (
-                list(input_data)
-                if isinstance(input_data, list)
-                else trajectory_to_messages(input_data)
-            )
+            messages = list(input_data) if isinstance(input_data, list) else trajectory_to_messages(input_data)
             signals = self._detect_from_messages(messages)
         except Exception as exc:
             logger.warning(
@@ -520,11 +609,18 @@ class ConversationSignalDetector:
 
         Judgment is based on the **last** user message. Recent user/assistant turns
         (role-labeled, up to 9 Q&A) are provided as context only.
+
+        When no skills are available, a skill-agnostic path still uses LLM judgment.
+        Correction-pattern matching is only a fallback when LLM is unavailable or fails.
+
+        Args:
+            messages: Normalized message list for this round.
+            extra_skills: Session-scoped skills used earlier in the conversation
+                (cross-turn inheritance when the current trajectory no longer
+                contains skill_tool / skill_complete records).
         """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
-            raise TypeError(
-                "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
-            )
+            raise TypeError("detect_user_intent() expects normalized messages; call trajectory_to_messages() first.")
         prompt_inputs = _build_user_feedback_prompt_inputs(
             messages,
             language=self._language,
@@ -538,9 +634,7 @@ class ConversationSignalDetector:
         )
 
         traj_skills = self.collect_skills_from_messages(messages)
-        session_used_skills = [
-            str(s).strip() for s in (extra_skills or []) if str(s).strip()
-        ]
+        session_used_skills = [str(s).strip() for s in (extra_skills or []) if str(s).strip()]
         skill_names = list(dict.fromkeys(session_used_skills or traj_skills))
         logger.info(
             "[detect_user_intent] session used skills=%s (traj=%s)",
@@ -548,7 +642,10 @@ class ConversationSignalDetector:
             traj_skills,
         )
         if not skill_names:
-            return []
+            return await self._detect_skillless_user_feedback(
+                conversation_context,
+                last_user_message,
+            )
 
         if self._llm is None or not self._model:
             return self._fallback_user_feedback_signals(last_user_message, skill_names)
@@ -594,6 +691,64 @@ class ConversationSignalDetector:
             )
             for skill_name, excerpt in pairs
         ]
+
+    async def _detect_skillless_user_feedback(
+        self,
+        conversation_context: str,
+        last_user_message: str,
+    ) -> List[EvolutionSignal]:
+        """Detect corrective feedback without skill attribution (TTSE / skill-agnostic).
+
+        Always invoke LLM when bound. Correction-pattern matching is only used as
+        fallback when LLM is unavailable or the call/parse fails.
+        """
+        text = str(last_user_message or "").strip()
+        if not text:
+            return []
+
+        if self._llm is None or not self._model:
+            return self._skillless_pattern_fallback(text)
+
+        prompt_template = (
+            _USER_FEEDBACK_SKILLESS_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_SKILLESS_PROMPT_EN
+        )
+        prompt = prompt_template.format(
+            conversation_context=conversation_context,
+            last_user_message=last_user_message,
+        )
+
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=30,
+            )
+            raw = _response_to_text(response)
+        except Exception as exc:
+            logger.warning(
+                "[ConversationSignalDetector] skillless user feedback detection failed: %s",
+                exc,
+            )
+            return self._skillless_pattern_fallback(text)
+
+        parsed = _parse_llm_feedback_response(raw)
+        if parsed is None or not isinstance(parsed, dict):
+            return self._skillless_pattern_fallback(text)
+        if not parsed.get("is_feedback", False):
+            return []
+        excerpt = str(parsed.get("excerpt") or text).strip() or text
+        return [self._make_user_feedback_signal(excerpt, None, user_message=text)]
+
+    def _skillless_pattern_fallback(self, text: str) -> List[EvolutionSignal]:
+        """Emit unattributed feedback only when correction cues match."""
+        if not text or not _CORRECTION_PATTERN.search(text):
+            return []
+        return [self._make_user_feedback_signal(text, None, user_message=text)]
+
+    @staticmethod
+    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+        """Convert trajectory to message list (compat wrapper for TTSE / callers)."""
+        return trajectory_to_messages(trajectory)
 
     def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
@@ -644,14 +799,15 @@ class ConversationSignalDetector:
                         )
                     del pending_scripts[tool_call_id]
 
-                if tool_name.lower() in _DATA_FETCH_TOOLS:
-                    continue
-
-                match = _FAILURE_KEYWORDS.search(content)
-                if match:
-                    if _TOOL_SCHEMA_PATTERN.search(content):
-                        continue
-                    excerpt = _extract_around_match(content, match)
+                excerpt = is_tool_execution_failure(content, str(tool_name or ""))
+                if excerpt:
+                    logger.debug(
+                        "[ConversationSignalDetector] tool attributed to skill=%s "
+                        "signal_type=execution_failure tool=%s msg_idx=%d",
+                        active_skill,
+                        tool_name or None,
+                        msg_idx,
+                    )
                     signals.append(
                         make_evolution_signal(
                             signal_type="execution_failure",
@@ -781,16 +937,13 @@ class ConversationSignalDetector:
         if not names or not text:
             return []
         if _CORRECTION_PATTERN.search(text):
-            return [
-                self._make_user_feedback_signal(text, name, user_message=text)
-                for name in names
-            ]
+            return [self._make_user_feedback_signal(text, name, user_message=text) for name in names]
         return []
 
     @staticmethod
     def _make_user_feedback_signal(
         excerpt: str,
-        skill_name: str,
+        skill_name: Optional[str],
         user_message: str = "",
     ) -> EvolutionSignal:
         return make_evolution_signal(
@@ -840,5 +993,7 @@ SignalDetector = ConversationSignalDetector
 __all__ = [
     "ConversationSignalDetector",
     "SignalDetector",  # backward compatibility alias
+    "detect_tool_error_signals",
+    "is_tool_execution_failure",
     "make_signal_fingerprint",
 ]
