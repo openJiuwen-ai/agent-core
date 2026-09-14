@@ -282,6 +282,20 @@ def test_llm_exchange_reads_the_standard_structured_attributes() -> None:
     assert completions == [{"role": "assistant", "content": "done"}]
 
 
+def test_legacy_standard_system_instructions_preserve_multimodal_parts() -> None:
+    span = _span("llm", attrs={
+        semconv.GEN_AI_SYSTEM_INSTRUCTIONS: json.dumps([
+            {"type": "text", "content": "inspect"},
+            {"type": "image", "content": {"type": "image_url", "omitted": "image_content"}},
+        ]),
+    })
+
+    assert read_llm_exchange(span)[0] == [{
+        "role": "system",
+        "content": ["inspect", {"type": "image_url", "omitted": "image_content"}],
+    }]
+
+
 def test_an_llm_exchange_round_trips_through_the_standard_attributes() -> None:
     """What write_llm_exchange records, read_llm_exchange gives back unchanged."""
     prompts = [

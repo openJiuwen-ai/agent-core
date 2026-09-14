@@ -726,11 +726,11 @@ def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
         return input_messages
 
     messages: list[dict[str, Any]] = []
-    system_text = _structured_parts_text(
-        _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
-    )
-    if system_text:
-        messages.append({"role": "system", "content": system_text})
+    system_parts = _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
+    if isinstance(system_parts, list):
+        system_message = _flatten_structured_message({"role": "system", "parts": system_parts})
+        if system_message.get("content") not in (None, ""):
+            messages.append(system_message)
     messages.extend(input_messages)
     return messages
 

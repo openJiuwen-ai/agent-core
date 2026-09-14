@@ -154,8 +154,12 @@ def _llm_exchange_attributes(detail: Mapping[str, Any]) -> dict[str, Any]:
     completions = _as_message_list(detail.get("response"))
     attributes = write_llm_exchange(prompts, completions)
     for message in completions:
-        if message.get("tool_calls") is not None:
-            attributes[semconv.GEN_AI_TOOL_CALLS] = deepcopy(message["tool_calls"])
+        calls = message.get("tool_calls")
+        if not isinstance(calls, list):
+            continue
+        valid_calls = [deepcopy(dict(call)) for call in calls if isinstance(call, Mapping)]
+        if valid_calls:
+            attributes[semconv.GEN_AI_TOOL_CALLS] = valid_calls
             break
     return attributes
 

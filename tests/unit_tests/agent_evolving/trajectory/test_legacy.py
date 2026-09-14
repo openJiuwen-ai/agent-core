@@ -5,7 +5,11 @@ from __future__ import annotations
 
 import pytest
 
-from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
+from openjiuwen.agent_evolving.trajectory.legacy import (
+    _llm_exchange_attributes,
+    is_legacy_record,
+    upgrade_legacy_record,
+)
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     MEMBER_ID,
@@ -22,6 +26,19 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_tool_call,
     read_usage,
 )
+from openjiuwen.extensions.observability import semconv
+
+
+def test_legacy_tool_calls_attribute_ignores_invalid_values() -> None:
+    invalid = _llm_exchange_attributes({
+        "response": {"role": "assistant", "tool_calls": "invalid"},
+    })
+    assert semconv.GEN_AI_TOOL_CALLS not in invalid
+
+    mixed = _llm_exchange_attributes({
+        "response": {"role": "assistant", "tool_calls": ["invalid", {"id": "call-1"}]},
+    })
+    assert mixed[semconv.GEN_AI_TOOL_CALLS] == [{"id": "call-1"}]
 
 
 def test_upgrade_legacy_steps_returns_canonical_trajectory() -> None:
