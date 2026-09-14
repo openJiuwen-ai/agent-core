@@ -30,7 +30,8 @@ def test_init_model_folds_thinking_fields_into_extra_body() -> None:
         "enable_thinking": True,
     }
     assert "enable_thinking" not in extras
-    assert model.model_config.top_p == 0.95
+    # top_p is not passed, so the factory forwards it as-is and it stays unset.
+    assert model.model_config.top_p is None
 
 
 def test_expand_nested_extra_body_flattens_one_level() -> None:
