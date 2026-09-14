@@ -427,11 +427,18 @@ def resolve_deep_agent_parts(
         skills_base = workspace_obj.get_node_path("skills")
         if skills_base:
             skills_dirs.append(str(skills_base))
-        # Aggregate skills from each team workspace mounted under
-        # ``.team/{team_id}``; the team mount is a symlink to the shared
-        # workspace root, so the team-shared skills live at
-        # ``{target}/skills``. Paths are added even when they do not yet
-        # exist — SkillUseRail skips missing directories at refresh time.
+        # Flat team mount: ``.team`` is itself a symlink/junction to the shared
+        # team workspace, so team-shared skills live at ``.team/skills``. Add it
+        # only when the mount actually resolves to a directory — ``exists()``
+        # would be False for a dangling link, and the hub layout below stores
+        # per-team links *inside* ``.team`` rather than a ``skills/`` child.
+        flat_team_skills = Path(workspace_obj.root_path) / Workspace.TEAM_LINKS_DIR / "skills"
+        if flat_team_skills.is_dir() and str(flat_team_skills) not in skills_dirs:
+            skills_dirs.append(str(flat_team_skills))
+        # Hub-style team mounts: one ``.team/{team_id}`` link per team, with the
+        # team-shared skills at ``{target}/skills``. Paths are added even when
+        # they do not yet exist — SkillUseRail skips missing directories at
+        # refresh time.
         for _team_id, target_path in workspace_obj.list_team_links():
             skills_dirs.append(str(Path(target_path) / "skills"))
         disabled_skills = _collect_disabled_skills_from_state(skills_dirs)
