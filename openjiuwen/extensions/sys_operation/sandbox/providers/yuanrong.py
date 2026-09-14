@@ -273,8 +273,18 @@ def _build_wrapped_command(
     cwd: Optional[str] = None,
     timeout: Optional[int] = None,
     environment: Optional[Dict[str, str]] = None,
+    base_env: Optional[Dict[str, str]] = None,
 ) -> str:
     inner_parts: List[str] = []
+    if base_env:
+        home = str(base_env.get("HOME") or "").strip()
+        if home:
+            # Braces keep the fallback grouped once this part is joined into the
+            # ``&&`` chain: an unwritable /tmp degrades to the previous behaviour
+            # (no home dir) instead of failing every command.
+            inner_parts.append(f"{{ mkdir -p {_quote_shell_value(home)} 2>/dev/null || :; }}")
+        base_prefix = " ".join(f"{key}={_quote_shell_value(value)}" for key, value in base_env.items())
+        inner_parts.append(f"export {base_prefix}")
     if cwd and cwd != ".":
         inner_parts.append(f"cd {_quote_shell_value(cwd)}")
     if environment:
@@ -541,11 +551,13 @@ class _YuanrongProviderMixin:
         timeout: Optional[int] = None,
         environment: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
+        base_env = self._launcher_extra_params().get("env")
         wrapped = _build_wrapped_command(
             command,
             cwd=cwd,
             timeout=timeout,
             environment=environment,
+            base_env=base_env if isinstance(base_env, dict) else None,
         )
         return await asyncio.to_thread(self._exec_sync, wrapped)
 
