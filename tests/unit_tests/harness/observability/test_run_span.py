@@ -8,10 +8,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from opentelemetry.trace import StatusCode, set_span_in_context
 from opentelemetry.sdk.trace import SpanProcessor, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode, set_span_in_context
 
 from openjiuwen.extensions.observability import setup as shared_setup
 from openjiuwen.extensions.observability import span_context as shared_span_context
@@ -19,7 +19,6 @@ from openjiuwen.extensions.observability.semconv import (
     ERROR_TYPE,
     GEN_AI_CONVERSATION_ID,
     GEN_AI_OPERATION_NAME,
-    OJ_SPAN_OUTPUT,
     OJ_AGENT_MODE,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -29,6 +28,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_RUN_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
+    OJ_SPAN_OUTPUT,
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
@@ -37,9 +37,9 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
-from openjiuwen.harness.observability import span_context as agent_span_context
-from openjiuwen.harness.observability import setup as agent_setup
 from openjiuwen.harness.execution_subject import ExecutionSubject
+from openjiuwen.harness.observability import setup as agent_setup
+from openjiuwen.harness.observability import span_context as agent_span_context
 from openjiuwen.harness.observability.run_span import (
     build_run_span_name,
     close_agent_run_span,
@@ -314,9 +314,7 @@ def test_cascade_forced_tool_is_unset_and_marks_root_before_root_ends(exporter) 
     child_record, root_record = finished
     assert child_record.status.status_code is StatusCode.UNSET
     assert child_record.attributes[OJ_SPAN_FORCED_CLOSE] is True
-    assert child_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
-        "missing_tool_terminal_callback"
-    )
+    assert child_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == ("missing_tool_terminal_callback")
     assert root_record.attributes[OJ_TRACE_FORCED_CLOSE] is True
     assert root_record.attributes[OJ_TRACE_COMPLETE] is True
 

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 from openjiuwen.extensions.observability.gen_ai_semconv import *  # noqa: F403
 
-
 # ---------------------------------------------------------------------------
 # openjiuwen.* — additive trajectory and correlation attributes
 # ---------------------------------------------------------------------------

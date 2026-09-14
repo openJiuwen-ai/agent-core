@@ -135,9 +135,7 @@ def open_agent_run_span(
             GEN_AI_OPERATION_NAME: "invoke_agent",
             OJ_TRAJECTORY_RECORD_KIND: "turn",
             OJ_EXECUTION_SUBJECT_ID: subject.subject_id if subject is not None else "main",
-            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (
-                subject.display_name if subject is not None else "Main Agent"
-            ),
+            OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (subject.display_name if subject is not None else "Main Agent"),
             OJ_EXECUTION_SUBJECT_KIND: subject.kind if subject is not None else "main_agent",
             OJ_EXECUTION_SUBJECT_SESSION_ID: (
                 subject.session_id if subject is not None and subject.session_id else session_id or ""
@@ -285,6 +283,7 @@ def close_agent_run_span(
             handle.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
 
         from openjiuwen.extensions.observability.usage_aggregation import drain_rollup
+
         if trace_id is not None:
             snapshot = drain_rollup(trace_id)
             if snapshot:

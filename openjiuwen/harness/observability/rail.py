@@ -45,17 +45,17 @@ from opentelemetry.trace import (
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+
+# Imported as a module, never by name: the run-root fallback installs itself by
+# rebinding ``get_root_span`` on this module, and a name bound at import time
+# would keep calling the unwrapped accessor.
+from openjiuwen.extensions.observability import span_context as shared_span_context
+from openjiuwen.extensions.observability.demand import publish_span_snapshot
+from openjiuwen.extensions.observability.error_reporting import record_span_error
 from openjiuwen.extensions.observability.redaction import (
     redact_completion,
     redact_error_summary,
     redact_prompt,
-)
-from openjiuwen.extensions.observability.demand import publish_span_snapshot
-from openjiuwen.extensions.observability.error_reporting import record_span_error
-from openjiuwen.extensions.observability.tool_outcome import (
-    TOOL_REPORTED_FAILURE,
-    tool_failure_reason,
-    tool_result_for_exception,
 )
 from openjiuwen.extensions.observability.semconv import (
     AT_TEAM_ID,
@@ -75,13 +75,13 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_DESCRIPTION,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    OJ_REQUEST_ID,
-    OJ_RUN_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_REQUEST_ID,
+    OJ_RUN_ID,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
     OJ_STEP_ID,
@@ -90,17 +90,12 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
     OJ_TRACE_ROOT,
-    OJ_TRAJECTORY_SCHEMA_VERSION,
-    TRAJECTORY_SPAN_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
-from openjiuwen.harness.execution_subject import current_execution_subject
-# Imported as a module, never by name: the run-root fallback installs itself by
-# rebinding ``get_root_span`` on this module, and a name bound at import time
-# would keep calling the unwrapped accessor.
-from openjiuwen.extensions.observability import span_context as shared_span_context
 from openjiuwen.extensions.observability.span_context import (
     cascade_close_children,
     clear_tool_span_context,
@@ -111,6 +106,12 @@ from openjiuwen.extensions.observability.span_context import (
     push_tool_span,
     set_current_agent_span,
 )
+from openjiuwen.extensions.observability.tool_outcome import (
+    TOOL_REPORTED_FAILURE,
+    tool_failure_reason,
+    tool_result_for_exception,
+)
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.observability.span_context import current_session_id
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -326,15 +327,9 @@ class ToolSpanScope:
         if not span.is_recording():
             return
 
-        recorded_output = (
-            tool_result_for_exception(exception) if exception is not None else output
-        )
+        recorded_output = tool_result_for_exception(exception) if exception is not None else output
         raw_call_result = "null" if recorded_output is None else serialize_ability_value(recorded_output)
-        redacted_call_result = (
-            redact_completion(raw_call_result, self._config)
-            if self._config
-            else raw_call_result
-        )
+        redacted_call_result = redact_completion(raw_call_result, self._config) if self._config else raw_call_result
         span.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted_call_result)
         span.set_attribute(OJ_SPAN_OUTPUT, redacted_call_result)
 
@@ -350,10 +345,12 @@ class ToolSpanScope:
         else:
             self._accumulate_tool_usage(span, is_error=True)
             span.set_attribute(ERROR_TYPE, TOOL_REPORTED_FAILURE)
-            span.set_status(Status(
-                StatusCode.ERROR,
-                redact_error_summary(failure_reason, self._config),
-            ))
+            span.set_status(
+                Status(
+                    StatusCode.ERROR,
+                    redact_error_summary(failure_reason, self._config),
+                )
+            )
         span.end()
 
     @staticmethod
@@ -433,9 +430,11 @@ class AgentObservabilityRail(DeepAgentRail):
         if session is None:
             return
         try:
-            session.update_state({
-                OPEN_STEP_STATE_KEY: {"step_id": step_id, "step_number": step_number},
-            })
+            session.update_state(
+                {
+                    OPEN_STEP_STATE_KEY: {"step_id": step_id, "step_number": step_number},
+                }
+            )
         except Exception as exc:
             logger.debug("[AgentObservability] open step publish failed: %s", exc)
 
@@ -502,8 +501,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 return
             if not root_span.is_recording():
                 logger.warning(
-                    "[AgentObservability] run root span already ended: name=%s "
-                    "agent=%s iteration=%s",
+                    "[AgentObservability] run root span already ended: name=%s agent=%s iteration=%s",
                     getattr(root_span, "name", "<unknown>"),
                     agent_name,
                     iteration,
@@ -570,8 +568,7 @@ class AgentObservabilityRail(DeepAgentRail):
             otel_context.attach(agent_ctx)
 
             logger.debug(
-                "[AgentObservability] agent span opened: agent.%s.task_iteration.%s "
-                "span_id=%016x trace_id=%032x",
+                "[AgentObservability] agent span opened: agent.%s.task_iteration.%s span_id=%016x trace_id=%032x",
                 label,
                 iteration,
                 span.context.span_id,
@@ -778,8 +775,7 @@ class AgentObservabilityRail(DeepAgentRail):
             publish_span_snapshot(span, "attributes")
 
             logger.debug(
-                "[AgentObservability] invoke span opened (single-round): agent.%s "
-                "span_id=%016x nested=%s",
+                "[AgentObservability] invoke span opened (single-round): agent.%s span_id=%016x nested=%s",
                 agent_name,
                 span.context.span_id,
                 parent_agent_span is not None,
@@ -804,9 +800,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             scope.close(output=output, exception=ctx.exception)
 
-            logger.debug(
-                "[AgentObservability] invoke span closed: name=%s", scope.span.name
-            )
+            logger.debug("[AgentObservability] invoke span closed: name=%s", scope.span.name)
         except Exception as exc:
             logger.warning("[AgentObservability] after_invoke failed: %s", exc)
 
@@ -853,9 +847,7 @@ class AgentObservabilityRail(DeepAgentRail):
 
             agent = ctx.agent
             agent_name = str(
-                scope_parent.attributes.get(GEN_AI_AGENT_NAME)
-                or self.resolve_agent_name(agent)
-                or "unknown"
+                scope_parent.attributes.get(GEN_AI_AGENT_NAME) or self.resolve_agent_name(agent) or "unknown"
             )
             parent_ctx = set_span_in_context(otel_parent, otel_context.get_current())
             span = self._tracer().start_span(
@@ -884,9 +876,7 @@ class AgentObservabilityRail(DeepAgentRail):
             self._open_react_step_parent = scope_parent
             self._open_react_step_iteration = iteration
             set_current_agent_span(span)
-            otel_context.attach(
-                set_span_in_context(span, otel_context.get_current())
-            )
+            otel_context.attach(set_span_in_context(span, otel_context.get_current()))
             publish_span_snapshot(span, "attributes")
         except Exception as exc:
             logger.warning("[AgentObservability] before_model_call failed: %s", exc)
@@ -913,13 +903,9 @@ class AgentObservabilityRail(DeepAgentRail):
             else:
                 span.set_status(Status(StatusCode.OK))
                 span.end()
-        set_current_agent_span(
-            parent if parent is not None and parent.is_recording() else None
-        )
+        set_current_agent_span(parent if parent is not None and parent.is_recording() else None)
         if parent is not None and parent.is_recording():
-            otel_context.attach(
-                set_span_in_context(parent, otel_context.get_current())
-            )
+            otel_context.attach(set_span_in_context(parent, otel_context.get_current()))
 
     # ------------------------------------------------------------------
     # Ability/tool lifecycle
@@ -939,11 +925,7 @@ class AgentObservabilityRail(DeepAgentRail):
             tool_name = str(getattr(inputs, "tool_name", "") or "unknown")
             current_agent = get_current_agent_span()
             root_span = self._root_span_for(ctx)
-            parent = (
-                current_agent
-                if current_agent is not None and current_agent.is_recording()
-                else root_span
-            )
+            parent = current_agent if current_agent is not None and current_agent.is_recording() else root_span
             if parent is None or not parent.is_recording():
                 return
 
@@ -979,13 +961,9 @@ class AgentObservabilityRail(DeepAgentRail):
             if ability_protocol:
                 span.set_attribute(OJ_TOOL_PROTOCOL, ability_protocol)
 
-            raw_arguments = serialize_ability_value(
-                getattr(inputs, "tool_args", None)
-            )
+            raw_arguments = serialize_ability_value(getattr(inputs, "tool_args", None))
             config = self._config()
-            redacted_arguments = (
-                redact_prompt(raw_arguments, config) if config else raw_arguments
-            )
+            redacted_arguments = redact_prompt(raw_arguments, config) if config else raw_arguments
             span.set_attribute(GEN_AI_TOOL_CALL_ARGUMENTS, redacted_arguments)
             span.set_attribute(OJ_SPAN_INPUT, redacted_arguments)
             self._copy_parent_correlation(parent, span)
@@ -1130,8 +1108,7 @@ class AgentObservabilityRail(DeepAgentRail):
             prev.end()
         else:
             logger.info(
-                "[AgentObservability] clearing stale agent span inherited from %s "
-                "(current agent: %s, same_run=%s)",
+                "[AgentObservability] clearing stale agent span inherited from %s (current agent: %s, same_run=%s)",
                 prev_name,
                 agent_name,
                 same_run,
@@ -1268,11 +1245,7 @@ class AgentObservabilityRail(DeepAgentRail):
         # overwritten here; the resolved id only fills a missing
         # ``gen_ai.conversation.id`` so the export adapter can always derive a
         # session.
-        session_id = str(
-            span.attributes.get(GEN_AI_CONVERSATION_ID)
-            or current_session_id()
-            or ""
-        )
+        session_id = str(span.attributes.get(GEN_AI_CONVERSATION_ID) or current_session_id() or "")
         if session_id and not span.attributes.get(GEN_AI_CONVERSATION_ID):
             span.set_attribute(GEN_AI_CONVERSATION_ID, session_id)
         for key, value in decoration.attributes.items():

@@ -14,7 +14,6 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
-
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -192,9 +191,7 @@ class ObservabilityRuntime:
                 )
                 self._callback_handler = callback_handler
                 self._context_compression_handler = context_compression_handler
-                self._register_callbacks(
-                    self._callback_pairs(callback_handler, context_compression_handler)
-                )
+                self._register_callbacks(self._callback_pairs(callback_handler, context_compression_handler))
                 try:
                     trace.set_tracer_provider(provider)
                 except Exception as exc:

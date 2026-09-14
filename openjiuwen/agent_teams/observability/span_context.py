@@ -18,11 +18,11 @@ from openjiuwen.extensions.observability.span_context import (
     close_current_agent_span,
     flush_child_spans,
     get_active_span_tracker,
+    get_bound_root_span,
     get_current_agent_span,
     get_current_llm_span,
     get_current_session_id,
     get_current_tool_span,
-    get_bound_root_span,
     get_root_span,
     pop_any_tool_span,
     pop_current_llm_span,
@@ -71,6 +71,7 @@ def get_or_create_team_span(team_name: str, tracer, *, session_id: str | None = 
         return span
 
     from opentelemetry.trace import SpanKind
+
     from openjiuwen.agent_teams.context import get_session_id
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_ID,
@@ -93,8 +94,7 @@ def get_or_create_team_span(team_name: str, tracer, *, session_id: str | None = 
     # nothing and the teammate's whole round goes unrecorded.
     set_root_span(span, session_id=session_id or None)
     team_logger.info(
-        "otel: get_or_create_team_span CREATE new team span team_name={} "
-        "trace_id={:032x} span_id={:016x}",
+        "otel: get_or_create_team_span CREATE new team span team_name={} trace_id={:032x} span_id={:016x}",
         team_name,
         span.context.trace_id,
         span.context.span_id,

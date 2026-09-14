@@ -14,7 +14,6 @@ from opentelemetry.sdk.trace.export import SpanExporter
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 
-
 _runtime = ObservabilityRuntime()
 
 
