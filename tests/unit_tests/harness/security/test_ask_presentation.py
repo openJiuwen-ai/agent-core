@@ -47,7 +47,25 @@ def test_builtin_rule_title_names_the_risk() -> None:
     assert pres.title == "检测到文件外发，需要确认后才能执行"
 
 
-def test_dir_listing_summary_is_read_path(tmp_path: Path) -> None:
+def test_command_rule_ask_summary_is_command_not_file_write() -> None:
+    cmd = 'rm -f "C:/Users/hanzhibin/Documents/JiuwenSwarm/test1.log"'
+    result = PermissionResult(
+        permission=PermissionLevel.ASK,
+        matched_rule=(
+            "tiered_policy:shell_subcommands:"
+            f"{cmd}=>tiered_policy:rules:rules[shell_ask_rm]"
+        ),
+    )
+    pres = build_permission_ask_presentation("bash", {"command": cmd}, result)
+    assert pres.category == "shell"
+    assert "命令执行" in pres.title
+    assert pres.summary.startswith("bash:")
+    assert "rm -f" in pres.summary
+    assert not pres.summary.lower().startswith("write ")
+    assert not pres.summary.lower().startswith("read ")
+
+
+def test_dir_listing_summary_is_command(tmp_path: Path) -> None:
     result = PermissionResult(
         permission=PermissionLevel.ASK,
         matched_rule="tools.bash",
@@ -58,7 +76,9 @@ def test_dir_listing_summary_is_read_path(tmp_path: Path) -> None:
         result,
     )
     assert pres.category == "shell"
-    assert pres.summary == f"read {tmp_path.resolve()}"
+    assert pres.summary.startswith("bash:")
+    assert "dir /b *.docx" in pres.summary
+    assert not pres.summary.lower().startswith("read ")
 
 
 def test_cd_alone_summary_is_not_read_path(tmp_path: Path) -> None:
@@ -72,28 +92,31 @@ def test_cd_alone_summary_is_not_read_path(tmp_path: Path) -> None:
         result,
     )
     assert pres.category == "shell"
+    assert pres.summary.startswith("bash:")
+    assert "cd " in pres.summary
     assert not pres.summary.lower().startswith("read ")
 
 
-def test_cd_then_dir_summary_is_read_listed_dir(tmp_path: Path) -> None:
+def test_cd_then_dir_summary_is_command(tmp_path: Path) -> None:
     listed = tmp_path / "listed"
     listed.mkdir()
     result = PermissionResult(
         permission=PermissionLevel.ASK,
         matched_rule="tools.bash",
     )
+    cmd = f'cd "{listed.as_posix()}" && dir /b *.docx'
     pres = build_permission_ask_presentation(
         "bash",
-        {
-            "command": f'cd "{listed.as_posix()}" && dir /b *.docx',
-            "workdir": str(tmp_path),
-        },
+        {"command": cmd, "workdir": str(tmp_path)},
         result,
     )
-    assert pres.summary == f"read {listed.resolve()}"
+    assert pres.category == "shell"
+    assert pres.summary.startswith("bash:")
+    assert "dir /b *.docx" in pres.summary
+    assert not pres.summary.lower().startswith("read ")
 
 
-def test_cd_slash_d_then_dir_summary_is_read_listed_dir(tmp_path: Path) -> None:
+def test_cd_slash_d_then_dir_summary_is_command(tmp_path: Path) -> None:
     listed = tmp_path / "listed"
     listed.mkdir()
     result = PermissionResult(
@@ -108,11 +131,13 @@ def test_cd_slash_d_then_dir_summary_is_read_listed_dir(tmp_path: Path) -> None:
         },
         result,
     )
-    assert pres.summary == f"read {listed.resolve()}"
-    assert "read /d" not in pres.summary.lower()
+    assert pres.category == "shell"
+    assert pres.summary.startswith("bash:")
+    assert "cd /d" in pres.summary
+    assert not pres.summary.lower().startswith("read ")
 
 
-def test_shell_redirect_summary_is_write_path(tmp_path: Path) -> None:
+def test_shell_redirect_summary_is_command(tmp_path: Path) -> None:
     target = tmp_path / "out.txt"
     cmd = f'echo hello > "{target.as_posix()}"'
     result = PermissionResult(
@@ -125,7 +150,9 @@ def test_shell_redirect_summary_is_write_path(tmp_path: Path) -> None:
         result,
     )
     assert pres.category == "shell"
-    assert pres.summary == f"write {target.resolve()}"
+    assert pres.summary.startswith("bash:")
+    assert "echo hello" in pres.summary
+    assert not pres.summary.lower().startswith("write ")
 
 
 def test_too_complex_eval_summary_is_command_not_quoted_write() -> None:
@@ -186,7 +213,7 @@ def test_shell_read_summary_is_read_path(tmp_path: Path) -> None:
     assert not pres.summary.startswith("bash ")
 
 
-def test_powershell_write_summary_is_write_path() -> None:
+def test_powershell_command_ask_summary_is_command() -> None:
     cmd = (
         'New-Item -Path "C:\\Users\\hanzhibin\\test2.txt" -ItemType File -Force'
         " | Select-Object FullName, Length, LastWriteTime"
@@ -197,9 +224,9 @@ def test_powershell_write_summary_is_write_path() -> None:
     )
     pres = build_permission_ask_presentation("powershell", {"command": cmd}, result)
     assert pres.category == "shell"
-    assert pres.summary.startswith("write ")
-    assert "test2.txt" in pres.summary
-    assert "Select-Object" not in pres.summary
+    assert pres.summary.startswith("powershell:")
+    assert "New-Item" in pres.summary
+    assert not pres.summary.lower().startswith("write ")
 
 
 def test_finding_ask_preferred_over_defaults_when_medium_finding() -> None:

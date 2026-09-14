@@ -3,8 +3,8 @@
 """Categorized HITL ASK copy: title / summary for permission dialogs.
 
 User-visible text is title + summary (+ remember hint). Internal rule ids stay
-out of the message body. Titles name the matched risk; shell file IO summaries
-use ``write`` / ``read`` / ``exec`` plus the path.
+out of the message body. Titles name the matched risk. Command matches show the
+command; file_guard matches use ``write`` / ``read`` / ``exec`` plus the path.
 """
 
 from __future__ import annotations
@@ -165,7 +165,7 @@ def _summary_for_category(
             or _finding_summary(name, args, result)
         )
     if category == "shell":
-        return _shell_summary(name, args, result, permission_config)
+        return _command_line_summary(name, args)
     if category == "tool":
         return f"{name}（当前模式默认需确认）"
     return name
@@ -313,20 +313,6 @@ def _network_summary(tool_args: dict[str, Any]) -> str:
         if isinstance(val, str) and val.strip():
             return val.strip()
     return ""
-
-
-def _shell_summary(
-    tool_name: str,
-    tool_args: dict[str, Any],
-    result: PermissionResult,
-    permission_config: Mapping[str, Any] | None = None,
-) -> str:
-    extracted = _shell_file_access_summary(
-        tool_name, tool_args, result, permission_config, require_file_io=True,
-    )
-    if extracted:
-        return extracted
-    return _command_line_summary(tool_name, tool_args)
 
 
 def _shell_file_access_summary(
