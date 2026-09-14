@@ -20,6 +20,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
     iter_spans,
+    read_llm_exchange,
     read_llm_messages,
     read_rl_fields,
     read_span_error,
@@ -39,6 +40,33 @@ def test_legacy_tool_calls_attribute_ignores_invalid_values() -> None:
         "response": {"role": "assistant", "tool_calls": ["invalid", {"id": "call-1"}]},
     })
     assert mixed[semconv.GEN_AI_TOOL_CALLS] == [{"id": "call-1"}]
+
+
+def test_legacy_tool_calls_attribute_truncates_long_arguments() -> None:
+    attributes = _llm_exchange_attributes({
+        "response": {"role": "assistant", "tool_calls": [
+            {"id": "call-1", "arguments": {"text": "x" * 1001}},
+        ]},
+    })
+
+    expected = [{"id": "call-1", "arguments": {"text": f"{'x' * 1000}..."}}]
+    assert attributes[semconv.GEN_AI_TOOL_CALLS] == expected
+    assert read_llm_exchange({"attributes": attributes})[1][0]["tool_calls"] == expected
+
+
+def test_legacy_tool_calls_attribute_does_not_move_later_reply_calls() -> None:
+    attributes = _llm_exchange_attributes({
+        "response": [
+            {"role": "assistant", "content": "first"},
+            {"role": "assistant", "tool_calls": [{"id": "call-2"}]},
+        ],
+    })
+
+    assert semconv.GEN_AI_TOOL_CALLS not in attributes
+    assert read_llm_exchange({"attributes": attributes})[1] == [
+        {"role": "assistant", "content": "first"},
+        {"role": "assistant", "tool_calls": [{"id": "call-2"}]},
+    ]
 
 
 def test_upgrade_legacy_steps_returns_canonical_trajectory() -> None:

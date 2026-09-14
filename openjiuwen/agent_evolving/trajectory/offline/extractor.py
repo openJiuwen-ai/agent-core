@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.spans import (
+    _trace_safe_value,
     attributes_from_map,
     normalize_span,
     write_llm_exchange,
@@ -203,8 +204,11 @@ class TrajectoryExtractor:
             response_message = _message(response)
             completions = [] if response_message is None else [response_message]
             attrs.update(write_llm_exchange(prompts, completions))
-            if response_message is not None and response_message.get("tool_calls") is not None:
-                attrs[semconv.GEN_AI_TOOL_CALLS] = response_message["tool_calls"]
+            calls = response_message.get("tool_calls") if response_message is not None else None
+            if isinstance(calls, list):
+                valid_calls = [_trace_safe_value(dict(call)) for call in calls if isinstance(call, Mapping)]
+                if valid_calls:
+                    attrs[semconv.GEN_AI_TOOL_CALLS] = valid_calls
             tools = params.get("tools")
             if tools:
                 attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = to_json_compatible(tools)

@@ -31,6 +31,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SOURCE,
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
+    _trace_safe_value,
     attributes_from_map,
     attributes_to_map,
     write_llm_exchange,
@@ -145,22 +146,19 @@ def _as_message_list(value: Any) -> list[dict[str, Any]]:
 def _llm_exchange_attributes(detail: Mapping[str, Any]) -> dict[str, Any]:
     """Convert one legacy LLM step into the standard GenAI attributes.
 
-    The tool calls of the reply keep their own top-level attribute, which is
-    where every reader looks for them, in addition to riding along inside the
-    structured output message.
+    The first reply's tool calls also keep a top-level attribute for legacy
+    readers. It carries the same bounded data as the structured output.
     """
 
     prompts = _as_message_list(detail.get("messages"))
     completions = _as_message_list(detail.get("response"))
     attributes = write_llm_exchange(prompts, completions)
-    for message in completions:
-        calls = message.get("tool_calls")
-        if not isinstance(calls, list):
-            continue
-        valid_calls = [deepcopy(dict(call)) for call in calls if isinstance(call, Mapping)]
-        if valid_calls:
-            attributes[semconv.GEN_AI_TOOL_CALLS] = valid_calls
-            break
+    if completions:
+        calls = completions[0].get("tool_calls")
+        if isinstance(calls, list):
+            valid_calls = [_trace_safe_value(dict(call)) for call in calls if isinstance(call, Mapping)]
+            if valid_calls:
+                attributes[semconv.GEN_AI_TOOL_CALLS] = valid_calls
     return attributes
 
 
