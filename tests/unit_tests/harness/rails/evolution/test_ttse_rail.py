@@ -31,12 +31,8 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeI
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
 from openjiuwen.harness.prompts.sections import SectionName
-from openjiuwen.harness.rails.evolution.evolution_rail import (
-    EvolutionRail,
-    EvolutionTriggerPoint,
-    PreparedEvolutionInput,
-)
-from openjiuwen.harness.rails.evolution.ttse import (
+from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, EvolutionTriggerPoint, PreparedEvolutionInput
+from openjiuwen.harness.rails.evolution import (
     TTSEConfig,
     TTSERail,
     TTSERecordStore,
@@ -45,23 +41,23 @@ from openjiuwen.harness.rails.evolution.ttse import (
     configure_ttse_evolution,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.harness.rails.evolution.ttse.stores import reset_shared_stores, shared_store
-from openjiuwen.harness.rails.evolution.ttse.catalog import project_catalog
-from openjiuwen.harness.rails.evolution.ttse.classify import parse_assignments
-from openjiuwen.harness.rails.evolution.ttse.consult import (
+from openjiuwen.agent_evolving.ttse.stores import reset_shared_stores, shared_store
+from openjiuwen.agent_evolving.ttse.catalog import project_catalog
+from openjiuwen.agent_evolving.ttse.classify import parse_assignments
+from openjiuwen.agent_evolving.ttse.consult import (
     MAX_CONSULT_CATEGORIES,
     parse_consult_categories,
     render_consult_result,
     render_consult_result_async,
 )
-from openjiuwen.harness.rails.evolution.ttse.prompts import FACT_TIP_DEFINITION, detect_judge_prompt
-from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
-from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
+from openjiuwen.agent_evolving.ttse.prompts import FACT_TIP_DEFINITION, detect_judge_prompt
+from openjiuwen.agent_evolving.ttse.render import DISK_CATALOG_GUIDANCE_CN
+from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
     count_tool_calls,
     extract_final_reply,
     extract_output_paths,
 )
-from openjiuwen.harness.rails.evolution.ttse.induction import (
+from openjiuwen.agent_evolving.ttse.induction import (
     blame,
     induce,
     induce_batch,
@@ -71,7 +67,7 @@ from openjiuwen.harness.rails.evolution.ttse.induction import (
     parse_verdict,
     synthesize,
 )
-from openjiuwen.harness.rails.evolution.ttse.ttse_rail import _TTSEPreparedEvolutionInput
+from openjiuwen.harness.rails.evolution.ttse_rail import _TTSEPreparedEvolutionInput
 
 _POLICY = GENERATE_RECORDS_LLM_POLICY
 _PROCESSOR = TrajectorySpanProcessor()
@@ -1509,7 +1505,7 @@ async def test_disk_catalog_attachment_uses_context_session_id(tmp_path):
 
 
 def test_trajectory_adapter_reads_openai_tool_args_and_keeps_tail():
-    from openjiuwen.harness.rails.evolution.ttse.trajectory_adapter import (
+    from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
         messages_to_trajectory_text,
     )
 

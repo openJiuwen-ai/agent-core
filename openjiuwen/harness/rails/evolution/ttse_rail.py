@@ -11,9 +11,8 @@ to the skill-body track:
     when) plus procedures for tasks that used no skill.
 
 Injection happens in ``before_model_call``. The frozen TTSE algorithm lives
-in :mod:`prompts` / :mod:`induction`; only the I/O layer (trajectory source,
-capability enumeration, persistence, prompt section) is rewired to jiuwen
-async primitives.
+in :mod:`openjiuwen.agent_evolving.ttse`; this rail is the I/O layer
+(trajectory source, capability enumeration, persistence, prompt section).
 """
 
 from __future__ import annotations
@@ -39,21 +38,32 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     PreparedEvolutionInput,
 )
 
-from .capabilities import list_capability_names, parse_capability_names_from_text, render_capabilities
-from .catalog import project_catalog, render_catalog_markdown
-from .classify import classify_rules
-from .config import TTSEConfig
-from .consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
-from .dream import load_dream_state, run_dream_pass
-from .induction import blame, induce, induce_batch, synthesize
-from .render import (
+from openjiuwen.agent_evolving.ttse.capabilities import (
+    list_capability_names,
+    parse_capability_names_from_text,
+    render_capabilities,
+)
+from openjiuwen.agent_evolving.ttse.catalog import project_catalog, render_catalog_markdown
+from openjiuwen.agent_evolving.ttse.classify import classify_rules
+from openjiuwen.agent_evolving.ttse.config import TTSEConfig
+from openjiuwen.agent_evolving.ttse.consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
+from openjiuwen.agent_evolving.ttse.dream import load_dream_state, run_dream_pass
+from openjiuwen.agent_evolving.ttse.induction import blame, induce, induce_batch, synthesize
+from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_CN,
     DISK_CATALOG_GUIDANCE_EN,
     rules_numbered,
 )
-from .stores import shared_store
-from .success import SignalBasedSuccessDetector, SuccessDetector
-from .trajectory_adapter import count_tool_calls, messages_to_trajectory_text
+from openjiuwen.agent_evolving.ttse.stores import shared_store
+from openjiuwen.agent_evolving.ttse.success import (
+    SignalBasedSuccessDetector,
+    SuccessDetector,
+    SuccessOutcome,
+)
+from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
+    count_tool_calls,
+    messages_to_trajectory_text,
+)
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200

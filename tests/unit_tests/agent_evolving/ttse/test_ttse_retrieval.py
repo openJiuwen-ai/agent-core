@@ -8,17 +8,17 @@ from typing import Dict, List
 
 import pytest
 
-from openjiuwen.harness.rails.evolution.ttse.config import TTSEConfig
-from openjiuwen.harness.rails.evolution.ttse.consult import (
+from openjiuwen.agent_evolving.ttse.config import TTSEConfig
+from openjiuwen.agent_evolving.ttse.consult import (
     parse_consult_query,
     render_consult_result_async,
 )
-from openjiuwen.harness.rails.evolution.ttse.retrieval import (
+from openjiuwen.agent_evolving.ttse.retrieval import (
     clamp_top_k,
     retrieve_rules,
     rrf_fuse_indices,
 )
-from openjiuwen.harness.rails.evolution.ttse.stores import TTSERecordStore, reset_shared_stores
+from openjiuwen.agent_evolving.ttse.stores import TTSERecordStore, reset_shared_stores
 
 OFFICE = "documents-office-and-records"
 

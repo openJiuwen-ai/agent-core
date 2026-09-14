@@ -14,17 +14,18 @@ from typing import Callable
 import pytest
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-from openjiuwen.harness.rails.evolution.ttse import TTSEConfig, TTSERail, TTSERecordStore
-from openjiuwen.harness.rails.evolution.ttse.dream import (
+from openjiuwen.agent_evolving.ttse import TTSEConfig, TTSERecordStore
+from openjiuwen.agent_evolving.ttse.dream import (
     DreamState,
     parse_merge_verdict,
     prune_stale,
     run_dream_pass,
     should_run_dream,
 )
-from openjiuwen.harness.rails.evolution.ttse.success import TrajectoryErrorSuccessDetector
-from openjiuwen.harness.rails.evolution.ttse.tip_parse import parse_tip, tip_purge_reason
-from openjiuwen.harness.rails.evolution.ttse.stores import _new_record
+from openjiuwen.agent_evolving.ttse.success import TrajectoryErrorSuccessDetector
+from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip, tip_purge_reason
+from openjiuwen.agent_evolving.ttse.stores import _new_record
+from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 
 
 class ScriptedLLM:
