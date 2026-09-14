@@ -309,13 +309,16 @@ class TaskTool(Tool):
                 ) from e
             finally:
                 if affinity_enabled:
-                    await kv_cache_hooks.finish_subagent(
-                        self.parent_agent,
-                        subagent_type=str(subagent_type),
-                        sub_session_id=sub_session_id,
-                        parent_session_id=parent_session_id,
-                        succeeded=succeeded,
-                    )
+                    try:
+                        await kv_cache_hooks.finish_subagent(
+                            self.parent_agent,
+                            subagent_type=str(subagent_type),
+                            sub_session_id=sub_session_id,
+                            parent_session_id=parent_session_id,
+                            succeeded=succeeded,
+                        )
+                    except Exception as cleanup_error:
+                        logger.warning("[TaskTool] KV-cache cleanup failed: %s", cleanup_error)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

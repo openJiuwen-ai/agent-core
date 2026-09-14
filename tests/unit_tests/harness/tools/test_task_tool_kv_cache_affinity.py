@@ -215,6 +215,22 @@ async def test_kvc_helper_failure_does_not_override_original_subagent_exception(
 
 
 @pytest.mark.asyncio
+async def test_finish_subagent_failure_does_not_mask_original_exception() -> None:
+    subagent = _FakeSubAgent("browser", error=RuntimeError("original subagent error"))
+    tool, _ = _make_tool(subagent=subagent)
+
+    with patch(
+        "openjiuwen.harness.kv_cache.kv_cache_hooks.finish_subagent",
+        new=AsyncMock(side_effect=RuntimeError("cleanup error")),
+    ):
+        with pytest.raises(Exception, match="original subagent error"):
+            await tool.invoke(
+                {"subagent_type": "browser_agent", "task_description": "run task"},
+                session=Session(session_id="parent_session"),
+            )
+
+
+@pytest.mark.asyncio
 async def test_affinity_disabled_preserves_baseline_invoke_and_skips_helpers() -> None:
     subagent = _FakeSubAgent("browser")
     tool, _ = _make_tool(enabled=False, subagent=subagent)
