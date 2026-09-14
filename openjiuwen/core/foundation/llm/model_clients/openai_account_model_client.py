@@ -5,24 +5,13 @@ import asyncio
 import threading
 from typing import Any, AsyncIterator, List, Optional, Union
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.common.exception.codes import StatusCode
-from openjiuwen.core.common.exception.errors import build_error
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.headers_helper import build_base_headers, merge_request_headers
-from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
-    DEFAULT_OPENAI_ACCOUNT_BASE_URL as _DEFAULT_OPENAI_ACCOUNT_BASE_URL,
-    OpenAIAccountAuthError,
-    OpenAIAccountAuthManager,
-)
-from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import OpenAIAccountModelCatalog
-from openjiuwen.core.foundation.llm.utils.responses_utils import (
-    OpenAIAccountResponsesError,
-    build_request_body,
-)
-from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema.generation_response import (
@@ -32,10 +21,22 @@ from openjiuwen.core.foundation.llm.schema.generation_response import (
 )
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UserMessage
 from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.responses_utils import (
+    OpenAIAccountResponsesError,
+    build_request_body,
+)
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
-
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    DEFAULT_OPENAI_ACCOUNT_BASE_URL as _DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+)
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_auth import (
+    OpenAIAccountAuthError,
+    OpenAIAccountAuthManager,
+)
+from openjiuwen.extensions.external_provider.openai_auth.openai_account_models import OpenAIAccountModelCatalog
 
 DEFAULT_OPENAI_ACCOUNT_BASE_URL = _DEFAULT_OPENAI_ACCOUNT_BASE_URL
 _AUTH_RETRY_STATUS_CODES = {401, 403}
@@ -108,6 +109,8 @@ class OpenAIAccountModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
         session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
 
         body = self._build_openai_account_request_body(
             messages=messages,
@@ -183,6 +186,8 @@ class OpenAIAccountModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
         session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
 
         body = self._build_openai_account_request_body(
             messages=messages,
@@ -325,8 +330,10 @@ class OpenAIAccountModelClient(BaseModelClient):
             raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
 
         final_temperature = (
-            temperature if temperature is not None else self.model_config.temperature
-        ) if send_sampling_params else None
+            (temperature if temperature is not None else self.model_config.temperature)
+            if send_sampling_params
+            else None
+        )
         final_top_p = (top_p if top_p is not None else self.model_config.top_p) if send_sampling_params else None
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
@@ -496,7 +503,15 @@ class OpenAIAccountModelClient(BaseModelClient):
     async def _try_parse_stream_content(self, content: str, output_parser: BaseOutputParser) -> Any:
         try:
             return await output_parser.parse(content)
-        except Exception:
+        except Exception as exc:
+            llm_logger.debug(
+                "OpenAI account stream output parser error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=True,
+                exception=str(exc),
+            )
             return None
 
     async def _emit_error(

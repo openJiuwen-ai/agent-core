@@ -1,10 +1,17 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
-from typing import Union, List, Optional, Any, Dict
+from typing import Any, Dict, List, Optional, Union
+
 from pydantic import BaseModel, Field, model_validator
 
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+
+OPENJIUWEN_MESSAGE_PROVENANCE_METADATA = "_openjiuwen_message_provenance"
+OPENJIUWEN_MESSAGE_ORIGIN_METADATA = "_openjiuwen_message_origin"
+OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA = "_openjiuwen_message_source_kind"
+OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER = "external_user"
+OPENJIUWEN_MESSAGE_ORIGIN_HARNESS_INTERNAL = "harness_internal"
 
 
 class UsageMetadata(BaseModel):
@@ -13,17 +20,24 @@ class UsageMetadata(BaseModel):
     prompt: str = ""
     task_id: str = ""
     model_name: str = ""
-    total_latency: float = 0.
+    total_latency: float = 0.0
     first_token_time: str = ""
     request_start_time: str = ""
     input_tokens: int = 0
     output_tokens: int = 0
     total_tokens: int = 0
     cache_tokens: int = 0
+    cache_read_tokens: Optional[int] = None
+    cache_miss_tokens: Optional[int] = None
+    cache_write_tokens: Optional[int] = None
+    cache_status: Optional[str] = None
+    cache_source: Optional[str] = None
+    cache_authoritative: bool = False
+    cache_creation_input_tokens: Optional[int] = None
     reasoning_tokens: int = 0
-    input_cost: float = 0.
-    output_cost: float = 0.
-    total_cost: float = 0.
+    input_cost: float = 0.0
+    output_cost: float = 0.0
+    total_cost: float = 0.0
 
 
 class BaseMessage(BaseModel):
@@ -46,8 +60,12 @@ class AssistantMessage(BaseMessage):
     prompt_token_ids: Optional[List[int]] = None
     completion_token_ids: Optional[List[int]] = None
     logprobs: Optional[Any] = None
+    response_id: Optional[str] = None
+    response_model: Optional[str] = None
+    provider_metadata: Dict[str, Any] = Field(default_factory=dict)
+    provider_content: Optional[Any] = None
 
-    @model_validator(mode='before')
+    @model_validator(mode="before")
     @classmethod
     def convert_openai_tool_calls_format(cls, data: Any) -> Any:
         """Convert OpenAI API format tool_calls to flat ToolCall format.
@@ -58,24 +76,24 @@ class AssistantMessage(BaseMessage):
         ToolCall model expects flat format:
         {"id": "xxx", "type": "function", "name": "...", "arguments": "..."}
         """
-        if isinstance(data, dict) and 'tool_calls' in data and data['tool_calls']:
+        if isinstance(data, dict) and "tool_calls" in data and data["tool_calls"]:
             converted_tool_calls = []
-            for tc in data['tool_calls']:
-                if isinstance(tc, dict) and 'function' in tc and isinstance(tc['function'], dict):
+            for tc in data["tool_calls"]:
+                if isinstance(tc, dict) and "function" in tc and isinstance(tc["function"], dict):
                     # OpenAI format - convert to flat format
                     converted_tc = {
-                        'id': tc.get('id'),
-                        'type': tc.get('type', 'function'),
-                        'name': tc['function'].get('name', ''),
-                        'arguments': tc['function'].get('arguments', ''),
-                        'index': tc.get('index'),
-                        'response_item_id': tc.get('response_item_id'),
+                        "id": tc.get("id"),
+                        "type": tc.get("type", "function"),
+                        "name": tc["function"].get("name", ""),
+                        "arguments": tc["function"].get("arguments", ""),
+                        "index": tc.get("index"),
+                        "response_item_id": tc.get("response_item_id"),
                     }
                     converted_tool_calls.append(converted_tc)
                 else:
                     # Already flat format or ToolCall instance
                     converted_tool_calls.append(tc)
-            data['tool_calls'] = converted_tool_calls
+            data["tool_calls"] = converted_tool_calls
         return data
 
     def model_dump(self, **kwargs) -> dict[str, Any]:
@@ -90,14 +108,9 @@ class AssistantMessage(BaseMessage):
         if self.tool_calls:
             tool_calls = []
             for call in self.tool_calls:
-                tool_calls.append({
-                    "id": call.id,
-                    "type": call.type,
-                    "function": {
-                        "name": call.name,
-                        "arguments": call.arguments
-                    }
-                })
+                tool_calls.append(
+                    {"id": call.id, "type": call.type, "function": {"name": call.name, "arguments": call.arguments}}
+                )
                 if call.response_item_id is not None:
                     tool_calls[-1]["response_item_id"] = call.response_item_id
             result["tool_calls"] = tool_calls
@@ -115,11 +128,20 @@ class AssistantMessage(BaseMessage):
             result["completion_token_ids"] = self.completion_token_ids
         if self.logprobs is not None:
             result["logprobs"] = self.logprobs
+        if self.response_id is not None:
+            result["response_id"] = self.response_id
+        if self.response_model is not None:
+            result["response_model"] = self.response_model
+        if self.provider_metadata:
+            result["provider_metadata"] = self.provider_metadata
+        if self.provider_content is not None:
+            result["provider_content"] = self.provider_content
         return result
 
 
 class UserMessage(BaseMessage):
     role: str = "user"
+
 
 class SystemMessage(BaseMessage):
     role: str = "system"

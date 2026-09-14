@@ -1,18 +1,19 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Any
 
 from pydantic import ConfigDict
 
-from openjiuwen.core.foundation.llm.schema.message import BaseMessage, AssistantMessage, ToolMessage
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 
 
 def merge_parser_content(left: Any, right: Any) -> Any:
     """
     Intelligently merge parser_content fields.
-    
+
     Merge strategy:
     - If right is empty, return left
     - If left is empty, return right
@@ -27,35 +28,35 @@ def merge_parser_content(left: Any, right: Any) -> Any:
         return left
     if left is None:
         return right
-    
+
     # String concatenation
     if isinstance(left, str) and isinstance(right, str):
         return left + right
-    
+
     # List concatenation
     if isinstance(left, list) and isinstance(right, list):
         return left + right
-    
+
     # Dictionary recursive merge
     if isinstance(left, dict) and isinstance(right, dict):
         return merge_dicts(left, right)
-    
+
     # Handle custom objects: check if __add__ method is implemented
-    if (hasattr(left, '__add__') and 
-        type(left) is type(right) and
-        not isinstance(left, (int, float, bool))):  # Exclude basic numeric types
+    if (
+        hasattr(left, "__add__") and type(left) is type(right) and not isinstance(left, (int, float, bool))
+    ):  # Exclude basic numeric types
         try:
             return left + right
         except (TypeError, NotImplementedError):
             pass
-    
+
     # Handle Pydantic Model objects
-    if hasattr(left, 'model_fields') and hasattr(right, 'model_fields'):
+    if hasattr(left, "model_fields") and hasattr(right, "model_fields"):
         try:
             return merge_pydantic_models(left, right)
-        except Exception:
-            pass
-    
+        except Exception as exc:
+            logger.debug("merge_pydantic_models failed, keeping latest value: {}", exc)
+
     # Otherwise, keep the latest value
     return right
 
@@ -63,7 +64,7 @@ def merge_parser_content(left: Any, right: Any) -> Any:
 def merge_dicts(left: dict, right: dict) -> dict:
     """
     Recursively merge two dictionaries.
-    
+
     For the same key:
     - If both values are strings, concatenate them
     - If both values are lists, concatenate them
@@ -71,11 +72,11 @@ def merge_dicts(left: dict, right: dict) -> dict:
     - Otherwise, use the value from the right side
     """
     result = left.copy()
-    
+
     for key, right_value in right.items():
         if key in result:
             left_value = result[key]
-            
+
             # Recursively handle same types
             if isinstance(left_value, str) and isinstance(right_value, str):
                 result[key] = left_value + right_value
@@ -88,14 +89,14 @@ def merge_dicts(left: dict, right: dict) -> dict:
                 result[key] = right_value
         else:
             result[key] = right_value
-    
+
     return result
 
 
 def merge_pydantic_models(left: Any, right: Any) -> Any:
     """
     Merge two Pydantic Model instances.
-    
+
     Strategy:
     - Iterate through all fields
     - For string fields, concatenate them
@@ -106,32 +107,32 @@ def merge_pydantic_models(left: Any, right: Any) -> Any:
     """
     if type(left) is not type(right):
         return right
-    
+
     # Get all fields of the model
     merged_data = {}
-    
+
     # First get all field values from the left side
-    left_dict = left.model_dump() if hasattr(left, 'model_dump') else left.dict()
-    right_dict = right.model_dump() if hasattr(right, 'model_dump') else right.dict()
-    
+    left_dict = left.model_dump() if hasattr(left, "model_dump") else left.dict()
+    right_dict = right.model_dump() if hasattr(right, "model_dump") else right.dict()
+
     for field_name in left_dict.keys() | right_dict.keys():
         left_value = left_dict.get(field_name)
         right_value = right_dict.get(field_name)
-        
+
         # Use the common merge logic
         merged_data[field_name] = merge_parser_content(left_value, right_value)
-    
+
     # Create new model instance
     try:
         return type(left)(**merged_data)
-    except Exception:
+    except Exception as exc:
         # If creation fails, return right side
+        logger.debug("merged model reconstruction failed, keeping latest chunk: {}", exc)
         return right
 
 
 class BaseMessageChunk(BaseMessage):
     model_config = ConfigDict(arbitrary_types_allowed=True, json_encoders={type(None): lambda _: None})
-
 
     def __add__(self, other: "BaseMessageChunk") -> "BaseMessageChunk":
         if not isinstance(other, BaseMessageChunk):
@@ -143,7 +144,6 @@ class BaseMessageChunk(BaseMessage):
             combined_content = self.content + other.content
         else:
             combined_content = other.content
-
 
         return self.__class__(role=self.role, content=combined_content, name=self.name or other.name)
 
@@ -165,22 +165,29 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
         merged_tool_calls = []
         if self.tool_calls:
             for tc in self.tool_calls:
-                merged_tool_calls.append(ToolCall(
-                    id=tc.id,
-                    type=tc.type,
-                    name=tc.name,
-                    arguments=tc.arguments,
-                    index=tc.index,
-                    response_item_id=tc.response_item_id,
-                ))
+                merged_tool_calls.append(
+                    ToolCall(
+                        id=tc.id,
+                        type=tc.type,
+                        name=tc.name,
+                        arguments=tc.arguments,
+                        index=tc.index,
+                        response_item_id=tc.response_item_id,
+                    )
+                )
 
         if other.tool_calls:
             for incoming in other.tool_calls:
                 if merged_tool_calls:
                     last = merged_tool_calls[-1]
                     same_id = (last.id and incoming.id and last.id == incoming.id) or (not last.id or not incoming.id)
-                    if (same_id and hasattr(last, 'type') and last.type == 'function'
-                            and hasattr(incoming, 'type') and incoming.type == 'function'):
+                    both_function_calls = (
+                        hasattr(last, "type")
+                        and last.type == "function"
+                        and hasattr(incoming, "type")
+                        and incoming.type == "function"
+                    )
+                    if same_id and both_function_calls:
                         merged_tool_calls[-1] = ToolCall(
                             id=last.id or incoming.id,
                             type=last.type or incoming.type,
@@ -191,14 +198,16 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                         )
                         continue
                 # otherwise, push as a new tool_call
-                merged_tool_calls.append(ToolCall(
-                    id=incoming.id,
-                    type=incoming.type,
-                    name=incoming.name,
-                    arguments=incoming.arguments,
-                    index=len(merged_tool_calls),
-                    response_item_id=incoming.response_item_id,
-                ))
+                merged_tool_calls.append(
+                    ToolCall(
+                        id=incoming.id,
+                        type=incoming.type,
+                        name=incoming.name,
+                        arguments=incoming.arguments,
+                        index=len(merged_tool_calls),
+                        response_item_id=incoming.response_item_id,
+                    )
+                )
 
         merged_finish_reason = other.finish_reason if other.finish_reason != "null" else self.finish_reason
 
@@ -208,9 +217,7 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
         # - logprobs streams as a per-chunk object (typically with a "content" list);
         #   merge content lists when both sides are dicts, otherwise prefer the latest.
         merged_prompt_token_ids = self.prompt_token_ids or other.prompt_token_ids
-        merged_completion_token_ids = _concat_token_ids(
-            self.completion_token_ids, other.completion_token_ids
-        )
+        merged_completion_token_ids = _concat_token_ids(self.completion_token_ids, other.completion_token_ids)
         merged_logprobs = _merge_logprobs(self.logprobs, other.logprobs)
 
         return AssistantMessageChunk(
@@ -219,11 +226,15 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             tool_calls=merged_tool_calls if merged_tool_calls else None,
             usage_metadata=other.usage_metadata or self.usage_metadata,
             finish_reason=merged_finish_reason,
-            parser_content=other.parser_content or self.parser_content,
-            reasoning_content=(self.reasoning_content or '') + (other.reasoning_content or ''),
+            parser_content=(other.parser_content if other.parser_content is not None else self.parser_content),
+            reasoning_content=(self.reasoning_content or "") + (other.reasoning_content or ""),
             prompt_token_ids=merged_prompt_token_ids,
             completion_token_ids=merged_completion_token_ids,
             logprobs=merged_logprobs,
+            response_id=other.response_id or self.response_id,
+            response_model=other.response_model or self.response_model,
+            provider_metadata={**self.provider_metadata, **other.provider_metadata},
+            provider_content=(other.provider_content if other.provider_content is not None else self.provider_content),
         )
 
 
@@ -273,5 +284,5 @@ class ToolMessageChunk(ToolMessage, BaseMessageChunk):
         return ToolMessageChunk(
             role="tool",
             content=(self.content or "") + (other.content or ""),
-            tool_call_id=other.tool_call_id or self.tool_call_id
+            tool_call_id=other.tool_call_id or self.tool_call_id,
         )

@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any, Iterator
 from unittest.mock import MagicMock
 
@@ -27,21 +28,11 @@ from opentelemetry.trace import SpanKind
 
 from openjiuwen.agent_teams.observability import (
     ObservabilityConfig,
-    ObservabilityRail,
+    TeamObservabilityRail,
     init_observability,
     shutdown_observability,
 )
 from openjiuwen.agent_teams.observability.monitor_handler import OtelTeamMonitorHandler
-from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_ID,
-    AT_MEMBER_NAME,
-    AT_PLAN_APPROVED,
-    AT_TASK_STATUS,
-    GEN_AI_REQUEST_MESSAGE_COUNT,
-    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
-)
 from openjiuwen.agent_teams.schema.events import (
     BroadcastEvent,
     EventMessage,
@@ -62,7 +53,18 @@ from openjiuwen.core.runner.callback.events import (
     LLMCallEvents,
     ToolCallEvents,
 )
-
+from openjiuwen.extensions.observability.semconv import (
+    AT_AGENT_ID,
+    AT_AGENT_OUTPUT,
+    AT_MEMBER_NAME,
+    AT_PLAN_APPROVED,
+    AT_TASK_STATUS,
+    GEN_AI_REQUEST_MESSAGE_COUNT,
+    GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX,
+    LANGFUSE_OBSERVATION_INPUT,
+    LANGFUSE_OBSERVATION_OUTPUT,
+)
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 
 # ---------------------------------------------------------------------------
 # Fixtures and helpers
@@ -76,7 +78,7 @@ class _FakeUsage:
     input_tokens: int = 12
     output_tokens: int = 7
     total_tokens: int = 19
-    cache_tokens: int = 0
+    cache_read_tokens: int | None = None
     reasoning_tokens: int = 0
     model_name: str = "fake-llm-1"
 
@@ -131,6 +133,37 @@ def in_memory_exporter() -> Iterator[InMemorySpanExporter]:
     shutdown_observability()
 
 
+class _TeamRails:
+    """The two rails a team member mounts, fired in their production order.
+
+    Team tracing is a pair: ``TeamObservabilityRail`` contributes the
+    ``agentteam.*`` block (higher priority, so it runs first and the
+    contribution is parked before the span exists) and
+    ``AgentObservabilityRail`` owns the agent span itself. Tests drive the
+    hooks directly, so they need the same ordering the callback framework
+    would apply.
+    """
+
+    def __init__(self) -> None:
+        self.team = TeamObservabilityRail()
+        self.agent = AgentObservabilityRail()
+
+    async def before_task_iteration(self, ctx: Any) -> None:
+        await self.team.before_task_iteration(ctx)
+        await self.agent.before_task_iteration(ctx)
+
+    async def after_task_iteration(self, ctx: Any) -> None:
+        await self.team.after_task_iteration(ctx)
+        await self.agent.after_task_iteration(ctx)
+
+    async def before_invoke(self, ctx: Any) -> None:
+        await self.team.before_invoke(ctx)
+        await self.agent.before_invoke(ctx)
+
+    async def after_invoke(self, ctx: Any) -> None:
+        await self.agent.after_invoke(ctx)
+
+
 def _spans_by_name(exporter: InMemorySpanExporter, name: str) -> list[Any]:
     """Return all finished spans matching the given name."""
     return [s for s in exporter.get_finished_spans() if s.name == name]
@@ -142,6 +175,55 @@ def _attr(span: Any, key: str, default: Any = None) -> Any:
     return attrs.get(key, default)
 
 
+def _prompt_messages(span: Any) -> list[dict[str, Any]]:
+    """Flatten the standard GenAI input attributes into ordered messages.
+
+    Instrumentation writes one structured value per attribute; the indexed
+    per-message view is derived for Langfuse at export, not recorded here.
+    """
+    messages: list[dict[str, Any]] = []
+    raw_system = _attr(span, "gen_ai.system_instructions")
+    if raw_system:
+        text = "\n".join(
+            part.get("content", "") for part in json.loads(raw_system) if isinstance(part, dict) and part.get("content")
+        )
+        if text:
+            messages.append({"role": "system", "content": text})
+    raw_input = _attr(span, "gen_ai.input.messages")
+    for message in json.loads(raw_input) if raw_input else []:
+        flat = {key: value for key, value in message.items() if key != "parts"}
+        parts = message.get("parts", [])
+        flat.setdefault(
+            "content",
+            "\n".join(part.get("content", "") for part in parts if isinstance(part, dict) and part.get("content")),
+        )
+        tool_calls = [
+            {key: value for key, value in part.items() if key != "type"}
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "tool_call"
+        ]
+        if tool_calls:
+            flat["tool_calls"] = tool_calls
+        messages.append(flat)
+    return messages
+
+
+def _completion_text(span: Any) -> str:
+    """Read the assistant text out of the standard output attribute."""
+    raw = _attr(span, "gen_ai.output.messages")
+    if not raw:
+        return ""
+    messages = json.loads(raw)
+    if not messages:
+        return ""
+    first = messages[0]
+    if isinstance(first.get("content"), str):
+        return first["content"]
+    return "\n".join(
+        part.get("content", "") for part in first.get("parts", []) if isinstance(part, dict) and part.get("content")
+    )
+
+
 def _create_team_span(team_name: str) -> Any:
     """Create a team span, simulating what Runner._maybe_attach_observability does.
 
@@ -149,8 +231,9 @@ def _create_team_span(team_name: str) -> Any:
     UTs that directly trigger AGENT_INVOKE_INPUT must create the team
     span first, just like the runner does before calling agent.invoke/stream.
     """
-    from openjiuwen.agent_teams.observability.span_context import get_or_create_team_span
     from openjiuwen.agent_teams.observability.setup import get_tracer
+    from openjiuwen.agent_teams.observability.span_context import get_or_create_team_span
+
     return get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
 
 
@@ -197,9 +280,7 @@ def test_legacy_api_uses_external_provider_without_shutting_it_down() -> None:
             ObservabilityConfig(enabled=True, service_name="external-provider-test"),
             tracer_provider_override=provider,
         )
-        core_span = get_tracer("openjiuwen.agent_teams.observability.test").start_span(
-            "agentcore.span"
-        )
+        core_span = get_tracer("openjiuwen.agent_teams.observability.test").start_span("agentcore.span")
         core_span.end()
         shutdown_observability()
 
@@ -249,9 +330,10 @@ async def test_legacy_abort_current_llm_span_closes_once(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """A consumer can settle the Core-owned current LLM span exactly once."""
+    from opentelemetry.trace import StatusCode
+
     from openjiuwen.agent_teams.observability import abort_current_llm_span
     from openjiuwen.agent_teams.observability.span_context import get_current_llm_span
-    from opentelemetry.trace import StatusCode
 
     _create_team_span("abort-test")
     await Runner.callback_framework.trigger(
@@ -331,6 +413,8 @@ def test_recursive_initialization_is_rejected_and_rolled_back(monkeypatch: Any) 
     assert setup.get_config() is None
     assert not setup._initializing
     shutdown_observability()
+
+
 # ---------------------------------------------------------------------------
 # Callback handler: LLM streaming + reasoning + TTFT
 # ---------------------------------------------------------------------------
@@ -384,7 +468,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
         content="42",
         reasoning_content="Six times seven equals forty-two.",
         finish_reason="stop",
-        usage=_FakeUsage(reasoning_tokens=5, cache_tokens=2),
+        usage=_FakeUsage(reasoning_tokens=5, cache_read_tokens=2),
     )
     # Mirror the real streaming trigger (openai_model_client): response is the
     # content string, usage is the metadata object, passed separately. The
@@ -415,20 +499,20 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     assert _attr(span, "gen_ai.usage.prompt_tokens") == 10
     assert _attr(span, "gen_ai.usage.completion_tokens") == 2
     assert _attr(span, "gen_ai.usage.total_tokens") == 19
-    assert _attr(span, "gen_ai.usage.cache_tokens") == 2
+    assert _attr(span, "gen_ai.usage.cache_read.input_tokens") == 2
     assert _attr(span, "gen_ai.usage.reasoning_tokens") == 5
     assert (
         _attr(span, "gen_ai.usage.prompt_tokens")
         + _attr(span, "gen_ai.usage.completion_tokens")
-        + _attr(span, "gen_ai.usage.cache_tokens")
+        + _attr(span, "gen_ai.usage.cache_read.input_tokens")
         + _attr(span, "gen_ai.usage.reasoning_tokens")
     ) == _attr(span, "gen_ai.usage.total_tokens")
 
     ttft = _attr(span, "gen_ai.response.time_to_first_token_ms")
     assert ttft is not None and ttft >= 0.0, "TTFT must be recorded on the LLM span"
 
-    assert "Compute 6 * 7" in _attr(span, "langfuse.gen_ai.prompt.1.content", "")
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert "Compute 6 * 7" in _prompt_messages(span)[1]["content"]
+    assert _completion_text(span) == "42"
     assert _attr(span, "gen_ai.response.finish_reason") == "stop"
 
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
@@ -436,7 +520,7 @@ async def test_streaming_llm_call_records_ttft_and_reasoning(
     rs = reasoning_spans[0]
     # Content comes from the trigger's reasoning_content (the business-layer
     # assembled text), not from the collector stitching chunk deltas.
-    assert _attr(rs, "gen_ai.completion.0.content") == "Six times seven equals forty-two."
+    assert _completion_text(rs) == "Six times seven equals forty-two."
     assert _attr(rs, "langfuse.observation.input") == "llm reasoning"
     assert rs.parent is not None and rs.parent.span_id == span.context.span_id
     # Reasoning duration is measured from the chunk stream (first..last reasoning
@@ -491,17 +575,17 @@ async def test_streaming_llm_call_closes_through_team_span_accessor_across_conte
 
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) == 1
-    assert _attr(llm_spans[0], "langfuse.gen_ai.completion.0.content") == "hello"
+    assert _completion_text(llm_spans[0]) == "hello"
 
     team_span.end()
     span_context.clear_ambient_root_span()
 
 
 @pytest.mark.asyncio
-async def test_backend_langfuse_only_writes_langfuse_attrs(
+async def test_the_recorded_span_carries_one_shape_whatever_the_backend(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
-    """Verify backend='langfuse' (default) only writes langfuse.* attrs, not gen_ai.*."""
+    """Instrumentation is backend-agnostic; Langfuse's view is derived at export."""
     fw = Runner.callback_framework
     _create_team_span("test_team")
 
@@ -520,12 +604,15 @@ async def test_backend_langfuse_only_writes_langfuse_attrs(
     )
 
     span = _spans_by_name(in_memory_exporter, "llm.call")[0]
-    # Langfuse backend: only langfuse.* attrs should be present, gen_ai.* should be absent
-    assert _attr(span, "langfuse.gen_ai.prompt.0.content") == "test question"
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "test answer"
-    # Standard gen_ai.* attrs should NOT be present when backend="langfuse"
-    assert _attr(span, "gen_ai.prompt.0.content") is None
-    assert _attr(span, "gen_ai.completion.0.content") is None
+    assert _prompt_messages(span)[0]["content"] == "test question"
+    assert _completion_text(span) == "test answer"
+    # The prefixed mirror is gone entirely: Langfuse's view is derived from
+    # the standard attributes at export, never recorded alongside them.
+    assert not [
+        key
+        for key in dict(span.attributes or {})
+        if key.startswith(("langfuse.gen_ai.prompt.", "langfuse.gen_ai.completion."))
+    ]
 
 
 @pytest.mark.asyncio
@@ -609,7 +696,7 @@ async def test_tool_call_nests_under_agent_span(
     mock_card.name = "leader"
     mock_agent.card = mock_card
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -647,7 +734,9 @@ async def test_tool_call_nests_under_agent_span(
     await rail.after_task_iteration(ctx)
 
     # Verify: tool span is child of agent span
-    agent_spans = [s for s in in_memory_exporter.get_finished_spans() if s.name.startswith("agent.leader.task_iteration")]
+    agent_spans = [
+        s for s in in_memory_exporter.get_finished_spans() if s.name.startswith("agent.leader.task_iteration")
+    ]
     tool_spans = _spans_by_name(in_memory_exporter, "tool.calc")
     assert agent_spans, "agent span missing"
     assert tool_spans, "tool span missing"
@@ -658,8 +747,10 @@ async def test_tool_call_nests_under_agent_span(
     assert tool_span.parent.span_id == agent_span.context.span_id
 
     # Cleanup
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from opentelemetry.trace import Status, StatusCode
+
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
+
     ts = remove_team_span("test_team")
     if ts is not None and ts.is_recording():
         ts.set_status(Status(StatusCode.OK))
@@ -677,11 +768,11 @@ async def test_child_spans_inherit_member_name_from_agent_span(
     agent span is closed abnormally, the orphaned llm.call/tool spans can
     still be traced back to the teammate that produced them.
     """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     _create_team_span("test_team")
 
@@ -697,7 +788,7 @@ async def test_child_spans_inherit_member_name_from_agent_span(
     )
 
     mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -739,6 +830,7 @@ async def test_child_spans_inherit_member_name_from_agent_span(
     ts = remove_team_span("test_team")
     if ts is not None and ts.is_recording():
         from opentelemetry.trace import Status, StatusCode
+
         ts.set_status(Status(StatusCode.OK))
         ts.end()
 
@@ -755,11 +847,11 @@ async def test_reasoning_span_inherits_member_name_from_agent_span(
     the common path where the agent span is still alive (streaming within
     an iteration) and asserts the member name lands on the reasoning span.
     """
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     _create_team_span("test_team")
 
@@ -775,7 +867,7 @@ async def test_reasoning_span_inherits_member_name_from_agent_span(
     )
 
     mock_agent = _create_mock_agent(team_name="test_team", member_name="leader")
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="think step by step", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -825,6 +917,7 @@ async def test_reasoning_span_inherits_member_name_from_agent_span(
     ts = remove_team_span("test_team")
     if ts is not None and ts.is_recording():
         from opentelemetry.trace import Status, StatusCode
+
         ts.set_status(Status(StatusCode.OK))
         ts.end()
 
@@ -876,7 +969,7 @@ async def test_llm_response_with_content_and_tool_calls(
     span = llm_spans[0]
 
     # Both content and tool_calls should be recorded
-    assert "Let me check the weather for you." in _attr(span, "langfuse.gen_ai.completion.0.content", "")
+    assert "Let me check the weather for you." in _completion_text(span)
     tool_calls_attr = _attr(span, "gen_ai.tool_calls", "")
     assert tool_calls_attr, "tool_calls should be recorded"
     assert "get_weather" in tool_calls_attr
@@ -921,18 +1014,15 @@ async def test_prompt_includes_tool_calls_for_assistant_message(
 
     span = _spans_by_name(in_memory_exporter, "llm.call")[0]
 
-    # Assistant message at index 2 should have tool_calls attribute.
-    tc_attr = _attr(span, "langfuse.gen_ai.prompt.2.tool_calls", "")
-    assert tc_attr, "assistant message with tool_calls should have tool_calls attribute"
-    assert "send_message" in tc_attr
-    assert "task done" in tc_attr
+    prompts = _prompt_messages(span)
 
-    # Messages without tool_calls should NOT have the attribute.
-    for i in (0, 1, 3, 4):
-        assert _attr(span, f"langfuse.gen_ai.prompt.{i}.tool_calls", "") == "", (
-            f"message {i} ({_attr(span, f'langfuse.gen_ai.prompt.{i}.role', '')}) "
-            f"should not have tool_calls attribute"
-        )
+    # The assistant turn carries its tool calls; nothing else does.
+    assistant = next(m for m in prompts if m["role"] == "assistant")
+    assert "send_message" in json.dumps(assistant["tool_calls"], ensure_ascii=False)
+    assert "task done" in json.dumps(assistant["tool_calls"], ensure_ascii=False)
+    for message in prompts:
+        if message["role"] != "assistant":
+            assert "tool_calls" not in message, f"{message['role']} message should not carry tool_calls"
 
 
 @pytest.mark.asyncio
@@ -974,7 +1064,7 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """End-to-end Monitor handler verifies team / task / message spans."""
-    from openjiuwen.agent_teams.observability.span_context import set_team_span, remove_team_span
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span, set_team_span
 
     config = ObservabilityConfig(enabled=True, sample_rate=1.0)
     handler = OtelTeamMonitorHandler(config)
@@ -982,6 +1072,7 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
     # v13: Team span is created by on_agent_invoke_input, not by monitor handler.
     # For this test, create it manually.
     from openjiuwen.agent_teams.observability.setup import get_tracer
+
     tracer = get_tracer("test")
     team_span = tracer.start_span(name="team.alpha", kind=SpanKind.SERVER)
     team_span.set_attribute("agentteam.team.name", "alpha")
@@ -1040,6 +1131,7 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
         # Close it manually here so it appears in the exporter.
         if team_span.is_recording():
             from opentelemetry.trace import Status, StatusCode
+
             team_span.set_status(Status(StatusCode.OK))
             team_span.end()
 
@@ -1064,6 +1156,7 @@ async def test_team_monitor_handler_emits_team_and_task_spans(
         # Cleanup team span if still recording
         if team_span.is_recording():
             from opentelemetry.trace import Status, StatusCode
+
             team_span.set_status(Status(StatusCode.OK))
             team_span.end()
         remove_team_span("alpha")
@@ -1078,6 +1171,7 @@ def _new_plan_handler(team_name: str) -> tuple[OtelTeamMonitorHandler, Any]:
     """
     from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import set_team_span
+
     config = ObservabilityConfig(enabled=True, sample_rate=1.0)
     handler = OtelTeamMonitorHandler(config)
     team_span = get_tracer("test").start_span(name=f"team.{team_name}", kind=SpanKind.SERVER)
@@ -1089,6 +1183,7 @@ def _new_plan_handler(team_name: str) -> tuple[OtelTeamMonitorHandler, Any]:
 def _close_team_span(team_span: Any) -> None:
     if team_span.is_recording():
         from opentelemetry.trace import Status, StatusCode
+
         team_span.set_status(Status(StatusCode.OK))
         team_span.end()
 
@@ -1113,14 +1208,28 @@ async def test_plan_request_advances_task_status_to_planning(
     task_id = "plan-task-1"
     handler, team_span = _new_plan_handler(team)
     try:
-        await handler(EventMessage.from_event(TaskCreatedEvent(
-            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value,
-        )))
-        await handler(EventMessage.from_event(TaskPlanRequestEvent(
-            team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.PLANNING.value, plan_id="plan-1",
-            member_plan_md="/tmp/plan.md", tool_call_id="tc-1",
-        )))
+        await handler(
+            EventMessage.from_event(
+                TaskCreatedEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    status=TaskStatus.PENDING.value,
+                )
+            )
+        )
+        await handler(
+            EventMessage.from_event(
+                TaskPlanRequestEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    member_name="member-1",
+                    status=TaskStatus.PLANNING.value,
+                    plan_id="plan-1",
+                    member_plan_md="/tmp/plan.md",
+                    tool_call_id="tc-1",
+                )
+            )
+        )
 
         task_span = handler._task_spans.get(task_id)
         assert task_span is not None, "task span missing after create + plan_request"
@@ -1144,27 +1253,55 @@ async def test_plan_response_approved_and_rejected_paths(
     feedback = "计划正确，请按计划执行"
     handler, team_span = _new_plan_handler(team)
     try:
-        await handler(EventMessage.from_event(TaskCreatedEvent(
-            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
-        await handler(EventMessage.from_event(TaskPlanRequestEvent(
-            team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.PLANNING.value, plan_id="plan-1",
-            member_plan_md="/tmp/plan.md")))
+        await handler(
+            EventMessage.from_event(TaskCreatedEvent(team_name=team, task_id=task_id, status=TaskStatus.PENDING.value))
+        )
+        await handler(
+            EventMessage.from_event(
+                TaskPlanRequestEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    member_name="member-1",
+                    status=TaskStatus.PLANNING.value,
+                    plan_id="plan-1",
+                    member_plan_md="/tmp/plan.md",
+                )
+            )
+        )
 
         # approved
-        await handler(EventMessage.from_event(TaskPlanResponseEvent(
-            team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
-            member_name="member-1", feedback=feedback, tool_call_id="tc-1")))
+        await handler(
+            EventMessage.from_event(
+                TaskPlanResponseEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    approved=True,
+                    status=TaskStatus.IN_PROGRESS.value,
+                    plan_id="plan-1",
+                    member_name="member-1",
+                    feedback=feedback,
+                    tool_call_id="tc-1",
+                )
+            )
+        )
         task_span = handler._task_spans.get(task_id)
         assert _attr(task_span, AT_TASK_STATUS) == "in_progress"
         assert _attr(task_span, AT_PLAN_APPROVED) is True
 
         # rejected: status reverts to planning
-        await handler(EventMessage.from_event(TaskPlanResponseEvent(
-            team_name=team, task_id=task_id, approved=False,
-            status=TaskStatus.PLANNING.value, plan_id="plan-1",
-            member_name="member-1", feedback="需要修改")))
+        await handler(
+            EventMessage.from_event(
+                TaskPlanResponseEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    approved=False,
+                    status=TaskStatus.PLANNING.value,
+                    plan_id="plan-1",
+                    member_name="member-1",
+                    feedback="需要修改",
+                )
+            )
+        )
         assert _attr(task_span, AT_TASK_STATUS) == "planning"
         assert _attr(task_span, AT_PLAN_APPROVED) is False
     finally:
@@ -1186,16 +1323,34 @@ async def test_plan_event_span_io_split_on_semantic_boundary(
     feedback = "计划正确，请按计划执行"
     handler, team_span = _new_plan_handler(team)
     try:
-        await handler(EventMessage.from_event(TaskCreatedEvent(
-            team_name=team, task_id=task_id, status=TaskStatus.PENDING.value)))
-        await handler(EventMessage.from_event(TaskPlanRequestEvent(
-            team_name=team, task_id=task_id, member_name="member-1",
-            status=TaskStatus.PLANNING.value, plan_id="plan-1",
-            member_plan_md="/tmp/plan.md")))
-        await handler(EventMessage.from_event(TaskPlanResponseEvent(
-            team_name=team, task_id=task_id, approved=True,
-            status=TaskStatus.IN_PROGRESS.value, plan_id="plan-1",
-            member_name="member-1", feedback=feedback)))
+        await handler(
+            EventMessage.from_event(TaskCreatedEvent(team_name=team, task_id=task_id, status=TaskStatus.PENDING.value))
+        )
+        await handler(
+            EventMessage.from_event(
+                TaskPlanRequestEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    member_name="member-1",
+                    status=TaskStatus.PLANNING.value,
+                    plan_id="plan-1",
+                    member_plan_md="/tmp/plan.md",
+                )
+            )
+        )
+        await handler(
+            EventMessage.from_event(
+                TaskPlanResponseEvent(
+                    team_name=team,
+                    task_id=task_id,
+                    approved=True,
+                    status=TaskStatus.IN_PROGRESS.value,
+                    plan_id="plan-1",
+                    member_name="member-1",
+                    feedback=feedback,
+                )
+            )
+        )
 
         finished = in_memory_exporter.get_finished_spans()
         plan_req_span = next(s for s in finished if s.name == f"task.{task_id}.plan_request")
@@ -1238,11 +1393,11 @@ async def test_observability_rail_opens_and_closes_iteration_span(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """Rail emits one agent.*.task_iteration span per before/after pair."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     # Create team span (simulating Runner._maybe_attach_observability)
@@ -1261,7 +1416,7 @@ async def test_observability_rail_opens_and_closes_iteration_span(
 
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=3, loop_event=None, is_follow_up=True)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
 
@@ -1269,8 +1424,11 @@ async def test_observability_rail_opens_and_closes_iteration_span(
     await rail.after_task_iteration(ctx)
 
     # v13: span name is agent.{member}.task_iteration.{n}
-    iter_spans = [s for s in in_memory_exporter.get_finished_spans()
-                  if s.name.startswith("agent.") and "task_iteration.3" in s.name]
+    iter_spans = [
+        s
+        for s in in_memory_exporter.get_finished_spans()
+        if s.name.startswith("agent.") and "task_iteration.3" in s.name
+    ]
     assert iter_spans, "agent.*.task_iteration.3 span missing"
     span = iter_spans[0]
     assert _attr(span, "deepagent.task.iteration") == 3
@@ -1287,11 +1445,11 @@ async def test_observability_rail_marks_error_on_exception(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """When ctx.exception is set, the iteration span closes as ERROR."""
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
     )
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     # Create team span (simulating Runner._maybe_attach_observability)
@@ -1310,7 +1468,7 @@ async def test_observability_rail_marks_error_on_exception(
 
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     ctx.exception = ValueError("kaboom")
@@ -1319,8 +1477,11 @@ async def test_observability_rail_marks_error_on_exception(
     await rail.after_task_iteration(ctx)
 
     # v13: span name is agent.{member}.task_iteration.{n}
-    iter_spans = [s for s in in_memory_exporter.get_finished_spans()
-                  if s.name.startswith("agent.") and "task_iteration.1" in s.name]
+    iter_spans = [
+        s
+        for s in in_memory_exporter.get_finished_spans()
+        if s.name.startswith("agent.") and "task_iteration.1" in s.name
+    ]
     assert iter_spans
     from opentelemetry.trace import StatusCode
 
@@ -1387,8 +1548,8 @@ async def test_redaction_replaces_prompt_and_completion_text() -> None:
         )
         spans = [s for s in exporter.get_finished_spans() if s.name == "llm.call"]
         assert spans
-        prompt = _attr(spans[0], "langfuse.gen_ai.prompt.0.content", "")
-        completion = _attr(spans[0], "langfuse.gen_ai.completion.0.content", "")
+        prompt = _prompt_messages(spans[0])[0]["content"]
+        completion = _completion_text(spans[0])
         assert prompt.startswith("sha256:") and "secret" not in prompt
         assert completion.startswith("sha256:") and "secret" not in completion
     finally:
@@ -1450,6 +1611,7 @@ async def test_agent_invoke_creates_team_span(
     # Team span is closed in finalize_team_trace (called from team_runner finally)
     # For this test, we manually close it
     from opentelemetry.trace import Status, StatusCode
+
     team_span.set_status(Status(StatusCode.OK))
     team_span.end()
     remove_team_span("test_team")
@@ -1476,8 +1638,8 @@ async def test_team_span_survives_after_rail_iteration(
     """
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
-        reset_all,
         remove_team_span,
+        reset_all,
     )
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
@@ -1513,7 +1675,7 @@ async def test_team_span_survives_after_rail_iteration(
     # Step 2: Rail creates and closes agent span (iteration 1)
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="hello", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1525,18 +1687,19 @@ async def test_team_span_survives_after_rail_iteration(
     assert team_span_after.is_recording() is True, "team span should STILL be recording"
 
     # The agent span should be in finished spans
-    agent_spans_in_exporter = [s for s in in_memory_exporter.get_finished_spans()
-                               if s.name.startswith("agent.leader.task_iteration")]
+    agent_spans_in_exporter = [
+        s for s in in_memory_exporter.get_finished_spans() if s.name.startswith("agent.leader.task_iteration")
+    ]
     assert agent_spans_in_exporter, "agent iteration span should be in exporter (was ended)"
 
     # Verify parent-child relationship: agent span was child of team span
     agent_span = agent_spans_in_exporter[0]
     assert agent_span.parent is not None, "agent span should have a parent"
-    assert agent_span.parent.span_id == team_span_after.context.span_id, \
-        "agent span's parent should be team span"
+    assert agent_span.parent.span_id == team_span_after.context.span_id, "agent span's parent should be team span"
 
     # Cleanup: end team span manually
     from opentelemetry.trace import Status, StatusCode
+
     ts = remove_team_span("test_team")
     if ts is not None and ts.is_recording():
         ts.set_attribute("langfuse.observation.output", "test_cleanup")
@@ -1556,8 +1719,8 @@ async def test_two_runs_produce_two_separate_traces(
     """v15: Two Runner.run calls produce two independent traces.
     Each trace has its own team span as root.
     Team span is closed in finalize_team_trace (called from team_runner finally)."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span, get_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import get_team_span, remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -1579,7 +1742,7 @@ async def test_two_runs_produce_two_separate_traces(
     # Rail iteration
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="run 1 query", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1630,16 +1793,16 @@ async def test_two_runs_produce_two_separate_traces(
     assert len(team_spans) == 2, f"expected 2 team spans (2 traces), got {len(team_spans)}"
 
     # Verify: 2 agent spans (1 per run)
-    agent_spans = [s for s in in_memory_exporter.get_finished_spans()
-                   if s.name.startswith("agent.leader.task_iteration")]
+    agent_spans = [
+        s for s in in_memory_exporter.get_finished_spans() if s.name.startswith("agent.leader.task_iteration")
+    ]
     assert len(agent_spans) == 2, f"expected 2 agent spans, got {len(agent_spans)}"
 
     # Verify: each agent span's parent is a team span
     team_span_ids = {s.context.span_id for s in team_spans}
     for agent_span in agent_spans:
         assert agent_span.parent is not None, "agent span should have parent"
-        assert agent_span.parent.span_id in team_span_ids, \
-            "agent span parent should be a team span"
+        assert agent_span.parent.span_id in team_span_ids, "agent span parent should be a team span"
 
     remove_team_span("test_team")
 
@@ -1650,8 +1813,8 @@ async def test_member_invoke_does_not_close_team_span(
 ) -> None:
     """v15: Member's AGENT_INVOKE_OUTPUT does NOT close the team span.
     Team span is closed in finalize_team_trace (called from team_runner finally)."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span, get_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import get_team_span, remove_team_span
 
     # v21: team_name and member_name are read from agent.team_name and agent.card.name
     fw = Runner.callback_framework
@@ -1705,8 +1868,8 @@ async def test_span_tree_shape(
       │       └── tool.xxx
     No duplicate team spans, no orphan spans.
     Team span is closed in finalize_team_trace."""
-    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.agent_teams.observability.setup import finalize_team_trace
+    from openjiuwen.agent_teams.observability.span_context import remove_team_span
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -1730,7 +1893,7 @@ async def test_span_tree_shape(
     # Step 2: Rail creates agent span (iteration 1)
     # v21: mock agent with team_name and card.name
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="use the calc tool", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -1792,31 +1955,27 @@ async def test_span_tree_shape(
     assert len(agent_spans) == 1, f"expected 1 agent span, got {len(agent_spans)}"
     agent_span = agent_spans[0]
     assert agent_span.parent is not None
-    assert agent_span.parent.span_id == team_span.context.span_id, \
-        "agent span parent should be team span"
+    assert agent_span.parent.span_id == team_span.context.span_id, "agent span parent should be team span"
 
     # LLM span parent = agent span
     llm_spans = [s for s in all_spans if s.name == "llm.call"]
     assert llm_spans, "llm.call span should exist"
     llm_span = llm_spans[0]
     assert llm_span.parent is not None
-    assert llm_span.parent.span_id == agent_span.context.span_id, \
-        "llm span parent should be agent span"
+    assert llm_span.parent.span_id == agent_span.context.span_id, "llm span parent should be agent span"
 
     # Tool span parent = agent span
     tool_spans = [s for s in all_spans if s.name == "tool.calc"]
     assert tool_spans, "tool.calc span should exist"
     tool_span = tool_spans[0]
     assert tool_span.parent is not None
-    assert tool_span.parent.span_id == agent_span.context.span_id, \
-        "tool span parent should be agent span"
+    assert tool_span.parent.span_id == agent_span.context.span_id, "tool span parent should be agent span"
 
     # No orphan spans (every non-root span's parent exists)
     span_ids = {s.context.span_id for s in all_spans}
     for s in all_spans:
         if s.parent is not None:
-            assert s.parent.span_id in span_ids, \
-                f"orphan span: {s.name} parent {s.parent.span_id} not found"
+            assert s.parent.span_id in span_ids, f"orphan span: {s.name} parent {s.parent.span_id} not found"
 
     remove_team_span("test_team")
 
@@ -1854,18 +2013,19 @@ async def test_team_span_uses_agent_team_name(
     team_span = get_team_span(real_team_name)
     assert team_span is not None, "team span should be created"
     assert team_span.is_recording(), "team span should be recording"
-    assert _attr(team_span, "agentteam.team.name") == real_team_name, \
+    assert _attr(team_span, "agentteam.team.name") == real_team_name, (
         f"team span name should be '{real_team_name}', not 'agent_team'"
+    )
 
     # Verify trace name comes from span name (Langfuse auto-maps root span name)
-    assert team_span.name == f"team.{real_team_name}", \
-        f"span name should be 'team.{real_team_name}'"
+    assert team_span.name == f"team.{real_team_name}", f"span name should be 'team.{real_team_name}'"
     tags = _attr(team_span, "langfuse.trace.tags")
     assert tags is not None
     assert real_team_name in tags, f"tags should contain '{real_team_name}'"
 
     # Cleanup
     from opentelemetry.trace import Status, StatusCode
+
     team_span.set_status(Status(StatusCode.OK))
     team_span.end()
     remove_team_span(real_team_name)
@@ -1887,11 +2047,11 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     still uses delta (only new messages), but per-message ``gen_ai.prompt.{i}.*``
     attributes use the full prompt so Langfuse always shows the complete context.
     """
+    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
     from openjiuwen.agent_teams.observability.span_context import (
         get_team_span,
         remove_team_span,
     )
-    from openjiuwen.agent_teams.observability.setup import finalize_team_trace
     from openjiuwen.core.single_agent.rail.base import (
         AgentCallbackContext,
         TaskIterationInputs,
@@ -1902,7 +2062,7 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     session = MagicMock()
     session.get_session_id.return_value = "test_session"
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
 
     # --- Iteration 1: system + 3 user messages ---
     inputs1 = TaskIterationInputs(iteration=1, query="iter1", loop_event=None)
@@ -1962,25 +2122,19 @@ async def test_cross_iteration_prompt_delta_uses_team_span_count(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) >= 2
     iter2_llm = llm_spans[-1]
-    # system always emitted.
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.0.role") == "system"
+    prompts = _prompt_messages(iter2_llm)
+    assert prompts[0]["role"] == "system"
     # m1/m2/m3 ARE re-emitted in iteration 2 (full prompt, not delta).
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.role") == "user", (
-        "iteration 2 should include iteration 1's m1 (full prompt)"
-    )
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.1.content") == "m1"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.2.content") == "m2"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.3.content") == "m3"
-    # m4/m5 are also emitted (indices 4 and 5 in the full list).
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.role") == "user"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.4.content") == "m4"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.role") == "user"
-    assert _attr(iter2_llm, "langfuse.gen_ai.prompt.5.content") == "m5"
+    assert [message["content"] for message in prompts[1:]] == [
+        "m1",
+        "m2",
+        "m3",
+        "m4",
+        "m5",
+    ], "iteration 2 should carry the full prompt, not a delta"
     # observation.input still uses delta — iteration 2 only has new messages.
     input_json = _attr(iter2_llm, "langfuse.observation.input", "")
-    assert "m4" in input_json and "m5" in input_json, (
-        "observation.input should contain new messages (delta)"
-    )
+    assert "m4" in input_json and "m5" in input_json, "observation.input should contain new messages (delta)"
     assert "m1" not in input_json and "m2" not in input_json, (
         "observation.input should NOT re-emit iteration 1 messages"
     )
@@ -1998,7 +2152,7 @@ def _get_iter_span(exporter: InMemorySpanExporter, iteration: int) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
+async def test_a_long_conversation_costs_a_fixed_number_of_attributes(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """A huge prompt must not evict the top-level gen_ai.* request attrs.
@@ -2019,7 +2173,7 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
     session = MagicMock()
     session.get_session_id.return_value = "test_session"
     mock_agent = _create_mock_agent()
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     inputs = TaskIterationInputs(iteration=1, query="big", loop_event=None)
     ctx = AgentCallbackContext(agent=mock_agent, inputs=inputs)
     await rail.before_task_iteration(ctx)
@@ -2053,19 +2207,26 @@ async def test_max_attributes_cap_keeps_top_level_prompt_attrs(
     # The per-span message_count is still recorded.
     assert _attr(llm_span, GEN_AI_REQUEST_MESSAGE_COUNT) == len(big_messages)
 
-    # Only the trailing N user messages are emitted (the head is dropped by
-    # the tail-cap, NOT by evicting the top-level attrs).
+    # A long conversation costs a fixed number of attributes: the messages
+    # ride in one structured value, so nothing competes with the request's own
+    # identity attributes for the span's budget.
     attrs = dict(llm_span.attributes or {})
-    user_prompt_idxs = sorted(
-        int(k.split(".")[3])
-        for k in attrs
-        if k.startswith("langfuse.gen_ai.prompt.") and k.endswith(".role") and attrs[k] == "user"
-    )
-    # Cap = (200 - 30) // 2 = 85 writable messages; 300 user messages → 85.
-    assert len(user_prompt_idxs) == 85, f"expected 85 trailing user prompts, got {len(user_prompt_idxs)}"
-    # The kept ones are the LAST 85 (indices 216..300), not the first.
-    assert user_prompt_idxs[0] == 216, f"expected first kept user prompt at index 216, got {user_prompt_idxs[0]}"
-    assert user_prompt_idxs[-1] == 300
+    user_messages = [m for m in _prompt_messages(llm_span) if m["role"] == "user"]
+    assert len(user_messages) == 300, f"every message must be recorded, got {len(user_messages)}"
+    assert user_messages[0]["content"] == "msg-0"
+    assert user_messages[-1]["content"] == "msg-299"
+    for key in (
+        "gen_ai.request.model",
+        "gen_ai.system",
+        "gen_ai.request.message_count",
+        "openjiuwen.request.number",
+    ):
+        assert key in attrs, f"{key} must survive a long conversation"
+    # The exported span also carries Langfuse's derived per-message view, which
+    # is allowed to scale -- it is built at export, where no limit applies. What
+    # must stay fixed-size is the recorded span underneath it.
+    recorded = [key for key in attrs if not key.startswith(("gen_ai.prompt.", "gen_ai.completion."))]
+    assert len(recorded) < 200, f"the recorded span must stay far below the cap, got {len(recorded)}"
 
     remove_team_span("test_team")
 
@@ -2093,15 +2254,16 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
        path covered by ``test_concurrent_llm_requests_never_cross_write``
        is what resolves this case in production.
     """
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         LlmSpanState,
         get_active_span_tracker,
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
-    from opentelemetry.trace import SpanKind, set_span_in_context
-    from opentelemetry import context as otel_context
 
     team_span = _create_team_span("test_team")
     tracer = get_tracer("test")
@@ -2120,7 +2282,8 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
 
     set_current_agent_span(agent_a)
     llm_a = tracer.start_span(
-        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        "llm.call",
+        context=set_span_in_context(agent_a, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
     # Attach state under the production attribute name (``otel_llm_state``);
@@ -2130,7 +2293,8 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
 
     set_current_agent_span(agent_b)
     llm_b = tracer.start_span(
-        "llm.call", context=set_span_in_context(agent_b, otel_context.get_current()),
+        "llm.call",
+        context=set_span_in_context(agent_b, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
     llm_b.otel_llm_state = LlmSpanState(span=llm_b, start_ns=1_000)
@@ -2150,22 +2314,22 @@ async def test_find_llm_span_disambiguates_concurrent_workers(
     # means. Guessing by recency is what used to write one request's
     # completion onto the other's span, so peek must answer None.
     llm_older = tracer.start_span(
-        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        "llm.call",
+        context=set_span_in_context(agent_a, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
     llm_older.otel_llm_state = LlmSpanState(span=llm_older, start_ns=2_000)
 
     llm_newer = tracer.start_span(
-        "llm.call", context=set_span_in_context(agent_a, otel_context.get_current()),
+        "llm.call",
+        context=set_span_in_context(agent_a, otel_context.get_current()),
         kind=SpanKind.CLIENT,
     )
     llm_newer.otel_llm_state = LlmSpanState(span=llm_newer, start_ns=3_000)
 
     set_current_agent_span(agent_a)
     # llm_a is still open under agent_a too, so three candidates share the parent.
-    assert tracker.peek_current_llm_span() is None, (
-        "an ambiguous parent match must not be resolved by guessing"
-    )
+    assert tracker.peek_current_llm_span() is None, "an ambiguous parent match must not be resolved by guessing"
 
     # Once only one candidate is left, the parent match is unambiguous again.
     llm_newer.end()
@@ -2198,13 +2362,14 @@ async def test_concurrent_llm_requests_never_cross_write(
     Matching on the LLM call id instead keeps each request on its own span, and
     the assertions below pin prompt against completion on both.
     """
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
-    from opentelemetry.trace import SpanKind, set_span_in_context
 
     fw = Runner.callback_framework
     team_span = _create_team_span("test_team")
@@ -2283,15 +2448,15 @@ async def test_concurrent_llm_requests_never_cross_write(
     llm_spans = _spans_by_name(in_memory_exporter, "llm.call")
     assert len(llm_spans) == 2, f"expected one span per request, got {len(llm_spans)}"
 
-    by_prompt = {_attr(s, "langfuse.gen_ai.prompt.0.content"): s for s in llm_spans}
+    by_prompt = {_prompt_messages(s)[0]["content"]: s for s in llm_spans}
     assert set(by_prompt) == {"Compute 6 * 7.", "What color is this image?"}
 
     member_span = by_prompt["Compute 6 * 7."]
     probe_span = by_prompt["What color is this image?"]
 
-    assert _attr(member_span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _completion_text(member_span) == "42"
     assert _attr(member_span, "gen_ai.usage.total_tokens") == 101
-    assert _attr(probe_span, "langfuse.gen_ai.completion.0.content") == "red"
+    assert _completion_text(probe_span) == "red"
     assert _attr(probe_span, "gen_ai.usage.total_tokens") == 10
 
     # Both spans carry the id their request ran under, and the two differ.
@@ -2311,13 +2476,14 @@ async def test_stream_callbacks_resolve_across_per_frame_task_hops(
     survive that hop, otherwise the chunk and completion callbacks fall back to
     guessing — which is where a second open request gets robbed.
     """
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.core.foundation.llm.call_scope import LlmCallScope
-    from opentelemetry.trace import SpanKind, set_span_in_context
 
     fw = Runner.callback_framework
     team_span = _create_team_span("test_team")
@@ -2357,12 +2523,13 @@ async def test_stream_callbacks_resolve_across_per_frame_task_hops(
     team_span.end()
 
     finished = [
-        s for s in _spans_by_name(in_memory_exporter, "llm.call")
-        if _attr(s, "langfuse.gen_ai.prompt.0.content") == "stream please"
+        s
+        for s in _spans_by_name(in_memory_exporter, "llm.call")
+        if _prompt_messages(s)[0]["content"] == "stream please"
     ]
     assert len(finished) == 1
     span = finished[0]
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "42"
+    assert _completion_text(span) == "42"
     assert _attr(span, "gen_ai.response.time_to_first_token_ms") is not None, (
         "the first chunk callback must have reached this span"
     )
@@ -2378,15 +2545,16 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     in_memory_exporter: InMemorySpanExporter,
 ) -> None:
     """A subagent invoke span must nest under the parent agent iteration span."""
+    from opentelemetry.trace import SpanKind, set_span_in_context
+
+    from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import (
         get_current_agent_span,
         remove_team_span,
         set_current_agent_span,
     )
-    from openjiuwen.agent_teams.observability.setup import get_tracer
-    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_AGENT_NAME
-    from opentelemetry.trace import SpanKind, set_span_in_context
     from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+    from openjiuwen.extensions.observability.semconv import AT_AGENT_NAME, AT_MEMBER_NAME
 
     team_span = _create_team_span("test_team")
     tracer = get_tracer("test")
@@ -2402,16 +2570,20 @@ async def test_subagent_invoke_span_nests_under_leader_iteration(
     set_current_agent_span(leader_span)
 
     # Simulate ObservabilityRail.before_invoke for a subagent (enable_task_loop=False).
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
-        agent=type("A", (), {
-            "member_name": "explore_agent",
-            "team_name": "test_team",
-            "deep_config": type("DC", (), {"enable_task_loop": False})(),
-            "card": type("C", (), {"name": "explore_agent"})(),
-            "role": None,
-        })(),
+        agent=type(
+            "A",
+            (),
+            {
+                "member_name": "explore_agent",
+                "team_name": "test_team",
+                "deep_config": type("DC", (), {"enable_task_loop": False})(),
+                "card": type("C", (), {"name": "explore_agent"})(),
+                "role": None,
+            },
+        )(),
         exception=None,
     )
     await rail.before_invoke(ctx)
@@ -2476,9 +2648,7 @@ async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
         await fw.trigger(LLMCallEvents.LLM_OUTPUT, response="pong")
 
     try:
-        task = asyncio.get_running_loop().create_task(
-            _agent_side(), context=supervisor_ctx
-        )
+        task = asyncio.get_running_loop().create_task(_agent_side(), context=supervisor_ctx)
         await task
     finally:
         root_span.end()
@@ -2489,7 +2659,7 @@ async def test_ambient_root_span_keeps_llm_span_findable_across_tasks(
     span = llm_spans[0]
     assert span.parent is not None
     assert span.parent.span_id == root_span.context.span_id
-    assert _attr(span, "langfuse.gen_ai.completion.0.content") == "pong"
+    assert _completion_text(span) == "pong"
     assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT), "llm span exported without output"
 
 
@@ -2503,13 +2673,13 @@ async def test_flush_spares_a_non_team_named_root_span(
     up as a leaked child: reported as an ORPHAN, force-ended by the tracker, and
     ended a second time by its actual owner.
     """
+    from opentelemetry import context as otel_context
+    from opentelemetry.trace import set_span_in_context
+
     from openjiuwen.agent_teams.observability import (
         clear_ambient_team_span,
         set_ambient_team_span,
     )
-    from opentelemetry import context as otel_context
-    from opentelemetry.trace import set_span_in_context
-
     from openjiuwen.agent_teams.observability.setup import get_tracer
     from openjiuwen.agent_teams.observability.span_context import flush_child_spans
 
@@ -2568,16 +2738,20 @@ async def test_subagent_invoke_nests_under_the_dispatching_tool_span(
         inputs={"subagent_type": "explore_agent"},
     )
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
-        agent=type("A", (), {
-            "member_name": "explore_agent",
-            "team_name": "test_team",
-            "deep_config": type("DC", (), {"enable_task_loop": False})(),
-            "card": type("C", (), {"name": "explore_agent"})(),
-            "role": None,
-        })(),
+        agent=type(
+            "A",
+            (),
+            {
+                "member_name": "explore_agent",
+                "team_name": "test_team",
+                "deep_config": type("DC", (), {"enable_task_loop": False})(),
+                "card": type("C", (), {"name": "explore_agent"})(),
+                "role": None,
+            },
+        )(),
         exception=None,
     )
     await rail.before_invoke(ctx)
@@ -2626,15 +2800,19 @@ async def test_subagent_without_team_name_still_gets_an_agent_span(
     )
     set_current_agent_span(agent_span)
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     ctx = AgentCallbackContext(
         inputs=type("In", (), {"query": "list files"})(),
-        agent=type("A", (), {
-            "team_name": "",  # harness sub-agents have no team
-            "deep_config": type("DC", (), {"enable_task_loop": False})(),
-            "card": type("C", (), {"name": "explore_agent"})(),
-            "role": None,
-        })(),
+        agent=type(
+            "A",
+            (),
+            {
+                "team_name": "",  # harness sub-agents have no team
+                "deep_config": type("DC", (), {"enable_task_loop": False})(),
+                "card": type("C", (), {"name": "explore_agent"})(),
+                "role": None,
+            },
+        )(),
         exception=None,
     )
     await rail.before_invoke(ctx)
@@ -2666,25 +2844,36 @@ async def test_iterations_nest_under_the_invoke_span_of_the_same_agent(
 
     _create_team_span("test_team")
 
-    agent = type("A", (), {
-        "team_name": "test_team",
-        "deep_config": type("DC", (), {"enable_task_loop": False})(),
-        "card": type("C", (), {"name": "main_agent"})(),
-        "role": None,
-    })()
+    agent = type(
+        "A",
+        (),
+        {
+            "team_name": "test_team",
+            "deep_config": type("DC", (), {"enable_task_loop": False})(),
+            "card": type("C", (), {"name": "main_agent"})(),
+            "role": None,
+        },
+    )()
 
     def _ctx() -> AgentCallbackContext:
         # The runtime hands each hook its own callback context.
         return AgentCallbackContext(
-            inputs=type("In", (), {
-                "query": "q", "result": "r", "iteration": 1,
-                "is_follow_up": False, "loop_event": None,
-            })(),
+            inputs=type(
+                "In",
+                (),
+                {
+                    "query": "q",
+                    "result": "r",
+                    "iteration": 1,
+                    "is_follow_up": False,
+                    "loop_event": None,
+                },
+            )(),
             agent=agent,
             exception=None,
         )
 
-    rail = ObservabilityRail()
+    rail = _TeamRails()
     invoke_ctx, iter_ctx = _ctx(), _ctx()
     await rail.before_invoke(invoke_ctx)
     await rail.before_task_iteration(iter_ctx)
@@ -2723,7 +2912,7 @@ def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
         input_tokens=1000,
         output_tokens=100,
         total_tokens=1100,
-        cache_tokens=900,
+        cache_read_tokens=900,
         reasoning_tokens=40,
     )
 
@@ -2743,14 +2932,18 @@ def test_usage_keys_are_disjoint_for_langfuse_but_semconv_for_otlp() -> None:
     langfuse = _recorded("langfuse")
     assert langfuse["gen_ai.usage.prompt_tokens"] == 100  # 1000 - 900 cached
     assert langfuse["gen_ai.usage.completion_tokens"] == 60  # 100 - 40 reasoning
-    assert langfuse["gen_ai.usage.cache_tokens"] == 900
+    assert langfuse["gen_ai.usage.cache_read.input_tokens"] == 900
     assert langfuse["gen_ai.usage.reasoning_tokens"] == 40
     assert (
-        langfuse["gen_ai.usage.prompt_tokens"]
-        + langfuse["gen_ai.usage.completion_tokens"]
-        + langfuse["gen_ai.usage.cache_tokens"]
-        + langfuse["gen_ai.usage.reasoning_tokens"]
-    ) == langfuse["gen_ai.usage.total_tokens"] == 1100
+        (
+            langfuse["gen_ai.usage.prompt_tokens"]
+            + langfuse["gen_ai.usage.completion_tokens"]
+            + langfuse["gen_ai.usage.cache_read.input_tokens"]
+            + langfuse["gen_ai.usage.reasoning_tokens"]
+        )
+        == langfuse["gen_ai.usage.total_tokens"]
+        == 1100
+    )
 
     otlp = _recorded("otlp")
     assert otlp["gen_ai.usage.prompt_tokens"] == 1000
@@ -2776,14 +2969,15 @@ def test_usage_subset_larger_than_its_parent_is_left_alone() -> None:
         attributes={},
         set_attribute=lambda key, value: written.update({key: value}),
     )
-    handler = OtelCallbackHandler(
-        ObservabilityConfig(enabled=True, backend="langfuse"), tracer=MagicMock()
-    )
+    handler = OtelCallbackHandler(ObservabilityConfig(enabled=True, backend="langfuse"), tracer=MagicMock())
     handler._record_usage_attrs(
         LlmSpanState(span=span, start_ns=0),
         _FakeUsage(
-            input_tokens=10, output_tokens=5, total_tokens=15,
-            cache_tokens=0, reasoning_tokens=9,  # > completion
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
+            cache_read_tokens=0,
+            reasoning_tokens=9,  # > completion
         ),
     )
 
@@ -2827,3 +3021,277 @@ async def test_non_streaming_reasoning_span_sits_at_the_call_start(
     assert _attr(reasoning, "gen_ai.reasoning.duration_ms") is None
     assert _attr(reasoning, "gen_ai.reasoning.timing") == "unmeasured: non-streaming call"
     assert _attr(reasoning, "langfuse.observation.output") == "Six times seven."
+
+
+# ---------------------------------------------------------------------------
+# rail split: agent tier vs team contribution
+# ---------------------------------------------------------------------------
+
+
+def test_team_rail_runs_before_the_agent_rail():
+    """The contribution must be parked before the span it decorates exists.
+
+    Higher priority runs first in every hook chain, so this ordering is what
+    makes the ctx.extra handoff work in the before hooks — and it is the whole
+    reason the team layer needs no subclass of the agent rail.
+    """
+    assert TeamObservabilityRail.priority > AgentObservabilityRail.priority
+
+
+@pytest.mark.asyncio
+async def test_agent_rail_alone_produces_a_span_with_no_team_identity(in_memory_exporter):
+    """The agent tier is team-agnostic — ``agentteam.*`` comes from the team rail."""
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    mock_agent = MagicMock()
+    mock_agent.team_name = "test_team"
+    mock_agent.member_name = "leader"
+
+    rail = AgentObservabilityRail()
+    ctx = AgentCallbackContext(
+        agent=mock_agent,
+        inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+    )
+    await rail.before_task_iteration(ctx)
+    await rail.after_task_iteration(ctx)
+
+    spans = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")
+    assert len(spans) == 1
+    assert not [key for key in spans[0].attributes if key.startswith("agentteam.")]
+
+
+@pytest.mark.asyncio
+async def test_the_pair_puts_the_team_identity_back_on_the_same_span(in_memory_exporter):
+    """Mounted together, the team block lands on the agent rail's span."""
+    from openjiuwen.core.single_agent.rail.base import (
+        AgentCallbackContext,
+        TaskIterationInputs,
+    )
+
+    _create_team_span("test_team")
+    mock_agent = MagicMock()
+    mock_agent.team_name = "test_team"
+    mock_agent.member_name = "leader"
+
+    rails = _TeamRails()
+    ctx = AgentCallbackContext(
+        agent=mock_agent,
+        inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+    )
+    await rails.before_task_iteration(ctx)
+    ctx.inputs.result = "done"
+    await rails.after_task_iteration(ctx)
+
+    span = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")[0]
+    assert span.attributes[AT_AGENT_ID] == "test_team_leader"
+    assert span.attributes[AT_MEMBER_NAME] == "leader"
+    assert span.attributes[LANGFUSE_OBSERVATION_INPUT] == "hello"
+    assert span.attributes[AT_AGENT_OUTPUT] == "done"
+
+
+def test_both_rails_are_reachable_through_their_declared_element_names(in_memory_exporter):
+    """The mount wiring is what makes the split invisible to a team member.
+
+    ``core.observability`` is a harness builtin (the agent span) and
+    ``core.team.observability`` is the team contribution; the configurator
+    mounts the pair, so a member spec resolving only one of them would silently
+    lose either its agent spans or its team identity.
+    """
+    from openjiuwen.agent_teams.rails.registration import (
+        ensure_harness_elements_registered,
+    )
+    from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+    ensure_harness_elements_registered()
+
+    agent_rail = RailSpec(type="core.observability").build(language="en")
+    team_rail = RailSpec(type="core.team.observability").build(language="en")
+
+    assert isinstance(agent_rail, AgentObservabilityRail)
+    assert isinstance(team_rail, TeamObservabilityRail)
+
+
+def test_neither_rail_is_built_while_observability_is_off():
+    """Both providers are safe unconditional additions to any spec."""
+    from openjiuwen.agent_teams.rails.registration import (
+        ensure_harness_elements_registered,
+    )
+    from openjiuwen.harness.schema.deep_agent_spec import RailSpec
+
+    ensure_harness_elements_registered()
+
+    assert RailSpec(type="core.observability").build(language="en") is None
+    assert RailSpec(type="core.team.observability").build(language="en") is None
+
+
+def test_a_subagent_spec_gets_the_agent_rail_only(in_memory_exporter):
+    """A sub-agent is dispatched work, not a member — no team identity on it.
+
+    Its ``agentteam.member.name`` would be the sub-agent *type*, asserting a
+    membership it does not have. Team attribution stays structural: the
+    sub-agent span nests under the dispatching member's span.
+    """
+    from openjiuwen.agent_teams.rails.subagent_elements import (
+        _attach_observability_rail,
+    )
+
+    spec = SimpleNamespace(rails=[])
+    _attach_observability_rail(spec)
+
+    assert [type(rail) for rail in spec.rails] == [AgentObservabilityRail]
+
+    # Idempotent: wrapping the same spec twice must not stack rails.
+    _attach_observability_rail(spec)
+    assert len(spec.rails) == 1
+
+
+@pytest.mark.asyncio
+async def test_injected_system_turns_stay_in_the_chat_history(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    """gen_ai.system_instructions is for instructions given outside the history.
+
+    The stable system prompt qualifies; a prompt-attachment snapshot written
+    into the conversation does not, and keeps its own message boundary and
+    history marker inside gen_ai.input.messages.
+    """
+    fw = Runner.callback_framework
+    _create_team_span("test_team")
+
+    messages = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "go"},
+        {
+            "role": "system",
+            "content": "dynamic context",
+            "metadata": {
+                "_openjiuwen_prompt_attachment_history": True,
+                "mode": "snapshot",
+            },
+        },
+    ]
+    await fw.trigger(LLMCallEvents.LLM_INVOKE_INPUT, messages=messages, model="fake-llm-1")
+    await fw.trigger(
+        LLMCallEvents.LLM_OUTPUT,
+        messages=messages,
+        response="ok",
+        usage=_FakeUsage(),
+    )
+
+    span = _spans_by_name(in_memory_exporter, "llm.call")[0]
+
+    instructions = json.loads(_attr(span, "gen_ai.system_instructions"))
+    assert [part["content"] for part in instructions] == ["You are helpful."]
+
+    recorded = json.loads(_attr(span, "gen_ai.input.messages"))
+    assert [message["role"] for message in recorded] == ["user", "system"]
+    assert recorded[1]["openjiuwen"] == {
+        "kind": "prompt_attachment_history",
+        "mode": "snapshot",
+    }
+
+
+@pytest.mark.asyncio
+async def test_team_agent_execution_scope_binds_leader_subject(in_memory_exporter):
+    """The leader's invoke binds an ExecutionSubject stamped on its agent span."""
+    from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.schema.team import TeamRole
+    from openjiuwen.extensions.observability.semconv import (
+        OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+        OJ_EXECUTION_SUBJECT_ID,
+        OJ_EXECUTION_SUBJECT_KIND,
+    )
+
+    _create_team_span("test_team")
+    session = SimpleNamespace(get_session_id=lambda: "session-1")
+
+    card = MagicMock()
+    card.name = "leader"
+    card.id = "leader"
+    agent = TeamAgent(card)
+    # Configure the member identity through the real runtime context so the
+    # read-only configurator properties resolve naturally.
+    from openjiuwen.agent_teams.agent.blueprint import TeamAgentBlueprint
+    from openjiuwen.agent_teams.schema.team import TeamRuntimeContext, TeamSpec
+
+    ctx = TeamRuntimeContext(
+        role=TeamRole.LEADER,
+        member_name="leader",
+        display_name="Team Leader",
+    )
+    ctx.team_spec = TeamSpec(
+        team_name="test_team",
+        display_name="Test Team",
+    )
+    object.__setattr__(
+        agent._configurator,
+        "_blueprint",
+        TeamAgentBlueprint(card=card, spec=MagicMock(), ctx=ctx, language="en"),
+    )
+
+    subject = agent.observability_execution_subject("session-1")
+    assert subject.subject_id == "team-member:session-1:test_team:leader"
+    assert subject.display_name == "Team Leader"
+    assert subject.kind == "team_leader"
+
+    with agent._observability_execution_scope(session):
+        from openjiuwen.core.single_agent.rail.base import (
+            AgentCallbackContext,
+            TaskIterationInputs,
+        )
+        from openjiuwen.harness.observability.rail import AgentObservabilityRail
+
+        mock_agent = MagicMock()
+        mock_agent.team_name = "test_team"
+        mock_agent.member_name = "leader"
+        rail = AgentObservabilityRail()
+        ctx = AgentCallbackContext(
+            agent=mock_agent,
+            inputs=TaskIterationInputs(iteration=1, query="hello", loop_event=None),
+        )
+        await rail.before_task_iteration(ctx)
+        await rail.after_task_iteration(ctx)
+
+    spans = _spans_by_name(in_memory_exporter, "agent.leader.task_iteration.1")
+    assert len(spans) == 1
+    attrs = dict(spans[0].attributes)
+    assert attrs.get(OJ_EXECUTION_SUBJECT_KIND) == "team_leader"
+    assert attrs.get(OJ_EXECUTION_SUBJECT_ID) == "team-member:session-1:test_team:leader"
+    assert attrs.get(OJ_EXECUTION_SUBJECT_DISPLAY_NAME) == "Team Leader"
+    # The member agent span carries the subject block; OJ_TEAM_* and the team
+    # mode stamp live on the team root span created by get_or_create_team_span.
+
+
+def test_team_span_carries_mode_and_team_identity_attributes(in_memory_exporter):
+    """The team root span records agent mode and Team identity for routing."""
+    from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+    from openjiuwen.extensions.observability.semconv import (
+        OJ_AGENT_MODE,
+        OJ_SESSION_ID,
+        OJ_TEAM_ID,
+        OJ_TEAM_NAME,
+        OJ_TEAM_SESSION_ID,
+    )
+
+    token = set_session_id("session-1")
+    try:
+        _create_team_span("test_team")
+    finally:
+        reset_session_id(token)
+
+    from openjiuwen.agent_teams.observability.span_context import finalize_trace
+
+    finalize_trace("test_team")
+
+    spans = _spans_by_name(in_memory_exporter, "team.test_team")
+    assert len(spans) >= 1
+    attrs = dict(spans[-1].attributes)
+    assert attrs.get(OJ_AGENT_MODE) == "team"
+    assert attrs.get(OJ_TEAM_ID) == "test_team"
+    assert attrs.get(OJ_TEAM_NAME) == "test_team"
+    assert attrs.get(OJ_TEAM_SESSION_ID) == "session-1"
+    assert attrs.get(OJ_SESSION_ID) == "session-1"

@@ -3,8 +3,8 @@
 
 """Manifest declarations for the built-in team rails.
 
-The seven team rails (tool / policy / workspace / tool-approval / plan-mode /
-reliability / debate-round-cap) plus ``core.observability`` are declared here as
+The team rails (tool / policy / workspace / tool-approval / plan-mode /
+reliability / debate-round-cap) plus ``core.team.observability`` are declared here as
 ``@harness_element`` factories so they assemble through the same provider
 path as every other DeepAgent capability — no more hand-``new`` +
 ``TeamHarness.build`` named params + closure ``add_rail``.
@@ -25,9 +25,9 @@ cached. State that must survive a rebuild lives in a reused object injected on
 the build context (e.g. ``reliability_components``) and passed into the fresh
 rail's constructor. Returning ``None`` gates the rail out for this member.
 """
+
 from __future__ import annotations
 
-from importlib.util import find_spec
 from typing import Any, Optional
 
 from openjiuwen.agent_teams.harness.manifest import (
@@ -50,11 +50,16 @@ from openjiuwen.agent_teams.rails.team_context import (
     get_team_backend,
     get_workspace_manager,
 )
+from openjiuwen.harness.manifest.builtin_elements import (
+    OBSERVABILITY,
+    observability_dependency_installed,
+)
 
 # Element names (the RailSpec ``type`` values). The team rails live under the
 # ``core.team.*`` namespace — the ``core.`` layer prefix plus a ``team`` group —
-# parallel to a platform's ``swarm.*`` namespace. ``core.observability`` is a
-# team-layer rail (team_name / TeamRole / session_id) declared alongside them.
+# parallel to a platform's ``swarm.*`` namespace. The agent-tier span itself is
+# not declared here: it is ``core.observability``, a harness builtin every agent
+# gets, and ``core.team.observability`` only layers the team identity onto it.
 TEAM_TOOL = "core.team.tool"
 TEAM_POLICY = "core.team.policy"
 TEAM_WORKSPACE = "core.team.workspace"
@@ -62,28 +67,7 @@ TEAM_TOOL_APPROVAL = "core.team.tool_approval"
 TEAM_PLAN_MODE = "core.team.plan_mode"
 TEAM_RELIABILITY = "core.team.reliability"
 TEAM_DEBATE_ROUND_CAP = "core.team.debate_round_cap"
-OBSERVABILITY = "core.observability"
-
-
-def observability_dependency_installed() -> bool:
-    """Report whether the optional ``observability`` extra is importable.
-
-    ``opentelemetry`` ships only in the ``observability`` extra, so a
-    default install has no tracing stack at all. Every module of the
-    observability package imports it at module scope — including
-    ``maybe_observability_rail``, the "is observability on" guard itself —
-    so the dependency must be probed *before* the package is touched;
-    catching the failure inside it is not possible. Probing the SDK covers
-    the API too (the SDK depends on it) and matches what
-    ``setup.is_initialized`` needs.
-
-    Returns:
-        True when the tracing stack can be imported, False otherwise.
-    """
-    try:
-        return find_spec("opentelemetry.sdk") is not None
-    except (ImportError, ValueError):
-        return False
+TEAM_OBSERVABILITY = "core.team.observability"
 
 
 # ---------------------------------------------------------------------------
@@ -398,31 +382,36 @@ def build_team_debate_round_cap_rail(params: dict[str, Any], context: Any) -> An
 
 
 # ---------------------------------------------------------------------------
-# core.observability — ObservabilityRail
+# core.team.observability — TeamObservabilityRail
 # ---------------------------------------------------------------------------
 
 
 @harness_element(
     kind=ElementKind.RAIL,
-    name=OBSERVABILITY,
-    description="Creates per-iteration agent spans for observability tracing.",
+    name=TEAM_OBSERVABILITY,
+    description="Layers the team identity onto the agent span (pairs with core.observability).",
 )
-def build_observability_rail(params: dict[str, Any], context: Any) -> Any:
-    """Build an ObservabilityRail when observability is available and on.
+def build_team_observability_rail(params: dict[str, Any], context: Any) -> Any:
+    """Build a TeamObservabilityRail when observability is available and on.
 
     Two gates, in order: the optional ``observability`` extra must be
     installed (``observability_dependency_installed``), and observability
-    must be initialized (``maybe_observability_rail``, the shared guard).
+    must be initialized (``maybe_team_observability_rail``, the shared guard).
     Returns ``None`` for either, making this a safe unconditional addition
     to any spec's ``rails`` list — the provider handles the on/off logic
     itself.
+
+    This rail contributes only the ``agentteam.*`` block and the trace output;
+    the agent span it annotates comes from ``core.observability``, which every
+    team member spec mounts alongside it.
     """
+    del params, context
     if not observability_dependency_installed():
         return None
 
-    from openjiuwen.agent_teams.observability.rail import maybe_observability_rail
+    from openjiuwen.agent_teams.observability.rail import maybe_team_observability_rail
 
-    return maybe_observability_rail()
+    return maybe_team_observability_rail()
 
 
 __all__ = [
@@ -433,6 +422,7 @@ __all__ = [
     "TEAM_PLAN_MODE",
     "TEAM_RELIABILITY",
     "TEAM_DEBATE_ROUND_CAP",
+    "TEAM_OBSERVABILITY",
     "OBSERVABILITY",
     "observability_dependency_installed",
 ]

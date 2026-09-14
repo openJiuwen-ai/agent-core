@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/` |
-| 最近一次修订日期 | 2026-06-27 |
-| 关联 feature | F_09_team-stream-logging.md |
+| 关联模块 | `openjiuwen/agent_teams/monitor/`、`openjiuwen/agent_teams/observability/`（agent 层 span 在 `openjiuwen/harness/observability/`） |
+| 最近一次修订日期 | 2026-08-17 |
+| 关联 feature | F_09_team-stream-logging.md、F_37_observability-otel-trace.md、F_83_agent-tier-rail-split.md |
 
 ## 范围 / 边界
 
@@ -20,11 +20,11 @@
    - `setup.py`：`init_observability/shutdown_observability` 管理 OTel 生命周期
    - `config.py`：`ObservabilityConfig` 配置类
    - `span_context.py`：ContextVar 管理 span 上下文 + `cascade_close_children`（唯一级联排空来源）
-   - `rail.py`：`AgentSpanScope`（agent span 完整生命周期）+ `before_task_iteration`/`after_task_iteration`（多轮 member）+ `before_invoke`/`after_invoke`（单轮 subagent 兜底）
+   - `rail.py`：`TeamObservabilityRail`——team 专有增量（`agentteam.*` 身份块 + leader 轮次结果打到 team root）。agent span 本身不在这里：它归 `harness/observability/rail.py` 的 `AgentObservabilityRail`（`AgentSpanScope` 完整生命周期 + `before/after_task_iteration` 多轮 member + `before/after_invoke` 单轮 subagent 兜底），单 agent 与 team 成员共用同一份实现，team 层通过 `AgentSpanDecoration` 叠加而不是继承
    - `callback_handler.py`：LLM/Tool span 生命周期，tool span input 自动剥离 session
    - `monitor_handler.py`：Team/Task/Member/Message span 生命周期，`_event_span_io` 按事件语义拆分 input/output
    - `semconv.py` / `redaction.py`：属性常量 + 脱敏
-   - `subagent_elements.py`：在 team 侧 subagent 工厂注入 ObservabilityRail（idempotent）
+   - `subagent_elements.py`：在 team 侧 subagent 工厂只注入 agent rail（`maybe_agent_observability_rail()`，idempotent）——subagent 不是 member，不挂 team rail，团队归属靠嵌在 member span 下体现
 
   Span 树结构、生命周期、ActiveSpanTracker 详细设计见 [F_37_observability-otel-trace.md](../features/F_37_observability-otel-trace.md)。
 

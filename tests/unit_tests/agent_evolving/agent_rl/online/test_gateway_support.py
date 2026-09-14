@@ -6,7 +6,10 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -133,7 +136,7 @@ class _FakeRedis:
         members = [member for member, _ in sorted(bucket.items(), key=lambda item: item[1])]
         if end == -1:
             end = len(members) - 1
-        return members[start:end + 1]
+        return members[start : end + 1]
 
     async def mget(self, keys: list[str]) -> list[str | None]:
         return [self._kv.get(key) for key in keys]
@@ -250,18 +253,26 @@ async def test_inference_notifier_uses_async_client():
 async def test_judge_scorer_retries_length_and_sanitizes_prompt():
     from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
 
-    first = _FakeResponse(payload={
-        "choices": [{
-            "finish_reason": "length",
-            "message": {"content": "<tag>bad</tag>"},
-        }],
-    })
-    second = _FakeResponse(payload={
-        "choices": [{
-            "finish_reason": "stop",
-            "message": {"content": '{"overall": 8, "reason": "ok"}'},
-        }],
-    })
+    first = _FakeResponse(
+        payload={
+            "choices": [
+                {
+                    "finish_reason": "length",
+                    "message": {"content": "<tag>bad</tag>"},
+                }
+            ],
+        }
+    )
+    second = _FakeResponse(
+        payload={
+            "choices": [
+                {
+                    "finish_reason": "stop",
+                    "message": {"content": '{"overall": 8, "reason": "ok"}'},
+                }
+            ],
+        }
+    )
     client = _FakeAsyncClient(response=first)
     client.response = None
 
@@ -312,10 +323,10 @@ def test_online_trajectory_converter_reads_prompt_and_response_token_ids_from_re
     trajectory = _canonical_llm_trajectory(
         "traj-1",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
             "provider_response_json": {
                 "prompt_token_ids": [1, 2, 3],
                 "choices": [{"token_ids": [4, 5], "logprobs": [-0.1, -0.2]}],
@@ -337,10 +348,10 @@ async def test_online_trajectory_converter_preserves_trace_plain_meta():
     trajectory = _canonical_llm_trajectory(
         "trace-meta-converter",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
         },
         resource_attrs={
             "openjiuwen.trajectory.source": "rl_online",
@@ -365,10 +376,10 @@ def test_online_trajectory_converter_normalizes_streaming_logprobs_for_gateway()
     trajectory = _canonical_llm_trajectory(
         "traj-stream",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [{"role": "user", "content": "hello"}],
+                [{"role": "assistant", "content": "pong"}],
+            ),
             "evolution.rl.prompt_token_ids": [1, 2, 3],
             "evolution.rl.completion_token_ids": [4, 5],
             "evolution.rl.logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
@@ -389,12 +400,13 @@ def test_online_trajectory_converter_reads_detached_messages():
     trajectory = _canonical_llm_trajectory(
         "traj-detached-message",
         {
-            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-            f"{semconv.GEN_AI_PROMPT}.1.role": "assistant",
-            f"{semconv.GEN_AI_PROMPT}.1.content": "previous turn",
-            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-            f"{semconv.GEN_AI_COMPLETION}.0.content": "pong",
+            **write_llm_exchange(
+                [
+                    {"role": "user", "content": "hello"},
+                    {"role": "assistant", "content": "previous turn"},
+                ],
+                [{"role": "assistant", "content": "pong"}],
+            ),
         },
     )
 
@@ -416,13 +428,15 @@ async def test_stream_chat_response_preserves_runtime_token_fields():
         "model": "m1",
         "prompt_token_ids": [1, 2, 3],
         "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
-        "choices": [{
-            "index": 0,
-            "finish_reason": "stop",
-            "token_ids": [4, 5],
-            "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
-            "message": {"role": "assistant", "content": "pong"},
-        }],
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "stop",
+                "token_ids": [4, 5],
+                "logprobs": {"content": [{"logprob": -0.1}, {"logprob": -0.2}]},
+                "message": {"role": "assistant", "content": "pong"},
+            }
+        ],
     }
 
     chunks = []

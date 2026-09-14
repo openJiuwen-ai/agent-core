@@ -19,8 +19,8 @@ from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import (
-    llm_logger,
     LogEventType,
+    llm_logger,
 )
 from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
@@ -48,6 +48,7 @@ class BaseModelClient(ABC):
 
     All Model Client implementations must inherit from this class and implement the abstract methods.
     """
+
     __client_name__: str = None
     __client_type__: str = "llm"
 
@@ -65,7 +66,7 @@ class BaseModelClient(ABC):
 
         # Skip registration for BaseClient itself (though this method won't be called for BaseClient)
         # Check if client name and type are defined
-        if hasattr(cls, '__client_name__') and hasattr(cls, '__client_type__'):
+        if hasattr(cls, "__client_name__") and hasattr(cls, "__client_type__"):
             # Automatically register with the global registry
             if cls.__client_name__ is not None:  # Ensure it's actually set
                 get_client_registry().register_class(cls)
@@ -148,6 +149,147 @@ class BaseModelClient(ABC):
         return 0
 
     @staticmethod
+    def _cache_usage_metadata(obj: Any) -> dict[str, Any]:
+        """Normalize cache read/miss/write fields while preserving zero values.
+
+        The legacy ``cache_tokens`` field is retained as a compatibility read
+        value, but it is not authoritative because providers disagree on
+        whether it represents cache hits or cache writes.
+        """
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        def _to_int(value: Any) -> int | None:
+            if value is None or isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value
+            if isinstance(value, float):
+                return int(value) if value.is_integer() else None
+            if isinstance(value, str):
+                text = value.strip()
+                if text.startswith(("+", "-")):
+                    digits = text[1:]
+                else:
+                    digits = text
+                if digits.isdigit():
+                    return int(text)
+            return None
+
+        def _first(paths: tuple[tuple[str, ...], ...]) -> int | None:
+            for path in paths:
+                value = _to_int(_get_path(obj, path))
+                if value is not None:
+                    return value
+            return None
+
+        read_tokens = _first(
+            (
+                ("prompt_tokens_details", "cached_tokens"),
+                ("promptTokensDetails", "cachedTokens"),
+                ("input_tokens_details", "cached_tokens"),
+                ("input_token_details", "cached_tokens"),
+                ("inputTokensDetails", "cachedTokens"),
+                ("inputTokenDetails", "cachedTokens"),
+                ("usageMetadata", "cachedContentTokenCount"),
+                ("usage_metadata", "cached_content_token_count"),
+                ("prompt_cache_hit_tokens",),
+                ("cache_read_input_tokens",),
+                ("cachedContentTokenCount",),
+                ("cached_content_token_count",),
+                ("cache_read_tokens",),
+                ("cached_tokens",),
+                ("cache_hit_tokens",),
+                ("cached_input_tokens",),
+                ("prompt_cache_tokens",),
+                ("prompt_cached_tokens",),
+            )
+        )
+        legacy_read_tokens = _first((("cache_tokens",),))
+        legacy_read = read_tokens is None and legacy_read_tokens is not None
+        if read_tokens is None:
+            read_tokens = legacy_read_tokens
+        miss_tokens = _first(
+            (
+                ("prompt_cache_miss_tokens",),
+                ("cache_miss_tokens",),
+                ("cache_miss_input_tokens",),
+                ("uncached_tokens",),
+            )
+        )
+        write_tokens = _first(
+            (
+                ("cache_write_tokens",),
+                ("cache_creation_input_tokens",),
+                ("cache_creation_tokens",),
+            )
+        )
+        has_cache_usage = any(value is not None for value in (read_tokens, miss_tokens, write_tokens))
+        return {
+            "cache_read_tokens": read_tokens,
+            "cache_miss_tokens": miss_tokens,
+            "cache_write_tokens": write_tokens,
+            "cache_status": "observed" if has_cache_usage else None,
+            "cache_source": "provider_usage" if has_cache_usage else None,
+            # ``cache_tokens`` is retained as a compatibility read value, but
+            # providers disagree on whether it means cache hits or writes.
+            "cache_authoritative": has_cache_usage and not legacy_read,
+        }
+
+    @staticmethod
+    def _extract_cache_creation_tokens(obj: Any) -> int | None:
+        """Extract cache-write tokens only when the provider exposes them."""
+
+        def _get_value(source: Any, key: str) -> Any:
+            if source is None:
+                return None
+            if isinstance(source, dict):
+                return source.get(key)
+            return getattr(source, key, None)
+
+        def _get_path(source: Any, path: tuple[str, ...]) -> Any:
+            current = source
+            for key in path:
+                current = _get_value(current, key)
+                if current is None:
+                    return None
+            return current
+
+        paths = (
+            ("input_tokens_details", "cache_creation_tokens"),
+            ("input_token_details", "cache_creation_tokens"),
+            ("prompt_tokens_details", "cache_creation_tokens"),
+        )
+        fields = (
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cache_creation_tokens",
+            "cache_write_tokens",
+        )
+        values = (_get_path(obj, path) for path in paths)
+        for value in (*values, *(_get_value(obj, field) for field in fields)):
+            if value is None or isinstance(value, bool):
+                continue
+            try:
+                return max(int(float(value)), 0)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
     def _extract_reasoning_tokens(obj: Any) -> int:
         """Extract reasoning/thinking token count from provider usage metadata.
 
@@ -216,31 +358,31 @@ class BaseModelClient(ABC):
         Returns:
             tuple: (input_cost, output_cost, total_cost)
         """
-        input_cost = 0.
-        output_cost = 0.
-        total_cost = 0.
-        cost_info = getattr(obj, 'cost', None) or getattr(obj, 'usage_cost', None)
-        cost_details = getattr(obj, 'cost_details', None)
+        input_cost = 0.0
+        output_cost = 0.0
+        total_cost = 0.0
+        cost_info = getattr(obj, "cost", None) or getattr(obj, "usage_cost", None)
+        cost_details = getattr(obj, "cost_details", None)
         if cost_info:
             if isinstance(cost_info, (int, float)):
                 total_cost = float(cost_info)
             else:
-                input_cost = float(getattr(cost_info, 'input_cost', 0) or
-                                   getattr(cost_info, 'prompt_cost', 0) or 0)
-                output_cost = float(getattr(cost_info, 'output_cost', 0) or
-                                    getattr(cost_info, 'completion_cost', 0) or 0)
-                total_cost = float(getattr(cost_info, 'total_cost', 0) or 0)
+                input_cost = float(getattr(cost_info, "input_cost", 0) or getattr(cost_info, "prompt_cost", 0) or 0)
+                output_cost = float(
+                    getattr(cost_info, "output_cost", 0) or getattr(cost_info, "completion_cost", 0) or 0
+                )
+                total_cost = float(getattr(cost_info, "total_cost", 0) or 0)
                 if not total_cost:
                     total_cost = input_cost + output_cost
         if cost_details and not input_cost and not output_cost:
             if isinstance(cost_details, dict):
-                input_cost = float(cost_details.get('upstream_inference_prompt_cost', 0) or 0)
-                output_cost = float(cost_details.get('upstream_inference_completions_cost', 0) or 0)
-                detail_total = float(cost_details.get('upstream_inference_cost', 0) or 0)
+                input_cost = float(cost_details.get("upstream_inference_prompt_cost", 0) or 0)
+                output_cost = float(cost_details.get("upstream_inference_completions_cost", 0) or 0)
+                detail_total = float(cost_details.get("upstream_inference_cost", 0) or 0)
             else:
-                input_cost = float(getattr(cost_details, 'upstream_inference_prompt_cost', 0) or 0)
-                output_cost = float(getattr(cost_details, 'upstream_inference_completions_cost', 0) or 0)
-                detail_total = float(getattr(cost_details, 'upstream_inference_cost', 0) or 0)
+                input_cost = float(getattr(cost_details, "upstream_inference_prompt_cost", 0) or 0)
+                output_cost = float(getattr(cost_details, "upstream_inference_completions_cost", 0) or 0)
+                detail_total = float(getattr(cost_details, "upstream_inference_cost", 0) or 0)
             if not total_cost:
                 total_cost = detail_total or (input_cost + output_cost)
         return input_cost, output_cost, total_cost
@@ -258,16 +400,23 @@ class BaseModelClient(ABC):
         client_name = self._get_client_name()
 
         if not self.model_client_config.api_key:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg=f"model client config api_key is required for {client_name}.")
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg=f"model client config api_key is required for {client_name}.",
+            )
         if not self.model_client_config.api_base:
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg=f"model client config api_base is required for {client_name}.")
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg=f"model client config api_base is required for {client_name}.",
+            )
 
-        if self.model_client_config.verify_ssl is not None and not isinstance(self.model_client_config.verify_ssl,
-                                                                              bool):
-            raise build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR,
-                              error_msg="model client config verify_ssl must be a boolean type.")
+        if self.model_client_config.verify_ssl is not None and not isinstance(
+            self.model_client_config.verify_ssl, bool
+        ):
+            raise build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg="model client config verify_ssl must be a boolean type.",
+            )
 
         # NOTE: ssl_cert is no longer mandatory when verify_ssl=True. With the
         # updated SslUtils.create_strict_ssl_context, omitting ssl_cert makes
@@ -296,8 +445,9 @@ class BaseModelClient(ABC):
         """
         # If it's a string, convert to user message
         if not messages:
-            raise build_error(StatusCode.MODEL_INVOKE_PARAM_ERROR,
-                              error_msg="The message sent to the llm cannot be empty.")
+            raise build_error(
+                StatusCode.MODEL_INVOKE_PARAM_ERROR, error_msg="The message sent to the llm cannot be empty."
+            )
         if isinstance(messages, str):
             return [{"role": "user", "content": messages}]
 
@@ -333,21 +483,15 @@ class BaseModelClient(ABC):
                         # debate _DebateInvocationMeta not yet popped by the
                         # tool); the warning preserves visibility either way.
                         llm_logger.warning(
-                            "[convert_messages] non-str tool arguments coerced: "
-                            "tool=%r call_id=%r arg_type=%s",
+                            "[convert_messages] non-str tool arguments coerced: tool=%r call_id=%r arg_type=%s",
                             tc.name,
                             tc.id,
                             type(arguments).__name__,
                         )
                         arguments = json.dumps(arguments, ensure_ascii=False, default=str)
-                    tool_calls_list.append({
-                        "id": tc.id,
-                        "type": tc.type,
-                        "function": {
-                            "name": tc.name,
-                            "arguments": arguments
-                        }
-                    })
+                    tool_calls_list.append(
+                        {"id": tc.id, "type": tc.type, "function": {"name": tc.name, "arguments": arguments}}
+                    )
                 msg_dict["tool_calls"] = tool_calls_list
 
             # Emit ``reasoning_content`` for all assistant turns: use stored value
@@ -384,7 +528,7 @@ class BaseModelClient(ABC):
         result = []
         for tool in tools:
             # Handle parameters (could be dict or BaseModel)
-            if hasattr(tool.parameters, 'model_dump'):
+            if hasattr(tool.parameters, "model_dump"):
                 # If it's a Pydantic BaseModel
                 parameters = tool.parameters.model_dump()
             else:
@@ -393,28 +537,24 @@ class BaseModelClient(ABC):
 
             tool_dict = {
                 "type": tool.type,
-                "function": {
-                    "name": tool.name,
-                    "description": tool.description,
-                    "parameters": parameters
-                }
+                "function": {"name": tool.name, "description": tool.description, "parameters": parameters},
             }
             result.append(tool_dict)
 
         return result
 
     def _build_request_params(
-            self,
-            *,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            tools: Union[List[ToolInfo], List[dict], None],
-            temperature: Optional[float],
-            top_p: Optional[float],
-            model: Optional[str],
-            stop: Union[Optional[str], None],
-            max_tokens: Optional[int],
-            stream: bool,
-            **kwargs
+        self,
+        *,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        tools: Union[List[ToolInfo], List[dict], None],
+        temperature: Optional[float],
+        top_p: Optional[float],
+        model: Optional[str],
+        stop: Union[Optional[str], None],
+        max_tokens: Optional[int],
+        stream: bool,
+        **kwargs,
     ) -> Dict[str, Any]:
         """Build OpenAI-compatible chat completion request parameters.
 
@@ -425,7 +565,7 @@ class BaseModelClient(ABC):
         if model is None and self.model_config.model_name is None:
             raise build_error(
                 StatusCode.MODEL_CONFIG_ERROR.code,
-                StatusCode.MODEL_CONFIG_ERROR.errmsg.format(error_msg="The model cannot be None.")
+                StatusCode.MODEL_CONFIG_ERROR.errmsg.format(error_msg="The model cannot be None."),
             )
 
         # Convert message format
@@ -474,12 +614,16 @@ class BaseModelClient(ABC):
 
         # Add other parameters (filter out internal parameters)
         # parser and output_parser are for internal use and should not be passed to model API
-        internal_params = {"parser", "output_parser"}
+        internal_params = {
+            "parser",
+            "output_parser",
+            "request_purpose",
+            "context_operation_id",
+        }
 
         # Get all fields from model_config (including extra fields)
         extra_params = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
-            exclude_none=True
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"}, exclude_none=True
         )
         params.update(extra_params)
 
@@ -501,7 +645,7 @@ class BaseModelClient(ABC):
                 is_stream=stream,
                 stop=final_stop,
                 metadata={"client_name": client_name},
-                extra_params=extra_params
+                extra_params=extra_params,
             )
         else:
             llm_logger.info(
@@ -516,25 +660,25 @@ class BaseModelClient(ABC):
                 max_tokens=final_max_tokens,
                 is_stream=stream,
                 metadata={"client_name": client_name},
-                extra_params=extra_params
+                extra_params=extra_params,
             )
 
         return params
 
     @abstractmethod
     async def invoke(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AssistantMessage:
         """Asynchronously invoke LLM
 
@@ -557,18 +701,18 @@ class BaseModelClient(ABC):
 
     @abstractmethod
     async def stream(
-            self,
-            messages: Union[str, List[BaseMessage], List[dict]],
-            *,
-            tools: Union[List[ToolInfo], List[dict], None] = None,
-            temperature: Optional[float] = None,
-            top_p: Optional[float] = None,
-            model: str = None,
-            max_tokens: Optional[int] = None,
-            stop: Union[Optional[str], None] = None,
-            output_parser: Optional[BaseOutputParser] = None,
-            timeout: float = None,
-            **kwargs
+        self,
+        messages: Union[str, List[BaseMessage], List[dict]],
+        *,
+        tools: Union[List[ToolInfo], List[dict], None] = None,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        model: str = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+        output_parser: Optional[BaseOutputParser] = None,
+        timeout: float = None,
+        **kwargs,
     ) -> AsyncIterator[AssistantMessageChunk]:
         """Asynchronously stream invoke LLM
 
@@ -591,17 +735,17 @@ class BaseModelClient(ABC):
 
     @abstractmethod
     async def generate_image(
-            self,
-            messages: List[UserMessage],
-            *,
-            model: Optional[str] = None,
-            size: Optional[str] = "1664*928",
-            negative_prompt: Optional[str] = None,
-            n: Optional[int] = 1,
-            prompt_extend: bool = True,
-            watermark: bool = False,
-            seed: int = 0,
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        size: Optional[str] = "1664*928",
+        negative_prompt: Optional[str] = None,
+        n: Optional[int] = 1,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        seed: int = 0,
+        **kwargs,
     ) -> ImageGenerationResponse:
         """Generate image from text prompt (text-to-image or text+image-to-image)
 
@@ -622,13 +766,13 @@ class BaseModelClient(ABC):
 
     @abstractmethod
     async def generate_speech(
-            self,
-            messages: List[UserMessage],
-            *,
-            model: Optional[str] = None,
-            voice: Optional[str] = "Cherry",
-            language_type: Optional[str] = "Auto",
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        model: Optional[str] = None,
+        voice: Optional[str] = "Cherry",
+        language_type: Optional[str] = "Auto",
+        **kwargs,
     ) -> AudioGenerationResponse:
         """Generate speech audio from text
 
@@ -648,20 +792,20 @@ class BaseModelClient(ABC):
 
     @abstractmethod
     async def generate_video(
-            self,
-            messages: List[UserMessage],
-            *,
-            img_url: Optional[str] = None,
-            audio_url: Optional[str] = None,
-            model: Optional[str] = None,
-            size: Optional[str] = None,
-            resolution: Optional[str] = None,
-            duration: Optional[int] = 5,
-            prompt_extend: bool = True,
-            watermark: bool = False,
-            negative_prompt: Optional[str] = None,
-            seed: Optional[int] = None,
-            **kwargs
+        self,
+        messages: List[UserMessage],
+        *,
+        img_url: Optional[str] = None,
+        audio_url: Optional[str] = None,
+        model: Optional[str] = None,
+        size: Optional[str] = None,
+        resolution: Optional[str] = None,
+        duration: Optional[int] = 5,
+        prompt_extend: bool = True,
+        watermark: bool = False,
+        negative_prompt: Optional[str] = None,
+        seed: Optional[int] = None,
+        **kwargs,
     ) -> VideoGenerationResponse:
         """Generate video from text prompt (text-to-video or image-to-video)
 

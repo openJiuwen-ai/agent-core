@@ -10,6 +10,7 @@ Main classes included:
 
 Created on: 2025-11-25
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -21,18 +22,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from functools import wraps
 from typing import (
+    TYPE_CHECKING,
     Any,
-    Union,
+    Awaitable,
+    Callable,
     Dict,
     List,
     Optional,
-    Callable,
-    Awaitable,
-    TYPE_CHECKING,
+    Union,
 )
 
 from openjiuwen.core.common.logging import logger
-
 from openjiuwen.core.context_engine import ModelContext
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.session.agent import Session
@@ -125,6 +125,7 @@ def log_rail_init_breakdown(entries: List[tuple]) -> None:
 
 class RunKind(Enum):
     """Run kind enumeration for different execution modes."""
+
     NORMAL = "normal"
     HEARTBEAT = "heartbeat"
     CRON = "cron"
@@ -133,6 +134,7 @@ class RunKind(Enum):
 
 class HeartbeatReason(Enum):
     """Heartbeat trigger reason."""
+
     INTERVAL = "interval"
     MANUAL = "manual"
 
@@ -140,6 +142,7 @@ class HeartbeatReason(Enum):
 @dataclass
 class RunContext:
     """Structured runtime context for heartbeat."""
+
     reason: Optional[HeartbeatReason] = None
     session_id: Optional[str] = None
     context_mode: Optional[str] = None
@@ -164,6 +167,7 @@ class InvokeInputs:
         run_context: Structured runtime context
         parent_session_id: Optional parent session id for lineage-aware runtimes
     """
+
     query: Optional[str, InteractiveInput]
     conversation_id: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
@@ -195,11 +199,21 @@ class ModelCallInputs:
         tools: Optional tool definitions
         model_context: Current ModelContext used to build the final LLM window
         response: LLM response (filled after call)
+        context_usage_report: Request-local report for the final context window
+        context_usage_request_id: Request-local context usage event id
+        context_usage_sequence: Request-local execution sequence
+        react_iteration: 1-based inner ReAct loop iteration
     """
+
     messages: List[Any] = field(default_factory=list)
     tools: Optional[List[Any]] = None
     model_context: Optional[ModelContext] = None
     response: Optional[Any] = None
+    context_usage_report: Optional[Any] = None
+    context_usage_request_id: Optional[str] = None
+    context_usage_sequence: Optional[int] = None
+    context_usage_attribution: Dict[str, Any] = field(default_factory=dict)
+    react_iteration: int = 0
 
 
 @dataclass
@@ -212,12 +226,15 @@ class ToolCallInputs:
         tool_args: Arguments for the tool
         tool_result: Tool execution result (filled after call)
         tool_msg: Tool message (filled after call)
+        react_iteration: 1-based inner ReAct loop iteration
     """
+
     tool_call: Optional[Any] = None
     tool_name: str = ""
     tool_args: Any = None
     tool_result: Optional[Any] = None
     tool_msg: Optional[Any] = None
+    react_iteration: int = 0
 
 
 @dataclass
@@ -247,6 +264,7 @@ class TaskIterationInputs:
             task metadata.  May be a ``RunContext`` dataclass or
             a plain dict depending on the caller.
     """
+
     iteration: int
     loop_event: Any
     conversation_id: Optional[str] = None
@@ -277,6 +295,7 @@ class UserMessageInputs:
             follow-up), ``"steering"`` (injected mid-round), or ``"resume"``
             (a workflow interrupt being resumed).
     """
+
     parts: list[str] = field(default_factory=list)
     source: str = "query"
 
@@ -337,6 +356,7 @@ class AgentCallbackEvent(str, Enum):
         AFTER_TOOL_CALL: After a tool execution completes
         ON_TOOL_EXCEPTION: When tool execution raises
     """
+
     BEFORE_INVOKE = "before_invoke"
     AFTER_INVOKE = "after_invoke"
     BEFORE_TASK_ITERATION = "before_task_iteration"
@@ -360,6 +380,7 @@ class RetryRecord:
     times the call was retried, what failed each time, and how long
     the whole sequence took.
     """
+
     attempt_index: int
     exception_type: str
     exception_message: str
@@ -387,7 +408,8 @@ class AgentCallbackContext:
         retry_history: Chronological list of every failed attempt
             inside the @rail retry loop for this invoke.
     """
-    agent: 'BaseAgent'
+
+    agent: "BaseAgent"
     event: Optional[AgentCallbackEvent] = None
     inputs: EventInputs = field(default_factory=dict)
     config: Any = None
@@ -398,19 +420,11 @@ class AgentCallbackContext:
     retry_attempt: int = 0
     retry_history: List[RetryRecord] = field(default_factory=list)
     invoke_start_time: float = 0.0
-    _retry_request: Optional[RetryRequest] = field(
-        default=None, init=False, repr=False
-    )
-    _force_finish_request: Optional[ForceFinishRequest] = field(
-        default=None, init=False, repr=False
-    )
-    _steering_queue: Optional[asyncio.Queue] = field(
-        default=None, init=False, repr=False
-    )
+    _retry_request: Optional[RetryRequest] = field(default=None, init=False, repr=False)
+    _force_finish_request: Optional[ForceFinishRequest] = field(default=None, init=False, repr=False)
+    _steering_queue: Optional[asyncio.Queue] = field(default=None, init=False, repr=False)
 
-    async def fire(
-        self, event: AgentCallbackEvent
-    ) -> None:
+    async def fire(self, event: AgentCallbackEvent) -> None:
         """Trigger all registered callbacks for an event.
 
         Args:
@@ -420,9 +434,7 @@ class AgentCallbackContext:
         logger.debug("[RailChain] %s started", event)
         started_at = time.monotonic()
         try:
-            await self.agent.agent_callback_manager.execute(
-                event, self
-            )
+            await self.agent.agent_callback_manager.execute(event, self)
         finally:
             elapsed = time.monotonic() - started_at
             # A rail chain is expected to be cheap glue around the model call;
@@ -451,9 +463,7 @@ class AgentCallbackContext:
         """
         if delay_seconds < 0:
             delay_seconds = 0.0
-        self._retry_request = RetryRequest(
-            delay_seconds=delay_seconds
-        )
+        self._retry_request = RetryRequest(delay_seconds=delay_seconds)
 
     def consume_retry_request(self) -> Optional[RetryRequest]:
         """Read and clear pending retry request."""
@@ -484,7 +494,8 @@ class AgentCallbackContext:
     # ---- Steering runtime control ----
 
     def bind_steering_queue(
-        self, queue: asyncio.Queue,
+        self,
+        queue: asyncio.Queue,
     ) -> None:
         """Bind an external steering queue.
 
@@ -521,9 +532,7 @@ class AgentCallbackContext:
         msgs: List[str] = []
         while not self._steering_queue.empty():
             try:
-                msgs.append(
-                    self._steering_queue.get_nowait()
-                )
+                msgs.append(self._steering_queue.get_nowait())
             except asyncio.QueueEmpty:
                 break
         return msgs
@@ -579,7 +588,7 @@ class AgentCallbackContext:
                         f"{after.value} callback error "
                         f"(masking original "
                         f"{type(exc_to_raise).__name__}): {callback_exc}",
-                        exc_info=True
+                        exc_info=True,
                     )
                 else:
                     raise
@@ -588,12 +597,8 @@ class AgentCallbackContext:
 # ================================================================
 # Callback Type Aliases
 # ================================================================
-AgentCallback = Callable[
-    [AgentCallbackContext], Awaitable[None]
-]
-SyncAgentCallback = Callable[
-    [AgentCallbackContext], None
-]
+AgentCallback = Callable[[AgentCallbackContext], Awaitable[None]]
+SyncAgentCallback = Callable[[AgentCallbackContext], None]
 AnyAgentCallback = Union[AgentCallback, SyncAgentCallback]
 
 
@@ -645,6 +650,7 @@ class AgentRail(ABC):
             async def after_model_call(self, ctx):
                 print("LLM responded")
 
+
         await agent.register_rail(LogRail())
     """
 
@@ -670,21 +676,15 @@ class AgentRail(ABC):
 
     # -- hook methods (override to activate) --
 
-    async def before_invoke(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def before_invoke(self, ctx: AgentCallbackContext) -> None:
         """Called before agent.invoke() starts."""
         pass
 
-    async def after_invoke(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def after_invoke(self, ctx: AgentCallbackContext) -> None:
         """Called after agent.invoke() completes."""
         pass
 
-    async def on_user_message(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def on_user_message(self, ctx: AgentCallbackContext) -> None:
         """Called before one consumed input is written into the conversation.
 
         ``ctx.inputs`` is a :class:`UserMessageInputs`; rails may rewrite
@@ -692,51 +692,35 @@ class AgentRail(ABC):
         """
         pass
 
-    async def before_model_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         """Called before LLM is invoked with preview messages and model_context."""
         pass
 
-    async def after_model_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def after_model_call(self, ctx: AgentCallbackContext) -> None:
         """Called after LLM response is received."""
         pass
 
-    async def on_model_exception(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def on_model_exception(self, ctx: AgentCallbackContext) -> None:
         """Called when LLM call raises an exception."""
         pass
 
-    async def before_tool_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Called before a tool is executed."""
         pass
 
-    async def after_tool_call(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         """Called after a tool execution completes."""
         pass
 
-    async def on_tool_exception(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def on_tool_exception(self, ctx: AgentCallbackContext) -> None:
         """Called when tool execution raises."""
         pass
 
-    async def before_task_iteration(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def before_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Called before each task-loop iteration."""
         pass
 
-    async def after_task_iteration(
-        self, ctx: AgentCallbackContext
-    ) -> None:
+    async def after_task_iteration(self, ctx: AgentCallbackContext) -> None:
         """Called after each task-loop iteration."""
         pass
 
@@ -750,25 +734,17 @@ class AgentRail(ABC):
             only for methods actually overridden by
             the subclass.
         """
-        callbacks: Dict[
-            AgentCallbackEvent, AgentCallback
-        ] = {}
+        callbacks: Dict[AgentCallbackEvent, AgentCallback] = {}
         for event, method_name in EVENT_METHOD_MAP.items():
             method = getattr(self, method_name, None)
-            if method and not self._is_base_method(
-                method_name
-            ):
+            if method and not self._is_base_method(method_name):
                 callbacks[event] = method
         return callbacks
 
     def _is_base_method(self, method_name: str) -> bool:
         """Check if method is the base AgentRail no-op."""
-        method = getattr(
-            self.__class__, method_name, None
-        )
-        base_method = getattr(
-            AgentRail, method_name, None
-        )
+        method = getattr(self.__class__, method_name, None)
+        base_method = getattr(AgentRail, method_name, None)
         return method is base_method
 
 
@@ -794,9 +770,9 @@ def rail(
             after=AgentCallbackEvent.AFTER_MODEL_CALL,
             on_exception=AgentCallbackEvent.ON_MODEL_EXCEPTION,
         )
-        async def _do_model_call(self, ctx):
-            ...
+        async def _do_model_call(self, ctx): ...
     """
+
     def decorator(fn):
         @wraps(fn)
         async def wrapper(self, ctx, *args, **kwargs):
@@ -838,7 +814,7 @@ def rail(
                                 f"{on_exception.value} callback error "
                                 f"(masking original "
                                 f"{type(exc_to_raise).__name__}): {callback_exc}",
-                                exc_info=True
+                                exc_info=True,
                             )
 
                     retry_request = ctx.consume_retry_request()
@@ -846,9 +822,7 @@ def rail(
                         raise
 
                     if retry_request.delay_seconds > 0:
-                        await asyncio.sleep(
-                            retry_request.delay_seconds
-                        )
+                        await asyncio.sleep(retry_request.delay_seconds)
                     exc_to_raise = None
                     will_retry = True
                     attempt += 1
@@ -876,11 +850,13 @@ def rail(
                                     f"{after.value} callback error "
                                     f"(masking original "
                                     f"{type(exc_to_raise).__name__}): {callback_exc}",
-                                    exc_info=True
+                                    exc_info=True,
                                 )
                             else:
                                 raise
+
         events = (before, after, on_exception)
         wrapper.rail_events = events
         return wrapper
+
     return decorator

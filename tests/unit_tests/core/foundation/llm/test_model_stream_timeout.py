@@ -3,6 +3,7 @@
 
 import asyncio
 import re
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,13 +15,15 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 
 
 def _build_model_with_stream(
-        stream_fn,
-        *,
-        first_timeout: float = 10.0,
-        idle_timeout: float = 10.0,
+    stream_fn,
+    *,
+    first_timeout: float = 10.0,
+    idle_timeout: float = 10.0,
 ) -> Model:
     model = Model(
         model_client_config=ModelClientConfig(
@@ -61,6 +64,38 @@ async def test_model_stream_raises_first_chunk_timeout():
     assert "first_chunk_elapsed=" in message
     assert "total_elapsed=" in message
     assert "model=mock-model" in message
+
+
+@pytest.mark.asyncio
+async def test_timeout_retains_call_id_without_emitting_success(monkeypatch):
+    seen_ids = []
+    closed = []
+    events = []
+
+    async def capture(event, **kwargs):
+        events.append((event, get_current_llm_call_id()))
+
+    async def slow_stream(**kwargs):
+        try:
+            seen_ids.append(get_current_llm_call_id())
+            yield AssistantMessageChunk(content="first")
+            await asyncio.sleep(1)
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr("openjiuwen.core.foundation.llm.model.trigger", AsyncMock(side_effect=capture))
+    model = _build_model_with_stream(slow_stream, idle_timeout=0.01)
+    previous_id = get_current_llm_call_id()
+    received = []
+    with pytest.raises(BaseError, match="stage=idle_chunk"):
+        async for chunk in model.stream(messages=[]):
+            received.append(chunk.content)
+
+    assert received == ["first"]
+    assert closed == [True]
+    assert seen_ids[0]
+    assert events == [(LLMCallEvents.LLM_CALL_ERROR, seen_ids[0])]
+    assert get_current_llm_call_id() == previous_id
 
 
 @pytest.mark.asyncio

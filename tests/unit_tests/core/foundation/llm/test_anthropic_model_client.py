@@ -26,7 +26,6 @@ from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import 
     _mark_cache_control,
 )
 
-
 # ---------------------------------------------------------------------------
 # A. Pure converters: _content_to_blocks
 # ---------------------------------------------------------------------------
@@ -76,33 +75,41 @@ class TestContentToBlocks:
 
 class TestConvertMessageSchemas:
     def test_system_extracted_to_top_level(self):
-        system_blocks, messages = _convert_message_schemas([
-            {"role": "system", "content": "you are helpful"},
-            {"role": "user", "content": "hi"},
-        ])
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "system", "content": "you are helpful"},
+                {"role": "user", "content": "hi"},
+            ]
+        )
         assert system_blocks == [{"type": "text", "text": "you are helpful"}]
         assert len(messages) == 1
         assert messages[0]["role"] == "user"
 
     def test_no_system_returns_none_blocks(self):
-        system_blocks, messages = _convert_message_schemas([
-            {"role": "user", "content": "hi"},
-        ])
+        system_blocks, messages = _convert_message_schemas(
+            [
+                {"role": "user", "content": "hi"},
+            ]
+        )
         assert system_blocks is None
         assert len(messages) == 1
 
     def test_consecutive_tool_results_merged_into_one_user(self):
-        _, messages = _convert_message_schemas([
-            {"role": "user", "content": "do it"},
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "t1", "type": "function",
-                 "function": {"name": "fn", "arguments": "{}"}},
-                {"id": "t2", "type": "function",
-                 "function": {"name": "fn2", "arguments": "{}"}},
-            ]},
-            {"role": "tool", "tool_call_id": "t1", "content": "result1"},
-            {"role": "tool", "tool_call_id": "t2", "content": "result2"},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {"role": "user", "content": "do it"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "t1", "type": "function", "function": {"name": "fn", "arguments": "{}"}},
+                        {"id": "t2", "type": "function", "function": {"name": "fn2", "arguments": "{}"}},
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "t1", "content": "result1"},
+                {"role": "tool", "tool_call_id": "t2", "content": "result2"},
+            ]
+        )
         # tool messages should merge into a single user message with two
         # tool_result blocks (Anthropic alternation requirement).
         assert len(messages) == 3
@@ -116,14 +123,18 @@ class TestConvertMessageSchemas:
         assert tool_results[1]["tool_use_id"] == "t2"
 
     def test_assistant_tool_calls_become_tool_use_blocks(self):
-        _, messages = _convert_message_schemas([
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": "thinking", "tool_calls": [
-                {"id": "abc", "type": "function",
-                 "function": {"name": "search",
-                              "arguments": '{"q": "x"}'}},
-            ]},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {"role": "user", "content": "go"},
+                {
+                    "role": "assistant",
+                    "content": "thinking",
+                    "tool_calls": [
+                        {"id": "abc", "type": "function", "function": {"name": "search", "arguments": '{"q": "x"}'}},
+                    ],
+                },
+            ]
+        )
         assistant = messages[1]
         assert assistant["role"] == "assistant"
         tool_use = [b for b in assistant["content"] if b["type"] == "tool_use"]
@@ -134,36 +145,47 @@ class TestConvertMessageSchemas:
         assert tool_use[0]["input"] == {"q": "x"}
 
     def test_assistant_with_invalid_json_arguments_falls_back_to_raw(self):
-        _, messages = _convert_message_schemas([
-            {"role": "assistant", "content": "", "tool_calls": [
-                {"id": "id1", "type": "function",
-                 "function": {"name": "fn", "arguments": "not json"}},
-            ]},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "id1", "type": "function", "function": {"name": "fn", "arguments": "not json"}},
+                    ],
+                },
+            ]
+        )
         tool_use = [b for b in messages[0]["content"] if b["type"] == "tool_use"]
         assert tool_use[0]["input"] == {"_raw_arguments": "not json"}
 
     def test_tool_result_empty_content_padded(self):
-        _, messages = _convert_message_schemas([
-            {"role": "tool", "tool_call_id": "t1", "content": ""},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {"role": "tool", "tool_call_id": "t1", "content": ""},
+            ]
+        )
         tool_result = messages[0]["content"][0]
         # Anthropic requires non-empty content for tool_result; should be padded
         assert tool_result["content"] == [{"type": "text", "text": ""}]
 
     def test_unknown_role_treated_as_user(self):
-        _, messages = _convert_message_schemas([
-            {"role": "developer", "content": "note"},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {"role": "developer", "content": "note"},
+            ]
+        )
         assert messages[0]["role"] == "user"
 
     def test_strict_alternation_with_pending_tool_results_flush(self):
         # When a user message lands between tool responses and the next message,
         # the pending tool_results must flush first.
-        _, messages = _convert_message_schemas([
-            {"role": "tool", "tool_call_id": "t1", "content": "r1"},
-            {"role": "user", "content": "another"},
-        ])
+        _, messages = _convert_message_schemas(
+            [
+                {"role": "tool", "tool_call_id": "t1", "content": "r1"},
+                {"role": "user", "content": "another"},
+            ]
+        )
         assert len(messages) == 2
         assert messages[0]["role"] == "user"
         assert messages[0]["content"][0]["type"] == "tool_result"
@@ -178,23 +200,32 @@ class TestConvertMessageSchemas:
 
 class TestConvertToolSchemas:
     def test_openai_function_schema_converted(self):
-        tools = _convert_tool_schemas([
-            {"type": "function", "function": {
+        tools = _convert_tool_schemas(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "search",
+                        "description": "search the web",
+                        "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+                    },
+                },
+            ]
+        )
+        assert tools == [
+            {
                 "name": "search",
                 "description": "search the web",
-                "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
-            }},
-        ])
-        assert tools == [{
-            "name": "search",
-            "description": "search the web",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
-        }]
+                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            }
+        ]
 
     def test_missing_parameters_defaults_to_empty_object(self):
-        tools = _convert_tool_schemas([
-            {"type": "function", "function": {"name": "fn", "description": "d"}},
-        ])
+        tools = _convert_tool_schemas(
+            [
+                {"type": "function", "function": {"name": "fn", "description": "d"}},
+            ]
+        )
         assert tools[0]["input_schema"] == {"type": "object", "properties": {}}
 
     def test_none_input_returns_none(self):
@@ -204,10 +235,12 @@ class TestConvertToolSchemas:
         assert _convert_tool_schemas([]) is None
 
     def test_non_dict_tool_skipped(self):
-        tools = _convert_tool_schemas([
-            "not a dict",
-            {"type": "function", "function": {"name": "ok"}},
-        ])
+        tools = _convert_tool_schemas(
+            [
+                "not a dict",
+                {"type": "function", "function": {"name": "ok"}},
+            ]
+        )
         assert len(tools) == 1
         assert tools[0]["name"] == "ok"
 
@@ -359,22 +392,13 @@ class TestApplyMessagesCacheBreakpoint:
 
 class TestNormalizeBaseUrl:
     def test_strips_trailing_v1(self):
-        assert (
-            AnthropicModelClient._normalize_base_url("https://openrouter.ai/api/v1")
-            == "https://openrouter.ai/api"
-        )
+        assert AnthropicModelClient._normalize_base_url("https://openrouter.ai/api/v1") == "https://openrouter.ai/api"
 
     def test_strips_trailing_slash_then_v1(self):
-        assert (
-            AnthropicModelClient._normalize_base_url("https://openrouter.ai/api/v1/")
-            == "https://openrouter.ai/api"
-        )
+        assert AnthropicModelClient._normalize_base_url("https://openrouter.ai/api/v1/") == "https://openrouter.ai/api"
 
     def test_passthrough_when_no_v1_suffix(self):
-        assert (
-            AnthropicModelClient._normalize_base_url("https://api.anthropic.com")
-            == "https://api.anthropic.com"
-        )
+        assert AnthropicModelClient._normalize_base_url("https://api.anthropic.com") == "https://api.anthropic.com"
 
     def test_empty_string_returns_none(self):
         assert AnthropicModelClient._normalize_base_url("") is None
@@ -415,6 +439,11 @@ class TestUsageFromAnthropic:
         assert meta.output_tokens == 50
         assert meta.total_tokens == 200
         assert meta.cache_tokens == 30  # cache_read only
+        assert meta.cache_read_tokens == 30
+        assert meta.cache_miss_tokens == 100
+        assert meta.cache_write_tokens == 20
+        assert meta.cache_creation_input_tokens == 20
+        assert meta.cache_authoritative is True
         assert meta.model_name == "claude-opus-4"
 
     def test_zero_cache_fields_handled(self):
@@ -426,6 +455,7 @@ class TestUsageFromAnthropic:
         meta = _make_client()._usage_from_anthropic(usage)
         assert meta.input_tokens == 10
         assert meta.cache_tokens == 0
+        assert meta.cache_creation_input_tokens is None
 
     def test_none_usage_returns_none(self):
         assert _make_client()._usage_from_anthropic(None) is None

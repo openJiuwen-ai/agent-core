@@ -15,9 +15,14 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_ID,
     TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, span_attributes
-from openjiuwen.extensions.observability import semconv
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    iter_spans,
+    span_attributes,
+    write_llm_exchange,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
+from openjiuwen.extensions.observability import semconv
 from openjiuwen.harness.rails.evolution import PreparedEvolutionInput
 
 
@@ -93,10 +98,10 @@ def _span(span_id: int, *, prompt: str = "hi", response: str = "hello") -> dict:
         "attributes": attributes_from_map(
             {
                 semconv.GEN_AI_REQUEST_MODEL: "m1",
-                f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                f"{semconv.GEN_AI_PROMPT}.0.content": prompt,
-                f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                f"{semconv.GEN_AI_COMPLETION}.0.content": response,
+                **write_llm_exchange(
+                    [{"role": "user", "content": prompt}],
+                    [{"role": "assistant", "content": response}],
+                ),
             }
         ),
     }
@@ -157,13 +162,15 @@ async def test_rl_online_rail_supports_direct_react_agent_config():
         tenant_id="user-1",
         uploader=_CollectingUploader(),
         lora_default_policy="latest_by_user",
-        lora_gateway_client=_FakeLoRAGatewayClient({
-            "enabled": True,
-            "model_id": "user-1",
-            "lora_id": "user-1:v2",
-            "version": "v2",
-            "path": "/tmp/lora/v2",
-        }),
+        lora_gateway_client=_FakeLoRAGatewayClient(
+            {
+                "enabled": True,
+                "model_id": "user-1",
+                "lora_id": "user-1:v2",
+                "version": "v2",
+                "path": "/tmp/lora/v2",
+            }
+        ),
         trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _DirectReactAgent()
@@ -186,13 +193,15 @@ async def test_rl_online_rail_supports_direct_react_agent_config():
 async def test_rl_online_rail_uses_latest_lora_model_for_one_call():
     from openjiuwen.agent_evolving.agent_rl.online.rail.online_rail import RLOnlineRail
 
-    lora_client = _FakeLoRAGatewayClient({
-        "enabled": True,
-        "model_id": "user-1",
-        "lora_id": "user-1:v2",
-        "version": "v2",
-        "path": "/tmp/lora/v2",
-    })
+    lora_client = _FakeLoRAGatewayClient(
+        {
+            "enabled": True,
+            "model_id": "user-1",
+            "lora_id": "user-1:v2",
+            "version": "v2",
+            "path": "/tmp/lora/v2",
+        }
+    )
     rail = RLOnlineRail(
         session_id="s1",
         gateway_endpoint="http://gateway.local",
@@ -212,11 +221,13 @@ async def test_rl_online_rail_uses_latest_lora_model_for_one_call():
     assert agent.react_agent.config.model_config_obj.model_name == "user-1"
     assert ctx.extra["rl_online_lora_id"] == "user-1:v2"
     assert ctx.extra["rl_online_lora_version"] == "v2"
-    assert lora_client.calls == [{
-        "url": "http://gateway.local/v1/rl/lora/effective",
-        "json": {"model_id": "user-1", "ensure_loaded": True},
-        "headers": {"Authorization": "Bearer gw-token"},
-    }]
+    assert lora_client.calls == [
+        {
+            "url": "http://gateway.local/v1/rl/lora/effective",
+            "json": {"model_id": "user-1", "ensure_loaded": True},
+            "headers": {"Authorization": "Bearer gw-token"},
+        }
+    ]
 
     await rail.after_model_call(ctx)
 
@@ -233,10 +244,12 @@ async def test_rl_online_rail_skips_lora_when_gateway_has_no_effective_adapter()
         tenant_id="user-1",
         uploader=_CollectingUploader(),
         lora_default_policy="latest_by_user",
-        lora_gateway_client=_FakeLoRAGatewayClient({
-            "enabled": False,
-            "reason": "latest_lora_not_found",
-        }),
+        lora_gateway_client=_FakeLoRAGatewayClient(
+            {
+                "enabled": False,
+                "reason": "latest_lora_not_found",
+            }
+        ),
         trajectory_span_processor=TrajectorySpanProcessor(),
     )
     agent = _Agent()
