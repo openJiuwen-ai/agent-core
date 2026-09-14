@@ -247,7 +247,13 @@ class WebFetchWebpageTool(Tool):
             # A JS-rendered page returns an HTML shell with no extractable text;
             # only fall back when there actually was a body to render.
             if not title.strip() and not text.strip() and body:
-                return await WebFetchWebpageTool._fetch_via_jina_reader(session, url, timeout_seconds, byte_cap)
+                return await WebFetchWebpageTool._fetch_via_jina_reader(
+                    request.session,
+                    request.url,
+                    request.timeout_seconds,
+                    request.byte_cap,
+                    proxy_url=request.proxy_url,
+                )
         else:
             text = re.sub(r"\s+", " ", text).strip()
 
