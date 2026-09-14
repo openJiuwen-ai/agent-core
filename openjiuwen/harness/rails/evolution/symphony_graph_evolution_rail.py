@@ -569,14 +569,14 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
             return None
         component_ids = _interactive_component_ids(query)
         with self._symphony_states_lock:
-            matches = [
-                (key, state)
-                for key, state in self._paused_symphony_states.items()
-                if key.session_id == session_id
-                and key.capture_mode == capture_mode
-                and key.owner_id == owner_id
-                and key.component_id in component_ids
-            ]
+            matches = []
+            for key, state in self._paused_symphony_states.items():
+                if key.session_id != session_id:
+                    continue
+                if key.capture_mode != capture_mode or key.owner_id != owner_id:
+                    continue
+                if key.component_id in component_ids:
+                    matches.append((key, state))
             if len(component_ids) != 1 or len(matches) != 1:
                 # An invalid or ambiguous response cannot be attached to a
                 # paused task.  Drop same-scope pending state rather than
@@ -1592,7 +1592,9 @@ class _PartialJSONParser:
             return escapes[token], True
         if token != "u":
             raise ValueError("invalid JSON escape")
-        digits = self._value[self._index : self._index + 4]
+        digits_start = self._index
+        digits_end = digits_start + 4
+        digits = self._value[digits_start:digits_end]
         if len(digits) < 4:
             self._index = len(self._value)
             return "", False
@@ -1609,7 +1611,9 @@ class _PartialJSONParser:
     def _parse_low_surrogate(self, high: int) -> str:
         if not self._value.startswith("\\u", self._index):
             return "\N{REPLACEMENT CHARACTER}"
-        digits = self._value[self._index + 2 : self._index + 6]
+        digits_start = self._index + 2
+        digits_end = self._index + 6
+        digits = self._value[digits_start:digits_end]
         if len(digits) != 4 or re.fullmatch(r"[0-9a-fA-F]{4}", digits) is None:
             return "\N{REPLACEMENT CHARACTER}"
         low = int(digits, 16)
@@ -1622,7 +1626,8 @@ class _PartialJSONParser:
         start = self._index
         while self._index < len(self._value) and self._value[self._index] not in ",]} \t\r\n":
             self._index += 1
-        token = self._value[start : self._index]
+        end = self._index
+        token = self._value[start:end]
         try:
             value = json.loads(token)
         except (TypeError, ValueError) as exc:
@@ -1724,7 +1729,8 @@ def _structured_json_value_summary(
 
 
 def _unwrap_partial_summary_payload(value: Any) -> Any:
-    if isinstance(value, list) and len(value) == 2 and isinstance(value[0], list) and isinstance(value[1], Mapping):
+    is_call_shape = isinstance(value, list) and len(value) == 2
+    if is_call_shape and isinstance(value[0], list) and isinstance(value[1], Mapping):
         args, kwargs = value
         business_kwargs = {
             key: item
@@ -1923,12 +1929,8 @@ def _unwrap_summary_payload(value: Any) -> Any:
             value = json.loads(value)
         except (TypeError, ValueError):
             return _structured_truncated_summary(value) or value
-    if (
-        isinstance(value, (list, tuple))
-        and len(value) == 2
-        and isinstance(value[0], (list, tuple))
-        and isinstance(value[1], Mapping)
-    ):
+    is_call_shape = isinstance(value, (list, tuple)) and len(value) == 2
+    if is_call_shape and isinstance(value[0], (list, tuple)) and isinstance(value[1], Mapping):
         args, kwargs = value
         business_kwargs = {
             key: item
@@ -1998,9 +2000,12 @@ def _redact_quoted_auth_value_match(match: re.Match[str]) -> str:
 def _redact_unquoted_auth_headers(value: str) -> str:
     parts: list[str] = []
     cursor = 0
-    while match := _SUMMARY_AUTH_START.search(value, cursor):
-        parts.append(value[cursor : match.end()])
+    while True:
+        match = _SUMMARY_AUTH_START.search(value, cursor)
+        if match is None:
+            break
         start = match.end()
+        parts.append(value[cursor:start])
         already_redacted_end = _redacted_auth_value_end(value, start)
         if already_redacted_end is not None:
             parts.append(value[start:already_redacted_end])

@@ -179,7 +179,7 @@ def test_authoritative_truncated_skill_output_preserves_success() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "travel-guide-generator"},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "travel-guide-generator"},
                         semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
                         semconv.OJ_TOOL_AUTHORITATIVE: True,
                     },
@@ -191,7 +191,7 @@ def test_authoritative_truncated_skill_output_preserves_success() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "untrusted"},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "untrusted"},
                         semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
                     },
                 ),
@@ -201,7 +201,7 @@ def test_authoritative_truncated_skill_output_preserves_success() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "errored"},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "errored"},
                         semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
                         semconv.OJ_TOOL_AUTHORITATIVE: True,
                     },
@@ -346,7 +346,7 @@ def test_skill_window_supports_relative_script_after_cd_and_keeps_preparation() 
             parent_span_id=1,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_INPUT: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
                 semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
             },
         )
@@ -387,7 +387,7 @@ def test_relative_multi_skill_reference_and_children_are_not_assigned() -> None:
             parent_span_id=parent_span_id,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_INPUT: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
                 semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
             },
         )
@@ -427,7 +427,7 @@ def test_relative_script_uses_latest_sequential_cd_scope() -> None:
             parent_span_id=1,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_INPUT: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
                 semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
             },
         ),
@@ -456,7 +456,9 @@ def test_relative_script_after_or_keeps_possible_cwd_ambiguous() -> None:
             parent_span_id=1,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_INPUT: {"command": "cd /skills/alpha || cd /skills/beta && python scripts/run.py"},
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {
+                    "command": "cd /skills/alpha || cd /skills/beta && python scripts/run.py"
+                },
                 semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
             },
         ),

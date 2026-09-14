@@ -868,7 +868,9 @@ async def test_rail_preserves_repeated_skill_occurrences() -> None:
                 parent_span_id=1,
                 attributes={
                     semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"skill_name": skill, "relative_file_path": "SKILL.md"}),
+                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps(
+                        {"skill_name": skill, "relative_file_path": "SKILL.md"}
+                    ),
                     semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
                 },
             )
@@ -1938,7 +1940,7 @@ def test_edge_summary_covers_expanded_fragment_head_and_tail() -> None:
             "attributes": attributes_from_map(
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
-                    semconv.GEN_AI_TOOL_INPUT: json.dumps({"content": content}),
+                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"content": content}),
                     semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
                 }
             ),
@@ -1996,7 +1998,7 @@ def test_edge_summary_omits_framework_ids_and_read_bodies() -> None:
             "attributes": attributes_from_map(
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
-                    semconv.GEN_AI_TOOL_INPUT: input_value,
+                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: input_value,
                     semconv.GEN_AI_TOOL_CALL_RESULT: output_value,
                     semconv.GEN_AI_TOOL_CALL_ID: "private-call-id",
                 }
@@ -2101,7 +2103,7 @@ def test_edge_summary_errors_stay_within_ten_standard_events() -> None:
                 "attributes": attributes_from_map(
                     {
                         semconv.GEN_AI_TOOL_NAME: "execute",
-                        semconv.GEN_AI_TOOL_INPUT: {"value": span_id},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"value": span_id},
                     }
                 ),
             }
@@ -2243,7 +2245,7 @@ async def test_edge_summary_preserves_diverse_middle_tool_and_tail_command() -> 
             "attributes": attributes_from_map(
                 {
                     semconv.GEN_AI_TOOL_NAME: name,
-                    semconv.GEN_AI_TOOL_INPUT: json.dumps(input_value),
+                    semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps(input_value),
                     semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps(output_value),
                 }
             ),
@@ -2381,7 +2383,7 @@ def _emit_interrupt_segment(rail: SymphonyGraphEvolutionRail, trace: int) -> Non
     processor = rail.trajectory_span_processor
     processor.on_end(_span("agent.root", 1, trace_id=trace))
     processor.on_end(
-        _span("agent.worker", 2, trace_id=trace, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: "worker"})
+        _span("agent.worker", 2, trace_id=trace, parent_span_id=1, attributes={semconv.AT_MEMBER_NAME: "worker"})
     )
     processor.on_end(
         _span(
@@ -2391,7 +2393,9 @@ def _emit_interrupt_segment(rail: SymphonyGraphEvolutionRail, trace: int) -> Non
             parent_span_id=2,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                semconv.GEN_AI_TOOL_INPUT: json.dumps({"skill_name": "alpha", "relative_file_path": "SKILL.md"}),
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps(
+                    {"skill_name": "alpha", "relative_file_path": "SKILL.md"}
+                ),
                 semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True}),
             },
         )
@@ -2722,7 +2726,7 @@ async def test_team_member_spans_and_repeated_completion_do_not_duplicate_submis
     _emit_interrupt_segment(rail, 1)
     for index, member in enumerate(("worker", "reviewer"), 10):
         rail.trajectory_span_processor.on_end(
-            _span("agent.member", index, trace_id=1, parent_span_id=1, attributes={semconv.AT_MEMBER_ID: member})
+            _span("agent.member", index, trace_id=1, parent_span_id=1, attributes={semconv.AT_MEMBER_NAME: member})
         )
     callback.assert_not_awaited()
     await rail.after_invoke(leader)

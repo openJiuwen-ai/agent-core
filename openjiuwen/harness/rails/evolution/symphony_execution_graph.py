@@ -125,7 +125,6 @@ def build_symphony_execution_graph(
         if candidate is None or decision is None:
             continue
         observation = _safe_validated_observation(
-            normalized_trace_id,
             valid_trace_ids,
             valid_continuations,
             candidate,
@@ -327,7 +326,6 @@ def _safe_candidate_id(item: SymphonyEdgeCandidate | SymphonyEdgeDecision) -> st
 
 
 def _safe_validated_observation(
-    trace_id: str,
     trace_ids: frozenset[str],
     interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
@@ -335,7 +333,7 @@ def _safe_validated_observation(
     identity_index: _IdentityIndex,
 ) -> tuple[dict[str, Any], CapabilityIdentity, CapabilityIdentity] | None:
     try:
-        return _validated_observation(trace_id, trace_ids, interrupt_continuations, candidate, decision, identity_index)
+        return _validated_observation(trace_ids, interrupt_continuations, candidate, decision, identity_index)
     except MemoryError:
         raise
     except Exception:
@@ -343,7 +341,6 @@ def _safe_validated_observation(
 
 
 def _validated_observation(
-    trace_id: str,
     trace_ids: frozenset[str],
     interrupt_continuations: frozenset[SymphonyInterruptContinuation],
     candidate: SymphonyEdgeCandidate,
@@ -360,13 +357,11 @@ def _validated_observation(
         return None
     if source.trace_id != target.trace_id:
         continuation = candidate.interrupt_continuation
-        if (
-            continuation is None
-            or continuation not in interrupt_continuations
-            or continuation.source_trace_id != source.trace_id
-            or continuation.target_trace_id != target.trace_id
-            or continuation.continuity_index != source.continuity_index
-        ):
+        if continuation is None or continuation not in interrupt_continuations:
+            return None
+        if continuation.source_trace_id != source.trace_id or continuation.target_trace_id != target.trace_id:
+            return None
+        if continuation.continuity_index != source.continuity_index:
             return None
     if _nonempty_text(decision.candidate_id) is None or decision.candidate_id != candidate.candidate_id:
         return None
@@ -575,29 +570,39 @@ def _valid_interrupt_continuations(
         raise
     except Exception:
         return ()
-    return tuple(
-        item
-        for item in items
-        if isinstance(item, SymphonyInterruptContinuation)
-        and _validated_trace_id(item.source_trace_id) is not None
-        and _validated_trace_id(item.target_trace_id) is not None
-        and item.source_trace_id != item.target_trace_id
-        and isinstance(item.continuity_index, int)
-        and not isinstance(item.continuity_index, bool)
-        and item.continuity_index >= 0
-        and isinstance(item.source_segment_index, int)
-        and not isinstance(item.source_segment_index, bool)
-        and item.source_segment_index >= 0
-        and isinstance(item.target_segment_index, int)
-        and not isinstance(item.target_segment_index, bool)
-        and item.target_segment_index >= 0
-        and item.target_segment_index == item.source_segment_index + 1
-        and isinstance(item.trace_ids, tuple)
-        and len(item.trace_ids) > item.target_segment_index
-        and all(_validated_trace_id(trace_id) is not None for trace_id in item.trace_ids)
-        and item.trace_ids[item.source_segment_index] == item.source_trace_id
-        and item.trace_ids[item.target_segment_index] == item.target_trace_id
-    )
+    valid: list[SymphonyInterruptContinuation] = []
+    for item in items:
+        if _is_valid_interrupt_continuation(item):
+            valid.append(item)
+    return tuple(valid)
+
+
+def _is_valid_interrupt_continuation(item: object) -> bool:
+    if not isinstance(item, SymphonyInterruptContinuation):
+        return False
+    if _validated_trace_id(item.source_trace_id) is None or _validated_trace_id(item.target_trace_id) is None:
+        return False
+    if item.source_trace_id == item.target_trace_id:
+        return False
+    if not isinstance(item.continuity_index, int) or isinstance(item.continuity_index, bool):
+        return False
+    if item.continuity_index < 0:
+        return False
+    if not isinstance(item.source_segment_index, int) or isinstance(item.source_segment_index, bool):
+        return False
+    if item.source_segment_index < 0:
+        return False
+    if not isinstance(item.target_segment_index, int) or isinstance(item.target_segment_index, bool):
+        return False
+    if item.target_segment_index < 0 or item.target_segment_index != item.source_segment_index + 1:
+        return False
+    if not isinstance(item.trace_ids, tuple) or len(item.trace_ids) <= item.target_segment_index:
+        return False
+    if any(_validated_trace_id(trace_id) is None for trace_id in item.trace_ids):
+        return False
+    if item.trace_ids[item.source_segment_index] != item.source_trace_id:
+        return False
+    return item.trace_ids[item.target_segment_index] == item.target_trace_id
 
 
 def _normalized_graph_snapshot(value: Any) -> dict[str, str] | None:
@@ -733,13 +738,11 @@ def _validate_execution_envelope(envelope: Any) -> None:
         raise ValueError("execution_graph.graph_snapshot is invalid")
     trace_ids = envelope.get("trace_ids")
     if trace_ids is not None:
-        if (
-            not isinstance(trace_ids, list)
-            or len(trace_ids) < 2
-            or trace_ids[0] != trace_id
-            or len(set(trace_ids)) != len(trace_ids)
-            or any(_validated_trace_id(item) is None for item in trace_ids)
-        ):
+        if not isinstance(trace_ids, list) or len(trace_ids) < 2:
+            raise ValueError("execution_graph.trace_ids is invalid")
+        if trace_ids[0] != trace_id or any(_validated_trace_id(item) is None for item in trace_ids):
+            raise ValueError("execution_graph.trace_ids is invalid")
+        if len(set(trace_ids)) != len(trace_ids):
             raise ValueError("execution_graph.trace_ids is invalid")
 
     graph = envelope.get("graph")

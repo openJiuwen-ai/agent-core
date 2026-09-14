@@ -273,12 +273,11 @@ def _add_interrupt_continuation_candidates(
             target_matches = [
                 fragment for fragment in target_items if _matches_planned_node(fragment, target_id, nodes[target_id])
             ]
-            if (
-                not source_matches
-                or not target_matches
-                or len({item.branch_span_id for item in source_matches}) != 1
-                or len({item.branch_span_id for item in target_matches}) != 1
-            ):
+            if not source_matches or not target_matches:
+                continue
+            source_branches = {item.branch_span_id for item in source_matches}
+            target_branches = {item.branch_span_id for item in target_matches}
+            if len(source_branches) != 1 or len(target_branches) != 1:
                 continue
             source = source_matches[-1]
             target = target_matches[0]
@@ -306,35 +305,45 @@ def _valid_interrupt_continuations(
         raise
     except Exception:
         return ()
-    valid = [
-        item
-        for item in items
-        if isinstance(item, SymphonyInterruptContinuation)
-        and isinstance(item.source_trace_id, str)
-        and bool(item.source_trace_id.strip())
-        and isinstance(item.target_trace_id, str)
-        and bool(item.target_trace_id.strip())
-        and item.source_trace_id != item.target_trace_id
-        and isinstance(item.continuity_index, int)
-        and not isinstance(item.continuity_index, bool)
-        and item.continuity_index >= 0
-        and isinstance(item.source_segment_index, int)
-        and not isinstance(item.source_segment_index, bool)
-        and item.source_segment_index >= 0
-        and isinstance(item.target_segment_index, int)
-        and not isinstance(item.target_segment_index, bool)
-        and item.target_segment_index >= 0
-        and item.target_segment_index == item.source_segment_index + 1
-        and isinstance(item.trace_ids, tuple)
-        and len(item.trace_ids) > item.target_segment_index
-        and all(isinstance(trace_id, str) and trace_id.strip() for trace_id in item.trace_ids)
-        and item.trace_ids[item.source_segment_index] == item.source_trace_id
-        and item.trace_ids[item.target_segment_index] == item.target_trace_id
-    ]
+    valid: list[SymphonyInterruptContinuation] = []
+    for item in items:
+        if _is_valid_interrupt_continuation(item):
+            valid.append(item)
     by_boundary: dict[tuple[int, str, str], set[SymphonyInterruptContinuation]] = defaultdict(set)
     for item in valid:
         by_boundary[(item.continuity_index, item.source_trace_id, item.target_trace_id)].add(item)
     return tuple(next(iter(values)) for key, values in sorted(by_boundary.items()) if len(values) == 1)
+
+
+def _is_valid_interrupt_continuation(item: object) -> bool:
+    if not isinstance(item, SymphonyInterruptContinuation):
+        return False
+    if not isinstance(item.source_trace_id, str) or not item.source_trace_id.strip():
+        return False
+    if not isinstance(item.target_trace_id, str) or not item.target_trace_id.strip():
+        return False
+    if item.source_trace_id == item.target_trace_id:
+        return False
+    if not isinstance(item.continuity_index, int) or isinstance(item.continuity_index, bool):
+        return False
+    if item.continuity_index < 0:
+        return False
+    if not isinstance(item.source_segment_index, int) or isinstance(item.source_segment_index, bool):
+        return False
+    if item.source_segment_index < 0:
+        return False
+    if not isinstance(item.target_segment_index, int) or isinstance(item.target_segment_index, bool):
+        return False
+    if item.target_segment_index < 0 or item.target_segment_index != item.source_segment_index + 1:
+        return False
+    if not isinstance(item.trace_ids, tuple) or len(item.trace_ids) <= item.target_segment_index:
+        return False
+    for trace_id in item.trace_ids:
+        if not isinstance(trace_id, str) or not trace_id.strip():
+            return False
+    if item.trace_ids[item.source_segment_index] != item.source_trace_id:
+        return False
+    return item.trace_ids[item.target_segment_index] == item.target_trace_id
 
 
 def _is_ready_directed_plan(planned_graph: Mapping[str, Any] | None) -> bool:
@@ -423,7 +432,11 @@ def _iter_planned_pairs(
             valid = False
         if valid:
             specs.setdefault((str(source_id), str(target_id)), (source_id, target_id))
-    ordered_specs = [specs[key] for key in sorted(specs)]
+    ordered_specs = []
+    for key in sorted(specs):
+        spec = specs.get(key)
+        if spec is not None:
+            ordered_specs.append(spec)
     branch_for = {
         fragment.fragment_id: branch_key
         for branch_key, branch_fragments in by_branch.items()
@@ -490,7 +503,9 @@ def _add_observed_order_candidates(
     for source in ordered_sources:
         branch = by_branch[branch_for[source.fragment_id]]
         source_position = positions[source.fragment_id]
-        for target in branch[source_position + 1 : source_position + edge_search_max_depth + 1]:
+        first_target = source_position + 1
+        target_limit = first_target + edge_search_max_depth
+        for target in branch[first_target:target_limit]:
             if source.capability_name == target.capability_name:
                 continue
             if _add_candidate(

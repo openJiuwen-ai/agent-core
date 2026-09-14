@@ -61,6 +61,18 @@ class _SpanTopology:
     branches: Mapping[tuple[str, str], tuple[str, str]]
 
 
+@dataclass(frozen=True)
+class _SkillExecutionWindow:
+    """Related indexes used to bound one explicitly executed Skill."""
+
+    branch: tuple[str, str]
+    execution_spans: set[tuple[str, str]]
+    script_span_owners: Mapping[tuple[str, str], tuple[str, str] | None]
+    anchors: Sequence[tuple[tuple[str, str], str]]
+    by_identity: Mapping[tuple[str, str], Mapping[str, Any]]
+    topology: _SpanTopology
+
+
 def project_symphony_execution_fragments(
     continuities: Sequence[tuple[int, Trajectory]],
     *,
@@ -292,12 +304,14 @@ def _skill_fragments(
             if explicit_span_ids:
                 span_ids = _skill_execution_span_window(
                     anchor,
-                    branch,
-                    explicit_span_ids,
-                    script_span_owners,
-                    effective_anchors,
-                    by_identity,
-                    topology,
+                    _SkillExecutionWindow(
+                        branch=branch,
+                        execution_spans=explicit_span_ids,
+                        script_span_owners=script_span_owners,
+                        anchors=effective_anchors,
+                        by_identity=by_identity,
+                        topology=topology,
+                    ),
                 )
             else:
                 next_position = position + 1
@@ -387,35 +401,32 @@ def _explicit_skill_execution_span_ids(
 
 def _skill_execution_span_window(
     anchor: tuple[str, str],
-    branch: tuple[str, str],
-    execution_spans: set[tuple[str, str]],
-    script_span_owners: Mapping[tuple[str, str], tuple[str, str] | None],
-    anchors: Sequence[tuple[tuple[str, str], str]],
-    by_identity: Mapping[tuple[str, str], Mapping[str, Any]],
-    topology: _SpanTopology,
+    window: _SkillExecutionWindow,
 ) -> tuple[str, ...]:
     """Keep the Skill's local interval while excluding other owned work."""
 
+    branch = window.branch
+    by_identity = window.by_identity
     first_order = span_sort_key(by_identity[anchor])
-    last_order = max(span_sort_key(by_identity[identity]) for identity in execution_spans)
+    last_order = max(span_sort_key(by_identity[identity]) for identity in window.execution_spans)
     selected = {
         identity
         for identity, span in by_identity.items()
-        if topology.branches.get(identity) == branch and first_order <= span_sort_key(span) <= last_order
+        if window.topology.branches.get(identity) == branch and first_order <= span_sort_key(span) <= last_order
     }
     excluded_roots = {
         candidate_anchor
-        for candidate_anchor, _ in anchors
+        for candidate_anchor, _ in window.anchors
         if candidate_anchor != anchor and candidate_anchor in selected
     }
     excluded_roots.update(
-        identity for identity, owner in script_span_owners.items() if identity in selected and owner != anchor
+        identity for identity, owner in window.script_span_owners.items() if identity in selected and owner != anchor
     )
-    excluded = _descendants_before_boundary(excluded_roots, None, by_identity, topology.children)
+    excluded = _descendants_before_boundary(excluded_roots, None, by_identity, window.topology.children)
     selected.difference_update(excluded)
     selected.add(anchor)
     selected.add(branch)
-    selected = {identity for identity in selected if topology.branches.get(identity) == branch}
+    selected = {identity for identity in selected if window.topology.branches.get(identity) == branch}
     return _ordered_span_ids(selected, by_identity)
 
 

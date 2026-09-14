@@ -338,13 +338,12 @@ def _summary_event(value: str, field_name: str) -> dict[str, Any] | None:
         return _synthetic_summary_event(value, field_name)
     if not isinstance(decoded, Mapping):
         return _synthetic_summary_event(value, field_name)
-    if (
-        not set(decoded).issubset(_EVENT_FIELDS)
-        or not isinstance(decoded.get("tool"), str)
-        or not cast(str, decoded["tool"]).strip()
-        or not isinstance(decoded.get("ok"), bool)
-        or _contains_reserved_event_key(decoded)
-    ):
+    if not set(decoded).issubset(_EVENT_FIELDS) or _contains_reserved_event_key(decoded):
+        return None
+    tool_name = decoded.get("tool")
+    if not isinstance(tool_name, str) or not tool_name.strip():
+        return None
+    if not isinstance(decoded.get("ok"), bool):
         return None
     return dict(decoded)
 
@@ -473,13 +472,11 @@ def _is_complete_candidate(candidate: SymphonyEdgeCandidate) -> bool:
         return False
     if source.trace_id != target.trace_id:
         continuation = candidate.interrupt_continuation
-        if (
-            continuation is None
-            or not _valid_interrupt_continuations((continuation,))
-            or continuation.source_trace_id != source.trace_id
-            or continuation.target_trace_id != target.trace_id
-            or continuation.continuity_index != source.continuity_index
-        ):
+        if continuation is None or not _valid_interrupt_continuations((continuation,)):
+            return False
+        if continuation.source_trace_id != source.trace_id or continuation.target_trace_id != target.trace_id:
+            return False
+        if continuation.continuity_index != source.continuity_index:
             return False
     allowed_span_ids = {(fragment.trace_id, span_id) for fragment in (source, target) for span_id in fragment.span_ids}
     for evidence_ref in candidate.evidence_refs:
@@ -542,7 +539,8 @@ def _safe_query(value: object) -> str:
         return ""
     safe = value.encode("utf-8", errors="replace").decode("utf-8").strip()
     if safe.startswith(_QUERY_ENVELOPE_PREFIX):
-        candidate = safe[len(_QUERY_ENVELOPE_PREFIX) :].strip()
+        prefix_length = len(_QUERY_ENVELOPE_PREFIX)
+        candidate = safe[prefix_length:].strip()
         try:
             decoded = json.loads(candidate)
         except (TypeError, ValueError):
