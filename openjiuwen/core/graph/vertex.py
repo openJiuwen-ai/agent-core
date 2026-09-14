@@ -98,7 +98,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         self._log_message = dict(graph_id=self._session.workflow_id(), node_id=self._node_id)
         if self._is_first_init:
             node_abilities = [ability.name for ability in self._component_ability]
-            logger.info(
+            logger.debug(
                 f"Initialized node [{self._node_id}], abilities is {node_abilities}",
                 event_type=LogEventType.GRAPH_VERTEX_INIT,
                 **self._log_message)
@@ -115,7 +115,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
                               event: asyncio.Event = None) -> bool:
         try:
             self._mark_node_executed()
-            logger.info(
+            logger.debug(
                 f"Begin to call node [{self._node_id}] ability [{ability.name}]",
                 event_type=LogEventType.GRAPH_VERTEX_ABILITY_START,
                 **self._log_message
@@ -197,7 +197,7 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             # Execute strategy if found
             strategy = ability_strategies.get(ability)
             await strategy()
-            logger.info(
+            logger.debug(
                 f"Succeed to call node [{self._node_id}] ability [{ability.name}]",
                 event_type=LogEventType.GRAPH_VERTEX_ABILITY_END,
                 **self._log_message
@@ -362,16 +362,16 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         raise error  # No framework / no handler / handler returned None → interrupt
 
     async def __call__(self, state: GraphState, config) -> Output:
-        logger.info(f"Begin to call batch-in node [{self._node_id}]", event_type=LogEventType.GRAPH_VERTEX_CALL_START,
-                    **self._log_message)
+        logger.debug(f"Begin to call batch-in node [{self._node_id}]", event_type=LogEventType.GRAPH_VERTEX_CALL_START,
+                     **self._log_message)
         try:
             if self._executable.post_commit():
                 await self.atomic_invoke(config=config, session=self._session)
             else:
                 await self.call(config)
-            logger.info(f"Succeed to call batch-in node [{self._node_id}]",
-                        event_type=LogEventType.GRAPH_VERTEX_CALL_END,
-                        **self._log_message)
+            logger.debug(f"Succeed to call batch-in node [{self._node_id}]",
+                         event_type=LogEventType.GRAPH_VERTEX_CALL_END,
+                         **self._log_message)
             node_output = self._session.state().get(self._node_id)
             # Emit node executed event with inputs and outputs
             await trigger(
@@ -716,9 +716,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
         return self._stream_call_count == self._call_count + 1
 
     async def stream_call(self, event: asyncio.Event, error_callback):
-        logger.info(f"Begin to call stream-in node [{self._node_id}]",
-                    event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_START,
-                    **self._log_message)
+        logger.debug(f"Begin to call stream-in node [{self._node_id}]",
+                     event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_START,
+                     **self._log_message)
         self._stream_call_count += 1
         self._stream_done = asyncio.Future()
 
@@ -747,9 +747,9 @@ class Vertex(AsyncAtomicNode, StreamConsumer):
             for result in results:
                 if isinstance(result, Exception):
                     raise result
-            logger.info(f"Succeed to call stream-in node [{self._node_id}]",
-                        event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
-                        **self._log_message)
+            logger.debug(f"Succeed to call stream-in node [{self._node_id}]",
+                         event_type=LogEventType.GRAPH_VERTEX_STREAM_CALL_END,
+                         **self._log_message)
         except asyncio.CancelledError:
             cancelled_tasks = []
             finished_tasks = []
