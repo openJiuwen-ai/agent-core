@@ -1193,6 +1193,33 @@ def test_create_deep_agent_auto_add_skill_rail_when_skill_discovery_enabled(tmp_
     assert skill_rail.enabled_skills == set()
 
 
+def test_create_deep_agent_skill_rail_includes_flat_team_mount_skills(tmp_path) -> None:
+    """Flat ``.team`` mount (junction to the shared team workspace) skills are discovered."""
+    workspace_root = tmp_path / "member_workspace"
+    team_workspace = tmp_path / "team-workspace"
+    team_skills = team_workspace / "skills"
+    team_skills.mkdir(parents=True)
+    (team_skills / "libai").mkdir()
+    (team_skills / "libai" / "SKILL.md").write_text(
+        "---\nname: libai\ndescription: team skill\n---\n", encoding="utf-8"
+    )
+
+    workspace_root.mkdir(parents=True)
+    workspace = Workspace(root_path=str(workspace_root))
+    workspace._create_directory_link(str(team_workspace), Path(workspace_root) / ".team")
+
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        skills=[],
+        workspace=workspace,
+        enable_skill_discovery=True,
+    )
+
+    non_null_rails = [rail for rail in agent._pending_rails if rail is not None]
+    skill_rail = next(rail for rail in non_null_rails if type(rail).__name__ == "SkillUseRail")
+    assert str(Path(workspace_root) / ".team" / "skills") in skill_rail.skills_dir
+
+
 def test_create_deep_agent_no_duplicate_task_planning_rail() -> None:
     """Test that TaskPlanningRail is not duplicated when manually provided."""
     from openjiuwen.harness.rails import TaskPlanningRail
