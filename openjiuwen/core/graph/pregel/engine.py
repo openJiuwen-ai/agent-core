@@ -224,7 +224,7 @@ class Pregel:
                 inner_config[PARENT_NS] = current_ns
 
         # Add GRAPH_START log
-        graph_logger.info(
+        graph_logger.debug(
             "Pregel graph engine execution started",
             event_type=LogEventType.GRAPH_START,
             graph_id=inner_config.get(NS),
@@ -245,7 +245,7 @@ class Pregel:
                 graph_id=inner_config.get(NS),
                 total_steps=loop.step)
             # Add GRAPH_END log
-            graph_logger.info(
+            graph_logger.debug(
                 "Pregel graph engine execution completed",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
@@ -259,7 +259,7 @@ class Pregel:
                 graph_id=inner_config.get(NS),
                 total_steps=loop.step)
             # Add GRAPH_END log (interrupted case)
-            graph_logger.info(
+            graph_logger.debug(
                 "Pregel graph engine execution interrupted",
                 event_type=LogEventType.GRAPH_END,
                 graph_id=inner_config.get(NS),
