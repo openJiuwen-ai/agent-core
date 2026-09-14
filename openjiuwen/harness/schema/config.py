@@ -279,6 +279,10 @@ class DeepAgentConfig:
     # Subagents inherit the stricter of their own spec and this value.
     restrict_to_work_dir: bool = True
 
+    # Code Graph tools are registered by CodeGraphProfileRail on code_agent.
+    # Product default is off: omit code_graph_profile, or pass "off".
+    code_graph_config: Any = None
+
 
 @dataclass
 class SubAgentConfig:
