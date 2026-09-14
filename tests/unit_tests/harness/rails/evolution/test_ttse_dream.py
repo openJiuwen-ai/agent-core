@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from types import SimpleNamespace
 from typing import Callable
@@ -204,6 +205,132 @@ async def test_legacy_migrated_not_immediately_pruned(tmp_path):
     pf, _ = await prune_stale(store, cfg, now=time.time())
     assert pf == 0
     assert store.facts_texts() == ["legacy"]
+
+
+@pytest.mark.asyncio
+async def test_mark_injected_flush_persists_for_new_store(tmp_path):
+    path = tmp_path / "bank.json"
+    cfg = TTSEConfig(
+        store_path=str(path),
+        inject_persist_min_hits=16,
+        inject_persist_min_secs=10_000,
+    )
+    store = TTSERecordStore(cfg)
+    await store.add_fact("valuable fact")
+    now = time.time()
+    assert store.mark_injected(store.facts, now=now) == 1
+    loaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    assert loaded.facts[0]["inject_hits"] == 0
+    assert loaded.facts[0]["last_injected_at"] is None
+
+    assert await store.flush_inject_metadata() is True
+    reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    rec = reloaded.facts[0]
+    assert rec["inject_hits"] == 1
+    assert rec["last_injected_at"] == pytest.approx(now)
+
+    pf, pt = await prune_stale(reloaded, TTSEConfig(store_path=str(path), dream_ttl_days=90), now=now)
+    assert pf == 0 and pt == 0
+    assert reloaded.facts_texts() == ["valuable fact"]
+
+
+@pytest.mark.asyncio
+async def test_mark_injected_auto_flush_at_min_hits(tmp_path):
+    path = tmp_path / "bank.json"
+    cfg = TTSEConfig(
+        store_path=str(path),
+        inject_persist_min_hits=2,
+        inject_persist_min_secs=10_000,
+    )
+    store = TTSERecordStore(cfg)
+    await store.add_fact("hit me")
+    now = time.time()
+    store.mark_injected(store.facts, now=now)
+    skipped = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    assert skipped.facts[0]["inject_hits"] == 0
+
+    store.mark_injected(store.facts, now=now)
+    task = store._inject_save_task
+    assert task is not None
+    await task
+    reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    assert reloaded.facts[0]["inject_hits"] == 2
+    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
+
+
+@pytest.mark.asyncio
+async def test_reload_overlay_prevents_ttl_prune_of_injected_rule(tmp_path):
+    path = tmp_path / "bank.json"
+    cfg = TTSEConfig(
+        store_path=str(path),
+        dream_ttl_days=90,
+        inject_persist_min_hits=16,
+        inject_persist_min_secs=10_000,
+    )
+    store = TTSERecordStore(cfg)
+    now = time.time()
+    stale_ts = now - 95 * 86400
+    rec = _new_record("high value", now=stale_ts)
+    rec["last_injected_at"] = stale_ts
+    store.facts = [rec]
+    await store.save()
+
+    assert store.mark_injected(store.facts, now=now) == 1
+    stale_snapshot = {
+        "facts": [
+            {
+                "text": "high value",
+                "count": 1,
+                "created_at": stale_ts,
+                "updated_at": stale_ts,
+                "last_injected_at": stale_ts,
+                "inject_hits": 0,
+            }
+        ],
+        "tips": [],
+        "retired": [],
+    }
+    path.write_text(json.dumps(stale_snapshot), encoding="utf-8")
+    later = float(store._loaded_mtime) + 10
+    os.utime(path, (later, later))
+
+    assert store.reload_if_disk_newer() is True
+    pf, pt = await prune_stale(store, cfg, now=now)
+    assert pf == 0 and pt == 0
+    kept = store.facts[0]
+    assert kept["text"] == "high value"
+    assert kept["last_injected_at"] == pytest.approx(now)
+    assert kept["inject_hits"] >= 1
+    store.cancel_inject_persist()
+
+
+@pytest.mark.asyncio
+async def test_flush_overlays_concurrent_disk_write(tmp_path):
+    path = tmp_path / "bank.json"
+    cfg = TTSEConfig(
+        store_path=str(path),
+        inject_persist_min_hits=16,
+        inject_persist_min_secs=10_000,
+    )
+    store = TTSERecordStore(cfg)
+    await store.add_fact("rule a")
+    now = time.time()
+    store.mark_injected(store.facts, now=now)
+
+    extra = _new_record("rule b", now=now)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["facts"].append(extra)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    later = float(store._loaded_mtime) + 10
+    os.utime(path, (later, later))
+
+    assert await store.flush_inject_metadata() is True
+    reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    texts = set(reloaded.facts_texts())
+    assert texts == {"rule a", "rule b"}
+    rec_a = next(r for r in reloaded.facts if r["text"] == "rule a")
+    assert rec_a["inject_hits"] == 1
+    assert rec_a["last_injected_at"] == pytest.approx(now)
 
 
 # ----------------------------------------------------------------------

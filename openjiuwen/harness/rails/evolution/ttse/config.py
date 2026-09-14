@@ -70,6 +70,13 @@ class TTSEConfig:
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
         consult_top_k: Default per-track hit count when the tool omits ``top_k``.
         consult_rrf_k: RRF constant for BM25+embedding fusion (KB hybrid uses 60).
+        inject_persist_min_secs / inject_persist_min_hits: Consult hits refresh
+            ``last_injected_at`` / ``inject_hits`` in memory immediately.
+            Those clocks are written on every bank save (add/retire/delete/
+            dream) and also on a debounced inject flush: after this many
+            seconds since the last save, or this many unsaved injects,
+            whichever comes first. Restarts inside that window can still
+            drop unsaved clocks; TTL prune then falls back to ``created_at``.
         detect_min_tool_calls: Min tool calls in the current invoke before
             reply-delivery detect runs (not session-cumulative).
         detect_max_output_paths: Cap on extracted write paths fed to the Judge.
@@ -83,6 +90,9 @@ class TTSEConfig:
         dream_cluster_min_size: Min cluster size to consider for merge.
         dream_max_llm_merges: Cap LLM merge calls per dream run.
         dream_ttl_days: Delete rules not injected for this many days.
+            Uses ``last_injected_at`` (else ``created_at``). Consult hits
+            persist on the debounce described by ``inject_persist_min_secs``
+            / ``inject_persist_min_hits``.
         dream_prune_enabled: Enable TTL prune pass.
         dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
         dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
@@ -107,6 +117,8 @@ class TTSEConfig:
     consult_max_rules: int = 40
     consult_top_k: int = 8
     consult_rrf_k: int = 60
+    inject_persist_min_secs: float = 30.0
+    inject_persist_min_hits: int = 16
     detect_min_tool_calls: int = 5
     detect_max_output_paths: int = 20
     detect_final_reply_chars: int = 1500

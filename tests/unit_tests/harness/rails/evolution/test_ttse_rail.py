@@ -11,8 +11,10 @@ configure/unconfigure API.
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 import inspect
 import json
+import time
 from typing import Callable
 
 import pytest
@@ -50,6 +52,7 @@ from openjiuwen.harness.rails.evolution.ttse.consult import (
     MAX_CONSULT_CATEGORIES,
     parse_consult_categories,
     render_consult_result,
+    render_consult_result_async,
 )
 from openjiuwen.harness.rails.evolution.ttse.prompts import FACT_TIP_DEFINITION, detect_judge_prompt
 from openjiuwen.harness.rails.evolution.ttse.render import DISK_CATALOG_GUIDANCE_CN
@@ -296,6 +299,99 @@ def test_shared_store_same_path_is_one_object(tmp_path):
     a = shared_store(TTSEConfig(store_path=path))
     b = shared_store(TTSEConfig(store_path=path))
     assert a is b
+    reset_shared_stores()
+
+
+def test_shared_store_second_config_same_path_is_ignored(tmp_path):
+    reset_shared_stores()
+    path = str(tmp_path / "bank.json")
+    first = shared_store(TTSEConfig(store_path=path, max_facts=3))
+    second = shared_store(TTSEConfig(store_path=path, max_facts=99))
+    assert first is second
+    assert first._config.max_facts == 3
+    reset_shared_stores()
+
+
+def test_shared_store_usable_across_sequential_event_loops(tmp_path):
+    """Process-wide store must not raise RuntimeError after the first loop closes."""
+    reset_shared_stores()
+    path = str(tmp_path / "bank.json")
+
+    class _Vec:
+        async def embed_query(self, text: str):
+            return [1.0, 0.0]
+
+    store = shared_store(
+        TTSEConfig(store_path=path, embedding=_Vec(), embedding_max_rps=4.0),
+        embedding=_Vec(),
+    )
+
+    def _run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    async def on_first_loop():
+        async with store.evolution_lock:
+            await store.add_fact("loop one fact")
+        return await render_consult_result_async(store)
+
+    async def on_second_loop():
+        async with store.evolution_lock:
+            await store.add_tip("loop two tip")
+        text = await render_consult_result_async(store)
+        assert "loop one fact" in store.facts_texts()
+        assert "loop two tip" in store.tips_texts()
+        return text
+
+    _run(on_first_loop())
+    _run(on_second_loop())
+    reset_shared_stores()
+
+
+def test_inject_debounce_reschedules_after_event_loop_replaced(tmp_path):
+    """loop.close() drops TimerHandle without cancel(); debounce must rebind."""
+    reset_shared_stores()
+    path = str(tmp_path / "bank.json")
+    store = shared_store(
+        TTSEConfig(
+            store_path=path,
+            inject_persist_min_hits=16,
+            inject_persist_min_secs=10_000,
+        )
+    )
+
+    def _run(coro):
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    async def seed():
+        await store.add_fact("clocked")
+        now = time.time()
+        store.mark_injected(store.facts, now=now)
+        assert store._inject_dirty
+        assert store._inject_save_handle is not None
+        return now
+
+    now = _run(seed())
+
+    async def on_second_loop():
+        store.mark_injected(store.facts, now=now)
+        handle = store._inject_save_handle
+        assert handle is not None
+        assert not handle.cancelled()
+        assert getattr(handle, "_loop", None) is asyncio.get_running_loop()
+        assert await store.flush_inject_metadata() is True
+
+    _run(on_second_loop())
+    reloaded = TTSERecordStore(TTSEConfig(store_path=path))
+    assert reloaded.facts[0]["inject_hits"] == 2
+    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
     reset_shared_stores()
 
 
