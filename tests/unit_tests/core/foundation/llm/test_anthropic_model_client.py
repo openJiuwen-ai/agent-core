@@ -470,7 +470,7 @@ class TestSamplingParams:
         assert "top_p" not in params
 
     def test_config_defaults_send_temperature_only(self):
-        # ModelRequestConfig defaults both (temperature=0.95, top_p=0.1); the
+        # ModelRequestConfig defaults both (temperature=0.95, top_p=0.9); the
         # base builder backfills them, so a plain call must still drop top_p.
         params = self._params(_make_client())
         assert "temperature" in params
