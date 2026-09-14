@@ -3,6 +3,8 @@
 # Copyright c) Huawei Technologies Co. Ltd. 2025-2025
 
 import asyncio
+import inspect
+from unittest.mock import patch
 
 import pytest
 
@@ -12,7 +14,7 @@ from openjiuwen.core.graph.pregel.base import PregelNode
 from openjiuwen.core.graph.pregel import PregelConfig
 from openjiuwen.core.graph.pregel.constants import PARENT_NS, NS
 from openjiuwen.core.graph.pregel.router import StaticRouter
-from openjiuwen.core.graph.pregel.task import TaskExecutorPool
+from openjiuwen.core.graph.pregel.task import NodeTask, TaskExecutorPool
 
 
 async def task_a_slow(config):
@@ -48,6 +50,42 @@ async def task_c_fast(config):
 
 
 class TestTaskExecutorPool:
+
+    @pytest.mark.asyncio
+    async def test_signature_is_cached_per_callable(self):
+        async def task_with_config(config):
+            assert config[NS] == 'root:A:1'
+
+        node = PregelNode(name='A', func=task_with_config, routers=[])
+        config: PregelConfig = {'ns': 'root', 'session_id': 'test_signature_cache'}
+        config[PARENT_NS] = config[NS]
+
+        with patch(
+            'openjiuwen.core.graph.pregel.task.inspect.signature',
+            wraps=inspect.signature
+        ) as signature:
+            await NodeTask(node, config, 1).run()
+            await NodeTask(node, config, 1).run()
+
+        assert signature.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_signature_cache_does_not_share_plain_functions(self):
+        calls = []
+
+        async def task_without_config():
+            calls.append('without_config')
+
+        async def task_with_config(config):
+            calls.append(config[NS])
+
+        config: PregelConfig = {'ns': 'root', 'session_id': 'test_signature_cache_isolation'}
+        config[PARENT_NS] = config[NS]
+
+        await NodeTask(PregelNode('A', task_without_config, []), config, 1).run()
+        await NodeTask(PregelNode('B', task_with_config, []), config, 1).run()
+
+        assert calls == ['without_config', 'root:B:1']
 
     @pytest.mark.asyncio
     async def test_pool_runtime_exception(self):

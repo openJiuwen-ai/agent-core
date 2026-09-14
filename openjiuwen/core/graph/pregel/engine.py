@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from typing import Dict, Optional, Union, Callable, Any, Coroutine, List, TYPE_CHECKING
+from typing import Dict, Optional, Union, Callable, Any, Coroutine, List
 
 from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import TriggerMessage, PregelNode, Channel, Interrupt, GraphInterrupt
@@ -98,9 +98,6 @@ class PregelLoop:
                 "active_nodes": list(self.active_nodes) if self.active_nodes else []
             }
         )
-        # 1. Determine tasks for this round
-        tasks_to_run = []
-
         # Retry tasks from graph state
         if self._retry_pending_nodes:
             self.active_nodes = list(self._retry_pending_nodes.keys())
@@ -130,12 +127,10 @@ class PregelLoop:
                 f"Recursion limit of {self.max_step} reached at step {self.step}"
             )
 
+        # 1. Consume and submit each node in one pass.
         for name in self.active_nodes:
             self.manager.consume(name)
-            tasks_to_run.append(self.graph.nodes[name])
-
-        # 2. Execute tasks
-        for node in tasks_to_run:
+            node = self.graph.nodes[name]
             self.executor.submit(node, self.node_version[node.name])
 
         try:
