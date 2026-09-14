@@ -782,6 +782,51 @@ class PersonalContext:
         if should_start:
             await self.start_fetch_service(safe_id)
 
+    async def _replace_fetch_service_credentials(
+        self,
+        replacements: tuple[PersonalContextFetchServiceConfig, ...],
+    ) -> None:
+        """Replace service credentials and provider instances without restarting work."""
+
+        if not isinstance(replacements, tuple) or any(
+            not isinstance(item, PersonalContextFetchServiceConfig) for item in replacements
+        ):
+            raise _state_error("replacements must be fetch service configurations")
+        replacement_by_id = {item.service_id: item for item in replacements}
+        if len(replacement_by_id) != len(replacements):
+            raise _state_error("replacement service IDs must be unique")
+
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            current_by_id = {item.service_id: item for item in config.fetch_services}
+            for service_id, replacement in replacement_by_id.items():
+                current = current_by_id.get(service_id)
+                if current is None:
+                    raise _state_error("unknown fetch service")
+                if current.model_copy(update={"credentials": replacement.credentials}) != replacement:
+                    raise _state_error("only fetch service credentials may be replaced")
+            replacement_providers = {
+                service_id: self._create_fetch_provider(replacement)
+                for service_id, replacement in replacement_by_id.items()
+            }
+            updated = config.model_copy(
+                update={
+                    "fetch_services": tuple(
+                        replacement_by_id.get(item.service_id, item) for item in config.fetch_services
+                    )
+                }
+            )
+            async with self._fetch_lock:
+                pipeline = self._pipeline_service
+                if pipeline is not None:
+                    pipeline.replace_configuration(updated)
+                self._config = updated
+                for service_id, provider in replacement_providers.items():
+                    if service_id in self._fetch_providers:
+                        self._fetch_providers[service_id] = provider
+
     async def _remove_fetch_service_config(self, service_id: str) -> None:
         """Roll back a newly appended service without restarting the runtime."""
 
@@ -1288,7 +1333,6 @@ class PersonalContext:
             self._active_fetch_run_stop_events.pop(service_id, None)
 
     async def _run_fetch_service(self, service_id: str, stop_event: asyncio.Event) -> None:
-        provider = self._fetch_providers[service_id]
         config = self._service_config(service_id)
         interval = config.interval_seconds
         try:
@@ -1303,6 +1347,7 @@ class PersonalContext:
                 async with self._fetch_lock:
                     if service_id in self._fetch_running:
                         continue
+                    provider = self._fetch_providers[service_id]
                     self._fetch_running.add(service_id)
                     if self._fetch_states.get(service_id) != "STOPPING":
                         self._fetch_states[service_id] = "RUNNING"

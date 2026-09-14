@@ -80,6 +80,35 @@ def _manual_config(
     )
 
 
+def _repository_runtime_config(
+    *,
+    token: str,
+    interval: float = 3600.0,
+) -> PersonalContextConfig:
+    return PersonalContextConfig.from_dict(
+        {
+            "collection_enabled": True,
+            "agent_use_enabled": False,
+            "strategy_profile": "rules",
+            "fetch_services": [
+                {
+                    "service_id": "github-main",
+                    "provider": "github",
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "time_range": {"mode": "all"},
+                    "source": {
+                        "owner": "openJiuwen",
+                        "repo": "agent-core",
+                        "resources": ["issues"],
+                    },
+                    "credentials": {"token": token},
+                }
+            ],
+        }
+    )
+
+
 class _RunningPipeline:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
@@ -163,6 +192,105 @@ async def _finish_manual_tasks(personal_context: PersonalContext, service_ids: t
         await asyncio.wait_for(provider.started.wait(), timeout=1.0)
         provider.release.set()
     await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_credential_replacement_keeps_active_manual_run_and_updates_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        personal_context_module._PROVIDER_TYPES,
+        "github",
+        _BlockingManualProvider,
+    )
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+
+    await personal_context.run_fetch(service_id="github-main")
+    first_task = personal_context._manual_fetch_tasks["github-main"]
+    await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+    try:
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+
+        assert isinstance(new_provider, _BlockingManualProvider)
+        assert new_provider is not old_provider
+        assert not new_provider.started.is_set()
+        assert not first_task.done()
+
+        old_provider.release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+        await personal_context.run_fetch(service_id="github-main")
+        second_task = personal_context._manual_fetch_tasks["github-main"]
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        new_provider.release.set()
+        await asyncio.wait_for(second_task, timeout=1.0)
+    finally:
+        old_provider.release.set()
+        if not first_task.done():
+            await asyncio.wait_for(first_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_reads_current_provider_cache_each_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "github", _BlockingManualProvider)
+    original = _repository_runtime_config(token="old-token", interval=0.01)
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+    stop_event = asyncio.Event()
+    scheduler = asyncio.create_task(personal_context._run_fetch_service("github-main", stop_event))
+
+    try:
+        await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+        replacement = _repository_runtime_config(token="new-token", interval=0.01).fetch_services[0]
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+        assert isinstance(new_provider, _BlockingManualProvider)
+        old_provider.release.set()
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        stop_event.set()
+        new_provider.release.set()
+        await asyncio.wait_for(scheduler, timeout=1.0)
+    finally:
+        stop_event.set()
+        old_provider.release.set()
+        cached = personal_context._fetch_providers.get("github-main")
+        if isinstance(cached, _BlockingManualProvider):
+            cached.release.set()
+        if not scheduler.done():
+            await asyncio.wait_for(scheduler, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_credential_replacement_provider_build_failure_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    pipeline = personal_context._pipeline_service
+
+    def fail_provider(_config: PersonalContextFetchServiceConfig) -> ContextFetchService:
+        raise RuntimeError("provider build failed")
+
+    monkeypatch.setattr(personal_context, "_create_fetch_provider", fail_provider)
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+
+    with pytest.raises(RuntimeError, match="provider build failed"):
+        await personal_context._replace_fetch_service_credentials((replacement,))
+
+    assert personal_context._config is original
+    assert isinstance(pipeline, _RunningPipeline)
+    assert pipeline.configurations == []
 
 
 @pytest.mark.asyncio
