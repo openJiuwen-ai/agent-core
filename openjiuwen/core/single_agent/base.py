@@ -16,6 +16,8 @@ Author: huenrui1@huawei.com
 """
 from __future__ import annotations
 
+import uuid
+
 from abc import ABCMeta, abstractmethod
 from typing import (
     Dict,
@@ -105,7 +107,11 @@ class BaseAgent(metaclass=_AgentMeta):
         """
         self.card = card
         self._ability_manager = AbilityManager()
-        self._agent_callback_manager = AgentCallbackManager(card.id)
+        self._instance_id = uuid.uuid4().hex
+        self._agent_callback_manager = AgentCallbackManager(
+            card.id,
+            event_namespace=self._instance_id,
+        )
         self._skill_util = None
         self.lazy_init_skill()
 

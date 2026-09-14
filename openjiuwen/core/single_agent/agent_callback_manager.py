@@ -14,8 +14,9 @@ class AgentCallbackManager:
 
     Supports both function-style and middleware-style callbacks with priority ordering.
     """
-    def __init__(self, agent_id):
+    def __init__(self, agent_id, event_namespace: Optional[str] = None):
         self.agent_id = agent_id
+        self.event_namespace = event_namespace or agent_id
 
     async def register_callback(
         self,
@@ -130,12 +131,12 @@ class AgentCallbackManager:
         return ctx
 
     def _get_agent_event(self, event: AgentCallbackEvent) -> str:
-        """Unified generation of event name with agent_id prefix to avoid duplicate name
+        """Unified generation of event name with instance prefix to avoid duplicate name
 
         Args:
             event: Original callback event
 
         Returns:
-            Event name string prefixed with agent_id
+            Event name string prefixed with the callback namespace
         """
-        return f"{self.agent_id}_{event}"
+        return f"{self.event_namespace}_{event}"
