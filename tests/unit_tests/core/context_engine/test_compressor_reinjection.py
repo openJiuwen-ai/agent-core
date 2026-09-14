@@ -26,7 +26,7 @@ from openjiuwen.core.context_engine.processor.forked.compressor.round_level_comp
     RoundLevelCompressorConfig,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessage, UserMessage
-from openjiuwen.core.foundation.kv_cache import KVCacheIdentity
+from openjiuwen.core.kv_cache import KVCacheIdentity
 
 
 def _tool_call(call_id: str, name: str, arguments: str) -> ToolCall:

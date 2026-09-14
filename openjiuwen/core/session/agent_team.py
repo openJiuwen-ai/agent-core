@@ -10,14 +10,16 @@ from openjiuwen.core.session.stream import (
     BaseStreamMode,
     OutputSchema,
 )
-from openjiuwen.core.foundation.kv_cache.kv_cache_metadata import (
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     KVCacheIdentity,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.core.single_agent import (
     create_agent_session,
     Session as AgentSession,
 )
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.core.common.logging import logger
 
 
 class Session:
@@ -29,6 +31,7 @@ class Session:
             envs: dict[str, Any] = None,
             team_id: str = "agent_team",
             source_metadata_enabled: bool = True,
+            kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
     ):
         if session_id is None:
             session_id = str(uuid.uuid4())
@@ -41,6 +44,8 @@ class Session:
         self._inner = AgentTeamSession(session_id=session_id, team_id=team_id, config=config)
         self._pre_run_done = False
         self._post_run_done = False
+        self._kv_cache_runtime: KVCacheRuntimeProtocol | None = kv_cache_runtime
+        self._kvc_released = False
 
     def get_session_id(self) -> str:
         return self._session_id
@@ -57,6 +62,43 @@ class Session:
             cache_id=self._session_id,
             parent_cache_id=self._session_id,
         )
+
+    def get_kv_cache_runtime(self) -> KVCacheRuntimeProtocol | None:
+        """Return the process-local KVC runtime while this Team Session is live."""
+        return None if self._kvc_released else self._kv_cache_runtime
+
+    async def prepare_kvc(self) -> bool:
+        runtime = self.get_kv_cache_runtime()
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.prepare(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("Team KVC prepare failed; continue normal flow: %s", exc)
+            return False
+
+    async def suspend_kvc(self) -> bool:
+        runtime = self.get_kv_cache_runtime()
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.suspend(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("Team KVC suspend failed; continue normal flow: %s", exc)
+            return False
+
+    async def release_kvc(self) -> bool:
+        if self._kvc_released:
+            return False
+        runtime = self._kv_cache_runtime
+        self._kvc_released = True
+        if runtime is None:
+            return False
+        try:
+            return bool(await runtime.release(self.get_cache_identity()))
+        except Exception as exc:
+            logger.warning("Team KVC release failed; continue normal cleanup: %s", exc)
+            return False
 
     def get_envs(self):
         return self._inner.config().get_envs()
@@ -133,6 +175,7 @@ class Session:
             stream_writer_manager=stream_writer_manager,
             close_stream_on_post_run=False,
             source_metadata=source_metadata,
+            kv_cache_runtime=self.get_kv_cache_runtime(),
         )
         child.set_team_cache_scope(team_id=self._team_id, agent_id=card.id)
         return child
@@ -169,6 +212,7 @@ def create_agent_team_session(
         envs: dict[str, Any] = None,
         team_id: str = "agent_team",
         source_metadata_enabled: bool = True,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
 ) -> Session:
     """Create AgentTeam Session"""
     return Session(
@@ -176,4 +220,5 @@ def create_agent_team_session(
         envs=envs,
         team_id=team_id,
         source_metadata_enabled=source_metadata_enabled,
+        kv_cache_runtime=kv_cache_runtime,
     )

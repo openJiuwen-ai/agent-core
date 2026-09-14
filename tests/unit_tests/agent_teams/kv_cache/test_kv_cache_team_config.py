@@ -1,7 +1,7 @@
 from unittest.mock import patch
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 
 
 def test_deep_agent_spec_preserves_kv_cache_affinity_config() -> None:

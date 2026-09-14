@@ -12,6 +12,7 @@ turns, and dispose lifecycle are all exercised deterministically.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,6 +94,32 @@ def _patch_build(monkeypatch, harnesses: list) -> None:
 def _mgr(**kw) -> AvatarSessionManager:
     base = DeepAgentSpec(enable_task_loop=True, enable_task_planning=True, tools=[])
     return AvatarSessionManager(worker_base_spec=base, team_name="t", language="en", **kw)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_session_lookup_failure_does_not_prevent_avatar_disposal(monkeypatch, enabled):
+    harnesses: list = []
+    _patch_build(monkeypatch, harnesses)
+    lookups = []
+
+    def broken_session_lookup():
+        lookups.append(True)
+        raise RuntimeError("session unavailable")
+
+    async def scenario():
+        mgr = _mgr()
+        sid = await mgr.open_session(kind="agent", instructions=None, opts={"label": "test"})
+        harness = harnesses[0]
+        harness.deep_config = SimpleNamespace(
+            kv_cache_affinity_config=SimpleNamespace(enable_kv_cache_affinity=enabled)
+        )
+        harness.current_session = broken_session_lookup
+        await mgr.close_session(sid)
+        await mgr.close_session(sid)
+
+    asyncio.run(scenario())
+    assert harnesses[0].disposed
+    assert lookups == ([True] if enabled else [])
 
 
 def test_agent_session_reuses_one_harness_across_turns(monkeypatch):

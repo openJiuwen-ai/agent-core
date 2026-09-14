@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Unit tests for SessionSpawnExecutor KV-cache affinity lifecycle."""
+"""SessionSpawnExecutor coverage for Session-owned KVC cleanup."""
 
 from __future__ import annotations
 
@@ -15,8 +15,9 @@ from openjiuwen.core.controller.modules import TaskExecutorDependencies
 from openjiuwen.core.controller.modules.event_queue import EventQueue
 from openjiuwen.core.controller.modules.task_manager import TaskManager
 from openjiuwen.core.controller.schema import EventType, Task, TaskStatus
-from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.task_loop.session_spawn_executor import SessionSpawnExecutor
 from openjiuwen.harness.tools import SESSION_SPAWN_TASK_TYPE
 
@@ -32,11 +33,7 @@ def _make_deps(task_manager: TaskManager) -> TaskExecutorDependencies:
     )
 
 
-def _make_task(
-        *,
-        task_id: str = "task-1",
-        sub_session_id: str | None = "parent_session_sub_meta",
-) -> Task:
+def _make_task(task_id: str = "task-1", sub_session_id: str | None = "parent_session_sub_meta") -> Task:
     metadata = {
         "subagent_type": "code",
         "task_description": "do work",
@@ -54,187 +51,107 @@ def _make_task(
     )
 
 
-def _make_deep_agent(*, model: object, subagent: object, enabled: bool = True) -> SimpleNamespace:
+def _subagent(*, error: Exception | None = None):
+    invoke = AsyncMock(return_value={"output": "done"})
+    if error is not None:
+        invoke.side_effect = error
     return SimpleNamespace(
+        card=AgentCard(id="child", name="child", description="child"),
+        invoke=invoke,
+    )
+
+
+async def _make_executor(*, task: Task | None, subagent: object, enabled: bool = True) -> SessionSpawnExecutor:
+    task_manager = TaskManager(config=ControllerConfig())
+    if task is not None:
+        await task_manager.add_task(task)
+    deep_agent = SimpleNamespace(
         deep_config=SimpleNamespace(
-            model=model,
             kv_cache_affinity_config=KVCacheAffinityConfig(enable_kv_cache_affinity=enabled),
         ),
         create_subagent=MagicMock(return_value=subagent),
     )
+    return SessionSpawnExecutor(_make_deps(task_manager), deep_agent)
 
 
-async def _make_executor(
-        *,
-        task: Task | None,
-        subagent: object,
-        enabled: bool = True,
-) -> tuple[SessionSpawnExecutor, object]:
-    task_manager = TaskManager(config=ControllerConfig())
-    if task is not None:
-        await task_manager.add_task(task)
-    model = SimpleNamespace(name="model")
-    executor = SessionSpawnExecutor(
-        _make_deps(task_manager),
-        _make_deep_agent(model=model, subagent=subagent, enabled=enabled),
-    )
-    return executor, model
-
-
-async def _collect_execute(executor: SessionSpawnExecutor, task_id: str):
-    return [chunk async for chunk in executor.execute_ability(task_id, Session(session_id="parent_session"))]
+async def _collect(executor: SessionSpawnExecutor, task_id: str):
+    session = Session(session_id="parent_session")
+    return [chunk async for chunk in executor.execute_ability(task_id, session)]
 
 
 @pytest.mark.asyncio
-async def test_success_evicts_subagent_session_and_returns_task_completion() -> None:
-    subagent = SimpleNamespace(invoke=AsyncMock(return_value={"output": "done"}))
-    executor, model = await _make_executor(task=_make_task(), subagent=subagent)
+async def test_success_passes_child_session_and_releases_it() -> None:
+    subagent = _subagent()
+    executor = await _make_executor(task=_make_task(), subagent=subagent)
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        chunks = await _collect_execute(executor, "task-1")
+    with patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
+        chunks = await _collect(executor, "task-1")
 
     assert chunks[-1].payload.type == EventType.TASK_COMPLETION
-    subagent.invoke.assert_awaited_once()
-    assert subagent.invoke.await_args.args[0]["conversation_id"] == "parent_session_sub_meta"
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id="parent_session_sub_meta",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
+    child = subagent.invoke.await_args.kwargs["session"]
+    assert child.get_session_id() == "parent_session_sub_meta"
+    assert child.get_parent_session_id() == "parent_session"
+    release.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_failure_evicts_subagent_session_and_returns_task_failed() -> None:
-    subagent = SimpleNamespace(invoke=AsyncMock(side_effect=RuntimeError("boom")))
-    executor, model = await _make_executor(task=_make_task(), subagent=subagent)
+async def test_failure_releases_child_and_returns_task_failed() -> None:
+    executor = await _make_executor(task=_make_task(), subagent=_subagent(error=RuntimeError("boom")))
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        chunks = await _collect_execute(executor, "task-1")
+    with patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
+        chunks = await _collect(executor, "task-1")
 
     assert chunks[-1].payload.type == EventType.TASK_FAILED
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id="parent_session_sub_meta",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
+    release.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_cancel_evicts_subagent_session_and_returns_true() -> None:
-    executor, model = await _make_executor(task=_make_task(), subagent=SimpleNamespace())
+async def test_cancel_releases_resolved_child_session() -> None:
+    executor = await _make_executor(task=_make_task(), subagent=_subagent())
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
+    with patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
         result = await executor.cancel("task-1", Session(session_id="parent_session"))
 
     assert result is True
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id="parent_session_sub_meta",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
+    release.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
-async def test_missing_task_cancel_does_not_evict_and_returns_true() -> None:
-    executor, _ = await _make_executor(task=None, subagent=SimpleNamespace())
+async def test_missing_task_cancel_is_noop() -> None:
+    executor = await _make_executor(task=None, subagent=_subagent())
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        result = await executor.cancel("missing-task", Session(session_id="parent_session"))
+    with patch.object(Session, "release_kvc", new=AsyncMock(return_value=True)) as release:
+        result = await executor.cancel("missing", Session(session_id="parent_session"))
 
     assert result is True
-    evict_mock.assert_not_awaited()
+    release.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_missing_metadata_sub_session_uses_same_fallback_for_invoke_and_evict() -> None:
-    subagent = SimpleNamespace(invoke=AsyncMock(return_value={"output": "done"}))
-    executor, model = await _make_executor(
+async def test_missing_sub_session_metadata_uses_stable_fallback() -> None:
+    subagent = _subagent()
+    executor = await _make_executor(
         task=_make_task(task_id="legacy-task", sub_session_id=None),
         subagent=subagent,
     )
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        chunks = await _collect_execute(executor, "legacy-task")
+    chunks = await _collect(executor, "legacy-task")
 
     assert chunks[-1].payload.type == EventType.TASK_COMPLETION
-    fallback_id = "parent_session_sub_legacy-task"
-    assert subagent.invoke.await_args.args[0]["conversation_id"] == fallback_id
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id=fallback_id,
-        parent_session_id="parent_session",
-        enabled=True,
-    )
+    assert subagent.invoke.await_args.args[0]["conversation_id"] == "parent_session_sub_legacy-task"
+    assert subagent.invoke.await_args.kwargs["session"].get_session_id() == "parent_session_sub_legacy-task"
 
 
 @pytest.mark.asyncio
-async def test_cancel_uses_fallback_sub_session_when_metadata_is_missing() -> None:
-    executor, model = await _make_executor(
-        task=_make_task(task_id="legacy-task", sub_session_id=None),
-        subagent=SimpleNamespace(),
-    )
+async def test_affinity_disabled_preserves_baseline_invoke() -> None:
+    subagent = _subagent()
+    executor = await _make_executor(task=_make_task(), subagent=subagent, enabled=False)
 
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=True),
-    ) as evict_mock:
-        result = await executor.cancel("legacy-task", Session(session_id="parent_session"))
-
-    assert result is True
-    evict_mock.assert_awaited_once_with(
-        model,
-        session_id="parent_session_sub_legacy-task",
-        parent_session_id="parent_session",
-        enabled=True,
-    )
-
-
-@pytest.mark.asyncio
-async def test_kvc_helper_failure_preserves_task_completion_result() -> None:
-    subagent = SimpleNamespace(invoke=AsyncMock(return_value={"output": "done"}))
-    executor, _ = await _make_executor(task=_make_task(), subagent=subagent)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(side_effect=RuntimeError("evict failed")),
-    ):
-        chunks = await _collect_execute(executor, "task-1")
+    chunks = await _collect(executor, "task-1")
 
     assert chunks[-1].payload.type == EventType.TASK_COMPLETION
-
-
-@pytest.mark.asyncio
-async def test_affinity_disabled_preserves_baseline_invoke_and_skips_evict() -> None:
-    subagent = SimpleNamespace(invoke=AsyncMock(return_value={"output": "done"}))
-    executor, _ = await _make_executor(task=_make_task(), subagent=subagent, enabled=False)
-
-    with patch(
-            "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache",
-        new=AsyncMock(return_value=False),
-    ) as evict_mock:
-        chunks = await _collect_execute(executor, "task-1")
-
-    assert chunks[-1].payload.type == EventType.TASK_COMPLETION
+    assert "session" not in subagent.invoke.await_args.kwargs
     assert subagent.invoke.await_args.args[0] == {
         "query": "do work",
         "conversation_id": "parent_session_sub_meta",
     }
-    evict_mock.assert_not_awaited()
