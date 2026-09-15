@@ -614,7 +614,8 @@ def _make_repo(tmp_path: Path, name: str) -> Path:
     repo = tmp_path / name
     repo.mkdir()
     for cmd in (
-        ["git", "init", "-b", "main", str(repo)],
+        # no `-b main`: git < 2.28 (older CI) rejects it and the branch name is never asserted
+        ["git", "init", str(repo)],
         ["git", "-C", str(repo), "config", "user.email", "st@example.com"],
         ["git", "-C", str(repo), "config", "user.name", "st"],
         ["git", "-C", str(repo), "add", "-A"],
