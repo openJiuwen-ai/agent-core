@@ -14,6 +14,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import (
     get_logger,
     log_context,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import infer_proposed_name
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     find_harness_run_dirs,
     module_attempt_dir,
@@ -51,6 +52,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     SurveyHandoff,
     TaskState,
     TerminalReport,
+    compact_execution_history_rows,
     default_requirements,
     limits_from_config,
     report_requirement,
@@ -73,6 +75,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.transitions im
     DecisionValidationError,
     apply_state_changes,
     can_complete,
+    code_head_from_state,
     list_legal_actions,
     remaining_code_retries,
     remaining_execution_retries,
@@ -293,7 +296,16 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
         return
 
     if report.module == "code_implementation":
-        task.counters.code_attempts += 1
+        restored = bool(
+            state.task_state.last_contract
+            and state.task_state.last_contract.restore_code_commit.strip()
+        )
+        promotion_failed = (
+            isinstance(report.handoff, CodeHandoff)
+            and report.handoff.readiness == "promotion_failed"
+        )
+        if not restored and not promotion_failed:
+            task.counters.code_attempts += 1
         if state.latest_implementation is not None:
             task.latest_implementation_status = state.latest_implementation.status
         task.phase = "code"
@@ -471,12 +483,42 @@ class ManagerRuntime:
         failure_class = ""
         fingerprint = ""
         diagnostic_paths: list[str] = []
+        code_head = code_head_from_state(state)
+        implemented_variants: list[str] = []
+        if state.latest_implementation is not None:
+            implemented_variants = [item.name for item in state.latest_implementation.variants]
+        if state.latest_execution is not None and state.latest_execution.variants:
+            process_status = state.latest_execution.status or process_status
+            variant_metrics = {
+                item.name: dict(item.metrics) for item in state.latest_execution.variants
+            }
+            plan = state.task_state.latest_plan
+            proposed_name = infer_proposed_name(
+                [item.name for item in state.latest_execution.variants],
+                metric_names=list(plan.metrics) if plan is not None else [],
+                baselines=list(plan.baselines) if plan is not None else [],
+            )
+            proposed = next(
+                (
+                    item
+                    for item in state.latest_execution.variants
+                    if item.name == (proposed_name or "proposed")
+                ),
+                None,
+            )
+            primary = proposed or state.latest_execution.variants[0]
+            latest_metrics = dict(primary.metrics)
+        head_slice_set = bool(variant_metrics)
         for report in reversed(state.reports):
             if report.module != "experiment_execution":
                 continue
             handoff = report.handoff
             if isinstance(handoff, ExecutionHandoff):
-                process_status = handoff.process_status or process_status
+                matches_head = (not code_head) or handoff.code_commit == code_head or any(
+                    item.code_commit == code_head for item in handoff.variants if item.code_commit
+                )
+                if code_head and not matches_head:
+                    continue
                 scientific_status = handoff.scientific_status
                 failure_kind = handoff.failure_kind
                 failure_stage = handoff.failure_stage
@@ -484,27 +526,33 @@ class ManagerRuntime:
                 failure_class = handoff.failure_class
                 fingerprint = handoff.fingerprint
                 diagnostic_paths = list(handoff.diagnostic_paths)
-                if handoff.diagnostic:
-                    latest_metrics = dict(handoff.diagnostic)
-                    failure_stage = failure_stage or str(handoff.diagnostic.get("failure_stage") or "")
-                    failure_substage = failure_substage or str(
-                        handoff.diagnostic.get("failure_substage") or ""
-                    )
-                    fingerprint = fingerprint or str(handoff.diagnostic.get("fingerprint") or "")
-                if handoff.variants:
-                    variant_metrics = {
-                        item.name: dict(item.metrics) for item in handoff.variants
-                    }
-                    proposed = next(
-                        (item for item in handoff.variants if item.name == "proposed"),
-                        None,
-                    )
-                    primary = proposed or handoff.variants[0]
-                    latest_metrics = {**dict(primary.metrics), **latest_metrics}
-                    for item in handoff.variants:
-                        path = getattr(item, "diagnostics_path", "") or ""
-                        if path and path not in diagnostic_paths:
-                            diagnostic_paths.append(path)
+                if not head_slice_set:
+                    process_status = handoff.process_status or process_status
+                    if handoff.diagnostic:
+                        latest_metrics = dict(handoff.diagnostic)
+                    if handoff.variants:
+                        variant_metrics = {
+                            item.name: dict(item.metrics) for item in handoff.variants
+                        }
+                        proposed = next(
+                            (item for item in handoff.variants if item.name == "proposed"),
+                            None,
+                        )
+                        primary = proposed or handoff.variants[0]
+                        latest_metrics = {**dict(primary.metrics), **latest_metrics}
+                else:
+                    if handoff.diagnostic:
+                        failure_stage = failure_stage or str(
+                            handoff.diagnostic.get("failure_stage") or ""
+                        )
+                        failure_substage = failure_substage or str(
+                            handoff.diagnostic.get("failure_substage") or ""
+                        )
+                        fingerprint = fingerprint or str(handoff.diagnostic.get("fingerprint") or "")
+                for item in handoff.variants:
+                    path = getattr(item, "diagnostics_path", "") or ""
+                    if path and path not in diagnostic_paths:
+                        diagnostic_paths.append(path)
                 break
             break
         complete_ok, complete_reason = can_complete(state)
@@ -518,7 +566,12 @@ class ManagerRuntime:
             ),
             remaining_reporting_retries=remaining_reporting_retries(task),
             known_record_ids=known,
-            legal_actions=list_legal_actions(task, state.reports),
+            legal_actions=list_legal_actions(
+                task,
+                state.reports,
+                code_commit=code_head,
+                execution_history=state.execution_history,
+            ),
             can_complete=complete_ok,
             can_complete_reason="" if complete_ok else complete_reason,
             latest_metrics=latest_metrics,
@@ -531,6 +584,9 @@ class ManagerRuntime:
             latest_failure_fingerprint=fingerprint,
             diagnostic_paths=diagnostic_paths,
             variant_metrics=variant_metrics,
+            code_head=code_head,
+            implemented_variants=implemented_variants,
+            execution_history=compact_execution_history_rows(state.execution_history),
         )
 
     def _snapshot(self, state: PersistedManagerState, round_index: int) -> ManagerSnapshot:

@@ -15,16 +15,11 @@ below) — they don't relax the write sandbox.
 
 ## Version control
 
-Your workspace includes git (via bash). Run `git init` inside `output/` before
-you start writing files, and commit as you go — e.g. after the entry point
-first runs, and again once every variant's smoke test passes — so there's a
-real history of how the implementation evolved. This is a local-only,
-disposable repo: there is no remote and nothing here is ever pushed. Keep the
-working tree in `output/`; the host copies a snapshot of your files into
-`generated_code/` without `.git`. `git push` and history-rewriting commands
-(`reset --hard`, `commit --amend`, `branch -D`, `clean -f`, `--no-verify`)
-are blocked at the tool level — you don't need any of them, just plain
-`git add` + `git commit`.
+Do **not** `git init` or commit inside `output/`. The host owns the
+checkpoint on `generated_code/` and reseeds `output/` at the start of each
+coding round. Edit files under `output/` only. History-rewriting git
+commands (`reset --hard`, `commit --amend`, `branch -D`, `clean -f`,
+`--no-verify`) and `git push` are blocked at the tool level.
 
 ## Living experiment design (read-only)
 
