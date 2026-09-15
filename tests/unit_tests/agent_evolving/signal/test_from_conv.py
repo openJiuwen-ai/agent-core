@@ -7,8 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
-from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
+from openjiuwen.agent_evolving.signal.from_conv import (
+    USER_INTENT_LLM_POLICY,
+    ConversationSignalDetector,
+)
 from openjiuwen.agent_evolving.trajectory.messages import trajectory_to_messages
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
@@ -651,6 +655,77 @@ class TestConversationSignalDetector:
 
         assert signals == []
         llm.invoke.assert_awaited_once()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_uses_llm_policy_timeout() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "不要叫我boss了，叫我master"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
+        policy = LLMInvokePolicy(
+            attempt_timeout_secs=12.0,
+            total_budget_secs=20.0,
+            max_attempts=1,
+        )
+        detector = ConversationSignalDetector().bind_llm(
+            llm=llm,
+            model="test-model",
+            llm_policy=policy,
+        )
+
+        await detector.detect_user_intent(messages)
+
+        assert llm.invoke.await_args.kwargs["timeout"] == 12.0
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_retries_empty_response() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "不要叫我boss了，叫我master"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            side_effect=["", {"content": '{"is_feedback": true, "excerpt": "叫我master"}'}]
+        )
+        policy = LLMInvokePolicy(
+            attempt_timeout_secs=5.0,
+            total_budget_secs=20.0,
+            max_attempts=2,
+            backoff_base_secs=0,
+        )
+        detector = ConversationSignalDetector().bind_llm(
+            llm=llm,
+            model="test-model",
+            llm_policy=policy,
+        )
+
+        signals = await detector.detect_user_intent(messages)
+
+        assert len(signals) == 1
+        assert signals[0].excerpt == "叫我master"
+        assert llm.invoke.await_count == 2
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_default_policy_keeps_30s_timeout() -> None:
+        messages = [
+            {"role": "user", "content": "写个脚本"},
+            {"role": "assistant", "content": "写好了"},
+            {"role": "user", "content": "不要叫我boss了，叫我master"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+
+        await detector.detect_user_intent(messages)
+
+        assert llm.invoke.await_args.kwargs["timeout"] == USER_INTENT_LLM_POLICY.attempt_timeout_secs
 
 
 class TestCollectSkillsFromMessages:

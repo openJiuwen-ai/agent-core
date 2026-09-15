@@ -8,7 +8,13 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * I/O is async via :func:`asyncio.to_thread` with an atomic ``tmp`` + ``os.replace``.
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
+  The scan is O(n) in bank size (capped by ``max_facts`` / ``max_tips``);
+  a process-local cache makes repeat adds CPU-only. Cold cache fills with
+  batched ``embed_documents``, not one RPC per row. n<=400 is a linear
+  scan; an ANN index is not used.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
+  The cache is an LRU capped at ``max_facts + max_tips + 100`` and is pruned
+  when records leave the bank (retire / delete / cap / reload).
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
   ``last_injected_at``, ``inject_hits``) for Auto-dream prune. Consult
   hits update those clocks in memory; they flush on bank writes and on a
@@ -33,6 +39,7 @@ import math
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import logger
@@ -128,6 +135,10 @@ def _store_key(store_path: str) -> str:
 _SHARED_STORES: Dict[str, "TTSERecordStore"] = {}
 _SHARED_STORES_GUARD = threading.Lock()
 _CROSS_LOOP_LOCK_POLL_S = 0.005
+# Cold-cache fill uses provider.embed_documents in chunks (one RPC per chunk).
+_EMBED_DOC_BATCH = 32
+# Headroom above max_facts+max_tips for in-flight query texts (consult / dedup).
+_EMBED_CACHE_SLACK = 100
 
 
 class _CrossLoopLock:
@@ -217,7 +228,7 @@ class TTSERecordStore:
         self.facts: List[Dict[str, Any]] = []  # [{"text","count","category"?,...meta}]
         self.tips: List[Dict[str, Any]] = []
         self.retired: List[Dict[str, Any]] = []  # [{"text","rtype","reason","retired_at_task"}]
-        self._emb_cache: Dict[str, List[float]] = {}
+        self._emb_cache: OrderedDict[str, List[float]] = OrderedDict()
         # threading.Lock-backed: shared_store outlives any one event loop.
         self._lock = _CrossLoopLock()
         # Cross-session induce/dream must serialize on the same bank object.
@@ -266,6 +277,7 @@ class TTSERecordStore:
             self.tips = [_migrate_record(dict(r), default_ts) for r in data.get("tips", [])]
             self.retired = list(data.get("retired", []))
             self._loaded_mtime = default_ts
+            self._drop_stale_embeddings()
         except (OSError, ValueError) as exc:
             logger.warning("[TTSERail] bank load failed at %s: %s", path, exc)
 
@@ -291,10 +303,25 @@ class TTSERecordStore:
             self._inject_dirty = True
         return True
 
+    def _bank_snapshot(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Copy bank lists before ``json.dump`` runs in a worker thread.
+
+        ``save`` holds ``_persist_lock``, but mutations (``add_fact`` / prune /
+        retire) take ``_lock``. ``asyncio.to_thread`` yields the event loop, so
+        another coroutine can append/sort/delete the live lists while CPython
+        iterates them in ``json.dump``. Snapshot on the event loop first.
+        """
+        return {
+            "facts": [dict(record) for record in self.facts],
+            "tips": [dict(record) for record in self.tips],
+            "retired": [dict(record) for record in self.retired],
+        }
+
     async def save(self) -> None:
         async with self._persist_lock:
             self._cancel_inject_timer()
-            await asyncio.to_thread(self._save_blocking)
+            payload = self._bank_snapshot()
+            await asyncio.to_thread(self._save_blocking, payload)
 
     async def flush_inject_metadata(self) -> bool:
         """Persist dirty consult-inject clocks if any.
@@ -319,7 +346,8 @@ class TTSERecordStore:
                 )
                 self.reload()
                 self._overlay_inject_clocks(clocks)
-            await asyncio.to_thread(self._save_blocking)
+            payload = self._bank_snapshot()
+            await asyncio.to_thread(self._save_blocking, payload)
             return True
 
     def cancel_inject_persist(self) -> None:
@@ -337,16 +365,17 @@ class TTSERecordStore:
         except RuntimeError:
             pass
 
-    def _save_blocking(self) -> None:
+    def _save_blocking(self, data: Optional[Dict[str, Any]] = None) -> None:
         path = self._config.store_path
         if not path:
             return
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        data = {"facts": self.facts, "tips": self.tips, "retired": self.retired}
+        if data is None:
+            data = self._bank_snapshot()
         tmp = f"{path}.tmp"
         try:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=1)
             os.replace(tmp, path)
@@ -354,8 +383,14 @@ class TTSERecordStore:
             self._inject_dirty = False
             self._inject_unsaved_hits = 0
             self._last_persist_mono = time.monotonic()
-        except OSError as exc:
+        except (OSError, TypeError, ValueError) as exc:
+            # json.dump raises TypeError/ValueError for non-JSON values; persist
+            # is best-effort so induction/dream must not crash on a bad record.
             logger.warning("[TTSERail] bank save failed at %s: %s", path, exc)
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
 
     def _capture_inject_clocks(self) -> Dict[Tuple[str, str], Tuple[Any, int]]:
         """Map ``(rtype, normalized text)`` to ``(last_injected_at, inject_hits)``."""
@@ -481,11 +516,37 @@ class TTSERecordStore:
                 await asyncio.sleep(wait)
             self._emb_last_call_at = time.monotonic()
 
+    def _embedding_cache_limit(self) -> int:
+        return max(int(self._config.max_facts) + int(self._config.max_tips) + _EMBED_CACHE_SLACK, 1)
+
+    def _cached_embedding(self, key: str) -> Optional[List[float]]:
+        vec = self._emb_cache.get(key)
+        if vec is not None:
+            self._emb_cache.move_to_end(key)
+        return vec
+
+    def _store_embedding(self, key: str, vec: List[float]) -> None:
+        if not key or not vec:
+            return
+        self._emb_cache[key] = vec
+        self._emb_cache.move_to_end(key)
+        limit = self._embedding_cache_limit()
+        while len(self._emb_cache) > limit:
+            self._emb_cache.popitem(last=False)
+
+    def _drop_stale_embeddings(self) -> None:
+        """Drop vectors whose text is no longer in the active FACT/TIP bank."""
+        live = {_norm(record.get("text", "")) for record in (*self.facts, *self.tips)}
+        live.discard("")
+        stale = [key for key in self._emb_cache if key not in live]
+        for key in stale:
+            del self._emb_cache[key]
+
     async def _embedding_of(self, text: str) -> Optional[List[float]]:
         key = _norm(text)
         if not key:
             return None
-        cached = self._emb_cache.get(key)
+        cached = self._cached_embedding(key)
         if cached is not None:
             return cached
         if self._embedding is None:
@@ -499,7 +560,7 @@ class TTSERecordStore:
             logger.warning("[TTSERail] embedding failed, falling back to substring dedup: %s", exc)
             return None
         if vec:
-            self._emb_cache[key] = vec
+            self._store_embedding(key, vec)
             logger.debug(
                 "[TTSERail] embedding ok model=%s dims=%s cache_size=%s",
                 model,
@@ -507,6 +568,42 @@ class TTSERecordStore:
                 len(self._emb_cache),
             )
         return vec or None
+
+    async def _fill_embedding_cache(self, texts: Sequence[str]) -> None:
+        """Embed cache misses in batches; skip texts already in ``_emb_cache``.
+
+        Prefers ``embed_documents`` (one RPC per chunk of ``_EMBED_DOC_BATCH``).
+        Providers without it, or a failed batch, fall back to per-text
+        ``embed_query``. Repeat scans after a warm cache do no I/O.
+        """
+        if self._embedding is None:
+            return
+        missing: List[str] = []
+        seen: set[str] = set()
+        for text in texts:
+            key = _norm(text)
+            if not key or key in self._emb_cache or key in seen:
+                continue
+            seen.add(key)
+            missing.append(str(text))
+        if not missing:
+            return
+        batch_fn = getattr(self._embedding, "embed_documents", None)
+        if callable(batch_fn):
+            try:
+                for i in range(0, len(missing), _EMBED_DOC_BATCH):
+                    end = i + _EMBED_DOC_BATCH
+                    chunk = missing[i:end]
+                    await self._wait_embedding_slot()
+                    vectors = await batch_fn(chunk)
+                    for text, vec in zip(chunk, vectors or []):
+                        if vec:
+                            self._store_embedding(_norm(text), list(vec))
+            except Exception as exc:  # noqa: BLE001 - degrade to per-text
+                logger.warning("[TTSERail] embedding batch failed, falling back to per-text: %s", exc)
+        for text in missing:
+            if _norm(text) not in self._emb_cache:
+                await self._embedding_of(text)
 
     async def embedding_of(self, text: str) -> Optional[List[float]]:
         """Public cached embedding accessor (reused by Auto-dream)."""
@@ -517,14 +614,21 @@ class TTSERecordStore:
         return self._embedding is not None
 
     async def _find_duplicate(self, text: str, store: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        """Return the matching record if ``text`` duplicates an existing rule."""
+        """Return the matching record if ``text`` duplicates an existing rule.
+
+        Semantic match is O(n) in ``store`` (n capped by max_facts/max_tips).
+        Vectors come from the process-local cache; cold misses are batched.
+        """
         if self._embedding is not None:
-            vec = await self._embedding_of(text)
+            await self._fill_embedding_cache(
+                [text, *(record.get("text", "") for record in store)]
+            )
+            vec = self._cached_embedding(_norm(text))
             if vec is not None:
                 best: Optional[Dict[str, Any]] = None
                 best_sim = self._config.dedup_threshold
                 for record in store:
-                    other = await self._embedding_of(record["text"])
+                    other = self._cached_embedding(_norm(record.get("text", "")))
                     if other is None:
                         continue
                     sim = _cosine(vec, other)
@@ -632,7 +736,9 @@ class TTSERecordStore:
                 return "merged"
             store.append(_new_record(text))
             store.sort(key=lambda x: -x.get("count", 0))
-            del store[cap:]
+            if len(store) > cap:
+                del store[cap:]
+                self._drop_stale_embeddings()
             return "added"
 
     async def add_fact(self, text: str) -> bool:
@@ -673,7 +779,9 @@ class TTSERecordStore:
         async with self._lock:
             store.append(record)
             store.sort(key=lambda x: -x.get("count", 0))
-            del store[cap:]
+            if len(store) > cap:
+                del store[cap:]
+                self._drop_stale_embeddings()
         if save:
             await self.save()
         return record
@@ -711,6 +819,7 @@ class TTSERecordStore:
                 self.tips = kept
             if removed:
                 self.retired.append({"text": text, "rtype": rtype, "reason": reason, "retired_at_task": task_id})
+                self._drop_stale_embeddings()
         if removed and save:
             await self.save()
         return removed
@@ -726,6 +835,8 @@ class TTSERecordStore:
                 self.facts = kept
             else:
                 self.tips = kept
+            if removed:
+                self._drop_stale_embeddings()
         if removed and save:
             await self.save()
         return removed

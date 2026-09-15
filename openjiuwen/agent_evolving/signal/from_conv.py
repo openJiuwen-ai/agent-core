@@ -11,6 +11,10 @@ import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
+)
 from openjiuwen.agent_evolving.protocols import USER_INTENT_SIGNAL
 from openjiuwen.agent_evolving.signal.base import (
     EvolutionSignal,
@@ -130,6 +134,12 @@ _TOOL_SCHEMA_PATTERN = re.compile(r"\{'content': '---\\nname: [^\n]+\\ndescripti
 _USER_FEEDBACK_MAX_TURNS = 9
 _USER_FEEDBACK_CONTEXT_CHAR_LIMIT = 3000
 _USER_FEEDBACK_LAST_USER_CHAR_LIMIT = 1000
+# Same 30s attempt as the old hardcoded timeout, with one empty/timeout retry.
+USER_INTENT_LLM_POLICY = LLMInvokePolicy(
+    attempt_timeout_secs=30.0,
+    total_budget_secs=70.0,
+    max_attempts=2,
+)
 
 _USER_FEEDBACK_PROMPT_CN = (
     "判断「待判定的用户消息」是否包含对对话中已使用 skill 的被动纠正或可沉淀的改进反馈。\n"
@@ -517,16 +527,23 @@ class ConversationSignalDetector:
     Unified interface for online and offline evolution paths.
     """
 
-    def __init__(self, existing_skills: Optional[Set[str]] = None) -> None:
+    def __init__(
+        self,
+        existing_skills: Optional[Set[str]] = None,
+        *,
+        llm_policy: Optional[LLMInvokePolicy] = None,
+    ) -> None:
         """Initialize detector with optional existing skills set.
 
         Args:
             existing_skills: Set of skill names for skill_name resolution.
+            llm_policy: Timeout/retry policy for user-intent LLM calls.
         """
         self._existing_skills = existing_skills or set()
         self._llm: object | None = None
         self._model = ""
         self._language = "cn"
+        self._llm_policy = llm_policy or USER_INTENT_LLM_POLICY
 
     def detect(self, trajectory_or_messages: DetectionInput) -> List[EvolutionSignal]:
         """Detect deterministic evolution signals from Trajectory or messages."""
@@ -576,12 +593,25 @@ class ConversationSignalDetector:
         llm: object,
         model: str,
         language: str = "cn",
+        llm_policy: Optional[LLMInvokePolicy] = None,
     ) -> "ConversationSignalDetector":
         """Attach optional LLM context for passive user-message detection."""
         self._llm = llm
         self._model = model
         self._language = language
+        if llm_policy is not None:
+            self._llm_policy = llm_policy
         return self
+
+    async def _invoke_feedback_llm(self, prompt: str) -> str:
+        """Run the user-intent LLM through the shared evolution retry policy."""
+        return await invoke_text_with_retry(
+            self._llm,  # type: ignore[arg-type]
+            self._model,
+            prompt,
+            policy=self._llm_policy,
+            temperature=0.0,
+        )
 
     async def detect_user_message_feedback(
         self,
@@ -658,12 +688,7 @@ class ConversationSignalDetector:
         )
 
         try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=30,
-            )
-            raw = _response_to_text(response)
+            raw = await self._invoke_feedback_llm(prompt)
         except Exception as exc:
             logger.warning("[ConversationSignalDetector] user feedback detection failed: %s", exc)
             return self._fallback_user_feedback_signals(last_user_message, skill_names)
@@ -718,12 +743,7 @@ class ConversationSignalDetector:
         )
 
         try:
-            response = await self._llm.invoke(
-                model=self._model,
-                messages=[{"role": "user", "content": prompt}],
-                timeout=30,
-            )
-            raw = _response_to_text(response)
+            raw = await self._invoke_feedback_llm(prompt)
         except Exception as exc:
             logger.warning(
                 "[ConversationSignalDetector] skillless user feedback detection failed: %s",
@@ -993,6 +1013,7 @@ SignalDetector = ConversationSignalDetector
 __all__ = [
     "ConversationSignalDetector",
     "SignalDetector",  # backward compatibility alias
+    "USER_INTENT_LLM_POLICY",
     "detect_tool_error_signals",
     "is_tool_execution_failure",
     "make_signal_fingerprint",

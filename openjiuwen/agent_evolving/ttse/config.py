@@ -33,18 +33,24 @@ class TTSEConfig:
             similarity (semantic). When ``None``, dedup falls back to substring
             matching. FACT/TIP are disclosed via ``ttse_consult``, not dumped
             into the system prompt.
+            Semantic dedup / consult recall scan the in-memory bank in O(n)
+            (n <= max_facts or max_tips, default 400). After the process-local
+            embedding cache is warm this is CPU cosine only; a cold bank is
+            filled with batched ``embed_documents`` (not one RPC per row).
+            An ANN index (faiss et al.) is intentionally not used at this n.
             The same provider is reused by ``ttse_consult`` for BM25+embedding
             hybrid recall when ``query`` is set; missing/failed embedding
             degrades to BM25. Callers typically construct
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
             and assign it here; do not put raw url/key strings on TTSEConfig.
-        embedding_max_rps: Max embedding API calls per second (cache misses only).
-            Default ``4.0`` matches ModelArts rate limits. ``<= 0`` disables
-            throttling.
+        embedding_max_rps: Max embedding API calls per second (cache misses
+            only, including each ``embed_documents`` chunk). Default ``4.0``
+            matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Ignored when ``embedding`` is None.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
+            Also the O(n) bound for semantic dedup / consult embedding scans.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
             ``None`` or ``<= 0`` means no truncation. When set, overflow keeps
             the tail (actions/observations), not the USER head.

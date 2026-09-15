@@ -322,6 +322,53 @@ async def test_flush_overlays_concurrent_disk_write(tmp_path):
     assert rec_a["last_injected_at"] == pytest.approx(now)
 
 
+@pytest.mark.asyncio
+async def test_save_dumps_snapshot_when_live_lists_mutate(tmp_path, monkeypatch):
+    """json.dump must not iterate the live facts/tips/retired lists.
+
+    save() yields in asyncio.to_thread while add_fact/dream still mutate those
+    lists under a different lock. Persist a copy taken before the worker runs.
+    """
+    path = tmp_path / "bank.json"
+    store = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    await store.add_fact("stable fact")
+    real_dump = json.dump
+
+    def dump_while_mutating(obj, fh, **kwargs):
+        assert obj["facts"] is not store.facts
+        assert obj["tips"] is not store.tips
+        assert obj["retired"] is not store.retired
+        store.facts.append(_new_record("raced fact"))
+        del store.facts[0]
+        store.tips.append(_new_record("raced tip"))
+        store.retired.append({"text": "gone", "rtype": "fact", "reason": "race", "retired_at_task": 1})
+        return real_dump(obj, fh, **kwargs)
+
+    monkeypatch.setattr("openjiuwen.agent_evolving.ttse.stores.json.dump", dump_while_mutating)
+    await store.save()
+
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [record["text"] for record in saved["facts"]] == ["stable fact"]
+    assert saved["tips"] == []
+    assert saved["retired"] == []
+
+
+@pytest.mark.asyncio
+async def test_save_swallows_non_serializable_record(tmp_path):
+    """json.dump TypeError must not crash add_fact / dream persist."""
+    path = tmp_path / "bank.json"
+    store = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    await store.add_fact("ok")
+    store.facts.append({"text": "bad", "count": 1, "blob": object()})
+
+    await store.save()
+
+    assert [record["text"] for record in store.facts] == ["ok", "bad"]
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert [record["text"] for record in saved["facts"]] == ["ok"]
+    assert not (tmp_path / "bank.json.tmp").exists()
+
+
 # ----------------------------------------------------------------------
 # merge
 # ----------------------------------------------------------------------
@@ -734,3 +781,137 @@ async def test_embedding_cache_hit_skips_rate_limit(tmp_path):
     assert first == second
     assert len(emb.call_times) == 1
     assert elapsed < 0.05
+
+
+class CountingBatchEmbedding:
+    def __init__(self) -> None:
+        self.queries = 0
+        self.docs = 0
+        self.doc_batch_sizes: list[int] = []
+
+    async def embed_query(self, text: str) -> list[float]:
+        self.queries += 1
+        return [float(len(text)), 1.0]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.docs += 1
+        self.doc_batch_sizes.append(len(texts))
+        return [[float(len(t)), 1.0] for t in texts]
+
+
+@pytest.mark.asyncio
+async def test_find_duplicate_batches_cold_cache_then_one_miss(tmp_path):
+    path = tmp_path / "bank.json"
+    path.write_text(
+        json.dumps(
+            {
+                "facts": [
+                    {"text": "alpha rule", "count": 1},
+                    {"text": "beta rule", "count": 1},
+                    {"text": "gamma rule", "count": 1},
+                ],
+                "tips": [],
+                "retired": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    emb = CountingBatchEmbedding()
+    store = TTSERecordStore(
+        TTSEConfig(
+            store_path=str(path),
+            embedding=emb,
+            embedding_max_rps=0,
+            dedup_threshold=0.99,
+        ),
+        embedding=emb,
+    )
+    assert len(store.facts) == 3
+
+    await store.add_fact("delta rule")
+    assert emb.docs == 1
+    assert emb.doc_batch_sizes == [4]
+    assert emb.queries == 0
+
+    await store.add_fact("epsilon rule")
+    assert emb.docs == 2
+    assert emb.doc_batch_sizes[-1] == 1
+    assert emb.queries == 0
+
+
+@pytest.mark.asyncio
+async def test_find_duplicate_query_only_provider_caches_after_first_add(tmp_path):
+    path = tmp_path / "bank.json"
+    path.write_text(
+        json.dumps(
+            {
+                "facts": [{"text": "alpha rule", "count": 1}, {"text": "beta rule", "count": 1}],
+                "tips": [],
+                "retired": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    emb = FakeEmbedding()
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(path), embedding=emb, embedding_max_rps=0, dedup_threshold=0.99),
+        embedding=emb,
+    )
+    await store.add_fact("gamma rule")
+    first_pass = len(emb.call_times)
+    assert first_pass == 3
+    await store.add_fact("delta rule")
+    assert len(emb.call_times) == first_pass + 1
+
+
+@pytest.mark.asyncio
+async def test_emb_cache_lru_evicts_when_over_limit(tmp_path):
+    emb = FakeEmbedding()
+    store = TTSERecordStore(
+        TTSEConfig(
+            store_path=str(tmp_path / "bank.json"),
+            embedding=emb,
+            embedding_max_rps=0,
+            max_facts=1,
+            max_tips=0,
+        ),
+        embedding=emb,
+    )
+    limit = store._embedding_cache_limit()
+    assert limit == 101
+    for i in range(limit + 10):
+        await store.embedding_of(f"query-{i}")
+    assert len(store._emb_cache) == limit
+    assert "query-0" not in store._emb_cache
+    assert f"query-{limit + 9}" in store._emb_cache
+
+
+@pytest.mark.asyncio
+async def test_emb_cache_drops_deleted_and_reloaded_texts(tmp_path):
+    path = tmp_path / "bank.json"
+    emb = FakeEmbedding(
+        mapping={
+            "keep me": [1.0, 0.0],
+            "drop me": [0.0, 1.0],
+        }
+    )
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(path), embedding=emb, embedding_max_rps=0, max_facts=10, max_tips=10),
+        embedding=emb,
+    )
+    await store.add_fact("keep me")
+    await store.add_fact("drop me")
+    assert "keep me" in store._emb_cache
+    assert "drop me" in store._emb_cache
+
+    assert await store.delete_record("drop me", "fact") == 1
+    assert "drop me" not in store._emb_cache
+    assert "keep me" in store._emb_cache
+
+    path.write_text(
+        json.dumps({"facts": [{"text": "replacement", "count": 1}], "tips": [], "retired": []}),
+        encoding="utf-8",
+    )
+    store.reload()
+    assert "keep me" not in store._emb_cache
+    assert "replacement" not in store._emb_cache
