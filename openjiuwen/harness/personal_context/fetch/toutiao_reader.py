@@ -10,9 +10,8 @@ import math
 import re
 import time
 from collections.abc import AsyncIterator, Mapping
-from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Callable
 from urllib.parse import parse_qsl, unquote, urlencode, urljoin, urlsplit, urlunsplit
 
 import aiohttp
@@ -20,6 +19,15 @@ import aiohttp
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    candidate_in_time_range,
+    select_latest_candidates,
+)
+from openjiuwen.harness.personal_context.fetch.retry import (
+    classify_payload_error,
+    classify_transport_error,
+    retry_provider_read,
+)
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
@@ -37,18 +45,69 @@ _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chro
 class ToutiaoReaderFetchService(ContextFetchService):
     """Read public articles from one Toutiao profile without login or persistent cookies."""
 
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id
+        try:
+            _validate_selection_cursor(cursor)
+            source_url = _source_url(self._config)
+            token = _profile_token(source_url)
+            timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
+            headers = {"Accept": "application/json,text/html", "User-Agent": _USER_AGENT}
+            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
+
+            def selected(articles: list[dict[str, Any]]) -> tuple[dict[str, object], ...]:
+                candidates = tuple(
+                    _candidate(
+                        article,
+                        profile_token=token,
+                        source_url=source_url,
+                        time_range=self._config.time_range,
+                        run_started_at=run_started_at,
+                    )
+                    for article in articles
+                )
+                filtered = tuple(candidate for candidate in candidates if candidate is not None)
+                return select_latest_candidates(filtered, cursor, max_items)
+
+            async with aiohttp.ClientSession(
+                timeout=timeout,
+                headers=headers,
+                cookie_jar=aiohttp.CookieJar(),
+            ) as session:
+                await _bootstrap_profile(session, source_url)
+                profile_referer = f"https://www.toutiao.com/c/user/token/{token}/"
+                articles = await _fetch_article_list(
+                    session,
+                    token,
+                    referer=profile_referer,
+                    stop_when=lambda records: len(selected(records)) >= max_items,
+                )
+            return selected(articles)
+        except asyncio.CancelledError:
+            raise
+        except BaseError:
+            raise
+        except Exception as exc:
+            raise _fetch_error("Toutiao article preparation failed", exc) from None
+
     async def fetch(
         self,
         *,
         run_id: str,
         cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
         del run_id
         try:
             source_url = _source_url(self._config)
             token = _profile_token(source_url)
-            state = _read_cursor(cursor, source_url)
-            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
+            next_cursor = dict(cursor) if cursor is not None else {}
 
             timeout = aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_SECONDS)
             headers = {"Accept": "application/json,text/html", "User-Agent": _USER_AGENT}
@@ -57,64 +116,49 @@ class ToutiaoReaderFetchService(ContextFetchService):
                 headers=headers,
                 cookie_jar=aiohttp.CookieJar(),
             ) as session:
-                # Establish the public session and Referer.  The feed API is
-                # authoritative because Toutiao may omit or change the
-                # profile page's embedded render payload.
-                await _request_body(
-                    session,
-                    _with_wid(source_url),
-                    headers={"Referer": source_url},
-                )
+                await _bootstrap_profile(session, source_url)
                 profile_referer = f"https://www.toutiao.com/c/user/token/{token}/"
-                articles = await _fetch_article_list(
-                    session,
-                    token,
-                    max_items=max_items,
-                    referer=profile_referer,
-                )
-                records = _sort_articles(articles)
-                selected = _select_articles(records, state, max_items)
-                changes: list[RawChangeItem] = []
-                next_state = dict(state)
-                cursor_states: list[dict[str, object]] = []
-
-                for article, category in selected:
-                    article_id = _article_id(article)
-                    if not article_id:
-                        raise _fetch_error("Toutiao article has no stable ID")
-                    (
-                        article_body,
-                        raw_snapshot,
-                        updated_value,
-                        content_truncated,
-                        content_fallback,
-                    ) = await _fetch_article_body(session, article, referer=profile_referer)
-                    effective_timestamp = _effective_timestamp(article)
-                    _advance_cursor_state(next_state, effective_timestamp, article_id, category)
-                    cursor_states.append(deepcopy(next_state))
-                    changes.append(
-                        _change_item(
-                            article,
-                            article_id=article_id,
-                            profile_token=token,
-                            source_url=source_url,
-                            body=article_body,
-                            raw_snapshot=raw_snapshot,
-                            updated_value=updated_value,
-                            content_truncated=content_truncated,
-                            content_fallback=content_fallback,
+                if not candidates:
+                    yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
+                    return
+                for index in range(0, len(candidates), _BATCH_SIZE):
+                    items: list[RawChangeItem] = []
+                    end = index + _BATCH_SIZE
+                    for candidate in candidates[index:end]:
+                        raw_article = candidate.get("article")
+                        if not isinstance(raw_article, Mapping):
+                            raise _fetch_error("Toutiao candidate has no article metadata")
+                        article = dict(raw_article)
+                        article_id = _article_id(article)
+                        if not article_id or article_id != candidate.get("stable_id"):
+                            raise _fetch_error("Toutiao candidate has no stable ID")
+                        (
+                            article_body,
+                            raw_snapshot,
+                            updated_value,
+                            content_truncated,
+                            content_fallback,
+                        ) = await _fetch_article_body(session, article, referer=profile_referer)
+                        items.append(
+                            _change_item(
+                                article,
+                                article_id=article_id,
+                                profile_token=token,
+                                source_url=source_url,
+                                body=article_body,
+                                raw_snapshot=raw_snapshot,
+                                updated_value=updated_value,
+                                content_truncated=content_truncated,
+                                content_fallback=content_fallback,
+                            )
                         )
+                    yield FetchBatch(
+                        batch_id=f"batch-{index // _BATCH_SIZE}",
+                        items=tuple(items),
+                        next_cursor=next_cursor,
                     )
-                _finalize_history_state(next_state, records, selected)
-                if cursor_states:
-                    cursor_states[-1] = deepcopy(next_state)
-
-            for batch in _batches(
-                changes,
-                cursor_states,
-                next_state,
-            ):
-                yield batch
+        except asyncio.CancelledError:
+            raise
         except BaseError:
             raise
         except Exception as exc:
@@ -125,15 +169,16 @@ async def _fetch_article_list(
     session: Any,
     token: str,
     *,
-    max_items: int,
     referer: str,
+    stop_when: Callable[[list[dict[str, Any]]], bool],
 ) -> list[dict[str, Any]]:
     url = "https://www.toutiao.com/api/pc/feed/"
     articles: list[dict[str, Any]] = []
+    article_ids: set[str] = set()
     max_behot_time = "0"
-    seen_tokens: set[str] = set()
+    seen_tokens = {max_behot_time}
     for _ in range(_MAX_PAGES):
-        body = await _request_body(
+        payload = await _request_json(
             session,
             url,
             params={
@@ -144,20 +189,81 @@ async def _fetch_article_list(
             },
             headers={"Referer": referer},
         )
-        payload = _payload(body)
-        page, has_more, next_token = _list_page(payload)
-        articles.extend(page)
-        # A public profile can advertise an unbounded feed.  Fetch only the
-        # newest records this run can consume instead of walking every page.
-        if not has_more:
+        page, next_token = _list_page(payload)
+        if not page:
             return articles
+        for article in page:
+            article_id = _article_id(article)
+            if article_id and article_id in article_ids:
+                continue
+            if article_id:
+                article_ids.add(article_id)
+            articles.append(article)
         if not next_token:
-            raise _fetch_error("Toutiao article list pagination token is missing")
-        if next_token == max_behot_time or next_token in seen_tokens:
+            return articles
+        if next_token in seen_tokens:
             raise _fetch_error("Toutiao article list pagination token did not advance")
-        seen_tokens.add(max_behot_time)
+        if stop_when(articles):
+            return articles
+        seen_tokens.add(next_token)
         max_behot_time = next_token
     raise _fetch_error("Toutiao article list pagination exceeded the limit")
+
+
+async def _bootstrap_profile(session: Any, source_url: str) -> None:
+    await _request_body(
+        session,
+        _with_wid(source_url),
+        headers={"Referer": source_url},
+    )
+
+
+def _validate_selection_cursor(cursor: dict[str, object] | None) -> None:
+    if cursor is None:
+        return
+    if not isinstance(cursor, Mapping) or set(cursor) - {"_selection"}:
+        raise ValueError("Toutiao cursor contains unsupported fields")
+
+
+def _candidate(
+    article: Mapping[str, object],
+    *,
+    profile_token: str,
+    source_url: str,
+    time_range: Mapping[str, object],
+    run_started_at: datetime,
+) -> dict[str, object] | None:
+    article_id = _article_id(article)
+    if not article_id:
+        raise _fetch_error("Toutiao article has no stable ID")
+    timestamp = _effective_timestamp(article)
+    if timestamp <= 0:
+        if time_range.get("mode") != "all":
+            raise _fetch_error("Toutiao article has no usable published or updated time")
+        candidate_time = "1970-01-01T00:00:00Z"
+    else:
+        candidate_time = datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
+    if not candidate_in_time_range(candidate_time, time_range, run_started_at):
+        return None
+    updated_value = _updated_value(article)
+    updated_timestamp = _timestamp_number(updated_value)
+    revision_id = (
+        str(updated_value)
+        if updated_value is not None and updated_timestamp > 0
+        else hashlib.sha256(
+            json.dumps(dict(article), ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+    )
+    return {
+        "stable_id": article_id,
+        "revision_id": revision_id,
+        "candidate_time": candidate_time,
+        "resource_lane": "article",
+        "locator": _article_url(article, article_id),
+        "article": dict(article),
+        "profile_token": profile_token,
+        "source_url": source_url,
+    }
 
 
 async def _fetch_article_body(
@@ -226,154 +332,9 @@ def _with_wid(url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
-def _read_cursor(cursor: dict[str, object] | None, source_url: str) -> dict[str, object]:
-    if cursor is None or cursor == {}:
-        return {
-            "source_url": source_url,
-            "latest_timestamp": 0.0,
-            "latest_timestamp_ids": [],
-            "history_before_timestamp": None,
-            "history_boundary_ids": [],
-            "history_complete": False,
-        }
-    if not isinstance(cursor, Mapping) or set(cursor) != {
-        "source_url",
-        "latest_timestamp",
-        "latest_timestamp_ids",
-        "history_before_timestamp",
-        "history_boundary_ids",
-        "history_complete",
-    }:
-        raise _fetch_error("Toutiao cursor is invalid")
-    if cursor.get("source_url") != source_url:
-        raise _fetch_error("Toutiao cursor source is invalid")
-    raw_latest = cursor.get("latest_timestamp")
-    if isinstance(raw_latest, bool) or not isinstance(raw_latest, (int, float)):
-        raise _fetch_error("Toutiao cursor is invalid")
-    latest = float(raw_latest)
-    if not math.isfinite(latest) or latest < 0:
-        raise _fetch_error("Toutiao cursor is invalid")
-    latest_ids = _cursor_ids(cursor.get("latest_timestamp_ids"))
-    raw_history = cursor.get("history_before_timestamp")
-    if raw_history is not None and (isinstance(raw_history, bool) or not isinstance(raw_history, (int, float))):
-        raise _fetch_error("Toutiao cursor is invalid")
-    history = None if raw_history is None else float(raw_history)
-    if history is not None and (not math.isfinite(history) or history < 0):
-        raise _fetch_error("Toutiao cursor is invalid")
-    boundary_ids = _cursor_ids(cursor.get("history_boundary_ids"))
-    history_complete = cursor.get("history_complete")
-    if not isinstance(history_complete, bool):
-        raise _fetch_error("Toutiao cursor is invalid")
-    return {
-        "source_url": source_url,
-        "latest_timestamp": latest,
-        "latest_timestamp_ids": sorted(set(latest_ids)),
-        "history_before_timestamp": history,
-        "history_boundary_ids": sorted(set(boundary_ids)),
-        "history_complete": history_complete,
-    }
-
-
-def _cursor_ids(value: object) -> list[str]:
-    if (
-        not isinstance(value, list)
-        or len(value) > 10_000
-        or any(not isinstance(item, str) or not item for item in value)
-    ):
-        raise _fetch_error("Toutiao cursor is invalid")
-    return sorted(set(value))
-
-
-def _advance_cursor_state(state: dict[str, object], timestamp: float, article_id: str, category: str) -> None:
-    if category == "latest":
-        latest = float(state["latest_timestamp"])
-        latest_ids = [str(item) for item in state["latest_timestamp_ids"]]
-        if timestamp > latest:
-            state["latest_timestamp"] = timestamp
-            state["latest_timestamp_ids"] = [article_id]
-        elif timestamp == latest and article_id not in latest_ids:
-            state["latest_timestamp_ids"] = sorted([*latest_ids, article_id])
-        return
-    history = state["history_before_timestamp"]
-    boundary_ids = [str(item) for item in state["history_boundary_ids"]]
-    if history is None or timestamp < float(history):
-        state["history_before_timestamp"] = timestamp
-        state["history_boundary_ids"] = [article_id]
-    elif timestamp == float(history) and article_id not in boundary_ids:
-        state["history_boundary_ids"] = sorted([*boundary_ids, article_id])
-
-
-def _finalize_history_state(
-    state: dict[str, object],
-    records: list[dict[str, Any]],
-    selected: list[tuple[dict[str, Any], str]],
-) -> None:
-    if state["history_before_timestamp"] is None and selected:
-        oldest_timestamp = min(_effective_timestamp(article) for article, _ in selected)
-        oldest_ids = [
-            _article_id(article) for article, _ in selected if _effective_timestamp(article) == oldest_timestamp
-        ]
-        state["history_before_timestamp"] = oldest_timestamp
-        state["history_boundary_ids"] = sorted(set(oldest_ids))
-    boundary = state["history_before_timestamp"]
-    if boundary is None:
-        state["history_complete"] = not records
-        return
-    boundary_value = float(boundary)
-    boundary_ids = {str(item) for item in state["history_boundary_ids"]}
-    selected_ids = {_article_id(article) for article, _ in selected}
-    state["history_complete"] = not any(
-        _article_id(article) not in selected_ids
-        and (
-            _effective_timestamp(article) < boundary_value
-            or (_effective_timestamp(article) == boundary_value and _article_id(article) not in boundary_ids)
-        )
-        for article in records
-    )
-
-
-def _select_articles(
-    records: list[dict[str, Any]],
-    state: Mapping[str, object],
-    max_items: int,
-) -> list[tuple[dict[str, Any], str]]:
-    latest_timestamp = float(state["latest_timestamp"])
-    latest_ids = {str(item) for item in state["latest_timestamp_ids"]}
-    history_before = state["history_before_timestamp"]
-    history_timestamp = None if history_before is None else float(history_before)
-    history_ids = {str(item) for item in state["history_boundary_ids"]}
-    latest_candidates: list[dict[str, Any]] = []
-    history_candidates: list[dict[str, Any]] = []
-    for record in records:
-        article_id = _article_id(record)
-        timestamp = _effective_timestamp(record)
-        if timestamp > latest_timestamp or (timestamp == latest_timestamp and article_id not in latest_ids):
-            latest_candidates.append(record)
-            continue
-        if history_timestamp is None:
-            history_candidates.append(record)
-        elif timestamp < history_timestamp or (timestamp == history_timestamp and article_id not in history_ids):
-            history_candidates.append(record)
-    selected: list[tuple[dict[str, Any], str]] = []
-    for record in latest_candidates:
-        if len(selected) >= max_items:
-            break
-        selected.append((record, "latest"))
-    if len(selected) < max_items:
-        for record in history_candidates:
-            if len(selected) >= max_items:
-                break
-            selected.append((record, "history"))
-    return selected
-
-
-def _sort_articles(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(articles, key=lambda article: (-_effective_timestamp(article), _article_id(article)))
-
-
-def _list_page(payload: object) -> tuple[list[dict[str, Any]], bool, str | None]:
+def _list_page(payload: object) -> tuple[list[dict[str, Any]], str | None]:
     if isinstance(payload, list):
-        return [dict(item) for item in payload if isinstance(item, Mapping)], False, None
+        return [dict(item) for item in payload if isinstance(item, Mapping)], None
     if not isinstance(payload, Mapping):
         raise _fetch_error("Toutiao article list response is invalid")
     raw_data = payload.get("data")
@@ -390,8 +351,7 @@ def _list_page(payload: object) -> tuple[list[dict[str, Any]], bool, str | None]
             raise _fetch_error("Toutiao article list response is invalid")
         page = [dict(item) for item in nested if isinstance(item, Mapping)]
     next_token = _next_token(payload)
-    has_more = bool(payload.get("has_more") or payload.get("hasMore") or next_token)
-    return page, has_more, next_token
+    return page, next_token
 
 
 def _next_token(payload: Mapping[str, object]) -> str | None:
@@ -613,6 +573,58 @@ async def _request_body(
     headers: dict[str, str] | None = None,
 ) -> bytes:
     try:
+        return await retry_provider_read(
+            lambda: _request_body_once(session, url, params=params, headers=headers),
+            provider="toutiao_reader",
+            operation_name="body_http_read",
+            classify=_reader_retry_reason,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise _fetch_error("Toutiao request failed", exc) from None
+
+
+async def _request_json(
+    session: Any,
+    url: str,
+    *,
+    params: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+) -> object:
+    async def read_and_parse_once() -> object:
+        body = await _request_body_once(session, url, params=params, headers=headers)
+        return _payload(body, allow_html=False)
+
+    try:
+        return await retry_provider_read(
+            read_and_parse_once,
+            provider="toutiao_reader",
+            operation_name="list_json_http_read",
+            classify=_reader_retry_reason,
+        )
+    except asyncio.CancelledError:
+        raise
+    except BaseError:
+        raise
+    except Exception as exc:
+        raise _fetch_error("Toutiao request failed", exc) from None
+
+
+def _reader_retry_reason(exc: BaseException) -> str | None:
+    return classify_transport_error(exc) or classify_payload_error(exc)
+
+
+async def _request_body_once(
+    session: Any,
+    url: str,
+    *,
+    params: dict[str, object] | None = None,
+    headers: dict[str, str] | None = None,
+) -> bytes:
+    try:
         current_url = url
         current_params = params
         for _redirect in range(6):
@@ -637,8 +649,12 @@ async def _request_body(
                     current_params = None
                     continue
                 if status < 200 or status >= 300:
-                    raise _fetch_error("Toutiao request failed")
-                return await _read_response_body(response)
+                    response.raise_for_status()
+                    raise RuntimeError("Toutiao request returned an unsuccessful HTTP status")
+                body = await _read_response_body(response)
+                if not body:
+                    raise EOFError("Toutiao response body is empty")
+                return body
         raise _fetch_error("Toutiao request redirected too many times")
     except asyncio.CancelledError:
         raise
@@ -683,26 +699,6 @@ async def _read_response_body(response: Any) -> bytes:
             raise _fetch_error("Toutiao response exceeds the size limit")
         return body
     raise _fetch_error("Toutiao response body is unavailable")
-
-
-def _batches(
-    items: list[RawChangeItem],
-    cursor_states: list[dict[str, object]],
-    cursor: dict[str, object],
-) -> list[FetchBatch]:
-    if not items:
-        return [FetchBatch(batch_id="batch-0", items=(), next_cursor=cursor)]
-    batches: list[FetchBatch] = []
-    for index in range(0, len(items), _BATCH_SIZE):
-        end = min(index + _BATCH_SIZE, len(items))
-        batches.append(
-            FetchBatch(
-                batch_id=f"batch-{index // _BATCH_SIZE}",
-                items=tuple(items[index:end]),
-                next_cursor=cursor_states[end - 1] if end - 1 < len(cursor_states) else cursor,
-            )
-        )
-    return batches
 
 
 def _fetch_error(message: str, cause: BaseException | None = None) -> BaseError:

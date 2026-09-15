@@ -1,15 +1,17 @@
 """Feishu ``lark-cli`` provider for the embedded personal-context core.
 
-The provider intentionally keeps the implementation in one production class.
-CLI execution, JSON decoding, pagination, bounded markdown conversion and
-cursor helpers are module-private functions so the public PersonalContext class inventory
-stays closed.  The provider never receives or stores a Feishu access token.
+The provider uses the user-authorized ``lark-cli`` identity and never receives
+or stores an access token.  Every run first enumerates metadata and selects a
+bounded latest-first candidate list.  Content reads and downloads happen only
+for that selected list, except for explicitly configured document IDs where the
+document endpoint is also the only available discovery endpoint.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hashlib
 import json
 import re
@@ -18,13 +20,22 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import AsyncIterator, Mapping
-from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    candidate_in_time_range,
+    select_latest_candidates,
+)
+from openjiuwen.harness.personal_context.fetch.retry import (
+    classify_payload_error,
+    classify_transport_error,
+    retry_provider_read,
+    retry_reason_from_http_status,
+)
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
@@ -36,6 +47,7 @@ _CLI_OUTPUT_BYTES = 4 * 1024 * 1024
 _MAX_CONTENT_CHARS = 2_000_000
 _MAX_RAW_BYTES = 2 * 1024 * 1024
 _MAX_WIKI_PATH_PARTS = 100
+_EPOCH = "1970-01-01T00:00:00Z"
 _FEISHU_SCOPE_BY_RESOURCE = {
     "docs": "docs:document.content:read",
     "search": "search:docs:read",
@@ -45,6 +57,7 @@ _FEISHU_SCOPE_BY_RESOURCE = {
     "wiki_docs": "docs:document.content:read",
     "wiki_files": "drive:file:download",
 }
+_SUPPORTED_FEISHU_READ_SCOPES = tuple(sorted(set(_FEISHU_SCOPE_BY_RESOURCE.values())))
 
 
 def _fetch_error(message: str, cause: BaseException | None = None) -> BaseError:
@@ -61,6 +74,11 @@ def _safe_detail(exc: BaseException) -> str:
         detail,
     )
     return detail[:512] or exc.__class__.__name__
+
+
+def _payload_data(payload: Mapping[str, object]) -> object:
+    data = payload.get("data")
+    return data if data is not None else payload
 
 
 def _content_from_payload(payload: Mapping[str, object]) -> tuple[Mapping[str, object], object]:
@@ -85,11 +103,6 @@ def _as_object(value: object, *, name: str) -> dict[str, object]:
     return dict(value)
 
 
-def _payload_data(payload: Mapping[str, object]) -> object:
-    data = payload.get("data")
-    return data if data is not None else payload
-
-
 def _as_items(payload: object, *, name: str) -> list[dict[str, object]]:
     if isinstance(payload, list):
         values = payload
@@ -110,37 +123,35 @@ def _as_items(payload: object, *, name: str) -> list[dict[str, object]]:
             return []
     else:
         raise _fetch_error(f"Feishu {name} response has invalid items")
-    result: list[dict[str, object]] = []
-    for item in values:
-        if isinstance(item, Mapping):
-            result.append(dict(item))
-    return result
+    return [dict(item) for item in values if isinstance(item, Mapping)]
 
 
-def _page_info(payload: Mapping[str, object]) -> tuple[bool, str | None]:
+def _page_token(payload: Mapping[str, object]) -> str | None:
     data = _payload_data(payload)
     if not isinstance(data, Mapping):
-        return False, None
-    has_more = bool(data.get("has_more", data.get("hasMore", False)))
+        return None
     token = data.get("page_token") or data.get("next_page_token") or data.get("nextPageToken")
-    return has_more, token.strip() if isinstance(token, str) and token.strip() else None
+    return token.strip() if isinstance(token, str) and token.strip() else None
 
 
 def _parse_cli_json(stdout: str) -> object:
     text = stdout.strip()
+    last_error: json.JSONDecodeError | None = None
     try:
         return json.loads(text)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as exc:
+        last_error = exc
         decoder = json.JSONDecoder()
         for index, char in enumerate(text):
             if char not in "[{":
                 continue
             try:
                 value, _ = decoder.raw_decode(text[index:])
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as decode_error:
+                last_error = decode_error
                 continue
             return value
-    raise _fetch_error("lark-cli did not return JSON")
+    raise _fetch_error("lark-cli did not return JSON", last_error)
 
 
 def _safe_cli_output(value: str) -> str:
@@ -172,12 +183,98 @@ def _cli_error_message(stdout: str, stderr: str) -> str:
     return _safe_cli_output(stdout or stderr or "lark-cli command failed")
 
 
-async def _run_lark_cli(
+def _decoded_process_output(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+def _structured_cli_retry_reason(value: object) -> str | None:
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if key in {"status", "status_code", "code"}:
+                if isinstance(nested, int) and not isinstance(nested, bool):
+                    reason = retry_reason_from_http_status(nested)
+                    if reason is not None:
+                        return reason
+                if isinstance(nested, str):
+                    normalized = nested.strip().casefold().replace("-", "_").replace(" ", "_")
+                    if normalized.isdigit():
+                        reason = retry_reason_from_http_status(int(normalized))
+                        if reason is not None:
+                            return reason
+                    if normalized in {
+                        "rate_limited",
+                        "server_error",
+                        "service_unavailable",
+                        "temporarily_unavailable",
+                        "upstream_timeout",
+                        "upstream_unavailable",
+                    }:
+                        return "cli_transient"
+            reason = _structured_cli_retry_reason(nested)
+            if reason is not None:
+                return reason
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            reason = _structured_cli_retry_reason(nested)
+            if reason is not None:
+                return reason
+    return None
+
+
+def _lark_cli_retry_reason(exc: BaseException) -> str | None:
+    reason = classify_transport_error(exc) or classify_payload_error(exc)
+    if reason is not None:
+        return reason
+    if isinstance(exc, OSError) and not isinstance(exc, FileNotFoundError):
+        if exc.errno in {
+            errno.EAGAIN,
+            errno.EBUSY,
+            errno.ECONNABORTED,
+            errno.ECONNREFUSED,
+            errno.ECONNRESET,
+            errno.ETIMEDOUT,
+        }:
+            return "cli_transient"
+    if not isinstance(exc, subprocess.CalledProcessError):
+        return None
+    for raw_output in (exc.output, exc.stderr):
+        text = _decoded_process_output(raw_output).strip()
+        if not text:
+            continue
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            continue
+        reason = _structured_cli_retry_reason(payload)
+        if reason is not None:
+            return reason
+    return None
+
+
+def _coerce_lark_cli_error(exc: Exception) -> BaseError:
+    if isinstance(exc, BaseError):
+        return exc
+    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+        return _fetch_error("lark-cli command timed out", exc)
+    if isinstance(exc, FileNotFoundError):
+        return _fetch_error("lark-cli is not installed in the deployment environment", exc)
+    if isinstance(exc, subprocess.CalledProcessError):
+        stdout = _decoded_process_output(exc.output)
+        stderr = _decoded_process_output(exc.stderr)
+        return _fetch_error(_cli_error_message(stdout, stderr), exc)
+    if isinstance(exc, OSError):
+        return _fetch_error("lark-cli could not be started", exc)
+    return _fetch_error("lark-cli read failed", exc)
+
+
+async def _run_lark_cli_once(
     argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS, cwd: Path | None = None
 ) -> tuple[str, str]:
     binary = shutil.which("lark-cli")
     if binary is None:
-        raise _fetch_error("lark-cli is not installed in the deployment environment")
+        raise FileNotFoundError("lark-cli is not installed in the deployment environment")
     kwargs: dict[str, object] = {
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
@@ -199,23 +296,66 @@ async def _run_lark_cli(
         if process is not None:
             with contextlib.suppress(Exception):
                 process.kill()
-        raise _fetch_error("lark-cli command timed out") from exc
-    except FileNotFoundError as exc:
-        raise _fetch_error("lark-cli is not installed in the deployment environment", exc) from None
-    except OSError as exc:
-        raise _fetch_error("lark-cli could not be started", exc) from None
+        raise TimeoutError("lark-cli command timed out") from exc
     stdout_text = bytes(stdout or b"").decode("utf-8", errors="replace")
     stderr_text = bytes(stderr or b"").decode("utf-8", errors="replace")
     if len(stdout_text.encode("utf-8")) > _CLI_OUTPUT_BYTES or len(stderr_text.encode("utf-8")) > _CLI_OUTPUT_BYTES:
         raise _fetch_error("lark-cli output exceeds the size limit")
     if process is None or process.returncode != 0:
-        raise _fetch_error(_cli_error_message(stdout_text, stderr_text))
+        raise subprocess.CalledProcessError(
+            process.returncode if process is not None else 1,
+            [binary, *argv],
+            output=bytes(stdout or b""),
+            stderr=bytes(stderr or b""),
+        )
     return stdout_text, stderr_text
 
 
+async def _run_lark_cli(
+    argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS, cwd: Path | None = None
+) -> tuple[str, str]:
+    try:
+        return await _run_lark_cli_once(argv, timeout_seconds=timeout_seconds, cwd=cwd)
+    except Exception as exc:
+        raise _coerce_lark_cli_error(exc) from None
+
+
+async def _run_lark_cli_read(
+    argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS, cwd: Path | None = None
+) -> tuple[str, str]:
+    try:
+        return await retry_provider_read(
+            lambda: _run_lark_cli_once(argv, timeout_seconds=timeout_seconds, cwd=cwd),
+            provider="feishu",
+            operation_name="cli_read",
+            classify=_lark_cli_retry_reason,
+        )
+    except Exception as exc:
+        raise _coerce_lark_cli_error(exc) from None
+
+
+async def _run_lark_cli_read_json(argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS) -> object:
+    async def read_and_parse_once() -> object:
+        stdout, _ = await _run_lark_cli_once(argv, timeout_seconds=timeout_seconds)
+        return _parse_cli_json(stdout)
+
+    try:
+        return await retry_provider_read(
+            read_and_parse_once,
+            provider="feishu",
+            operation_name="cli_json_read",
+            classify=_lark_cli_retry_reason,
+        )
+    except Exception as exc:
+        raise _coerce_lark_cli_error(exc) from None
+
+
 async def _run_lark_cli_json(argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS) -> object:
-    stdout, stderr = await _run_lark_cli(argv, timeout_seconds=timeout_seconds)
-    del stderr
+    return await _run_lark_cli_read_json(argv, timeout_seconds=timeout_seconds)
+
+
+async def _run_lark_cli_json_without_retry(argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS) -> object:
+    stdout, _ = await _run_lark_cli(argv, timeout_seconds=timeout_seconds)
     return _parse_cli_json(stdout)
 
 
@@ -254,11 +394,11 @@ def _required_scopes_for_service(config: object) -> tuple[str, ...]:
     resources = source.get("resources")
     if not isinstance(resources, (list, tuple)):
         return ()
-    for resource in resources:
-        name = str(resource).casefold()
-        if name in _FEISHU_SCOPE_BY_RESOURCE:
-            result.add(_FEISHU_SCOPE_BY_RESOURCE[name])
-    if "docs" in {str(item).casefold() for item in resources} and "document_ids" not in source:
+    normalized = {str(item).casefold() for item in resources}
+    for resource in normalized:
+        if resource in _FEISHU_SCOPE_BY_RESOURCE:
+            result.add(_FEISHU_SCOPE_BY_RESOURCE[resource])
+    if "docs" in normalized and "document_ids" not in source:
         result.add(_FEISHU_SCOPE_BY_RESOURCE["search"])
     return tuple(sorted(result))
 
@@ -273,6 +413,12 @@ def required_scopes_for_config(config: object) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def supported_read_scopes() -> tuple[str, ...]:
+    """Return the complete PCS-supported Feishu read-only scope set."""
+
+    return _SUPPORTED_FEISHU_READ_SCOPES
+
+
 async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool, set[str]]:
     payload = await _run_lark_cli_json(["auth", "status", "--json", "--verify"])
     ready, granted = _user_auth_status(payload)
@@ -282,7 +428,9 @@ async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool,
 async def _lark_cli_begin_authorization(required_scopes: tuple[str, ...]) -> tuple[str, str, str]:
     if not required_scopes:
         raise _fetch_error("no Feishu read scope is required by the current configuration")
-    payload = await _run_lark_cli_json(["auth", "login", "--scope", " ".join(required_scopes), "--no-wait", "--json"])
+    payload = await _run_lark_cli_json_without_retry(
+        ["auth", "login", "--scope", " ".join(required_scopes), "--no-wait", "--json"]
+    )
     if not isinstance(payload, Mapping):
         raise _fetch_error("lark-cli authorization response is invalid")
     device_code = _find_nested_text(payload, "device_code")
@@ -359,17 +507,22 @@ async def _paged_lark_cli(
 ) -> list[dict[str, object]]:
     result: list[dict[str, object]] = []
     next_args = list(argv)
+    seen_tokens: set[str] = set()
     for _ in range(_MAX_PAGES):
         payload = await _run_lark_cli_json(next_args)
         if not isinstance(payload, Mapping):
             raise _fetch_error(f"Feishu {name} response is not an object")
-        result.extend(_as_items(payload, name=name))
-        has_more, page_token = _page_info(payload)
-        if not has_more:
+        page_items = _as_items(payload, name=name)
+        if not page_items:
             return result
-        if not page_token:
-            raise _fetch_error(f"Feishu {name} page is missing its continuation token")
-        next_args = [*argv, page_token_flag, page_token]
+        result.extend(page_items)
+        token = _page_token(payload)
+        if not token:
+            return result
+        if token in seen_tokens:
+            raise _fetch_error(f"Feishu {name} pagination token did not advance")
+        seen_tokens.add(token)
+        next_args = [*argv, page_token_flag, token]
     raise _fetch_error(f"Feishu {name} pagination exceeds the page limit")
 
 
@@ -388,10 +541,10 @@ def _string(value: object, *keys: str) -> str | None:
 
 def _stable_identifier(item: Mapping[str, object], *keys: str, fallback: str) -> str:
     identifier = _string(item, *keys)
-    if identifier is None:
-        digest = hashlib.sha256(_canonical_json(item).encode("utf-8")).hexdigest()[:16]
-        return f"{fallback}:{digest}"
-    return identifier
+    if identifier is not None:
+        return identifier
+    digest = hashlib.sha256(_canonical_json(item).encode("utf-8")).hexdigest()[:16]
+    return f"{fallback}:{digest}"
 
 
 def _canonical_json(value: object) -> str:
@@ -429,8 +582,6 @@ def _original_ref(item: Mapping[str, object], fallback: str) -> str:
 
 
 def _markdown(value: object) -> str:
-    """Convert common Feishu text/block payloads into bounded Markdown text."""
-
     if isinstance(value, str):
         return value.replace("\r\n", "\n").replace("\r", "\n")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -457,28 +608,6 @@ def _json_snapshot(value: object) -> bytes | None:
     return raw if len(raw) <= _MAX_RAW_BYTES else None
 
 
-def _bounded_content(value: object) -> tuple[str, bool]:
-    text = _markdown(value)
-    truncated = len(text) > _MAX_CONTENT_CHARS
-    return text[:_MAX_CONTENT_CHARS], truncated
-
-
-def _item_metadata(
-    *,
-    resource: str,
-    payload: Mapping[str, object],
-    content_truncated: bool,
-    raw_snapshot: bytes | None,
-    **extra: object,
-) -> dict[str, object]:
-    return {
-        "resource": resource,
-        "content_truncated": content_truncated,
-        "raw_snapshot_omitted": raw_snapshot is None,
-        **extra,
-    }
-
-
 def _make_upsert(
     *,
     logical_id: str,
@@ -487,152 +616,135 @@ def _make_upsert(
     title: str,
     content: object,
     original_ref: str,
-    revision_id: str | None = None,
+    revision_id: str,
     **metadata: object,
 ) -> RawChangeItem:
     full_markdown = _markdown(content)
-    markdown, truncated = _bounded_content(full_markdown)
+    markdown = full_markdown[:_MAX_CONTENT_CHARS]
     if not markdown.strip():
         markdown = title
     snapshot = _json_snapshot(payload)
     return RawChangeItem(
         logical_id=logical_id,
-        revision_id=revision_id or _revision(payload, full_markdown),
+        revision_id=revision_id,
         operation="upsert",
         title=title,
         content=markdown,
         original_ref=original_ref,
-        metadata=_item_metadata(
-            resource=resource,
-            payload=payload,
-            content_truncated=truncated,
-            raw_snapshot=snapshot,
+        metadata={
+            "resource": resource,
+            "content_truncated": len(full_markdown) > _MAX_CONTENT_CHARS,
+            "raw_snapshot_omitted": snapshot is None,
             **metadata,
-        ),
+        },
         raw_snapshot=snapshot,
     )
 
 
-def _make_delete(
-    *,
-    logical_id: str,
-    resource: str,
-    title: str,
-    original_ref: str,
-    revision_id: str | None,
-    **metadata: object,
-) -> RawChangeItem:
-    return RawChangeItem(
-        logical_id=logical_id,
-        revision_id=f"deleted:{revision_id or 'unknown'}",
-        operation="delete",
-        title=title,
-        original_ref=original_ref,
-        metadata={"resource": resource, **metadata},
-    )
+def _parse_time(value: object) -> str | None:
+    if isinstance(value, Mapping):
+        for key in ("date_time", "timestamp", "time", "start_time", "value"):
+            if key in value:
+                parsed = _parse_time(value[key])
+                if parsed is not None:
+                    return parsed
+        return None
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = float(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            timestamp = float(text)
+        except ValueError:
+            try:
+                parsed_datetime = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            if parsed_datetime.tzinfo is None:
+                parsed_datetime = parsed_datetime.replace(tzinfo=UTC)
+            return parsed_datetime.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    else:
+        return None
+    while abs(timestamp) >= 100_000_000_000:
+        timestamp /= 1000
+    try:
+        return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
-def _merge_cursor(target: dict[str, object], update: Mapping[str, object]) -> None:
-    for key, value in update.items():
-        target[key] = deepcopy(value)
+def _first_time(payload: Mapping[str, object], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        if key in payload:
+            value = _parse_time(payload[key])
+            if value is not None:
+                return value
+    return None
 
 
-def _batches(
-    pending: list[tuple[RawChangeItem, Mapping[str, object]]],
-    cursor: Mapping[str, object],
-) -> list[FetchBatch]:
-    if not pending:
-        return [FetchBatch(batch_id="batch-0", items=(), next_cursor=deepcopy(dict(cursor)))]
-    result: list[FetchBatch] = []
-    current = deepcopy(dict(cursor))
-    for index in range(0, len(pending), _BATCH_SIZE):
-        end = index + _BATCH_SIZE
-        chunk = pending[index:end]
-        for _, update in chunk:
-            _merge_cursor(current, update)
-        result.append(
-            FetchBatch(
-                batch_id=f"batch-{index // _BATCH_SIZE}",
-                items=tuple(item for item, _ in chunk),
-                next_cursor=deepcopy(current),
-            )
+def _resource_time(payload: Mapping[str, object], resource: str) -> str | None:
+    if resource == "docs":
+        return _first_time(
+            payload,
+            (
+                "update_time",
+                "updated_at",
+                "updated_time",
+                "modify_time",
+                "modified_time",
+                "last_update_time",
+                "create_time",
+                "created_at",
+                "created_time",
+            ),
         )
-    return result
+    if resource == "tasks":
+        return _first_time(
+            payload,
+            ("update_time", "updated_at", "updated_time", "create_time", "created_at", "created_time"),
+        )
+    if resource == "calendar":
+        return _first_time(payload, ("start", "start_time", "event_time"))
+    if resource == "wiki":
+        return _first_time(payload, ("update_time", "updated_at", "updated_time", "obj_edit_time"))
+    return None
 
 
-def _resource_cursor(cursor: Mapping[str, object], key: str) -> dict[str, object]:
-    value = cursor.get(key)
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _item_revision_map(cursor: Mapping[str, object]) -> dict[str, object]:
-    value = cursor.get("items")
-    if value is None:
-        value = cursor.get("documents")
-    return dict(value) if isinstance(value, Mapping) else {}
-
-
-def _validate_cursor(value: object) -> dict[str, object]:
-    if value is None:
-        return {}
-    if not isinstance(value, Mapping):
-        raise _fetch_error("Feishu cursor must be an object")
-    allowed = {"docs", "tasks", "calendar", "wiki_space"}
-    if set(value) - allowed:
-        raise _fetch_error("Feishu cursor contains unsupported fields")
-    result = deepcopy(dict(value))
-    for key, raw_resource in result.items():
-        if not isinstance(raw_resource, Mapping):
-            raise _fetch_error(f"Feishu {key} cursor is invalid")
-        resource = dict(raw_resource)
-        allowed_resource_keys = {
-            "docs": {"items", "documents", "document_ids", "known_ids", "query"},
-            "tasks": {"items", "known_ids"},
-            "calendar": {"items", "known_ids", "start", "end"},
-            "wiki_space": {"nodes", "known_ids"},
-        }[key]
-        if set(resource) - allowed_resource_keys:
-            raise _fetch_error(f"Feishu {key} cursor contains unsupported fields")
-        for item_key in ("items", "documents"):
-            nested = resource.get(item_key)
-            if nested is not None and not isinstance(nested, Mapping):
-                raise _fetch_error(f"Feishu {key} cursor is invalid")
-            if isinstance(nested, Mapping):
-                for item_value in nested.values():
-                    if not isinstance(item_value, Mapping):
-                        raise _fetch_error(f"Feishu {key} cursor is invalid")
-                    revision = item_value.get("revision_id")
-                    if revision is not None and not isinstance(revision, str):
-                        raise _fetch_error(f"Feishu {key} cursor is invalid")
-        if key == "docs":
-            document_ids = resource.get("document_ids")
-            if document_ids is not None:
-                if not isinstance(document_ids, list) or any(
-                    not isinstance(document_id, str) or not document_id.strip() for document_id in document_ids
-                ):
-                    raise _fetch_error("Feishu docs cursor is invalid")
-        known_ids = resource.get("known_ids")
-        if known_ids is not None:
-            if not isinstance(known_ids, list) or any(
-                not isinstance(identifier, str) or not identifier.strip() for identifier in known_ids
-            ):
-                raise _fetch_error(f"Feishu {key} cursor is invalid")
-        if key == "wiki_space":
-            nodes = resource.get("nodes")
-            if nodes is not None and not isinstance(nodes, Mapping):
-                raise _fetch_error("Feishu wiki_space cursor is invalid")
-            if isinstance(nodes, Mapping):
-                for node in nodes.values():
-                    if not isinstance(node, Mapping):
-                        raise _fetch_error("Feishu wiki_space cursor is invalid")
-        result[key] = resource
-    return result
+def _candidate(
+    *,
+    resource: str,
+    stable_id: str,
+    revision_id: str,
+    locator: str,
+    metadata: Mapping[str, object],
+    time_range: Mapping[str, object],
+    run_started_at: datetime,
+    extra: Mapping[str, object],
+) -> dict[str, object] | None:
+    candidate_time = _resource_time(metadata, resource)
+    if candidate_time is None:
+        if time_range.get("mode") != "all":
+            raise _fetch_error(f"Feishu {resource} candidate has no usable time")
+        candidate_time = _EPOCH
+    if not candidate_in_time_range(candidate_time, time_range, run_started_at):
+        return None
+    return {
+        "resource_lane": resource,
+        "stable_id": stable_id,
+        "revision_id": revision_id,
+        "candidate_time": candidate_time,
+        "locator": locator,
+        **dict(extra),
+    }
 
 
 def _wiki_node(raw: Mapping[str, object], *, parent: str | None, path: list[str]) -> dict[str, object]:
     token = _stable_identifier(raw, "node_token", "token", "id", fallback="node")
     title = _title(raw, token)
-    node_path = [*path, title][:_MAX_WIKI_PATH_PARTS]
     return {
         "node_token": token,
         "obj_token": _string(raw, "obj_token", "object_token", "token") or token,
@@ -641,13 +753,8 @@ def _wiki_node(raw: Mapping[str, object], *, parent: str | None, path: list[str]
         "parent_node_token": parent,
         "has_child": bool(raw.get("has_child", raw.get("has_children", False))),
         "update_time": _string(raw, "update_time", "updated_at", "obj_edit_time", "revision"),
-        "path": node_path,
+        "path": [*path, title][:_MAX_WIKI_PATH_PARTS],
     }
-
-
-def _wiki_change_sort_value(value: object) -> str:
-    node = value if isinstance(value, Mapping) else {}
-    return _string(node, "update_time", "updated_at", "obj_edit_time", "title") or ""
 
 
 async def _scan_wiki(
@@ -661,20 +768,10 @@ async def _scan_wiki(
 ) -> list[dict[str, object]]:
     if len(path) > max_depth + 1 or depth > max_depth or max_nodes <= 0:
         return []
-    args = _cli_args(
-        "wiki",
-        "+node-list",
-        "--space-id",
-        space_id,
-        "--page-size",
-        str(min(50, max_nodes)),
-    )
+    args = _cli_args("wiki", "+node-list", "--space-id", space_id, "--page-size", str(min(50, max_nodes)))
     if parent:
         args.extend(["--parent-node-token", parent])
-    raw_nodes = await _paged_lark_cli(
-        args,
-        name="wiki nodes",
-    )
+    raw_nodes = await _paged_lark_cli(args, name="wiki nodes")
     result: list[dict[str, object]] = []
     for raw in raw_nodes:
         node = _wiki_node(raw, parent=parent, path=path)
@@ -713,386 +810,247 @@ async def _fetch_wiki_content(
     if obj_type == "file":
         sandbox_root = home / "workspace" / "sandboxes"
         sandbox_root.mkdir(parents=True, exist_ok=True)
+        stdout, raw = await _download_wiki_file(
+            _cli_args(
+                "drive",
+                "+download",
+                "--file-token",
+                obj_token,
+                "--output",
+                "./download",
+                "--overwrite",
+            ),
+            sandbox_root=sandbox_root,
+        )
+        return {"node": dict(node), "cli_result": _safe_cli_output(stdout)}, raw.decode("utf-8", errors="replace")
+    return {"node": dict(node)}, _markdown(node.get("title") or obj_token)
+
+
+async def _download_wiki_file(argv: list[str], *, sandbox_root: Path) -> tuple[str, bytes]:
+    async def download_once() -> tuple[str, bytes]:
         with tempfile.TemporaryDirectory(prefix="feishu-", dir=sandbox_root) as temporary:
-            output_path = Path(temporary) / "download"
-            stdout, _ = await _run_lark_cli(
-                _cli_args(
-                    "drive",
-                    "+download",
-                    "--file-token",
-                    obj_token,
-                    "--output",
-                    "./download",
-                    "--overwrite",
-                ),
-                cwd=Path(temporary),
-            )
+            attempt_root = Path(temporary)
+            output_path = attempt_root / "download"
+            stdout, _ = await _run_lark_cli_once(argv, cwd=attempt_root)
             try:
                 raw = output_path.read_bytes()
             except OSError as exc:
                 raise _fetch_error("Feishu Wiki file download did not produce a readable file", exc) from None
-            content = raw.decode("utf-8", errors="replace")
-            return {"node": dict(node), "cli_result": _safe_cli_output(stdout)}, content
-    return {"node": dict(node)}, _markdown(node.get("title") or obj_token)
+            if not raw:
+                raise EOFError("Feishu Wiki file download is empty")
+            return stdout, raw
+
+    try:
+        return await retry_provider_read(
+            download_once,
+            provider="feishu",
+            operation_name="cli_file_download",
+            classify=_lark_cli_retry_reason,
+        )
+    except Exception as exc:
+        raise _coerce_lark_cli_error(exc) from None
 
 
 class FeishuFetchService(ContextFetchService):
     """Fetch Feishu docs, tasks, calendar events or Wiki nodes."""
+
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id
+        try:
+            await _ensure_lark_cli_authorized(self._config)
+            source = dict(self._config.source)
+            mode = str(source.get("mode") or "").casefold()
+            candidates = (
+                await self._discover_wiki(source=source, run_started_at=run_started_at)
+                if mode == "wiki_space"
+                else await self._discover_account(source=source, run_started_at=run_started_at)
+            )
+            return select_latest_candidates(
+                tuple(candidates),
+                cursor,
+                self._config.max_items_per_run or _DEFAULT_MAX_ITEMS,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseError:
+            raise
+        except Exception as exc:
+            raise _fetch_error(f"Feishu preparation failed: {_safe_detail(exc)}", exc) from None
 
     async def fetch(
         self,
         *,
         run_id: str,
         cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
         del run_id
         try:
-            await _ensure_lark_cli_authorized(self._config)
-            batches = await self._fetch_impl(cursor=cursor)
+            next_cursor = dict(cursor) if cursor is not None else {}
+            if not candidates:
+                yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
+                return
+            for index in range(0, len(candidates), _BATCH_SIZE):
+                end = index + _BATCH_SIZE
+                items = [await self._read_candidate(candidate) for candidate in candidates[index:end]]
+                yield FetchBatch(
+                    batch_id=f"batch-{index // _BATCH_SIZE}",
+                    items=tuple(items),
+                    next_cursor=next_cursor,
+                )
         except asyncio.CancelledError:
             raise
         except BaseError:
             raise
         except Exception as exc:
             raise _fetch_error(f"Feishu fetch failed: {_safe_detail(exc)}", exc) from None
-        for batch in batches:
-            yield batch
 
-    async def _fetch_impl(self, *, cursor: dict[str, object] | None) -> list[FetchBatch]:
-        old_cursor = _validate_cursor(cursor)
-        source = dict(self._config.source)
-        mode = str(source.get("mode") or "").casefold()
-        max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-        if mode == "wiki_space":
-            return await self._fetch_wiki(source=source, cursor=old_cursor, max_items=max_items)
-        return await self._fetch_account(source=source, cursor=old_cursor, max_items=max_items)
-
-    async def _fetch_account(
+    async def _discover_account(
         self,
         *,
-        source: dict[str, object],
-        cursor: dict[str, object],
-        max_items: int,
-    ) -> list[FetchBatch]:
-        resources_value = source.get("resources")
-        resources = [str(item) for item in resources_value] if isinstance(resources_value, (list, tuple)) else []
-        latest: list[tuple[RawChangeItem, str, str, object]] = []
-        history: list[tuple[RawChangeItem, str, str, object]] = []
-        states: dict[str, dict[str, object]] = {}
+        source: Mapping[str, object],
+        run_started_at: datetime,
+    ) -> list[dict[str, object]]:
+        raw_resources = source.get("resources")
+        resources = [str(item) for item in raw_resources] if isinstance(raw_resources, (list, tuple)) else []
+        candidates: list[dict[str, object]] = []
         if "docs" in resources:
-            doc_cursor = _resource_cursor(cursor, "docs")
-            previous_items = _item_revision_map(doc_cursor)
-            known_ids = {str(item) for item in doc_cursor.get("known_ids", []) if isinstance(item, str)}
-            document_ids = source.get("document_ids")
-            if isinstance(document_ids, (list, tuple)):
-                ids = [str(item) for item in document_ids]
-                query = None
-                found = [{"document_id": identifier} for identifier in ids]
-            else:
-                query = source.get("query")
-                search_args = _cli_args("docs", "+search", "--page-size", "20")
-                if isinstance(query, str):
-                    search_args.extend(["--query", query])
-                found = await _paged_lark_cli(
-                    search_args,
-                    name="document search",
-                )
-            current_ids = [
-                _stable_identifier(result, "document_id", "doc_id", "token", "id", fallback="doc") for result in found
-            ]
-            states["docs"] = {
-                "items": deepcopy(previous_items),
-                "document_ids": current_ids,
-                "known_ids": sorted(known_ids | set(current_ids)),
-                "query": query,
-            }
-            new_candidates: list[tuple[RawChangeItem, str, str, object]] = []
-            changed_candidates: list[tuple[RawChangeItem, str, str, object]] = []
-            history_candidates: list[tuple[RawChangeItem, str, str, object]] = []
-            for result, doc_id in zip(found, current_ids, strict=False):
-                content = result.get("content") or result.get("summary") or result.get("description")
-                payload: Mapping[str, object] = result
-                if not content:
-                    raw_value = await _run_lark_cli_json(
-                        _cli_args("docs", "+fetch", "--doc", doc_id, "--doc-format", "markdown")
-                    )
-                    payload = _as_object(raw_value, name="document")
-                    payload_data, content = _content_from_payload(payload)
-                else:
-                    payload_data, _ = _content_from_payload(payload)
-                if content is None:
-                    content = ""
-                title = _title(result, f"Feishu doc {doc_id}")
-                if isinstance(payload_data, Mapping):
-                    title = _title(payload_data, title)
-                item = _make_upsert(
-                    logical_id=f"feishu:doc:{doc_id}",
-                    resource="docs",
-                    payload=payload,
-                    title=title,
-                    content=content,
-                    original_ref=_original_ref(result, f"feishu://doc/{doc_id}"),
-                    revision_id=_revision(result, _markdown(content)),
-                    query=query,
-                )
-                previous = previous_items.get(doc_id)
-                entry = {"revision_id": item.revision_id, "title": title}
-                if isinstance(previous, Mapping) and previous.get("revision_id") == item.revision_id:
-                    continue
-                candidate = (item, "docs", doc_id, entry)
-                if isinstance(previous, Mapping):
-                    changed_candidates.append(candidate)
-                elif doc_id not in known_ids:
-                    new_candidates.append(candidate)
-                else:
-                    history_candidates.append(candidate)
-            if known_ids:
-                new_candidates.sort(key=lambda value: value[2], reverse=True)
-            latest.extend([*new_candidates, *changed_candidates])
-            history.extend(history_candidates)
+            candidates.extend(await self._discover_docs(source=source, run_started_at=run_started_at))
         if "tasks" in resources:
-            task_latest, task_history, task_state = await self._fetch_task_candidates(cursor=cursor)
-            states["tasks"] = task_state
-            latest.extend(task_latest)
-            history.extend(task_history)
-        if "calendar" in resources:
-            calendar_latest, calendar_history, calendar_state = await self._fetch_calendar_candidates(
-                source=source, cursor=cursor
-            )
-            states["calendar"] = calendar_state
-            latest.extend(calendar_latest)
-            history.extend(calendar_history)
-
-        selected = [*latest, *history][:max_items]
-        running = deepcopy(states)
-        pending: list[tuple[RawChangeItem, Mapping[str, object]]] = []
-        for item, resource, identifier, entry in selected:
-            state = running[resource]
-            items = state.setdefault("items", {})
-            if not isinstance(items, dict):
-                items = {}
-                state["items"] = items
-            items[identifier] = deepcopy(entry)
-            pending.append((item, {resource: deepcopy(state)}))
-        return _batches(pending, cursor)
-
-    async def _fetch_task_candidates(
-        self, *, cursor: Mapping[str, object]
-    ) -> tuple[
-        list[tuple[RawChangeItem, str, str, object]], list[tuple[RawChangeItem, str, str, object]], dict[str, object]
-    ]:
-        values = await _paged_lark_cli(_cli_args("task", "+get-my-tasks"), name="tasks")
-        resource = _resource_cursor(cursor, "tasks")
-        previous = _item_revision_map(resource)
-        known_ids = {str(item) for item in resource.get("known_ids", []) if isinstance(item, str)}
-        current_ids: list[str] = []
-        latest: list[tuple[RawChangeItem, str, str, object]] = []
-        history: list[tuple[RawChangeItem, str, str, object]] = []
-        state: dict[str, object] = {"items": deepcopy(previous), "known_ids": []}
-        for value in values:
-            identifier = _stable_identifier(value, "guid", "task_id", "id", "url", fallback="task")
-            current_ids.append(identifier)
-            content = (
-                value.get("notes") or value.get("description") or value.get("content") or _title(value, identifier)
-            )
-            item = _make_upsert(
-                logical_id=f"feishu:task:{identifier}",
-                resource="tasks",
-                payload=value,
-                title=_title(value, f"Feishu task {identifier}"),
-                content=content,
-                original_ref=_original_ref(value, f"feishu://task/{identifier}"),
-                revision_id=_revision(value, _markdown(content)),
-                task_id=identifier,
-            )
-            previous_item = previous.get(identifier)
-            if isinstance(previous_item, Mapping) and previous_item.get("revision_id") == item.revision_id:
-                continue
-            candidate = (item, "tasks", identifier, {"revision_id": item.revision_id, "title": item.title})
-            if isinstance(previous_item, Mapping) or identifier not in known_ids:
-                latest.append(candidate)
-            else:
-                history.append(candidate)
-        state["known_ids"] = sorted(known_ids | set(current_ids))
-        return latest, history, state
-
-    async def _fetch_calendar_candidates(
-        self, *, source: Mapping[str, object], cursor: Mapping[str, object]
-    ) -> tuple[
-        list[tuple[RawChangeItem, str, str, object]], list[tuple[RawChangeItem, str, str, object]], dict[str, object]
-    ]:
-        args = _cli_args("calendar", "+agenda")
-        if isinstance(source.get("start"), str):
-            args.extend(["--start", str(source["start"])])
-        if isinstance(source.get("end"), str):
-            args.extend(["--end", str(source["end"])])
-        payload = await _run_lark_cli_json(args)
-        values = _as_items(payload, name="calendar")
-        resource = _resource_cursor(cursor, "calendar")
-        previous = _item_revision_map(resource)
-        known_ids = {str(item) for item in resource.get("known_ids", []) if isinstance(item, str)}
-        current_ids: list[str] = []
-        latest: list[tuple[RawChangeItem, str, str, object]] = []
-        history: list[tuple[RawChangeItem, str, str, object]] = []
-        state: dict[str, object] = {
-            "items": deepcopy(previous),
-            "known_ids": [],
-            "start": source.get("start"),
-            "end": source.get("end"),
-        }
-        for value in values:
-            identifier = _stable_identifier(value, "event_id", "id", "uid", "url", fallback="event")
-            current_ids.append(identifier)
-            content = value.get("description") or value.get("content") or _title(value, identifier)
-            item = _make_upsert(
-                logical_id=f"feishu:calendar:{identifier}",
-                resource="calendar",
-                payload=value,
-                title=_title(value, f"Feishu event {identifier}"),
-                content=content,
-                original_ref=_original_ref(value, f"feishu://calendar/{identifier}"),
-                revision_id=_revision(value, _markdown(content)),
-                event_id=identifier,
-                start=value.get("start") or value.get("start_time"),
-                end=value.get("end") or value.get("end_time"),
-            )
-            previous_item = previous.get(identifier)
-            if isinstance(previous_item, Mapping) and previous_item.get("revision_id") == item.revision_id:
-                continue
-            candidate = (item, "calendar", identifier, {"revision_id": item.revision_id, "title": item.title})
-            if isinstance(previous_item, Mapping) or identifier not in known_ids:
-                latest.append(candidate)
-            else:
-                history.append(candidate)
-        state["known_ids"] = sorted(known_ids | set(current_ids))
-        return latest, history, state
-
-    async def _fetch_selected_docs(
-        self,
-        *,
-        document_ids: list[str],
-        cursor: Mapping[str, object],
-        limit: int,
-    ) -> list[tuple[RawChangeItem, Mapping[str, object]]]:
-        doc_cursor = _resource_cursor(cursor, "docs")
-        previous_items = _item_revision_map(doc_cursor)
-        current_items = dict(previous_items)
-        pending: list[tuple[RawChangeItem, Mapping[str, object]]] = []
-        for document_id in document_ids:
-            if len(pending) >= limit:
-                break
-            raw_value = await _run_lark_cli_json(
-                _cli_args("docs", "+fetch", "--doc", document_id, "--doc-format", "markdown")
-            )
-            payload = _as_object(raw_value, name="document")
-            previous = previous_items.get(document_id)
-            data_map, content = _content_from_payload(payload)
-            title = _title(data_map, f"Feishu doc {document_id}")
-            item = _make_upsert(
-                logical_id=f"feishu:doc:{document_id}",
-                resource="docs",
-                payload=payload,
-                title=title,
-                content=content,
-                original_ref=_original_ref(data_map, f"feishu://doc/{document_id}"),
-                revision_id=_revision(data_map, _markdown(content)),
-                document_id=document_id,
-            )
-            current_items[document_id] = {"revision_id": item.revision_id, "title": title}
-            if not isinstance(previous, Mapping) or previous.get("revision_id") != item.revision_id:
-                pending.append((item, {"docs": {"items": deepcopy(current_items)}}))
-        return pending
-
-    async def _fetch_tasks(
-        self,
-        *,
-        cursor: Mapping[str, object],
-    ) -> list[tuple[RawChangeItem, Mapping[str, object]]]:
-        values = await _paged_lark_cli(
-            _cli_args("task", "+get-my-tasks"),
-            name="tasks",
-        )
-        previous = _item_revision_map(_resource_cursor(cursor, "tasks"))
-        current = dict(previous)
-        pending: list[tuple[RawChangeItem, Mapping[str, object]]] = []
-        for value in values:
-            identifier = _stable_identifier(value, "guid", "task_id", "id", "url", fallback="task")
-            content = (
-                value.get("notes") or value.get("description") or value.get("content") or _title(value, identifier)
-            )
-            item = _make_upsert(
-                logical_id=f"feishu:task:{identifier}",
-                resource="tasks",
-                payload=value,
-                title=_title(value, f"Feishu task {identifier}"),
-                content=content,
-                original_ref=_original_ref(value, f"feishu://task/{identifier}"),
-                revision_id=_revision(value, _markdown(content)),
-                task_id=identifier,
-            )
-            current[identifier] = {"revision_id": item.revision_id, "title": item.title}
-            previous_item = previous.get(identifier)
-            if not isinstance(previous_item, Mapping) or previous_item.get("revision_id") != item.revision_id:
-                pending.append((item, {"tasks": {"items": deepcopy(current)}}))
-        return pending
-
-    async def _fetch_calendar(
-        self,
-        *,
-        source: Mapping[str, object],
-        cursor: Mapping[str, object],
-    ) -> list[tuple[RawChangeItem, Mapping[str, object]]]:
-        args = _cli_args("calendar", "+agenda")
-        if isinstance(source.get("start"), str):
-            args.extend(["--start", str(source["start"])])
-        if isinstance(source.get("end"), str):
-            args.extend(["--end", str(source["end"])])
-        payload = await _run_lark_cli_json(args)
-        values = _as_items(payload, name="calendar")
-        previous = _item_revision_map(_resource_cursor(cursor, "calendar"))
-        current = dict(previous)
-        pending: list[tuple[RawChangeItem, Mapping[str, object]]] = []
-        for value in values:
-            identifier = _stable_identifier(value, "event_id", "id", "uid", "url", fallback="event")
-            start = value.get("start") or value.get("start_time")
-            end = value.get("end") or value.get("end_time")
-            content = value.get("description") or value.get("content") or _title(value, identifier)
-            item = _make_upsert(
-                logical_id=f"feishu:calendar:{identifier}",
-                resource="calendar",
-                payload=value,
-                title=_title(value, f"Feishu event {identifier}"),
-                content=content,
-                original_ref=_original_ref(value, f"feishu://calendar/{identifier}"),
-                revision_id=_revision(value, _markdown(content)),
-                event_id=identifier,
-                start=start,
-                end=end,
-            )
-            current[identifier] = {"revision_id": item.revision_id, "title": item.title}
-            previous_item = previous.get(identifier)
-            if not isinstance(previous_item, Mapping) or previous_item.get("revision_id") != item.revision_id:
-                pending.append(
-                    (
-                        item,
-                        {
-                            "calendar": {
-                                "items": deepcopy(current),
-                                "start": source.get("start"),
-                                "end": source.get("end"),
-                            }
-                        },
-                    )
+            values = await _paged_lark_cli(_cli_args("task", "+get-my-tasks"), name="tasks")
+            for value in values:
+                identifier = _stable_identifier(value, "guid", "task_id", "id", "url", fallback="task")
+                logical_id = f"feishu:task:{identifier}"
+                candidate = _candidate(
+                    resource="tasks",
+                    stable_id=logical_id,
+                    revision_id=_revision(value),
+                    locator=_original_ref(value, f"feishu://task/{identifier}"),
+                    metadata=value,
+                    time_range=self._config.time_range,
+                    run_started_at=run_started_at,
+                    extra={"kind": "task", "payload": value, "identifier": identifier},
                 )
-        return pending
+                if candidate is not None:
+                    candidates.append(candidate)
+        if "calendar" in resources:
+            args = _cli_args("calendar", "+agenda")
+            if isinstance(source.get("start"), str):
+                args.extend(["--start", str(source["start"])])
+            if isinstance(source.get("end"), str):
+                args.extend(["--end", str(source["end"])])
+            payload = await _run_lark_cli_json(args)
+            for value in _as_items(payload, name="calendar"):
+                identifier = _stable_identifier(value, "event_id", "id", "uid", "url", fallback="event")
+                logical_id = f"feishu:calendar:{identifier}"
+                candidate = _candidate(
+                    resource="calendar",
+                    stable_id=logical_id,
+                    revision_id=_revision(value),
+                    locator=_original_ref(value, f"feishu://calendar/{identifier}"),
+                    metadata=value,
+                    time_range=self._config.time_range,
+                    run_started_at=run_started_at,
+                    extra={"kind": "calendar", "payload": value, "identifier": identifier},
+                )
+                if candidate is not None:
+                    candidates.append(candidate)
+        return candidates
 
-    async def _fetch_wiki(
+    async def _discover_docs(
         self,
         *,
         source: Mapping[str, object],
-        cursor: dict[str, object],
-        max_items: int,
-    ) -> list[FetchBatch]:
+        run_started_at: datetime,
+    ) -> list[dict[str, object]]:
+        raw_ids = source.get("document_ids")
+        if isinstance(raw_ids, (list, tuple)):
+            found: list[dict[str, object]] = []
+            for raw_id in raw_ids:
+                document_id = str(raw_id)
+                payload = _as_object(
+                    await _run_lark_cli_json(
+                        _cli_args("docs", "+fetch", "--doc", document_id, "--doc-format", "markdown")
+                    ),
+                    name="document",
+                )
+                metadata, content = _content_from_payload(payload)
+                found.append(
+                    {
+                        "document_id": document_id,
+                        "metadata": dict(metadata),
+                        "payload": payload,
+                        "content": content,
+                    }
+                )
+        else:
+            query = source.get("query")
+            args = _cli_args("docs", "+search", "--page-size", "20")
+            if isinstance(query, str):
+                args.extend(["--query", query])
+            found = []
+            for value in await _paged_lark_cli(args, name="document search"):
+                content = value.get("content") or value.get("summary") or value.get("description")
+                found.append(
+                    {
+                        "document_id": _stable_identifier(
+                            value,
+                            "document_id",
+                            "doc_id",
+                            "token",
+                            "id",
+                            fallback="doc",
+                        ),
+                        "metadata": value,
+                        "payload": value if content is not None else None,
+                        "content": content,
+                    }
+                )
+        result: list[dict[str, object]] = []
+        for discovered in found:
+            discovered_metadata = discovered.get("metadata")
+            if not isinstance(discovered_metadata, Mapping):
+                raise _fetch_error("Feishu document metadata is invalid")
+            document_id = str(discovered["document_id"])
+            logical_id = f"feishu:doc:{document_id}"
+            content = discovered.get("content")
+            revision = _revision(
+                discovered_metadata,
+                _markdown(content) if content is not None else None,
+            )
+            candidate = _candidate(
+                resource="docs",
+                stable_id=logical_id,
+                revision_id=revision,
+                locator=_original_ref(discovered_metadata, f"feishu://doc/{document_id}"),
+                metadata=discovered_metadata,
+                time_range=self._config.time_range,
+                run_started_at=run_started_at,
+                extra={
+                    "kind": "doc",
+                    "document_id": document_id,
+                    "metadata": dict(discovered_metadata),
+                    "payload": discovered.get("payload"),
+                    "content": content,
+                    "query": source.get("query"),
+                },
+            )
+            if candidate is not None:
+                result.append(candidate)
+        return result
+
+    async def _discover_wiki(
+        self,
+        *,
+        source: Mapping[str, object],
+        run_started_at: datetime,
+    ) -> list[dict[str, object]]:
         space_id = str(source.get("wiki_space_id") or "").strip()
         if not space_id:
             raise _fetch_error("Feishu wiki_space requires wiki_space_id")
@@ -1108,88 +1066,103 @@ class FeishuFetchService(ContextFetchService):
             max_depth=max_depth,
             max_nodes=max_nodes,
         )
-        current = {str(node["node_token"]): node for node in nodes}
-        complete_scan = len(nodes) < max_nodes
-        resource = _resource_cursor(cursor, "wiki_space")
-        previous = resource.get("nodes")
-        previous_nodes = dict(previous) if isinstance(previous, Mapping) else {}
-        known_ids = {str(item) for item in resource.get("known_ids", []) if isinstance(item, str)}
-        latest_nodes: list[tuple[str, Mapping[str, object] | None, Mapping[str, object] | None]] = []
-        history_nodes: list[tuple[str, Mapping[str, object], Mapping[str, object] | None]] = []
-        for node_token, node in current.items():
-            previous_node = previous_nodes.get(node_token)
-            if isinstance(previous_node, Mapping) and _revision(previous_node) == _revision(node):
-                continue
-            if isinstance(previous_node, Mapping) or node_token not in known_ids:
-                latest_nodes.append((node_token, node, previous_node if isinstance(previous_node, Mapping) else None))
-            else:
-                history_nodes.append((node_token, node, previous_node if isinstance(previous_node, Mapping) else None))
-        latest: list[tuple[RawChangeItem, str, object]] = []
-        history: list[tuple[RawChangeItem, str, object]] = []
-        if complete_scan:
-            for node_token, old_node in previous_nodes.items():
-                if node_token in current:
-                    continue
-                old_map = old_node if isinstance(old_node, Mapping) else {}
-                latest_nodes.append((node_token, None, old_map))
-        latest_nodes.sort(
-            key=lambda candidate: (_wiki_change_sort_value(candidate[1] or candidate[2]), candidate[0]), reverse=True
-        )
-        history_nodes.sort(
-            key=lambda candidate: (_wiki_change_sort_value(candidate[1] or candidate[2]), candidate[0]), reverse=True
-        )
-        selected_nodes = [*latest_nodes, *history_nodes][:max_items]
-        for node_token, node, previous_node in selected_nodes:
-            old_map = previous_node if isinstance(previous_node, Mapping) else {}
-            if node is None:
-                latest.append(
-                    (
-                        _make_delete(
-                            logical_id=f"feishu:wiki:{space_id}:{node_token}",
-                            resource="wiki",
-                            title=_title(old_map, str(node_token)),
-                            original_ref=f"feishu://wiki/{space_id}/{node_token}",
-                            revision_id=_revision(old_map),
-                            space_id=space_id,
-                            node_token=node_token,
-                        ),
-                        node_token,
-                        None,
-                    )
+        result: list[dict[str, object]] = []
+        for node in nodes:
+            node_token = str(node["node_token"])
+            logical_id = f"feishu:wiki:{space_id}:{node_token}"
+            candidate = _candidate(
+                resource="wiki",
+                stable_id=logical_id,
+                revision_id=_revision(node),
+                locator=f"feishu://wiki/{space_id}/{node_token}",
+                metadata=node,
+                time_range=self._config.time_range,
+                run_started_at=run_started_at,
+                extra={"kind": "wiki", "space_id": space_id, "node": node},
+            )
+            if candidate is not None:
+                result.append(candidate)
+        return result
+
+    async def _read_candidate(self, candidate: Mapping[str, object]) -> RawChangeItem:
+        kind = candidate.get("kind")
+        revision_id = str(candidate.get("revision_id") or "")
+        logical_id = str(candidate.get("stable_id") or "")
+        locator = str(candidate.get("locator") or "")
+        if not revision_id or not logical_id or not locator:
+            raise _fetch_error("Feishu candidate is invalid")
+        if kind == "doc":
+            document_id = str(candidate.get("document_id") or "")
+            payload = candidate.get("payload")
+            content = candidate.get("content")
+            metadata = candidate.get("metadata")
+            if not isinstance(metadata, Mapping):
+                raise _fetch_error("Feishu document candidate is invalid")
+            if not isinstance(payload, Mapping):
+                payload = _as_object(
+                    await _run_lark_cli_json(
+                        _cli_args("docs", "+fetch", "--doc", document_id, "--doc-format", "markdown")
+                    ),
+                    name="document",
                 )
-                continue
+                fetched_metadata, content = _content_from_payload(payload)
+                metadata = fetched_metadata
+            return _make_upsert(
+                logical_id=logical_id,
+                resource="docs",
+                payload=payload,
+                title=_title(metadata, f"Feishu doc {document_id}"),
+                content=content,
+                original_ref=locator,
+                revision_id=revision_id,
+                document_id=document_id,
+                query=candidate.get("query"),
+            )
+        if kind in {"task", "calendar"}:
+            payload = candidate.get("payload")
+            if not isinstance(payload, Mapping):
+                raise _fetch_error("Feishu list candidate is invalid")
+            identifier = str(candidate.get("identifier") or "")
+            if kind == "task":
+                content = payload.get("notes") or payload.get("description") or payload.get("content")
+                title = _title(payload, f"Feishu task {identifier}")
+                metadata = {"task_id": identifier}
+                resource = "tasks"
+            else:
+                content = payload.get("description") or payload.get("content")
+                title = _title(payload, f"Feishu event {identifier}")
+                metadata = {
+                    "event_id": identifier,
+                    "start": payload.get("start") or payload.get("start_time"),
+                    "end": payload.get("end") or payload.get("end_time"),
+                }
+                resource = "calendar"
+            return _make_upsert(
+                logical_id=logical_id,
+                resource=resource,
+                payload=payload,
+                title=title,
+                content=content or title,
+                original_ref=locator,
+                revision_id=revision_id,
+                **metadata,
+            )
+        if kind == "wiki":
+            node = candidate.get("node")
+            if not isinstance(node, Mapping):
+                raise _fetch_error("Feishu Wiki candidate is invalid")
             payload, content = await _fetch_wiki_content(node, home=self._home)
-            item = _make_upsert(
-                logical_id=f"feishu:wiki:{space_id}:{node_token}",
+            return _make_upsert(
+                logical_id=logical_id,
                 resource="wiki",
                 payload=payload,
-                title=_title(node, node_token),
+                title=_title(node, str(node.get("node_token") or "Wiki")),
                 content=content,
-                original_ref=f"feishu://wiki/{space_id}/{node_token}",
-                revision_id=_revision(node, content),
-                space_id=space_id,
-                node_token=node_token,
+                original_ref=locator,
+                revision_id=revision_id,
+                space_id=candidate.get("space_id"),
+                node_token=node.get("node_token"),
                 wiki_path=node.get("path"),
                 obj_type=node.get("obj_type"),
             )
-            (latest if isinstance(previous_node, Mapping) or node_token not in known_ids else history).append(
-                (item, node_token, deepcopy(node))
-            )
-        latest.sort(key=lambda candidate: (_wiki_change_sort_value(candidate[2]), candidate[1]), reverse=True)
-        history.sort(key=lambda candidate: (_wiki_change_sort_value(candidate[2]), candidate[1]), reverse=True)
-        selected = [*latest, *history]
-        running_nodes = deepcopy(previous_nodes)
-        known = sorted(known_ids | set(current))
-        changed: list[tuple[RawChangeItem, Mapping[str, object]]] = []
-        for item, node_token, node in selected:
-            if node is None:
-                running_nodes.pop(node_token, None)
-            else:
-                running_nodes[node_token] = deepcopy(node)
-            changed.append(
-                (
-                    item,
-                    {"wiki_space": {"nodes": deepcopy(running_nodes), "known_ids": known}},
-                )
-            )
-        return _batches(changed, cursor)
+        raise _fetch_error("Feishu candidate kind is invalid")

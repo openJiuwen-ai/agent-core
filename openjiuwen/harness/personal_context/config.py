@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -19,16 +20,25 @@ from openjiuwen.harness.personal_context.status_codes import StatusCode, build_e
 Provider = Literal[
     "local_files",
     "github",
+    "gitcode",
     "feishu",
     "browser_bookmarks",
     "zhihu_reader",
     "toutiao_reader",
+    "rss_feed",
 ]
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _WINDOWS_SENSITIVE_PATH = re.compile(r"^[a-z]:\\windows\\(?:system32|syswow64|system)(?:\\|$)", re.IGNORECASE)
-_GITHUB_RESOURCES = ("readme", "issues", "pull_requests", "commits", "code")
+_REPOSITORY_RESOURCES = ("readme", "issues", "pull_requests", "commits", "code")
 _FEISHU_RESOURCES = ("docs", "tasks", "calendar")
+_RFC3339_TIMESTAMP = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$")
+
+# Shared semantic Context directory defaults.  The public YAML fields below
+# override these values for all three Filesystem profiles; tool helpers import
+# the same constants only for direct construction outside the Host lifecycle.
+DEFAULT_MAX_PAGES_PER_DIRECTORY = 20
+DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY = 20
 
 
 def _mapping(value: object, *, name: str) -> dict[str, Any]:
@@ -55,6 +65,45 @@ def _safe_profile(value: object) -> str:
     if text in {".", ".."} or any(separator in text for separator in ("/", "\\")):
         raise ValueError("profile must be a single path segment")
     return text
+
+
+def _normalize_rfc3339(value: object, *, name: str) -> tuple[str, datetime]:
+    text = _non_empty_text(value, name=name)
+    if not _RFC3339_TIMESTAMP.fullmatch(text):
+        raise ValueError(f"{name} must be a timezone-aware RFC 3339 timestamp")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a timezone-aware RFC 3339 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    utc_value = parsed.astimezone(UTC)
+    return utc_value.isoformat().replace("+00:00", "Z"), utc_value
+
+
+def _normalize_time_range(value: object) -> dict[str, object]:
+    raw = _mapping(value, name="time_range")
+    mode = raw.get("mode")
+    if mode == "all":
+        if set(raw) != {"mode"}:
+            raise ValueError("all time_range must contain only mode")
+        return {"mode": "all"}
+    if mode == "recent":
+        if set(raw) != {"mode", "recent_days"}:
+            raise ValueError("recent time_range must contain only mode and recent_days")
+        recent_days = raw["recent_days"]
+        if isinstance(recent_days, bool) or not isinstance(recent_days, int) or recent_days <= 0:
+            raise ValueError("recent_days must be a positive integer")
+        return {"mode": "recent", "recent_days": recent_days}
+    if mode == "fixed":
+        if set(raw) != {"mode", "start_at", "end_at"}:
+            raise ValueError("fixed time_range must contain only mode, start_at, and end_at")
+        start_at, start_value = _normalize_rfc3339(raw["start_at"], name="start_at")
+        end_at, end_value = _normalize_rfc3339(raw["end_at"], name="end_at")
+        if start_value >= end_value:
+            raise ValueError("fixed time_range start_at must be before end_at")
+        return {"mode": "fixed", "start_at": start_at, "end_at": end_at}
+    raise ValueError("time_range mode must be all, recent, or fixed")
 
 
 def _normalize_path(value: object, *, name: str) -> str:
@@ -97,6 +146,22 @@ def _normalize_url(value: object, *, name: str, host_suffix: str, path_prefix: s
     return urlunsplit(("https", parsed.netloc, path, "", ""))
 
 
+def _normalize_feed_url(value: object) -> str:
+    text = _non_empty_text(value, name="feed_url")
+    parsed = urlsplit(text)
+    if parsed.scheme.casefold() != "https" or not parsed.netloc or not parsed.hostname:
+        raise ValueError("feed_url must be an https URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("feed_url must be an https URL")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("feed_url must not contain a custom port") from exc
+    if port is not None:
+        raise ValueError("feed_url must not contain a custom port")
+    return urlunsplit(("https", parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
 def _ordered_resources(value: object, *, allowed: tuple[str, ...], name: str) -> list[str]:
     if not isinstance(value, (list, tuple)) or not value:
         raise ValueError(f"{name} must be a non-empty list")
@@ -114,15 +179,19 @@ def _normalize_service_source(provider: str, source: object) -> dict[str, Any]:
             raise ValueError("local_files source must contain only root_dir")
         return {"root_dir": _normalize_path(raw["root_dir"], name="root_dir")}
 
-    if provider == "github":
+    if provider in {"github", "gitcode"}:
         allowed = {"owner", "repo", "resources"}
         if set(raw) - allowed or not {"owner", "repo"}.issubset(raw):
-            raise ValueError("github source requires owner and repo")
-        resources = raw.get("resources", list(_GITHUB_RESOURCES))
+            raise ValueError(f"{provider} source requires owner and repo")
+        resources = raw.get("resources", list(_REPOSITORY_RESOURCES))
         return {
             "owner": _safe_segment(raw["owner"], name="owner"),
             "repo": _safe_segment(raw["repo"], name="repo"),
-            "resources": _ordered_resources(resources, allowed=_GITHUB_RESOURCES, name="resources"),
+            "resources": _ordered_resources(
+                resources,
+                allowed=_REPOSITORY_RESOURCES,
+                name="resources",
+            ),
         }
 
     if provider == "feishu":
@@ -229,16 +298,21 @@ def _normalize_service_source(provider: str, source: object) -> dict[str, Any]:
             raise ValueError("profile_url must be a Toutiao profile homepage URL")
         return {"profile_url": profile_url}
 
+    if provider == "rss_feed":
+        if set(raw) != {"feed_url"}:
+            raise ValueError("rss_feed source must contain only feed_url")
+        return {"feed_url": _normalize_feed_url(raw["feed_url"])}
+
     raise ValueError("unsupported provider")
 
 
 def _normalize_credentials(provider: str, credentials: object) -> dict[str, str]:
     raw = _mapping(credentials, name="credentials")
-    if provider in {"local_files", "feishu", "browser_bookmarks", "zhihu_reader", "toutiao_reader"}:
+    if provider in {"local_files", "feishu", "browser_bookmarks", "zhihu_reader", "toutiao_reader", "rss_feed"}:
         if raw:
             raise ValueError(f"{provider} does not accept credentials")
         return {}
-    required = "token" if provider == "github" else "access_token"
+    required = "token" if provider == "github" else "pat"
     if set(raw) != {required}:
         raise ValueError(f"{provider} credentials must contain only {required}")
     value = _non_empty_text(raw[required], name=required)
@@ -255,6 +329,7 @@ class PersonalContextFetchServiceConfig(BaseModel):
     enabled: bool
     interval_seconds: float = Field(default=10_800.0, gt=0, le=31_536_000)
     max_items_per_run: int | None = Field(default=None, ge=1, le=10_000)
+    time_range: dict[str, object]
     source: dict[str, object]
     credentials: dict[str, str] = Field(default_factory=dict, repr=False)
 
@@ -268,6 +343,8 @@ class PersonalContextFetchServiceConfig(BaseModel):
         if isinstance(provider, str):
             provider = provider.strip().casefold()
             copied["provider"] = provider
+            if "time_range" in copied:
+                copied["time_range"] = _normalize_time_range(copied["time_range"])
             copied["source"] = _normalize_service_source(provider, copied.get("source", {}))
             copied["credentials"] = _normalize_credentials(provider, copied.get("credentials", {}))
         return copied
@@ -283,9 +360,21 @@ class PersonalContextConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    enabled: bool
-    fetching_enabled: bool
+    collection_enabled: bool = False
+    agent_use_enabled: bool = False
     strategy_profile: Literal["rules", "balanced", "agent"]
+    max_pages_per_directory: int = Field(
+        default=DEFAULT_MAX_PAGES_PER_DIRECTORY,
+        strict=True,
+        ge=1,
+        le=100,
+    )
+    max_subdirectories_per_directory: int = Field(
+        default=DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+        strict=True,
+        ge=2,
+        le=100,
+    )
     model_client: ModelClientConfig | None = Field(default=None, repr=False)
     model_request: ModelRequestConfig | None = None
     fetch_services: tuple[PersonalContextFetchServiceConfig, ...]

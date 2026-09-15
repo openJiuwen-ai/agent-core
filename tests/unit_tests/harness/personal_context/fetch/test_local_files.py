@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
+import io
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,28 +14,61 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import local_files
+from openjiuwen.harness.personal_context.fetch import retry as retry_module
+from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
 from openjiuwen.harness.personal_context.status_codes import StatusCode
 
 
-def _config(root: Path, *, max_items: int | None = None) -> PersonalContextFetchServiceConfig:
+def _config(
+    root: Path,
+    *,
+    max_items: int | None = None,
+    time_range: dict[str, object] | None = None,
+) -> PersonalContextFetchServiceConfig:
     return PersonalContextFetchServiceConfig(
         service_id="notes",
         provider="local_files",
         enabled=True,
         interval_seconds=60,
         max_items_per_run=max_items,
+        time_range=time_range or {"mode": "all"},
         source={"root_dir": str(root)},
         credentials={},
     )
 
 
-async def _batches(service: LocalFilesFetchService, cursor: dict[str, object] | None = None):
-    return [batch async for batch in service.fetch(run_id="run-1", cursor=cursor)]
+async def _batches(
+    service: LocalFilesFetchService,
+    cursor: dict[str, object] | None = None,
+    *,
+    run_started_at: datetime | None = None,
+):
+    candidates = await service.prepare_run(
+        run_id="run-1",
+        run_started_at=run_started_at or datetime.now(UTC),
+        cursor=cursor,
+    )
+    batches = [
+        batch
+        async for batch in service.fetch(
+            run_id="run-1",
+            cursor=cursor,
+            candidates=candidates,
+        )
+    ]
+    if batches:
+        committed = record_completed_candidates(batches[-1].next_cursor, candidates)
+        batches[-1] = batches[-1].model_copy(update={"next_cursor": committed})
+    return batches
 
 
 def _items(batches):
     return [item for batch in batches for item in batch.items]
+
+
+async def _no_retry_sleep(_delay: float) -> None:
+    return None
 
 
 class _FakePdf:
@@ -117,6 +153,174 @@ def test_local_files_only_materializes_selected_changes(tmp_path: Path, monkeypa
     assert set(materialized_paths) == {Path(item.original_ref).relative_to(root).as_posix() for item in _items(batches)}
 
 
+def test_local_files_retries_one_busy_materialization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "note.md").write_text("hello", encoding="utf-8")
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    original = local_files._materialize_candidate
+    calls = 0
+
+    def flaky(candidate):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            error = OSError(errno.EBUSY, "busy")
+            raise local_files._file_error("local file read failed", error)
+        return original(candidate)
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", flaky)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+
+    items = _items(asyncio.run(_batches(service)))
+
+    assert calls == 2
+    assert len(items) == 1
+    assert items[0].content == "hello"
+
+
+def test_local_files_does_not_retry_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "note.md").write_text("hello", encoding="utf-8")
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    calls = 0
+
+    def denied(_candidate):
+        nonlocal calls
+        calls += 1
+        error = PermissionError(errno.EACCES, "denied")
+        raise local_files._file_error("local file read failed", error)
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", denied)
+    monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
+
+    with pytest.raises(BaseError) as caught:
+        asyncio.run(_batches(service))
+
+    assert calls == 1
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+
+
+def test_local_files_marks_concurrent_read_change_as_retryable() -> None:
+    stats = iter(
+        (
+            SimpleNamespace(st_size=4, st_mtime_ns=1),
+            SimpleNamespace(st_size=4, st_mtime_ns=2),
+        )
+    )
+
+    class ChangingPath:
+        def stat(self):
+            return next(stats)
+
+        def open(self, _mode: str):
+            return io.BytesIO(b"body")
+
+    with pytest.raises(BaseError) as caught:
+        local_files._read_checked(ChangingPath(), extension=".txt")  # type: ignore[arg-type]
+
+    assert retry_module.classify_file_error(caught.value) == "file_changed"
+
+
+def test_local_files_prepare_uses_mtime_time_ranges_and_reads_only_latest_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "time-source"
+    root.mkdir()
+    run_started_at = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    files: dict[str, Path] = {}
+    for name, offset_days in (
+        ("old.txt", -4),
+        ("start.txt", -3),
+        ("middle.txt", -1),
+        ("end.txt", 0),
+        ("future.txt", 1),
+    ):
+        path = root / name
+        path.write_text(name, encoding="utf-8")
+        timestamp = run_started_at + timedelta(days=offset_days)
+        os.utime(path, ns=(int(timestamp.timestamp() * 1_000_000_000),) * 2)
+        files[name] = path
+
+    materialized: list[str] = []
+    original_materialize = local_files._materialize_candidate
+
+    def tracking_materialize(candidate):
+        materialized.append(str(candidate["relative_path"]))
+        return original_materialize(candidate)
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", tracking_materialize)
+    recent = LocalFilesFetchService(
+        _config(root, max_items=2, time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path / "recent-home",
+    )
+
+    candidates = asyncio.run(recent.prepare_run(run_id="recent", run_started_at=run_started_at, cursor=None))
+
+    assert [candidate["stable_id"] for candidate in candidates] == [
+        os.path.normcase(str(files["end.txt"].resolve())),
+        os.path.normcase(str(files["middle.txt"].resolve())),
+    ]
+    assert all(candidate["resource_lane"] == "file" for candidate in candidates)
+    assert all(candidate["revision_id"] for candidate in candidates)
+    assert materialized == []
+
+    batches = asyncio.run(recent.fetch(run_id="recent", cursor=None, candidates=candidates).__anext__())
+    assert [item.title for item in batches.items] == ["end.txt", "middle.txt"]
+    assert materialized == ["end.txt", "middle.txt"]
+
+    fixed = LocalFilesFetchService(
+        _config(
+            root,
+            time_range={
+                "mode": "fixed",
+                "start_at": (run_started_at - timedelta(days=3)).isoformat(),
+                "end_at": run_started_at.isoformat(),
+            },
+        ),
+        home=tmp_path / "fixed-home",
+    )
+    fixed_candidates = asyncio.run(fixed.prepare_run(run_id="fixed", run_started_at=run_started_at, cursor=None))
+    assert {candidate["stable_id"] for candidate in fixed_candidates} == {
+        os.path.normcase(str(files["start.txt"].resolve())),
+        os.path.normcase(str(files["middle.txt"].resolve())),
+    }
+
+    all_files = LocalFilesFetchService(_config(root), home=tmp_path / "all-home")
+    assert len(asyncio.run(all_files.prepare_run(run_id="all", run_started_at=run_started_at, cursor=None))) == 5
+
+
+def test_local_files_recent_window_recomputes_and_removed_files_do_not_emit_delete(tmp_path: Path) -> None:
+    root = tmp_path / "rolling-source"
+    root.mkdir()
+    path = root / "rolling.txt"
+    path.write_text("rolling", encoding="utf-8")
+    candidate_time = datetime(2026, 8, 8, 12, tzinfo=UTC)
+    os.utime(path, ns=(int(candidate_time.timestamp() * 1_000_000_000),) * 2)
+    service = LocalFilesFetchService(
+        _config(root, time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path / "rolling-home",
+    )
+
+    first = asyncio.run(_batches(service, run_started_at=datetime(2026, 8, 10, 12, tzinfo=UTC)))
+    cursor = first[-1].next_cursor
+    assert [item.operation for item in _items(first)] == ["upsert"]
+    assert cursor is not None
+
+    path.unlink()
+    second_candidates = asyncio.run(
+        service.prepare_run(
+            run_id="second",
+            run_started_at=datetime(2026, 8, 12, 12, tzinfo=UTC),
+            cursor=cursor,
+        )
+    )
+    assert second_candidates == ()
+
+
 def test_local_files_skips_fixed_directories_and_symlink_paths(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
@@ -138,7 +342,7 @@ def test_local_files_skips_fixed_directories_and_symlink_paths(tmp_path: Path):
     assert [Path(item.original_ref).name for item in items] == ["kept.md"]
 
 
-def test_local_files_detects_add_modify_delete_and_empty_run(tmp_path: Path):
+def test_local_files_detects_add_modify_ignores_delete_and_then_emits_empty_run(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
     first = root / "first.md"
@@ -158,12 +362,9 @@ def test_local_files_detects_add_modify_delete_and_empty_run(tmp_path: Path):
     changed = _items(changed_batches)
     assert {(item.operation, Path(item.original_ref).name) for item in changed} == {
         ("upsert", "first.md"),
-        ("delete", "second.txt"),
         ("upsert", "third.json"),
     }
-    deleted = next(item for item in changed if item.operation == "delete")
-    assert deleted.content is None
-    assert deleted.raw_snapshot is None
+    assert all(item.operation == "upsert" for item in changed)
 
     # The cursor returned from the completed changed run makes the following run empty.
     next_cursor = changed_batches[-1].next_cursor
@@ -200,8 +401,9 @@ def test_local_files_batches_at_twenty_and_max_items_only_advances_emitted_items
     batches = asyncio.run(_batches(service))
     assert [len(batch.items) for batch in batches] == [20, 5]
     assert all(len(batch.items) <= 20 for batch in batches)
-    assert len(batches[0].next_cursor["files"]) == 20
-    assert len(batches[1].next_cursor["files"]) == 25
+    selection = batches[-1].next_cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == 25
 
     remaining = _items(asyncio.run(_batches(service, batches[-1].next_cursor)))
     assert len(remaining) == 20
@@ -229,7 +431,7 @@ def test_local_files_backlog_truncation_reuses_mtime_path_order(tmp_path: Path):
     assert second_names == ["3.txt", "2.txt"]
 
 
-def test_local_files_revision_uses_content_only_when_file_is_touched(tmp_path: Path):
+def test_local_files_touch_reselects_file_but_keeps_content_revision(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
     path = root / "note.md"
@@ -243,7 +445,8 @@ def test_local_files_revision_uses_content_only_when_file_is_touched(tmp_path: P
     second = asyncio.run(_batches(service, first[0].next_cursor))
 
     assert original_revision == hashlib.sha256(b"same").hexdigest()
-    assert second[0].items == ()
+    assert len(second[0].items) == 1
+    assert second[0].items[0].revision_id == original_revision
 
 
 def test_local_files_rejects_text_larger_than_one_mib_before_reading(tmp_path: Path, monkeypatch):
@@ -314,7 +517,7 @@ def test_local_files_pdf_extraction_stops_after_content_cap(tmp_path: Path, monk
     assert len(items[0].content) == 2_000_000
 
 
-def test_local_files_delete_for_replaced_external_symlink_stays_inside_root(tmp_path: Path):
+def test_local_files_replaced_external_symlink_is_ignored(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
     target = root / "note.md"
@@ -331,10 +534,8 @@ def test_local_files_delete_for_replaced_external_symlink_stays_inside_root(tmp_
         pytest.skip("symlink creation is unavailable on this Windows runner")
 
     changed = _items(asyncio.run(_batches(service, initial[-1].next_cursor)))
-    assert len(changed) == 1
-    assert changed[0].operation == "delete"
-    assert changed[0].original_ref == str(root / "note.md")
-    assert outside not in Path(changed[0].original_ref).parents
+
+    assert changed == []
 
 
 def test_local_files_read_change_fails_entire_run_with_file_error(tmp_path: Path, monkeypatch):
@@ -385,41 +586,11 @@ def test_local_files_no_change_emits_empty_batch_without_creating_home_state(tmp
     assert not home.exists()
 
 
-def test_local_files_rejects_path_traversal_in_previous_cursor(tmp_path: Path):
+def test_local_files_rejects_legacy_files_cursor(tmp_path: Path):
     root = tmp_path / "source"
     root.mkdir()
     (root / "note.md").write_text("same", encoding="utf-8")
-    cursor = {
-        "files": {
-            "../outside.md": {
-                "mtime_ns": 1,
-                "size": 1,
-                "revision_id": "revision-1",
-            }
-        }
-    }
-
-    with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home"), cursor))
-    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
-
-
-@pytest.mark.parametrize(
-    "unsafe_path",
-    ["C:foo.md", "drive:relative/note.md", "a/D:/foo.md", "a/b:c.md"],
-)
-def test_local_files_rejects_drive_relative_cursor_paths(tmp_path: Path, unsafe_path: str):
-    root = tmp_path / "source"
-    root.mkdir()
-    cursor = {
-        "files": {
-            unsafe_path: {
-                "mtime_ns": 1,
-                "size": 1,
-                "revision_id": "revision-1",
-            }
-        }
-    }
+    cursor = {"files": {"note.md": {"revision_id": "legacy"}}}
 
     with pytest.raises(BaseError) as caught:
         asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home"), cursor))
@@ -483,7 +654,42 @@ def test_local_files_continues_205_source_history_across_bounded_runs(tmp_path: 
     assert len(logical_ids) == len(set(logical_ids)) == 205
     assert {Path(item.original_ref).name for items in rounds for item in items} == expected_names
     assert cursor is not None
-    assert set(cursor["files"]) == expected_names
+    selection = cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == len(expected_names)
+
+
+def test_local_files_new_overflow_stays_ahead_of_history(tmp_path: Path):
+    root = tmp_path / "overflow-source"
+    root.mkdir()
+
+    def write(name: str, timestamp: int) -> None:
+        path = root / name
+        path.write_text(name, encoding="utf-8")
+        value = 1_700_000_000_000_000_000 + timestamp * 1_000_000
+        os.utime(path, ns=(value, value))
+
+    for timestamp in (3, 2, 1):
+        write(f"base-{timestamp}.txt", timestamp)
+    service = LocalFilesFetchService(_config(root, max_items=2), home=tmp_path / "overflow-home")
+    first = asyncio.run(_batches(service))
+    cursor = first[-1].next_cursor
+    assert cursor is not None
+
+    for timestamp in range(4, 9):
+        write(f"new-{timestamp}.txt", timestamp)
+    round_names: list[list[str]] = []
+    for _ in range(3):
+        batches = asyncio.run(_batches(service, cursor))
+        round_names.append([Path(item.original_ref).name for item in _items(batches)])
+        cursor = batches[-1].next_cursor
+        assert cursor is not None
+
+    assert round_names == [
+        ["new-8.txt", "new-7.txt"],
+        ["new-6.txt", "new-5.txt"],
+        ["new-4.txt", "base-1.txt"],
+    ]
 
 
 def test_local_files_prioritizes_new_and_modified_sources_before_history(tmp_path: Path):
@@ -526,48 +732,3 @@ def test_local_files_prioritizes_new_and_modified_sources_before_history(tmp_pat
         modified.name,
     ]
     assert second_items[2].revision_id != first_items[-1].revision_id
-
-
-def test_local_files_prioritizes_delete_before_history_even_with_older_mtime(tmp_path: Path):
-    root = tmp_path / "source"
-    root.mkdir()
-    kept = {
-        "relative_path": "kept.txt",
-        "path": root / "kept.txt",
-        "mtime_ns": 300,
-        "size": 1,
-        "extension": ".txt",
-        "revision_id": "kept-revision",
-    }
-    historical = {
-        "relative_path": "history.txt",
-        "path": root / "history.txt",
-        "mtime_ns": 200,
-        "size": 1,
-        "extension": ".txt",
-        "revision_id": "history-revision",
-    }
-    previous = {
-        "kept.txt": {
-            "mtime_ns": 300,
-            "size": 1,
-            "revision_id": "kept-revision",
-        },
-        "deleted.txt": {
-            "mtime_ns": 100,
-            "size": 1,
-            "revision_id": "deleted-revision",
-        },
-    }
-
-    changes = local_files._changes(
-        root,
-        [kept, historical],
-        {"kept.txt": kept, "history.txt": historical},
-        previous,
-        initial=False,
-        max_items=1,
-    )
-
-    assert [change["operation"] for change in changes] == ["delete", "upsert"]
-    assert changes[0]["relative_path"] == "deleted.txt"

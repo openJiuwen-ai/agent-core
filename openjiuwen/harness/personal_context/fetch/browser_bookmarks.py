@@ -8,6 +8,7 @@ import json
 import os
 import re
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -17,6 +18,16 @@ from bs4 import BeautifulSoup
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    candidate_in_time_range,
+    select_latest_candidates,
+)
+from openjiuwen.harness.personal_context.fetch.retry import (
+    classify_file_error,
+    classify_payload_error,
+    classify_transport_error,
+    retry_provider_read,
+)
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
@@ -124,6 +135,14 @@ def _date_sort_value(value: str) -> int:
         return -1
 
 
+def _bookmark_candidate_time(value: str) -> str:
+    microseconds = _date_sort_value(value)
+    if microseconds < 0:
+        raise ValueError("bookmark date_added is invalid")
+    epoch = datetime(1601, 1, 1, tzinfo=UTC)
+    return (epoch + timedelta(microseconds=microseconds)).isoformat().replace("+00:00", "Z")
+
+
 def _bounded_text(value: object, *, name: str, limit: int, fallback: str | None = None) -> str:
     if value is None and fallback is not None:
         value = fallback
@@ -180,6 +199,10 @@ def _read_bookmarks_file(path: Path) -> object:
         return json.loads(raw)
     except (TypeError, ValueError) as exc:
         raise _file_error("Edge Bookmarks file is not valid JSON", exc) from None
+
+
+def _bookmarks_read_retry_reason(exc: BaseException) -> str | None:
+    return classify_file_error(exc) or classify_payload_error(exc)
 
 
 def _bookmark_node(node: object, *, folders: tuple[str, ...], output: list[dict[str, str]]) -> None:
@@ -248,24 +271,11 @@ def _read_bookmarks(payload: object) -> list[dict[str, str]]:
     return result
 
 
-def _cursor_items(cursor: object) -> dict[str, str]:
+def _validate_selection_cursor(cursor: dict[str, object] | None) -> None:
     if cursor is None:
-        return {}
-    if not isinstance(cursor, Mapping):
-        raise _fetch_error("browser bookmarks cursor must be an object")
-    if set(cursor) != {"items"}:
-        raise _fetch_error("browser bookmarks cursor has unsupported fields")
-    raw_items: object = cursor.get("items")
-    if not isinstance(raw_items, Mapping):
-        raise _fetch_error("browser bookmarks cursor items must be an object")
-    result: dict[str, str] = {}
-    for key, value in raw_items.items():
-        if not isinstance(key, str) or not key.strip():
-            raise _fetch_error("browser bookmarks cursor ID is invalid")
-        if not isinstance(value, str) or not value.strip():
-            raise _fetch_error("browser bookmarks cursor fingerprint is invalid")
-        result[key] = value
-    return result
+        return
+    if not isinstance(cursor, Mapping) or set(cursor) - {"_selection"}:
+        raise ValueError("browser bookmarks cursor contains unsupported fields")
 
 
 def _page_value(page: object, name: str, default: object = None) -> object:
@@ -338,18 +348,6 @@ def _bookmark_item(bookmark: Mapping[str, str], *, profile: str, page: object) -
     )
 
 
-def _deleted_item(logical_id: str, fingerprint: str) -> RawChangeItem:
-    return RawChangeItem(
-        logical_id=logical_id,
-        revision_id=f"deleted:{fingerprint}",
-        operation="delete",
-        title=None,
-        content=None,
-        original_ref=f"bookmark:{logical_id}",
-        metadata={"deleted": True},
-    )
-
-
 async def _read_response_body(response: Any) -> bytes:
     headers = getattr(response, "headers", {})
     content_length = headers.get("Content-Length") if isinstance(headers, Mapping) else None
@@ -413,6 +411,15 @@ def _extract_page(html_text: str, *, final_url: str) -> dict[str, object]:
 
 
 async def _fetch_page_content(url: str) -> dict[str, object]:
+    return await retry_provider_read(
+        lambda: _fetch_page_content_once(url),
+        provider="browser_bookmarks",
+        operation_name="page_http_read",
+        classify=classify_transport_error,
+    )
+
+
+async def _fetch_page_content_once(url: str) -> dict[str, object]:
     parsed = urlsplit(url)
     if parsed.scheme.casefold() not in {"http", "https"} or not parsed.hostname:
         return {
@@ -463,7 +470,8 @@ async def _fetch_page_content(url: str) -> dict[str, object]:
                     current_url = normalized_redirect
                     continue
                 if response.status < 200 or response.status >= 300:
-                    raise RuntimeError(f"page returned HTTP {response.status}")
+                    response.raise_for_status()
+                    raise RuntimeError("page returned an unsuccessful HTTP status")
                 content_type = str(getattr(response, "headers", {}).get("Content-Type", "")).casefold()
                 if content_type and not (
                     content_type.startswith("text/") or "html" in content_type or "xml" in content_type
@@ -492,85 +500,89 @@ def _is_fetchable_url(url: str) -> bool:
 class BrowserBookmarksFetchService(ContextFetchService):
     """Read Windows Edge bookmarks and optionally bounded public page text."""
 
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id
+        try:
+            _validate_selection_cursor(cursor)
+            bookmarks_path, profile, filters, include_subfolders, fetch_page_content = _source_values(self._config)
+            payload = await retry_provider_read(
+                lambda: asyncio.to_thread(_read_bookmarks_file, bookmarks_path),
+                provider="browser_bookmarks",
+                operation_name="bookmarks_file_read",
+                classify=_bookmarks_read_retry_reason,
+            )
+            bookmarks = _read_bookmarks(payload)
+            current: dict[str, dict[str, object]] = {}
+            for bookmark in bookmarks:
+                if not _folder_matches(
+                    bookmark["folder_path"],
+                    filters,
+                    include_subfolders=include_subfolders,
+                ):
+                    continue
+                logical_id = _logical_id(bookmark["url"])
+                fingerprint = _canonical_fingerprint(
+                    bookmark["title"],
+                    bookmark["url"],
+                    bookmark["folder_path"],
+                    bookmark["date_added"],
+                )
+                candidate_time = _bookmark_candidate_time(bookmark["date_added"])
+                candidate = {
+                    "stable_id": logical_id,
+                    "revision_id": fingerprint,
+                    "candidate_time": candidate_time,
+                    "resource_lane": "bookmark",
+                    "locator": bookmark["url"],
+                    "bookmark": bookmark,
+                    "profile": profile,
+                    "fetch_page_content": fetch_page_content,
+                }
+                if candidate_in_time_range(candidate_time, self._config.time_range, run_started_at):
+                    current[logical_id] = candidate
+            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
+            return select_latest_candidates(tuple(current.values()), cursor, max_items)
+        except asyncio.CancelledError:
+            raise
+        except BaseError:
+            raise
+        except Exception as exc:
+            raise _fetch_error("Edge Bookmarks preparation failed", exc) from None
+
     async def fetch(
         self,
         *,
         run_id: str,
         cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
         del run_id
+        next_cursor = dict(cursor) if cursor is not None else {}
         try:
-            previous = _cursor_items(cursor)
-            bookmarks_path, profile, filters, include_subfolders, fetch_page_content = _source_values(self._config)
-            payload = await asyncio.to_thread(_read_bookmarks_file, bookmarks_path)
-            bookmarks = _read_bookmarks(payload)
-            selected = [
-                bookmark
-                for bookmark in bookmarks
-                if _folder_matches(bookmark["folder_path"], filters, include_subfolders=include_subfolders)
-            ]
-            current: dict[str, tuple[dict[str, str], str]] = {}
-            for bookmark in selected:
-                logical_id = _logical_id(bookmark["url"])
-                fingerprint = _canonical_fingerprint(
-                    bookmark["title"], bookmark["url"], bookmark["folder_path"], bookmark["date_added"]
-                )
-                current[logical_id] = (bookmark, fingerprint)
-            new_or_changed: list[tuple[int, str, str, dict[str, str] | None, str]] = []
-            historical: list[tuple[int, str, str, dict[str, str] | None, str]] = []
-            latest_known_date = max(
-                (
-                    _date_sort_value(current[logical_id][0]["date_added"])
-                    for logical_id in previous
-                    if logical_id in current
-                ),
-                default=None,
-            )
-            for input_index, (logical_id, (bookmark, fingerprint)) in enumerate(current.items()):
-                previous_fingerprint = previous.get(logical_id)
-                change = (input_index, "upsert", logical_id, bookmark, fingerprint)
-                if previous_fingerprint is not None and previous_fingerprint != fingerprint:
-                    new_or_changed.append(change)
-                    continue
-                if previous_fingerprint is None:
-                    if (
-                        not previous
-                        or latest_known_date is None
-                        or _date_sort_value(bookmark["date_added"]) > latest_known_date
-                    ):
-                        new_or_changed.append(change)
-                    else:
-                        historical.append(change)
-            for input_index, (logical_id, fingerprint) in enumerate(previous.items(), start=len(current)):
-                if logical_id not in current:
-                    new_or_changed.append((input_index, "delete", logical_id, None, fingerprint))
-
-            def _sort_key(change: tuple[int, str, str, dict[str, str] | None, str]) -> tuple[int, int, str, str]:
-                input_index, _operation, logical_id, bookmark, _fingerprint = change
-                date_added = _date_sort_value(bookmark["date_added"]) if bookmark is not None else -1
-                title = bookmark["title"].casefold() if bookmark is not None else ""
-                return (-date_added, input_index, title, logical_id)
-
-            new_or_changed.sort(key=_sort_key)
-            historical.sort(key=_sort_key)
-            changes = [*new_or_changed, *historical]
-            max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            if not changes:
-                yield FetchBatch(batch_id="batch-0", items=(), next_cursor={"items": previous})
+            if not candidates:
+                yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
-            cumulative = dict(previous)
-            change_limit = min(len(changes), max_items)
-            for batch_index in range(0, change_limit, _BATCH_SIZE):
-                batch_end = min(batch_index + _BATCH_SIZE, change_limit)
-                chunk = changes[batch_index:batch_end]
+            for batch_index in range(0, len(candidates), _BATCH_SIZE):
+                end = batch_index + _BATCH_SIZE
+                chunk = candidates[batch_index:end]
                 items: list[RawChangeItem] = []
-                for _input_index, operation, logical_id, bookmark, fingerprint in chunk:
-                    if operation == "delete":
-                        cumulative.pop(logical_id, None)
-                        items.append(_deleted_item(logical_id, fingerprint))
-                        continue
-                    if bookmark is None:
-                        raise _fetch_error("bookmark upsert has no source item")
+                for candidate in chunk:
+                    raw_bookmark = candidate.get("bookmark")
+                    if not isinstance(raw_bookmark, Mapping):
+                        raise _fetch_error("bookmark candidate has no source item")
+                    bookmark = {str(key): str(value) for key, value in raw_bookmark.items()}
+                    profile = candidate.get("profile")
+                    if not isinstance(profile, str):
+                        raise _fetch_error("bookmark candidate profile is invalid")
+                    fetch_page_content = candidate.get("fetch_page_content")
+                    if not isinstance(fetch_page_content, bool):
+                        raise _fetch_error("bookmark candidate page setting is invalid")
                     page: object = {
                         "status": "disabled",
                         "final_url": None,
@@ -593,12 +605,11 @@ class BrowserBookmarksFetchService(ContextFetchService):
                             "text": None,
                             "error": "unsupported URL scheme",
                         }
-                    cumulative[logical_id] = fingerprint
                     items.append(_bookmark_item(bookmark, profile=profile, page=page))
                 yield FetchBatch(
                     batch_id=f"batch-{batch_index // _BATCH_SIZE}",
                     items=tuple(items),
-                    next_cursor={"items": dict(cumulative)},
+                    next_cursor=next_cursor,
                 )
         except asyncio.CancelledError:
             raise

@@ -45,6 +45,21 @@ def test_source_id_uses_trimmed_locator_and_128_bit_digest() -> None:
     assert module.source_id_for_locator(locator) == f"src_{hashlib.sha256(locator.encode()).hexdigest()[:32]}"
 
 
+def test_source_item_version_matches_persisted_metadata(tmp_path: Path) -> None:
+    module = _module()
+    item = _item(revision="revision-7")
+    version = module.source_item_version(item)
+    source_id = module.upsert_source_metadata(
+        tmp_path,
+        item,
+        provider="github",
+        service_id="github-main",
+        observed_at="2026-09-07T00:00:00Z",
+    )
+    metadata = module.read_source_metadata(tmp_path / f"{source_id}.md")
+    assert version == (metadata["latest_revision"], metadata["latest_hash"])
+
+
 def test_source_locator_removes_url_credentials_query_and_fragment_but_preserves_local_path(tmp_path: Path) -> None:
     module = _module()
     local_path = str((tmp_path / "private note.md").resolve())
@@ -154,6 +169,69 @@ def test_source_metadata_markdown_contains_only_metadata(tmp_path: Path) -> None
     assert "RAW-MUST-NOT-BE-PERSISTED" not in markdown
     assert "summary" not in markdown.casefold()
     assert "blocks" not in markdown.casefold()
+
+
+def test_public_source_detail_projects_only_user_facing_fields(tmp_path: Path) -> None:
+    module = _module()
+    home = tmp_path / "personal-context"
+    source_root = home / "workspace" / "source-meta"
+    local_path = str((tmp_path / "notes" / "Agent 设计.md").resolve())
+    source_id = module.upsert_source_metadata(
+        source_root,
+        _item(locator=local_path, title="Agent 设计", revision="private-revision"),
+        provider="local_files",
+        service_id="local-notes",
+        observed_at="2026-08-25T00:00:00Z",
+    )
+
+    detail = module.read_source_detail(source_root, source_id)
+
+    assert detail == {
+        "source_id": source_id,
+        "title": "Agent 设计",
+        "source_type": "pull_request",
+        "locator": local_path,
+        "provider": "local_files",
+        "service_id": "local-notes",
+        "first_seen": "2026-08-25T00:00:00Z",
+        "last_seen": "2026-08-25T00:00:00Z",
+    }
+    assert set(detail) == {
+        "source_id",
+        "title",
+        "source_type",
+        "locator",
+        "provider",
+        "service_id",
+        "first_seen",
+        "last_seen",
+    }
+    assert "private-revision" not in str(detail)
+    assert "SOURCE-BODY" not in str(detail)
+
+
+@pytest.mark.asyncio
+async def test_personal_context_get_source_normalizes_url_and_rejects_unknown_or_traversal(tmp_path: Path) -> None:
+    module = _module()
+    home = tmp_path / "personal-context"
+    source_root = home / "workspace" / "source-meta"
+    source_id = module.upsert_source_metadata(
+        source_root,
+        _item(locator="https://user:pass@zhuanlan.zhihu.com/p/42?token=secret#answer"),
+        provider="zhihu_reader",
+        service_id="zhihu-main",
+        observed_at="2026-08-25T00:00:00Z",
+    )
+
+    detail = await PersonalContext(home=home).get_source(source_id)
+
+    assert detail["locator"] == "https://zhuanlan.zhihu.com/p/42"
+    assert detail["service_id"] == "zhihu-main"
+    for invalid in ("", "source:src_bad", "../outside", f"{source_id}/../../outside"):
+        with pytest.raises(PersonalContext.Error):
+            await PersonalContext(home=home).get_source(invalid)
+    with pytest.raises(PersonalContext.Error):
+        await PersonalContext(home=home).get_source(f"src_{'0' * 32}")
 
 
 def test_source_metadata_rejects_corruption_filename_mismatch_and_symlink(tmp_path: Path) -> None:

@@ -2,12 +2,14 @@
 
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
 from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
+from openjiuwen.harness.personal_context.fetch.rss_feed import RssFeedFetchService
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
 
 __all__ = [
     "ContextFetchService",
     "LocalFilesFetchService",
+    "RssFeedFetchService",
     "ZhihuReaderFetchService",
     "ToutiaoReaderFetchService",
 ]
