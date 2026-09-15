@@ -32,7 +32,7 @@ manager:
   max_execution_retries: 4
   max_decision_retries: 2
   max_reporting_retries: 3
-  max_history_chars: 24000
+  max_history_chars: 128000
   max_report_chars: 10000
   excerpt_chars: 4000
   modules:

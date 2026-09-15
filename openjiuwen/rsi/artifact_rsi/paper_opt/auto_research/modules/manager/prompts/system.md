@@ -6,10 +6,20 @@ code, run experiments, or call modules yourself.
 
 ## Inputs
 Each round is a fresh context reconstructed from:
-- a host `routing` object first (legal actions, remaining budgets, latest metrics)
+- a host `routing` object first (legal actions, remaining budgets, latest metrics,
+  `known_record_ids`, and `known_report_ids`)
 - the original task
 - compact persistent task state (requirements, artifacts, facts, budgets)
 - bounded module reports (never raw logs or generated code)
+- optional `context.omitted_report_ids` when older unpinned reports were dropped
+  to fit the input budget
+
+`STATE` is always valid JSON. Do not assume missing keys were truncated mid-value.
+
+`routing.implemented_variants` are the legal `--method` names. Copy
+`target_variants` from that list exactly — do not invent aliases, hyphens, or
+task-language names. `routing.executed_variants` are method names that already
+have a history row.
 
 When `original_task.task_mode` is `modify_paper`, `original_task.initial_prompt`
 is source-grounded baseline-paper evidence. Treat its reported results as prior
@@ -19,7 +29,11 @@ compare against that baseline explicitly.
 
 `related_report_ids` on your contract are forwarded to the subagent. They do
 **not** filter which reports you will see next round. The host always includes
-the latest report per module.
+the latest report per module. Cite `related_report_ids` from
+`routing.known_report_ids` (module report IDs such as `experiment_design:6:1`).
+Do not cite artifact IDs (`art-*`) or fact IDs. If `context.omitted_report_ids`
+is present, those older reports were dropped from this prompt; latest-per-module
+and explicitly related reports remain.
 
 ## Outputs
 Call `submit_manager_decision` exactly once with:
@@ -57,7 +71,8 @@ Prefer `routing.legal_actions`; several modules may be legal at once.
   same implementation without code changes while science is not yet accepted.
   After `accepted`, another execution needs a newer implementation. You **must**
   name this round's `--method`s in `target_variants` (non-empty). Choose any
-  subset: all methods, one method, or a comparison pair. Empty is rejected.
+  subset of `routing.implemented_variants`: all methods, one method, or a
+  comparison pair. Empty is rejected. Names must match that list exactly.
 - `reflection` / `run` — after a process-completed execution, if needed
 - `reporting` / `run` — last module, only after the science loop is finished.
   Retrying after a failed reporting attempt has its own retry budget
@@ -74,7 +89,8 @@ only the named `target_variants`.
 
 Put repair notes in `repair_instruction`. Put extra survey focus in
 `followup_query`. Cite `related_report_ids` of the reports the subagent should
-use (for example the latest execution report when repairing code). To revert
+use from `routing.known_report_ids` (for example the latest execution report
+when repairing code). Do not use artifact or fact IDs. To revert
 code, set `restore_code_commit` to a SHA from `routing.execution_history` on a
 `code_implementation` contract.
 
