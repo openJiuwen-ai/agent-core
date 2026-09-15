@@ -331,3 +331,44 @@ class TestBashToolHistoryPath(unittest.TestCase):
         path = tool._build_history_path(session)
         filename = os.path.basename(path)
         assert filename == "file_ops_myagent_sess123.json"
+
+
+# ── head_ratio resolution ─────────────────────────────────────
+
+class TestBashToolResolveHeadRatio:
+    """BASH_TOOL_HEAD_RATIO must override the default only when head_ratio is omitted."""
+
+    def test_env_overrides_default_when_omitted(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "0.9")
+        assert BashTool._resolve_head_ratio(None) == 0.9
+
+    def test_default_when_omitted_without_env(self, monkeypatch) -> None:
+        monkeypatch.delenv("BASH_TOOL_HEAD_RATIO", raising=False)
+        assert BashTool._resolve_head_ratio(None) == 0.6
+
+    def test_explicit_value_wins_over_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "0.9")
+        assert BashTool._resolve_head_ratio(0.4) == 0.4
+
+    def test_clamped_to_unit_range(self, monkeypatch) -> None:
+        monkeypatch.delenv("BASH_TOOL_HEAD_RATIO", raising=False)
+        assert BashTool._resolve_head_ratio(1.7) == 1.0
+        assert BashTool._resolve_head_ratio(-0.2) == 0.0
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "not-a-number")
+        assert BashTool._resolve_head_ratio(None) == 0.6
+
+    def test_invalid_raw_falls_back_to_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "0.8")
+        assert BashTool._resolve_head_ratio("abc") == 0.8
+
+    def test_parse_inputs_env_override_when_omitted(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "0.85")
+        parsed = BashTool._parse_inputs({"command": "echo hi"})
+        assert parsed.head_ratio == 0.85
+
+    def test_parse_inputs_explicit_beats_env(self, monkeypatch) -> None:
+        monkeypatch.setenv("BASH_TOOL_HEAD_RATIO", "0.85")
+        parsed = BashTool._parse_inputs({"command": "echo hi", "head_ratio": 0.3})
+        assert parsed.head_ratio == 0.3

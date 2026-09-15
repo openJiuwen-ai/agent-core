@@ -268,6 +268,17 @@ BASH_PARAMS: Dict[str, Dict[str, str]] = {
             "preventing oversized output from flooding context. Pass 0 explicitly to disable the limit (use with care)"
         ),
     },
+    "head_ratio": {
+        "cn": (
+            "输出超限被截断时保留开头（head）的比例（0~1，默认 0.6）："
+            "剩余比例保留结尾（tail），确保输出结尾的错误或最终状态不被截掉"
+        ),
+        "en": (
+            "Fraction (0-1, default 0.6) of the truncated-output budget kept from "
+            "the beginning (head); the remainder keeps the tail, so trailing errors "
+            "and final status stay visible"
+        ),
+    },
     "shell_type": {
         "cn": (
             "指定 Shell 类型，可选值：auto/cmd/powershell/bash/sh，默认 auto。cmd/PowerShell 不支持 `mkdir -p`；"
@@ -301,6 +312,7 @@ def get_bash_input_params(language: str = "cn") -> Dict[str, Any]:
             "run_in_background": {"type": "boolean", "description": p["run_in_background"][lang]},
             "workdir": {"type": "string", "description": p["workdir"][lang]},
             "max_output_chars": {"type": "integer", "description": p["max_output_chars"][lang]},
+            "head_ratio": {"type": "number", "description": p["head_ratio"][lang]},
             "shell_type": {
                 "type": "string",
                 "enum": ["auto", "cmd", "powershell", "bash", "sh"],
