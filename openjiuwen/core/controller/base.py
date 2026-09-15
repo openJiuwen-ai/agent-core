@@ -206,9 +206,11 @@ class Controller:
         """
         controller_state = session.get_state("controller")
         if not controller_state or "task_manager_state" not in controller_state:
-            # No saved state, clear all task manager state
+            # No saved state, clear this session's task manager state
             logger.info(f"No saved state found for session {session.get_session_id()}, clearing task manager")
-            await self._task_manager.clear_state()
+            await self._task_manager.clear_state(
+                session_id=session.get_session_id()
+            )
             return False
 
         try:
@@ -233,8 +235,10 @@ class Controller:
                 f"clearing task manager state instead",
                 exc_info=True
             )
-            # Fallback: clear all task manager state to allow user to continue
-            await self._task_manager.clear_state()
+            # Fallback: clear this session's task manager state to allow user to continue
+            await self._task_manager.clear_state(
+                session_id=session.get_session_id()
+            )
             return False
 
     async def _save_task_manager_state(self, session: Session) -> None:
