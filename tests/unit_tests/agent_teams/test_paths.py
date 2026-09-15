@@ -74,3 +74,26 @@ def test_workflow_path_sanitizes_untrusted_segments():
 
     # Spaces and unsafe characters collapse to underscores.
     assert paths.workflow_run_dir("demo-team", "s", "My Flow!").name == "My_Flow"
+
+
+@pytest.mark.level1
+def test_per_run_journal_and_wal_layout():
+    """run_id splits the journal per-run and the WAL into wal/{run_id}.wal."""
+    paths.configure_openjiuwen_home(Path("/tmp/custom-home/.jiuwenclaw"))
+    base = paths.team_session_dir("demo-team", "sess1") / "workflows" / "wf"
+
+    assert paths.workflow_run_journal_path("demo-team", "sess1", "wf", "wf_ab12cd34ef56") == (
+        base / "journal-wf_ab12cd34ef56.jsonl"
+    )
+    assert paths.workflow_run_wal_path("demo-team", "sess1", "wf", "wf_ab12cd34ef56") == (
+        base / "wal" / "wf_ab12cd34ef56.wal"
+    )
+    # None falls back to the shared legacy layout.
+    assert paths.workflow_run_journal_path("demo-team", "sess1", "wf", None) == (
+        base / "journal.jsonl"
+    )
+    assert paths.workflow_run_wal_path("demo-team", "sess1", "wf", None) == (
+        base / "journal.jsonl.wal"
+    )
+    # A traversal-style run_id is sanitized like every other segment.
+    assert ".." not in paths.workflow_run_wal_path("demo-team", "sess1", "wf", "../../x").parts
