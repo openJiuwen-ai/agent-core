@@ -55,6 +55,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     default_requirements,
     limits_from_config,
     report_requirement,
+    unique_executed_variant_names,
     utc_now,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
@@ -564,6 +565,7 @@ class ManagerRuntime:
             ),
             remaining_reporting_retries=remaining_reporting_retries(task),
             known_record_ids=known,
+            known_report_ids=[item.report_id for item in state.reports],
             legal_actions=list_legal_actions(
                 task,
                 state.reports,
@@ -572,6 +574,9 @@ class ManagerRuntime:
             ),
             can_complete=complete_ok,
             can_complete_reason="" if complete_ok else complete_reason,
+            implemented_variants=implemented_variants,
+            executed_variants=unique_executed_variant_names(state.execution_history),
+            code_head=code_head,
             latest_metrics=latest_metrics,
             latest_process_status=process_status,
             latest_scientific_status=scientific_status,
@@ -582,8 +587,6 @@ class ManagerRuntime:
             latest_failure_fingerprint=fingerprint,
             diagnostic_paths=diagnostic_paths,
             variant_metrics=variant_metrics,
-            code_head=code_head,
-            implemented_variants=implemented_variants,
             execution_history=compact_execution_history_rows(state.execution_history),
         )
 
@@ -620,7 +623,7 @@ class ManagerRuntime:
                 report_id=f"manager:{round_index}:{attempt + 1}",
             ):
                 try:
-                    decision = await self.manager.adecide(snapshot)
+                    decision = await self.manager.adecide(snapshot, query=query)
                     if decision.signal == "EXECUTE":
                         kept, dropped = sanitize_execute_state_changes(
                             state.task_state, decision.state_changes

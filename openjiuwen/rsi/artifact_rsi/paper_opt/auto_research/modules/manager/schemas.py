@@ -168,7 +168,10 @@ class BudgetLimits(BaseModel):
     # retry from a cold, fresh workspace every ~10 minutes with nothing to
     # stop it short of max_rounds.
     max_reporting_retries: int = Field(default=3, ge=0)
-    max_history_chars: int = Field(default=16_000, ge=500)
+    # Fail-loud ceiling for rendered manager STATE JSON after structured
+    # compaction (~32k tokens at 4 chars/token). The host never truncates
+    # serialized JSON to fit this budget.
+    max_history_chars: int = Field(default=128_000, ge=500)
     max_report_chars: int = Field(default=8_000, ge=200)
     excerpt_chars: int = Field(default=4_000, ge=80)
 
@@ -542,10 +545,13 @@ class RoutingHint(BaseModel):
     remaining_design_revisions: int = 0
     remaining_reporting_retries: int = 0
     known_record_ids: list[str] = Field(default_factory=list)
+    known_report_ids: list[str] = Field(default_factory=list)
     legal_actions: list[dict[str, str]] = Field(default_factory=list)
     can_complete: bool = False
     can_complete_reason: str = ""
-    latest_metrics: dict[str, Any] = Field(default_factory=dict)
+    implemented_variants: list[str] = Field(default_factory=list)
+    executed_variants: list[str] = Field(default_factory=list)
+    code_head: str = ""
     latest_process_status: str = ""
     latest_scientific_status: str = ""
     latest_failure_kind: str = ""
@@ -553,11 +559,10 @@ class RoutingHint(BaseModel):
     latest_failure_substage: str = ""
     latest_failure_class: str = ""
     latest_failure_fingerprint: str = ""
-    diagnostic_paths: list[str] = Field(default_factory=list)
     variant_metrics: dict[str, dict[str, Any]] = Field(default_factory=dict)
-    code_head: str = ""
-    implemented_variants: list[str] = Field(default_factory=list)
+    latest_metrics: dict[str, Any] = Field(default_factory=dict)
     execution_history: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostic_paths: list[str] = Field(default_factory=list)
 
 
 class ManagerSnapshot(BaseModel):
@@ -591,6 +596,18 @@ def default_requirements(topic: str) -> list[RequirementRecord]:
             description="Run the experiment and collect per-variant metrics",
         ),
     ]
+
+
+def unique_executed_variant_names(history: list[ExecutionHistoryRecord]) -> list[str]:
+    """First-seen variant names from execution history."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for record in history:
+        if not record.name or record.name in seen:
+            continue
+        seen.add(record.name)
+        names.append(record.name)
+    return names
 
 
 def compact_execution_history_rows(
