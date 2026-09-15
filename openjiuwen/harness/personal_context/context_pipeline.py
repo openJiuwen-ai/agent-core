@@ -5588,6 +5588,7 @@ async def _apply_rules_increment(
     max_subdirectories_per_directory: int | None = None,
     preserve_existing_paths: bool = False,
     refresh_related_documents: bool = True,
+    finalize_context: bool = True,
     use_source_prior: bool = True,
     baseline: Mapping[str, tuple[int, str]] | None = None,
     baseline_path_by_identity: Mapping[str, str] | None = None,
@@ -5750,16 +5751,26 @@ async def _apply_rules_increment(
         },
     )
     navigation_changed_paths = changed_paths | recluster_changed
-    await _finalize_semantic_context_hybrid(
-        context_root,
-        embed_texts=embed_texts,
-        fallback_references=fallback_references,
-        max_pages_per_directory=max_pages,
-        max_subdirectories_per_directory=max_subdirectories,
-        capacity_exempt=preserve_existing_paths,
-        navigation_changed_paths=navigation_changed_paths,
-        refresh_related_documents=refresh_related_documents,
-    )
+    if finalize_context:
+        await _finalize_semantic_context_hybrid(
+            context_root,
+            embed_texts=embed_texts,
+            fallback_references=fallback_references,
+            max_pages_per_directory=max_pages,
+            max_subdirectories_per_directory=max_subdirectories,
+            capacity_exempt=preserve_existing_paths,
+            navigation_changed_paths=navigation_changed_paths,
+            refresh_related_documents=refresh_related_documents,
+        )
+    else:
+        _render_context_navigation(
+            context_root,
+            fallback_references=fallback_references,
+            affected_directories=_navigation_directories_for_changed_paths(
+                context_root,
+                navigation_changed_paths,
+            ),
+        )
     return _changed_context_paths(context_root, effective_baseline)
 
 
@@ -8488,6 +8499,7 @@ class ContextPipelineService:
             max_pages_per_directory=self._config.max_pages_per_directory,
             max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
             preserve_existing_paths=preserve_existing_paths,
+            finalize_context=False,
         )
         accepted_count = sum(
             str(document["logical_id"]) in cached
@@ -8629,7 +8641,14 @@ class ContextPipelineService:
             titles=directory_titles,
             existing_directories=_baseline_context_directories(context_baseline),
         )
-        _render_context_navigation(context_root, fallback_references=tuple(alias_targets or ()))
+        await _finalize_semantic_context_hybrid(
+            context_root,
+            embed_texts=self._embed_semantic_texts if self._embedding is not None else None,
+            fallback_references=tuple(alias_targets or ()),
+            max_pages_per_directory=self._config.max_pages_per_directory,
+            max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+            capacity_exempt=preserve_existing_paths,
+        )
         return _changed_context_paths(context_root, context_baseline), accepted_count
 
     async def _publish_processed(
