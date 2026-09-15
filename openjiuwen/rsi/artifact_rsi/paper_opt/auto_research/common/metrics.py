@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -102,6 +103,7 @@ _SCORE_LEAVES = frozenset(
         "semantic_correct",
     }
 )
+_PAIR_METRIC_STATUS = "computed_from_last_measured_rows"
 
 
 def infer_baseline_names(*texts: str) -> list[str]:
@@ -529,41 +531,241 @@ def scientific_status_from_metrics(metrics: dict[str, Any]) -> str:
     return "unknown"
 
 
-def scientific_status_from_comparison(
-    metric_names: list[str], variants: list[VariantResult]
-) -> str:
-    """Compare the "proposed" variant against every other ("baseline")
-    variant on each of the plan's declared metrics — the actual acceptance
-    question for this pipeline's baseline-vs-proposed experiments, which
-    scientific_status_from_metrics() never answers on its own (it only ever
-    reads one variant's metrics in isolation, never a baseline).
+def metric_number(metrics: dict[str, Any], name: str) -> float | int | None:
+    """Read a numeric plan metric from a raw or compact payload."""
+    if not name:
+        return None
+    direct = metrics.get(name)
+    if isinstance(direct, (int, float)) and not isinstance(direct, bool):
+        return direct
+    nested = metrics.get("metrics")
+    if isinstance(nested, dict):
+        nested_value = nested.get(name)
+        if isinstance(nested_value, (int, float)) and not isinstance(nested_value, bool):
+            return nested_value
+    compact = compact_metrics(dict(metrics))
+    suffix = f".{name}"
+    for key, value in compact.items():
+        if key != name and not key.endswith(suffix):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value
+    return None
 
-    No explicit threshold needed: "not worse than any baseline on any
-    declared metric, and strictly better on at least one" is the acceptance
-    bar for this pipeline's baseline-vs-proposed convention. "unknown" when
-    there isn't enough data to compare (no declared metrics, no proposed/
-    baseline variant, or proposed didn't complete) — same fail-safe default
-    scientific_status_from_metrics() uses.
+
+def score_number(metrics: dict[str, Any]) -> float | None:
+    """Primary score used to pair subset runs (accuracy, then correct/n)."""
+    for leaf in _SCORE_LEAVES:
+        value = metric_number(metrics, leaf)
+        if value is not None:
+            return float(value)
+    correct = metric_number(metrics, "correct")
+    denominator = metric_number(metrics, "denominator")
+    if correct is not None and denominator not in {None, 0}:
+        return float(correct) / float(denominator)
+    return None
+
+
+def infer_baseline_variant_names(
+    names: list[str],
+    *,
+    baselines: list[str] | None = None,
+) -> set[str]:
+    """Baselines come from the plan, or the host's `baseline` / `*_baseline` names."""
+    named = {item.strip() for item in (baselines or []) if str(item).strip()}
+    found: set[str] = set()
+    for name in names:
+        if name == "proposed":
+            continue
+        if name in named or name == "baseline":
+            found.add(name)
+            continue
+        if name.endswith("_baseline") or name.endswith("_comparator"):
+            found.add(name)
+    return found
+
+
+def infer_proposed_name(
+    names: list[str],
+    *,
+    metric_names: list[str] | None = None,
+    baselines: list[str] | None = None,
+) -> str | None:
+    """Pick the treatment method: `proposed`, else a metric-prefixed name."""
+    if "proposed" in names:
+        return "proposed"
+    baseline_names = infer_baseline_variant_names(names, baselines=baselines)
+    treatments = [name for name in names if name not in baseline_names]
+    for metric in metric_names or []:
+        for name in sorted(treatments, key=len, reverse=True):
+            if metric == name or metric.startswith(f"{name}_"):
+                return name
+    return treatments[0] if treatments else None
+
+
+def _write_pair_metric(metrics: dict[str, Any], name: str, value: float) -> dict[str, Any]:
+    out = copy.deepcopy(metrics)
+    out[name] = value
+    nested = out.get("metrics")
+    if isinstance(nested, dict):
+        nested[name] = value
+        nested[f"{name}_status"] = _PAIR_METRIC_STATUS
+        status_map = nested.get("metric_status")
+        if isinstance(status_map, dict):
+            status_map[name] = "paired"
+        out["metrics"] = nested
+    else:
+        out[f"{name}_status"] = _PAIR_METRIC_STATUS
+    return out
+
+
+def _peer_variants(
+    item: VariantResult,
+    variants: list[VariantResult],
+    baseline_names: set[str],
+) -> list[VariantResult]:
+    others = [
+        peer
+        for peer in variants
+        if peer.name != item.name and peer.process_status == "completed"
+    ]
+    if not baseline_names:
+        return others
+    named = [peer for peer in others if peer.name in baseline_names]
+    return named or others
+
+
+def overlay_paired_metrics(
+    variants: list[VariantResult],
+    metric_names: list[str],
+    *,
+    baselines: list[str] | None = None,
+) -> list[VariantResult]:
+    """Fill plan metrics that a single-method artifact left empty.
+
+    Pairing uses last-measured sibling scores. Disk ``results/*.metrics.json``
+    files are left as the process wrote them.
     """
-    proposed = next((v for v in variants if v.name == "proposed"), None)
-    baselines = [v for v in variants if v.name != "proposed"]
-    if not metric_names or proposed is None or not baselines:
+    if not metric_names or len(variants) < 2:
+        return variants
+    names = [item.name for item in variants]
+    baseline_names = infer_baseline_variant_names(names, baselines=baselines)
+    proposed_name = infer_proposed_name(
+        names, metric_names=metric_names, baselines=baselines
+    )
+    seed = next((item for item in variants if item.name == proposed_name), None)
+    peer_names = {
+        peer.name
+        for peer in (
+            _peer_variants(seed, variants, baseline_names) if seed is not None else []
+        )
+    }
+    overlaid: list[VariantResult] = []
+    for item in variants:
+        if (
+            item.name in peer_names
+            or item.name in baseline_names
+            or item.process_status != "completed"
+        ):
+            overlaid.append(item)
+            continue
+        missing = [name for name in metric_names if metric_number(item.metrics, name) is None]
+        if not missing:
+            overlaid.append(item)
+            continue
+        proposed_score = score_number(item.metrics)
+        peer_scores = [
+            score
+            for peer in _peer_variants(item, variants, baseline_names)
+            if (score := score_number(peer.metrics)) is not None
+        ]
+        if proposed_score is None or not peer_scores:
+            overlaid.append(item)
+            continue
+        deltas = [proposed_score - score for score in peer_scores]
+        if len(set(deltas)) != 1:
+            overlaid.append(item)
+            continue
+        metrics = dict(item.metrics)
+        for metric in missing:
+            metrics = _write_pair_metric(metrics, metric, deltas[0])
+        overlaid.append(item.model_copy(update={"metrics": metrics}))
+    return overlaid
+
+
+def _split_proposed_baselines(
+    variants: list[VariantResult],
+    metric_names: list[str],
+    *,
+    baselines: list[str] | None = None,
+) -> tuple[VariantResult | None, list[VariantResult]]:
+    names = [item.name for item in variants]
+    proposed_name = infer_proposed_name(names, metric_names=metric_names, baselines=baselines)
+    if proposed_name is None:
+        return None, []
+    proposed = next((item for item in variants if item.name == proposed_name), None)
+    baseline_names = infer_baseline_variant_names(names, baselines=baselines)
+    peers = [
+        item
+        for item in variants
+        if item.name in baseline_names and item.name != proposed_name
+    ]
+    if not peers:
+        peers = [item for item in variants if item.name != proposed_name]
+    return proposed, peers
+
+
+def scientific_status_from_comparison(
+    metric_names: list[str],
+    variants: list[VariantResult],
+    *,
+    baselines: list[str] | None = None,
+) -> str:
+    """Compare the treatment method against stored baseline rows.
+
+    Pair/gain plan metrics are filled from last-measured sibling scores so a
+    one-variant run can still be scored against an earlier method. Acceptance
+    is "not worse than any baseline on any declared metric, and strictly
+    better on at least one" (a derived gain is strictly better when > 0).
+    "unknown" when there isn't enough data to compare.
+    """
+    compare_variants = overlay_paired_metrics(
+        variants, metric_names, baselines=baselines
+    )
+    proposed, baseline_rows = _split_proposed_baselines(
+        compare_variants, metric_names, baselines=baselines
+    )
+    if not metric_names or proposed is None or not baseline_rows:
         return "unknown"
     if proposed.process_status != "completed":
         return "unknown"
     strictly_better = False
+    compared = False
     for metric in metric_names:
-        p_val = proposed.metrics.get(metric)
-        if not isinstance(p_val, (int, float)) or isinstance(p_val, bool):
+        p_val = metric_number(proposed.metrics, metric)
+        if p_val is None:
             continue
-        for baseline in baselines:
-            b_val = baseline.metrics.get(metric)
-            if not isinstance(b_val, (int, float)) or isinstance(b_val, bool):
+        shared = False
+        for baseline in baseline_rows:
+            b_val = metric_number(baseline.metrics, metric)
+            if b_val is None:
                 continue
+            shared = True
+            compared = True
             if p_val < b_val:
                 return "below_threshold"
             if p_val > b_val:
                 strictly_better = True
+        if shared:
+            continue
+        # Present only on the treatment row: a host-filled difference.
+        compared = True
+        if p_val < 0:
+            return "below_threshold"
+        if p_val > 0:
+            strictly_better = True
+    if not compared:
+        return "unknown"
     return "accepted" if strictly_better else "below_threshold"
 
 

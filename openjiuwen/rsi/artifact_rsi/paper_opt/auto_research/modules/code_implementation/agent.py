@@ -8,7 +8,6 @@ import logging
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
 import traceback
@@ -28,6 +27,13 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     generated_code_dir,
     resolve_project_reference,
     smoke_test_dir,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
+    current_commit,
+    force_rmtree,
+    host_commit,
+    seed_output_from_head,
+    sync_tree_into_repo,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.grounding import (
     docs_index_path,
@@ -61,10 +67,12 @@ _REQUIREMENTS_FILE = "requirements.txt"
 _ASSUMPTIONS_FILE = "ASSUMPTIONS.md"
 _OUTPUT_SUBDIR = "output"
 _PROMOTION_LOG = "promotion.log"
-# Git history stays in agent_workspace/output/. generated_code/ is a runnable
-# snapshot, not a nested repo — copying .git then rmtree'ing it fails on
-# Windows because object files are read-only (WinError 5).
-_PROMOTION_SKIP_NAMES = {".git", "__pycache__"}
+# Host git lives on generated_code/. Agent output/.git is never the
+# checkpoint — skip it on copy so a host seed cannot be overwritten by an
+# agent-created repo, and so Windows read-only git objects are not rmtree'd
+# as part of the deliverable snapshot.
+_PROMOTION_SKIP_NAMES = {".git", "__pycache__", "logs"}
+_PROMOTE_ATTEMPTS = 3
 # Cap on how much of a failing variant's stderr/stdout gets inlined into
 # CodeImplementationManifest.notes — enough to capture a real Python
 # traceback's tail (where the actual exception line lives), without letting
@@ -324,8 +332,11 @@ class CodeImplementationAgent:
         # cwd boundary with an absolute path.
         agent_workspace = agent_workspace_dir(plan.run_id).resolve()
         output_dir = agent_workspace / _OUTPUT_SUBDIR
-        output_dir.mkdir(parents=True, exist_ok=True)
         code_dir = generated_code_dir(plan.run_id).resolve()
+        # Seed the working copy from generated_code HEAD at the start of each
+        # manager code round (not inner smoke cycles). Drops output/.git so
+        # the coding agent cannot treat a leftover workspace repo as truth.
+        seed_output_from_head(code_dir, output_dir)
         agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
         referenced_candidates = self._extract_path_candidates(design_context, inputs.extra_host_instructions)
         referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace)
@@ -441,15 +452,23 @@ class CodeImplementationAgent:
             await shutdown_lsp()
 
         if validation is not None and validation.ok:
-            try:
-                self._promote_output(
-                    output_dir,
-                    code_dir,
-                    log_path=smoke_root / _PROMOTION_LOG,
-                )
-            except Exception as exc:  # noqa: BLE001
+            last_exc: BaseException | None = None
+            for promote_attempt in range(_PROMOTE_ATTEMPTS):
+                try:
+                    self._promote_output(
+                        output_dir,
+                        code_dir,
+                        log_path=smoke_root / _PROMOTION_LOG,
+                    )
+                    last_exc = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    if promote_attempt + 1 < _PROMOTE_ATTEMPTS:
+                        await asyncio.sleep(0.05 * (2 ** promote_attempt))
+            if last_exc is not None:
                 return self._promotion_failure_output(
-                    plan, code_dir, validation, agent_message, exc
+                    plan, code_dir, validation, agent_message, last_exc
                 )
             return self._build_output(
                 plan,
@@ -472,22 +491,7 @@ class CodeImplementationAgent:
     @staticmethod
     def _force_rmtree(path: Path) -> None:
         """Delete a tree that may contain read-only Git objects (Windows)."""
-
-        def _unlock_and_retry(func, target, exc):
-            error = exc if isinstance(exc, BaseException) else exc[1]
-            try:
-                os.chmod(target, stat.S_IWRITE)
-                func(target)
-            except OSError as retry_exc:
-                raise error from retry_exc
-
-        if sys.version_info >= (3, 12):
-            shutil.rmtree(path, onexc=_unlock_and_retry)
-        else:
-            shutil.rmtree(
-                path,
-                onerror=lambda func, target, exc_info: _unlock_and_retry(func, target, exc_info),
-            )
+        force_rmtree(path)
 
     @staticmethod
     def _promotion_ignore(_directory: str, names: list[str]) -> list[str]:
@@ -517,29 +521,17 @@ class CodeImplementationAgent:
 
     @classmethod
     def _copy_deliverable(cls, source_dir: Path, destination_dir: Path) -> list[str]:
-        skipped: list[str] = []
-        destination_dir.mkdir(parents=True, exist_ok=True)
-        for item in source_dir.iterdir():
-            if item.name in _PROMOTION_SKIP_NAMES or item.suffix == ".pyc":
-                skipped.append(item.name)
-                continue
-            destination = destination_dir / item.name
-            if item.is_dir():
-                shutil.copytree(item, destination, ignore=cls._promotion_ignore)
-            else:
-                shutil.copy2(item, destination)
-        return skipped
+        return sync_tree_into_repo(source_dir, destination_dir)
 
     @classmethod
     def _promote_output(
         cls, output_dir: Path, code_dir: Path, *, log_path: Path | None = None
     ) -> None:
-        """Atomically replace generated_code/ with a passing staged candidate.
+        """Copy a passing staged candidate into generated_code/ in place.
 
-        Copies into a temporary sibling, then swaps it into place so a copy
-        or replace failure leaves the previous runnable snapshot intact.
-        Git history stays in agent_workspace/output/; `.git` and caches are
-        skipped.
+        ``generated_code/.git`` stays put. Files from ``output/`` overwrite the
+        working tree (skipping ``.git`` and ``logs/``), extras are deleted, then
+        the host commits. Agent ``output/.git`` is not the checkpoint.
         """
         lines = [
             "--- promotion ---",
@@ -548,10 +540,6 @@ class CodeImplementationAgent:
         ]
         skipped: list[str] = []
         stage = "start"
-        parent = code_dir.parent
-        parent.mkdir(parents=True, exist_ok=True)
-        tmp_dir = parent / f".{code_dir.name}.promoting-{os.getpid()}"
-        backup_dir = parent / f".{code_dir.name}.previous-{os.getpid()}"
         try:
             if not output_dir.exists():
                 stage = "copy"
@@ -568,31 +556,17 @@ class CodeImplementationAgent:
                 cls._write_promotion_log(log_path, lines)
                 raise FileNotFoundError(f"promotion source missing: {output_dir}")
 
-            stage = "copy"
-            if tmp_dir.exists():
-                cls._force_rmtree(tmp_dir)
-            skipped = cls._copy_deliverable(output_dir, tmp_dir)
+            stage = "sync"
+            skipped = sync_tree_into_repo(output_dir, code_dir)
 
-            stage = "replace"
-            if backup_dir.exists():
-                cls._force_rmtree(backup_dir)
-            replaced_existing = code_dir.exists()
-            if replaced_existing:
-                os.replace(code_dir, backup_dir)
-            try:
-                os.replace(tmp_dir, code_dir)
-            except Exception:
-                if replaced_existing and backup_dir.exists() and not code_dir.exists():
-                    os.replace(backup_dir, code_dir)
-                raise
-            if backup_dir.exists():
-                cls._force_rmtree(backup_dir)
-
+            stage = "commit"
+            sha = host_commit(code_dir, "code_implementation promote")
             stage = "done"
             lines.extend(
                 [
-                    "stage=replace",
+                    "stage=sync",
                     "status=ok",
+                    f"code_commit={sha or '(none)'}",
                     f"skipped={', '.join(skipped) or '(none)'}",
                     f"source_files: {cls._file_manifest(output_dir)}",
                     f"destination_files: {cls._file_manifest(code_dir)}",
@@ -613,17 +587,6 @@ class CodeImplementationAgent:
             )
             cls._write_promotion_log(log_path, lines)
             raise
-        finally:
-            if tmp_dir.exists() and tmp_dir.resolve() != code_dir.resolve():
-                try:
-                    cls._force_rmtree(tmp_dir)
-                except OSError:
-                    pass
-            if backup_dir.exists() and backup_dir.resolve() != code_dir.resolve():
-                try:
-                    cls._force_rmtree(backup_dir)
-                except OSError:
-                    pass
 
     # -- design context -----------------------------------------------------
 
@@ -1034,8 +997,8 @@ class CodeImplementationAgent:
             f"every file that matters for actually running the experiment — must be written under "
             f"`{_OUTPUT_SUBDIR}/`, not the workspace root. Only what's inside `{_OUTPUT_SUBDIR}/` "
             "gets used afterwards; anything you leave outside it (notes, scratch scripts, etc.) is "
-            f"discarded. Keep git history inside `{_OUTPUT_SUBDIR}/` with `git init` / `git commit`; "
-            "do not copy files into `generated_code/` — the host promotes a snapshot without `.git`. "
+            f"discarded. Do not copy files into `generated_code/` and do not create a git repo in "
+            f"`{_OUTPUT_SUBDIR}/` — the host owns checkpoint/restore on `generated_code/`. "
             f"If you run a local check, use `{_OUTPUT_SUBDIR}/` as the working directory "
             f"(e.g. `cd {_OUTPUT_SUBDIR} && python {_ENTRY_POINT} ...`) so you are testing "
             "exactly what the host will validate later — not a version that also sees files "
@@ -1550,7 +1513,9 @@ class CodeImplementationAgent:
         files: list[str] = []
         if code_dir.exists():
             files = sorted(
-                str(path.relative_to(code_dir)) for path in code_dir.rglob("*") if path.is_file()
+                str(path.relative_to(code_dir))
+                for path in code_dir.rglob("*")
+                if path.is_file() and ".git" not in path.parts
             )
         notes = (
             f"promotion failed after a passing candidate; previous generated_code/ retained.\n"
@@ -1565,9 +1530,9 @@ class CodeImplementationAgent:
                 workspace_dir=str(code_dir),
                 files=files,
                 variants=list(validation.variants),
-                smoke_test_passed=False,
+                smoke_test_passed=True,
                 status="failed",
-                readiness="failed",
+                readiness="promotion_failed",
                 smoke_failures={"promotion": f"{type(exc).__name__}: {exc}"},
                 notes=notes,
             )
@@ -1630,6 +1595,7 @@ class CodeImplementationAgent:
             readiness="smoke_ready" if status == "ready" else "failed",
             smoke_failures=failures,
             notes=notes.strip(),
+            code_commit=current_commit(code_dir) if smoke_test_passed else "",
         )
         return CodeImplementationOutput(implementation=manifest)
 

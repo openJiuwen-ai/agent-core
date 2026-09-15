@@ -130,6 +130,9 @@ def _compact_contract(contract: dict[str, Any] | None) -> dict[str, Any] | None:
         "module": contract.get("module"),
         "mode": contract.get("mode"),
         "goal": contract.get("goal"),
+        "target_variants": list(contract.get("target_variants") or []),
+        "restore_code_commit": contract.get("restore_code_commit") or "",
+        "repair_instruction": contract.get("repair_instruction") or "",
     }
 
 
