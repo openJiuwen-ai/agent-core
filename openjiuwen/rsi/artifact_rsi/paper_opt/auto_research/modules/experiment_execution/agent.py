@@ -19,6 +19,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     validate_metrics_contract,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import logs_dir, results_dir, workspace_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import current_commit
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import ImplementedVariant
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     ExperimentExecutionInput,
@@ -370,6 +371,21 @@ def _variant_note(name: str, run: _VariantRun, attempts: int) -> str:
     )
 
 
+def _selected_variants(
+    variants: list[ImplementedVariant],
+    target_variants: list[str],
+) -> list[ImplementedVariant]:
+    """Empty target list means all (standalone runner). Unknown names raise first."""
+    if not target_variants:
+        return list(variants)
+    available = {item.name: item for item in variants}
+    missing = [name for name in target_variants if name not in available]
+    if missing:
+        known = sorted(available)
+        raise ValueError(f"unknown target_variants: {missing}; known: {known}")
+    return [available[name] for name in target_variants]
+
+
 class ExperimentExecutionAgent:
     """Runs an already-implemented, smoke-tested experiment codebase for real."""
 
@@ -413,9 +429,12 @@ class ExperimentExecutionAgent:
         if artifact_path is not None:
             artifact_path = str(artifact_path).strip() or None
 
+        selected = _selected_variants(implementation.variants, inputs.target_variants)
+        code_commit = current_commit(code_dir) or implementation.code_commit
+
         variant_results: list[VariantResult] = []
         notes_parts: list[str] = []
-        for variant in implementation.variants:
+        for variant in selected:
             result, run = self._run_variant(
                 variant,
                 code_dir=code_dir,
@@ -425,6 +444,7 @@ class ExperimentExecutionAgent:
                 max_transient_retries=max_transient_retries,
                 artifact_path=artifact_path,
             )
+            result = result.model_copy(update={"code_commit": code_commit})
             variant_results.append(result)
             _mirror_artifact(
                 results / f"{variant.name}.metrics.json",

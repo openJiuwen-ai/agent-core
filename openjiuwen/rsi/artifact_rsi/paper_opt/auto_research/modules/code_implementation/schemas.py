@@ -41,9 +41,10 @@ class CodeImplementationManifest(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     smoke_test_passed: bool = False
     status: Literal["ready", "failed"] = "failed"
-    readiness: Literal["smoke_ready", "failed"] = "failed"
+    readiness: Literal["smoke_ready", "failed", "promotion_failed"] = "failed"
     smoke_failures: dict[str, str] = Field(default_factory=dict)
     notes: str = ""
+    code_commit: str = ""
 
 
 class CodeImplementationOutput(BaseModel):

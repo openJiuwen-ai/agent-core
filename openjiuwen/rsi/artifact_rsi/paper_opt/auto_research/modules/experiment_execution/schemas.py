@@ -20,6 +20,9 @@ class ExperimentExecutionInput(BaseModel):
     # exposes it to the generated subprocess as an explicit paper pin instead
     # of relying on the subprocess's inherited working directory.
     artifact_path: str | None = None
+    # Empty means run every implemented variant (standalone runner). The
+    # manager host requires a non-empty list on EXECUTE.
+    target_variants: list[str] = Field(default_factory=list)
 
 
 class VariantResult(BaseModel):
@@ -37,6 +40,7 @@ class VariantResult(BaseModel):
     # Attempt-scoped sanitized sidecar copied from a workspace-contained
     # harness diagnostics_path, if any.
     diagnostics_path: str = ""
+    code_commit: str = ""
 
 
 class ExperimentResult(BaseModel):
