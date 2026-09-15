@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, cast
 
 import pytest
@@ -229,6 +230,151 @@ async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp
     assert "../../source-meta/" in moved.read_text(encoding="utf-8")
 
 
+def test_modern_context_normalization_skips_legacy_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    page = context_root / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    page.write_text("# Page\n\nModern content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    before = {path.relative_to(context_root): path.read_bytes() for path in context_root.rglob("*.md")}
+
+    def unexpected_rewrite(*_args: object, **_kwargs: object) -> set[str]:
+        raise AssertionError("modern nested Context must not run legacy layout rewrite")
+
+    monkeypatch.setattr(context_pipeline, "_apply_context_layout_normalization", unexpected_rewrite)
+
+    baseline, baseline_paths = context_pipeline._normalize_context_candidate(
+        context_root,
+        source_root=source_root,
+        run_time=datetime(2026, 9, 14, tzinfo=timezone.utc),
+        max_pages_per_directory=20,
+        max_subdirectories_per_directory=20,
+    )
+
+    assert baseline_paths == {relative: relative for relative in baseline}
+    assert {path.relative_to(context_root): path.read_bytes() for path in context_root.rglob("*.md")} == before
+
+
+@pytest.mark.asyncio
+async def test_agent_context_normalization_keeps_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    page = context_root / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    page.write_text("# Page\n\nModern content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    original_normalize = context_pipeline._normalize_context_candidate
+
+    def slow_normalize(*args: object, **kwargs: object) -> tuple[dict[str, tuple[int, str]], dict[str, str]]:
+        time.sleep(0.2)
+        return original_normalize(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fail_after_preparation(**_kwargs: object) -> str:
+        raise build_error(StatusCode.DEEPAGENT_RUNTIME_ERROR, error_msg="stop after preparation")
+
+    monkeypatch.setattr(context_pipeline, "_normalize_context_candidate", slow_normalize)
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", fail_after_preparation)
+    attempt = asyncio.create_task(
+        service._filesystem_with_fallback(
+            processed={"documents": [], "blocks": [], "deleted_ids": []},
+            sandbox=sandbox,
+            batch=_processing_batch(0),
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = loop.time() - heartbeat_started
+    with pytest.raises(BaseError):
+        await attempt
+
+    assert heartbeat_elapsed < 0.1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_stage", ["validation", "commit"])
+async def test_publication_filesystem_stages_keep_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_stage: str,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    page = sandbox / "context" / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Page\n\nPublished content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (sandbox / "context" / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+
+    async def skip_semantic_finalize(*_args: object, **_kwargs: object) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", skip_semantic_finalize)
+    if slow_stage == "validation":
+
+        def slow_validation(*_args: object, **_kwargs: object) -> None:
+            time.sleep(0.2)
+
+        monkeypatch.setattr(context_pipeline, "_validate_candidate", slow_validation)
+    else:
+        original_publish = context_pipeline._copy_and_publish_tree
+
+        def slow_publish(*args: object, **kwargs: object) -> set[str]:
+            time.sleep(0.2)
+            return original_publish(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(context_pipeline, "_copy_and_publish_tree", slow_publish)
+
+    publication = asyncio.create_task(
+        service._publish_processed(
+            service_id="local",
+            run_id="run-responsive",
+            batch=_processing_batch(0),
+            processed={
+                "documents": [],
+                "blocks": [],
+                "deleted_ids": [],
+                "source_link_book": {},
+                "_filesystem_candidate_prepared": True,
+                "_filesystem_candidate_profile": "agent",
+            },
+            sandbox=sandbox,
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = loop.time() - heartbeat_started
+    await publication
+
+    assert heartbeat_elapsed < 0.1
+
+
 @pytest.mark.asyncio
 async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
     tmp_path: Path,
@@ -270,6 +416,46 @@ async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
     assert (sandbox / "context" / "topics" / "existing.md").read_text(encoding="utf-8") == (
         "# Existing\n\nRetained content.\n"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["rules", "balanced", "agent"])
+async def test_retaining_run_never_calls_embedding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    service = ContextPipelineService(home=tmp_path, config=_config(profile), input_queue=queue)
+    service._embedding = cast(Any, object())
+    original_finalize = context_pipeline._finalize_semantic_context_hybrid
+    finalize_calls = 0
+
+    async def unexpected_embedding(_texts: object) -> list[list[float]] | None:
+        raise AssertionError("retention must not call embedding")
+
+    def unexpected_source_prior(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("retention must not scan the full Context source prior")
+
+    async def finalize_without_embedding(*args: object, **kwargs: object) -> None:
+        nonlocal finalize_calls
+        finalize_calls += 1
+        assert kwargs["embed_texts"] is None
+        assert kwargs["refresh_related_documents"] is False
+        await original_finalize(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_embed_semantic_texts", unexpected_embedding)
+    monkeypatch.setattr(context_pipeline, "_source_distribution_for_id", unexpected_source_prior)
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", finalize_without_embedding)
+    await service.start()
+    try:
+        for tag, payload in (("batch", _batch()), ("retain", None)):
+            completion = asyncio.get_running_loop().create_future()
+            await queue.put((tag, "local", "run-retain", payload, completion))
+            await completion
+        assert finalize_calls == 1
+    finally:
+        await service.stop(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -6703,6 +6889,47 @@ def test_reference_graph_accepts_nested_descriptions_and_virtual_alias(tmp_path:
         alias_targets={"[[ref:0]]": source_id},
         repairable=True,
     )
+
+
+def test_reference_graph_groups_pages_by_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    pages = {
+        "description.md": "# Context\n\n"
+        + "".join(f"- [Topic {index}](topic-{index}/description.md)\n" for index in range(20))
+    }
+    for index in range(20):
+        relative = f"topic-{index}/page.md"
+        source_link = _source_link(
+            page_relative=relative,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            source_id=source_id,
+        )
+        pages[f"topic-{index}/description.md"] = f"# Topic {index}\n\n- [Page](page.md)\n"
+        pages[relative] = f"# Page {index}\n\nReferenced object: {source_link}.\n"
+    _write_context_pages(candidate, pages)
+
+    real_pure_posix_path = context_pipeline.PurePosixPath
+    constructor_calls = 0
+
+    def count_pure_posix_path(*parts: object) -> PurePosixPath:
+        nonlocal constructor_calls
+        constructor_calls += 1
+        return real_pure_posix_path(*parts)
+
+    monkeypatch.setattr(context_pipeline, "PurePosixPath", count_pure_posix_path)
+
+    context_pipeline._validate_reference_graph(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+        repairable=False,
+    )
+
+    assert constructor_calls < 300
 
 
 def test_reference_graph_ignores_unlinked_source_and_parses_fragment_and_title(tmp_path: Path) -> None:
