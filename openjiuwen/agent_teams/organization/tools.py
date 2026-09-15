@@ -1144,10 +1144,19 @@ class OrgAttachSummarySourcesTool(_OrgLeaderTool):
 class OrgViewSummarySourcesTool(_OrgLeaderTool):
     """View source tasks and outputs for a summary task."""
 
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        *,
+        name: str = "org_view_summary_sources",
+        description: str = "View source task outputs attached to an organization summary task.",
+    ) -> None:
+        """Create a source-reader tool with its final ToolCard identity."""
         super().__init__(
-            name="org_view_summary_sources",
-            description="View source task outputs attached to an organization summary task.",
+            name=name,
+            description=description,
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -1179,10 +1188,13 @@ class OrgSummaryGetInputsTool(OrgViewSummarySourcesTool):
 
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         """Expose a Summary Team-only name for reading bound source snapshots."""
-        super().__init__(manager, team_id, leader_id)
-        self.card.id = "team_org.org_summary_get_inputs"
-        self.card.name = "org_summary_get_inputs"
-        self.card.description = "Read only the bound, accepted inputs for this Summary Team execution."
+        super().__init__(
+            manager,
+            team_id,
+            leader_id,
+            name="org_summary_get_inputs",
+            description="Read only the bound, accepted inputs for this Summary Team execution.",
+        )
 
 
 class OrgSummaryCompleteTool(_OrgLeaderTool):

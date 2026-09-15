@@ -40,8 +40,10 @@ from openjiuwen.agent_teams.organization.tools import (
     OrgCreateSummaryExecutionTool,
     OrgCreateTaskTool,
     OrgReviewTaskTool,
+    OrgSummaryGetInputsTool,
     OrgUpdateTaskTool,
     OrgViewChildTasksTool,
+    OrgViewSummarySourcesTool,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
@@ -58,6 +60,18 @@ class FakeMessager:
 
     async def subscribe(self, topic_id, handler):
         self.subscriptions.append((topic_id, handler))
+
+
+def test_summary_input_tools_create_their_final_tool_cards() -> None:
+    """Ensure the Summary Team input tool never mutates its card after construction."""
+    manager = SimpleNamespace()
+    view_tool = OrgViewSummarySourcesTool(manager, "team-1", "leader-1")
+    summary_tool = OrgSummaryGetInputsTool(manager, "team-1", "leader-1")
+
+    assert view_tool.card.id == "team_org.org_view_summary_sources"
+    assert view_tool.card.name == "org_view_summary_sources"
+    assert summary_tool.card.id == "team_org.org_summary_get_inputs"
+    assert summary_tool.card.name == "org_summary_get_inputs"
 
 
 class FakeHarness:
