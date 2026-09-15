@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from typing import Dict, Optional, List, Union
+import threading
+from typing import Any, Callable, Dict, Optional, List, Union
 
 from openjiuwen.core.common.logging import graph_logger, LogEventType
 from openjiuwen.core.graph.pregel.base import Message, PregelNode, GraphInterrupt
@@ -14,6 +15,34 @@ from openjiuwen.core.graph.pregel.config import PregelConfig, InnerPregelConfig,
 from openjiuwen.core.graph.pregel.constants import TASK_STATUS_INTERRUPT, TASK_STATUS_ERROR, PARENT_NS, NS
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import WorkflowEvents
+
+
+_SIGNATURE_CACHE_LIMIT = 1024
+_signature_cache: dict[int, tuple[Callable[..., Any], inspect.Signature]] = {}
+_signature_cache_lock = threading.Lock()
+
+
+def _get_callable_signature(func: Callable[..., Any]) -> inspect.Signature:
+    """Return a callable's signature, avoiding repeated reflection."""
+    explicit_signature = getattr(func, '__signature__', None)
+    if isinstance(explicit_signature, inspect.Signature):
+        return explicit_signature
+
+    cache_key = id(func)
+    cached = _signature_cache.get(cache_key)
+    if cached is not None and cached[0] is func:
+        return cached[1]
+
+    signature = inspect.signature(func)
+    with _signature_cache_lock:
+        cached = _signature_cache.get(cache_key)
+        if cached is not None and cached[0] is func:
+            return cached[1]
+
+        if len(_signature_cache) >= _SIGNATURE_CACHE_LIMIT:
+            _signature_cache.pop(next(iter(_signature_cache)))
+        _signature_cache[cache_key] = (func, signature)
+    return signature
 
 
 class TaskExecutorPool:
@@ -103,7 +132,7 @@ class TaskExecutorPool:
         results = await asyncio.gather(*to_cancel, return_exceptions=True)
         for result in results:
             if isinstance(result, Exception):
-                graph_logger.warning(f"running task with exception",
+                graph_logger.warning("running task with exception",
                                      event_type=LogEventType.GRAPH_VERTEX_CALL_ERROR,
                                      metadata={"error": str(result)}
                                      )
@@ -134,7 +163,7 @@ class NodeTask:
         try:
             func = self.node.func
             target_func = func.__call__ if hasattr(func, "__call__") else func
-            sig = inspect.signature(func)
+            sig = _get_callable_signature(func)
             kwargs = {}
             if 'config' in sig.parameters:
                 inner_config: InnerPregelConfig = create_inner_config(self.config)
