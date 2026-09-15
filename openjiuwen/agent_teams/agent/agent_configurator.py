@@ -415,6 +415,29 @@ class AgentConfigurator:
             )
         return None
 
+    @staticmethod
+    def _task_loop_budget_rail_specs(agent_spec: Any) -> list[RailSpec]:
+        """Rail specs bounding + warning on a member's outer task-loop budget.
+
+        Every member built here forces ``enable_task_loop=True``, so the outer
+        loop needs a real ceiling (``core.task_completion``) and a wind-down
+        signal (``core.budget_notice``). The ceiling is the member's own
+        ``max_iterations``; token / wall-clock caps stay unset (opt-in), exactly
+        as in the single-agent host wiring.
+        """
+        from openjiuwen.harness.manifest.harness_elements import (
+            BUDGET_NOTICE,
+            TASK_COMPLETION,
+        )
+
+        return [
+            RailSpec(
+                type=TASK_COMPLETION,
+                params={"max_rounds": getattr(agent_spec, "max_iterations", None)},
+            ),
+            RailSpec(type=BUDGET_NOTICE),
+        ]
+
     def setup_agent(
         self,
         spec: TeamAgentSpec,
@@ -852,6 +875,21 @@ class AgentConfigurator:
         )
         if skill_rail_spec is not None:
             team_rail_specs.append(skill_rail_spec)
+
+        # Task-loop budgets for every locally-built member (leader / teammate /
+        # avatar): every member forces ``enable_task_loop=True`` above, so cap
+        # the outer loop at the member's own ``max_iterations`` and warn before
+        # it is exhausted — otherwise the outer loop runs unbounded and a
+        # runaway member has no wind-down signal. Token / wall-clock caps stay
+        # opt-in (unset), matching the single-agent host policy. A blueprint that
+        # declared either rail keeps its own — we never double-mount.
+        declared_rail_types = {rail_spec.type for rail_spec in base_rails}
+        team_rail_specs.extend(
+            rail_spec
+            for rail_spec in self._task_loop_budget_rail_specs(agent_spec)
+            if rail_spec.type not in declared_rail_types
+        )
+
         build_spec = build_spec.model_copy(
             update={"rails": base_rails + team_rail_specs},
         )

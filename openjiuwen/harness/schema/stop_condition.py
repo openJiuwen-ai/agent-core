@@ -20,6 +20,24 @@ logger = logging.getLogger(__name__)
 # Evaluation context (decoupled from AgentCallbackContext)
 # ================================================================
 
+@dataclass(frozen=True)
+class BudgetLimit:
+    """A hard resource limit enforced by a stop-condition evaluator.
+
+    Consumers such as the budget-notice rail read these so their warnings
+    track the loop's actually-configured budgets instead of keeping a
+    parallel copy that can drift from what really stops the loop.
+
+    Attributes:
+        kind: Resource kind — ``"rounds"``, ``"tokens"``, or ``"seconds"``.
+        limit: The hard limit value (``max_rounds`` / ``max_tokens`` /
+            ``timeout_seconds``).
+    """
+
+    kind: str
+    limit: float
+
+
 @dataclass
 class StopEvaluationContext:
     """Runtime context passed to each StopConditionEvaluator.
@@ -74,6 +92,15 @@ class StopConditionEvaluator(ABC):
     def reset(self) -> None:
         """Reset internal state for a new invoke cycle."""
 
+    def budget(self) -> Optional[BudgetLimit]:
+        """Return the hard limit this evaluator enforces, if any.
+
+        Returns:
+            A :class:`BudgetLimit`, or ``None`` for evaluators that do not
+            represent a countable resource budget.
+        """
+        return None
+
     def get_state(self) -> Optional[Dict[str, Any]]:
         """Export serialisable state snapshot.
 
@@ -108,6 +135,10 @@ class MaxRoundsEvaluator(StopConditionEvaluator):
         """Return True when completed rounds >= max_rounds."""
         return ctx.iteration >= self._max_rounds
 
+    def budget(self) -> Optional[BudgetLimit]:
+        """Return the ``rounds`` limit."""
+        return BudgetLimit("rounds", float(self._max_rounds))
+
 
 class TokenBudgetEvaluator(StopConditionEvaluator):
     """Stop when cumulative token usage exceeds a budget.
@@ -123,6 +154,10 @@ class TokenBudgetEvaluator(StopConditionEvaluator):
         """Return True when token usage >= max_tokens."""
         return ctx.token_usage >= self._max_tokens
 
+    def budget(self) -> Optional[BudgetLimit]:
+        """Return the ``tokens`` limit."""
+        return BudgetLimit("tokens", float(self._max_tokens))
+
 
 class TimeoutEvaluator(StopConditionEvaluator):
     """Stop when wall-clock elapsed time exceeds a limit.
@@ -137,6 +172,10 @@ class TimeoutEvaluator(StopConditionEvaluator):
     def should_stop(self, ctx: StopEvaluationContext) -> bool:
         """Return True when elapsed_seconds >= timeout_seconds."""
         return ctx.elapsed_seconds >= self._timeout_seconds
+
+    def budget(self) -> Optional[BudgetLimit]:
+        """Return the ``seconds`` limit."""
+        return BudgetLimit("seconds", float(self._timeout_seconds))
 
 
 class NoProgressAnswerEvaluator(StopConditionEvaluator):
@@ -312,6 +351,7 @@ class CustomPredicateEvaluator(StopConditionEvaluator):
 
 
 __all__ = [
+    "BudgetLimit",
     "StopEvaluationContext",
     "StopConditionEvaluator",
     "MaxRoundsEvaluator",
