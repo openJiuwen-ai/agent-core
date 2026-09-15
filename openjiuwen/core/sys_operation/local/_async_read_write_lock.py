@@ -24,6 +24,11 @@ class _ManagedReadWriteLock(ReadWriteLock):
     ) -> None:
         try:
             super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
+        except sqlite3.ProgrammingError as exc:
+            if "cannot operate on a closed database" not in str(exc).lower():
+                raise
+            self._con = sqlite3.connect(self.lock_file, check_same_thread=False)
+            super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
         except sqlite3.OperationalError as exc:
             if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
                 raise
