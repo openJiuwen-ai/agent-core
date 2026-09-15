@@ -941,3 +941,134 @@ async def test_before_model_call_with_english_language(tmp_path: Path):
     assert ws is not None
     assert builder.has_section("workspace")
     assert "# Workspace" in ws.render("en")
+
+@pytest.mark.asyncio
+async def test_before_model_call_allowlist_and_fingerprint_skip_tools_rewrite(tmp_path: Path):
+    """Eager allowlist + fingerprint: deferred MCP cards must not rewrite tools section."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    await sys_operation.fs().write_file(f"{workspace.root_path}/README.md", "# Test")
+
+    agent = _make_agent(sys_operation, workspace)
+    await agent.ensure_initialized()
+    agent.ability_manager.add(ToolCard(id="bash-a", name="bash", description="run shell"))
+    agent.ability_manager.add(ToolCard(id="search-a", name="tools_search", description="search tools"))
+
+    rail = ContextAssembleRail(tool_name_allowlist=["bash", "tools_search"])
+    await agent.register_rail(rail)
+
+    ctx = _make_model_call_context(agent)
+    await rail.before_invoke(ctx)
+    await rail.before_model_call(ctx)
+
+    first = agent.system_prompt_builder.get_section("tools")
+    assert first is not None
+    rendered = first.render("cn")
+    assert "bash" in rendered
+    assert "tools_search" in rendered
+    assert "office_claw_x" not in rendered
+    fingerprint = rail._tools_section_fingerprint
+    assert fingerprint is not None
+
+    # Deferred / request-scoped MCP registration mid-task.
+    agent.ability_manager.add(
+        ToolCard(id="oc-1", name="office_claw_x", description="office claw tool")
+    )
+    await rail.before_model_call(ctx)
+
+    second = agent.system_prompt_builder.get_section("tools")
+    assert second is first
+    assert rail._tools_section_fingerprint == fingerprint
+    assert "office_claw_x" not in second.render("cn")
+
+
+def test_build_tools_content_allowed_tools_filters_deferred():
+    mock_manager = Mock()
+    mock_manager.list.return_value = [
+        ToolCard(name="bash", description="run shell"),
+        ToolCard(name="tools_search", description="search"),
+        ToolCard(name="office_claw_x", description="deferred mcp"),
+    ]
+    content = build_tools_content(
+        mock_manager,
+        "cn",
+        allowed_tools=["bash", "tools_search"],
+    )
+    assert content is not None
+    assert "bash" in content
+    assert "tools_search" in content
+    assert "office_claw_x" not in content
+
+
+def test_build_tools_content_leftovers_follow_allowed_tools_order():
+    """ability_manager registration order must not reshuffle leftover bullets."""
+    mock_manager = Mock()
+    # Deliberately reverse of eager/allowlist order among leftovers.
+    mock_manager.list.return_value = [
+        ToolCard(name="send_file_to_user", description="send files"),
+        ToolCard(name="bash", description="run shell"),
+        ToolCard(name="invoke_tool", description="invoke deferred"),
+        ToolCard(name="tools_search", description="search deferred"),
+        ToolCard(name="office_claw_x", description="deferred mcp"),
+    ]
+    allowlist = [
+        "tools_search",
+        "invoke_tool",
+        "bash",
+        "send_file_to_user",
+    ]
+    content = build_tools_content(
+        mock_manager,
+        "cn",
+        allowed_tools=allowlist,
+    )
+    assert content is not None
+    assert "office_claw_x" not in content
+    # bash is emitted in the preferred/layout path; leftovers are meta + send_file.
+    leftover_names = [
+        line.split(":", 1)[0][2:].strip()
+        for line in content.splitlines()
+        if line.startswith("- ")
+        and line.split(":", 1)[0][2:].strip()
+        in {"tools_search", "invoke_tool", "send_file_to_user"}
+    ]
+    assert leftover_names == ["tools_search", "invoke_tool", "send_file_to_user"]
+
+    # Flip ability_manager order — leftover bullets must stay pinned.
+    mock_manager.list.return_value = [
+        ToolCard(name="bash", description="run shell"),
+        ToolCard(name="tools_search", description="search deferred"),
+        ToolCard(name="send_file_to_user", description="send files"),
+        ToolCard(name="invoke_tool", description="invoke deferred"),
+    ]
+    content2 = build_tools_content(
+        mock_manager,
+        "cn",
+        allowed_tools=allowlist,
+    )
+    leftover_names2 = [
+        line.split(":", 1)[0][2:].strip()
+        for line in content2.splitlines()
+        if line.startswith("- ")
+        and line.split(":", 1)[0][2:].strip()
+        in {"tools_search", "invoke_tool", "send_file_to_user"}
+    ]
+    assert leftover_names2 == leftover_names
+    assert content == content2
+
+
+def test_set_tool_name_allowlist_clears_fingerprint():
+    rail = ContextAssembleRail(tool_name_allowlist=["bash"])
+    rail._tools_section_fingerprint = "deadbeef"
+    rail.set_tool_name_allowlist(["bash", "tools_search"])
+    assert rail._tool_name_allowlist == ["bash", "tools_search"]
+    assert rail._tools_section_fingerprint is None
+
+
+def test_set_tool_name_allowlist_preserves_order_and_dedupes():
+    rail = ContextAssembleRail(
+        tool_name_allowlist=["tools_search", "invoke_tool", "bash", "tools_search"]
+    )
+    assert rail._tool_name_allowlist == ["tools_search", "invoke_tool", "bash"]
+    rail.set_tool_name_allowlist(["send_file_to_user", "bash", "send_file_to_user"])
+    assert rail._tool_name_allowlist == ["send_file_to_user", "bash"]
