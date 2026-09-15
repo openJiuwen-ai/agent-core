@@ -10,19 +10,19 @@ import re
 
 # Tools that only the leader can use
 LEADER_ONLY_TOOLS: set[str] = {
-    "build_team",         # Create a new team
-    "clean_team",         # Clean up a team
-    "spawn_teammate",     # Spawn an ordinary LLM teammate
+    "build_team",  # Create a new team
+    "clean_team",  # Clean up a team
+    "spawn_teammate",  # Spawn an ordinary LLM teammate
     "spawn_human_agent",  # Spawn a human member (HITT)
-    "spawn_bridge_agent", # Spawn a bridge to a remote agent
-    "spawn_external_cli", # Spawn a third-party CLI agent teammate
-    "shutdown_member",    # Shutdown a team member
-    "approve_plan",       # Approve or reject a member's plan
-    "approve_tool",       # Approve or reject a teammate tool call
-    "list_checkpoints",   # List named checkpoints available for fork inheritance
-    "create_task",        # Create tasks (batch / with deps)
-    "update_task",        # Update task content / cancel tasks
-    "swarmflow",          # Run a swarmflow orchestration script (gated by enable_swarmflow)
+    "spawn_bridge_agent",  # Spawn a bridge to a remote agent
+    "spawn_external_cli",  # Spawn a third-party CLI agent teammate
+    "shutdown_member",  # Shutdown a team member
+    "approve_plan",  # Approve or reject a member's plan
+    "approve_tool",  # Approve or reject a teammate tool call
+    "list_checkpoints",  # List named checkpoints available for fork inheritance
+    "create_task",  # Create tasks (batch / with deps)
+    "update_task",  # Update task content / cancel tasks
+    "swarmflow",  # Run a swarmflow orchestration script (gated by enable_swarmflow)
     # Async-tool control — inspect / fetch / cancel background async tasks
     "async_tasks_list",
     "async_task_output",
@@ -44,16 +44,15 @@ LEADER_ONLY_TOOLS: set[str] = {
     "org_view_child_tasks",
     "org_view_pending_reviews",
     "org_review_task",
-    "org_create_summary_task",
-    "org_attach_summary_sources",
-    "org_view_summary_sources",
+    # Root Leader creates a Summary Execution after accepted sources are ready.
+    "org_create_summary_execution",
 }
 
 # Tools that only members can use
 MEMBER_ONLY_TOOLS: set[str] = {
     "claim_task",  # Claim or complete a task
-    "submit_plan", # Submit a plan before executing in plan_mode
-    "verify_task", # Pass/fail a task in the verify gate (reviewer-guarded)
+    "submit_plan",  # Submit a plan before executing in plan_mode
+    "verify_task",  # Pass/fail a task in the verify gate (reviewer-guarded)
     # Worktree tools — members work in isolated worktrees
     # "enter_worktree",          # Enter an isolated git worktree
     # "exit_worktree",           # Exit the current worktree session
@@ -64,11 +63,11 @@ SHARED_TOOLS: set[str] = {
     # Query tools
     # "get_team_info",           # Get team information
     # "get_member",              # Get member information
-    "view_task",      # View tasks (unified - supports get/list/claimable)
+    "view_task",  # View tasks (unified - supports get/list/claimable)
     # Messaging tools
-    "send_message",   # Send a message (point-to-point or broadcast)
-    "workspace_meta", # Workspace lock management and version history
-    "checkpoint",     # Snapshot conversation context for fork (gated by enable_fork)
+    "send_message",  # Send a message (point-to-point or broadcast)
+    "workspace_meta",  # Workspace lock management and version history
+    "checkpoint",  # Snapshot conversation context for fork (gated by enable_fork)
 }
 
 # Member-only tools under scheduled dispatch. The leader assigns every task,
@@ -78,8 +77,8 @@ SHARED_TOOLS: set[str] = {
 # ``submit_plan`` stays: plan_mode members still submit plans for approval.
 MEMBER_ONLY_TOOLS_SCHEDULED: set[str] = {
     "member_complete_task",  # Complete a task assigned to you
-    "submit_plan",           # Submit a plan before executing in plan_mode
-    "verify_task",           # Pass/fail a task in the verify gate (reviewer-guarded)
+    "submit_plan",  # Submit a plan before executing in plan_mode
+    "verify_task",  # Pass/fail a task in the verify gate (reviewer-guarded)
 }
 
 # All tools available to leader. Dispatch-invariant: the leader's tool *names*

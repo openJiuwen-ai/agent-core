@@ -17,22 +17,18 @@ async def test_org_db_context_creates_static_tables():
     async with db.engine.connect() as conn:
         table_names = await conn.run_sync(lambda sync_conn: set(inspect(sync_conn).get_table_names()))
         message_columns = await conn.run_sync(
-            lambda sync_conn: {
-                column["name"]
-                for column in inspect(sync_conn).get_columns("org_leader_message")
-            }
+            lambda sync_conn: {column["name"] for column in inspect(sync_conn).get_columns("org_leader_message")}
         )
         receipt_columns = await conn.run_sync(
             lambda sync_conn: {
-                column["name"]
-                for column in inspect(sync_conn).get_columns("org_leader_message_receipt")
+                column["name"] for column in inspect(sync_conn).get_columns("org_leader_message_receipt")
             }
         )
         org_task_columns = await conn.run_sync(
             lambda sync_conn: {col["name"] for col in inspect(sync_conn).get_columns("org_task")}
         )
     assert set(ORG_STATIC_TABLE_NAMES).issubset(table_names)
-    assert "org_summary_execution" not in table_names
+    assert {"org_summary_team", "org_summary_execution"}.issubset(table_names)
     assert "read_at" not in message_columns
     assert "read_at" not in receipt_columns
     assert {

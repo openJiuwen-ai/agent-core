@@ -208,7 +208,6 @@ async def test_policy_snapshot_and_exclusions(lifecycle):
     assert (await create(manager, "new")).task.unclaimed.deadline_at == clock[0] + 20_000
     assert (await manager.task_pool.get_task(task.task_id)).unclaimed.deadline_at == clock[0] + 10_000
     assert (await create(manager, "delegated", delegated_to_team_id="worker")).task.unclaimed is None
-    assert (await create(manager, "summary", task_type="organization.summary")).task.unclaimed is None
     client = await manager.task_pool.create_task(
         title="Client task",
         description="root",
