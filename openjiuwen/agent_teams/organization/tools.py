@@ -423,7 +423,11 @@ class OrgCreateTaskTool(_OrgLeaderTool):
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_create_task",
-            description="Create an organization task. Use parent_task_id for child tasks; root_task_id is derived.",
+            description=(
+                "Create an organization task. required_capabilities is required and must contain at least "
+                "one non-empty capability label, for example ['analysis'] or ['writing']. Use parent_task_id "
+                "for child tasks; root_task_id is derived."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -435,7 +439,15 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "parent_task_id": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "required_capabilities": {"type": "array", "items": {"type": "string"}},
+                "required_capabilities": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string"},
+                    "description": (
+                        "Required. Provide at least one non-empty capability label that an eligible Team has, "
+                        "for example ['analysis'], ['writing'], or ['summary']."
+                    ),
+                },
                 "output_spec": {"type": "object"},
                 "metadata": {"type": "object"},
                 "repairs_task_id": {
@@ -959,7 +971,11 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
         """Build the leader tool with the runtime needed to lazily launch the shared team."""
         super().__init__(
             name="org_create_summary_execution",
-            description="Create the one Summary Team execution for the current claimed root task.",
+            description=(
+                "Create the one Summary Team execution for a claimed root task that already selected "
+                "SUMMARY_TEAM aggregation. Do not use this tool for HIERARCHICAL roots; their Root Leader "
+                "must integrate accepted child outputs and complete the root directly."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -969,7 +985,10 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
         self.card.input_params = {
             "type": "object",
             "properties": {
-                "root_task_id": {"type": "string"},
+                "root_task_id": {
+                    "type": "string",
+                    "description": "A claimed root task whose aggregation mode is SUMMARY_TEAM.",
+                },
                 "task_id": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},

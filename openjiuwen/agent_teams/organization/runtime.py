@@ -71,13 +71,21 @@ _ORG_COLLABORATION_PROMPT = {
         "## Team Organization 协作记录\n"
         "当跨 Team 依赖需要确认 API 契约、输入输出、验收结论或明确阻塞项时，使用 "
         "org_send_leader_message 向相关 leader 发送简短、可执行的消息。不要用它发送例行状态，"
-        "也不要用它替代 task pool 的认领、完成和评审操作。"
+        "也不要用它替代 task pool 的认领、完成和评审操作。\n"
+        "对于已委派给其他 Team 的直接子任务，DELEGATED、CLAIMED 和 IN_PROGRESS 均表示对方 "
+        "正在负责处理；暂未出现 output_context 或 output_abstract 不代表失败。不得重新委派、"
+        "认领、启动、完成该任务，也不得为绕过等待创建内容重复的替代子任务。结束当前回合并等待 "
+        "完成事件；只有 FAILED、REJECTED 或 NEEDS_REVISION 时，才按既有修复流程创建修复子任务。"
     ),
     "en": (
         "## Team Organization collaboration record\n"
         "When a cross-team dependency needs an API-contract, input/output, acceptance, or concrete "
         "blocker confirmation, send a short actionable org_send_leader_message to the relevant leader. "
-        "Do not use it for routine status updates or instead of task-pool claim, completion, and review operations."
+        "Do not use it for routine status updates or instead of task-pool claim, completion, and review operations.\n"
+        "For a direct child delegated to another Team, DELEGATED, CLAIMED, and IN_PROGRESS mean that Team "
+        "owns its execution; missing output does not mean failure. Do not re-delegate, claim, start, or complete "
+        "it, and do not create a duplicate replacement merely to bypass waiting. End the current turn and wait "
+        "for its completion event. Create a repair child only after FAILED, REJECTED, or NEEDS_REVISION."
     ),
 }
 
@@ -1137,14 +1145,29 @@ class OrganizationRuntimeManager:
                 return
             if isinstance(event, OrgTaskCompletedEvent):
                 # Completion is a second durable opportunity to claim matching
-                # OPEN tasks. Parent-team review wake is driven by
-                # OrgTaskReviewRequestedEvent so it aligns with PENDING review.
+                # OPEN tasks and wake a parent review if its separate review
+                # event was not delivered.
                 await self._schedule_matching_open_claims(
                     manager=manager,
                     team_id=backend.team_name,
                     session_id=session_id,
                     capabilities=capabilities,
                     completed_task_id=event.task_id,
+                )
+                task = await manager.task_pool.get_task(event.task_id)
+                if task is None or not task.parent_task_id:
+                    return
+                if task.created_by.team_id != backend.team_name:
+                    return
+                review = await manager.task_pool.get_task_review(event.task_id)
+                if review is None or review.review_status is not OrgTaskReviewStatus.PENDING:
+                    return
+                self._schedule_parent_review_turn(
+                    team_id=backend.team_name,
+                    session_id=session_id,
+                    child_task_id=event.task_id,
+                    parent_task_id=task.parent_task_id,
+                    organization_id=manager.organization_id,
                 )
                 return
             if isinstance(event, OrgTaskFailedEvent):
@@ -1393,7 +1416,11 @@ class OrganizationRuntimeManager:
             "Use only those bound, accepted source outputs. Do NOT create child tasks, delegate, "
             "claim, review, or modify any source task. Delegate only the two internal analysis/drafting "
             f"tasks to the fixed Summary Team teammates and prefix their internal task titles with {execution_id}, "
-            "then produce the final user-facing result. "
+            "then produce the final user-facing result. After those two internal tasks report, immediately call "
+            "org_summary_complete in the same leader turn. Internal task completion, Team idle, or Team pause is "
+            "not Summary Task completion: do not start another internal task cycle, wait, or poll instead. "
+            "A Root Leader message may add delivery requirements, but it does not change this Team's two-tool "
+            "protocol or authorize access to other organization tasks. "
             "Complete this Summary Task with org_summary_complete, placing the deliverable in "
             "output_context.description "
             "and a concise summary in output_abstract; completing it also completes the root task."
@@ -1459,6 +1486,9 @@ class OrganizationRuntimeManager:
             f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, acceptance "
             "criteria, and only the capabilities it needs; do not set delegated_to_team_id. Track children "
             "with org_view_child_tasks and wait until every direct child is completed and accepted. If the "
+            "child is delegated to another Team and is DELEGATED, CLAIMED, or IN_PROGRESS, it is still being "
+            "executed: do not re-delegate it or create a duplicate replacement; end this turn and wait for "
+            "its completion event. "
             "root uses HIERARCHICAL, integrate those accepted outputs and complete the root yourself with "
             "org_update_task(action='complete'). If the root uses SUMMARY_TEAM, include every contribution "
             "(including work your own Team performs) as a direct child, then call "

@@ -160,6 +160,7 @@ async def test_leader_inbox_tools_get_list_and_ack(org_facade: TeamOrganizationM
         "org_get_leader_message",
         "org_list_leader_messages",
         "org_ack_leader_message",
+        "org_create_summary_execution",
     }.issubset(LEADER_ONLY_TOOLS)
 
     listed = await tools["org_list_leader_messages"].invoke({"unread_only": True})

@@ -2500,6 +2500,8 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     assert agents["team-a"].team_backend.org_task_manager.organization_id == "org-active"
     owner_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_owner_lifecycle"]
     assert "org_dissolve_organization" in owner_prompt.content["en"]
+    collaboration_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_collaboration"]
+    assert "do not create a duplicate replacement" in collaboration_prompt.content["en"]
     owner_tools = {tool.card.name: tool for tool in agents["team-a"].harness.tools}
     owner_tool_names = set(owner_tools)
     assert {"org_create_organization", "org_invite_team", "org_view_tasks"} <= owner_tool_names
@@ -2703,6 +2705,8 @@ async def test_summary_execution_prompt_requires_source_aggregation_only(active_
     assert "execution_id=execution-1" in prompts[0]
     assert "Do NOT create child tasks" in prompts[0]
     assert "org_summary_complete" in prompts[0]
+    assert "not Summary Task completion" in prompts[0]
+    assert "does not change this Team's two-tool protocol" in prompts[0]
     assert "org_create_task(parent_task_id=" not in prompts[0]
 
     runtime.schedule_summary_execution(
@@ -2818,6 +2822,8 @@ async def test_summary_execution_tool_uses_fresh_task_status_for_initial_schedul
         runtime_manager=runtime,
         session_id="session-summary",
     )
+    assert "Do not use this tool for HIERARCHICAL roots" in tool.card.description
+    assert "SUMMARY_TEAM" in tool.card.input_params["properties"]["root_task_id"]["description"]
 
     result = await tool.invoke(
         {
@@ -3241,6 +3247,38 @@ async def test_completed_child_does_not_schedule_parent_review_turn(active_organ
         ),
     )
     assert turns == []
+
+
+@pytest.mark.asyncio
+async def test_completed_child_wakes_pending_parent_review(active_organization_runtime):
+    """Recover the parent review wake when only the completion event arrives."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-completed-review-wake"
+    manager, leader = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    await _create_claimed_parent(manager, org_id=org_id, parent_id="parent")
+    await _create_claimed_child(manager, creator=leader, parent_id="parent", child_id="child")
+    assert (
+        await manager.complete_task(
+            task_id="child",
+            team_id="team-b",
+            output_abstract="Completed child output.",
+        )
+    ).ok
+
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents,
+        session_id,
+        org_id,
+        OrgTaskCompletedEvent(
+            organization_id=org_id,
+            team_id="team-b",
+            task_id="child",
+        ),
+    )
+
+    assert turns[0]["team_name"] == "team-a"
+    assert "org_review_task" in turns[0]["inputs"]["query"]
 
 
 @pytest.mark.asyncio

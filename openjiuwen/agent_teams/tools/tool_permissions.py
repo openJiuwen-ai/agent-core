@@ -44,6 +44,8 @@ LEADER_ONLY_TOOLS: set[str] = {
     "org_view_child_tasks",
     "org_view_pending_reviews",
     "org_review_task",
+    # Root Leader creates a Summary Execution after accepted sources are ready.
+    "org_create_summary_execution",
 }
 
 # Tools that only members can use
