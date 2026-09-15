@@ -358,6 +358,10 @@ class AbilityManager:
         """Parse tool-call arguments and return any repaired JSON string."""
         if not isinstance(arguments, str):
             return arguments, None
+        # Models sometimes emit todo_list (and other no-arg tools) with "" instead of "{}".
+        # Treat blank as empty object so schema-valid zero-arg calls do not fail JSON parse.
+        if not arguments.strip():
+            return {}, None
         try:
             return json.loads(arguments), None
         except (json.JSONDecodeError, AttributeError, TypeError) as exc:
