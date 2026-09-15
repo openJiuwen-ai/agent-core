@@ -1,9 +1,15 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Skill prompt section for DeepAgent (used by SkillUseRail)."""
+"""Skill prompt section for DeepAgent, and the shared rendering of one skill.
+
+SkillUseRail builds the section from here; the skill tools render individual
+skills through the same helpers so a skill is described the same way
+wherever the model meets it.
+"""
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional
+from pathlib import Path
+from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Union
 
 from openjiuwen.harness.prompts.sections import SectionName
 
@@ -43,14 +49,22 @@ SKILL_RAIL_LIST_SKILL_SYSTEM_PROMPT: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 SKILL_RAIL_ALL_MODE_HEADER_CN = (
     "# 技能\n\n"
-    "选择与任务最相关的技能，使用技能前，调用 `skill_tool` 获取该技能的完整 `SKILL.md`。\n\n"
+    "选择与任务最相关的技能，使用技能前，调用 `skill_tool` 获取该技能的完整 `SKILL.md`。\n"
+    "每个技能下方的 `Directory:` 是该技能目录的绝对路径。技能随附的脚本、参考文档等文件"
+    "均位于该目录下：将 `SKILL.md` 中的相对路径拼接到该绝对路径之后，再用文件系统工具读取或执行，"
+    "不要按裸文件名搜索。\n\n"
     "当前可用技能：\n\n"
 )
 
 SKILL_RAIL_ALL_MODE_HEADER_EN = (
     "# Skills\n\n"
     "Select the skill most relevant to the task. Before using a skill, call "
-    "`skill_tool` to retrieve its complete `SKILL.md`.\n\n"
+    "`skill_tool` to retrieve its complete `SKILL.md`.\n"
+    "The `Directory:` line under each skill is the absolute path of that skill's own "
+    "directory. Files bundled with a skill (scripts, reference documents, templates) live "
+    "under it: join the relative paths used in `SKILL.md` onto that absolute path before "
+    "reading or executing them with the filesystem tools, instead of searching for bare "
+    "file names.\n\n"
     "Currently available skills:\n\n"
 )
 
@@ -111,6 +125,26 @@ SKILL_RAIL_NO_SKILL_PROMPT: Dict[str, str] = {
 
 
 # ---------------------------------------------------------------------------
+# Skill directory normalization
+# ---------------------------------------------------------------------------
+def resolve_skill_directory(directory: Union[str, Path, None]) -> str:
+    """Normalize a skill directory into the absolute path rendered to the model.
+
+    Returns an empty string when there is no directory to render. ``Path("")``
+    and ``Path(".")`` both resolve to the process working directory, which the
+    model cannot tell apart from a real skill directory and would join relative
+    paths onto, so neither is rendered.
+    """
+    raw = str(directory or "").strip()
+    if not raw or raw == ".":
+        return ""
+    try:
+        return str(Path(raw).resolve())
+    except (OSError, ValueError):
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # Helper functions (same signatures, now accept language)
 # ---------------------------------------------------------------------------
 def build_skill_line(
@@ -119,12 +153,19 @@ def build_skill_line(
     skill_name: str,
     description: str,
     skill_md_path: Optional[str] = None,
+    skill_directory: Optional[str] = None,
     language: str = "cn",
 ) -> str:
-    """Build one rendered skill line."""
+    """Build one rendered skill line.
+
+    ``skill_directory`` renders the absolute path of the skill's own directory.
+    Without it the model has no way to resolve the relative paths a ``SKILL.md``
+    uses for its bundled scripts and reference documents.
+    """
     separator = "：" if language == "cn" else ": "
     return (
         f"{index}. `{skill_name}`{separator}{description}"
+        + (f"\n   Directory: {skill_directory}" if skill_directory else "")
         + (f"\n   Path: {skill_md_path}" if skill_md_path else "")
     )
 
