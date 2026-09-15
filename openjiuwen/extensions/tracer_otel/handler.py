@@ -53,7 +53,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ERROR,
     OJ_INNER_ERROR,
     OJ_INVOKE_ID,
-    OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -323,9 +322,6 @@ class OtelAgentHandler(TraceExtAgentHandler):
         name_val = agent_span.name or (instance_info.get("class_name", "") if instance_info else "")
         otel_span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
         otel_span.set_attribute(OJ_AGENT_NAME, name_val)
-        meta_data = agent_span.meta_data or instance_info
-        if meta_data is not None:
-            otel_span.set_attribute(OJ_META_DATA, _serialize(meta_data))
 
     # ================================================================
     # LLM events — SpanKind.CLIENT, gen_ai.* attributes
@@ -350,8 +346,6 @@ class OtelAgentHandler(TraceExtAgentHandler):
             name_val = span.name or instance_info.get("class_name", "")
             state.span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
             state.span.set_attribute(OJ_AGENT_NAME, name_val)
-            meta_data = span.meta_data or instance_info
-            state.span.set_attribute(OJ_META_DATA, _serialize(meta_data))
             if inputs is not None:
                 instructions, messages = _standard_messages(inputs, default_role="user")
                 if instructions:
