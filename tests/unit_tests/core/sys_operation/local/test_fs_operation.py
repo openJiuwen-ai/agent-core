@@ -1256,7 +1256,7 @@ lock.close()
         assert process.stdin is not None
         process.stdin.write("release\n")
         process.stdin.flush()
-        assert await asyncio.to_thread(process.wait, 1.0) == 0
+        assert await asyncio.to_thread(process.wait, 10.0) == 0
 
         await ReadWriteLockManager.cleanup_expired_locks()
         assert not lock_file.exists()

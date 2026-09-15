@@ -2,6 +2,14 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Evolution rail implementations and their historical harness exports."""
 
+from openjiuwen.agent_evolving.ttse import (
+    SignalBasedSuccessDetector,
+    SuccessDetector,
+    SuccessOutcome,
+    TrajectoryErrorSuccessDetector,
+    TTSEConfig,
+    TTSERecordStore,
+)
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -17,7 +25,9 @@ from openjiuwen.harness.rails.evolution.commands import (
 from openjiuwen.harness.rails.evolution.configuration import (
     configure_skill_evolution,
     configure_skill_evolution_runtime,
+    configure_ttse_evolution,
     unconfigure_skill_evolution,
+    unconfigure_ttse_evolution,
 )
 from openjiuwen.harness.rails.evolution.context_evolution_rail import (
     ContextEvolutionRail,
@@ -52,6 +62,7 @@ from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
 )
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
+from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
@@ -92,4 +103,13 @@ __all__ = [
     "ensure_evolution_review_agent_config",
     "remove_evolution_review_agent_config",
     "unconfigure_skill_evolution",
+    "configure_ttse_evolution",
+    "unconfigure_ttse_evolution",
+    "TTSEConfig",
+    "TTSERail",
+    "TTSERecordStore",
+    "SuccessDetector",
+    "SuccessOutcome",
+    "TrajectoryErrorSuccessDetector",
+    "SignalBasedSuccessDetector",
 ]
