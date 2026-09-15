@@ -9,7 +9,10 @@ from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.evolution import (
     configure_skill_evolution,
     configure_skill_evolution_runtime,
+    configure_ttse_evolution,
+    configure_ttse_evolution_runtime,
     unconfigure_skill_evolution,
+    unconfigure_ttse_evolution,
     ContextEvolutionRail,
     EvolutionInterruptRail,
     EvolutionRail,
@@ -21,6 +24,7 @@ from openjiuwen.harness.rails.evolution import (
     TeamInsightBuffer,
     TeamInsightEntry,
     TrajectoryRail,
+    TTSERail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.llm_retry_rail import LLMRetryRail
@@ -112,8 +116,12 @@ __all__ = [
     "TeamSkillRail",
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",
+    "configure_ttse_evolution",
+    "configure_ttse_evolution_runtime",
     "unconfigure_skill_evolution",
+    "unconfigure_ttse_evolution",
     "TrajectoryRail",
+    "TTSERail",
     "VerificationContractRail",
     "VerificationRail",
 ]
