@@ -66,7 +66,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
             return self._failure_result(execution_result.error)
         if not output_dir:
             raise EvaluationInfrastructureError("llm_as_judge requires a case output directory")
-        case_dir = Path(output_dir).resolve()
+        case_dir = await asyncio.to_thread(Path(output_dir).resolve)
         judge_dir = case_dir / "judge" / f"evaluation_{uuid.uuid4().hex[:12]}"
         workspace = judge_dir / "evidence"
         behaviors, forbidden = scoring_contract(case)
@@ -80,14 +80,13 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 behaviors=behaviors,
                 forbidden=forbidden,
             )
-            async with asyncio.timeout(self._config.judge_timeout_sec):
-                return await self._evaluate(
-                    workspace,
-                    judge_dir,
-                    behaviors,
-                    forbidden,
-                    penalty_mode=case.get("reference", {}).get("penalty_mode", "ceiling"),
-                )
+            return await self._evaluate(
+                workspace,
+                judge_dir,
+                behaviors,
+                forbidden,
+                penalty_mode=case.get("reference", {}).get("penalty_mode", "ceiling"),
+            )
         except EvaluationInfrastructureError as exc:
             write_judge_json(judge_dir / "error.json", {"error_type": type(exc).__name__, "message": str(exc)})
             raise
@@ -104,12 +103,34 @@ class LlmAsJudgeJudger(EvaluationJudger):
         *,
         penalty_mode: str = "ceiling",
     ) -> JudgeResult:
-        prompt = "Read request.json and the relevant evidence files, then return the complete evaluation JSON."
+        resolved_workspace = await asyncio.to_thread(workspace.resolve)
+        prompt = (
+            f"Evidence workspace: {resolved_workspace}. "
+            f"Read this exact request file: {resolved_workspace / 'request.json'}. "
+            "Do not assume /workspace or /request.json. Read relevant evidence files, "
+            "then return exactly one JSON object using the system schema, without surrounding text or Markdown. "
+            "Put explanations and evidence inside its fields. Score each supplied ID exactly once; "
+            "use [] when no forbidden IDs are supplied.\n"
+            + json.dumps({
+                "behavior_ids": [item["id"] for item in behaviors],
+                "forbidden_ids": [item["id"] for item in forbidden],
+            }, ensure_ascii=False)
+            + "\nDo not invent evidence or change a supported score to satisfy the format."
+        )
         # One format/classification retry on frozen evidence, never best-of scoring.
         for attempt in range(2):
 
             async def invoke(current_prompt: str = prompt) -> str:
-                return await run_judge_agent(self._config, workspace, current_prompt, judge_dir / "tool_events.jsonl")
+                # Each transient retry receives its own deadline on the same frozen evidence.
+                try:
+                    async with asyncio.timeout(self._config.judge_timeout_sec):
+                        return await run_judge_agent(
+                            self._config, workspace, current_prompt, judge_dir / "tool_events.jsonl",
+                        )
+                except TimeoutError as exc:
+                    raise TimeoutError(
+                        f"Judge attempt timed out after {self._config.judge_timeout_sec}s"
+                    ) from exc
 
             raw = await run_model_call_with_retries(
                 invoke,
