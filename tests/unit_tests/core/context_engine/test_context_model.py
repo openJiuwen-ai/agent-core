@@ -11,6 +11,9 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.context_engine import ContextEngine, ContextEngineConfig, ContextWindow, ModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+from openjiuwen.core.context_engine.processor.forked.compressor.support.util import (
+    count_usage_tokens_with_tail,
+)
 from openjiuwen.core.foundation.llm import (
     AssistantMessage,
     BaseMessage,
@@ -449,9 +452,22 @@ class TestModelContext:
         assert stat.tool_tokens > 0
 
     @pytest.mark.asyncio
-    async def test_appending_tail_invalidates_assistant_usage(self):
+    async def test_appending_tail_preserves_assistant_usage_for_tail_estimation(self):
         assistant = AssistantMessage(content="answer", usage_metadata=UsageMetadata(total_tokens=100))
         context = await self.create_context([UserMessage(content="question"), assistant])
+
+        await context.add_messages(UserMessage(content="x" * 30))
+
+        assert ContextUtils.has_valid_usage_metadata(assistant) is True
+        assert count_usage_tokens_with_tail(context.get_messages()) == 110
+
+    @pytest.mark.asyncio
+    async def test_appending_after_retained_window_rollover_invalidates_usage(self):
+        assistant = AssistantMessage(content="answer", usage_metadata=UsageMetadata(total_tokens=100))
+        context = await self.create_context(
+            [UserMessage(content="question"), assistant],
+            max_context_message_num=2,
+        )
 
         await context.add_messages(UserMessage(content="next question"))
 
