@@ -19,6 +19,7 @@ import re
 import shutil
 import stat
 import tempfile
+import threading
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -64,6 +65,7 @@ from openjiuwen.harness.personal_context.source_metadata import (
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+_PIPELINE_CANCEL_GRACE_SECONDS = 1.0
 _LEGACY_AGENT_BASELINE_SEGMENT = re.compile(r"^\.personal-context-agent-baseline-[A-Za-z0-9_-]+$")
 _MARKDOWN_ANGLE_DESTINATION = r"""<[^<>\r\n]+>(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'|\([^)]*\)))?"""
 _MARKDOWN_BARE_DESTINATION = r"(?:[^()\r\n]|\([^()\r\n]*\))+"
@@ -785,11 +787,31 @@ def _sparse_semantic_scores(
     if not query:
         return [0.0] * len(corpus)
     comparison_corpus = [*corpus, query]
-    self_score = max(_bm25_raw(query, query, comparison_corpus), 1e-9)
+    lengths = [sum(item.values()) for item in comparison_corpus]
+    average_length = max(sum(lengths) / len(lengths), 1.0)
+    document_frequencies = {term: sum(1 for item in comparison_corpus if item.get(term, 0.0) > 0) for term in query}
+    inverses = {
+        term: math.log(1.0 + (len(comparison_corpus) - document_frequency + 0.5) / (document_frequency + 0.5))
+        for term, document_frequency in document_frequencies.items()
+    }
+
+    def bm25(document: Mapping[str, float]) -> float:
+        document_length = sum(document.values())
+        length_normalization = 1.0 - _BM25_B + _BM25_B * document_length / average_length
+        score = 0.0
+        for term, query_weight in query.items():
+            frequency = document.get(term, 0.0)
+            if frequency <= 0:
+                continue
+            denominator = frequency + _BM25_K1 * length_normalization
+            score += query_weight * inverses[term] * frequency * (_BM25_K1 + 1.0) / denominator
+        return score
+
+    self_score = max(bm25(query), 1e-9)
     query_weight = max(sum(query.values()), 1e-9)
     scores: list[float] = []
     for document in corpus:
-        bm25 = min(1.0, _bm25_raw(query, document, comparison_corpus) / self_score)
+        normalized_bm25 = min(1.0, bm25(document) / self_score)
         overlap = sum(min(weight, document.get(term, 0.0)) for term, weight in query.items()) / query_weight
         shared_phrase = max(
             (
@@ -799,7 +821,7 @@ def _sparse_semantic_scores(
             ),
             default=0.0,
         )
-        scores.append(min(1.0, 0.50 * bm25 + 0.25 * overlap + 0.25 * shared_phrase))
+        scores.append(min(1.0, 0.50 * normalized_bm25 + 0.25 * overlap + 0.25 * shared_phrase))
     return scores
 
 
@@ -972,6 +994,50 @@ async def _cancel_safe_to_thread(
             task.result()
         raise cancellation
     return task.result()
+
+
+_COOPERATIVE_THREAD_CANCELLATIONS: dict[asyncio.Task[object], threading.Event] = {}
+
+
+def _request_cooperative_thread_cancel(task: asyncio.Task[None]) -> None:
+    event = _COOPERATIVE_THREAD_CANCELLATIONS.get(cast(asyncio.Task[object], task))
+    if event is not None:
+        event.set()
+
+
+def _raise_if_thread_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
+    if cancel_requested is not None and cancel_requested():
+        raise asyncio.CancelledError
+
+
+async def _cancel_cooperative_to_thread(function: Callable[[Callable[[], bool]], _T], /) -> _T:
+    """Keep the event loop responsive while allowing read-only work to stop safely."""
+
+    cancel_requested = threading.Event()
+    owner = cast(asyncio.Task[object] | None, asyncio.current_task())
+    if owner is not None:
+        _COOPERATIVE_THREAD_CANCELLATIONS[owner] = cancel_requested
+    task = asyncio.create_task(asyncio.to_thread(function, cancel_requested.is_set))
+    cancellation: asyncio.CancelledError | None = None
+    try:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if cancellation is None:
+                    cancellation = error
+                cancel_requested.set()
+            except BaseException:
+                if cancellation is None:
+                    raise
+        if cancellation is not None:
+            with contextlib.suppress(BaseException):
+                task.result()
+            raise cancellation
+        return task.result()
+    finally:
+        if owner is not None and _COOPERATIVE_THREAD_CANCELLATIONS.get(owner) is cancel_requested:
+            _COOPERATIVE_THREAD_CANCELLATIONS.pop(owner, None)
 
 
 def _digest(value: str) -> str:
@@ -1193,7 +1259,14 @@ def _copy_and_publish_tree(
     for relative in [*ordinary_files, *nested_descriptions]:
         source = candidate / relative
         destination = target / relative
-        _atomic_write(destination, _extended_path(source).read_bytes())
+        source_data = _extended_path(source).read_bytes()
+        if _path_is_file(destination):
+            try:
+                if _extended_path(destination).read_bytes() == source_data:
+                    continue
+            except OSError:
+                pass
+        _atomic_write(destination, source_data)
     return target_files - candidate_files
 
 
@@ -1204,6 +1277,20 @@ def _remove_published_tree_entries(target: Path, relatives: set[str]) -> None:
     for relative in sorted(relatives):
         _remove_tree_entry(target / relative)
     _remove_empty_directories(target)
+
+
+def _commit_context_tree(candidate: Path, target: Path) -> None:
+    """Publish one validated candidate as a cancellation-safe commit unit."""
+
+    obsolete_context_files = _copy_and_publish_tree(
+        candidate,
+        target,
+        skip_relative="description.md",
+    )
+    description = candidate / "description.md"
+    _atomic_write(target / "description.md", description.read_bytes())
+    _remove_published_tree_entries(target, obsolete_context_files)
+    _assert_no_symlinks(target)
 
 
 def _split_blocks(markdown: str) -> list[str]:
@@ -1691,7 +1778,12 @@ def _source_distribution_for_id(source_root: Path | None, source_id: str) -> dic
 
 
 def _page_source_distribution(
-    page: Path, *, context_root: Path, source_root: Path, alias_targets: Mapping[str, str] | None = None
+    page: Path,
+    *,
+    context_root: Path,
+    source_root: Path,
+    alias_targets: Mapping[str, str] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[tuple[str, str], float]:
     if not source_root.exists():
         return {}
@@ -1702,19 +1794,41 @@ def _page_source_distribution(
             final_context_root=source_root.parent / "context",
             source_root=source_root,
             alias_targets=alias_targets,
+            cancel_requested=cancel_requested,
         )
     )
 
 
 def _directory_source_distribution(
-    directory: Path, *, context_root: Path, source_root: Path
+    directory: Path,
+    *,
+    context_root: Path,
+    source_root: Path,
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> dict[tuple[str, str], float]:
-    return _mean_source_distribution(
-        [
-            _page_source_distribution(page, context_root=context_root, source_root=source_root)
-            for page in _context_ordinary_pages(directory)
-        ]
-    )
+    values: list[_SourceDistribution] = []
+    for page in _context_ordinary_pages(directory):
+        _raise_if_thread_cancelled(cancel_requested)
+        if page_source_cache is None:
+            distribution = _page_source_distribution(
+                page,
+                context_root=context_root,
+                source_root=source_root,
+                cancel_requested=cancel_requested,
+            )
+        else:
+            distribution = page_source_cache.get(page)
+            if distribution is None:
+                distribution = _page_source_distribution(
+                    page,
+                    context_root=context_root,
+                    source_root=source_root,
+                    cancel_requested=cancel_requested,
+                )
+                page_source_cache[page] = distribution
+        values.append(distribution)
+    return _mean_source_distribution(values)
 
 
 def _rank_with_source_prior(
@@ -1724,23 +1838,38 @@ def _rank_with_source_prior(
     query_source: _SourceDistribution,
     context_root: Path | None,
     source_root: Path | None,
+    directory_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[tuple[int, float]]:
     if context_root is None or source_root is None or not query_source:
         return list(ranked)
-    return sorted(
-        (
-            (
-                index,
-                _source_aware_score(
-                    score,
-                    query_source,
-                    _directory_source_distribution(
-                        directories[index], context_root=context_root, source_root=source_root
-                    ),
-                ),
+    rescored: list[tuple[int, float]] = []
+    for index, score in ranked:
+        _raise_if_thread_cancelled(cancel_requested)
+        directory = directories[index]
+        if directory_source_cache is None:
+            source_distribution = _directory_source_distribution(
+                directory,
+                context_root=context_root,
+                source_root=source_root,
+                page_source_cache=page_source_cache,
+                cancel_requested=cancel_requested,
             )
-            for index, score in ranked
-        ),
+        else:
+            source_distribution = directory_source_cache.get(directory)
+            if source_distribution is None:
+                source_distribution = _directory_source_distribution(
+                    directory,
+                    context_root=context_root,
+                    source_root=source_root,
+                    page_source_cache=page_source_cache,
+                    cancel_requested=cancel_requested,
+                )
+                directory_source_cache[directory] = source_distribution
+        rescored.append((index, _source_aware_score(score, query_source, source_distribution)))
+    return sorted(
+        rescored,
         key=lambda item: (-item[1], item[0]),
     )
 
@@ -1752,12 +1881,34 @@ def _accepted_semantic_directory(
     query_source: _SourceDistribution | None = None,
     context_root: Path | None = None,
     source_root: Path | None = None,
+    directory_fields_cache: dict[Path, dict[str, float]] | None = None,
+    directory_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> Path | None:
     if not directories:
         return None
-    ranked = _rank_semantic_candidates(query, [_directory_semantic_fields(path) for path in directories])
+    fields: list[dict[str, float]] = []
+    for path in directories:
+        _raise_if_thread_cancelled(cancel_requested)
+        if directory_fields_cache is None:
+            value = _directory_semantic_fields(path)
+        else:
+            value = directory_fields_cache.get(path)
+            if value is None:
+                value = _directory_semantic_fields(path)
+                directory_fields_cache[path] = value
+        fields.append(value)
+    ranked = _rank_semantic_candidates(query, fields)
     ranked = _rank_with_source_prior(
-        ranked, directories, query_source=query_source or {}, context_root=context_root, source_root=source_root
+        ranked,
+        directories,
+        query_source=query_source or {},
+        context_root=context_root,
+        source_root=source_root,
+        directory_source_cache=directory_source_cache,
+        page_source_cache=page_source_cache,
+        cancel_requested=cancel_requested,
     )
     accepted = _accepted_directory_rank(ranked)
     return directories[accepted] if accepted is not None else None
@@ -1783,8 +1934,17 @@ async def _accepted_semantic_directory_hybrid(
         candidate_texts=[_directory_semantic_text(path) for path in directories],
         embed_texts=embed_texts,
     )
-    ranked = _rank_with_source_prior(
-        ranked, directories, query_source=query_source or {}, context_root=context_root, source_root=source_root
+    ranked = await _cancel_cooperative_to_thread(
+        lambda cancel_requested: _rank_with_source_prior(
+            ranked,
+            directories,
+            query_source=query_source or {},
+            context_root=context_root,
+            source_root=source_root,
+            directory_source_cache={},
+            page_source_cache={},
+            cancel_requested=cancel_requested,
+        )
     )
     accepted = _accepted_directory_rank(ranked)
     return directories[accepted] if accepted is not None else None
@@ -1905,7 +2065,14 @@ def _select_rules_directory(
     max_subdirectories: int | None = None,
     source_root: Path | None = None,
     provider_neutral_fallback: bool = False,
+    cancel_requested: Callable[[], bool] | None = None,
+    directory_fields_cache: dict[Path, dict[str, float]] | None = None,
+    directory_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    use_source_prior: bool = True,
+    placement_directories: Sequence[Path] | None = None,
 ) -> Path:
+    _raise_if_thread_cancelled(cancel_requested)
     provider_neutral_label: str | None = None
     if source_root is not None:
         partition, provider_neutral_label, _reason = _prospective_rules_page_partition(
@@ -1931,10 +2098,25 @@ def _select_rules_directory(
     else:
         title, headings, preview = _document_semantic_parts(document)
     query = _semantic_fields(title, headings, preview)
-    directories = _semantic_context_directories(context_root)
-    query_source = _source_distribution_for_id(source_root, source_id)
+    directories = (
+        list(placement_directories)
+        if placement_directories is not None
+        else _semantic_context_directories(context_root)
+    )
+    query_source = _source_distribution_for_id(source_root, source_id) if use_source_prior else {}
+    effective_fields_cache = directory_fields_cache if directory_fields_cache is not None else {}
+    effective_directory_source_cache = directory_source_cache if directory_source_cache is not None else {}
+    effective_page_source_cache = page_source_cache if page_source_cache is not None else {}
     full_accepted = _accepted_semantic_directory(
-        query, directories, query_source=query_source, context_root=context_root, source_root=source_root
+        query,
+        directories,
+        query_source=query_source,
+        context_root=context_root,
+        source_root=source_root,
+        directory_fields_cache=effective_fields_cache,
+        directory_source_cache=effective_directory_source_cache,
+        page_source_cache=effective_page_source_cache,
+        cancel_requested=cancel_requested,
     )
     eligible_directories = (
         [directory for directory in directories if _directory_accepts_new_page(directory, max_pages=max_pages)]
@@ -1942,7 +2124,15 @@ def _select_rules_directory(
         else directories
     )
     accepted = _accepted_semantic_directory(
-        query, eligible_directories, query_source=query_source, context_root=context_root, source_root=source_root
+        query,
+        eligible_directories,
+        query_source=query_source,
+        context_root=context_root,
+        source_root=source_root,
+        directory_fields_cache=effective_fields_cache,
+        directory_source_cache=effective_directory_source_cache,
+        page_source_cache=effective_page_source_cache,
+        cancel_requested=cancel_requested,
     )
     if accepted is not None:
         return accepted
@@ -2000,18 +2190,31 @@ async def _select_rules_directory_hybrid(
     max_subdirectories: int | None = None,
     source_root: Path | None = None,
     provider_neutral_fallback: bool = False,
+    directory_fields_cache: dict[Path, dict[str, float]] | None = None,
+    directory_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] | None = None,
+    use_source_prior: bool = True,
+    placement_directories: Sequence[Path] | None = None,
 ) -> Path:
     if embed_texts is None:
-        return _select_rules_directory(
-            context_root,
-            provider=provider,
-            document=document,
-            source_id=source_id,
-            run_time=run_time,
-            max_pages=max_pages,
-            max_subdirectories=max_subdirectories,
-            source_root=source_root,
-            provider_neutral_fallback=provider_neutral_fallback,
+        return await _cancel_cooperative_to_thread(
+            lambda cancel_requested: _select_rules_directory(
+                context_root,
+                provider=provider,
+                document=document,
+                source_id=source_id,
+                run_time=run_time,
+                max_pages=max_pages,
+                max_subdirectories=max_subdirectories,
+                source_root=source_root,
+                provider_neutral_fallback=provider_neutral_fallback,
+                cancel_requested=cancel_requested,
+                directory_fields_cache=directory_fields_cache,
+                directory_source_cache=directory_source_cache,
+                page_source_cache=page_source_cache,
+                use_source_prior=use_source_prior,
+                placement_directories=placement_directories,
+            )
         )
     provider_neutral_label: str | None = None
     if source_root is not None:
@@ -2039,13 +2242,17 @@ async def _select_rules_directory_hybrid(
         title, headings, preview = _document_semantic_parts(document)
     query = _semantic_fields(title, headings, preview)
     query_text = _semantic_embedding_text(title, headings, preview)
-    directories = _semantic_context_directories(context_root)
+    directories = (
+        list(placement_directories)
+        if placement_directories is not None
+        else _semantic_context_directories(context_root)
+    )
     accepted = await _accepted_semantic_directory_hybrid(
         query,
         query_text=query_text,
         directories=directories,
         embed_texts=embed_texts,
-        query_source=_source_distribution_for_id(source_root, source_id),
+        query_source=_source_distribution_for_id(source_root, source_id) if use_source_prior else {},
         context_root=context_root,
         source_root=source_root,
     )
@@ -2453,6 +2660,74 @@ def _render_related_document_selections(
     return changed
 
 
+def _related_block_targets_are_valid(
+    context_root: Path,
+    *,
+    page: Path,
+    markdown: str,
+    bounds: tuple[int, int],
+) -> bool:
+    begin, finish = bounds
+    reference_text = _markdown_reference_text(markdown[begin:finish])
+    raw_targets = _MARKDOWN_LINK.findall(reference_text)
+    if not raw_targets:
+        return False
+    page_relative = PurePosixPath(page.relative_to(context_root).as_posix())
+    for raw_target in raw_targets:
+        try:
+            classified = _classify_reference_target(
+                raw_target,
+                page_relative=page_relative,
+                context_root=context_root,
+                final_context_root=context_root,
+                source_root=context_root.parent / "source-meta",
+                error=_pipeline_error,
+            )
+        except BaseError:
+            return False
+        if classified is None or classified[0] != "context" or classified[1] == page_relative.as_posix():
+            return False
+    return True
+
+
+async def _retain_valid_related_documents(context_root: Path) -> set[str]:
+    """Keep existing related blocks whose Context targets still exist."""
+
+    _assert_no_symlinks(context_root)
+    changed: set[str] = set()
+    pages = sorted(
+        _managed_pages_by_source(context_root).values(),
+        key=lambda page: (
+            page.relative_to(context_root).as_posix().casefold(),
+            page.relative_to(context_root).as_posix(),
+        ),
+    )
+    for page in pages:
+        await asyncio.sleep(0)
+        try:
+            markdown = _extended_path(page).read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise _pipeline_error("Context page could not be read for related-document retention") from exc
+        bounds = _managed_block_bounds(markdown, start=_RELATED_START, end=_RELATED_END)
+        if bounds is None or _related_block_targets_are_valid(
+            context_root,
+            page=page,
+            markdown=markdown,
+            bounds=bounds,
+        ):
+            continue
+        updated = _replace_managed_block(
+            markdown,
+            start=_RELATED_START,
+            end=_RELATED_END,
+            body=None,
+            default_heading=page.stem,
+        )
+        _atomic_write(page, updated.encode("utf-8"))
+        changed.add(page.relative_to(context_root).as_posix())
+    return changed
+
+
 def _refresh_related_documents(context_root: Path) -> set[str]:
     """Recompute managed related-document blocks from the final candidate paths."""
 
@@ -2494,13 +2769,58 @@ def _refresh_related_documents(context_root: Path) -> set[str]:
     )
 
 
+async def _refresh_related_documents_cooperative(context_root: Path) -> set[str]:
+    """Refresh related pages while yielding between independent score calculations."""
+
+    _assert_no_symlinks(context_root)
+    pages = _related_context_pages(context_root)
+    relative_paths = [page.relative_to(context_root).as_posix() for page in pages]
+    fields: dict[str, dict[str, float]] = {}
+    for relative, page in zip(relative_paths, pages, strict=True):
+        fields[relative] = _related_page_fields(page)
+        await asyncio.sleep(0.001)
+    inverted: dict[str, list[str]] = {}
+    for relative in relative_paths:
+        for token in fields[relative]:
+            inverted.setdefault(token, []).append(relative)
+
+    selected_by_relative: dict[str, list[str]] = {}
+    for page in _managed_pages_by_source(context_root).values():
+        await asyncio.sleep(0.001)
+        relative = page.relative_to(context_root).as_posix()
+        query = fields.get(relative, {})
+        related_candidates = set()
+        for matched_token in query:
+            for matched_candidate in inverted.get(matched_token, ()):
+                if matched_candidate == relative:
+                    continue
+                related_candidates.add(matched_candidate)
+        candidate_relatives = sorted(
+            related_candidates,
+            key=lambda candidate: (candidate.casefold(), candidate),
+        )
+        candidate_fields = [fields[candidate] for candidate in candidate_relatives]
+        scores = _sparse_semantic_scores(query, candidate_fields)
+        ranked = sorted(
+            zip(candidate_relatives, scores, strict=True),
+            key=lambda item: (-item[1], item[0].casefold(), item[0]),
+        )
+        selected_by_relative[relative] = [candidate for candidate, score in ranked if score >= _RELATED_ACCEPT_SCORE][
+            :_RELATED_LIMIT
+        ]
+    return _render_related_document_selections(
+        context_root,
+        selected_by_relative=selected_by_relative,
+    )
+
+
 async def _refresh_related_documents_hybrid(
     context_root: Path,
     *,
     embed_texts: _SemanticEmbedder | None,
 ) -> set[str]:
     if embed_texts is None:
-        return _refresh_related_documents(context_root)
+        return await _refresh_related_documents_cooperative(context_root)
     _assert_no_symlinks(context_root)
     pages = _related_context_pages(context_root)
     relative_paths = [page.relative_to(context_root).as_posix() for page in pages]
@@ -2539,10 +2859,10 @@ async def _refresh_related_documents_hybrid(
         try:
             raw_vectors = await embed_texts([texts[relative], *(texts[candidate] for candidate, _score in shortlist)])
         except Exception:
-            return _refresh_related_documents(context_root)
+            return await _refresh_related_documents_cooperative(context_root)
         vectors = _validated_embedding_vectors(raw_vectors, expected_count=len(shortlist) + 1)
         if vectors is None:
-            return _refresh_related_documents(context_root)
+            return await _refresh_related_documents_cooperative(context_root)
         ranked = sorted(
             (
                 (
@@ -2678,16 +2998,8 @@ async def _finalize_semantic_context_hybrid(
     max_subdirectories_per_directory: int | None = None,
     capacity_exempt: bool = False,
     navigation_changed_paths: set[str] | None = None,
+    refresh_related_documents: bool = True,
 ) -> set[str]:
-    if embed_texts is None:
-        return _finalize_semantic_context(
-            context_root,
-            fallback_references=fallback_references,
-            max_pages_per_directory=max_pages_per_directory,
-            max_subdirectories_per_directory=max_subdirectories_per_directory,
-            capacity_exempt=capacity_exempt,
-            navigation_changed_paths=navigation_changed_paths,
-        )
     affected_directories = (
         None
         if navigation_changed_paths is None
@@ -2698,7 +3010,10 @@ async def _finalize_semantic_context_hybrid(
         fallback_references=fallback_references,
         affected_directories=affected_directories,
     )
-    changed.update(await _refresh_related_documents_hybrid(context_root, embed_texts=embed_texts))
+    if refresh_related_documents:
+        changed.update(await _refresh_related_documents_hybrid(context_root, embed_texts=embed_texts))
+    else:
+        changed.update(await _retain_valid_related_documents(context_root))
     _validate_context_root_layout(context_root, repairable=True)
     _validate_description_coverage(context_root, repairable=True)
     _validate_context_capacities(
@@ -3359,6 +3674,10 @@ def _normalize_context_candidate(
         source_root=source_root,
         run_time=run_time,
     )
+    root_description = context_root / "description.md"
+    if not mapping and _path_is_file(root_description) and not _path_is_link_or_reparse(root_description):
+        baseline = _snapshot_managed_files(context_root)
+        return baseline, {relative: relative for relative in baseline}
     _apply_context_layout_normalization(
         context_root,
         source_root=source_root,
@@ -3548,6 +3867,7 @@ def _page_source_metadata(
     final_context_root: Path | None = None,
     source_root: Path,
     alias_targets: Mapping[str, str] | None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> list[dict[str, object]]:
     """Read all valid atomic-source metadata reachable from one page."""
 
@@ -3557,6 +3877,7 @@ def _page_source_metadata(
         source_root=source_root,
         page_relative=page.relative_to(context_root).as_posix(),
         alias_targets=alias_targets,
+        cancel_requested=cancel_requested,
     )
     return [read_source_metadata(source_root / f"{source_id}.md") for source_id in sorted(source_ids)]
 
@@ -5266,6 +5587,11 @@ async def _apply_rules_increment(
     max_pages_per_directory: int | None = None,
     max_subdirectories_per_directory: int | None = None,
     preserve_existing_paths: bool = False,
+    refresh_related_documents: bool = True,
+    finalize_context: bool = True,
+    use_source_prior: bool = True,
+    baseline: Mapping[str, tuple[int, str]] | None = None,
+    baseline_path_by_identity: Mapping[str, str] | None = None,
 ) -> set[str]:
     """Apply one deterministic semantic increment to a copied Context."""
 
@@ -5281,8 +5607,18 @@ async def _apply_rules_increment(
         if max_subdirectories_per_directory is None
         else max_subdirectories_per_directory
     )
-    baseline = _snapshot_managed_files(context_root)
-    baseline_path_by_identity = _context_page_paths_by_identity(context_root)
+    effective_baseline = dict(baseline) if baseline is not None else _snapshot_managed_files(context_root)
+    effective_baseline_path_by_identity = (
+        dict(baseline_path_by_identity)
+        if baseline_path_by_identity is not None
+        else _context_page_paths_by_identity(context_root)
+    )
+    retaining_touched_paths: set[str] = set()
+    if preserve_existing_paths:
+        for source_id in deleted_source_ids:
+            relative = effective_baseline_path_by_identity.get(source_id)
+            if relative is not None:
+                retaining_touched_paths.add(relative)
     _remove_rules_pages_for_deleted_source_ids(
         context_root,
         deleted_source_ids=deleted_source_ids,
@@ -5290,6 +5626,10 @@ async def _apply_rules_increment(
     managed_pages = _managed_pages_by_source(context_root)
     documents: list[tuple[str, Mapping[str, object]]] = []
     seen_source_ids: set[str] = set()
+    directory_fields_cache: dict[Path, dict[str, float]] = {}
+    directory_source_cache: dict[Path, dict[tuple[str, str], float]] = {}
+    page_source_cache: dict[Path, dict[tuple[str, str], float]] = {}
+    placement_directories = _semantic_context_directories(context_root)
     for document in _processed_documents(processed):
         logical_id = str(document["logical_id"])
         source_id = source_ids_by_logical_id.get(logical_id)
@@ -5351,6 +5691,11 @@ async def _apply_rules_increment(
                 max_subdirectories=max_subdirectories,
                 source_root=effective_source_root,
                 provider_neutral_fallback=preserve_existing_paths,
+                directory_fields_cache=directory_fields_cache,
+                directory_source_cache=directory_source_cache,
+                page_source_cache=page_source_cache,
+                use_source_prior=use_source_prior,
+                placement_directories=placement_directories,
             )
             page = _unique_semantic_page_path(
                 target_directory,
@@ -5358,6 +5703,8 @@ async def _apply_rules_increment(
                 source_id=source_id,
             )
             managed_pages[source_id] = page
+        if preserve_existing_paths:
+            retaining_touched_paths.add(page.relative_to(context_root).as_posix())
         _atomic_write(
             page,
             _rules_source_page(
@@ -5367,12 +5714,31 @@ async def _apply_rules_increment(
                 summary_override=str(enrichment["summary"]) if isinstance(enrichment, Mapping) else None,
             ).encode("utf-8"),
         )
-    changed_paths = _changed_context_paths(context_root, baseline)
+        relative_directory = page.parent.relative_to(context_root)
+        if (
+            relative_directory.parts
+            and not any(part.casefold() in _RESERVED_CONTEXT_SEGMENTS for part in relative_directory.parts)
+            and page.parent not in placement_directories
+        ):
+            placement_directories.append(page.parent)
+            placement_directories.sort(key=lambda path: path.relative_to(context_root).as_posix())
+        if not preserve_existing_paths:
+            page_source_cache.pop(page, None)
+            current_directory = page.parent
+            while current_directory.is_relative_to(context_root):
+                directory_fields_cache.pop(current_directory, None)
+                directory_source_cache.pop(current_directory, None)
+                if current_directory == context_root:
+                    break
+                current_directory = current_directory.parent
+    changed_paths = (
+        retaining_touched_paths if preserve_existing_paths else _changed_context_paths(context_root, effective_baseline)
+    )
     recluster_changed = await _recluster_context_candidate(
         context_root,
         source_root=effective_source_root,
         changed_paths=changed_paths,
-        baseline_path_by_identity=baseline_path_by_identity,
+        baseline_path_by_identity=effective_baseline_path_by_identity,
         max_pages_per_directory=max_pages,
         max_subdirectories_per_directory=max_subdirectories,
         embed_texts=embed_texts,
@@ -5384,16 +5750,27 @@ async def _apply_rules_increment(
         },
     )
     navigation_changed_paths = changed_paths | recluster_changed
-    await _finalize_semantic_context_hybrid(
-        context_root,
-        embed_texts=embed_texts,
-        fallback_references=fallback_references,
-        max_pages_per_directory=max_pages,
-        max_subdirectories_per_directory=max_subdirectories,
-        capacity_exempt=preserve_existing_paths,
-        navigation_changed_paths=navigation_changed_paths,
-    )
-    return _changed_context_paths(context_root, baseline)
+    if finalize_context:
+        await _finalize_semantic_context_hybrid(
+            context_root,
+            embed_texts=embed_texts,
+            fallback_references=fallback_references,
+            max_pages_per_directory=max_pages,
+            max_subdirectories_per_directory=max_subdirectories,
+            capacity_exempt=preserve_existing_paths,
+            navigation_changed_paths=navigation_changed_paths,
+            refresh_related_documents=refresh_related_documents,
+        )
+    else:
+        _render_context_navigation(
+            context_root,
+            fallback_references=fallback_references,
+            affected_directories=_navigation_directories_for_changed_paths(
+                context_root,
+                navigation_changed_paths,
+            ),
+        )
+    return _changed_context_paths(context_root, effective_baseline)
 
 
 def _balanced_summary_is_safe(summary: str) -> bool:
@@ -6246,7 +6623,11 @@ def _validate_reference_graph(
             else:
                 context_edges[relative].add(target)
 
-    directory_paths = {PurePosixPath(relative).parent for relative in pages}
+    pages_by_directory: dict[PurePosixPath, set[str]] = {}
+    for relative in pages:
+        directory = PurePosixPath(relative).parent
+        pages_by_directory.setdefault(directory, set()).add(relative)
+    directory_paths = set(pages_by_directory)
     directory_paths.add(PurePosixPath("."))
     for directory in sorted(directory_paths, key=lambda value: (len(value.parts), value.as_posix())):
         description = (directory / "description.md").as_posix()
@@ -6254,14 +6635,11 @@ def _validate_reference_graph(
             description = description[2:]
         if description not in pages:
             raise error("candidate Context directory is missing description.md")
-        directory_pages = set()
-        for matched_relative in pages:
-            if PurePosixPath(matched_relative).parent != directory:
-                continue
-            if PurePosixPath(matched_relative).name.casefold() == "description.md":
-                continue
-            directory_pages.add(matched_relative)
-        direct_pages = directory_pages
+        direct_pages = {
+            matched_relative
+            for matched_relative in pages_by_directory.get(directory, set())
+            if PurePosixPath(matched_relative).name.casefold() != "description.md"
+        }
         direct_directories = {child for child in directory_paths if child != directory and child.parent == directory}
         expected = direct_pages | {(child / "description.md").as_posix() for child in direct_directories}
         missing = expected - context_edges[description]
@@ -6298,6 +6676,7 @@ def _source_ids_reachable_from_page(
     source_root: Path,
     page_relative: str,
     alias_targets: Mapping[str, str] | None = None,
+    cancel_requested: Callable[[], bool] | None = None,
 ) -> set[str]:
     """Return atomic sources reachable from a physical or candidate Context page."""
 
@@ -6306,6 +6685,7 @@ def _source_ids_reachable_from_page(
     visited: set[str] = set()
     sources: set[str] = set()
     while pending:
+        _raise_if_thread_cancelled(cancel_requested)
         relative = pending.pop()
         if relative in visited:
             continue
@@ -6333,6 +6713,7 @@ def _source_ids_reachable_from_page(
                 if token.group(0) in alias_targets
             )
         for raw_target in _MARKDOWN_LINK.findall(reference_text):
+            _raise_if_thread_cancelled(cancel_requested)
             classified = _classify_reference_target(
                 raw_target,
                 page_relative=PurePosixPath(relative),
@@ -6449,6 +6830,7 @@ class ContextPipelineService:
         config: PersonalContextConfig,
         input_queue: asyncio.Queue[object],
         embedding_config: EmbeddingConfig | None = None,
+        progress_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._home = home.expanduser().resolve()
         self._config = config
@@ -6462,7 +6844,10 @@ class ContextPipelineService:
         self._active_event_task: asyncio.Task[None] | None = None
         self._active_run_key: tuple[str, str] | None = None
         self._run_states: dict[tuple[str, str], dict[str, object]] = {}
+        self._cancelled_run_keys: set[tuple[str, str]] = set()
+        self._invalidated_run_keys: set[tuple[str, str]] = set()
         self._publish_lock = asyncio.Lock()
+        self._progress_callback = progress_callback
         self._embedding: APIEmbedding | None = None
         self._embedding_cache: dict[str, tuple[float, ...]] = {}
         self._embedding_dimension: int | None = None
@@ -6576,6 +6961,16 @@ class ContextPipelineService:
 
         self._config = config
 
+    def invalidate_run(self, service_id: str, run_id: str) -> None:
+        """Fence one timed-out run from any later Context publication."""
+
+        self._invalidated_run_keys.add(
+            (
+                _safe_segment(service_id, name="service_id"),
+                _safe_segment(run_id, name="run_id"),
+            )
+        )
+
     async def cancel_run(self, service_id: str, run_id: str) -> None:
         """Cancel only the active event for one run without stopping the consumer."""
 
@@ -6586,9 +6981,17 @@ class ContextPipelineService:
         task = self._active_event_task
         if task is None or task.done() or self._active_run_key != key:
             return
+        self._cancelled_run_keys.add(key)
+        _request_cooperative_thread_cancel(task)
         task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_PIPELINE_CANCEL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            return
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
 
     async def _consume(self) -> None:
         while True:
@@ -6651,6 +7054,8 @@ class ContextPipelineService:
         elif tag == "retain":
             if payload is not None:
                 raise _pipeline_error("retain event payload must be None")
+            if (safe_service, safe_run) not in self._invalidated_run_keys:
+                self._cancelled_run_keys.discard((safe_service, safe_run))
             await self._finish_run_event(safe_service, safe_run, retaining=True)
         elif tag == "abort":
             if payload is not None:
@@ -6708,6 +7113,10 @@ class ContextPipelineService:
         if safe_batch in batch_ids:
             await self._cleanup_run_state(key)
             raise _pipeline_error("duplicate batch_id in run")
+        checkpoint = (
+            self._snapshot_run_state(state),
+            self._snapshot_batch_source_metadata(batch),
+        )
         try:
             self._merge_materialized_source(state, batch)
         except BaseError:
@@ -6719,14 +7128,13 @@ class ContextPipelineService:
             raise _pipeline_error("run sandbox state is invalid")
         try:
             await _cancel_safe_to_thread(_assert_no_symlinks, sandbox_value)
-            provider = state.get("provider")
-            if not isinstance(provider, str) or not provider:
+            if not isinstance(state.get("provider"), str) or not state["provider"]:
                 raise _pipeline_error("run provider state is invalid")
             source_refs = await _cancel_safe_to_thread(
                 _register_batch_source_refs,
                 self._source_meta_root,
                 batch,
-                provider=provider,
+                provider=cast(str, state["provider"]),
                 service_id=service_id,
                 state=state,
             )
@@ -6743,7 +7151,16 @@ class ContextPipelineService:
             batch_ids.append(safe_batch)
             state["batch_count"] = len(batch_ids)
         except asyncio.CancelledError:
-            await self._cleanup_run_state(key)
+            await _cancel_safe_to_thread(
+                self._restore_batch_checkpoint,
+                state,
+                checkpoint[0],
+                checkpoint[1],
+                sandbox_value,
+                safe_batch,
+            )
+            if checkpoint[0].get("batch_ids") == []:
+                await self._cleanup_run_state(key, discard_new_source_metadata=True)
             raise
         except BaseError:
             await self._cleanup_run_state(key)
@@ -6754,6 +7171,88 @@ class ContextPipelineService:
         except Exception as exc:
             await self._cleanup_run_state(key)
             raise _pipeline_error("batch processing failed") from exc
+
+    @staticmethod
+    def _snapshot_run_state(state: Mapping[str, object]) -> dict[str, object]:
+        """Copy the small mutable run index at one completed-batch boundary."""
+
+        checkpoint: dict[str, object] = {}
+        for name, value in state.items():
+            if isinstance(value, dict):
+                checkpoint[name] = dict(value)
+            elif isinstance(value, list):
+                checkpoint[name] = list(value)
+            elif isinstance(value, set):
+                checkpoint[name] = set(value)
+            else:
+                checkpoint[name] = value
+        return checkpoint
+
+    def _snapshot_batch_source_metadata(self, batch: FetchBatch) -> dict[str, bytes | None]:
+        """Read metadata touched by one batch so cancellation can restore it."""
+
+        checkpoint: dict[str, bytes | None] = {}
+        for item in batch.items:
+            source_id = source_id_for_locator(item.original_ref)
+            path = self._source_meta_root / f"{source_id}.md"
+            if path.exists() or path.is_symlink():
+                read_source_metadata(path)
+                checkpoint[source_id] = path.read_bytes()
+            else:
+                checkpoint[source_id] = None
+        return checkpoint
+
+    def _restore_batch_checkpoint(
+        self,
+        state: dict[str, object],
+        state_checkpoint: Mapping[str, object],
+        metadata_checkpoint: Mapping[str, bytes | None],
+        sandbox: Path,
+        batch_id: str,
+    ) -> None:
+        """Discard one incomplete batch without losing earlier completed batches."""
+
+        for source_id, previous in metadata_checkpoint.items():
+            if _SOURCE_METADATA_ID.fullmatch(source_id) is None:
+                raise _pipeline_error("run source metadata ID is invalid")
+            path = self._source_meta_root / f"{source_id}.md"
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                _atomic_write(path, previous)
+        for path in (
+            sandbox / "inputs" / "records" / batch_id,
+            sandbox / "inputs" / "processed" / batch_id,
+            sandbox / "inputs" / "deleted" / f"{batch_id}.json",
+        ):
+            if path.exists() or path.is_symlink():
+                _make_tree_writable(path)
+                _remove_tree_entry(path)
+        state.clear()
+        state.update(state_checkpoint)
+
+    @staticmethod
+    def _validated_finish_state(
+        state: Mapping[str, object],
+    ) -> tuple[dict[str, str], dict[str, str], str]:
+        """Return the validated aliases, logical sources, and provider for one finish."""
+
+        aliases = state.get("source_alias_by_id")
+        if not isinstance(aliases, dict) or not all(
+            isinstance(source_id, str) and isinstance(source_ref, str) for source_id, source_ref in aliases.items()
+        ):
+            raise _pipeline_error("run source alias state is invalid")
+        alias_targets = {source_ref: source_id for source_id, source_ref in cast(dict[str, str], aliases).items()}
+        logical_sources = state.get("source_id_by_logical_id")
+        if not isinstance(logical_sources, dict) or not all(
+            isinstance(logical_id, str) and isinstance(source_id, str)
+            for logical_id, source_id in logical_sources.items()
+        ):
+            raise _pipeline_error("run logical source state is invalid")
+        provider = state.get("provider")
+        if not isinstance(provider, str) or not provider:
+            raise _pipeline_error("run provider state is invalid")
+        return alias_targets, cast(dict[str, str], logical_sources), provider
 
     async def _finish_run_event(
         self,
@@ -6781,6 +7280,7 @@ class ContextPipelineService:
             raise _pipeline_error("run sandbox state is invalid")
         state["status"] = "finishing"
         try:
+            self._raise_if_publication_fenced(key)
             processed = await _cancel_safe_to_thread(self._prepare_run_finish_io, sandbox, dict(state))
             batch = FetchBatch(
                 batch_id="finish-run",
@@ -6788,30 +7288,12 @@ class ContextPipelineService:
                 materialized_source_path=cast(str | None, state.get("materialized_source_path")),
                 materialized_revision=cast(str | None, state.get("materialized_revision")),
             )
-            aliases_value = state.get("source_alias_by_id")
-            if not isinstance(aliases_value, dict) or not all(
-                isinstance(source_id, str) and isinstance(source_ref, str)
-                for source_id, source_ref in aliases_value.items()
-            ):
-                raise _pipeline_error("run source alias state is invalid")
-            alias_targets = {
-                source_ref: source_id for source_id, source_ref in cast(dict[str, str], aliases_value).items()
-            }
-            logical_sources_value = state.get("source_id_by_logical_id")
-            if not isinstance(logical_sources_value, dict) or not all(
-                isinstance(logical_id, str) and isinstance(source_id, str)
-                for logical_id, source_id in logical_sources_value.items()
-            ):
-                raise _pipeline_error("run logical source state is invalid")
-            logical_sources = cast(dict[str, str], logical_sources_value)
+            alias_targets, logical_sources, provider = self._validated_finish_state(state)
             deleted_source_ids = {
                 logical_sources[logical_id]
                 for logical_id in _processed_deleted_ids(processed)
                 if logical_id in logical_sources
             }
-            provider = state.get("provider")
-            if not isinstance(provider, str) or not provider:
-                raise _pipeline_error("run provider state is invalid")
             run_time = datetime.now(timezone.utc)
             filesystem_profile = await self._filesystem_with_fallback(
                 processed=processed,
@@ -6825,6 +7307,11 @@ class ContextPipelineService:
                 run_time=run_time,
                 retaining=retaining,
             )
+            self._raise_if_publication_fenced(key)
+            if self._progress_callback is not None:
+                self._progress_callback(service_id, run_id, "validating")
+            if retaining:
+                processed["_retaining"] = True
             actual_profile = filesystem_profile
             processed["actual_profile"] = actual_profile
             documents_value = processed.get("documents", [])
@@ -6845,8 +7332,21 @@ class ContextPipelineService:
                 run_time=run_time,
             )
             state["status"] = "published"
-        finally:
+        except asyncio.CancelledError:
+            await _cancel_safe_to_thread(self._restore_run_checkpoint, sandbox)
+            state["status"] = "processing"
+            raise
+        except BaseException:
             await self._cleanup_run_state(key)
+            raise
+        await self._cleanup_run_state(key)
+
+    @staticmethod
+    def _restore_run_checkpoint(sandbox: Path) -> None:
+        """Discard finish outputs while preserving completed batch inputs."""
+
+        _reset_filesystem_sandbox(sandbox)
+        _make_tree_writable(sandbox / "inputs")
 
     async def _abort_run_event(self, service_id: str, run_id: str) -> None:
         """Idempotently discard one unpublished run."""
@@ -7289,6 +7789,14 @@ class ContextPipelineService:
             )
         await _cancel_safe_to_thread(self._delete_run_sandbox, key)
         self._run_states.pop(key, None)
+        self._cancelled_run_keys.discard(key)
+        self._invalidated_run_keys.discard(key)
+
+    def _raise_if_publication_fenced(self, key: tuple[str, str]) -> None:
+        if key in self._invalidated_run_keys:
+            raise _pipeline_error("invalidated run cannot publish")
+        if key in self._cancelled_run_keys:
+            raise asyncio.CancelledError
 
     def _delete_run_sandbox(self, key: tuple[str, str]) -> None:
         """Delete one controlled run tree without mutating in-memory state."""
@@ -7427,15 +7935,16 @@ class ContextPipelineService:
                     profile,
                 )
 
-        def prepare_context_baseline(
+        async def prepare_context_baseline(
             candidate_context: Path,
             *,
             preserve_existing_paths: bool,
         ) -> tuple[dict[str, tuple[int, str]], dict[str, str]]:
             if preserve_existing_paths:
-                baseline = _snapshot_managed_files(candidate_context)
+                baseline = await _cancel_safe_to_thread(_snapshot_managed_files, candidate_context)
                 return baseline, {relative: relative for relative in baseline}
-            return _normalize_context_candidate(
+            return await _cancel_safe_to_thread(
+                _normalize_context_candidate,
                 candidate_context,
                 source_root=self._source_meta_root,
                 run_time=effective_run_time,
@@ -7447,14 +7956,17 @@ class ContextPipelineService:
             *,
             preserve_existing_paths: bool = False,
         ) -> tuple[dict[str, tuple[int, str]], set[str]]:
-            _reset_filesystem_sandbox(sandbox)
-            _prepare_agent_candidate(self._context_root, sandbox)
+            await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
+            await _cancel_safe_to_thread(_prepare_agent_candidate, self._context_root, sandbox)
             candidate_context = sandbox / "context"
-            baseline, _ = prepare_context_baseline(
+            baseline, _ = await prepare_context_baseline(
                 candidate_context,
                 preserve_existing_paths=preserve_existing_paths,
             )
-            baseline_partition_path_by_identity = _context_page_paths_by_identity(candidate_context)
+            baseline_partition_path_by_identity = await _cancel_safe_to_thread(
+                _context_page_paths_by_identity,
+                candidate_context,
+            )
             changed = await _apply_rules_increment(
                 candidate_context,
                 source_root=self._source_meta_root,
@@ -7468,6 +7980,10 @@ class ContextPipelineService:
                 max_pages_per_directory=self._config.max_pages_per_directory,
                 max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
                 preserve_existing_paths=preserve_existing_paths,
+                refresh_related_documents=not retaining,
+                use_source_prior=not retaining,
+                baseline=baseline,
+                baseline_path_by_identity=baseline_partition_path_by_identity,
             )
             if preserve_existing_paths:
                 _validate_context_partition_integrity(
@@ -7519,24 +8035,33 @@ class ContextPipelineService:
                 preserve_existing_paths = requested == "agent" and candidate in {"balanced", "rules"}
                 processed["_filesystem_preserve_existing_paths"] = preserve_existing_paths
                 processed["_filesystem_capacity_exempt"] = preserve_existing_paths
-                _reset_filesystem_sandbox(sandbox)
-                _prepare_agent_candidate(
+                await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
+                await _cancel_safe_to_thread(
+                    _prepare_agent_candidate,
                     self._context_root,
                     sandbox,
                 )
-                context_baseline, baseline_path_by_candidate = prepare_context_baseline(
+                context_baseline, baseline_path_by_candidate = await prepare_context_baseline(
                     sandbox / "context",
                     preserve_existing_paths=preserve_existing_paths,
                 )
-                baseline_partition_path_by_identity = _context_page_paths_by_identity(sandbox / "context")
+                baseline_partition_path_by_identity = await _cancel_safe_to_thread(
+                    _context_page_paths_by_identity,
+                    sandbox / "context",
+                )
+                managed_pages_by_source = await _cancel_safe_to_thread(
+                    _managed_pages_by_source,
+                    sandbox / "context",
+                )
                 preexisting_managed_pages_by_source = {
                     source_id: page.relative_to(sandbox / "context").as_posix()
-                    for source_id, page in _managed_pages_by_source(sandbox / "context").items()
+                    for source_id, page in managed_pages_by_source.items()
                 }
                 preexisting_managed_source_ids = frozenset(preexisting_managed_pages_by_source)
                 balanced_baseline_managed_pages_by_source = preexisting_managed_pages_by_source or None
                 if candidate == "agent":
-                    _remove_rules_pages_for_deleted_source_ids(
+                    await _cancel_safe_to_thread(
+                        _remove_rules_pages_for_deleted_source_ids,
                         sandbox / "context",
                         deleted_source_ids=effective_deleted_source_ids,
                     )
@@ -7545,9 +8070,13 @@ class ContextPipelineService:
                 inputs_baseline: Mapping[str, tuple[int, str]] | None = None
                 if candidate == "agent":
                     if (sandbox / "inputs").is_dir():
-                        inputs_baseline = _snapshot_managed_files(sandbox / "inputs")
+                        inputs_baseline = await _cancel_safe_to_thread(
+                            _snapshot_managed_files,
+                            sandbox / "inputs",
+                        )
                     else:
-                        inputs_baseline = _prepare_agent_inputs(
+                        inputs_baseline = await _cancel_safe_to_thread(
+                            _prepare_agent_inputs,
                             batch,
                             sandbox=sandbox,
                             processed=processed,
@@ -7969,6 +8498,7 @@ class ContextPipelineService:
             max_pages_per_directory=self._config.max_pages_per_directory,
             max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
             preserve_existing_paths=preserve_existing_paths,
+            finalize_context=False,
         )
         accepted_count = sum(
             str(document["logical_id"]) in cached
@@ -8110,7 +8640,14 @@ class ContextPipelineService:
             titles=directory_titles,
             existing_directories=_baseline_context_directories(context_baseline),
         )
-        _render_context_navigation(context_root, fallback_references=tuple(alias_targets or ()))
+        await _finalize_semantic_context_hybrid(
+            context_root,
+            embed_texts=self._embed_semantic_texts if self._embedding is not None else None,
+            fallback_references=tuple(alias_targets or ()),
+            max_pages_per_directory=self._config.max_pages_per_directory,
+            max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+            capacity_exempt=preserve_existing_paths,
+        )
         return _changed_context_paths(context_root, context_baseline), accepted_count
 
     async def _publish_processed(
@@ -8127,7 +8664,7 @@ class ContextPipelineService:
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
     ) -> None:
-        del run_id, batch
+        del batch
         async with self._publish_lock:
             _assert_path_chain_no_symlinks(self._home / "workspace")
             candidate_context = sandbox / "context"
@@ -8136,11 +8673,12 @@ class ContextPipelineService:
                 processed.get("_filesystem_candidate_prepared") or processed.get("_agent_candidate_prepared")
             )
             if not candidate_prepared:
-                _copy_tree(self._context_root, candidate_context)
+                await _cancel_safe_to_thread(_copy_tree, self._context_root, candidate_context)
             candidate_context.mkdir(parents=True, exist_ok=True)
-            _assert_no_symlinks(candidate_context)
+            await _cancel_safe_to_thread(_assert_no_symlinks, candidate_context)
             if not candidate_prepared:
-                _normalize_context_candidate(
+                await _cancel_safe_to_thread(
+                    _normalize_context_candidate,
                     candidate_context,
                     source_root=self._source_meta_root,
                     run_time=run_time or datetime.now(timezone.utc),
@@ -8154,8 +8692,12 @@ class ContextPipelineService:
                 source_ids_by_logical_id=source_ids_by_logical_id,
                 alias_targets=alias_targets,
             )
-            publication_baseline = _snapshot_managed_files(candidate_context)
-            _remove_rules_pages_for_deleted_source_ids(
+            retaining = processed.get("_retaining") is True
+            publication_baseline = (
+                {} if retaining else await _cancel_safe_to_thread(_snapshot_managed_files, candidate_context)
+            )
+            await _cancel_safe_to_thread(
+                _remove_rules_pages_for_deleted_source_ids,
                 candidate_context,
                 deleted_source_ids=effective_deleted_source_ids,
             )
@@ -8174,7 +8716,8 @@ class ContextPipelineService:
                     max_pages_per_directory=self._config.max_pages_per_directory,
                     max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
                 )
-                navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
+                if not retaining:
+                    navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
             elif processed.get("_filesystem_candidate_profile") in {"rules", "balanced"}:
                 prepared_changes = processed.get("_agent_changed_context_paths")
                 navigation_changed_paths = (
@@ -8183,22 +8726,34 @@ class ContextPipelineService:
                     else set()
                 )
                 navigation_changed_paths.update(_changed_context_paths(candidate_context, publication_baseline))
-            await _finalize_semantic_context_hybrid(
-                candidate_context,
-                embed_texts=self._embed_semantic_texts if self._embedding is not None else None,
-                fallback_references=tuple(alias_targets or ()),
-                max_pages_per_directory=self._config.max_pages_per_directory,
-                max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
-                capacity_exempt=capacity_exempt,
-                navigation_changed_paths=navigation_changed_paths,
+            retained_rules_candidate_is_finalized = (
+                processed.get("_retaining") is True
+                and candidate_prepared
+                and processed.get("_filesystem_candidate_profile") == "rules"
             )
-            resolve_source_links(
+            if not retained_rules_candidate_is_finalized:
+                await _finalize_semantic_context_hybrid(
+                    candidate_context,
+                    embed_texts=(
+                        self._embed_semantic_texts
+                        if self._embedding is not None and processed.get("_retaining") is not True
+                        else None
+                    ),
+                    fallback_references=tuple(alias_targets or ()),
+                    max_pages_per_directory=self._config.max_pages_per_directory,
+                    max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                    capacity_exempt=capacity_exempt,
+                    navigation_changed_paths=navigation_changed_paths,
+                )
+            await _cancel_safe_to_thread(
+                resolve_source_links,
                 candidate_context,
                 final_context_root=self._context_root,
                 source_root=self._source_meta_root,
                 book=cast(Mapping[str, Mapping[str, str]], processed.get("source_link_book", {})),
             )
-            _validate_candidate(
+            await _cancel_safe_to_thread(
+                _validate_candidate,
                 candidate_context,
                 final_context_root=self._context_root,
                 source_root=self._source_meta_root,
@@ -8207,27 +8762,24 @@ class ContextPipelineService:
                 capacity_exempt=capacity_exempt,
             )
             if alias_targets is not None:
-                _resolve_short_references(
+                await _cancel_safe_to_thread(
+                    _resolve_short_references,
                     candidate_context,
                     final_context_root=self._context_root,
                     source_root=self._source_meta_root,
                     alias_targets=alias_targets,
                 )
-                _validate_reference_graph(
+                await _cancel_safe_to_thread(
+                    _validate_reference_graph,
                     candidate_context,
                     final_context_root=self._context_root,
                     source_root=self._source_meta_root,
                     repairable=False,
                 )
-            obsolete_context_files = _copy_and_publish_tree(
-                candidate_context,
-                self._context_root,
-                skip_relative="description.md",
-            )
-            description = candidate_context / "description.md"
-            _atomic_write(self._context_root / "description.md", description.read_bytes())
-            _remove_published_tree_entries(self._context_root, obsolete_context_files)
-            _assert_no_symlinks(self._context_root)
+            self._raise_if_publication_fenced((service_id, run_id))
+            if self._progress_callback is not None:
+                self._progress_callback(service_id, run_id, "committing")
+            await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
 
     def _fail_active(self, error: BaseError) -> None:
         if self._active_completion is not None and not self._active_completion.done():

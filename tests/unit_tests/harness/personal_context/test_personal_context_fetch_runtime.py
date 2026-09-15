@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context import context_pipeline
 from openjiuwen.harness.personal_context import personal_context as personal_context_module
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
@@ -80,6 +81,35 @@ def _manual_config(
     )
 
 
+def _repository_runtime_config(
+    *,
+    token: str,
+    interval: float = 3600.0,
+) -> PersonalContextConfig:
+    return PersonalContextConfig.from_dict(
+        {
+            "collection_enabled": True,
+            "agent_use_enabled": False,
+            "strategy_profile": "rules",
+            "fetch_services": [
+                {
+                    "service_id": "github-main",
+                    "provider": "github",
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "time_range": {"mode": "all"},
+                    "source": {
+                        "owner": "openJiuwen",
+                        "repo": "agent-core",
+                        "resources": ["issues"],
+                    },
+                    "credentials": {"token": token},
+                }
+            ],
+        }
+    )
+
+
 class _RunningPipeline:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
@@ -93,6 +123,9 @@ class _RunningPipeline:
         self.running = False
 
     async def cancel_run(self, service_id: str, run_id: str) -> None:
+        del service_id, run_id
+
+    def invalidate_run(self, service_id: str, run_id: str) -> None:
         del service_id, run_id
 
     def replace_configuration(self, config: PersonalContextConfig) -> None:
@@ -163,6 +196,105 @@ async def _finish_manual_tasks(personal_context: PersonalContext, service_ids: t
         await asyncio.wait_for(provider.started.wait(), timeout=1.0)
         provider.release.set()
     await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_credential_replacement_keeps_active_manual_run_and_updates_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        personal_context_module._PROVIDER_TYPES,
+        "github",
+        _BlockingManualProvider,
+    )
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+
+    await personal_context.run_fetch(service_id="github-main")
+    first_task = personal_context._manual_fetch_tasks["github-main"]
+    await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+    try:
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+
+        assert isinstance(new_provider, _BlockingManualProvider)
+        assert new_provider is not old_provider
+        assert not new_provider.started.is_set()
+        assert not first_task.done()
+
+        old_provider.release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+        await personal_context.run_fetch(service_id="github-main")
+        second_task = personal_context._manual_fetch_tasks["github-main"]
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        new_provider.release.set()
+        await asyncio.wait_for(second_task, timeout=1.0)
+    finally:
+        old_provider.release.set()
+        if not first_task.done():
+            await asyncio.wait_for(first_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_reads_current_provider_cache_each_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "github", _BlockingManualProvider)
+    original = _repository_runtime_config(token="old-token", interval=0.01)
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+    stop_event = asyncio.Event()
+    scheduler = asyncio.create_task(personal_context._run_fetch_service("github-main", stop_event))
+
+    try:
+        await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+        replacement = _repository_runtime_config(token="new-token", interval=0.01).fetch_services[0]
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+        assert isinstance(new_provider, _BlockingManualProvider)
+        old_provider.release.set()
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        stop_event.set()
+        new_provider.release.set()
+        await asyncio.wait_for(scheduler, timeout=1.0)
+    finally:
+        stop_event.set()
+        old_provider.release.set()
+        cached = personal_context._fetch_providers.get("github-main")
+        if isinstance(cached, _BlockingManualProvider):
+            cached.release.set()
+        if not scheduler.done():
+            await asyncio.wait_for(scheduler, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_credential_replacement_provider_build_failure_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    pipeline = personal_context._pipeline_service
+
+    def fail_provider(_config: PersonalContextFetchServiceConfig) -> ContextFetchService:
+        raise RuntimeError("provider build failed")
+
+    monkeypatch.setattr(personal_context, "_create_fetch_provider", fail_provider)
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+
+    with pytest.raises(RuntimeError, match="provider build failed"):
+        await personal_context._replace_fetch_service_credentials((replacement,))
+
+    assert personal_context._config is original
+    assert isinstance(pipeline, _RunningPipeline)
+    assert pipeline.configurations == []
 
 
 @pytest.mark.asyncio
@@ -497,12 +629,13 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     assert provider.events == ["prepare_started", "prepare_returned", "fetch_started"]
     assert isinstance(provider.received_candidates, tuple)
     assert len(provider.received_candidates) == 20
-    assert (await personal_context.snapshot()).fetch_run_progress["notes"]["total_items"] == 20
+    discovered = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (discovered["total_items"], discovered["progress_percent"]) == (20, 5)
 
     submit_release[0].set()
     await asyncio.wait_for(submit_entered[1].wait(), timeout=1)
     first = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (first["completed_items"], first["progress_percent"]) == (2, 10)
+    assert (first["completed_items"], first["progress_percent"]) == (2, 12)
 
     submit_release[1].set()
     await asyncio.wait_for(submit_entered[2].wait(), timeout=1)
@@ -512,7 +645,7 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     submit_release[2].set()
     await asyncio.wait_for(finish_entered.wait(), timeout=1)
     publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 99)
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 80)
 
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
@@ -581,7 +714,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await personal_context._run_fetch_once("notes", failed)
     failed_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert failed_status["run_state"] == "failed"
-    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 10)
+    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 12)
     assert isinstance(failed_status["last_error"], str)
 
     cancelled = CancelledProvider(service_config, home=tmp_path)
@@ -593,7 +726,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await task
     cancelled_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert cancelled_status["run_state"] == "cancelled"
-    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 10)
+    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 12)
     assert cancelled_status["last_error"] is None
 
 
@@ -2230,7 +2363,6 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
     personal_context._write_cursor("notes", {"n": 0})
     second_entered = asyncio.Event()
-    replayed = asyncio.Event()
     calls: list[tuple[str, str]] = []
     batch_calls: dict[str, int] = {}
 
@@ -2248,8 +2380,6 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
         if batch.batch_id == "partial-2":
             second_entered.set()
             await asyncio.Event().wait()
-        if batch.batch_id == "partial-1" and batch_calls[batch.batch_id] == 2:
-            replayed.set()
 
     async def retain(_service_id: str, _run_id: str) -> None:
         calls.append(("retain", "run"))
@@ -2266,14 +2396,12 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     await personal_context.stop_fetch_run("notes")
 
     provider = _PartialStopProvider.instances["notes"]
-    assert replayed.is_set()
     assert calls == [
         ("batch", "partial-1"),
         ("batch", "partial-2"),
-        ("rollback", "run"),
-        ("batch", "partial-1"),
         ("retain", "run"),
     ]
+    assert batch_calls == {"partial-1": 1, "partial-2": 1}
     assert len(provider.commit_calls) == 1
     assert provider.abort_calls == []
     cursor = personal_context._read_cursor("notes")
@@ -2284,7 +2412,7 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         1,
-        50,
+        40,
     )
     assert personal_context._config is not None
     assert personal_context._config.fetch_services[0].enabled is True
@@ -2334,6 +2462,209 @@ async def test_stop_fetch_run_immediately_after_acceptance_reports_cancelled(
     assert progress["run_state"] == "cancelled"
     assert progress["completed_items"] == 0
     assert "notes" not in personal_context._active_fetch_run_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    release = asyncio.Event()
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+
+    async def stubborn_run() -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+
+    task = asyncio.create_task(stubborn_run())
+    await started.wait()
+    run_id = "a" * 32
+    personal_context._active_fetch_run_tasks["notes"] = task
+    personal_context._active_fetch_run_stop_events["notes"] = asyncio.Event()
+    personal_context._fetch_run_identity["notes"] = {
+        "run_id": run_id,
+        "started_at": "2026-09-14T00:00:00Z",
+        "finished_at": None,
+    }
+    personal_context._fetch_run_progress["notes"] = personal_context_module._fetch_run_status(
+        "notes",
+        run_state="running",
+        total_items=20,
+        completed_items=20,
+        phase="organizing",
+    )
+    personal_context._fetch_states["notes"] = "RUNNING"
+    monkeypatch.setattr(personal_context_module, "_PIPELINE_CANCEL_GRACE_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    async def ignore_pipeline_cancel(_service_id: str, _run_id: str) -> None:
+        await asyncio.Event().wait()
+
+    personal_context._cancel_pipeline_run = ignore_pipeline_cancel  # type: ignore[method-assign]
+    try:
+        with pytest.raises(BaseError):
+            await asyncio.wait_for(personal_context.stop_fetch_run("notes"), timeout=0.5)
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["run_state"] == "failed"
+        assert progress["progress_percent"] == 80
+        assert personal_context._fetch_states["notes"] == "FAILED"
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_does_not_block_accepting_another_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"a": True, "b": True}),
+    )
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    pipeline_cancel_started = asyncio.Event()
+    pipeline_cancel_release = asyncio.Event()
+
+    async def stubborn_run() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+
+    async def stalled_pipeline_cancel(_service_id: str, _run_id: str) -> None:
+        pipeline_cancel_started.set()
+        await pipeline_cancel_release.wait()
+
+    task = asyncio.create_task(stubborn_run())
+    run_id = "a" * 32
+    personal_context._active_fetch_run_tasks["a"] = task
+    personal_context._active_fetch_run_stop_events["a"] = asyncio.Event()
+    personal_context._fetch_run_identity["a"] = {
+        "run_id": run_id,
+        "started_at": "2026-09-14T00:00:00Z",
+        "finished_at": None,
+    }
+    personal_context._fetch_run_progress["a"] = personal_context_module._fetch_run_status(
+        "a",
+        run_state="running",
+        total_items=10,
+        completed_items=5,
+        phase="processing",
+    )
+    personal_context._fetch_states["a"] = "RUNNING"
+    personal_context._cancel_pipeline_run = stalled_pipeline_cancel  # type: ignore[method-assign]
+    stop_task = asyncio.create_task(personal_context.stop_fetch_run("a"))
+
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        await asyncio.wait_for(pipeline_cancel_started.wait(), timeout=1)
+        accepted = await asyncio.wait_for(personal_context.run_fetch(service_id="b"), timeout=0.2)
+        assert accepted["state"] == "accepted"
+        assert accepted["service_ids"] == ["b"]
+        assert not stop_task.done()
+        await asyncio.wait_for(_BlockingManualProvider.instances["b"].started.wait(), timeout=1)
+    finally:
+        release.set()
+        pipeline_cancel_release.set()
+        provider = _BlockingManualProvider.instances.get("b")
+        if provider is not None:
+            provider.release.set()
+        await asyncio.gather(
+            stop_task,
+            *personal_context._manual_fetch_tasks.values(),
+            return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_timed_out_run_cannot_commit_after_provider_ignores_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubbornProvider(ContextFetchService):
+        instance: "StubbornProvider | None" = None
+
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+            self.commit_calls: list[str] = []
+            self.abort_calls: list[str] = []
+            type(self).instance = self
+
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return (_run_candidate(1),)
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await self.release.wait()
+            yield FetchBatch(batch_id="late", items=(_run_item(1),), next_cursor={"n": 1})
+
+        async def commit_run(self, *, run_id: str) -> None:
+            self.commit_calls.append(run_id)
+
+        async def abort_run(self, *, run_id: str) -> None:
+            self.abort_calls.append(run_id)
+
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", StubbornProvider)
+    monkeypatch.setattr(personal_context_module, "_PIPELINE_CANCEL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    personal_context._submit_batch = no_op  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = no_op  # type: ignore[method-assign]
+    await personal_context.run_fetch(service_id="notes")
+    provider = StubbornProvider.instance
+    assert provider is not None
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+
+    with pytest.raises(BaseError):
+        await personal_context.stop_fetch_run("notes")
+    await asyncio.wait_for(provider.cancelled.wait(), timeout=0.1)
+    provider.release.set()
+    await asyncio.wait_for(personal_context._manual_fetch_tasks["notes"], timeout=1)
+
+    assert provider.commit_calls == []
+    assert len(provider.abort_calls) == 1
+    assert personal_context._read_cursor("notes") is None
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -2513,7 +2844,7 @@ async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         2,
-        99,
+        80,
     )
 
 
@@ -2529,7 +2860,6 @@ async def test_stop_fetch_run_partial_publish_failure_keeps_old_cursor(
     cursor_path = tmp_path / "state" / "cursors" / "notes.json"
     before = cursor_path.read_bytes()
     second_entered = asyncio.Event()
-    first_calls = 0
 
     async def submit(
         _service_id: str,
@@ -2538,24 +2868,23 @@ async def test_stop_fetch_run_partial_publish_failure_keeps_old_cursor(
         *,
         enqueued: asyncio.Event | None = None,
     ) -> None:
-        nonlocal first_calls
         if enqueued is not None:
             enqueued.set()
-        if batch.batch_id == "partial-1":
-            first_calls += 1
-            if first_calls == 2:
-                raise RuntimeError("replay failed")
-        else:
+        if batch.batch_id == "partial-2":
             second_entered.set()
             await asyncio.Event().wait()
 
     async def no_op(*_args: object) -> None:
         return None
 
+    async def fail_retain(*_args: object) -> None:
+        raise RuntimeError("retain failed")
+
     personal_context._submit_batch = submit  # type: ignore[method-assign]
     personal_context._finish_pipeline_run = no_op  # type: ignore[method-assign]
     personal_context._abort_pipeline_run = no_op  # type: ignore[method-assign]
     personal_context._rollback_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = fail_retain  # type: ignore[method-assign]
 
     await personal_context.run_fetch(service_id="notes")
     await asyncio.wait_for(second_entered.wait(), timeout=1.0)

@@ -4094,7 +4094,26 @@ async def test_embedding_failure_keeps_balanced_profile_and_one_model_attempt(
     sandbox.mkdir()
     model_attempts: list[int] = []
     original_balanced = service._filesystem_balanced_model_attempt
-    monkeypatch.setattr(context_pipeline, "Model", _KeepRulesBalancedModel)
+
+    class EmbeddingFallbackBalancedModel:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def invoke(self, messages: list[object], **_kwargs: object) -> str:
+            content = str(getattr(messages[0], "content", ""))
+            directory = re.search(r'"directory_id"\s*:\s*"([^"]+)"', content)
+            if directory is not None:
+                directory_id = directory.group(1)
+                return (
+                    f'{{"directory_id":"{directory_id}","directory_title":"数据库资料",'
+                    '"directory_description":"该目录收录数据库索引相关资料。"}}'
+                )
+            return (
+                '{"items":[{"item_index":0,"summary":"数据库索引的可读摘要。",'
+                '"page_title":"数据库索引实践","keywords":["数据库索引"]}]}'
+            )
+
+    monkeypatch.setattr(context_pipeline, "Model", EmbeddingFallbackBalancedModel)
 
     async def balanced_attempt(**kwargs: object) -> tuple[set[str], int]:
         model_attempts.append(1)
