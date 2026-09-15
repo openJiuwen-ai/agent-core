@@ -8,7 +8,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/agent/scheduling/` |
-| 最近一次修订日期 | 2026-08-10 |
+| 最近一次修订日期 | 2026-08-18 |
 | 关联 feature | `F_62_scheduled-dispatch-runtime-and-review-voting.md`、`F_63_scheduler-message-templating-and-delivery-render.md`（交接消息的两阶段渲染）、`F_65_runtime-idle-clock-stall-nudge.md`（自主模式改用 idle 时钟后，本模式 stale 计时的钉住策略与遗留）、`F_73_reviewer-feedback-skill-evolution-boundaries.md`（失败 feedback 与团队终态的可选宿主 callback） |
 
 ## 范围 / 边界
@@ -37,11 +37,11 @@
 5. **交接 = leader 身份邮箱消息，投递即启动**：`_send_as_leader` 先写邮箱行（持久）再 `host.auto_start_member`（`UNSTARTED→STARTING` CAS，幂等）。成员在线与否不是开工前置条件；成员侧零新代码（走既有 `MessageHandler`）。行里存的是**投递载荷不是文案**（`content=""` + `meta`），文案在投递时按模板渲染——见「消息面」段与 `S_12` 的 meta 三铁律。
 6. **`SchedulerHost.deliver_input` 只准注入 leader 自身**（终态摘要 / 升级 / 收尾）。对成员的输入永远走邮箱。
 7. **开工规则**：成员无活跃任务（`{PLANNING, IN_PROGRESS, IN_REVIEW}`）时，取其名下 `updated_at` 最早的 `PENDING(assignee)` 任务 `start_task`（DAO CAS；plan_mode 成员落 `PLANNING`）。并发/重复触发由 CAS 与一活跃探针消歧。
-8. **验票规则**：每轮 `(task_id, review_round)` 送审派发一次（内存去重，崩溃后至多重发一轮）；`verdict.judge` 三值判定——`pass ≥ ceil(threshold×n)` 过、fail 票使配额不可达即败、否则未定；settle 经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，单判定者 + CAS 保证不双结算。
+8. **验票规则**：一次 reviewer job 以 `(task_id, review_round, reviewer)` 唯一标识；持久化票仓而非 harness 自然返回才是完成权威。未投票 reviewer 独立派发，正常返回无票或异常最多运行两次；耗尽后 fail-closed 升级 leader，绝不伪造票。`verdict.judge` 三值判定——`pass ≥ ceil(threshold×n)` 过、fail 票使配额不可达即败、否则未定；settle 经 `task_manager.settle_review` 的 `IN_REVIEW` 源态 CAS，单判定者 + CAS 保证不双结算。
 9. **升级规则**：败局且 `review_round ≥ max_review_rounds`（任务列，NULL → `spec.default_max_review_rounds`）→ 不再自动打回，任务**留 `IN_REVIEW`**，升级注入 leader；未定且本轮开启超 `spec.review_stall_timeout` → 停摆升级（附已投/未投名单）。两类升级共用 `(task_id, review_round)` 去重；升级后决定性迟票仍可正常 settle。软催办（600s，包内常量 `_REVIEW_RENUDGE_SECONDS`）只发给未投票 reviewer、每轮每窗一次。
 10. **投票判定策略在调度器，票据事实在 DB**：`verify_task`（scheduled 团队）只追加票行 + 发 `TASK_REVIEW_VOTE`，不翻转状态；autonomous 团队维持首裁即决。工具描述随语义分离（desc_key：`verify_task` / `verify_task_scheduled`）。策略更换 = 替换 `verdict.judge`，不碰票表与状态机。
 11. **leader 自发事件经 `SCHEDULER_SCAN` 回声可见**：`kernel._filter_self` 丢弃 self 事件时，若调度器激活且事件是 `task_*`，改投 `InnerEventType.SCHEDULER_SCAN`。coordination 无 handler 监听该 inner 事件；调度器视其为纯扫描提示。
-12. **异常语义**：`TeamScheduler.on_event` 吞普通异常（log + 下次触发重试幂等扫描），绝不让 bus loop 挂掉——与 `AsyncCallbackFramework.trigger` 的 swallow 语义对齐。
+12. **异常语义**：`TeamScheduler.on_event` 吞普通异常（log + 下次触发重试幂等扫描），绝不让 bus loop 挂掉——与 `AsyncCallbackFramework.trigger` 的 swallow 语义对齐。并发 wake 由 `_scan_lock` 串行化；`deactivate()` 取消仍在运行的 reviewer jobs，避免暂停/停止后后台审核继续改动状态。
 13. **内存记账不持久化**：送审去重 / 催办节流 / 升级去重 / 摘要去重都是进程内状态；leader 重启最坏重发一次送审或升级。看板真相只在 DB。
 14. **各分发模式拥有自己的 task-board / stale handler 类，选择只发生在装配点**：
     `ScheduledTaskBoardHandler` / `ScheduledStaleTaskHandler` 是调度模式的 task-board / stale
@@ -130,7 +130,7 @@ kernel 侧：
 ## 数据结构
 
 - 票表 / `review_round` / `max_review_rounds` / `team_info` 能力列：见 `S_12`。
-- 调度器内存记账：`_review_dispatched: set[(task_id, round)]`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`、`_review_feedback_dispatched: set[(task_id, round)]`、`_review_feedback_tasks: set[asyncio.Task]`、`_team_review_feedback_dispatched: bool`。其中团队终态 callback 标记在 `activate()` 复位；失败轮次去重随 scheduler 实例生命周期保留。
+- 调度器内存记账：`_review_jobs: dict[(task_id, round, reviewer), asyncio.Task]`、`_review_attempts: dict[(task_id, round, reviewer), int]`、`_scan_lock`、`_renudged_at: dict[(task_id, round), ms]`、`_escalated: set[(task_id, round)]`、`_digested_tasks: set[task_id]`、`_all_done_announced: bool`、`_review_feedback_dispatched: set[(task_id, round)]`、`_review_feedback_tasks: set[asyncio.Task]`、`_team_review_feedback_dispatched: bool`。review job 终态会再次从 DB 扫描，无票路径不依赖事件唤醒；团队终态 callback 标记在 `activate()` 复位，失败轮次去重随 scheduler 实例生命周期保留。
 
 ## 消息面
 
