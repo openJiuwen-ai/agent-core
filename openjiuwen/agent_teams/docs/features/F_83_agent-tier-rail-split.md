@@ -42,7 +42,7 @@ agent 层 span（`agent.{name}.task_iteration.{n}` / `agent.{name}.invoke`）的
    和单 agent 的 `agent.{mode}.{session}` 都是 run root。合成 team 名与属性过滤补丁随之删除，
    不是搬家而是结构性消失。
 4. **孤儿判据补上 trace 维度**。`_drain_or_clear_stale` 原先只比 member 名，拆分后通用侧改用
-   `deepagent.agent.name`（新增 semconv 键，见「拒绝的方案」第 3 条），必须同时满足
+   `gen_ai.agent.name`（见「拒绝的方案」第 3 条），必须同时满足
    **同名 + 同 trace** 才当作自己的孤儿去 end。并发 session 跑同一个 agent 时，名字必然相同，
    只按名字判会 end 掉另一条还在跑的 trace 的 agent span。
 5. **挂载成对声明**。`core.observability` 降为 harness 内置元素，`core.team.observability` 留在
@@ -61,7 +61,8 @@ agent 层 span（`agent.{name}.task_iteration.{n}` / `agent.{name}.invoke`）的
    单 agent 不受益。分支不会随时间收敛，只会继续长。
 3. **孤儿判据继续复用 `agentteam.member.name`**。通用逻辑不该依赖 team 命名空间；而且单 agent
    场景下这个属性被补丁抹掉了，比较**永远不相等**，一律走"别人的 span，不要动"分支——旧代码在
-   单 agent 下的并发安全是巧合而非设计。改用 `deepagent.agent.name` 后必须显式补 trace 判据。
+   单 agent 下的并发安全是巧合而非设计。改用 `gen_ai.agent.name` 后必须显式补 trace 判据。
+   （最初引入的是项目私有键 `deepagent.agent.name`；它与标准键始终同值同写，已回归到标准键。）
 4. **team rail 用更高优先级抢在 agent rail 之后关 span**。priority 是每 rail 一个值，四个 hook
    共用同一个序：让 team 的 `after_*` 晚于 agent 关 span，就必然让它的 `before_*` 也晚于 agent
    开 span，那时贡献已经来不及了。output 镜像键随 scope 走到 `close()` 才是正解。

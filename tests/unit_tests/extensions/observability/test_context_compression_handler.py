@@ -19,7 +19,6 @@ from openjiuwen.core.context_engine.schema.context_state import (
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
-    GEN_AI_REQUEST_ID,
     OJ_AGENT_MODE,
     OJ_CONTEXT_OPERATION_ID,
     OJ_EXECUTION_SUBJECT_ID,
@@ -30,19 +29,15 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_EVENT_KIND,
     OJ_TRAJECTORY_PAYLOAD,
-    OJ_TRAJECTORY_REQUEST_ID,
     OJ_TRAJECTORY_SCHEMA_VERSION,
-    OJ_TRAJECTORY_SESSION_ID,
-    OJ_TRAJECTORY_STEP_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
-    OJ_TRAJECTORY_TURN_ID,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
 )
@@ -96,7 +91,7 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
     try:
         tracer = runtime.get_tracer("context-compression-v2-test")
         parent_attributes = {
-            OJ_SESSION_ID: "root-session-1",
+            GEN_AI_CONVERSATION_ID: "root-session-1",
             OJ_REQUEST_ID: "request-1",
             OJ_RUN_ID: "run-1",
             OJ_TURN_ID: "turn-1",
@@ -113,7 +108,7 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
             with tracer.start_as_current_span(
                 "llm.call",
                 attributes={
-                    GEN_AI_REQUEST_ID: "compaction-request-1",
+                    OJ_REQUEST_ID: "compaction-request-1",
                     OJ_INFERENCE_ID: "compaction-inference-1",
                 },
             ) as llm_span:
@@ -181,11 +176,11 @@ async def test_real_recorder_completion_emits_correlated_native_v2_span(
         assert event.attributes[OJ_TRAJECTORY_EVENT_KIND] == "compaction.completed"
         assert event.attributes[OJ_TRAJECTORY_SUBJECT_ID] == "subagent:one"
         assert event.attributes[OJ_TRAJECTORY_SUBJECT_SEQUENCE] == 2
-        assert event.attributes[OJ_TRAJECTORY_SESSION_ID] == "root-session-1"
-        assert event.attributes[OJ_TRAJECTORY_TURN_ID] == "turn-1"
-        assert event.attributes[OJ_TRAJECTORY_STEP_ID] == "step-1"
-        assert event.attributes[OJ_TRAJECTORY_REQUEST_ID] == "request-1"
-        assert event.attributes[OJ_SESSION_ID] == "root-session-1"
+        assert event.attributes[GEN_AI_CONVERSATION_ID] == "root-session-1"
+        assert event.attributes[OJ_TURN_ID] == "turn-1"
+        assert event.attributes[OJ_STEP_ID] == "step-1"
+        assert event.attributes[OJ_REQUEST_ID] == "request-1"
+        assert event.attributes[GEN_AI_CONVERSATION_ID] == "root-session-1"
         assert event.attributes[OJ_TURN_NUMBER] == 7
         assert event.attributes[OJ_STEP_NUMBER] == 3
         assert event.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "sub-session-1"

@@ -32,6 +32,7 @@ class RsiTaskCreateRequest:
     search_width: int | None
     model_refs: dict[str, str]
     max_iterations: int
+    web_proxy: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,11 +55,11 @@ class ArtifactValidationResult:
 
 @dataclass(frozen=True, slots=True)
 class RsiUsageTokens:
-    """Cumulative token counters for one optimization task."""
+    """Provider token counters; ``None`` means the counter was not reported."""
 
-    input: int
-    output: int
-    cache_hit: int
+    input: int | None
+    output: int | None
+    cache_hit: int | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,8 +67,19 @@ class RsiUsage:
     """Cumulative model and optimization-engine usage."""
 
     tokens: RsiUsageTokens
-    cost_estimate: float
+    cost_estimate: float | None
     call_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class RsiModelCall:
+    """One completed model request, without prompts or credentials."""
+
+    model: str
+    call_count: int
+    tokens: RsiUsageTokens
+    status: Literal["succeeded", "failed", "incomplete"] = "succeeded"
+    duration_ms: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,6 +139,7 @@ class EngineState:
     status: RsiStatus
     iteration: int
     total_iterations: int
+    best_node_id: str | None
     score: float | None
     baseline: float | None
     usage: RsiUsage | None
@@ -158,6 +171,11 @@ class EngineReport:
     usage: RsiUsage | None
     artifact_index: list[ArtifactRef]
     summary: str | None
+    # Paper providers expose the current best and the initial baseline here
+    # so AgentServer can render the same scores in task/report responses.
+    # Defaults keep older program providers and persisted reports compatible.
+    best_score: float | None = None
+    baseline: float | None = None
 
 
 __all__ = [
@@ -168,6 +186,7 @@ __all__ = [
     "EngineResult",
     "EngineState",
     "RsiChange",
+    "RsiModelCall",
     "RsiScenario",
     "RsiStatus",
     "RsiTaskCreateRequest",

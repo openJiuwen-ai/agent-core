@@ -230,9 +230,16 @@ def file_config(tmp_path: Path) -> ObservabilityConfig:
 
 
 def test_build_exporter_returns_trace_file_exporter(file_config: ObservabilityConfig) -> None:
+    from openjiuwen.extensions.observability.exporters.transforming import (
+        TransformingSpanExporter,
+    )
     from openjiuwen.extensions.observability.runtime import build_span_exporter
 
     exporter = build_span_exporter(file_config)
-    assert isinstance(exporter, TraceFileExporter)
-    assert exporter.root_dir == file_config.traces_dir
-    assert exporter.retention_days == 7
+    # The file exporter is the Langfuse file WAL: it is wrapped behind the
+    # shared Langfuse projection so its OTLP JSON lines match the langfuse
+    # exporter's payload.
+    assert isinstance(exporter, TransformingSpanExporter)
+    assert isinstance(exporter.exporter, TraceFileExporter)
+    assert exporter.exporter.root_dir == file_config.traces_dir
+    assert exporter.exporter.retention_days == 7

@@ -206,7 +206,14 @@
     `failed` → FAILED → IDLE。状态机不允许"round 跑完了但既不是 COMPLETED 也不是
     CANCELLED / FAILED"的中间态。**`StreamController` 不再自己判断"这轮是不是被取消
     了"**——它只翻译 runtime 报上来的 kind。
-16. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
+16. **Codex 恢复只严格续接已保存的 thread**：成员 checkpoint 有
+    `external_session_id` 时必须 resume 该 id，resume 失败不得静默新建 thread；
+    checkpoint 无该 id 时没有可恢复目标，允许新建并立即回写 id。checkpoint 读取和
+    thread 建立都属于 startup failure 边界，异常必须上报并将成员保持为 ERROR。
+17. **失败上报只携带显式 CLI 路径**：Claude 的 `options.cli_path` 与 Codex 的
+    `config.codex_bin` 对外统一为 `ExternalRuntimeFailure.cli_path`；未配置时字段不进入
+    mailbox JSON，不推测 SDK 的默认可执行文件，也不上报 argv 或环境变量。
+18. **Spawn 子进程命令固定**：`spawn_process` 用 `sys.executable -m
     openjiuwen.core.runner.spawn.child_process` 启动，不是 `os.fork`。
     Windows / macOS / Linux 全平台使用相同的 `asyncio.create_subprocess_exec`
     路径，依赖 stdin/stdout pipe 通信。**禁止**为了"在 Linux 上更快"切到

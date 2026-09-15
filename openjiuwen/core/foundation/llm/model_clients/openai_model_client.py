@@ -45,7 +45,11 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    _deepseek_reasoning_content,
+    apply_message_transforms,
+    model_requires_reasoning_content,
+)
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
@@ -100,6 +104,11 @@ _OPENAI_EXTRA_BODY_EXTENSION_FIELDS = {
     "cache_salt",
     "cache_sharing",
     "return_token_ids",
+    # Vendor thinking flags must ride in extra_body; OpenAI SDK rejects them
+    # as top-level chat.completions.create kwargs.
+    "enable_thinking",
+    "thinking",
+    "chat_template_kwargs",
 }
 
 
@@ -946,6 +955,8 @@ class OpenAIModelClient(BaseModelClient):
             self.model_client_config,
             params["messages"],
         )
+        if model_requires_reasoning_content(params.get("model")):
+            params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()
         kv_mode = self._kv_cache_mode()
@@ -1462,6 +1473,9 @@ class OpenAIModelClient(BaseModelClient):
             model_provider=self.model_client_config.client_provider,
             is_stream=is_stream,
             error=error,
+            error_message=(
+                _format_exception_detail(error) if not str(error).strip() else None
+            ),
         )
         llm_logger.error(
             "Responses API call error.",
@@ -1620,7 +1634,10 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
-                error=e)
+                error=e,
+                error_message=(
+                    _format_exception_detail(e) if not str(e).strip() else None
+                ))
             llm_logger.error(
                 "OpenAI API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -1821,7 +1838,8 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                error=e)
+                error=e,
+                error_message=error_detail if not str(e).strip() else None)
             llm_logger.error(
                 "OpenAI API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,

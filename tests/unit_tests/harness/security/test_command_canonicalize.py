@@ -195,9 +195,11 @@ def test_ask_summary_uses_inner_command_not_cmd_wrap(tmp_path: Path) -> None:
         PermissionResult(permission=PermissionLevel.ASK, matched_rule="tools.bash"),
     )
     assert pres.category == "shell"
-    assert "cmd //c" not in pres.summary
-    assert pres.summary.lower().startswith("read ")
+    assert pres.summary.startswith("bash:")
+    assert "cmd //c" not in pres.summary.lower()
+    assert "dir /b *.docx" in pres.summary
     assert "workspace" in pres.summary.replace("\\", "/").lower()
+    assert not pres.summary.lower().startswith("read ")
 
 
 def test_posix_windows_cd_artifact_suffix_is_not_file_read() -> None:
@@ -241,9 +243,11 @@ def test_ask_summary_cd_then_dir_not_cmd_wrap(tmp_path: Path) -> None:
         PermissionResult(permission=PermissionLevel.ASK, matched_rule="tools.bash"),
     )
     assert pres.category == "shell"
-    assert "cmd //c" not in pres.summary
-    assert pres.summary.lower().startswith("read ")
+    assert pres.summary.startswith("bash:")
+    assert "cmd //c" not in pres.summary.lower()
+    assert "dir /b *.docx" in pres.summary
     assert "workspace" in pres.summary.replace("\\", "/").lower()
+    assert not pres.summary.lower().startswith("read ")
 
 
 def test_persist_suggests_unwrapped_dir_not_cmd() -> None:

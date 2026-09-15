@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from openjiuwen.agent_teams.schema.status import MemberStatus
@@ -58,7 +59,12 @@ class _StatusSink:
         self.statuses.append(status)
 
 
-def _build_ctx(*, message_manager=None, messager=None) -> RuntimeReliabilityContext:
+def _build_ctx(
+    *,
+    message_manager: Any = None,
+    messager: Any = None,
+    cli_path: str | None = None,
+) -> RuntimeReliabilityContext:
     return RuntimeReliabilityContext(
         member_name="worker1",
         team_name="team",
@@ -68,6 +74,7 @@ def _build_ctx(*, message_manager=None, messager=None) -> RuntimeReliabilityCont
         messager=messager,
         leader_name="leader",
         update_status_cb=_StatusSink() if messager is not None else _StatusSink(),  # type: ignore[arg-type]
+        cli_path=cli_path,
     )
 
 
@@ -76,6 +83,7 @@ async def test_finalize_failure_persists_one_message():
     mm = _FakeMessageManager()
     ctx = _build_ctx(message_manager=mm, messager=_FakeMessager())
     ctx.begin_attempt(phase="turn", round_id=1)
+    ctx.update_model("gpt-effective")
 
     failure = await ctx.finalize_failure(
         category="auth_required",
@@ -86,10 +94,60 @@ async def test_finalize_failure_persists_one_message():
     assert failure.failure_id == ctx.failure_id
     assert failure.category == "auth_required"
     assert failure.user_action_required is True
+    assert failure.model == "gpt-effective"
     assert failure.round_id == 1
     assert len(mm.sent) == 1
     assert mm.sent[0]["to"] == "leader"
     assert mm.sent[0]["protocol"] == "json"
+
+
+@pytest.mark.asyncio
+async def test_finalize_failure_reports_explicit_cli_path_only_when_configured() -> None:
+    configured_mm = _FakeMessageManager()
+    configured = _build_ctx(
+        message_manager=configured_mm,
+        messager=_FakeMessager(),
+        cli_path=" /opt/codex ",
+    )
+    configured.begin_attempt(phase="startup", round_id=None)
+    configured_failure = await configured.finalize_failure(
+        category="process_start_failed",
+        reason=ExternalRuntimeFailureReason(message="failed"),
+        summary="startup failed",
+    )
+
+    default_mm = _FakeMessageManager()
+    default = _build_ctx(message_manager=default_mm, messager=_FakeMessager())
+    default.begin_attempt(phase="startup", round_id=None)
+    await default.finalize_failure(
+        category="process_start_failed",
+        reason=ExternalRuntimeFailureReason(message="failed"),
+        summary="startup failed",
+    )
+
+    assert configured_failure is not None
+    assert configured_failure.cli_path == "/opt/codex"
+    assert json.loads(configured_mm.sent[0]["content"])["cli_path"] == "/opt/codex"
+    assert "cli_path" not in json.loads(default_mm.sent[0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_request_rejected_requires_configuration_action():
+    """HTTP 400 failures carry an actionable category and suggestion."""
+    ctx = _build_ctx(message_manager=_FakeMessageManager(), messager=_FakeMessager())
+    ctx.begin_attempt(phase="turn", round_id=1)
+
+    failure = await ctx.finalize_failure(
+        category="request_rejected",
+        reason=ExternalRuntimeFailureReason(message="unknown", http_status=400),
+        summary="Claude SDK turn failed: unknown",
+    )
+
+    assert failure is not None
+    assert failure.user_action_required is True
+    assert "HTTP 400" not in failure.suggested_action
+    assert "请求配置" in failure.suggested_action
+    assert "MCP" not in failure.suggested_action
 
 
 @pytest.mark.asyncio
@@ -162,12 +220,15 @@ async def test_publish_retrying_emits_event_without_persisting():
     mm = _FakeMessageManager()
     ctx = _build_ctx(message_manager=mm, messager=msgr)
     ctx.begin_attempt(phase="turn", round_id=3)
+    ctx.update_model("gpt-effective")
     await ctx.publish_retrying(
         category="server_unavailable",
         reason=ExternalRuntimeFailureReason(message="overloaded"),
         summary="retrying",
     )
     assert len(msgr.published) == 1
+    _topic_id, event_message = msgr.published[0]
+    assert event_message.get_payload().model == "gpt-effective"
     assert len(mm.sent) == 0
     # Retrying does not finalize a failure.
     assert not ctx.has_finalized

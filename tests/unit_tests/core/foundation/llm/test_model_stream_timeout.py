@@ -98,3 +98,46 @@ async def test_model_stream_raises_idle_timeout_on_third_frame():
     assert total_match is not None
     assert float(total_match.group(1)) >= float(idle_match.group(1))
     assert "model=mock-model" in message
+
+
+@pytest.mark.asyncio
+async def test_model_stream_timeout_carries_error_message_into_callback():
+    """The LLM_CALL_ERROR event carries the built detail as error_message.
+
+    The raised asyncio.TimeoutError renders as an empty string, so the span
+    would otherwise record a blank cause even though the stage/timeout/chunk
+    diagnostics were already assembled here.
+    """
+    from openjiuwen.core.runner import Runner
+    from openjiuwen.core.runner.callback.events import LLMCallEvents
+
+    captured: list[dict] = []
+
+    async def capture_error(**kwargs):
+        captured.append(kwargs)
+
+    Runner.callback_framework.on(LLMCallEvents.LLM_CALL_ERROR)(capture_error)
+
+    async def stalled_stream(**kwargs):
+        await asyncio.sleep(1.0)
+        yield AssistantMessageChunk(content="never")
+
+    model = _build_model_with_stream(
+        stalled_stream,
+        first_timeout=0.01,
+        idle_timeout=0.01,
+    )
+
+    with pytest.raises(BaseError):
+        async for _ in model.stream(messages=[]):
+            pass
+
+    assert captured, "LLM_CALL_ERROR must be triggered on stream timeout"
+    event_kwargs = captured[-1]
+    assert isinstance(event_kwargs.get("error"), asyncio.TimeoutError)
+    error_message = event_kwargs.get("error_message")
+    assert isinstance(error_message, str)
+    assert "LLM stream timeout" in error_message
+    assert "stage=first_chunk" in error_message
+    assert "chunk_count=0" in error_message
+    assert "model=mock-model" in error_message

@@ -33,11 +33,11 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import MemberAct
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     load_member_optimizer_model,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import role_execution_errors
 from openjiuwen.rsi.harness_rsi.member_optimizer.hypothesis import (
     load_optimization_hypotheses,
     write_candidate_manifest,
 )
-from openjiuwen.rsi.harness_rsi.member_optimizer.execution_contract import role_execution_errors
 from openjiuwen.rsi.harness_rsi.member_optimizer.lever import (
     LEVER_ACTION,
     LEVER_CONFIGURATION,
@@ -204,13 +204,14 @@ class MemberOptimizer:
             if reusable_ref:
                 return reusable_ref
 
+        analysis_ref = load_analysis_ref(analysis_result_path)
+        analysis_ref.require_usable()
         load_member_optimizer_model(self.config.model_config_ref)
 
         path_layout = MemberOptimizerPathLayout.from_output_root(output_root)
         run_dir = _allocate_optimization_dir(output_root)
 
         eval_ref = load_eval_ref(eval_ref_path)
-        analysis_ref = load_analysis_ref(analysis_result_path)
         team_issues = resolve_team_issues(analysis_ref)
 
         candidate_roles = resolve_candidate_roles(
@@ -253,6 +254,7 @@ class MemberOptimizer:
                     )
                 team_issues = [issue for issue in team_issues if issue.issue_id in issue_scope]
                 hypotheses = [item for item in hypotheses if str(item.get("source_issue_id", "")) in issue_scope]
+        selection_path: str | Path = run_dir / "member_selection.yaml"
         if single_harness:
             (
                 role_attr_report,
@@ -680,8 +682,12 @@ class MemberOptimizer:
             role: role_execution_errors(plan, execution_results, role) for role in selected_roles
         }
         verified_roles = {
-            role: vr.status == "passed" and not execution_errors_by_role.get(role)
-            for role, vr in verification_result.role_results.items()
+            role: (
+                verification_result.role_results.get(role) is not None
+                and verification_result.role_results[role].status == "passed"
+                and not execution_errors_by_role.get(role)
+            )
+            for role in selected_roles
         }
 
         for role in sorted(selected_roles):

@@ -80,6 +80,10 @@ class Runtime:
     """Run identifier threaded into journal records as a cache-isolation key
     (``get_cached`` checks ``sig`` AND ``run_id``): a fresh run never hits the
     prior run's cache; a resume keeps the same id."""
+    script_path: str | None = field(default=None, repr=False)
+    """Absolute path of the script driving this run, threaded onto the
+    ``WORKFLOW_STARTED`` progress event so embedders can rebuild a cold-start
+    resume advisory (``resume_id`` + ``script_path``)."""
     current_agent: "dict | None" = field(default=None, repr=False)
     """The in-flight agent (``{"agent_id", "label", "started_spent"}``); a
     pause/stop mid-agent reads this to record which agent was interrupted."""

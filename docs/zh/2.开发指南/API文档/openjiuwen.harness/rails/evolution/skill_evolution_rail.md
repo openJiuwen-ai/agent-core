@@ -2,6 +2,8 @@
 
 普通 Skill 在线演进 public Rail。本文只覆盖已有普通 skill 的经验演进，不覆盖新建 skill，也不覆盖 team skill 演进。
 
+先安装运行时依赖：`uv sync --extra observability`。
+
 ---
 
 ## class SkillEvolutionRail
@@ -13,10 +15,10 @@ public Rail，用于采集 agent 轨迹、检测普通 skill 的可复用改进�
 ```python
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
-    EvolutionReviewRuntime,
     SkillEvolutionRail,
     configure_skill_evolution,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime, build_evolve_review_command_prompt
 ```
 
 `SkillEvolutionRail` 的主动演进 review 流程通过 Rail 自有的 `evolve_review_task` 工具委托稳定的
@@ -45,6 +47,10 @@ configure_skill_evolution(
 
 配置 API 会将 `EvolutionInterruptRail` 与普通 `SkillEvolutionRail` 正确绑定。
 
+Agent 已初始化时改用 `configure_skill_evolution_runtime(...)`，它会立即注册本次新增的 interrupt 与 evolution
+Rails。两个配置函数对相同配置都是幂等的，并拒绝配置冲突或跨模式切换。使用
+`unconfigure_skill_evolution(agent, team=False)` 移除普通 Skill 演进 Rails；省略 `team` 会移除两种模式。
+
 手工组装时必须显式共享：
 
 ```python
@@ -59,7 +65,7 @@ skill_rail = SkillEvolutionRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 agent = create_deep_agent(
     model=model_client,
@@ -77,8 +83,16 @@ agent = create_deep_agent(
 - `review_trigger` 控制周期性自检 follow_up 注入，默认关闭。
 - `review_interval` 控制两次 review 检查之间的非 follow_up task iteration 数，必须大于等于 1。
 - `signal_trigger=False` 会关闭被动信号扫描，也会跳过被动演进的 async snapshot。
-- 主动演进通过 `request_user_evolution()` 触发；返回的 prompt 会要求主 agent 先调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 rail 已采集到的执行/对话轨迹作为默认 review materials，`user_intent` 只补充优化方向。
-- 普通 skill 演进会忽略 `kind: team-skill`；team skill 使用 `TeamSkillEvolutionRail` / `TeamSkillRail`。
+- 推荐的主动入口由 host command handler 持有：解析 subject 后调用
+  `build_evolve_review_command_prompt()`，并把 prompt 作为同一 Agent Session 的下一条 query。该 prompt 要求先
+  调用 `prepare_skill_evolution(user_confirmed=true)`，再调用
+  `evolve_review_task(evolution_review_ref=...)`。prepare tool 会把当前 Rail 已采集到的执行/对话轨迹作为默认
+  review materials，`user_intent` 只提供审核方向。
+- `request_user_evolution()` 仅作为尚未迁移到 command dispatch 的 host 兼容 wrapper 保留。
+- 普通 skill 的自动检测会排除 `kind: team-skill` 和 `kind: swarm-skill`；Team root 轨迹采集及
+  Team/Swarm Skill 被动检测应使用 `TeamSkillEvolutionRail`。显式 `/evolve` command 使用从磁盘
+  `SKILL.md` 解析出的 canonical subject kind，而不是 Rail mode，并且不受该自动检测分工限制；legacy
+  `team-skill` 会解析为 `swarm-skill`。
 
 ### 外部已归因信号入口
 
@@ -140,7 +154,7 @@ class SkillEvolutionRail(
 * **review_runtime** (EvolutionReviewRuntime): review 子智能体状态与中断审核绑定的共享运行时，active-review 依赖必须显式传入。
 * **subject_kind** (str): 本 rail 的演进对象类型（`"skill"` 或 `"swarm-skill"`，会做统一归一化）。
 * **language** (str): prompt 语言，常见值为 `"cn"` 或 `"en"`。
-* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
+* **trajectory_span_processor** (TrajectorySpanProcessor): `get_trajectory_span_processor()` 返回的进程级共享 processor。单 Agent 宿主还必须 acquire observability、挂载 `AgentObservabilityRail`，并使用 `open_agent_run_span()` / `close_agent_run_span()` 包裹每个 Agent turn；参见 `trajectory_rail_example`。
 * **eval_interval** (int): 经验展示评分检查间隔，必须大于等于 1。
 * **evolution_total_timeout_secs** (float): 后台演进总超时预算。
 * **generate_records_llm_policy** (LLMInvokePolicy): 经验记录生成阶段的 LLM 重试/超时策略。
@@ -167,10 +181,10 @@ class SkillEvolutionRail(
 ```python
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
-    EvolutionReviewRuntime,
     SkillEvolutionRail,
-    TeamSkillRail,
+    TeamSkillEvolutionRail,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime, build_evolve_review_command_prompt
 
 runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
@@ -180,7 +194,7 @@ skill_rail = SkillEvolutionRail(
     trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
 )
-team_rail = TeamSkillRail(
+team_rail = TeamSkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
@@ -190,7 +204,7 @@ team_rail = TeamSkillRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 rails = [interrupt_rail, skill_rail, team_rail]
 ```
@@ -306,9 +320,18 @@ Skill experience 数据的演进存储。执行轨迹仍由注入的 processor �
 
 ## 方法
 
-### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+### build_evolve_review_command_prompt(*, subject, user_intent=None, review_agent_name="evolution_reviewer", language="cn") -> str
 
-为普通 skill 构造由 host 投递的主动演进 command prompt。该 prompt 不直接创建 review scope，而是要求主 agent 调用 `prepare_skill_evolution(user_confirmed=true)`，再用返回的 `evolution_review_ref` 调用 `evolve_review_task(evolution_review_ref=...)`。
+构造主动 `/evolve` follow-up prompt，从 `openjiuwen.harness.rails.evolution` 导入。Host 应通过
+`EvolutionStore.resolve_subject_payload(skill_name)` 解析真实 subject kind，并在产生证据轨迹的同一 Agent
+Session 中运行返回的 prompt。
+
+显式 command path 与 `signal_trigger` 相互独立：前者是用户授权的审核请求，后者开启 invoke 后的被动检测。
+
+### 兼容方法：async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+
+为普通 skill 构造主动演进 command prompt 的兼容 wrapper。新的 host command handler 应在解析 subject 后直接
+调用 `build_evolve_review_command_prompt()`。
 
 **参数**：
 
@@ -321,9 +344,11 @@ Skill experience 数据的演进存储。执行轨迹仍由注入的 processor �
 
 * `EvolutionRequestResult`: `mode="agent_prompt"`，`followup_prompt` 由 host 注入 agent loop；不会暂存记录，也不会发出审批事件。
 
-### async approve_record(request_id) -> None
+### async approve_record(request_id, *, approved_record_ids=None) -> None
 
 审批暂存记录，并通过 `EvolutionStore` 写入。
+
+提供 `approved_record_ids` 时只审批选中的暂存记录；省略时审批全部暂存记录。
 
 如果发生部分失败，未写入的尾部会保留在同一个 `PendingChange` 中；宿主可使用同一个 `request_id` 重试。
 
@@ -331,17 +356,20 @@ Skill experience 数据的演进存储。执行轨迹仍由注入的 processor �
 
 拒绝暂存记录，不写入。
 
-### async request_simplify(skill_name, user_intent=None, mode="agent_prompt") -> SimplifyRequestResult
+### async request_simplify(skill_name, user_intent=None, *, mode="agent_prompt", max_index_records=100) -> SimplifyRequestResult
 
-构造由 host 投递的 simplify command prompt。prompt 会包含有界经验摘要索引，并要求 agent 使用 `list_skill_experiences`、`read_skill_experiences` 和 `simplify_skill_experiences`。
+构造由 host 投递的 simplify command prompt。prompt 会包含受 `max_index_records` 限制的经验摘要索引，
+并要求 agent 使用 `list_skill_experiences`、`read_skill_experiences` 和 `simplify_skill_experiences`。
 
 **返回**：
 
 * `SimplifyRequestResult`: `mode="agent_prompt"` 和 `followup_prompt`。它不会调用 scorer、暂存治理动作或发出审批事件。
 
-### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
+### async request_rebuild(skill_name, user_intent=None, min_score=0.5, max_context_records=40, max_context_chars=20000) -> Optional[str]
 
 归档当前 skill 资产，并基于筛选后的演进记录返回 rebuild follow-up prompt。宿主或命令处理器需要把返回的 prompt 注入 agent loop；rail 不会直接写出重建后的 `SKILL.md`。
+
+`max_context_records` 和 `max_context_chars` 限制 prompt 中内联的确定性 rebuild context。
 
 ### async drain_pending_host_events(wait=False, timeout=None) -> list[OutputSchema]
 
@@ -355,9 +383,15 @@ Skill experience 数据的演进存储。执行轨迹仍由注入的 processor �
 
 ## 示例
 
+可运行模块 `examples.agent_evolving.skill_evolution_example` 同时包含普通 Skill 创建与演进案例，并包含
+span 采集所需、由宿主持有的单 Agent root trace。使用 `--scenario create` 或 `--scenario evolve` 选择
+单个案例，使用 `--scenario all` 依次运行两者。
+
 ```python
 from openjiuwen.harness import create_deep_agent
-from openjiuwen.harness.rails import EvolutionInterruptRail, EvolutionReviewRuntime, SkillEvolutionRail
+from openjiuwen.core.runner import Runner
+from openjiuwen.harness.rails import EvolutionInterruptRail, SkillEvolutionRail
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
@@ -370,7 +404,7 @@ skill_rail = SkillEvolutionRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 
 agent = create_deep_agent(
@@ -379,13 +413,11 @@ agent = create_deep_agent(
     rails=[interrupt_rail, skill_rail],
 )
 
-result = await skill_rail.request_user_evolution(
-    "code-review",
-    "优先输出行为级问题，再输出风格建议",
+subject = skill_rail.store.resolve_subject_payload("code-review")
+followup_prompt = build_evolve_review_command_prompt(
+    subject=subject,
+    user_intent="优先输出行为级问题，再输出风格建议",
 )
-
-if result.followup_prompt:
-    # Host 投递方式由应用决定：可以作为下一条 query、follow-up，
-    # 或其他等价消息注入 agent loop。
-    await agent.invoke({"query": result.followup_prompt})
+# 在产生轨迹的同一 Session 中作为下一条 query 运行。
+await Runner.run_agent(agent, {"query": followup_prompt}, session=session)
 ```

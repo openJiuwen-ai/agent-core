@@ -21,7 +21,7 @@ def _canonical_llm_trajectory(
 ) -> Trajectory:
     resource = {
         "openjiuwen.trajectory_id": execution_id,
-        semconv.AT_SESSION_ID: "session-1",
+        semconv.GEN_AI_CONVERSATION_ID: "session-1",
         "openjiuwen.trajectory.source": "online",
     }
     resource.update(resource_attrs or {})

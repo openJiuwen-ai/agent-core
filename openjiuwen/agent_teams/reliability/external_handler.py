@@ -52,10 +52,13 @@ class ExternalRuntimeHandler(BaseCoordinationHandler):
         category = payload.category
         summary = payload.summary
         agent_kind = payload.agent_kind
+        model = payload.model or "<unknown>"
+        empty_field = "<unknown>"
         team_logger.info(
-            "[external-runtime] member {} {} retrying category={} summary={}",
+            "[external-runtime] member {} {} retrying model={} category={} summary={}",
             member_name,
             agent_kind,
+            model,
             category,
             summary,
         )
@@ -64,8 +67,16 @@ class ExternalRuntimeHandler(BaseCoordinationHandler):
                 "reliability.external_runtime_retrying",
                 member_name=member_name,
                 agent_kind=agent_kind,
+                model=model,
                 category=category,
                 summary=summary,
+                reason_message=payload.reason.message or empty_field,
+                http_status=payload.reason.http_status
+                if payload.reason.http_status is not None
+                else empty_field,
+                sdk_error_code=payload.reason.sdk_error_code or empty_field,
+                attempt=payload.attempt if payload.attempt is not None else empty_field,
+                max_attempts=payload.max_attempts if payload.max_attempts is not None else empty_field,
             )
         )
 

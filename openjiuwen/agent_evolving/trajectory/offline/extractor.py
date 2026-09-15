@@ -178,10 +178,12 @@ class TrajectoryExtractor:
         native_trace, native_span = _derived_id(trace_id, span, index)
         name = str(_get(span, "name", "") or "")
         if kind == "llm":
-            span_name = "llm.call"
+            params = _llm_params(span)
+            model = str(params.get("model") or _get(span, "model") or "").strip()
+            span_name = f"chat {model}" if model else "chat"
         elif kind == "tool":
             tool_name = name.removeprefix("tool.") or str(_get(span, "tool_name", "unknown"))
-            span_name = f"tool.{tool_name}"
+            span_name = f"execute_tool {tool_name}"
         else:
             span_name = name or kind
 
@@ -203,16 +205,13 @@ class TrajectoryExtractor:
             response_message = _message(response)
             completions = [] if response_message is None else [response_message]
             attrs.update(write_llm_exchange(prompts, completions))
-            if response_message is not None and response_message.get("tool_calls") is not None:
-                attrs[semconv.GEN_AI_TOOL_CALLS] = response_message["tool_calls"]
             tools = params.get("tools")
             if tools:
                 attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = to_json_compatible(tools)
             usage = _usage(response, params)
             for source_keys, target in (
-                (("prompt_tokens", "input_tokens"), semconv.GEN_AI_USAGE_PROMPT_TOKENS),
-                (("completion_tokens", "output_tokens"), semconv.GEN_AI_USAGE_COMPLETION_TOKENS),
-                (("total_tokens",), semconv.GEN_AI_USAGE_TOTAL_TOKENS),
+                (("prompt_tokens", "input_tokens"), semconv.GEN_AI_USAGE_INPUT_TOKENS),
+                (("completion_tokens", "output_tokens"), semconv.GEN_AI_USAGE_OUTPUT_TOKENS),
             ):
                 value = next((usage[key] for key in source_keys if key in usage), None)
                 if value is not None:
@@ -229,17 +228,17 @@ class TrajectoryExtractor:
             tool_name = name.removeprefix("tool.") or str(_get(span, "tool_name", "unknown"))
             attrs[semconv.GEN_AI_OPERATION_NAME] = "execute_tool"
             attrs[semconv.GEN_AI_TOOL_NAME] = tool_name
-            attrs[semconv.GEN_AI_TOOL_INPUT] = _extract_inputs(span)
-            attrs[semconv.GEN_AI_TOOL_OUTPUT] = _extract_outputs(span)
+            attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS] = _extract_inputs(span)
+            attrs[semconv.GEN_AI_TOOL_CALL_RESULT] = _extract_outputs(span)
             tool_id = _get(span, "tool_call_id") or _get(span, "call_id")
             if tool_id:
-                attrs[semconv.GEN_AI_TOOL_ID] = str(tool_id)
+                attrs[semconv.GEN_AI_TOOL_CALL_ID] = str(tool_id)
             tool_info = self._tool_info(tool_name)
             if tool_info is not None:
                 attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = tool_info
         else:
-            attrs[semconv.AT_AGENT_INPUT] = _extract_inputs(span)
-            attrs[semconv.AT_AGENT_OUTPUT] = _extract_outputs(span)
+            attrs[semconv.OJ_SPAN_INPUT] = _extract_inputs(span)
+            attrs[semconv.OJ_SPAN_OUTPUT] = _extract_outputs(span)
             agent_id = _get(span, "agent_id")
             if agent_id:
                 attrs[semconv.AT_AGENT_ID] = str(agent_id)

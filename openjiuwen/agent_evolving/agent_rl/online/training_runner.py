@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import math
 import re
 import uuid
 from collections import Counter
@@ -21,11 +22,6 @@ from typing import Any, ParamSpec, Protocol, TypeVar
 from redis.asyncio import Redis
 from redis.exceptions import WatchError
 
-from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import (
-    RedisTrajectoryStore,
-    trajectory_index_key,
-    trajectory_key,
-)
 from openjiuwen.agent_evolving.agent_rl.storage.trajectory_store import TrajectorySampleStore
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
@@ -169,14 +165,23 @@ class _TrainingRunStore:
         redis: Redis,
         trajectory_store: TrajectorySampleStore,
         model_id: str,
+        sample_owner_id: str,
         min_samples: int,
         max_samples: int,
+        pending_min_score: float | None = None,
     ) -> None:
+        if pending_min_score is not None and not math.isfinite(pending_min_score):
+            raise build_error(
+                StatusCode.AGENT_RL_SERVICE_PARAM_ERROR,
+                error_msg="pending_min_score must be finite when configured",
+            )
         self._redis = redis
         self._trajectory_store = trajectory_store
         self._model_id = model_id
+        self._sample_owner_id = sample_owner_id
         self._min_samples = min_samples
         self._max_samples = max_samples
+        self._pending_min_score = pending_min_score
 
     @_translate_run_store_errors
     async def get(self, training_run_id: str) -> TrainingRunRecord | None:
@@ -204,10 +209,16 @@ class _TrainingRunStore:
     ) -> tuple[TrainingRunRecord, list[dict[str, Any]], bool]:
         """Create a Run and claim its fixed sample batch as one operation."""
 
-        if isinstance(self._trajectory_store, RedisTrajectoryStore):
-            return await self._claim_redis(run)
+        keyspace = self._redis_keyspace()
+        if keyspace is not None:
+            return await self._claim_redis(run, keyspace)
 
-        pending = await self._trajectory_store.get_pending_count(self._model_id)
+        if self._pending_min_score is not None:
+            raise build_error(
+                StatusCode.AGENT_RL_SERVICE_PARAM_ERROR,
+                error_msg="pending_min_score requires a Redis-backed training sample store",
+            )
+        pending = await self._trajectory_store.get_pending_count(self._sample_owner_id)
         if pending < self._min_samples:
             raise build_error(
                 StatusCode.AGENT_RL_TRAINING_SAMPLES_INVALID,
@@ -217,7 +228,7 @@ class _TrainingRunStore:
         if existing is not None:
             return existing, [], False
         samples = await self._trajectory_store.fetch_and_mark_training(
-            self._model_id,
+            self._sample_owner_id,
             min(pending, self._max_samples),
         )
         claimed = self._with_samples(run, samples)
@@ -245,17 +256,17 @@ class _TrainingRunStore:
         """Persist the artifact and trained-sample transition atomically in Redis."""
 
         sample_ids = list(run.sample_ids)
-        if not isinstance(self._trajectory_store, RedisTrajectoryStore):
+        keyspace = self._redis_keyspace()
+        if keyspace is None:
             await self._trajectory_store.mark_trained(sample_ids)
             await self.save(run)
             return
 
-        training_key = trajectory_index_key(self._model_id, "training")
-        trained_key = trajectory_index_key(self._model_id, "trained")
+        _, training_key, trained_key, sample_key_prefix = keyspace
         score = datetime.now(timezone.utc).timestamp()
         pipe = self._redis.pipeline(transaction=True)
         for sample_id in sample_ids:
-            sample_key = trajectory_key(sample_id)
+            sample_key = f"{sample_key_prefix}:{sample_id}"
             pipe.zrem(training_key, sample_id)
             pipe.zadd(trained_key, {sample_id: score})
             pipe.hset(sample_key, "status", "trained")
@@ -265,9 +276,9 @@ class _TrainingRunStore:
     async def _claim_redis(  # pylint: disable=too-many-locals
         self,
         run: TrainingRunRecord,
+        keyspace: tuple[str, str, str, str],
     ) -> tuple[TrainingRunRecord, list[dict[str, Any]], bool]:
-        pending_key = trajectory_index_key(self._model_id, "pending")
-        training_key = trajectory_index_key(self._model_id, "training")
+        pending_key, training_key, _, sample_key_prefix = keyspace
         while True:
             async with self._redis.pipeline(transaction=True) as pipe:
                 try:
@@ -283,14 +294,23 @@ class _TrainingRunStore:
                             if active.status.value in _ACTIVE_STATUSES:
                                 return active, [], False
 
-                    raw_ids = await pipe.zrange(pending_key, 0, self._max_samples - 1)
+                    if self._pending_min_score is None:
+                        raw_ids = await pipe.zrange(pending_key, 0, self._max_samples - 1)
+                    else:
+                        raw_ids = await pipe.zrangebyscore(
+                            pending_key,
+                            self._pending_min_score,
+                            "+inf",
+                            start=0,
+                            num=self._max_samples,
+                        )
                     if len(raw_ids) < self._min_samples:
                         raise build_error(
                             StatusCode.AGENT_RL_TRAINING_SAMPLES_INVALID,
                             error_msg=f"pending samples {len(raw_ids)} is below minimum {self._min_samples}",
                         )
                     sample_ids = [value.decode() if isinstance(value, bytes) else str(value) for value in raw_ids]
-                    sample_keys = [trajectory_key(sample_id) for sample_id in sample_ids]
+                    sample_keys = [f"{sample_key_prefix}:{sample_id}" for sample_id in sample_ids]
                     await pipe.watch(*sample_keys)
                     payloads = [await pipe.hget(key, "sample_json") for key in sample_keys]
                     if any(payload is None for payload in payloads):
@@ -319,6 +339,24 @@ class _TrainingRunStore:
                     return claimed, samples, True
                 except WatchError:
                     continue
+
+    def _redis_keyspace(self) -> tuple[str, str, str, str] | None:
+        """Return an atomic keyspace when the store supports one."""
+
+        keyspace_builder = getattr(self._trajectory_store, "training_run_keyspace", None)
+        if not callable(keyspace_builder):
+            return None
+        keyspace = keyspace_builder(self._sample_owner_id)
+        if (
+            not isinstance(keyspace, tuple)
+            or len(keyspace) != 4
+            or not all(isinstance(key, str) and key for key in keyspace)
+        ):
+            raise build_error(
+                StatusCode.AGENT_RL_SERVICE_PARAM_ERROR,
+                error_msg="training trajectory store returned an invalid Redis keyspace",
+            )
+        return keyspace
 
     async def _create(self, run: TrainingRunRecord) -> TrainingRunRecord | None:
         while True:
@@ -388,7 +426,10 @@ class TrainingRunner:
         base_model_path: str,
         min_samples_for_training: int,
         max_samples_per_run: int,
+        sample_owner_id: str | None = None,
         active_policy: Callable[[], PolicySnapshot | Awaitable[PolicySnapshot]] | None = None,
+        pending_min_score: float | None = None,
+        auto_activate_lora: bool = True,
     ) -> None:
         if not model_id.strip():
             raise build_error(StatusCode.AGENT_RL_SERVICE_PARAM_ERROR, error_msg="model_id is required")
@@ -402,18 +443,29 @@ class TrainingRunner:
                 StatusCode.AGENT_RL_SERVICE_PARAM_ERROR,
                 error_msg="max_samples_per_run must be >= min_samples_for_training",
             )
+        if pending_min_score is not None and not math.isfinite(pending_min_score):
+            raise build_error(
+                StatusCode.AGENT_RL_SERVICE_PARAM_ERROR,
+                error_msg="pending_min_score must be finite when configured",
+            )
         self._ppo = ppo
         self._activator = activator
         self._model_id = model_id
         self._base_model_path = base_model_path
+        self._sample_owner_id = str(sample_owner_id or model_id).strip()
+        if not self._sample_owner_id:
+            raise build_error(StatusCode.AGENT_RL_SERVICE_PARAM_ERROR, error_msg="sample_owner_id is required")
         self._run_store = _TrainingRunStore(
             redis=redis,
             trajectory_store=trajectory_store,
             model_id=model_id,
+            sample_owner_id=self._sample_owner_id,
             min_samples=min_samples_for_training,
             max_samples=max_samples_per_run,
+            pending_min_score=pending_min_score,
         )
         self._active_policy = active_policy or PolicySnapshot
+        self._auto_activate_lora = auto_activate_lora
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._stop_requests: set[str] = set()
         self._lock = asyncio.Lock()
@@ -534,6 +586,8 @@ class TrainingRunner:
                     RunStatus.FAILED,
                     failure_reason="service_restarted",
                 )
+            if not self._auto_activate_lora:
+                return await self._finish(run, RunStatus.SUCCEEDED)
             try:
                 await self._activate(run)
             except Exception as exc:  # Activation is an idempotent external recovery operation.
@@ -585,6 +639,9 @@ class TrainingRunner:
             return
         if activating.training_run_id in self._stop_requests:
             await self._finish(activating, RunStatus.CANCELED)
+            return
+        if not self._auto_activate_lora:
+            await self._finish(activating, RunStatus.SUCCEEDED)
             return
         try:
             await self._activate(activating)

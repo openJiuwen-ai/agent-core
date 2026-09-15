@@ -65,8 +65,8 @@ def _tool_span(span_index: int, tool_name: str, *, tool_input: object = "{}") ->
         "attributes": attributes_from_map(
             {
                 semconv.GEN_AI_TOOL_NAME: tool_name,
-                semconv.GEN_AI_TOOL_INPUT: tool_input,
-                semconv.GEN_AI_TOOL_OUTPUT: "ok",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: tool_input,
+                semconv.GEN_AI_TOOL_CALL_RESULT: "ok",
             }
         ),
     }

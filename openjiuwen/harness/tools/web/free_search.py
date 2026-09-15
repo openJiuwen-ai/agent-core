@@ -15,11 +15,12 @@ from __future__ import annotations
 import json
 import os
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from html import unescape
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import quote_plus, urlparse
+from urllib.parse import quote_plus, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -38,6 +39,7 @@ from openjiuwen.harness.tools.web._common import (
     _decode_ddg_redirect,
     _decode_bing_redirect,
     _duckduckgo_search_url,
+    _domain_allowed,
     _env_flag,
     _normalized_domain,
     _parse_html,
@@ -94,6 +96,31 @@ _LOW_FETCH_VALUE_DOMAINS = {
     "mp.weixin.qq.com",
     "so.html5.qq.com",
 }
+
+# These endpoints are used only when the caller has explicitly constrained
+# search to domestic academic domains.  They deliberately stay in this
+# module, instead of turning the generic web-search tool into a domestic-only
+# tool for every caller.
+_DOMESTIC_SEARCH_DOMAINS = (
+    "scholar.baidu.com",
+    "xueshu.baidu.com",
+    "cnki.net",
+    "wanfangdata.com.cn",
+)
+_DOMESTIC_ENGINE_NAMES = frozenset({"baidu-scholar", "baidu-web", "cnki", "wanfang"})
+
+
+@dataclass(frozen=True)
+class _FreeSearchRequest:
+    """Inputs for one free-search fallback pass."""
+
+    session: aiohttp.ClientSession
+    query: str
+    max_results: int
+    timeout_seconds: int
+    proxy_url: str | None = None
+    allowed_domains: tuple[str, ...] | None = None
+    enabled_engines: frozenset[str] | tuple[str, ...] | None = None
 
 
 def _is_low_fetch_value_url(url: str) -> bool:
@@ -447,17 +474,149 @@ def _parse_ddg_html(html: str, max_results: int) -> list[dict[str, str]]:
     return rows
 
 
+def _domestic_scope_requested(allowed_domains: tuple[str, ...] | None) -> bool:
+    """Return whether the allowlist includes one of the domestic sources."""
+    if not allowed_domains:
+        return False
+    return any(
+        _domain_allowed(f"https://{domain}/", allowed_domains)
+        for domain in _DOMESTIC_SEARCH_DOMAINS
+    )
+
+
+def _is_domestic_navigation_url(url: str, *, source: str = "") -> bool:
+    """Filter search/home/navigation links returned by domestic portals."""
+    parsed = urlparse(url)
+    path = parsed.path.rstrip("/").lower() or "/"
+    domain = _normalized_domain(url)
+    if path == "/":
+        return True
+    blocked_paths = {
+        "/s",
+        "/search",
+        "/paper",
+        "/periodical",
+        "/thesis",
+        "/conference",
+        "/nstr",
+        "/patent",
+        "/standard",
+        "/cstad",
+        "/claw",
+        "/book",
+        "/video",
+        "/localchronicle",
+        "/kns8s/defaultresult/index",
+        "/defaultresult/index",
+    }
+    if path in blocked_paths:
+        return True
+    if domain.endswith("cnki.net") and "defaultresult" in path and "detail" not in path:
+        return True
+    if domain.endswith("wanfangdata.com.cn") and domain != "d.wanfangdata.com.cn":
+        return True
+    if domain.endswith("cnki.net") and domain not in {"kns.cnki.net", "www.cnki.net"}:
+        return True
+    if domain.endswith("baidu.com") and domain not in {"scholar.baidu.com", "xueshu.baidu.com"}:
+        return True
+    if source == "wanfang" and domain != "d.wanfangdata.com.cn":
+        return True
+    return False
+
+
+def _parse_domestic_search_html(
+    html: str,
+    max_results: int,
+    *,
+    base_url: str,
+    source: str,
+    allowed_domains: tuple[str, ...] | None,
+) -> list[dict[str, str]]:
+    """Parse result links from Baidu Scholar, CNKI, or Wanfang HTML."""
+    soup = _parse_html(html)
+    rows: list[dict[str, str]] = []
+    seen: set[str] = set()
+    navigation_titles = {"首页", "登录", "注册", "帮助", "下一页", "上一页"}
+
+    # The three portals have changed CSS names over time.  Selecting all
+    # anchors after the portal-specific selectors keeps this parser useful on
+    # both server-rendered and lightly revised pages; URL and title filters
+    # remove navigation links and shell-page noise.
+    selectors = (
+        "a.sc_content_title[href]",
+        "a.result-table-list-title[href]",
+        "a.fz14[href]",
+        "a.title[href]",
+        "a[href]",
+    )
+    anchors: list[Any] = []
+    for selector in selectors:
+        anchors.extend(soup.select(selector))
+
+    for anchor in anchors:
+        href = str(anchor.get("href", "") or "").strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:")):
+            continue
+        absolute = urljoin(base_url, unescape(href))
+        parsed = urlparse(absolute)
+        if parsed.scheme not in {"http", "https"}:
+            continue
+        if allowed_domains and not _domain_allowed(absolute, allowed_domains):
+            continue
+        if _is_domestic_navigation_url(absolute, source=source) or absolute in seen:
+            continue
+
+        title = anchor.get_text(" ", strip=True) or str(anchor.get("title", "") or "").strip()
+        title = re.sub(r"\s+", " ", unescape(title)).strip()
+        if len(title) < 4 or title in navigation_titles:
+            continue
+
+        snippet = ""
+        container = anchor.find_parent(["article", "li", "div"])
+        if container is not None:
+            for selector in (".abstract", ".summary", ".snippet", ".source", "p"):
+                node = container.select_one(selector)
+                if node is not None:
+                    snippet = node.get_text(" ", strip=True)
+                    if snippet and snippet != title:
+                        break
+        seen.add(absolute)
+        rows.append(
+            {
+                "title": title,
+                "url": absolute,
+                "snippet": re.sub(r"\s+", " ", snippet).strip()[:1000],
+                "origin": source,
+                "date": "",
+                "source": source,
+            }
+        )
+        if len(rows) >= max_results:
+            break
+    return rows
+
+
 class WebFreeSearchTool(Tool):
-    """Free search via DuckDuckGo/Bing. Input query and return ranked URLs with snippets."""
+    """Free search via global engines or constrained domestic academic portals."""
 
     def __init__(
         self,
         language: str = "cn",
         agent_id: str | None = None,
         card: ToolCard | None = None,
+        proxy_url: str | None = None,
+        allowed_domains: tuple[str, ...] | None = None,
+        enabled_engines: tuple[str, ...] | None = None,
     ):
         super().__init__(
             card or build_tool_card("free_search", "WebFreeSearchTool", language, agent_id=agent_id)
+        )
+        self._proxy_url = str(proxy_url or "").strip() or None
+        self._allowed_domains = allowed_domains
+        self._enabled_engines = (
+            frozenset(str(engine).strip().lower() for engine in enabled_engines if str(engine).strip())
+            if enabled_engines is not None
+            else None
         )
 
     @staticmethod
@@ -479,6 +638,7 @@ class WebFreeSearchTool(Tool):
         query: str,
         max_results: int,
         timeout_seconds: int,
+        proxy_url: str | None = None,
     ) -> list[dict[str, str]]:
         """Search the DuckDuckGo HTML endpoint and parse results."""
         url = _duckduckgo_search_url(query)
@@ -488,6 +648,7 @@ class WebFreeSearchTool(Tool):
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
+            proxy_url=proxy_url,
         )
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
         if WebFreeSearchTool._is_ddg_challenge_page(status, html):
@@ -510,6 +671,7 @@ class WebFreeSearchTool(Tool):
         query: str,
         max_results: int,
         timeout_seconds: int,
+        proxy_url: str | None = None,
     ) -> list[dict[str, str]]:
         """Search DuckDuckGo via the jina.ai proxy and parse markdown results."""
         url = f"https://r.jina.ai/http://duckduckgo.com/html/?q={quote_plus(query)}"
@@ -519,6 +681,7 @@ class WebFreeSearchTool(Tool):
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
+            proxy_url=proxy_url,
         )
         _http.raise_for_status_with_body(status, body, engine="duckduckgo-jina")
         text = _decode_response_text(body, content_type=headers.get("Content-Type", "")) or ""
@@ -553,6 +716,7 @@ class WebFreeSearchTool(Tool):
         timeout_seconds: int,
         *,
         debug_run_id: str | None = None,
+        proxy_url: str | None = None,
     ) -> list[dict[str, str]]:
         """Search Bing and parse standard SERP result blocks."""
         if _contains_cjk(query):
@@ -566,6 +730,7 @@ class WebFreeSearchTool(Tool):
             url,
             headers=_search_request_headers(query),
             timeout_seconds=timeout_seconds,
+            proxy_url=proxy_url,
         )
         _http.raise_for_status_with_body(status, body, engine="bing")
         html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
@@ -633,6 +798,59 @@ class WebFreeSearchTool(Tool):
             },
         )
         return rows
+
+    @staticmethod
+    async def _search_domestic(
+        session: aiohttp.ClientSession,
+        query: str,
+        max_results: int,
+        timeout_seconds: int,
+        *,
+        engine: str,
+        proxy_url: str | None = None,
+        allowed_domains: tuple[str, ...] | None = None,
+    ) -> list[dict[str, str]]:
+        """Search one of the public domestic academic portals."""
+        endpoint_templates = {
+            "baidu-scholar": "https://xueshu.baidu.com/s?wd={query}",
+            "baidu-web": "https://www.baidu.com/s?wd={query}",
+            "cnki": "https://kns.cnki.net/kns8s/defaultresult/index?kw={query}",
+            "wanfang": "https://s.wanfangdata.com.cn/paper?q={query}",
+        }
+        endpoint = endpoint_templates.get(engine)
+        if endpoint is None:
+            raise ValueError(f"unsupported domestic search engine: {engine}")
+        url = endpoint.format(query=quote_plus(query))
+        status, headers, body, final_url, _truncated = await _http.request(
+            session,
+            "GET",
+            url,
+            headers=_search_request_headers(query),
+            timeout_seconds=timeout_seconds,
+            max_bytes=2_000_000,
+            proxy_url=proxy_url,
+        )
+        _http.raise_for_status_with_body(status, body, engine=engine)
+        endpoint_domain_allowed = _domain_allowed(final_url, allowed_domains)
+        if engine == "baidu-web" and (
+            _normalized_domain(final_url) == "baidu.com"
+            or _normalized_domain(final_url).endswith(".baidu.com")
+        ):
+            endpoint_domain_allowed = True
+        if allowed_domains and not endpoint_domain_allowed:
+            raise build_error(
+                StatusCode.TOOL_WEB_SEARCH_ENGINE_ERROR,
+                engine=engine,
+                reason="search endpoint redirected outside the configured domestic domains",
+            )
+        html = _decode_response_text(body, content_type=headers.get("Content-Type", ""))
+        return _parse_domestic_search_html(
+            html,
+            max_results,
+            base_url=final_url or url,
+            source=engine,
+            allowed_domains=allowed_domains,
+        )
 
     @staticmethod
     def _score_row(query: str, row: dict[str, str]) -> float:
@@ -706,27 +924,48 @@ class WebFreeSearchTool(Tool):
         return [normalized] if normalized else []
 
     @staticmethod
-    async def _search_free(
-        session: aiohttp.ClientSession,
-        query: str,
-        max_results: int,
-        timeout_seconds: int,
-    ) -> tuple[str, list[dict[str, str]]]:
+    async def _search_free(request: _FreeSearchRequest) -> tuple[str, list[dict[str, str]]]:
         """Search using multiple free search engines with best-effort fallback."""
+        session = request.session
+        query = request.query
+        max_results = request.max_results
+        timeout_seconds = request.timeout_seconds
+        proxy_url = request.proxy_url
+        allowed_domains = request.allowed_domains
+        enabled_engines = request.enabled_engines
         errors: list[str] = []
         debug_run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S_%f")
         best_engine = ""
         best_rows: list[dict[str, str]] = []
 
         engines: list[tuple[str, Any]] = []
-        if _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False):
+        configured_engines = (
+            frozenset(str(engine).strip().lower() for engine in enabled_engines)
+            if enabled_engines is not None
+            else None
+        )
+        ddg_enabled = (
+            any(name in configured_engines for name in {"duckduckgo", "ddg"})
+            if configured_engines is not None
+            else _env_flag(_FREE_SEARCH_DDG_ENABLED_ENV, default=False)
+        )
+        bing_enabled = (
+            "bing" in configured_engines
+            if configured_engines is not None
+            else _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False)
+        )
+        domestic_scope = _domestic_scope_requested(allowed_domains)
+        if domestic_scope:
+            for engine_name in ("baidu-scholar", "baidu-web", "cnki", "wanfang"):
+                engines.append((engine_name, WebFreeSearchTool._search_domestic))
+        if not domestic_scope and ddg_enabled:
             engines.extend(
                 [
                     ("duckduckgo", WebFreeSearchTool._search_duckduckgo),
                     ("duckduckgo-jina", WebFreeSearchTool._search_duckduckgo_via_jina),
                 ]
             )
-        if _env_flag(_FREE_SEARCH_BING_ENABLED_ENV, default=False):
+        if not domestic_scope and bing_enabled:
             engines.append(("bing", WebFreeSearchTool._search_bing))
 
         if not engines:
@@ -742,11 +981,35 @@ class WebFreeSearchTool(Tool):
 
             for effective_query in candidate_queries:
                 try:
-                    if engine_name == "bing":
+                    if allowed_domains and engine_name not in _DOMESTIC_ENGINE_NAMES:
+                        effective_query = (
+                            f"{effective_query} ({' OR '.join(f'site:{domain}' for domain in allowed_domains)})"
+                        )
+                    if engine_name == "baidu-web" and allowed_domains:
+                        effective_query = " OR ".join(
+                            f"site:{domain} {query}" for domain in allowed_domains
+                        )
+                    if engine_name in _DOMESTIC_ENGINE_NAMES:
+                        rows = await runner(
+                            session,
+                            effective_query,
+                            max_results,
+                            timeout_seconds,
+                            engine=engine_name,
+                            proxy_url=proxy_url,
+                            allowed_domains=allowed_domains,
+                        )
+                    elif engine_name == "bing":
                         rows = await runner(session, effective_query, max_results, timeout_seconds,
-                                            debug_run_id=debug_run_id)
+                                            debug_run_id=debug_run_id, proxy_url=proxy_url)
                     else:
-                        rows = await runner(session, effective_query, max_results, timeout_seconds)
+                        rows = await runner(
+                            session,
+                            effective_query,
+                            max_results,
+                            timeout_seconds,
+                            proxy_url=proxy_url,
+                        )
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"{engine_name}: {exc}")
                     _write_debug_payload(
@@ -757,6 +1020,12 @@ class WebFreeSearchTool(Tool):
                     )
                     continue
 
+                if allowed_domains:
+                    rows = [
+                        row
+                        for row in rows
+                        if _domain_allowed(str(row.get("url", "") or ""), allowed_domains)
+                    ]
                 filtered_rows = WebFreeSearchTool._filter_ranked_rows(query, rows)[:max_results]
                 _write_debug_payload(
                     debug_run_id,
@@ -842,6 +1111,10 @@ class WebFreeSearchTool(Tool):
             "duckduckgo": "DuckDuckGo",
             "duckduckgo-jina": "DuckDuckGo (via jina.ai)",
             "bing": "Bing",
+            "baidu-scholar": "Baidu Scholar",
+            "baidu-web": "Baidu Web (academic-only results)",
+            "cnki": "CNKI",
+            "wanfang": "Wanfang Data",
         }
         return mapping.get(engine, engine)
 
@@ -859,7 +1132,15 @@ class WebFreeSearchTool(Tool):
         try:
             async with _http.new_session() as session:
                 engine_used, rows = await WebFreeSearchTool._search_free(
-                    session, query, max_results, timeout_seconds
+                    _FreeSearchRequest(
+                        session=session,
+                        query=query,
+                        max_results=max_results,
+                        timeout_seconds=timeout_seconds,
+                        proxy_url=self._proxy_url,
+                        allowed_domains=self._allowed_domains,
+                        enabled_engines=self._enabled_engines,
+                    ),
                 )
         except Exception as exc:  # noqa: BLE001
             return f"[ERROR]: free search failed: {exc}"

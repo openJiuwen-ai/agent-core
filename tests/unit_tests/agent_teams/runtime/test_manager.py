@@ -211,16 +211,16 @@ class TestFinalizeMember:
 
     @pytest.mark.asyncio
     @pytest.mark.level1
-    async def test_error_status_pauses_and_marks_ready(self):
-        """ERROR status should pause and reset to READY for recovery."""
+    async def test_error_status_stops_and_preserves_error(self):
+        """ERROR is owned by the failure path and must survive finalization."""
         fake_member = FakeTeamMember(MemberStatus.ERROR)
         agent = FakeTeamAgent(team_member=fake_member)
 
         await TeamRuntimeManager.finalize_member(agent)
 
-        assert agent.stop_coordination_calls == 0
-        assert agent.pause_coordination_calls == 1
-        assert fake_member.update_status_calls == [MemberStatus.READY]
+        assert agent.stop_coordination_calls == 1
+        assert agent.pause_coordination_calls == 0
+        assert fake_member.update_status_calls == []
 
     @pytest.mark.asyncio
     @pytest.mark.level1

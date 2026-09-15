@@ -110,7 +110,7 @@ def test_missing_config_bootstraps_standalone_template(tmp_path: Path) -> None:
     assert config_path.is_file()
     assert config.evaluator.backend == "single_harness"
     assert config.evaluator.evaluation_method == "script-based"
-    assert config.max_epochs == 1
+    assert config.max_epochs == 5
 
 
 def test_evaluator_solver_backend_defaults_to_deep_agent() -> None:

@@ -39,15 +39,22 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 
 _LEGACY_TRAJECTORY_ID = "openjiuwen.trajectory.id"
 _LEGACY_SESSION_ID = "openjiuwen.session.id"
+_LEGACY_TEAM_SESSION_ID = "agentteam.session.id"
 _LEGACY_TEAM_ID = "openjiuwen.team.id"
 _LEGACY_MEMBER_ID = "openjiuwen.member.id"
+_LEGACY_TEAM_MEMBER_ID = "agentteam.member.id"
 
+# Historical attribute names live here and nowhere else: the live pipeline
+# writes one canonical key per fact, so only this read-only converter knows
+# what the archives used to be called.
 _RESOURCE_ALIASES = {
     _LEGACY_TRAJECTORY_ID: TRAJECTORY_ID,
     "openjiuwen.session_id": SESSION_ID,
     _LEGACY_SESSION_ID: SESSION_ID,
+    _LEGACY_TEAM_SESSION_ID: SESSION_ID,
     _LEGACY_TEAM_ID: TEAM_ID,
     _LEGACY_MEMBER_ID: MEMBER_ID,
+    _LEGACY_TEAM_MEMBER_ID: MEMBER_ID,
     "session.id": SESSION_ID,
     "session_id": SESSION_ID,
     "team_id": TEAM_ID,
@@ -145,19 +152,13 @@ def _as_message_list(value: Any) -> list[dict[str, Any]]:
 def _llm_exchange_attributes(detail: Mapping[str, Any]) -> dict[str, Any]:
     """Convert one legacy LLM step into the standard GenAI attributes.
 
-    The tool calls of the reply keep their own top-level attribute, which is
-    where every reader looks for them, in addition to riding along inside the
-    structured output message.
+    Tool calls ride only in ``gen_ai.output.messages`` as standard structured
+    message parts.
     """
 
     prompts = _as_message_list(detail.get("messages"))
     completions = _as_message_list(detail.get("response"))
-    attributes = write_llm_exchange(prompts, completions)
-    for message in completions:
-        if message.get("tool_calls") is not None:
-            attributes[semconv.GEN_AI_TOOL_CALLS] = deepcopy(message["tool_calls"])
-            break
-    return attributes
+    return write_llm_exchange(prompts, completions)
 
 
 def _legacy_step_span(value: Any, index: int, execution_id: str) -> dict[str, Any]:
@@ -187,7 +188,8 @@ def _legacy_step_span(value: Any, index: int, execution_id: str) -> dict[str, An
             attributes[key] = deepcopy(value)
 
     if kind == "llm":
-        name = str(meta.get("span_name") or "llm.call")
+        model = str(detail.get("model") or "").strip()
+        name = str(meta.get("span_name") or (f"chat {model}" if model else "chat"))
         attributes[semconv.GEN_AI_OPERATION_NAME] = "chat"
         if detail.get("model") is not None:
             attributes[semconv.GEN_AI_REQUEST_MODEL] = deepcopy(detail["model"])
@@ -198,20 +200,20 @@ def _legacy_step_span(value: Any, index: int, execution_id: str) -> dict[str, An
         prompt_tokens = usage.get("prompt_tokens", usage.get("input_tokens"))
         completion_tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         if prompt_tokens is not None:
-            attributes[semconv.GEN_AI_USAGE_PROMPT_TOKENS] = prompt_tokens
+            attributes[semconv.GEN_AI_USAGE_INPUT_TOKENS] = prompt_tokens
         if completion_tokens is not None:
-            attributes[semconv.GEN_AI_USAGE_COMPLETION_TOKENS] = completion_tokens
+            attributes[semconv.GEN_AI_USAGE_OUTPUT_TOKENS] = completion_tokens
     else:
         tool_name = str(detail.get("tool_name") or "")
-        name = str(meta.get("span_name") or f"tool.{tool_name or index + 1}")
+        name = str(meta.get("span_name") or f"execute_tool {tool_name or index + 1}")
         attributes[semconv.GEN_AI_OPERATION_NAME] = "execute_tool"
         attributes[semconv.GEN_AI_TOOL_NAME] = tool_name
         if detail.get("tool_call_id") is not None:
-            attributes[semconv.GEN_AI_TOOL_ID] = deepcopy(detail["tool_call_id"])
+            attributes[semconv.GEN_AI_TOOL_CALL_ID] = deepcopy(detail["tool_call_id"])
         if detail.get("call_args") is not None:
-            attributes[semconv.GEN_AI_TOOL_INPUT] = deepcopy(detail["call_args"])
+            attributes[semconv.GEN_AI_TOOL_CALL_ARGUMENTS] = deepcopy(detail["call_args"])
         if detail.get("call_result") is not None:
-            attributes[semconv.GEN_AI_TOOL_OUTPUT] = deepcopy(detail["call_result"])
+            attributes[semconv.GEN_AI_TOOL_CALL_RESULT] = deepcopy(detail["call_result"])
 
     span: dict[str, Any] = {
         "traceId": _trace_id(execution_id),

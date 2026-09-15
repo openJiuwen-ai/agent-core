@@ -1,95 +1,34 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Semantic convention constants for OpenTelemetry attributes.
+"""OpenJiuwen semantic-convention facade for observability attributes.
 
-Standard LLM attributes follow OpenLLMetry / GenAI semantic conventions
-(`gen_ai.*`). Team collaboration attributes use the project-specific
-`agentteam.*` namespace; DeepAgent task-loop attributes use `deepagent.*`.
+Standard GenAI attributes are re-exported from the replaceable generated
+``gen_ai_semconv`` module. Team collaboration attributes use the project-specific
+``agentteam.*`` namespace; DeepAgent task-loop attributes use ``deepagent.*``.
 
-Langfuse-specific attributes (`langfuse.*`) are used for fields that
-Langfuse's OTel ingestion processor maps to its observation model
-(input, output, session_id, trace name, etc.).
+Only standard GenAI/core attributes and ``openjiuwen.*`` / ``agentteam.*``
+project extensions live here. Any backend-specific projection (the Langfuse
+namespace included) belongs exclusively to the exporter adapters under
+``exporters/``.
 
-Keeping all attribute keys here avoids typo drift between handlers.
+A project key is defined here only when the standard carries no attribute for
+the same fact. Where a standard key exists it is the single carrier and no
+project mirror is written, so no reader ever needs a fallback chain:
+
+* session / conversation identity → ``gen_ai.conversation.id``
+* agent identity → ``gen_ai.agent.name`` / ``gen_ai.agent.id``
+* tool call identity → ``gen_ai.tool.call.id`` / ``gen_ai.tool.name``
+
+``openjiuwen.gen_ai.*`` is the additive extension namespace for facts the
+standard does not model at all (cost, TPOT, logprobs, provider payloads).
+
+Keeping project-owned attribute keys here avoids typo drift between handlers.
 """
 
 from __future__ import annotations
 
-
-# ---------------------------------------------------------------------------
-# OpenLLMetry / GenAI standard attributes
-# ---------------------------------------------------------------------------
-
-GEN_AI_SYSTEM = "gen_ai.system"
-GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
-GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
-GEN_AI_AGENT_ID = "gen_ai.agent.id"
-GEN_AI_AGENT_NAME = "gen_ai.agent.name"
-GEN_AI_AGENT_VERSION = "gen_ai.agent.version"
-GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
-GEN_AI_SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
-GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
-GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
-
-# Id of the LLM request this span belongs to, stamped so a trace can be read
-# back against the framework's own correlation key when a span looks wrong.
-GEN_AI_REQUEST_ID = "gen_ai.request.id"
-
-GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
-GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
-GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
-GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
-GEN_AI_REQUEST_MESSAGE_COUNT = "gen_ai.request.message_count"
-GEN_AI_REQUEST_STREAM = "gen_ai.request.stream"
-
-# Per-member prev-message-count stored on the team span to make prompt
-# delta tracking survive across iterations (each iteration opens/closes its
-# own agent span, so a count stored there is lost). Keyed by agent_id
-# (``{team}_{member}``), i.e. ``gen_ai.request.prev_message_count.<agent_id>``.
-# Distinct prefix from the standard ``gen_ai.request.message_count`` to avoid
-# collision with the per-span display count.
-GEN_AI_REQUEST_MESSAGE_COUNT_PREFIX = "gen_ai.request.prev_message_count."
-
-GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
-GEN_AI_USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
-GEN_AI_USAGE_CACHE_TOKENS = "gen_ai.usage.cache_tokens"
-GEN_AI_USAGE_REASONING_TOKENS = "gen_ai.usage.reasoning_tokens"
-GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
-GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
-GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS = "gen_ai.usage.cache_creation.input_tokens"
-GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
-GEN_AI_RESPONSE_FINISH_REASON = "gen_ai.response.finish_reason"
-GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
-GEN_AI_RESPONSE_ID = "gen_ai.response.id"
-GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
-GEN_AI_RESPONSE_TTFT_MS = "gen_ai.response.time_to_first_token_ms"
-GEN_AI_RESPONSE_TTFC = "gen_ai.response.time_to_first_chunk"
-GEN_AI_REASONING_DURATION_MS = "gen_ai.reasoning.duration_ms"
-# Why a reasoning span carries no duration. Reasoning time is measured from the
-# stream, so a non-streaming call has none to report — the attribute says so
-# rather than leaving a bare zero-length span to read as instant thinking.
-GEN_AI_REASONING_TIMING = "gen_ai.reasoning.timing"
-REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"
-
-# Standard OpenLLMetry / GenAI keys
-GEN_AI_PROMPT = "gen_ai.prompt"
-GEN_AI_COMPLETION = "gen_ai.completion"
-GEN_AI_TOOL_DEFINITIONS = "gen_ai.tool.definitions"
-
-GEN_AI_TOOL_NAME = "gen_ai.tool.name"
-GEN_AI_TOOL_INPUT = "gen_ai.tool.input"
-GEN_AI_TOOL_OUTPUT = "gen_ai.tool.output"
-GEN_AI_TOOL_ID = "gen_ai.tool.id"
-GEN_AI_TOOL_CALLS = "gen_ai.tool_calls"
-GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
-GEN_AI_TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
-GEN_AI_TOOL_CALL_RESULT = "gen_ai.tool.call.result"
-GEN_AI_TOOL_TYPE = "gen_ai.tool.type"
-GEN_AI_TOOL_DESCRIPTION = "gen_ai.tool.description"
+from openjiuwen.extensions.observability.gen_ai_semconv import *  # noqa: F403
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +41,13 @@ OJ_TRACE_COMPLETE = "openjiuwen.trace.complete"
 OJ_TRACE_FORCED_CLOSE = "openjiuwen.trace.forced_close"
 OJ_SPAN_FORCED_CLOSE = "openjiuwen.span.forced_close"
 OJ_SPAN_FORCED_CLOSE_REASON = "openjiuwen.span.forced_close.reason"
-OJ_SESSION_ID = "openjiuwen.session.id"
+# Backend-neutral span input/output for records that have no dedicated
+# standard carrier (team/task/event/agent-tier spans). Kept as JSON strings
+# and governed by the same redaction and truncation policies as prompts.
+OJ_SPAN_INPUT = "openjiuwen.span.input"
+OJ_SPAN_OUTPUT = "openjiuwen.span.output"
 OJ_REQUEST_ID = "openjiuwen.request.id"
+OJ_REQUEST_MESSAGE_COUNT = "openjiuwen.request.message_count"
 OJ_RUN_ID = "openjiuwen.run.id"
 OJ_TURN_ID = "openjiuwen.turn.id"
 OJ_TURN_NUMBER = "openjiuwen.turn.number"
@@ -113,6 +57,11 @@ OJ_INFERENCE_ID = "openjiuwen.inference.id"
 OJ_REQUEST_NUMBER = "openjiuwen.request.number"
 OJ_REQUEST_PURPOSE = "openjiuwen.request.purpose"
 OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
+# Which compaction this is for its subject, counting operations rather than
+# model calls: a compaction the provider throttles is retried, and all of its
+# attempts state the same number so a reader counts what happened to the
+# context, not what the provider made of it.
+OJ_COMPACTION_NUMBER = "openjiuwen.compaction.number"
 OJ_TRAJECTORY_RECORD_KIND = "openjiuwen.trajectory.record.kind"
 OJ_TRAJECTORY_SCHEMA_VERSION = "openjiuwen.trajectory.schema_version"
 OJ_TRAJECTORY_EVENT_ID = "openjiuwen.trajectory.event_id"
@@ -120,10 +69,6 @@ OJ_TRAJECTORY_EVENT_KIND = "openjiuwen.trajectory.event_kind"
 OJ_TRAJECTORY_SUBJECT_ID = "openjiuwen.trajectory.subject_id"
 OJ_TRAJECTORY_SEQUENCE_EPOCH = "openjiuwen.trajectory.sequence_epoch"
 OJ_TRAJECTORY_SUBJECT_SEQUENCE = "openjiuwen.trajectory.subject_sequence"
-OJ_TRAJECTORY_SESSION_ID = "openjiuwen.trajectory.session_id"
-OJ_TRAJECTORY_TURN_ID = "openjiuwen.trajectory.turn_id"
-OJ_TRAJECTORY_STEP_ID = "openjiuwen.trajectory.step_id"
-OJ_TRAJECTORY_REQUEST_ID = "openjiuwen.trajectory.request_id"
 OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO = "openjiuwen.trajectory.recorded_at_unix_nano"
 OJ_TRAJECTORY_PAYLOAD = "openjiuwen.trajectory.payload"
 OJ_AGENT_MODE = "openjiuwen.agent.mode"
@@ -137,8 +82,6 @@ OJ_EXECUTION_SUBJECT_REQUEST_NUMBER = "openjiuwen.execution.subject.request.numb
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
-OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
-OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
 OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS = "openjiuwen.gen_ai.response.prompt_token_ids"
 OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS = "openjiuwen.gen_ai.response.completion_token_ids"
 OJ_GEN_AI_RESPONSE_LOGPROBS = "openjiuwen.gen_ai.response.logprobs"
@@ -146,19 +89,51 @@ OJ_GEN_AI_RESPONSE_PARSER_RESULT = "openjiuwen.gen_ai.response.parser_result"
 OJ_GEN_AI_RESPONSE_PROVIDER_METADATA = "openjiuwen.gen_ai.response.provider_metadata"
 OJ_GEN_AI_RESPONSE_PROVIDER_CONTENT = "openjiuwen.gen_ai.response.provider_content"
 OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE = "openjiuwen.gen_ai.input.message_provenance"
+OJ_GEN_AI_REASONING_TIMING = "openjiuwen.gen_ai.reasoning.timing"
+
+# Durations, in milliseconds. The GenAI standard states durations in seconds:
+# ``gen_ai.response.time_to_first_chunk`` is the only duration attribute in the
+# pinned registry and the handler writes it in seconds. These three stay in
+# milliseconds on purpose, and the ``_ms`` suffix is load-bearing -- it is the
+# only thing telling a reader the unit differs from the standard's.
+#
+# No standard *attribute* means the same thing as any of these, so none is a
+# duplicate. The nearest relative is ``total_latency_ms``: it measures the whole
+# call, which is what the standard's ``gen_ai.client.operation.duration`` metric
+# measures in seconds -- same fact, different unit and a metric rather than a
+# span attribute. Should any of these later gain a same-meaning standard key,
+# drop the project key rather than writing both.
+OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS = "openjiuwen.gen_ai.response.total_latency_ms"
+OJ_GEN_AI_RESPONSE_TPOT_MS = "openjiuwen.gen_ai.response.tpot_ms"
+OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 OJ_EVENT_SEQUENCE = "openjiuwen.event.sequence"
-OJ_TEAM_ID = "openjiuwen.team.id"
-OJ_TEAM_NAME = "openjiuwen.team.name"
-OJ_TEAM_SESSION_ID = "openjiuwen.team.session.id"
 OJ_STREAM_KIND = "openjiuwen.stream.kind"
 OJ_STREAM_TEXT = "openjiuwen.stream.text"
-OJ_STREAM_TOOL_CALL_ID = "openjiuwen.stream.tool_call.id"
-OJ_STREAM_TOOL_CALL_NAME = "openjiuwen.stream.tool_call.name"
 OJ_STREAM_TOOL_CALL_ARGUMENTS_DELTA = "openjiuwen.stream.tool_call.arguments_delta"
 
+# Name of one model-stream frame. A frame is carried on the stream-frame
+# channel rather than as a span event: an answer produces hundreds of them,
+# and the SDK's per-span event limit evicts the oldest, which would drop the
+# beginning of every long answer.
+OJ_STREAM_FRAME_EVENT = "openjiuwen.stream.chunk"
+
+# Phase markers kept on the span itself. Their count grows with the number of
+# phases a call goes through, not with the length of its answer, so the span
+# stays well inside the event limit however long the model talks.
+OJ_STREAM_OPEN_EVENT = "openjiuwen.stream.open"
+OJ_STREAM_PHASE_OPEN_EVENT = "openjiuwen.stream.phase.open"
+OJ_STREAM_PHASE_CLOSE_EVENT = "openjiuwen.stream.phase.close"
+OJ_STREAM_CLOSE_EVENT = "openjiuwen.stream.close"
+
+# Frame sequence a phase marker refers to, so a reader can line a marker up
+# against the frame stream without replaying it.
+OJ_STREAM_PHASE_FIRST_SEQUENCE = "openjiuwen.stream.phase.first_sequence"
+OJ_STREAM_PHASE_LAST_SEQUENCE = "openjiuwen.stream.phase.last_sequence"
+OJ_STREAM_FRAME_COUNT = "openjiuwen.stream.frame_count"
+
 OJ_TOOL_RESOURCE_ID = "openjiuwen.tool.resource_id"
-OJ_TOOL_TYPE = "openjiuwen.tool.type"
+OJ_TOOL_PROTOCOL = "openjiuwen.tool.protocol"
 OJ_TOOL_AUTHORITATIVE = "openjiuwen.tool.authoritative"
 
 ERROR_TYPE = "error.type"
@@ -174,13 +149,8 @@ AT_TEAM_LEADER = "agentteam.team.leader"
 AT_EVENT_TYPE = "agentteam.event_type"
 
 AT_AGENT_ID = "agentteam.agent.id"
-AT_AGENT_NAME = "agentteam.agent.name"
 AT_AGENT_ROLE = "agentteam.agent.role"
-AT_AGENT_INPUT = "agentteam.agent.input"
-AT_AGENT_OUTPUT = "agentteam.agent.output"
-AT_SESSION_ID = "agentteam.session.id"
 
-AT_MEMBER_ID = "agentteam.member.id"
 AT_MEMBER_NAME = "agentteam.member.name"
 AT_MEMBER_STATUS_OLD = "agentteam.member.status.old"
 AT_MEMBER_STATUS_NEW = "agentteam.member.status.new"
@@ -196,6 +166,10 @@ AT_MESSAGE_BROADCAST = "agentteam.message.broadcast"
 AT_TASK_ID = "agentteam.task.id"
 AT_TASK_STATUS = "agentteam.task.status"
 AT_TASK_ASSIGNEE = "agentteam.task.assignee"
+AT_TASK_TAG = "agentteam.task.tag"
+# Marks a task span rebuilt after a pause/resume cycle, so the trace viewer can
+# tell it apart from a task created inside the current trace.
+AT_TASK_RECOVERED = "agentteam.task.recovered"
 
 AT_PLAN_APPROVED = "agentteam.plan.approved"
 AT_PLAN_SUBMITTED_BY = "agentteam.plan.submitted_by"
@@ -208,34 +182,11 @@ DA_TASK_ITERATION = "deepagent.task.iteration"
 DA_TASK_IS_FOLLOW_UP = "deepagent.task.is_follow_up"
 DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
 
-# Identifies which agent an agent-tier span belongs to, without assuming the
-# agent is a team member. The rail reads it back off a leftover span to tell an
-# own orphan from another agent's span inherited through a ContextVar snapshot,
-# so it must stay independent of the team-only ``agentteam.*`` namespace.
-DA_AGENT_NAME = "deepagent.agent.name"
-
-
 # ---------------------------------------------------------------------------
-# langfuse.* — Langfuse OTel ingestion processor attributes
+# Attribute values — everything above this line is an attribute key
 # ---------------------------------------------------------------------------
-# These attribute keys are specifically recognized by Langfuse's
-# OTel ingestion processor (both Python SDK and Langfuse backend) to
-# populate trace/observation fields that aren't covered by standard
-# gen_ai.* or custom agentteam.* attrs.
-#
-# CRITICAL: The Python SDK's LangfuseOtelSpanAttributes defines the
-# canonical key names. Some differ from what one might expect:
-#   - "session.id" (NOT "langfuse.session.id")
-#   - "langfuse.trace.tags" ✓
-#   - "langfuse.observation.input" ✓
-#   - "langfuse.observation.output" ✓
-#
-# See: langfuse.LangfuseOtelSpanAttributes for the full list.
 
-LANGFUSE_TRACE_NAME = "langfuse.trace.name"
-LANGFUSE_TRACE_TAGS = "langfuse.trace.tags"
-LANGFUSE_SESSION_ID = "session.id"
-
-LANGFUSE_OBSERVATION_INPUT = "langfuse.observation.input"
-LANGFUSE_OBSERVATION_OUTPUT = "langfuse.observation.output"
-LANGFUSE_OBSERVATION_TYPE = "langfuse.observation.type"
+# Recorded as the value of ``OJ_GEN_AI_REASONING_TIMING`` when no reasoning
+# duration could be measured. A zero would itself be a measurement, so the
+# reason is recorded in place of a duration.
+OJ_GEN_AI_REASONING_TIMING_UNMEASURED = "unmeasured: non-streaming call"

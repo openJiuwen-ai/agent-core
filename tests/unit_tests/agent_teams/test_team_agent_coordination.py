@@ -410,6 +410,120 @@ async def test_broadcast_skips_departed_human_but_reaches_the_live_one():
     assert len(still_here) == 1
 
 
+async def _leader_with_passive(agent: TeamAgent, member_name: str, *, register_cb: bool = True):
+    """Seed a passive human member with its controller callback (optional).
+
+    Returns ``(received_list, mark_read_mock)``. The leader's message
+    handler shares ``agent._configurator.message_manager``; wiring its
+    ``mark_message_read`` to an AsyncMock lets the test assert the
+    leader-side read-ack behaviour for passive members.
+    """
+    await _prepare_backend_db(agent)
+    backend = agent.team_backend
+    await backend.spawn_member(
+        member_name=member_name,
+        display_name=member_name,
+        agent_card=AgentCard(),
+        desc="passive human",
+        status=MemberStatus.READY,
+        role=TeamRole.PASSIVE_HUMAN,
+    )
+
+    received: list = []
+    if register_cb:
+
+        async def cb(evt):
+            received.append(evt)
+
+        await backend.register_human_agent_inbound(member_name, cb)
+
+    fake_row = MagicMock()
+    fake_row.content = "team traffic"
+    fake_row.timestamp = 12345
+    fake_row.meta = None
+    mark_read = AsyncMock(return_value=True)
+    mm = MagicMock()
+    mm.db.message.get_message = AsyncMock(return_value=fake_row)
+    mm.mark_message_read = mark_read
+    agent._configurator.message_manager = mm
+    return received, mark_read
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_passive_inbound_fires_callback_and_marks_read():
+    """A passive member's callback fires AND the leader acks the message —
+    nobody polls the bus for a member with no runtime, so an un-acked row
+    would block ``is_team_completed`` forever."""
+    agent = _make_leader()
+    received, mark_read = await _leader_with_passive(agent, "passive_pm")
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-1",
+                from_member_name="leader-1",
+                to_member_name="passive_pm",
+            )
+        )
+    )
+
+    assert len(received) == 1
+    mark_read.assert_awaited_once_with("msg-1", "passive_pm")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_passive_inbound_marks_read_even_without_callback():
+    """The ack is unconditional (mirroring the ``user`` pseudo-member ack):
+    callback delivery IS the consumption, registered or not."""
+    agent = _make_leader()
+    received, mark_read = await _leader_with_passive(agent, "passive_pm", register_cb=False)
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-2",
+                from_member_name="leader-1",
+                to_member_name="passive_pm",
+            )
+        )
+    )
+
+    assert received == []
+    mark_read.assert_awaited_once_with("msg-2", "passive_pm")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_avatar_member_is_never_marked_read_by_leader():
+    """F_20 regression: an avatar keeps its own read-flip discipline — the
+    leader-side ack is passive-only."""
+    agent = _make_leader()
+    # Avatar member with the same message-manager mock wiring.
+    received = await _leader_with_human(agent, "avatar_pm", MemberStatus.READY)
+    mark_read = AsyncMock(return_value=True)
+    # _leader_with_human already installed its mock manager; attach the
+    # read mock to the same object the handler reads.
+    agent._configurator.message_manager.mark_message_read = mark_read
+
+    await agent._coordination.dispatcher.message._notify_human_agent_inbound(
+        EventMessage.from_event(
+            MessageEvent(
+                team_name="test-team",
+                message_id="msg-3",
+                from_member_name="leader-1",
+                to_member_name="avatar_pm",
+            )
+        )
+    )
+
+    assert len(received) == 1
+    mark_read.assert_not_called()
+
+
 @pytest.mark.asyncio
 @pytest.mark.level0
 @pytest.mark.skip(reason="pre-existing autonomous coordination issue, unrelated to reviewer PR")
@@ -749,6 +863,90 @@ async def test_human_agent_ignores_other_member_task_claim():
     agent._configurator.task_manager.list_tasks.assert_not_awaited()
     agent._start_agent.assert_not_called()
     agent.steer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_leader_relays_task_claim_for_passive_member_as_templated_message():
+    """A foreign claim targeting a passive member becomes a framework
+    template message on the bus — from there the ordinary pipeline
+    delivers it to the human (inbound callback + read-ack)."""
+    from openjiuwen.agent_teams.message_template import parse_meta
+
+    agent = _make_leader(team_name="passive-claim-team")
+    await _prepare_backend_db(agent)
+    await agent.team_backend.spawn_member(
+        member_name="passive_pm",
+        display_name="passive_pm",
+        agent_card=AgentCard(),
+        desc="passive human",
+        status=MemberStatus.READY,
+        role=TeamRole.PASSIVE_HUMAN,
+    )
+    send_message = AsyncMock(return_value="msg-id")
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = send_message
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="passive-claim-team",
+            member_name="passive_pm",
+            task_id="task-9",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    send_message.assert_awaited_once()
+    kwargs = send_message.await_args.kwargs
+    assert kwargs["to_member_name"] == "passive_pm"
+    assert kwargs["content"] == ""
+    meta = parse_meta(kwargs["meta"]["template"] if isinstance(kwargs["meta"], dict) else None) or kwargs["meta"]
+    assert meta["template"] == "passive_task_assigned"
+    assert meta["refs"]["task"] == "task-9"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_teammate_does_not_relay_task_claim_for_passive_member():
+    """Only the leader writes the relay — every member's handler sees the
+    same TASK_CLAIMED event, and an unconditioned write would deliver one
+    copy per coordination loop."""
+    agent = _make_teammate()  # dev-1; team_spec.leader_member_name is leader-1
+    await _prepare_backend_db(agent)
+    await agent.team_backend.spawn_member(
+        member_name="passive_pm",
+        display_name="passive_pm",
+        agent_card=AgentCard(),
+        desc="passive human",
+        status=MemberStatus.READY,
+        role=TeamRole.PASSIVE_HUMAN,
+    )
+    send_message = AsyncMock(return_value="msg-id")
+    agent._configurator.message_manager = MagicMock()
+    agent._configurator.message_manager.send_message = send_message
+    agent._configurator.task_manager = MagicMock()
+    agent._configurator.task_manager.list_tasks = AsyncMock(return_value=[])
+    agent._is_agent_running = lambda: False
+    agent._start_agent = AsyncMock()
+    agent.steer = AsyncMock()
+    agent.deliver_input = AsyncMock()
+
+    event = EventMessage.from_event(
+        TaskClaimedEvent(
+            team_name="passive-claim-mate",
+            member_name="passive_pm",
+            task_id="task-10",
+        )
+    )
+    await agent._coordination.dispatcher.task_board.on_task_claimed(event)
+
+    send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -177,6 +177,9 @@ class OnlineRLSystem:
     def stop_service(self) -> requests.Response:
         return self._request("POST", "/v1/rl/service/stop")
 
+    def upload_batch(self, payload: dict[str, Any]) -> requests.Response:
+        return self._request("POST", "/v1/gateway/upload/batch", json=payload)
+
     def start_task(self, *, session_id: str, reward_mode: str) -> requests.Response:
         return self._request(
             "POST",

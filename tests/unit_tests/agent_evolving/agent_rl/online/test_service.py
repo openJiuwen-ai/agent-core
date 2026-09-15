@@ -16,11 +16,23 @@ class _TrajectoryAPI:
     def __init__(self, store: InMemoryTrajectoryStore) -> None:
         self.store = store
         self.uploads: list[dict] = []
+        self.rail_uploads: list[dict] = []
         self.rail_ingestor = self
 
     async def ingest_rail_batch(self, payload: dict) -> dict:
+        self.rail_uploads.append(payload)
+        return {"accepted": 1, "rejected": 0, "source": "rail_ingestor"}
+
+    async def batch_create_trajectories(self, payload: dict) -> dict:
         self.uploads.append(payload)
-        return {"accepted": 1, "rejected": 0}
+        if payload.get("protocol_version") == "unsupported":
+            raise ValueError("unsupported protocol_version: unsupported")
+        return {
+            "accepted": 1,
+            "rejected": 0,
+            "duplicate": 0,
+            "protocol_version": payload["protocol_version"],
+        }
 
     async def trajectory_management_stats(self, **kwargs) -> dict:
         del kwargs
@@ -444,7 +456,7 @@ async def test_unknown_task_completion_and_terminal_routes_return_404() -> None:
 
 
 @pytest.mark.asyncio
-async def test_errors_use_stable_envelope_and_rail_query_routes_are_mapped() -> None:
+async def test_errors_use_stable_envelope_and_upload_protocol_routes_are_mapped() -> None:
     app, store, trajectory_api = _app()
     await store.save_sample({"sample_id": "sample-1"}, user_id="model-1")
 
@@ -462,12 +474,83 @@ async def test_errors_use_stable_envelope_and_rail_query_routes_are_mapped() -> 
     assert invalid.status_code == 400
     assert invalid.json()["error"]["code"] == "missing_session_id"
     assert upload.status_code == 200
-    assert trajectory_api.uploads[0]["protocol_version"] == "rail-v1"
+    assert trajectory_api.rail_uploads == [{"protocol_version": "rail-v1", "samples": []}]
+    assert trajectory_api.uploads == []
+    assert upload.json() == {"ok": True, "result": {"accepted": 1, "rejected": 0, "source": "rail_ingestor"}}
     assert stats.json()["total"] == 1
     assert len(listed.json()["items"]) == 1
     assert fetched.json()["sample_id"] == "sample-1"
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "trajectory_not_found"
+
+
+@pytest.mark.asyncio
+async def test_upload_batch_uses_protocol_aware_trajectory_runtime() -> None:
+    app, _, trajectory_api = _app()
+
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://rl.local") as client:
+        sft = await client.post(
+            "/v1/gateway/upload/batch",
+            json={"protocol_version": "sft-sample-v1", "sample_id": "sample-sft"},
+        )
+        invalid = await client.post(
+            "/v1/gateway/upload/batch",
+            json={"protocol_version": "unsupported"},
+        )
+
+    assert sft.status_code == 200
+    assert sft.json()["result"] == {
+        "accepted": 1,
+        "rejected": 0,
+        "duplicate": 0,
+        "protocol_version": "sft-sample-v1",
+    }
+    assert trajectory_api.uploads == [
+        {"protocol_version": "sft-sample-v1", "sample_id": "sample-sft"},
+        {"protocol_version": "unsupported"},
+    ]
+    assert invalid.status_code == 400
+    assert invalid.json()["error"]["code"] == "invalid_trajectory_batch"
+
+
+def test_trainer_backend_prefers_new_setting_and_falls_back_to_legacy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.service import _trainer_backend_from_env
+
+    monkeypatch.setenv("TRAIN_BACKEND", "SFT")
+    assert _trainer_backend_from_env() == "SFT"
+
+    monkeypatch.setenv("TRAINER_BACKEND", "PPO")
+    assert _trainer_backend_from_env() == "PPO"
+
+    monkeypatch.setenv("TRAINER_BACKEND", "RL")
+    assert _trainer_backend_from_env() == "PPO"
+
+
+def test_sft_training_min_pending_score_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.service import _sft_training_min_pending_score_from_env
+
+    monkeypatch.delenv("SFT_TRAINING_MIN_PENDING_SCORE", raising=False)
+    assert _sft_training_min_pending_score_from_env() is None
+
+    monkeypatch.setenv("SFT_TRAINING_MIN_PENDING_SCORE", "123.25")
+    assert _sft_training_min_pending_score_from_env() == 123.25
+
+    monkeypatch.setenv("SFT_TRAINING_MIN_PENDING_SCORE", "nan")
+    with pytest.raises(ValueError, match="finite number"):
+        _sft_training_min_pending_score_from_env()
+
+
+def test_sft_auto_activate_lora_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openjiuwen.agent_evolving.agent_rl.online.service import _sft_auto_activate_lora_from_env
+
+    monkeypatch.delenv("SFT_AUTO_ACTIVATE_LORA", raising=False)
+    assert _sft_auto_activate_lora_from_env() is True
+
+    monkeypatch.setenv("SFT_AUTO_ACTIVATE_LORA", "false")
+    assert _sft_auto_activate_lora_from_env() is False
+
+    monkeypatch.setenv("SFT_AUTO_ACTIVATE_LORA", "1")
+    assert _sft_auto_activate_lora_from_env() is True
 
 
 @pytest.mark.asyncio

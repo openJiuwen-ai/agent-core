@@ -1,11 +1,11 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Codex SDK backend for external CLI team members."""
+"""Team-side Codex wiring (observability notification observer, option helpers).
 
-from openjiuwen.agent_teams.external.cli_agent.codex.runtime import (
-    CodexSdkRuntime,
-    build_codex_runtime,
-)
+The Codex harness itself lives in ``openjiuwen.harness_providers.codex``.
+"""
 
-__all__ = ["CodexSdkRuntime", "build_codex_runtime"]
+from openjiuwen.agent_teams.external.cli_agent.codex.observer import build_codex_notification_observer
+
+__all__ = ["build_codex_notification_observer"]

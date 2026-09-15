@@ -67,6 +67,16 @@ class RedisTrajectoryStore:
     def _idx_key(self, user_id: str, status: str) -> str:
         return f"{self._idx_prefix}:{user_id}:{status}"
 
+    def training_run_keyspace(self, user_id: str) -> tuple[str, str, str, str]:
+        """Return Redis keys used by the durable Training Run transaction."""
+
+        return (
+            self._idx_key(user_id, "pending"),
+            self._idx_key(user_id, "training"),
+            self._idx_key(user_id, "trained"),
+            self._key_prefix,
+        )
+
     async def save_sample(self, sample: dict[str, Any], *, user_id: str = "online") -> None:
         sample_id = str(sample.get("sample_id") or "").strip()
         if not sample_id:

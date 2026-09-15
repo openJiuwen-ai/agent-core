@@ -425,6 +425,8 @@ class MessageHandler(BaseCoordinationHandler):
         backend = self._infra.team_backend
         if backend is None:
             return None
+        if await backend.is_passive_human(member_name):
+            return TeamRole.PASSIVE_HUMAN
         if await backend.is_human_agent(member_name):
             return TeamRole.HUMAN_AGENT
         if backend.is_bridge_agent(member_name):
@@ -438,13 +440,13 @@ class MessageHandler(BaseCoordinationHandler):
         return TeamRole.TEAMMATE
 
     async def _notify_human_agent_inbound(self, event: CoordinationEvent) -> None:
-        """Forward a team-side message to the SDK's human-agent callbacks.
+        """Forward a team-side message to the SDK's human-member callbacks.
 
         The leader observes every MESSAGE / BROADCAST event on the team
-        topic. For point-to-point messages addressed to a human agent
+        topic. For point-to-point messages addressed to a human member
         we fire the recipient's callback; for broadcasts we fire every
         registered callback whose owner is not the broadcast sender (so
-        a human agent doesn't get its own broadcast echoed back).
+        a human member doesn't get its own broadcast echoed back).
 
         The lookup goes through ``TeamBackend.get_human_agent_inbound``
         — the registry the SDK populates via
@@ -452,6 +454,16 @@ class MessageHandler(BaseCoordinationHandler):
         message metadata (e.g. body lookup failure) is logged and
         swallowed so a notification glitch never breaks the dispatch
         loop.
+
+        Passive members additionally get the message marked read here.
+        Unlike an avatar (which polls the bus and flips ``is_read``
+        itself after its controller has seen the message, F_20), a
+        passive member has no runtime to poll — nobody but the leader
+        would ever clear the flag, and ``is_team_completed``'s
+        unread check would block forever. The ack is unconditional
+        (mirroring ``_ack_user_bound_message``'s treatment of the
+        ``user`` pseudo-member): the callback delivery IS the
+        consumption, whether or not a callback is registered.
         """
         backend = self._infra.team_backend
         mm = self._infra.message_manager
@@ -459,6 +471,7 @@ class MessageHandler(BaseCoordinationHandler):
             return
 
         from openjiuwen.agent_teams.interaction.payload import HumanAgentInboundEvent
+        from openjiuwen.agent_teams.message_template import parse_meta
 
         payload: MessageEvent = event.get_payload()
         message_id = payload.message_id
@@ -482,6 +495,7 @@ class MessageHandler(BaseCoordinationHandler):
         # here too, or the controller would be pushed a blank message (F_63).
         body = (await self._expand(row)).body
         ts = row.timestamp
+        meta = parse_meta(row.meta)
 
         # Recipients are the humans still reachable — a fully SHUTDOWN member has
         # left the team and its controller has no business still being fed the
@@ -498,6 +512,19 @@ class MessageHandler(BaseCoordinationHandler):
             recipients = [target]
 
         for recipient in recipients:
+            # Single probe per recipient (index-friendly): avatars keep their
+            # own read-flip discipline (F_20), passive members are acked here.
+            recipient_is_passive = await backend.is_passive_human(recipient)
+            if recipient_is_passive:
+                try:
+                    await mm.mark_message_read(message_id, recipient)
+                except Exception as exc:
+                    team_logger.warning(
+                        "passive member read-ack failed for message %s / %s: %s",
+                        message_id,
+                        recipient,
+                        exc,
+                    )
             callback = backend.get_human_agent_inbound(recipient)
             if callback is None:
                 continue
@@ -508,6 +535,7 @@ class MessageHandler(BaseCoordinationHandler):
                 broadcast=is_broadcast,
                 message_id=message_id,
                 timestamp=ts or 0,
+                meta=meta,
             )
             try:
                 result = callback(evt)
@@ -652,15 +680,36 @@ class MessageHandler(BaseCoordinationHandler):
                 getattr(msg, "message_id", "?"),
             )
             return None
+        phase_key = failure.phase
+        if failure.phase == "turn" and failure.reason.http_status is not None:
+            phase_key = "turn_http"
+        phase_guidance = t(f"reliability.external_runtime_phase.{phase_key}")
+        user_action_key = "required" if failure.user_action_required else "not_identified"
+        user_action_guidance = t(f"reliability.user_action.{user_action_key}")
+        empty_field = "<none>"
+        cli_path_diagnostic = (
+            t("reliability.external_runtime_cli_path", cli_path=failure.cli_path)
+            if failure.cli_path
+            else ""
+        )
         body = t(
             "reliability.external_runtime_failed",
             member_name=failure.member_name,
             agent_kind=failure.agent_kind,
+            model=failure.model or "<unknown>",
             phase=failure.phase,
             category=failure.category,
             summary=failure.summary,
             reason_message=failure.reason.message,
             suggested_action=failure.suggested_action,
             user_action_required=failure.user_action_required,
+            failure_id=failure.failure_id,
+            round_id=failure.round_id if failure.round_id is not None else empty_field,
+            http_status=failure.reason.http_status if failure.reason.http_status is not None else empty_field,
+            sdk_error_type=failure.reason.sdk_error_type or empty_field,
+            sdk_error_code=failure.reason.sdk_error_code or empty_field,
+            cli_path_diagnostic=cli_path_diagnostic,
+            phase_guidance=phase_guidance,
+            user_action_guidance=user_action_guidance,
         )
         return render_event(kind="external-runtime-failed", body=body)

@@ -353,6 +353,61 @@ async def test_codex_spawn_passes_stable_member_agent_id(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_claude_spawn_passes_turn_idle_timeout(monkeypatch):
+    """Claude spawn forwards the configured idle ceiling to its SDK runtime."""
+    runtime = _FakeRuntime()
+    started = asyncio.Event()
+    build_kwargs: dict[str, Any] = {}
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args
+        build_kwargs.update(kwargs)
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+        external_cli_agents=[
+            {
+                "cli_agent": "claude",
+                "claude_turn_idle_timeout_s": 45.0,
+            },
+        ],
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="claude-1",
+        cli_agent="claude",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+
+    handle = await spawn_mod.external_cli_spawn(
+        team_agent=_team_agent_mock(),
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
+        session_id="sess-1",
+    )
+    await started.wait()
+
+    assert build_kwargs["claude_turn_idle_timeout_s"] == 45.0
+
+    await handle.force_kill()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_external_cli_spawn_resolves_worktree_cwd_and_add_dirs(monkeypatch, tmp_path):
     """External members use worktree cwd and expose project/team roots as extra dirs."""
     runtime = _FakeRuntime()

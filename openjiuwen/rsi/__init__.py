@@ -1,6 +1,13 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Recursive self-improvement for standalone Expert Harnesses."""
 
+from openjiuwen.rsi.artifact_rsi import (
+    ArtifactProvider,
+    PaperArtifactProvider,
+    ProgramArtifactProvider,
+    build_request,
+    validate_artifact_task_request,
+)
 from openjiuwen.rsi.harness_rsi.auto_harness import (
     AutoHarnessConfig,
     AutoHarnessOrchestrator,
@@ -55,12 +62,14 @@ from openjiuwen.rsi.harness_rsi.single_harness import (
     IterativeSingleHarnessRequest,
     IterativeSingleHarnessResult,
     SingleHarnessIterativeOptimizationOrchestrator,
+    load_cases,
 )
 
 __all__ = [
     "EXTENDED_EVOLVE_PIPELINE",
     "META_EVOLVE_PIPELINE",
     "ActionDefinition",
+    "ArtifactProvider",
     "AutoCoordinatingHarnessConfig",
     # Downstream-facing AutoHarness exports (JiuwenSwarm and other integrators).
     "AutoHarnessConfig",
@@ -86,6 +95,8 @@ __all__ = [
     "ModelConfigs",
     "OptimizationTask",
     "OrchestratorSchedulingConfig",
+    "PaperArtifactProvider",
+    "ProgramArtifactProvider",
     "RuntimeExtensionArtifact",
     "SingleHarnessIterativeOptimizationOrchestrator",
     "StageResult",
@@ -94,6 +105,9 @@ __all__ = [
     "TeamEvaluator",
     "TeamIssue",
     "build_git_auth_env",
+    "build_request",
     "create_auto_harness_orchestrator",
     "load_auto_harness_config",
+    "load_cases",
+    "validate_artifact_task_request",
 ]

@@ -14,9 +14,9 @@ from opentelemetry import context as otel_context
 from opentelemetry.trace import Span, SpanKind, Status, StatusCode, Tracer, set_span_in_context
 
 from openjiuwen.extensions.observability.semconv import (
+    GEN_AI_CONVERSATION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_AGENT_MODE,
@@ -25,14 +25,10 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_PAYLOAD,
     OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO,
     OJ_TRAJECTORY_RECORD_KIND,
-    OJ_TRAJECTORY_REQUEST_ID,
     OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_SEQUENCE_EPOCH,
-    OJ_TRAJECTORY_SESSION_ID,
-    OJ_TRAJECTORY_STEP_ID,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
-    OJ_TRAJECTORY_TURN_ID,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -61,7 +57,7 @@ def emit_native_trajectory_event(
     """Emit one immutable v2 event using the parent's concrete owner."""
     if not parent_span.is_recording():
         return None
-    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     if subject_sequence is None and sequence_epoch is None:
         resolved_epoch, sequence = next_trajectory_subject_position(
@@ -84,22 +80,15 @@ def emit_native_trajectory_event(
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
         OJ_TRAJECTORY_SEQUENCE_EPOCH: resolved_epoch,
         OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
-        OJ_TRAJECTORY_SESSION_ID: session_id,
+        GEN_AI_CONVERSATION_ID: session_id,
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
         OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
         OJ_TRAJECTORY_RECORD_KIND: "event",
         OJ_TRACE_SCHEMA_VERSION: "2",
     }
-    for source_key, target_key in (
-        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
-        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
-        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
-    ):
-        value = parent_span.attributes.get(source_key)
-        if value not in (None, ""):
-            attributes[target_key] = str(value)
     for routing_key in (
-        OJ_SESSION_ID,
+        OJ_TURN_ID,
+        OJ_STEP_ID,
         OJ_REQUEST_ID,
         OJ_RUN_ID,
         OJ_AGENT_MODE,
@@ -130,7 +119,7 @@ def record_native_trajectory_log_event(
     """Record one immutable trajectory event on the current short-lived Span."""
     if not parent_span.is_recording():
         return False
-    session_id = str(parent_span.attributes.get(OJ_SESSION_ID) or "")
+    session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     sequence_epoch, sequence = next_trajectory_subject_position(
         session_id=session_id,
@@ -144,18 +133,14 @@ def record_native_trajectory_log_event(
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
         OJ_TRAJECTORY_SEQUENCE_EPOCH: sequence_epoch,
         OJ_TRAJECTORY_SUBJECT_SEQUENCE: sequence,
-        OJ_TRAJECTORY_SESSION_ID: session_id,
+        GEN_AI_CONVERSATION_ID: session_id,
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
         OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
     }
-    for source_key, target_key in (
-        (OJ_TURN_ID, OJ_TRAJECTORY_TURN_ID),
-        (OJ_STEP_ID, OJ_TRAJECTORY_STEP_ID),
-        (OJ_REQUEST_ID, OJ_TRAJECTORY_REQUEST_ID),
-    ):
-        value = parent_span.attributes.get(source_key)
+    for correlation_key in (OJ_TURN_ID, OJ_STEP_ID, OJ_REQUEST_ID):
+        value = parent_span.attributes.get(correlation_key)
         if value not in (None, ""):
-            attributes[target_key] = str(value)
+            attributes[correlation_key] = str(value)
     parent_span.add_event(event_kind, attributes=attributes, timestamp=recorded_at)
     return True
 
@@ -167,8 +152,25 @@ def emit_context_window_commit(
     messages: list[dict[str, Any]],
     request_purpose: str,
 ) -> Span | None:
-    """Emit one ended context.window.commit child span."""
-    session_id = str(llm_span.attributes.get(OJ_SESSION_ID) or "")
+    """Emit one ended context.window.commit child span.
+
+    Only a request that carries the conversation forward advances the chain.
+    A compaction asks the model to summarize the conversation, so its prompt
+    is *about* the context rather than part of it; committing it would splice
+    a foreign window into the chain a reader replays.
+
+    Returns:
+        The emitted span, or None when this request does not advance the
+        chain or the owning span is no longer recording.
+    """
+    if request_purpose == "compaction":
+        # Return before advancing: the advance is what rewrites the subject's
+        # canonical state, so letting a compaction reach it would both corrupt
+        # the chain and make the next real turn's delta a near-full window.
+        # The compaction's own prompt stays on its LLM span, and its operation
+        # is already recorded by the compaction.completed event.
+        return None
+    session_id = str(llm_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
     window_id = uuid.uuid4().hex
     sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline = advance_context_window(
@@ -177,23 +179,28 @@ def emit_context_window_commit(
         window_id=window_id,
         messages=messages,
     )
-    payload = {
+    # Only a baseline carries the complete window. Every later commit is the
+    # delta against the one before it, which a consumer applies onto the chain
+    # it has already read. Repeating the whole window on each commit made a
+    # streaming turn's storage grow with the square of its length: measured on
+    # one real session, 173 commits carried 121.7 MB of windows to express
+    # 0.5 MB of actual change.
+    payload: dict[str, Any] = {
         "window_id": window_id,
         "base_window_id": base_window_id,
         "complete": True,
-        "messages": messages,
         "delta": delta,
         "request_purpose": request_purpose,
     }
     if is_epoch_baseline:
         payload.update({
+            "messages": messages,
             "transition_kind": "epoch_baseline",
             "baseline_reason": "runtime_epoch_start",
         })
     caused_by_operation_id = consume_context_window_compaction(
         session_id=session_id,
         subject_id=subject_id,
-        request_id=str(llm_span.attributes.get(OJ_REQUEST_ID) or ""),
         step_id=str(llm_span.attributes.get(OJ_STEP_ID) or ""),
     )
     if caused_by_operation_id is not None:

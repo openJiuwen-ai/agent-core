@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from tests.test_logger import logger
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import Span, StatusCode, set_span_in_context
@@ -36,29 +38,24 @@ from openjiuwen.extensions.observability import demand as demand_module
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.runtime import ObservabilityRuntime
 from openjiuwen.extensions.observability.semconv import (
+    ERROR_TYPE,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
-    GEN_AI_REQUEST_ID,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_STREAM,
-    GEN_AI_RESPONSE_FINISH_REASON,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_ID,
-    GEN_AI_RESPONSE_TTFC,
-    GEN_AI_RESPONSE_TTFT_MS,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_DEFINITIONS,
-    GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
-    GEN_AI_USAGE_CACHE_TOKENS,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
-    GEN_AI_USAGE_PROMPT_TOKENS,
-    GEN_AI_USAGE_COMPLETION_TOKENS,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_TYPE,
     OJ_EVENT_SEQUENCE,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
@@ -71,9 +68,17 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     OJ_SPAN_FORCED_CLOSE,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
+    OJ_STREAM_CLOSE_EVENT,
+    OJ_STREAM_FRAME_COUNT,
+    OJ_STREAM_FRAME_EVENT,
     OJ_STREAM_KIND,
+    OJ_STREAM_OPEN_EVENT,
+    OJ_STREAM_PHASE_CLOSE_EVENT,
+    OJ_STREAM_PHASE_OPEN_EVENT,
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
@@ -83,6 +88,7 @@ from openjiuwen.extensions.observability.semconv import (
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
     clear_root_span,
+    get_current_llm_span,
     reset_state,
     set_active_span_tracker,
     set_current_agent_span,
@@ -92,6 +98,7 @@ from openjiuwen.extensions.observability.span_record_processor import (
     OtlpSpanRecord,
     OtlpSpanSnapshotRecord,
     SpanRecordProcessor,
+    StreamFrameRecord,
 )
 from openjiuwen.harness.observability.run_span import close_agent_run_span
 
@@ -100,12 +107,23 @@ class _LiveRecordConsumer:
     def __init__(self) -> None:
         self.records: list[OtlpSpanRecord] = []
         self.snapshots: list[OtlpSpanSnapshotRecord] = []
+        self.frames: list[StreamFrameRecord] = []
 
     def consume(self, record: OtlpSpanRecord) -> None:
         self.records.append(record)
 
     def consume_snapshot(self, record: OtlpSpanSnapshotRecord) -> None:
         self.snapshots.append(record)
+
+    def consume_stream_frame(self, record: StreamFrameRecord) -> None:
+        self.frames.append(record)
+
+
+def _llm_spans(exporter: InMemorySpanExporter) -> list[Any]:
+    return [
+        span for span in exporter.get_finished_spans()
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+    ]
 
 
 def test_llm_span_omits_unknown_request_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,9 +172,8 @@ def test_usage_does_not_fallback_to_legacy_cache_fields() -> None:
 
     handler._record_usage_attrs(state, usage)
 
-    assert GEN_AI_USAGE_CACHE_TOKENS not in span.attributes
     assert GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS not in span.attributes
-    assert GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS not in span.attributes
+    assert GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS not in span.attributes
     span.end()
     provider.shutdown()
 
@@ -229,10 +246,60 @@ async def test_runtime_initialize_wires_global_callback_framework() -> None:
         runtime.shutdown()
         reset_state()
 
-    names = [span.name for exporter in exporters for span in exporter.get_finished_spans()]
-    assert names.count("llm.call") == 2
-    assert names.count("tool.search") == 2
+    spans = [span for exporter in exporters for span in exporter.get_finished_spans()]
+    assert sum(span.attributes.get(GEN_AI_OPERATION_NAME) == "chat" for span in spans) == 2
+    assert sum(span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool" for span in spans) == 2
+    names = [span.name for span in spans]
     assert names.count("agent.root") == 2
+
+
+@pytest.mark.asyncio
+async def test_backend_neutral_io_is_reserved_for_spans_without_a_carrier() -> None:
+    """Only spans with no standard carrier state their I/O the neutral way.
+
+    ``openjiuwen.span.input``/``output`` exist for records that have no
+    dedicated GenAI field. An LLM span has ``gen_ai.input.messages`` and a
+    tool span has ``gen_ai.tool.call.arguments``/``result``; writing the
+    neutral keys there too stored the same bytes twice and let the two
+    copies drift.
+    """
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    config = ObservabilityConfig(enabled=True, service_name="neutral-io-test", sample_rate=1.0)
+    framework = Runner.callback_framework
+
+    try:
+        runtime.initialize(config, span_exporter_override=exporter)
+        root = runtime.get_tracer("neutral-io-test").start_span("agent.root")
+        set_root_span(root, session_id="session-neutral")
+        session = SimpleNamespace(get_session_id=lambda: "session-neutral")
+        try:
+            await _emit_callback_flow(framework, session)
+        finally:
+            if root.is_recording():
+                root.end()
+            clear_root_span(session_id="session-neutral", expected_span=root)
+            runtime.shutdown()
+    finally:
+        runtime.shutdown()
+        reset_state()
+
+    spans = exporter.get_finished_spans()
+    llm = next(s for s in spans if s.attributes.get(GEN_AI_OPERATION_NAME) == "chat")
+    tool = next(s for s in spans if s.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool")
+    agent_root = next(s for s in spans if s.name == "agent.root")
+
+    # Each carries its I/O through the standard field for its kind...
+    assert llm.attributes[GEN_AI_INPUT_MESSAGES]
+    assert tool.attributes[GEN_AI_TOOL_CALL_ARGUMENTS]
+    assert tool.attributes[GEN_AI_TOOL_CALL_RESULT]
+    # ...and does not repeat it through the neutral one.
+    assert OJ_SPAN_INPUT not in llm.attributes
+    assert OJ_SPAN_INPUT not in tool.attributes
+    assert OJ_SPAN_OUTPUT not in tool.attributes
+    # The agent root has no standard carrier, so the neutral keys are its own.
+    assert agent_root.attributes[OJ_SPAN_INPUT] == "hello"
+    assert OJ_SPAN_OUTPUT in agent_root.attributes
 
 
 def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> None:
@@ -251,7 +318,7 @@ def test_request_numbers_are_additive_and_subject_local_across_turn_roots() -> N
         root = tracer.start_span(
             "agent.root",
             attributes={
-                OJ_SESSION_ID: session_id,
+                GEN_AI_CONVERSATION_ID: session_id,
                 OJ_EXECUTION_SUBJECT_ID: "main",
             },
         )
@@ -332,13 +399,12 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         enabled=True,
         service_name="stream-contract-test",
         sample_rate=1.0,
-        backend="langfuse",
+        exporter="langfuse",
     )
     framework = Runner.callback_framework
     runtime.initialize(config, span_exporter_override=exporter)
     root = runtime.get_tracer("stream-contract-test").start_span("agent.root")
     root.set_attribute("gen_ai.conversation.id", "session-1")
-    root.set_attribute("openjiuwen.session.id", "session-1")
     root.set_attribute(OJ_REQUEST_ID, "request-1")
     root.set_attribute(OJ_RUN_ID, "run-1")
     set_root_span(root, session_id="session-1")
@@ -448,9 +514,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
                 response="hello",
                 usage=usage,
             )
-        assert not [
-            span for span in exporter.get_finished_spans() if span.name == "llm.call"
-        ], "provider enrichment must not close a streaming span"
+        assert not _llm_spans(exporter), "provider enrichment must not close a streaming span"
 
         await framework.trigger(
             LLMCallEvents.LLM_STREAM_COMPLETED,
@@ -482,7 +546,7 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         runtime.shutdown()
         reset_state()
 
-    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    llm_span = _llm_spans(exporter)[0]
     attrs = llm_span.attributes
     # The only system turn here is injected prompt-attachment history, which
     # belongs to the chat history rather than to the instructions given
@@ -517,21 +581,14 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
         "arguments": {"q": "next"},
     }
 
-    # Existing Langfuse carve-out remains unchanged; additive totals stay raw.
-    assert attrs[GEN_AI_USAGE_PROMPT_TOKENS] == 8
-    assert attrs[GEN_AI_USAGE_COMPLETION_TOKENS] == 5
     assert attrs[GEN_AI_USAGE_INPUT_TOKENS] == 11
     assert attrs[GEN_AI_USAGE_OUTPUT_TOKENS] == 7
-    assert GEN_AI_USAGE_CACHE_TOKENS not in attrs
     assert attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 3
-    assert attrs[GEN_AI_USAGE_CACHE_CREATION_INPUT_TOKENS] == 2
+    assert attrs[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 2
     assert attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 2
-    assert attrs[GEN_AI_RESPONSE_FINISH_REASON] == "stop"
     assert list(attrs[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
     assert attrs[GEN_AI_RESPONSE_ID] == "resp-1"
-    assert attrs[GEN_AI_RESPONSE_TTFC] == pytest.approx(
-        attrs[GEN_AI_RESPONSE_TTFT_MS] / 1000.0
-    )
+    assert attrs[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] >= 0
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROMPT_TOKEN_IDS]) == [1, 2]
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_COMPLETION_TOKEN_IDS]) == [3, 4]
     assert json.loads(attrs[OJ_GEN_AI_RESPONSE_PROVIDER_METADATA]) == {
@@ -541,14 +598,28 @@ async def test_stream_completion_records_the_standard_structured_fields() -> Non
     assert attrs[OJ_REQUEST_ID] == "request-1"
     assert attrs[OJ_RUN_ID] == "run-1"
 
-    stream_events = [
-        event for event in llm_span.events if event.name == "openjiuwen.stream.chunk"
+    # Frames leave on their own channel, so the span carries phase markers
+    # rather than one event per frame.
+    assert not [
+        event for event in llm_span.events if event.name == OJ_STREAM_FRAME_EVENT
     ]
-    assert [event.attributes[OJ_EVENT_SEQUENCE] for event in stream_events] == [0, 1]
-    assert [event.attributes[OJ_STREAM_KIND] for event in stream_events] == [
+    phase_opens = [
+        event for event in llm_span.events if event.name == OJ_STREAM_PHASE_OPEN_EVENT
+    ]
+    assert [event.attributes[OJ_STREAM_KIND] for event in phase_opens] == [
         "text-delta",
         "reasoning-delta",
     ]
+    marker_names = [
+        event.name for event in llm_span.events
+        if event.name.startswith("openjiuwen.stream.")
+    ]
+    assert marker_names[0] == OJ_STREAM_OPEN_EVENT
+    assert marker_names[-1] == OJ_STREAM_CLOSE_EVENT
+    closes = [
+        event for event in llm_span.events if event.name == OJ_STREAM_PHASE_CLOSE_EVENT
+    ]
+    assert len(closes) == len(phase_opens)
 
 
 @pytest.mark.asyncio
@@ -589,7 +660,7 @@ async def test_structured_input_and_output_share_redaction_decisions() -> None:
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     input_text = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]["parts"][0]["content"]
     output_text = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
     assert input_text.startswith("sha256:")
@@ -666,7 +737,7 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     provenance = json.loads(span.attributes[OJ_GEN_AI_INPUT_MESSAGE_PROVENANCE])
     assert provenance == [
         {
@@ -692,12 +763,8 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
         "preserved tail",
     ]
     assert all("metadata" not in message for message in structured)
-    langfuse_input = json.loads(span.attributes[LANGFUSE_OBSERVATION_INPUT])
-    assert [message["content"] for message in langfuse_input] == [
-        repeated_content,
-        repeated_content,
-        "preserved tail",
-    ]
+    # An LLM span states its input once, through the standard carrier.
+    assert OJ_SPAN_INPUT not in span.attributes
     assert "private" not in json.dumps(provenance)
 
 
@@ -768,7 +835,7 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     # Every message is recorded now: the per-message expansion that used to
     # crowd this attribute out of the span's budget is gone.
     assert GEN_AI_INPUT_MESSAGES in span.attributes
@@ -802,7 +869,7 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
             enabled=True,
             service_name="semantic-identity-pressure-test",
             sample_rate=1.0,
-            backend="langfuse",
+            exporter="langfuse",
             max_attributes=80,
         ),
         span_exporter_override=exporter,
@@ -858,13 +925,12 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
-    assert span.attributes[GEN_AI_REQUEST_ID] == "semantic-pressure-call"
+    span = _llm_spans(exporter)[0]
+    assert span.attributes[OJ_REQUEST_ID] == "semantic-pressure-call"
     assert span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
     assert span.attributes[GEN_AI_OPERATION_NAME] == "chat"
     assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
     assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "inference"
-    assert span.attributes[LANGFUSE_OBSERVATION_TYPE] == "generation"
     assert span.attributes[GEN_AI_REQUEST_STREAM] is False
     assert GEN_AI_OUTPUT_MESSAGES in span.attributes
 
@@ -934,7 +1000,7 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     input_message = json.loads(span.attributes[GEN_AI_INPUT_MESSAGES])[0]
     assert input_message["name"] == "named-reviewer"
     assert [part["type"] for part in input_message["parts"]] == [
@@ -960,7 +1026,8 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
 
     output_message = json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]
     assert output_message["name"] == "named-assistant"
-    assert output_message["finish_reason"] == "stop"
+    assert "finish_reason" not in output_message
+    assert span.attributes[GEN_AI_RESPONSE_FINISH_REASONS] == ("stop",)
     assert [part["type"] for part in output_message["parts"]] == [
         "output_text",
         "citation",
@@ -1002,7 +1069,7 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
                 response="unified answer",
                 usage=UsageMetadata(input_tokens=1, output_tokens=1, total_tokens=2),
             )
-            assert not [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+            assert not _llm_spans(exporter)
             await framework.trigger(
                 LLMCallEvents.LLM_STREAM_COMPLETED,
                 result=AssistantMessage(content="unified answer", finish_reason="stop"),
@@ -1038,7 +1105,7 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
         runtime.shutdown()
         reset_state()
 
-    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    llm_spans = _llm_spans(exporter)
     assert len(llm_spans) == 2
     assert {
         json.loads(span.attributes[GEN_AI_OUTPUT_MESSAGES])[0]["parts"][0]["content"]
@@ -1085,9 +1152,7 @@ async def test_internal_probe_callback_flow_does_not_create_trajectory_span() ->
         runtime.shutdown()
         reset_state()
 
-    assert not [
-        span for span in exporter.get_finished_spans() if span.name == "llm.call"
-    ]
+    assert not _llm_spans(exporter)
 
 
 @pytest.mark.asyncio
@@ -1148,7 +1213,7 @@ async def test_tool_definitions_model_dump_before_string_fallback() -> None:
         runtime.shutdown()
         reset_state()
 
-    span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    span = _llm_spans(exporter)[0]
     definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
     assert definitions == [
         {
@@ -1215,7 +1280,7 @@ async def test_tool_definitions_failures_fallback_per_item_without_orphaning_spa
         runtime.shutdown()
         reset_state()
 
-    llm_spans = [span for span in exporter.get_finished_spans() if span.name == "llm.call"]
+    llm_spans = _llm_spans(exporter)
     assert len(llm_spans) == 1
     span = llm_spans[0]
     definitions = json.loads(span.attributes[GEN_AI_TOOL_DEFINITIONS])
@@ -1282,7 +1347,7 @@ async def test_real_model_stream_early_close_is_forced_unset_before_root(
         runtime.shutdown()
         reset_state()
 
-    llm_span = next(span for span in exporter.get_finished_spans() if span.name == "llm.call")
+    llm_span = _llm_spans(exporter)[0]
     root_span = next(span for span in exporter.get_finished_spans() if span.name == "agent.root")
     assert llm_span.status.status_code is StatusCode.UNSET
     assert llm_span.attributes[OJ_SPAN_FORCED_CLOSE] is True
@@ -1345,27 +1410,171 @@ async def test_stream_callbacks_publish_recoverable_live_snapshots(
         reset_state()
         provider.shutdown()
 
-    llm_snapshots = [record for record in consumer.snapshots if record.name == "llm.call"]
+    llm_snapshots = [record for record in consumer.snapshots if record.name == "chat test-model"]
+    # A chunk no longer costs a whole-span snapshot: it travels as a frame.
     assert [record.update_kind for record in llm_snapshots] == [
         "started",
         "attributes",
         "attributes",
-        "stream_chunk",
-        "stream_chunk",
     ]
-    assert [record.record_revision for record in llm_snapshots] == [1, 2, 3, 4, 5]
+    assert [frame.kind for frame in consumer.frames] == ["text-delta", "text-delta"]
+    assert [frame.sequence for frame in consumer.frames] == [0, 1]
+    assert [frame.text for frame in consumer.frames] == ["hel", "lo"]
+    assert {frame.session_id for frame in consumer.frames} == {"live-session"}
+    assert [record.record_revision for record in llm_snapshots] == [1, 2, 3]
     final = next(record for record in consumer.records if record.span_id == llm_snapshots[0].span_id)
-    assert final.record_revision == 6
+    assert final.record_revision == 4
     assert final.lifecycle == "final"
-    second_chunk_payload = json.loads(llm_snapshots[-1].raw_json)
-    second_chunk_span = second_chunk_payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
-    assert [event["name"] for event in second_chunk_span["events"]] == [
-        "llm.chunk",
-        "openjiuwen.stream.chunk",
-        "llm.chunk",
-        "openjiuwen.stream.chunk",
+    final_payload = json.loads(final.raw_json)
+    final_span = final_payload["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    # The ended span keeps only the bounded phase markers: no event on it
+    # scales with the number of chunks any more.
+    assert [event["name"] for event in final_span["events"]] == [
+        OJ_STREAM_OPEN_EVENT,
+        OJ_STREAM_PHASE_OPEN_EVENT,
+        OJ_STREAM_PHASE_CLOSE_EVENT,
+        OJ_STREAM_CLOSE_EVENT,
     ]
 
+
+@pytest.mark.asyncio
+async def test_streamed_agent_output_is_recorded_without_republishing_the_root(
+    monkeypatch,
+) -> None:
+    """A streamed answer updates the root span's attribute, nothing more.
+
+    Streaming routes every chunk through the invoke-output callback, so
+    publishing there rewrote the whole root span once per chunk -- measured at
+    23,414 publishes over one 840-second turn, to restate a 744-character
+    answer the stream frames already carry increment by increment. The span
+    holds the value and states it once, when it ends.
+    """
+    processor = SpanRecordProcessor()
+    consumer = _LiveRecordConsumer()
+    processor.register_consumer(consumer)
+    provider = TracerProvider()
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("root-output-test")
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+    reset_state()
+    root = tracer.start_span(
+        "agent.root",
+        attributes={
+            OJ_TRACE_ROOT: True,
+            "gen_ai.conversation.id": "root-output-session",
+        },
+    )
+    set_root_span(root, session_id="root-output-session")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="root-output-test"),
+        tracer=tracer,
+    )
+    session = SimpleNamespace(get_session_id=lambda: "root-output-session")
+
+    try:
+        for answer in ("par", "partial", "partial answer"):
+            await handler.on_agent_stream_output(result=answer, session=session)
+        assert root.attributes[OJ_SPAN_OUTPUT] == "partial answer"
+        # Only the snapshot the processor states when the span opens: three
+        # chunks add nothing to it.
+        assert [record.update_kind for record in consumer.snapshots] == ["started"]
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="root-output-session", expected_span=root)
+        reset_state()
+        provider.shutdown()
+
+    # The answer reaches a reader once, on the record the ended span states.
+    final = next(record for record in consumer.records if record.span_id == f"{root.context.span_id:016x}")
+    final_span = json.loads(final.raw_json)["resourceSpans"][0]["scopeSpans"][0]["spans"][0]
+    output = next(
+        attribute["value"]["stringValue"]
+        for attribute in final_span["attributes"]
+        if attribute["key"] == OJ_SPAN_OUTPUT
+    )
+    assert output == "partial answer"
+
+
+@pytest.mark.asyncio
+async def test_long_stream_keeps_every_frame_and_a_bounded_span(monkeypatch) -> None:
+    """A long answer loses no frame, and its span stays inside the event cap.
+
+    Frames used to be span events. The SDK caps a span at 128 events and
+    evicts the *oldest* on overflow, so a long answer silently lost its
+    beginning -- exactly the part a reader needs to replay it from the start.
+    """
+    processor = SpanRecordProcessor()
+    consumer = _LiveRecordConsumer()
+    processor.register_consumer(consumer)
+    provider = TracerProvider()
+    tracker = ActiveSpanTracker()
+    provider.add_span_processor(tracker)
+    provider.add_span_processor(processor)
+    tracer = provider.get_tracer("long-stream-test")
+    monkeypatch.setattr(demand_module, "_SPAN_RECORD_PROCESSOR", processor)
+    reset_state()
+    set_active_span_tracker(tracker)
+    root = tracer.start_span(
+        "agent.root",
+        attributes={OJ_TRACE_ROOT: True, "gen_ai.conversation.id": "long-session"},
+    )
+    set_root_span(root, session_id="long-session")
+    handler = OtelCallbackHandler(
+        ObservabilityConfig(enabled=True, service_name="long-stream-test"),
+        tracer=tracer,
+    )
+    chunk_count = 300
+    llm_span = None
+
+    try:
+        with LlmCallScope(unified_completion=True):
+            await handler.on_llm_stream_input(
+                messages=[{"role": "user", "content": "write at length"}],
+                model="test-model",
+            )
+            await handler.on_llm_input(messages=[{"role": "user", "content": "write at length"}])
+            llm_span = get_current_llm_span()
+            for index in range(chunk_count):
+                await handler.on_llm_stream_output(
+                    result=AssistantMessageChunk(content=f"w{index} "),
+                )
+            await handler.on_llm_stream_completed(
+                result=AssistantMessage(content="done", finish_reason="stop"),
+            )
+    finally:
+        if root.is_recording():
+            root.end()
+        clear_root_span(session_id="long-session", expected_span=root)
+        set_active_span_tracker(None)
+        reset_state()
+        provider.shutdown()
+
+    frames = [frame for frame in consumer.frames if frame.kind == "text-delta"]
+    logger.info(
+        "long stream: chunks={} frames={} span_events={}",
+        chunk_count,
+        len(frames),
+        len(llm_span.events),
+    )
+    # Every frame arrives, in order, with no gap a reader would have to guess at.
+    assert [frame.sequence for frame in frames] == list(range(chunk_count))
+    assert [frame.text for frame in frames] == [f"w{index} " for index in range(chunk_count)]
+    # One text phase for the whole answer, so the span holds four markers no
+    # matter how long the model talks.
+    assert [event.name for event in llm_span.events] == [
+        OJ_STREAM_OPEN_EVENT,
+        OJ_STREAM_PHASE_OPEN_EVENT,
+        OJ_STREAM_PHASE_CLOSE_EVENT,
+        OJ_STREAM_CLOSE_EVENT,
+    ]
+    close_event = llm_span.events[-1]
+    assert close_event.attributes[OJ_STREAM_FRAME_COUNT] == chunk_count
+    # No chunk costs a whole-span snapshot any more.
+    chunk_snapshots = [
+        record for record in consumer.snapshots if record.update_kind == "stream_chunk"
+    ]
+    assert chunk_snapshots == []
 
 
 def test_request_numbers_are_allocated_without_a_root_span() -> None:
@@ -1387,3 +1596,269 @@ def test_request_numbers_are_allocated_without_a_root_span() -> None:
         reset_state()
 
     assert allocated == [1, 2, 3]
+
+
+def _error_test_runtime(service_name: str):
+    exporter = InMemorySpanExporter()
+    runtime = ObservabilityRuntime()
+    config = ObservabilityConfig(
+        enabled=True,
+        service_name=service_name,
+        sample_rate=1.0,
+    )
+    runtime.initialize(config, span_exporter_override=exporter)
+    root = runtime.get_tracer(service_name).start_span("agent.root")
+    root.set_attribute(GEN_AI_CONVERSATION_ID, f"{service_name}-session")
+    set_root_span(root, session_id=f"{service_name}-session")
+    return exporter, runtime, root
+
+
+def _execute_tool_spans(exporter: InMemorySpanExporter) -> list[Any]:
+    return [
+        span for span in exporter.get_finished_spans()
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+    ]
+
+
+def _exception_events(span: Any) -> list[Any]:
+    return [event for event in span.events if event.name == "exception"]
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_error_message_reaches_the_span() -> None:
+    """A bare TimeoutError with an explicit error_message records the detail."""
+    exporter, runtime, root = _error_test_runtime("llm-error-detail")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        reason = (
+            "LLM stream timeout: stage=idle_chunk, timeout=60.0s, "
+            "chunk_count=368, idle_elapsed=60.00s, total_elapsed=91.15s, "
+            "model=GLM-5.3"
+        )
+        # Raised, not constructed, so the exception carries a real traceback
+        # exactly like the streaming timeout path does.
+        try:
+            raise asyncio.TimeoutError()
+        except asyncio.TimeoutError as timeout_error:
+            error = timeout_error
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=error,
+            error_message=reason,
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-detail-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == reason
+    assert span.attributes[ERROR_TYPE] == "TimeoutError"
+    events = _exception_events(span)
+    assert len(events) == 1
+    assert events[0].attributes["exception.message"] == reason
+    assert events[0].attributes["exception.type"] == "TimeoutError"
+    assert "Traceback" in events[0].attributes["exception.stacktrace"]
+
+
+@pytest.mark.asyncio
+async def test_llm_error_with_plain_exception_keeps_legacy_display() -> None:
+    """A normal str(exc) error keeps showing str(exc) — backward compatible."""
+    exporter, runtime, root = _error_test_runtime("llm-error-plain")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError("provider down"),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-plain-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "provider down"
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+    events = _exception_events(span)
+    assert events[0].attributes["exception.message"] == "provider down"
+
+
+@pytest.mark.asyncio
+async def test_llm_error_with_blank_error_falls_back_to_type_name() -> None:
+    exporter, runtime, root = _error_test_runtime("llm-error-blank")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=asyncio.TimeoutError(),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-blank-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == "TimeoutError"
+    assert span.attributes[ERROR_TYPE] == "TimeoutError"
+
+
+@pytest.mark.asyncio
+async def test_llm_error_summary_masks_secrets_and_is_single_line() -> None:
+    reason = (
+        "call failed: Authorization: Bearer sk-secret123456, "
+        "api_key=sk-abcdef123456\nretrying"
+    )
+    exporter, runtime, root = _error_test_runtime("llm-error-secrets")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError(reason),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-secrets-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    description = span.status.description
+    assert "sk-secret123456" not in description
+    assert "sk-abcdef123456" not in description
+    assert "Authorization: ***" in description
+    assert "api_key=***" in description
+    assert "\n" not in description
+    assert "retrying" in description
+
+
+@pytest.mark.asyncio
+async def test_llm_error_summary_is_truncated() -> None:
+    reason = "x" * 10_000
+    exporter, runtime, root = _error_test_runtime("llm-error-long")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            LLMCallEvents.LLM_STREAM_INPUT,
+            messages=[{"role": "user", "content": "hi"}],
+            model="GLM-5.3",
+        )
+        await framework.trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name="GLM-5.3",
+            is_stream=True,
+            error=RuntimeError(reason),
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="llm-error-long-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    span = _llm_spans(exporter)[0]
+    assert len(span.status.description) < len(reason)
+    assert "truncated" in span.status.description
+
+
+@pytest.mark.asyncio
+async def test_tool_error_records_redacted_reason_and_keeps_result() -> None:
+    exporter, runtime, root = _error_test_runtime("tool-error")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_STARTED,
+            tool_name="bash",
+            tool_id="t-1",
+            inputs=((), {}),
+        )
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_ERROR,
+            tool_name="bash",
+            tool_id="t-1",
+            error=RuntimeError("exec failed: password=hunter2"),
+            error_message="Ability execution error: exec failed: password=hunter2",
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="tool-error-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    spans = _execute_tool_spans(exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description == (
+        "Ability execution error: exec failed: password=***"
+    )
+    assert span.attributes[ERROR_TYPE] == "RuntimeError"
+    # The recorded result mirrors what the model actually received (the
+    # conversation content), so it is not masked like the status summary.
+    assert span.attributes["gen_ai.tool.call.result"] == (
+        "Ability execution error: exec failed: password=hunter2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_reported_failure_masks_reason_in_status() -> None:
+    exporter, runtime, root = _error_test_runtime("tool-failure")
+    framework = Runner.callback_framework
+    try:
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_STARTED,
+            tool_name="bash",
+            tool_id="t-2",
+            inputs=((), {}),
+        )
+        await framework.trigger(
+            ToolCallEvents.TOOL_CALL_FINISHED,
+            tool_name="bash",
+            tool_id="t-2",
+            result={"success": False, "error": "auth failed: access_token=eyAbCdEf123"},
+        )
+    finally:
+        root.end()
+        clear_root_span(session_id="tool-failure-session", expected_span=root)
+        runtime.shutdown()
+        reset_state()
+
+    spans = _execute_tool_spans(exporter)
+    assert len(spans) == 1
+    span = spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes[ERROR_TYPE] == "ToolReportedFailure"
+    assert span.status.description == "auth failed: access_token=***"
+    assert "eyAbCdEf123" not in span.status.description

@@ -5,6 +5,7 @@
 All mutable state lives in HarnessInternalState; the supervisor coroutine
 is the sole writer. External API methods only push ControlEvent objects.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -13,28 +14,12 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from openjiuwen.harness_protocol.state import HarnessState
+
 if TYPE_CHECKING:
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
-
-
-class HarnessState(str, Enum):
-    """High-level lifecycle phase for NativeHarness.
-
-    Transitions are documented in the NativeHarness state-transition table.
-    Only the supervisor coroutine mutates ``HarnessInternalState.phase``.
-
-    ``PAUSING`` is a transient phase entered when a pause is requested during
-    the tool phase of an iteration: the inner loop finishes the current
-    iteration cooperatively, then ``_on_round_done`` settles it to ``PAUSED``.
-    """
-
-    IDLE = "idle"
-    RUNNING = "running"
-    PAUSING = "pausing"
-    PAUSED = "paused"
-    TERMINATED = "terminated"
 
 
 class RoundPhase(str, Enum):

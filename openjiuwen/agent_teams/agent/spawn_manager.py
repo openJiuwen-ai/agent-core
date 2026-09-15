@@ -81,6 +81,20 @@ class SpawnManager:
         resume_external_backend: bool = False,
     ) -> Optional[SpawnedProcessHandle]:
         member_name = ctx.member_name
+        # Structural guard: a passive human member must never get a runtime,
+        # no matter which code path asks (recovery sweeps, future auto-start
+        # variants). It lives as a READY roster row only; its actions flow
+        # through the interact channel (messages + tool-call passthrough).
+        # The recovery loop also skips it explicitly (see
+        # ``RecoveryManager.recover_team``) — one guard per layer, each
+        # pointing at the other, so future drift is grep-able (F_14 lesson).
+        if getattr(ctx, "role", None) == TeamRole.PASSIVE_HUMAN:
+            team_logger.warning(
+                "[{}] refusing to spawn passive human {}; it has no runtime by design",
+                self._configurator.member_name or "?",
+                member_name,
+            )
+            return None
         # Idempotency: skip a duplicate spawn of an already-spawned or
         # in-flight member. ``startup()`` re-reads UNSTARTED rows on every
         # auto-start trigger, so the same member can be requested several

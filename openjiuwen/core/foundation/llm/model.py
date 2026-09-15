@@ -261,7 +261,10 @@ class Model:
                             model_name=effective_model_name,
                             model_provider=model_provider,
                             is_stream=True,
-                            error=exc)
+                            error=exc,
+                            # The bare TimeoutError renders as an empty string;
+                            # carry the already-built diagnostic into the span.
+                            error_message=f"LLM stream timeout: {error_detail}")
                         llm_logger.error(
                             "LLM stream timeout.",
                             event_type=LogEventType.LLM_CALL_ERROR,
@@ -563,19 +566,31 @@ class Model:
         )
 
 
+# Vendor JSON-body extensions that must not be passed as top-level OpenAI SDK
+# kwargs (``chat.completions.create`` rejects them with TypeError).
+_INIT_MODEL_EXTRA_BODY_FIELDS = frozenset({
+    "enable_thinking",
+    "thinking",
+    "chat_template_kwargs",
+})
+
+
 def init_model(
         provider: str,
         model_name: str,
         api_key: str,
         api_base: str,
         *,
-        temperature: float = 0.95,
-        top_p: float = 0.95,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: float = 60.0,
         max_retries: int = 3,
         verify_ssl: bool = False,
         custom_headers: Optional[dict[str, str]] = None,
+        extra_body: Optional[dict] = None,
+        reasoning_effort: Optional[str] = None,
+        **request_extras,
 ) -> Model:
     """Convenience factory to create a Model instance.
 
@@ -591,6 +606,13 @@ def init_model(
         max_retries: Maximum number of retries.
         verify_ssl: Whether to verify SSL certificates.
         custom_headers: Additional headers sent with each model request.
+        extra_body: Extra JSON body fields (e.g. DeepSeek ``thinking``,
+            OpenLux ``enable_thinking``). Prefer this over top-level kwargs.
+        reasoning_effort: Top-level reasoning effort (e.g. ``low``/``high``/``max``).
+        **request_extras: Additional ``ModelRequestConfig`` fields. Known
+            body-extension keys (``enable_thinking``, ``thinking``,
+            ``chat_template_kwargs``) are folded into ``extra_body`` so they
+            are not forwarded as illegal OpenAI SDK kwargs.
 
     Returns:
         Configured Model instance.
@@ -604,11 +626,28 @@ def init_model(
         verify_ssl=verify_ssl,
         custom_headers=custom_headers,
     )
+    request_kwargs: dict = {}
+    if reasoning_effort is not None:
+        request_kwargs["reasoning_effort"] = reasoning_effort
+
+    merged_extra_body: dict = dict(extra_body or {})
+    remaining_extras: dict = {}
+    for key, value in request_extras.items():
+        if key in _INIT_MODEL_EXTRA_BODY_FIELDS:
+            merged_extra_body[key] = value
+        else:
+            remaining_extras[key] = value
+    if merged_extra_body:
+        request_kwargs["extra_body"] = merged_extra_body
+    if remaining_extras:
+        request_kwargs.update(remaining_extras)
+
     request_config = ModelRequestConfig(
         model=model_name,
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
+        **request_kwargs,
     )
     return Model(
         model_client_config=client_config,

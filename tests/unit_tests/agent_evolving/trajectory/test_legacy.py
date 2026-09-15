@@ -211,7 +211,11 @@ def test_upgrade_legacy_steps_preserves_canonical_consumer_fields() -> None:
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
     ]
-    assert read_usage(llm_span) == {"prompt_tokens": 2, "completion_tokens": 1}
+    assert read_usage(llm_span) == {
+        "prompt_tokens": 2,
+        "completion_tokens": 1,
+        "total_tokens": 3,
+    }
     assert read_rl_fields(llm_span) == {
         "prompt_token_ids": [1, 2],
         "completion_token_ids": [3],

@@ -15,7 +15,6 @@ from typing import Any, Optional
 from openjiuwen.agent_evolving.agent_rl.online.backends.sft.sample_builder import (
     assistant_text,
     build_direct_supervisor_sft_samples,
-    json_safe,
     normalize_assistant_message,
     normalize_message,
     normalize_messages,
@@ -607,8 +606,6 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         elif not response.get("tool_calls"):
             completion["content"] = turn.get("llm_str") or ""
         attrs.update(write_llm_exchange(prompts, [completion]))
-        if response.get("tool_calls"):
-            attrs[semconv.GEN_AI_TOOL_CALLS] = response["tool_calls"]
         if turn.get("prompt_ids") is not None:
             attrs["prompt_ids"] = turn.get("prompt_ids")
         if turn.get("completion_token_ids") is not None:
@@ -616,7 +613,7 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         return {
             "traceId": f"{uuid.uuid4().int & ((1 << 128) - 1):032x}",
             "spanId": f"{index + 1:016x}",
-            "name": "llm.call",
+            "name": f"chat {attrs[semconv.GEN_AI_REQUEST_MODEL]}",
             "startTimeUnixNano": str(index + 1),
             "endTimeUnixNano": str(index + 2),
             "attributes": attributes_from_map(attrs),

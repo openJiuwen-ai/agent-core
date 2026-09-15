@@ -7,13 +7,15 @@ from pydantic import ValidationError
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError
-from openjiuwen.core.foundation.llm import AnthropicModelClient, BaseModelClient
+from openjiuwen.core.foundation.llm import AnthropicModelClient, BaseModelClient, init_model
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMAuthMode,
     LLMApiMode,
     ModelClientConfig,
+    ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.mode_info import BaseModelInfo
 
 
 class _TempMockClient(BaseModelClient):
@@ -225,6 +227,37 @@ def test_model_client_config_timeout_must_be_positive():
             timeout=0,
         )
     assert error.value.errors()[0]["type"] == "greater_than"
+
+
+def test_model_request_config_sampling_defaults_are_unset():
+    cfg = ModelRequestConfig(model="gpt-4o-mini")
+
+    assert cfg.temperature is None
+    assert cfg.top_p is None
+    assert "temperature" not in cfg.model_fields_set
+    assert "top_p" not in cfg.model_fields_set
+
+
+def test_base_model_info_sampling_defaults_are_unset():
+    info = BaseModelInfo(api_base="https://example.test")
+
+    assert info.temperature is None
+    assert info.top_p is None
+    assert "temperature" not in info.model_fields_set
+    assert "top_p" not in info.model_fields_set
+
+
+def test_init_model_does_not_configure_sampling_by_default():
+    model = init_model(
+        provider="OpenAI",
+        model_name="gpt-4o-mini",
+        api_key="sk-test",
+        api_base="https://example.test",
+        verify_ssl=False,
+    )
+
+    assert model.model_config.temperature is None
+    assert model.model_config.top_p is None
 
 
 def test_model_client_config_accepts_custom_headers():

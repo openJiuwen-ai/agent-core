@@ -14,8 +14,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from openjiuwen.agent_teams.paths import configure_openjiuwen_home, reset_openjiuwen_home
+from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
 from openjiuwen.core.common.logging import logger
+from openjiuwen.rsi.harness_rsi.data_loader.case_files import task_input
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
     CaseExecutionBackend,
     CaseExecutionResult,
@@ -24,11 +25,13 @@ from openjiuwen.rsi.harness_rsi.evaluator.case_backend import (
 )
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import EvaluationJudger, JudgeResult
+from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
 from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
     ROLE_TRAJECTORY_DIR_NAME,
     TRAJECTORY_EVENTS_FILE_NAME,
 )
 from openjiuwen.rsi.harness_rsi.schema import EvaluationCaseTraceRef
+from openjiuwen.rsi.usage import model_usage_stage
 
 _MAX_ROLE_TRAJECTORY_FILE_BYTES = 2_000_000
 _ROLE_TRAJECTORY_TAIL_BYTES = 64_000
@@ -71,7 +74,7 @@ class CaseRunner:
         """Run one case and persist final trace/result artifacts.
 
         Execution order:
-        1. ``configure_openjiuwen_home`` redirects the global home to a case-scoped
+        1. ``set_task_openjiuwen_home`` binds a task-local home to a case-scoped
            runtime home. On Windows this uses a short temp root to avoid MAX_PATH
            failures while preserving per-case isolation. Other platforms keep
            ``case_dir`` as the runtime home.
@@ -84,17 +87,17 @@ class CaseRunner:
            first; this call is the fallback for normal/error exit without ``clean_team``).
         4. ``judger.judge`` reads stable ``case_dir/artifacts/`` and ``case_dir/tr/``.
         5. ``trace.json`` and ``result.json`` are written with final evaluation fields.
-        6. ``backend.cleanup``, ``_cleanup_scratch``, and ``reset_openjiuwen_home`` run in ``finally``.
+        6. ``backend.cleanup``, ``_cleanup_scratch``, and ``reset_task_openjiuwen_home`` run in ``finally``.
         """
         case_id = _case_id(case)
         session_id = f"eval_{case_id}_{uuid4().hex}"
         case_dir = Path(output_dir).expanduser().resolve()
         _prepare_case_dir(case_dir)
-        # Redirect global home so team_home() and stable_base path derivation
+        # Bind task-local home so team_home() and stable_base path derivation
         # resolve under a case-scoped runtime home for this case only.
         runtime_home_dir = _runtime_home_dir(case_dir, session_id)
         runtime_home_dir.mkdir(parents=True, exist_ok=True)
-        configure_openjiuwen_home(runtime_home_dir)
+        home_token = set_task_openjiuwen_home(runtime_home_dir)
         result_path = case_dir / "result.json"
         trace_path = case_dir / "trace.json"
         started_at = datetime.now(UTC).astimezone()
@@ -267,6 +270,10 @@ class CaseRunner:
         except Exception as exc:
             if isinstance(exc, EvaluationInfrastructureError):
                 body_error = exc
+                _write_json(
+                    case_dir / "evaluation_error.json",
+                    {"case_id": case_id, "status": "error", "score": None, "error": str(exc)},
+                )
                 raise
             body_error = exc
             return _write_error_case_artifacts(
@@ -291,9 +298,12 @@ class CaseRunner:
                     raise
                 logger.warning("case runtime cleanup failed after case error: {}", exc)
             finally:
-                _cleanup_scratch(case_dir, runtime_home_dir)
-                reset_openjiuwen_home()
+                try:
+                    _cleanup_scratch(case_dir, runtime_home_dir)
+                finally:
+                    reset_task_openjiuwen_home(home_token)
 
+    @model_usage_stage("judge")
     async def _judge(
         self,
         *,
@@ -301,21 +311,23 @@ class CaseRunner:
         execution_result: CaseExecutionResult,
         output_dir: str,
     ) -> JudgeResult:
-        """Return the backend judge result, configured judge result, or default score."""
+        """Require an actual evaluation result, never a completion-based score."""
         if execution_result.judge_result is not None:
-            return execution_result.judge_result
-        if self.judger is not None:
-            return await self.judger.judge(
+            result = execution_result.judge_result
+        elif self.judger is not None:
+            result = await self.judger.judge(
                 case=case,
                 execution_result=execution_result,
                 output_dir=output_dir,
             )
-        return JudgeResult(
-            method="none",
-            score=1.0 if execution_result.execution_status == "passed" else 0.0,
-            passed=execution_result.execution_status == "passed",
-            reason="no judger configured",
-        )
+        else:
+            raise EvaluationInfrastructureError(
+                "Cannot score this case: no judger configured and no backend JudgeResult. "
+                "Successful execution is not evidence of correctness."
+            )
+        if _is_execution_only_evaluation({"method": result.method, "metadata": result.metadata}):
+            raise EvaluationInfrastructureError("Completion-only JudgeResult is not a valid correctness evaluation")
+        return result
 
 
 def _case_id(case: dict[str, Any]) -> str:
@@ -323,13 +335,11 @@ def _case_id(case: dict[str, Any]) -> str:
 
 
 def _case_inputs(case: dict[str, Any]) -> Any:
-    for key in ("input", "inputs", "task_input", "query", "prompt"):
-        if key in case:
-            value = case[key]
-            if key == "input" and isinstance(value, dict) and set(value) == {"user_message"}:
-                return value["user_message"]
-            return value
-    return case
+    try:
+        return task_input(case)
+    except ValueError:
+        # Invalid inputs still need a diagnostic trace, never a reference dump.
+        return None
 
 
 def _case_result_status(
@@ -682,11 +692,10 @@ def _failure_signatures(
         for event in events
     ):
         signatures.append("tool_execution_failure")
-    has_workspace_change = any(event.get("event_type") == "workspace_change" for event in events)
-    if has_workspace_change:
-        signatures.append("patch_quality_gap")
-    else:
-        signatures.append("workspace_edit_gap")
+    # Only the patch evaluator establishes that a workspace edit is required.
+    if judge_result.method == "swebench_official":
+        has_workspace_change = any(event.get("event_type") == "workspace_change" for event in events)
+        signatures.append("patch_quality_gap" if has_workspace_change else "workspace_edit_gap")
     return signatures
 
 

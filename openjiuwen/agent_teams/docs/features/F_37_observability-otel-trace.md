@@ -1,5 +1,12 @@
 # F_37: Observability OTel Trace
 
+> 当前 GenAI 属性契约已由
+> [F_110_genai-semconv-canonicalization.md](F_110_genai-semconv-canonicalization.md)
+> 取代。本文件保留最初落地时的历史设计背景，其中旧 `gen_ai.*` 名称不再是当前写入契约。
+> 文中出现的 `langfuse.*` / `session.id` 字段同样仅是历史记录：采集层现只写
+> 标准 GenAI 字段与 `openjiuwen.*` / `agentteam.*` 扩展，Langfuse 投影由
+> `openjiuwen/extensions/observability/exporters/langfuse.py` 在导出阶段生成。
+
 ## 元信息
 
 | 项 | 值 |
@@ -297,12 +304,11 @@ DeepAgent 初始化阶段的 ImageModalityProbe 调用发生在 agent span 创�
 |------|------|
 | `langfuse.observation.type` | `"agent"` |
 | `agentteam.agent.id` | `{team_name}_{member_name}` |
-| `agentteam.agent.name` | member_name |
 | `agentteam.agent.role` | 成员角色值（`TeamRole.value`，如 `leader` / `teammate` / `human_agent` / `external_cli`） |
-| `agentteam.member.id` | member_name |
 | `agentteam.member.name` | member_name |
 | `agentteam.team.id` | team_name |
-| `agentteam.session.id` | session_id |
+| `gen_ai.agent.name` | member_name，由 agent rail 统一打点 |
+| `gen_ai.conversation.id` | session_id |
 | `deepagent.task.iteration` | 当前 iteration 序号 |
 | `deepagent.task.is_follow_up` | 是否为 follow-up 任务 |
 | `langfuse.observation.input` | agent 输入 query（脱敏） |

@@ -8,6 +8,8 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, EvaluationWindow, Evaluator
+from openjiuwen.symphony.flow import LLMPackageReviewAgent
+from openjiuwen.symphony.flow.models import CombinationCandidate
 from openjiuwen.symphony.graph_engine import SymphonyGraphEngine
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
@@ -36,7 +38,6 @@ from openjiuwen.symphony.models import (
 )
 from openjiuwen.symphony.observation import (
     GRAPH_EVOLUTION_INPUT_SCHEMA,
-    CapabilityEvidence,
     EvidenceStrength,
     EvolutionEdgeMetadata,
     EvolutionGraph,
@@ -47,7 +48,6 @@ from openjiuwen.symphony.observation import (
     GraphSnapshot,
     GraphSnapshotRef,
     ObservationReceipt,
-    PortMapping,
     TaskEvidence,
     TaskOutcome,
     TaskOutcomeLabel,
@@ -66,7 +66,7 @@ from openjiuwen.symphony.orchestration import (
     PrepareArtifactHook,
 )
 from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
-from openjiuwen.symphony.runtime import SymphonyRuntime
+from openjiuwen.symphony.runtime import EvolutionSubmitResult, SymphonyRuntime
 from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec, normalize_name_key
 from openjiuwen.symphony.shared.fingerprint import (
     FINGERPRINT_ARTIFACT_FILENAME,
@@ -98,6 +98,7 @@ __all__ = [
     "ArtifactSpec",
     "AtomicCapabilityProvider",
     "CapabilityCall",
+    "CombinationCandidate",
     "CapabilityDescriptor",
     "CapabilityFingerprint",
     "CapabilityGraph",
@@ -105,7 +106,6 @@ __all__ = [
     "CapabilityInput",
     "CapabilityOutput",
     "CapabilityProvider",
-    "CapabilityEvidence",
     "EvidenceStrength",
     "EvaluationCase",
     "EvaluationContext",
@@ -114,6 +114,7 @@ __all__ = [
     "EvolutionGraph",
     "EvolutionGraphEdge",
     "EvolutionGraphNode",
+    "EvolutionSubmitResult",
     "EvolutionEdgeMetadata",
     "Evaluator",
     "EvidenceRef",
@@ -132,6 +133,7 @@ __all__ = [
     "GraphMutationResult",
     "GraphSnapshot",
     "GraphSnapshotRef",
+    "LLMPackageReviewAgent",
     "IONameVocabulary",
     "ImprovementSuggestion",
     "MetricResult",
@@ -143,7 +145,6 @@ __all__ = [
     "ObservationReceipt",
     "ParameterSpec",
     "PrepareArtifactHook",
-    "PortMapping",
     "QualityConfidence",
     "QualityResult",
     "ScanDiagnostic",

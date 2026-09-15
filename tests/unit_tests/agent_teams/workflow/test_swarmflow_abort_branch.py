@@ -126,12 +126,21 @@ def test_run_background_pause_raises_cancelled_error():
 
 
 class _CapturingMessager:
-    """Records every publish (topic, EventMessage) without fanning out."""
+    """Records every publish (topic, EventMessage) without fanning out.
+
+    ``closed`` simulates the bus being torn down; a publish arriving after
+    that is recorded separately so a test can prove delivery happened before.
+    """
 
     def __init__(self) -> None:
         self.published: list[tuple[str, Any]] = []
+        self.published_after_close: list[tuple[str, Any]] = []
+        self.closed = False
 
     async def publish(self, topic_id: str, message) -> None:
+        if self.closed:
+            self.published_after_close.append((topic_id, message))
+            return
         self.published.append((topic_id, message))
 
 
@@ -153,6 +162,45 @@ def _run_abort_and_drain(tool, task_id: str, inputs: dict[str, Any], *, expect: 
 
 def _published_kinds(tool) -> list[str]:
     return [message.payload["kind"] for _, message in tool._messager.published]
+
+
+@pytest.mark.parametrize(
+    ("reason", "expect", "kind"),
+    [
+        ("pause", asyncio.CancelledError, ProgressKind.WORKFLOW_PAUSED),
+        ("stop", BackendError, ProgressKind.WORKFLOW_STOPPED),
+        ("early_return", BackendError, ProgressKind.WORKFLOW_PAUSED),
+    ],
+)
+def test_terminal_event_is_delivered_before_run_background_unwinds(reason, expect, kind):
+    """The terminal status event is on the messager when run_background raises.
+
+    Terminal publishes must await delivery, not schedule it: the controller
+    returns right after the task unwinds and the embedder then tears the
+    leader harness (and its messager/monitor) down — a fire-and-forget
+    publish would land on a closed bus and the card would stay 'running'.
+    """
+    tool = _make_tool(messager=_CapturingMessager())
+    kwargs = {"reply": "改 X", "edit_hints": "y"} if reason == "early_return" else {}
+
+    async def _scenario() -> None:
+        # Mirror the controller + embedder sequence exactly: await the task,
+        # then IMMEDIATELY (no yield) close the messager the way Runner.pause
+        # tears the bus down. A merely-scheduled publish lands on the closed
+        # bus; an awaited one is already recorded.
+        task = asyncio.ensure_future(tool.run_background(f"task-{reason}", _inputs("wf_1")))
+        await asyncio.wait({task})
+        tool._messager.closed = True
+        with pytest.raises(expect):
+            task.result()
+
+    with patch(
+        "openjiuwen.agent_teams.workflow.runner.run_swarmflow",
+        side_effect=WorkflowAborted(reason=reason, **kwargs),
+    ):
+        asyncio.run(_scenario())
+    assert kind in _published_kinds(tool)
+    assert not tool._messager.published_after_close
 
 
 def test_run_background_stop_publishes_workflow_stopped_event():
@@ -293,3 +341,31 @@ def _inputs(run_id: str) -> dict[str, Any]:
         "_completion_ctx": {},
         "script_path": "/tmp/flow.py",
     }
+
+
+def test_workflow_started_team_event_carries_script_path():
+    """The engine puts script_path on WORKFLOW_STARTED; the tool must carry it
+    onto the team event, or the embedder's snapshot never sees it and a
+    cold-start resume advisory has no launch-plane call to offer. (The engine
+    and embedder tests each covered their own side; this is the bridge.)
+    """
+    from openjiuwen.agent_teams.workflow.engine.progress import WorkflowProgressEvent
+
+    tool = _make_tool(messager=_CapturingMessager())
+
+    async def _fake_run_swarmflow(*_a, observer=None, **_k):
+        observer.emit(WorkflowProgressEvent(
+            kind=ProgressKind.WORKFLOW_STARTED, name="m", script_path="/abs/flow.py",
+        ))
+        return {"ok": True}
+
+    with patch("openjiuwen.agent_teams.workflow.runner.run_swarmflow", side_effect=_fake_run_swarmflow):
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(tool.run_background("task-sp", _inputs("wf_1")))
+            loop.run_until_complete(asyncio.sleep(0))
+        finally:
+            loop.close()
+
+    started = [m for _, m in tool._messager.published if m.payload["kind"] == ProgressKind.WORKFLOW_STARTED]
+    assert started and started[0].payload["script_path"] == "/abs/flow.py"

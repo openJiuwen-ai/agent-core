@@ -71,7 +71,7 @@ def _payload(spans, *, trajectory_id="t1"):
                     "attributes": _attrs(
                         {
                             "openjiuwen.trajectory_id": trajectory_id,
-                            semconv.AT_SESSION_ID: "session",
+                            semconv.GEN_AI_CONVERSATION_ID: "session",
                         }
                     )
                 },
@@ -98,12 +98,14 @@ def test_read_llm_tool_usage_and_error_use_observability_keys() -> None:
         attrs={
             **write_llm_exchange(
                 [{"role": "user", "content": "hello"}],
-                [{"role": "assistant", "content": "done"}],
+                [{
+                    "role": "assistant",
+                    "content": "done",
+                    "tool_calls": [{"name": "search", "arguments": {"q": "x"}}],
+                }],
             ),
-            semconv.GEN_AI_TOOL_CALLS: '[{"name": "search", "arguments": {"q": "x"}}]',
-            semconv.GEN_AI_USAGE_PROMPT_TOKENS: 3,
-            semconv.GEN_AI_USAGE_COMPLETION_TOKENS: 2,
-            semconv.GEN_AI_USAGE_TOTAL_TOKENS: 5,
+            semconv.GEN_AI_USAGE_INPUT_TOKENS: 3,
+            semconv.GEN_AI_USAGE_OUTPUT_TOKENS: 2,
         },
     )
     tool = _span(
@@ -111,9 +113,9 @@ def test_read_llm_tool_usage_and_error_use_observability_keys() -> None:
         name="tool.search",
         attrs={
             semconv.GEN_AI_TOOL_NAME: "search",
-            semconv.GEN_AI_TOOL_ID: "call-1",
-            semconv.GEN_AI_TOOL_INPUT: '{"q": "x"}',
-            semconv.GEN_AI_TOOL_OUTPUT: '{"ok": true}',
+            semconv.GEN_AI_TOOL_CALL_ID: "call-1",
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: '{"q": "x"}',
+            semconv.GEN_AI_TOOL_CALL_RESULT: '{"ok": true}',
         },
         status={"code": "STATUS_CODE_ERROR", "message": "failed"},
     )
@@ -142,8 +144,8 @@ def test_tool_accessor_keeps_json_scalar_strings_unchanged() -> None:
         "tool-scalar",
         name="tool.scalar",
         attrs={
-            semconv.GEN_AI_TOOL_INPUT: "0",
-            semconv.GEN_AI_TOOL_OUTPUT: "true",
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: "0",
+            semconv.GEN_AI_TOOL_CALL_RESULT: "true",
         },
     )
 
@@ -163,9 +165,12 @@ def test_shared_attribute_decoder_and_llm_exchange_are_detached() -> None:
         attrs={
             **write_llm_exchange(
                 [{"role": "user", "content": "hello"}],
-                [{"role": "assistant", "content": "done"}],
+                [{
+                    "role": "assistant",
+                    "content": "done",
+                    "tool_calls": [{"id": "call-1"}],
+                }],
             ),
-            semconv.GEN_AI_TOOL_CALLS: '[{"id": "call-1"}]',
         },
     )
 
@@ -187,8 +192,13 @@ def test_llm_exchange_preserves_tool_call_without_completion_attributes() -> Non
     span = _span(
         "llm-tool-call",
         attrs={
-            **write_llm_exchange([{"role": "user", "content": "search"}], []),
-            semconv.GEN_AI_TOOL_CALLS: '[{"id": "call-1", "name": "search"}]',
+            **write_llm_exchange(
+                [{"role": "user", "content": "search"}],
+                [{
+                    "role": "assistant",
+                    "tool_calls": [{"id": "call-1", "name": "search"}],
+                }],
+            ),
         },
     )
 

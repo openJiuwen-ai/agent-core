@@ -98,8 +98,6 @@ def open_agent_run_span(
         from openjiuwen.extensions.observability.semconv import (
             GEN_AI_CONVERSATION_ID,
             GEN_AI_OPERATION_NAME,
-            LANGFUSE_OBSERVATION_TYPE,
-            LANGFUSE_SESSION_ID,
             OJ_AGENT_MODE,
             OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
             OJ_EXECUTION_SUBJECT_ID,
@@ -108,7 +106,6 @@ def open_agent_run_span(
             OJ_EXECUTION_SUBJECT_SESSION_ID,
             OJ_REQUEST_ID,
             OJ_RUN_ID,
-            OJ_SESSION_ID,
             OJ_TRACE_ROOT,
             OJ_TRACE_SCHEMA_VERSION,
             OJ_TRAJECTORY_RECORD_KIND,
@@ -131,13 +128,11 @@ def open_agent_run_span(
         name = build_run_span_name(mode=mode, session_id=session_id)
         subject = execution_subject
         base_attributes: dict[str, Any] = {
-            LANGFUSE_SESSION_ID: session_id or "",
             OJ_AGENT_MODE: mode or "",
             OJ_TRACE_ROOT: True,
             OJ_TRACE_SCHEMA_VERSION: "1",
             GEN_AI_OPERATION_NAME: "invoke_agent",
             OJ_TRAJECTORY_RECORD_KIND: "turn",
-            LANGFUSE_OBSERVATION_TYPE: "agent",
             OJ_EXECUTION_SUBJECT_ID: subject.subject_id if subject is not None else "main",
             OJ_EXECUTION_SUBJECT_DISPLAY_NAME: (
                 subject.display_name if subject is not None else "Main Agent"
@@ -151,7 +146,6 @@ def open_agent_run_span(
             base_attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] = subject.parent_subject_id
         if session_id:
             base_attributes[GEN_AI_CONVERSATION_ID] = session_id
-            base_attributes[OJ_SESSION_ID] = session_id
         if request_id:
             base_attributes[OJ_REQUEST_ID] = request_id
         if run_id:
@@ -198,13 +192,13 @@ def stamp_run_output(handle: Any, output: Any, *, allow_empty: bool = False) -> 
     if not output and not allow_empty:
         return
     from openjiuwen.extensions.observability.redaction import redact_completion
-    from openjiuwen.extensions.observability.semconv import LANGFUSE_OBSERVATION_OUTPUT
+    from openjiuwen.extensions.observability.semconv import OJ_SPAN_OUTPUT
     from openjiuwen.extensions.observability.setup import get_config
 
     config = get_config()
     output_text = str(output)
     text = redact_completion(output_text, config) if config else output_text
-    handle.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, text)
+    handle.set_attribute(OJ_SPAN_OUTPUT, text)
     from openjiuwen.extensions.observability.demand import publish_span_snapshot
 
     publish_span_snapshot(handle, "output")

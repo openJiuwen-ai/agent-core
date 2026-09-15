@@ -55,10 +55,8 @@ _ROLE_IDENTITY_SCOPES = frozenset({"role_identity", "duty_boundary"})
 _SOUL_SCOPES = frozenset({"durable_operating_principle"})
 _PROMPT_CORE_PATHS = frozenset({"identity.md", "soul.md"})
 _RUN_IF_VALUES = frozenset({"dependency_succeeded", "dependency_failed", "always"})
-_UNSUPPORTED_OPTIMIZATION_SURFACES: frozenset[str] = frozenset()
 _PLAN_VALIDATION_ATTEMPTS = 3
 _MAX_ACTIONS_PER_ISSUE = 3
-_MIN_NEW_SKILL_SUPPORT_CASES = 2
 
 
 def _validate_action(
@@ -99,8 +97,6 @@ def _validate_plan(
         errors.extend(f"action {action_id}: {e}" for e in surface_errors)
         alignment_errors = _validate_optimization_surface_alignment(action, targets_by_role)
         errors.extend(f"action {action_id}: {e}" for e in alignment_errors)
-        skill_qualification_errors = _validate_new_skill_qualification(action, targets_by_role)
-        errors.extend(f"action {action_id}: {e}" for e in skill_qualification_errors)
         attribution_errors = _validate_action_issue_attribution(action, targets_by_role)
         errors.extend(f"action {action_id}: {e}" for e in attribution_errors)
         existing_surface_errors = _validate_existing_surface_operation(action, targets_by_role)
@@ -130,9 +126,7 @@ def _validate_plan(
             if action_id not in all_action_ids:
                 errors.append(f"wave[{wave_idx}] references unknown action_id: {action_id}")
 
-    action_ids_from_waves: set[str] = set()
-    for wave in plan_data.get("action_waves", []):
-        action_ids_from_waves.update(wave)
+    action_ids_from_waves = {aid for wave in plan_data.get("action_waves", []) for aid in wave}
     if action_ids_from_waves != all_action_ids:
         missing = all_action_ids - action_ids_from_waves
         extra = action_ids_from_waves - all_action_ids
@@ -247,43 +241,13 @@ def _validate_action_issue_attribution(
     return _validate_action_issue_text_scope(action, action_issue_ids)
 
 
-def _validate_new_skill_qualification(
-    action: dict[str, Any],
-    targets_by_role: dict[str, MemberOptimizationTarget],
-) -> list[str]:
-    """Prevent one observed subtask from being materialized as a new Skill."""
-    if str(action.get("action_group", "")).strip() != "skill":
-        return []
-    target = targets_by_role.get(str(action.get("role", "") or ""))
-    if target is None:
-        return []
-    qualification = target.metadata.get("new_skill_qualification", {})
-    if not isinstance(qualification, dict):
-        return []
-    if qualification.get("status") != "insufficient_cross_case_support":
-        return []
-    return [
-        "a Skill change requires the same reusable mechanism in at least "
-        f"{qualification.get('required_support_case_count', _MIN_NEW_SKILL_SUPPORT_CASES)} "
-        "distinct cases; use the declared prompt_section fallback for this "
-        "single-case observation"
-    ]
-
-
 def _validate_action_issue_text_scope(
     action: dict[str, Any],
     action_issue_ids: set[str],
 ) -> list[str]:
     """Reject prose that silently merges diagnoses outside the declared issue."""
-    scoped_fields: dict[str, Any] = {}
-    for key in (
-        "description",
-        "rationale",
-        "expected_effect",
-        "risk_notes",
-        "constraints",
-    ):
-        scoped_fields[key] = action.get(key)
+    scope_fields = ("description", "rationale", "expected_effect", "risk_notes", "constraints")
+    scoped_fields = {key: action.get(key) for key in scope_fields}
     text = yaml.safe_dump(scoped_fields, allow_unicode=True).lower()
     merged_claims = (
         "both attributed issues",
@@ -397,11 +361,11 @@ def _validate_actionable_target_coverage(
 
     errors: list[str] = []
     for target in targets:
-        target_surfaces: set[str] = set()
-        for raw_surface in target.optimization_surfaces:
-            surface = _normalize_optimization_surface(raw_surface)
-            if surface and surface not in _UNSUPPORTED_OPTIMIZATION_SURFACES and surface in supported_surfaces:
-                target_surfaces.add(surface)
+        target_surfaces = {
+            surface
+            for surface in (_normalize_optimization_surface(surface) for surface in target.optimization_surfaces)
+            if surface and surface in supported_surfaces
+        }
         if target_surfaces and not actions_by_role.get(target.role):
             errors.append(
                 f"target {target.role} has actionable optimization_surfaces "
@@ -431,7 +395,7 @@ def _normalize_optimization_surface(surface: Any) -> str:
 
 
 def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
-    """Require explicit failure semantics for local add after skill search."""
+    """Require explicit failure semantics for skill/add fallback after skill/search."""
     actions = {
         str(action.get("action_id", "") or ""): action
         for action in plan_data.get("actions", [])
@@ -440,13 +404,13 @@ def _validate_skill_search_add_fallback(plan_data: dict[str, Any]) -> list[str]:
     search_action_ids = {
         action_id
         for action_id, action in actions.items()
-        if str(action.get("action_group", "") or "") == "skill" and str(action.get("operation", "") or "") == "search"
+        if (str(action.get("action_group", "") or "") == "skill" and str(action.get("operation", "") or "") == "search")
     }
     errors: list[str] = []
     for action_id, action in actions.items():
         if str(action.get("action_group", "") or "") != "skill" or str(action.get("operation", "") or "") != "add":
             continue
-        depends_on = {str(dependency_id) for dependency_id in action.get("depends_on", [])}
+        depends_on = {str(dep) for dep in action.get("depends_on", [])}
         if not (depends_on & search_action_ids):
             continue
         run_if = str(action.get("run_if", "dependency_succeeded") or "dependency_succeeded")
@@ -497,14 +461,12 @@ def _required_declared_paths_for_action(
 ) -> list[str]:
     if action_group == "prompt" and target_path.startswith("prompt_sections/files/"):
         return [target_path, "prompt_sections/sections.yaml"]
-    if action_group == "skill" and target_path.startswith("skills/"):
-        return [target_path, "skills/skills.yaml"]
     if action_group == "skill" and operation == "search":
         return ["skills", "skills/skills.yaml"]
+    if action_group == "skill" and target_path.startswith("skills/"):
+        return [target_path, "skills/skills.yaml"]
     if action_group == "tool" and target_path.startswith("tools/") and target_path != "tools/tools.yaml":
         return [target_path, "tools/tools.yaml"]
-    if action_group == "rail" and target_path.startswith("rails/") and target_path != "rails/rails.yaml":
-        return [target_path, "rails/rails.yaml"]
     return []
 
 
@@ -588,11 +550,9 @@ def _validate_optimization_surface_alignment(
     if target is None or not target.optimization_surfaces:
         return []
 
-    allowed_surfaces: set[str] = set()
-    for raw_surface in target.optimization_surfaces:
-        surface = str(raw_surface).strip()
-        if surface and surface not in _UNSUPPORTED_OPTIMIZATION_SURFACES:
-            allowed_surfaces.add(surface)
+    allowed_surfaces = {
+        _normalize_optimization_surface(surface) for surface in target.optimization_surfaces if str(surface).strip()
+    }
     if not allowed_surfaces:
         return []
 
@@ -883,8 +843,6 @@ evidence-backed surface and repair the causal discriminator instead.
                     "public_trigger": item.get("public_trigger", []),
                     "decisive_probe": item.get("decisive_probe", {}),
                     "decision_contract": item.get("decision_contract", {}),
-                    "supported_causal_hypothesis_ids": item.get("supported_causal_hypothesis_ids", []),
-                    "falsified_causal_hypothesis_ids": item.get("falsified_causal_hypothesis_ids", []),
                 }
                 for item in optimization_hypotheses
                 if isinstance(item, dict)
@@ -894,13 +852,13 @@ evidence-backed surface and repair the causal discriminator instead.
 
 {json.dumps(compact_hypotheses, ensure_ascii=False, indent=2)}
 
-These analyzer-authored contracts are semantic source of truth. Select exactly
-one allowed runtime surface, but do not weaken, reverse, or paraphrase away its
-required_behavior or decision_contract. Attribute each action only to the
-source_issue_id it fixes. The action must teach the selected required_action;
-do not turn it back into a menu containing the recorded wrong_decision.
-Every action is controller-bound to supported_causal_hypothesis_ids. Never use,
-rename, or combine a hypothesis listed in falsified_causal_hypothesis_ids.
+These analyzer-authored contracts are semantic source of truth. Prefer one
+allowed runtime surface. When the same required_behavior needs implementation,
+registration, and routing, plan at most three connected actions that all retain
+the same source_issue_id. Do not weaken, reverse, or paraphrase away the
+required_behavior or decision_contract. Never connect actions for different
+issues. Every action must teach the selected required_action; do not turn it
+back into a menu containing the recorded wrong_decision.
 """
         experience_context = ""
         if optimization_experience:
@@ -911,8 +869,7 @@ rename, or combine a hypothesis listed in falsified_causal_hypothesis_ids.
                 if isinstance(journal, list)
                 else []
             )
-            if scoreboard or recent:
-                experience_context = f"""
+            experience_context = f"""
 ## Optimization Experience
 
 Lever scoreboard:
@@ -930,13 +887,11 @@ that behavior and narrow the next action to remaining_failed_fail_to_pass.
 Do not describe a binary 0-to-0 case score as "no effect" when the official
 per-test delta records partial contract progress.
 """
-        sibling_generation_context = _build_sibling_generation_context(
-            optimization_experience,
-        )
-        improver_policy_context = _build_improver_policy_context(
-            optimization_experience,
-        )
+            if "journal" not in optimization_experience and "lever_scoreboard" not in optimization_experience:
+                experience_context = ""
 
+        policy_context = _build_improver_policy_context(optimization_experience)
+        sibling_context = _build_sibling_generation_context(optimization_experience)
         return f"""## Current Action Contract
 
 {action_contract}
@@ -954,201 +909,13 @@ per-test delta records partial contract progress.
 {role_mechanisms_text}
 {hypothesis_contract}
 {experience_context}
-{improver_policy_context}
-{sibling_generation_context}
-{validation_feedback}
+{policy_context}{sibling_context}{validation_feedback}
 {rejected_feedback}
 
 ## Output
 
 Return ONLY a JSON plan object as specified in the system prompt.
 """
-
-
-def _planner_session_id(optimization_experience: dict[str, Any] | None) -> str:
-    sibling_generation = _sibling_generation(optimization_experience)
-    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
-    if not candidate_id:
-        return "member_action_planner"
-    safe_candidate_id = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate_id).strip("_")
-    digest = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:10]
-    return f"member_action_planner_{safe_candidate_id[:32] or 'candidate'}_{digest}"
-
-
-def _build_improver_policy_context(
-    optimization_experience: dict[str, Any] | None,
-) -> str:
-    if not isinstance(optimization_experience, dict):
-        return ""
-    raw_policy = optimization_experience.get("improver_policy")
-    if not isinstance(raw_policy, dict) or not str(raw_policy.get("version_id", "") or ""):
-        return ""
-    policy = {
-        "version_id": str(raw_policy.get("version_id", "") or ""),
-        "policy_digest": str(raw_policy.get("policy_digest", "") or ""),
-        "generation_directives": (
-            dict(raw_policy.get("generation_directives", {}))
-            if isinstance(raw_policy.get("generation_directives"), dict)
-            else {}
-        ),
-        "budget_policy": (
-            dict(raw_policy.get("budget_policy", {})) if isinstance(raw_policy.get("budget_policy"), dict) else {}
-        ),
-    }
-    return f"""
-## Frozen Improver Policy
-
-{json.dumps(policy, ensure_ascii=False, indent=2)}
-
-This is the versioned pre-execution policy for the current Improver. It is not
-sibling execution feedback and contains no result for the current cohort.
-Apply its generation directives only within the immutable hypothesis, diagnosed
-lever, run-specific action contract, and available Harness surfaces. A diversity
-directive never permits an unsupported cross-lever change. An activation-evidence
-directive requires concrete current execution or Harness-path evidence before
-choosing that surface. Do not invent evidence merely to satisfy the policy.
-"""
-
-
-def _build_sibling_generation_context(
-    optimization_experience: dict[str, Any] | None,
-) -> str:
-    sibling_generation = _sibling_generation(optimization_experience)
-    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
-    if not candidate_id:
-        return ""
-    prior_proposals = sibling_generation.get("prior_proposals", [])
-    if not isinstance(prior_proposals, list):
-        prior_proposals = []
-    compact_proposals = [_compact_sibling_proposal(item) for item in prior_proposals if isinstance(item, dict)]
-    compact_proposals = [item for item in compact_proposals if item]
-    generation_position = {
-        "candidate_id": candidate_id,
-        "generation_index": sibling_generation.get(
-            "generation_index",
-            sibling_generation.get("candidate_index", ""),
-        ),
-        "candidate_count": sibling_generation.get("candidate_count", ""),
-    }
-    return f"""
-## Sibling Candidate Generation (Pre-Execution Plans Only)
-
-Current candidate position:
-{json.dumps(generation_position, ensure_ascii=False, indent=2)}
-
-Prior sibling proposal summaries:
-{json.dumps(compact_proposals, ensure_ascii=False, indent=2)}
-
-This section contains static plans produced before candidate execution. It is
-not execution feedback, rejection history, verifier evidence, a score outcome,
-or evidence that any sibling works. `generation_index` is only a generation
-slot; it is not a quality prediction. Predicted ranks are computed and frozen
-only after every sibling proposal exists.
-
-Generate the proposal assigned to the current generation slot. Make it
-materially different from the prior proposal summaries in its intervention,
-not merely in action IDs, wording, or file names. Stay inside the immutable
-hypothesis and its diagnosed lever. Never cross levers just to manufacture
-diversity. If no evidence-backed materially distinct proposal exists, keep the
-evidence contract even if the resulting proposal is a duplicate; the cohort
-ranker will identify that duplicate without pretending it is a new strategy.
-"""
-
-
-def _sibling_generation(
-    optimization_experience: dict[str, Any] | None,
-) -> dict[str, Any]:
-    if not isinstance(optimization_experience, dict):
-        return {}
-    sibling_generation = optimization_experience.get("sibling_generation")
-    return dict(sibling_generation) if isinstance(sibling_generation, dict) else {}
-
-
-def _compact_sibling_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
-    static_keys = (
-        "candidate_id",
-        "index",
-        "candidate_index",
-        "generation_order",
-        "plan_id",
-        "summary",
-        "proposal_summary",
-        "intervention_summary",
-        "intervention_strategy",
-        "diversity_signature",
-        "candidate_fingerprint",
-        "role",
-        "action_group",
-        "operation",
-        "action_type",
-        "target_path",
-        "runtime_name",
-        "description",
-        "rationale",
-        "expected_effect",
-        "selected_lever",
-        "selected_surface",
-        "action_groups",
-        "operations",
-        "target_paths",
-        "hypothesis_ids",
-        "source_issue_ids",
-        "target_case_ids",
-        "action_count",
-    )
-    compact = {key: proposal[key] for key in static_keys if key in proposal and proposal[key] not in (None, "", [], {})}
-    raw_actions = proposal.get("actions", [])
-    if isinstance(raw_actions, list):
-        actions = [_compact_sibling_action(action) for action in raw_actions if isinstance(action, dict)]
-        actions = [action for action in actions if action]
-        if actions:
-            compact["actions"] = actions
-    raw_capabilities = proposal.get("capabilities", [])
-    if isinstance(raw_capabilities, list):
-        capabilities = [
-            _compact_sibling_action(capability) for capability in raw_capabilities if isinstance(capability, dict)
-        ]
-        capabilities = [capability for capability in capabilities if capability]
-        if capabilities:
-            compact["capabilities"] = capabilities
-    return compact
-
-
-def _compact_sibling_action(action: dict[str, Any]) -> dict[str, Any]:
-    static_keys = (
-        "role",
-        "action_group",
-        "operation",
-        "action_type",
-        "target_path",
-        "runtime_name",
-        "description",
-        "rationale",
-        "expected_effect",
-        "attributed_issue_ids",
-        "declared_write_paths",
-        "optimization_hypothesis_ids",
-        "target_case_ids",
-    )
-    compact = {key: action[key] for key in static_keys if key in action and action[key] not in (None, "", [], {})}
-    lever_decision = action.get("lever_decision")
-    if not isinstance(lever_decision, dict):
-        constraints = action.get("constraints")
-        if isinstance(constraints, dict):
-            lever_decision = constraints.get("lever_decision")
-    if isinstance(lever_decision, dict):
-        compact_lever: dict[str, Any] = {}
-        for key in (
-            "selected_lever",
-            "selected_surface",
-            "recommended_levers",
-            "predicted_affected_case_ids",
-        ):
-            if key in lever_decision and lever_decision[key] not in (None, "", [], {}):
-                compact_lever[key] = lever_decision[key]
-        if compact_lever:
-            compact["lever_decision"] = compact_lever
-    return compact
 
 
 def _summarize_evidence_items(items: list[dict[str, Any]], *, limit: int = 4) -> str:
@@ -1201,14 +968,6 @@ def _bind_immutable_hypotheses(
                 "public_trigger": item.get("public_trigger", []),
                 "decisive_probe": item.get("decisive_probe", {}),
             }
-            if item.get("supported_causal_hypothesis_ids"):
-                contract["supported_causal_hypothesis_ids"] = item["supported_causal_hypothesis_ids"]
-            if item.get("supported_causal_hypothesis_semantic_ids"):
-                contract["supported_causal_hypothesis_semantic_ids"] = item["supported_causal_hypothesis_semantic_ids"]
-            if item.get("falsified_causal_hypothesis_ids"):
-                contract["falsified_causal_hypothesis_ids"] = item["falsified_causal_hypothesis_ids"]
-            if item.get("falsified_causal_hypothesis_semantic_ids"):
-                contract["falsified_causal_hypothesis_semantic_ids"] = item["falsified_causal_hypothesis_semantic_ids"]
             if isinstance(item.get("decision_contract"), dict) and item.get("decision_contract"):
                 contract["decision_contract"] = item["decision_contract"]
             if isinstance(item.get("lever_policy"), dict) and item.get("lever_policy"):
@@ -1222,31 +981,6 @@ def _bind_immutable_hypotheses(
             contracts.append(contract)
         constraints = dict(action.get("constraints") or {})
         constraints["optimization_contracts"] = contracts
-        supported_causal_ids: list[str] = []
-        falsified_causal_ids: set[str] = set()
-        for item in selected:
-            for hypothesis_id in item.get("supported_causal_hypothesis_ids", []):
-                normalized = str(hypothesis_id)
-                if normalized and normalized not in supported_causal_ids:
-                    supported_causal_ids.append(normalized)
-            for hypothesis_id in item.get("falsified_causal_hypothesis_ids", []):
-                normalized = str(hypothesis_id)
-                if normalized:
-                    falsified_causal_ids.add(normalized)
-        if set(supported_causal_ids) & falsified_causal_ids:
-            raise RuntimeError("optimization hypothesis marks one causal hypothesis both supported and falsified")
-        if any(item.get("hypothesis_assessment") for item in selected) and not supported_causal_ids:
-            raise RuntimeError("optimization hypothesis has no supported causal hypothesis")
-        if supported_causal_ids:
-            constraints["source_causal_hypothesis_ids"] = supported_causal_ids
-        supported_causal_semantic_ids: list[str] = []
-        for item in selected:
-            for semantic_id in item.get("supported_causal_hypothesis_semantic_ids", []):
-                normalized = str(semantic_id)
-                if normalized and normalized not in supported_causal_semantic_ids:
-                    supported_causal_semantic_ids.append(normalized)
-        if supported_causal_semantic_ids:
-            constraints["source_causal_hypothesis_semantic_ids"] = supported_causal_semantic_ids
         policies = [
             dict(item.get("lever_policy", {}))
             for item in selected
@@ -1326,6 +1060,8 @@ def _build_action_contract_text(action_definitions: list[ActionDefinition]) -> s
         "Only the exact action_group/operation pairs listed under Action Definitions are allowed.",
         "Globally documented actions that are absent from Action Definitions are disabled for this run.",
     ]
+    if not any(definition.group == "skill" and definition.operation == "search" for definition in filtered_definitions):
+        strict_lines.append("skill/search is disabled for this run; use an offered local skill action instead.")
     parts.append("\n".join(strict_lines))
     if filtered_definitions:
         lines = ["## Action Definitions"]
@@ -1371,8 +1107,10 @@ def _attach_improvement_briefs(
             continue
 
         role = str(action.get("role", ""))
-        action_issue_ids = {str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)}
-        candidate_issue_ids = action_issue_ids or issue_ids_by_role.get(role, set())
+        attributed_issue_ids = [str(issue_id) for issue_id in action.get("attributed_issue_ids", []) if str(issue_id)]
+        candidate_issue_ids = (
+            attributed_issue_ids if attributed_issue_ids else sorted(issue_ids_by_role.get(role, set()))
+        )
         for issue_id in candidate_issue_ids:
             brief = brief_by_issue.get(issue_id)
             if brief:
@@ -1395,7 +1133,6 @@ def _filter_actionable_planning_inputs(
     list[str],
 ]:
     """Remove issues whose mechanism attribution explicitly says evidence is insufficient."""
-    targets = [_without_unsupported_surfaces(target) for target in targets]
     inactionable_issue_ids: set[str] = set()
     for mechanisms in mechanism_attribution_report.role_mechanisms.values():
         by_issue: dict[str, list[RoleMechanismAttribution]] = {}
@@ -1418,7 +1155,7 @@ def _filter_actionable_planning_inputs(
             if mechanism.issue_id in inactionable_issue_ids:
                 continue
             surface = str(getattr(mechanism, "optimization_surface", "") or "").strip()
-            if surface and surface not in _UNSUPPORTED_OPTIMIZATION_SURFACES and surface not in seen:
+            if surface and surface not in seen:
                 surfaces.append(surface)
                 seen.add(surface)
         if surfaces:
@@ -1444,23 +1181,24 @@ def _filter_actionable_planning_inputs(
         )
         actionable_roles.add(target.role)
 
-    actionable_issues = []
-    for issue in role_attribution_report.assigned_role_issues:
-        if issue.role in actionable_roles and issue.issue_id not in inactionable_issue_ids:
-            actionable_issues.append(issue)
     actionable_role_report = replace(
         role_attribution_report,
-        assigned_role_issues=actionable_issues,
+        assigned_role_issues=[
+            issue
+            for issue in role_attribution_report.assigned_role_issues
+            if issue.role in actionable_roles and issue.issue_id not in inactionable_issue_ids
+        ],
     )
 
     actionable_mechanisms: dict[str, list[RoleMechanismAttribution]] = {}
     for role, mechanisms in mechanism_attribution_report.role_mechanisms.items():
         if role not in actionable_roles:
             continue
-        kept = []
-        for mechanism in mechanisms:
-            if mechanism.issue_id not in inactionable_issue_ids and not _is_inactionable_mechanism(mechanism):
-                kept.append(mechanism)
+        kept = [
+            mechanism
+            for mechanism in mechanisms
+            if mechanism.issue_id not in inactionable_issue_ids and not _is_inactionable_mechanism(mechanism)
+        ]
         if kept:
             actionable_mechanisms[role] = kept
 
@@ -1480,38 +1218,9 @@ def _is_inactionable_mechanism(mechanism: RoleMechanismAttribution) -> bool:
     return mechanism.mechanism_type == _INACTIONABLE_MECHANISM or mechanism.failure_signature == _INACTIONABLE_MECHANISM
 
 
-def _without_unsupported_surfaces(
-    target: MemberOptimizationTarget,
-) -> MemberOptimizationTarget:
-    surfaces = [
-        surface
-        for surface in target.optimization_surfaces
-        if str(surface).strip() not in _UNSUPPORTED_OPTIMIZATION_SURFACES
-    ]
-    if surfaces == target.optimization_surfaces:
-        return target
-    return replace(target, optimization_surfaces=surfaces)
-
-
-def _case_ids_from_value(value: Any) -> set[str]:
-    """Extract explicit case identifiers without interpreting free-form prose."""
-    case_ids: set[str] = set()
-    if isinstance(value, dict):
-        for key, nested in value.items():
-            if key in {"case_id", "source_case_id"} and str(nested).strip():
-                case_ids.add(str(nested).strip())
-            else:
-                case_ids.update(_case_ids_from_value(nested))
-    elif isinstance(value, list):
-        for nested in value:
-            case_ids.update(_case_ids_from_value(nested))
-    return case_ids
-
-
 def _compact_experiment_for_planner(record: dict[str, Any]) -> dict[str, Any]:
     """Keep causal candidate feedback while excluding bulky artifact payloads."""
-    compact: dict[str, Any] = {}
-    for key in (
+    experiment_fields = (
         "experiment_id",
         "surface",
         "lever",
@@ -1523,333 +1232,8 @@ def _compact_experiment_for_planner(record: dict[str, Any]) -> dict[str, Any]:
         "verifier_deltas_by_case",
         "candidate_failure_diagnoses",
         "epoch_checkpoint",
-    ):
-        if key in record:
-            compact[key] = record.get(key)
-    return compact
-
-
-def _adapt_surface_for_activation_phase(
-    *,
-    targets: list[MemberOptimizationTarget],
-    mechanism_report: MechanismAttributionReport,
-    optimization_hypotheses: list[dict[str, Any]],
-) -> tuple[
-    list[MemberOptimizationTarget],
-    MechanismAttributionReport,
-    list[dict[str, Any]],
-]:
-    """Move post-diagnosis Instructions to Control without inferring reuse.
-
-    Activation phase answers *when* behavior is needed. It does not establish
-    that a method is reusable enough to become a Skill. Investigation-time
-    Prompt guidance therefore remains a Prompt; Skill qualification is handled
-    independently from cross-case evidence.
-    """
-    instruction_surfaces = {
-        "identity",
-        "soul",
-        "prompt",
-        "prompt_section",
-        "skill",
-    }
-    control_phases = {"post_diagnosis", "pre_submission"}
-    phase_by_issue: dict[str, str] = {}
-    for item in optimization_hypotheses:
-        if not isinstance(item, dict):
-            continue
-        decision_contract = item.get("decision_contract", {})
-        if not isinstance(decision_contract, dict):
-            continue
-        phase_by_issue[str(item.get("source_issue_id", ""))] = str(
-            decision_contract.get("activation_phase", "task_start")
-        )
-    adapted_surface_by_issue: dict[str, str] = {}
-    adaptations: list[dict[str, Any]] = []
-    adapted_targets: list[MemberOptimizationTarget] = []
-    for target in targets:
-        issue_ids = set(target.attributed_issue_ids)
-        phases = {phase_by_issue.get(issue_id, "task_start") for issue_id in issue_ids}
-        source_surfaces = set(target.optimization_surfaces)
-        adapted_surface = ""
-        reason = ""
-        if phases and phases <= control_phases and source_surfaces & instruction_surfaces:
-            adapted_surface = "control"
-            reason = "required_action_is_not_knowable_at_task_start_and_must_not_be_recast_as_static_instruction"
-        if not adapted_surface:
-            adapted_targets.append(target)
-            continue
-        metadata = dict(target.metadata)
-        adaptation = {
-            "source_surfaces": sorted(source_surfaces & instruction_surfaces),
-            "adapted_surface": adapted_surface,
-            "activation_phases": sorted(phases),
-            "reason": reason,
-        }
-        metadata["activation_phase_surface_adaptation"] = adaptation
-        adapted_surfaces = [surface for surface in target.optimization_surfaces if surface not in instruction_surfaces]
-        if adapted_surface not in adapted_surfaces:
-            adapted_surfaces.append(adapted_surface)
-        adapted_targets.append(
-            replace(
-                target,
-                optimization_surfaces=adapted_surfaces,
-                metadata=metadata,
-            )
-        )
-        adapted_surface_by_issue.update({issue_id: adapted_surface for issue_id in issue_ids})
-        adaptations.append(
-            {
-                "role": target.role,
-                "issue_ids": sorted(issue_ids),
-                **adaptation,
-            }
-        )
-
-    if not adaptations:
-        return targets, mechanism_report, []
-    role_mechanisms = {
-        role: [
-            replace(
-                mechanism,
-                optimization_surface=adapted_surface_by_issue[mechanism.issue_id],
-                rationale=(
-                    f"{mechanism.rationale} The required action becomes knowable "
-                    "at the activation phase recorded by the decision contract; "
-                    "place it on the routed runtime surface for that phase rather "
-                    "than a global static Prompt."
-                ).strip(),
-            )
-            if mechanism.issue_id in adapted_surface_by_issue
-            else mechanism
-            for mechanism in mechanisms
-        ]
-        for role, mechanisms in mechanism_report.role_mechanisms.items()
-    }
-    metadata = dict(mechanism_report.metadata)
-    metadata["activation_phase_surface_adaptations"] = adaptations
-    return (
-        adapted_targets,
-        replace(
-            mechanism_report,
-            role_mechanisms=role_mechanisms,
-            metadata=metadata,
-        ),
-        adaptations,
     )
-
-
-def _adapt_surface_for_new_skill_qualification(
-    *,
-    targets: list[MemberOptimizationTarget],
-    mechanism_report: MechanismAttributionReport,
-    optimization_hypotheses: list[dict[str, Any]],
-) -> tuple[
-    list[MemberOptimizationTarget],
-    MechanismAttributionReport,
-    list[dict[str, Any]],
-]:
-    """Expose a Prompt fallback when a proposed new Skill has one-case support.
-
-    The mechanism presented to the planner defaults to a prompt section and
-    every Skill action is rejected for that target. Thus one observed verifier
-    subitem cannot create or contaminate a benchmark-specific runtime
-    capability.
-    """
-    support_by_issue: dict[str, set[str]] = {}
-    for hypothesis in optimization_hypotheses:
-        if not isinstance(hypothesis, dict):
-            continue
-        issue_id = str(hypothesis.get("source_issue_id", "") or "").strip()
-        if not issue_id:
-            continue
-        raw_case_ids = hypothesis.get("target_case_ids", [])
-        if not isinstance(raw_case_ids, list):
-            continue
-        support_by_issue.setdefault(issue_id, set()).update(
-            str(case_id).strip() for case_id in raw_case_ids if str(case_id).strip()
-        )
-
-    adaptations: list[dict[str, Any]] = []
-    adapted_targets: list[MemberOptimizationTarget] = []
-    for target in targets:
-        surfaces = [str(surface).strip() for surface in target.optimization_surfaces if str(surface).strip()]
-        if "skill" not in surfaces:
-            adapted_targets.append(target)
-            continue
-        issue_ids = {str(issue_id).strip() for issue_id in target.attributed_issue_ids if str(issue_id).strip()}
-        support_case_id_set: set[str] = set()
-        for issue_id in issue_ids:
-            support_case_id_set.update(support_by_issue.get(issue_id, set()))
-        support_case_ids = sorted(support_case_id_set)
-        if len(support_case_ids) != 1:
-            adapted_targets.append(target)
-            continue
-
-        qualification = {
-            "status": "insufficient_cross_case_support",
-            "support_case_ids": support_case_ids,
-            "support_case_count": len(support_case_ids),
-            "required_support_case_count": _MIN_NEW_SKILL_SUPPORT_CASES,
-            "fallback_surface": "prompt_section",
-            "reason": "one_observed_subtask_does_not_establish_a_reusable_skill",
-        }
-        metadata = dict(target.metadata)
-        metadata["new_skill_qualification"] = qualification
-        adapted_surfaces = [surface for surface in surfaces if surface != "skill"]
-        if "prompt_section" not in adapted_surfaces:
-            adapted_surfaces.append("prompt_section")
-        adapted_targets.append(
-            replace(
-                target,
-                optimization_surfaces=adapted_surfaces,
-                metadata=metadata,
-            )
-        )
-        adaptations.append(
-            {
-                "role": target.role,
-                "issue_ids": sorted(issue_ids),
-                **qualification,
-            }
-        )
-    if not adaptations:
-        return targets, mechanism_report, []
-    adapted_issue_ids: set[str] = set()
-    for adaptation in adaptations:
-        adapted_issue_ids.update(adaptation["issue_ids"])
-    role_mechanisms = {
-        role: [
-            replace(
-                mechanism,
-                optimization_surface="prompt_section",
-                rationale=(
-                    f"{mechanism.rationale} A single observed case does not establish "
-                    "cross-case Skill reuse; test the instruction as a bounded prompt "
-                    "section until another independent case supports the mechanism."
-                ).strip(),
-            )
-            if mechanism.issue_id in adapted_issue_ids and mechanism.optimization_surface == "skill"
-            else mechanism
-            for mechanism in mechanisms
-        ]
-        for role, mechanisms in mechanism_report.role_mechanisms.items()
-    }
-    metadata = dict(mechanism_report.metadata)
-    metadata["new_skill_qualification_adaptations"] = adaptations
-    return (
-        adapted_targets,
-        replace(
-            mechanism_report,
-            role_mechanisms=role_mechanisms,
-            metadata=metadata,
-        ),
-        adaptations,
-    )
-
-
-def _adapt_recovery_surface_from_history(
-    *,
-    targets: list[MemberOptimizationTarget],
-    role_report: RoleAttributionReport,
-    mechanism_report: MechanismAttributionReport,
-    rejected_capabilities: list[dict[str, Any]],
-) -> tuple[
-    list[MemberOptimizationTarget],
-    MechanismAttributionReport,
-    list[dict[str, Any]],
-]:
-    """Move a delivered-but-unapplied Skill to runtime transition control."""
-    if not rejected_capabilities:
-        return targets, mechanism_report, []
-    issue_case_ids: dict[str, set[str]] = {}
-    for issue in role_report.assigned_role_issues:
-        issue_case_ids[issue.issue_id] = _case_ids_from_value(
-            [issue.evidence, issue.trace_refs, issue.role_output_refs]
-        )
-    adaptations: list[dict[str, Any]] = []
-    adapted_issue_ids: set[str] = set()
-    adapted_targets: list[MemberOptimizationTarget] = []
-    for target in targets:
-        current_case_ids: set[str] = set()
-        for issue_id in target.attributed_issue_ids:
-            current_case_ids.update(issue_case_ids.get(issue_id, set()))
-        matching = None
-        for item in reversed(rejected_capabilities):
-            if not isinstance(item, dict):
-                continue
-            target_case_ids = {str(case_id) for case_id in item.get("target_case_ids", []) if str(case_id)}
-            same_role = str(item.get("role", "")) == target.role
-            is_skill = str(item.get("action_group", "")) == "skill"
-            recoverable_failure = str(item.get("failure_class", "")) in {
-                "late_skill_activation",
-                "execution_convergence_failure",
-            }
-            matches_failed_skill = same_role and is_skill and recoverable_failure
-            targets_overlap = bool(current_case_ids & target_case_ids)
-            if matches_failed_skill and targets_overlap:
-                matching = item
-                break
-        if matching is None:
-            adapted_targets.append(target)
-            continue
-        metadata = dict(target.metadata)
-        metadata["recovery_surface_adaptation"] = {
-            "source_surface": "skill",
-            "adapted_surface": "control",
-            "failure_class": str(matching.get("failure_class", "")),
-            "target_case_ids": sorted(current_case_ids),
-            "reason": (
-                "skill_knowledge_was_available_but_not_applied_in_time; "
-                "replace_method_repetition_with_a_bounded_execution_checkpoint"
-            ),
-        }
-        adapted_targets.append(
-            replace(
-                target,
-                optimization_surfaces=["control"],
-                metadata=metadata,
-            )
-        )
-        adapted_issue_ids.update(target.attributed_issue_ids)
-        adaptations.append(
-            {
-                "role": target.role,
-                "issue_ids": list(target.attributed_issue_ids),
-                **metadata["recovery_surface_adaptation"],
-            }
-        )
-
-    if not adaptations:
-        return targets, mechanism_report, []
-    role_mechanisms: dict[str, list[RoleMechanismAttribution]] = {}
-    for role, mechanisms in mechanism_report.role_mechanisms.items():
-        role_mechanisms[role] = [
-            replace(
-                mechanism,
-                optimization_surface="control",
-                rationale=(
-                    f"{mechanism.rationale} A prior Skill candidate reached the "
-                    "target but failed through late activation or failure to converge "
-                    "on an edit; use runtime transition control that resumes the "
-                    "established action, rather than adding another static instruction."
-                ).strip(),
-            )
-            if mechanism.issue_id in adapted_issue_ids
-            else mechanism
-            for mechanism in mechanisms
-        ]
-    metadata = dict(mechanism_report.metadata)
-    metadata["recovery_surface_adaptations"] = adaptations
-    return (
-        adapted_targets,
-        replace(
-            mechanism_report,
-            role_mechanisms=role_mechanisms,
-            metadata=metadata,
-        ),
-        adaptations,
-    )
+    return {key: record.get(key) for key in experiment_fields if key in record}
 
 
 def _adapt_prompt_surface_within_instruction_lever(
@@ -1976,36 +1360,8 @@ class MemberActionPlanner:
             role_attribution_report=role_attribution_report,
             mechanism_attribution_report=mechanism_attribution_report,
         )
-        (
-            actionable_targets,
-            actionable_mechanism_report,
-            activation_phase_surface_adaptations,
-        ) = _adapt_surface_for_activation_phase(
-            targets=actionable_targets,
-            mechanism_report=actionable_mechanism_report,
-            optimization_hypotheses=list(optimization_hypotheses or []),
-        )
-        (
-            actionable_targets,
-            actionable_mechanism_report,
-            new_skill_qualification_adaptations,
-        ) = _adapt_surface_for_new_skill_qualification(
-            targets=actionable_targets,
-            mechanism_report=actionable_mechanism_report,
-            optimization_hypotheses=list(optimization_hypotheses or []),
-        )
-        # A delivered-but-unapplied Skill already supplied the method. Adapt the
-        # next attempt to a bounded execution checkpoint instead of another Skill.
-        (
-            actionable_targets,
-            actionable_mechanism_report,
-            recovery_surface_adaptations,
-        ) = _adapt_recovery_surface_from_history(
-            targets=actionable_targets,
-            role_report=actionable_role_report,
-            mechanism_report=actionable_mechanism_report,
-            rejected_capabilities=list(rejected_capabilities or []),
-        )
+        # Timing and past activation failures are authoring feedback, not a new
+        # diagnosis. Keep the chosen surface and pass that feedback to the agent.
         restricted_groups = {str(group).strip() for group in (allowed_action_groups or []) if str(group).strip()}
         restricted_prompt_surfaces = {
             _normalize_optimization_surface(surface)
@@ -2032,6 +1388,7 @@ class MemberActionPlanner:
             allowed_surfaces = set(restricted_groups)
             if "prompt" in allowed_surfaces:
                 allowed_surfaces.update(restricted_prompt_surfaces or {"prompt_section", "identity", "soul"})
+            allowed_surfaces &= _supported_optimization_surfaces(action_definitions)
             retained_targets: list[MemberOptimizationTarget] = []
             for target in actionable_targets:
                 target_surfaces = {str(surface).strip() for surface in target.optimization_surfaces}
@@ -2045,7 +1402,7 @@ class MemberActionPlanner:
                         "required_surfaces": sorted(target_surfaces),
                         "status": "unsupported_capability_request",
                         "reason": (
-                            "surface_not_allowed_in_restricted_optimization_mode; cross_lever_compensation_is_forbidden"
+                            "surface_not_available_in_restricted_action_contract; cross_lever_compensation_is_forbidden"
                         ),
                     }
                 )
@@ -2062,8 +1419,6 @@ class MemberActionPlanner:
                     "action_count": 0,
                     "wave_count": 0,
                     "filtered_inactionable_issue_ids": filtered_issue_ids,
-                    "activation_phase_surface_adaptations": (activation_phase_surface_adaptations),
-                    "new_skill_qualification_adaptations": (new_skill_qualification_adaptations),
                     "allowed_action_groups": sorted(restricted_groups),
                     "allowed_prompt_surfaces": sorted(restricted_prompt_surfaces),
                     "capability_requests": deferred_capability_requests,
@@ -2082,6 +1437,17 @@ class MemberActionPlanner:
             action_definitions = [
                 definition for definition in action_definitions if definition.group in restricted_groups
             ]
+        search_disabled_for_single_action = max_actions_per_plan == 1
+        if search_disabled_for_single_action:
+            # A search-only plan cannot recover when every external candidate is
+            # rejected. In one-action mode, spend the action on a bounded local
+            # patch derived from current evidence instead.
+            action_definitions = [
+                definition
+                for definition in action_definitions
+                if not (definition.group == "skill" and definition.operation == "search")
+            ]
+
         plan_data: dict[str, Any] = {}
         validation_errors: list[str] | None = None
         final_errors: list[str] = []
@@ -2189,10 +1555,8 @@ class MemberActionPlanner:
                 "allowed_action_groups": sorted(restricted_groups),
                 "allowed_prompt_surfaces": sorted(restricted_prompt_surfaces),
                 "max_actions_per_plan": max_actions_per_plan,
+                "skill_search_disabled_for_single_action": search_disabled_for_single_action,
                 "capability_requests": deferred_capability_requests,
-                "activation_phase_surface_adaptations": (activation_phase_surface_adaptations),
-                "new_skill_qualification_adaptations": (new_skill_qualification_adaptations),
-                "recovery_surface_adaptations": recovery_surface_adaptations,
                 "optimization_hypothesis_ids": list(
                     (plan_data.get("metadata") or {}).get(
                         "optimization_hypothesis_ids",
@@ -2212,8 +1576,9 @@ class MemberActionPlanner:
             },
         )
 
-    @staticmethod
-    def write_plan(plan: MemberOptimizationPlan, output_dir: Path) -> Path:
+    # Preserve the published instance-method calling convention.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
+    def write_plan(self, plan: MemberOptimizationPlan, output_dir: Path) -> Path:
         """Write plan to plan.yaml."""
         path = output_dir / "plan.yaml"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2238,3 +1603,185 @@ __all__ = [
     "MemberActionPlanner",
     "MemberActionPlannerAgent",
 ]
+
+
+def _build_improver_policy_context(
+    optimization_experience: dict[str, Any] | None,
+) -> str:
+    if not isinstance(optimization_experience, dict):
+        return ""
+    raw_policy = optimization_experience.get("improver_policy")
+    if not isinstance(raw_policy, dict) or not str(raw_policy.get("version_id", "") or ""):
+        return ""
+    policy = {
+        "version_id": str(raw_policy.get("version_id", "") or ""),
+        "policy_digest": str(raw_policy.get("policy_digest", "") or ""),
+        "generation_directives": (
+            dict(raw_policy.get("generation_directives", {}))
+            if isinstance(raw_policy.get("generation_directives"), dict)
+            else {}
+        ),
+        "budget_policy": (
+            dict(raw_policy.get("budget_policy", {})) if isinstance(raw_policy.get("budget_policy"), dict) else {}
+        ),
+    }
+    return f"""
+## Frozen Improver Policy
+
+{json.dumps(policy, ensure_ascii=False, indent=2)}
+
+This is the versioned pre-execution policy for the current Improver. It is not
+sibling execution feedback and contains no result for the current cohort.
+Apply its generation directives only within the immutable hypothesis, diagnosed
+lever, run-specific action contract, and available Harness surfaces. A diversity
+directive never permits an unsupported cross-lever change. An activation-evidence
+directive requires concrete current execution or Harness-path evidence before
+choosing that surface. Do not invent evidence merely to satisfy the policy.
+"""
+
+
+def _build_sibling_generation_context(
+    optimization_experience: dict[str, Any] | None,
+) -> str:
+    sibling_generation = _sibling_generation(optimization_experience)
+    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
+    if not candidate_id:
+        return ""
+    prior_proposals = sibling_generation.get("prior_proposals", [])
+    if not isinstance(prior_proposals, list):
+        prior_proposals = []
+    compact_proposals = [_compact_sibling_proposal(item) for item in prior_proposals if isinstance(item, dict)]
+    compact_proposals = [item for item in compact_proposals if item]
+    generation_position = {
+        "candidate_id": candidate_id,
+        "generation_index": sibling_generation.get(
+            "generation_index",
+            sibling_generation.get("candidate_index", ""),
+        ),
+        "candidate_count": sibling_generation.get("candidate_count", ""),
+    }
+    return f"""
+## Sibling Candidate Generation (Pre-Execution Plans Only)
+
+Current candidate position:
+{json.dumps(generation_position, ensure_ascii=False, indent=2)}
+
+Prior sibling proposal summaries:
+{json.dumps(compact_proposals, ensure_ascii=False, indent=2)}
+
+This section contains static plans produced before candidate execution. It is
+not execution feedback, rejection history, verifier evidence, a score outcome,
+or evidence that any sibling works. `generation_index` is only a generation
+slot; it is not a quality prediction. Predicted ranks are computed and frozen
+only after every sibling proposal exists.
+
+Generate the proposal assigned to the current generation slot. Make it
+materially different from the prior proposal summaries in its intervention,
+not merely in action IDs, wording, or file names. Stay inside the immutable
+hypothesis and its diagnosed lever. Never cross levers just to manufacture
+diversity. If no evidence-backed materially distinct proposal exists, keep the
+evidence contract even if the resulting proposal is a duplicate; the cohort
+ranker will identify that duplicate without pretending it is a new strategy.
+"""
+
+
+def _compact_sibling_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    static_keys = (
+        "candidate_id",
+        "index",
+        "candidate_index",
+        "generation_order",
+        "plan_id",
+        "summary",
+        "proposal_summary",
+        "intervention_summary",
+        "intervention_strategy",
+        "diversity_signature",
+        "candidate_fingerprint",
+        "role",
+        "action_group",
+        "operation",
+        "action_type",
+        "target_path",
+        "runtime_name",
+        "description",
+        "rationale",
+        "expected_effect",
+        "selected_lever",
+        "selected_surface",
+        "action_groups",
+        "operations",
+        "target_paths",
+        "hypothesis_ids",
+        "source_issue_ids",
+        "target_case_ids",
+        "action_count",
+    )
+    compact = {key: proposal[key] for key in static_keys if key in proposal and proposal[key] not in (None, "", [], {})}
+    raw_actions = proposal.get("actions", [])
+    if isinstance(raw_actions, list):
+        actions = [_compact_sibling_action(action) for action in raw_actions if isinstance(action, dict)]
+        actions = [action for action in actions if action]
+        if actions:
+            compact["actions"] = actions
+    raw_capabilities = proposal.get("capabilities", [])
+    if isinstance(raw_capabilities, list):
+        capabilities = [
+            _compact_sibling_action(capability) for capability in raw_capabilities if isinstance(capability, dict)
+        ]
+        capabilities = [capability for capability in capabilities if capability]
+        if capabilities:
+            compact["capabilities"] = capabilities
+    return compact
+
+
+def _sibling_generation(
+    optimization_experience: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(optimization_experience, dict):
+        return {}
+    sibling_generation = optimization_experience.get("sibling_generation")
+    return dict(sibling_generation) if isinstance(sibling_generation, dict) else {}
+
+
+def _planner_session_id(optimization_experience: dict[str, Any] | None) -> str:
+    sibling_generation = _sibling_generation(optimization_experience)
+    candidate_id = str(sibling_generation.get("candidate_id", "") or "").strip()
+    if not candidate_id:
+        return "member_action_planner"
+    safe_candidate_id = re.sub(r"[^A-Za-z0-9_-]+", "_", candidate_id).strip("_")
+    digest = hashlib.sha256(candidate_id.encode("utf-8")).hexdigest()[:10]
+    return f"member_action_planner_{safe_candidate_id[:32] or 'candidate'}_{digest}"
+
+
+def _compact_sibling_action(action: dict[str, Any]) -> dict[str, Any]:
+    static_keys = (
+        "role",
+        "action_group",
+        "operation",
+        "action_type",
+        "target_path",
+        "runtime_name",
+        "description",
+        "rationale",
+        "expected_effect",
+        "attributed_issue_ids",
+        "declared_write_paths",
+        "optimization_hypothesis_ids",
+        "target_case_ids",
+    )
+    compact = {key: action[key] for key in static_keys if key in action and action[key] not in (None, "", [], {})}
+    lever_decision = action.get("lever_decision")
+    if not isinstance(lever_decision, dict):
+        constraints = action.get("constraints")
+        if isinstance(constraints, dict):
+            lever_decision = constraints.get("lever_decision")
+    if isinstance(lever_decision, dict):
+        compact_lever = {
+            key: lever_decision[key]
+            for key in ("selected_lever", "selected_surface", "recommended_levers", "predicted_affected_case_ids")
+            if key in lever_decision and lever_decision[key] not in (None, "", [], {})
+        }
+        if compact_lever:
+            compact["lever_decision"] = compact_lever
+    return compact

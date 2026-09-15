@@ -35,8 +35,8 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 
 
 _RESOURCE_ALIASES = {
-    "session_id": semconv.AT_SESSION_ID,
-    "member_id": semconv.AT_MEMBER_ID,
+    "session_id": semconv.GEN_AI_CONVERSATION_ID,
+    "member_id": semconv.AT_MEMBER_NAME,
     "team_id": semconv.AT_TEAM_ID,
     "source": TRAJECTORY_SOURCE,
     "case_id": CASE_ID,
@@ -123,12 +123,12 @@ class TrajectoryBuilder:
             TRAJECTORY_ID: self.trajectory_id,
             TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
             TRAJECTORY_SOURCE: self.source,
-            semconv.AT_SESSION_ID: self.session_id,
+            semconv.GEN_AI_CONVERSATION_ID: self.session_id,
         }
         if self.case_id is not None:
             attrs[CASE_ID] = self.case_id
         if self.member_id is not None:
-            attrs[semconv.AT_MEMBER_ID] = self.member_id
+            attrs[semconv.AT_MEMBER_NAME] = self.member_id
         if self.team_id is not None:
             attrs[semconv.AT_TEAM_ID] = self.team_id
         for key, value in self.meta.items():

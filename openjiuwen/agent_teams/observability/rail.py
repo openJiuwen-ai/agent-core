@@ -38,15 +38,12 @@ from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.extensions.observability.redaction import redact_completion
 from openjiuwen.extensions.observability.semconv import (
     AT_AGENT_ID,
-    AT_AGENT_INPUT,
-    AT_AGENT_NAME,
-    AT_AGENT_OUTPUT,
     AT_AGENT_ROLE,
-    AT_MEMBER_ID,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
     AT_TEAM_ID,
-    LANGFUSE_OBSERVATION_OUTPUT,
+    GEN_AI_CONVERSATION_ID,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
 )
 from openjiuwen.harness.observability.rail import (
     AgentObservabilityRail,
@@ -106,7 +103,7 @@ class TeamObservabilityRail(DeepAgentRail):
             config = get_config()
             output_str = str(output)
             redacted = redact_completion(output_str, config) if config else output_str
-            team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
+            team_span.set_attribute(OJ_SPAN_OUTPUT, redacted)
         except Exception as exc:
             team_logger.warning("otel team rail after_task_iteration failed: {}", exc)
 
@@ -162,8 +159,8 @@ class TeamObservabilityRail(DeepAgentRail):
         elif member_name:
             attributes[AT_AGENT_ID] = member_name
         if member_name:
-            attributes[AT_AGENT_NAME] = member_name
-            attributes[AT_MEMBER_ID] = member_name
+            # ``gen_ai.agent.name`` is stamped by the agent rail from the same
+            # resolver; this block only adds the team-membership identity.
             attributes[AT_MEMBER_NAME] = member_name
         # AT_AGENT_ROLE carries the resolved role value (leader / teammate /
         # human_agent / ...) when the agent exposes one; sub-agents and shells
@@ -173,12 +170,12 @@ class TeamObservabilityRail(DeepAgentRail):
         if team_name:
             attributes[AT_TEAM_ID] = team_name
         if session_id:
-            attributes[AT_SESSION_ID] = session_id
+            attributes[GEN_AI_CONVERSATION_ID] = session_id
 
         return AgentSpanDecoration(
             attributes=attributes,
-            input_attribute_keys=(AT_AGENT_INPUT,),
-            output_attribute_keys=(AT_AGENT_OUTPUT,),
+            input_attribute_keys=(OJ_SPAN_INPUT,),
+            output_attribute_keys=(OJ_SPAN_OUTPUT,),
         )
 
 

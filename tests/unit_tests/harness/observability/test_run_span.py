@@ -19,9 +19,7 @@ from openjiuwen.extensions.observability.semconv import (
     ERROR_TYPE,
     GEN_AI_CONVERSATION_ID,
     GEN_AI_OPERATION_NAME,
-    LANGFUSE_OBSERVATION_OUTPUT,
-    LANGFUSE_OBSERVATION_TYPE,
-    LANGFUSE_SESSION_ID,
+    OJ_SPAN_OUTPUT,
     OJ_AGENT_MODE,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
@@ -29,7 +27,6 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_SESSION_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_TRACE_COMPLETE,
@@ -116,19 +113,17 @@ def test_root_routing_attributes_exist_during_processor_on_start(monkeypatch) ->
     try:
         assert started_attributes == [
             {
-                LANGFUSE_SESSION_ID: "sess-live",
                 OJ_AGENT_MODE: "agent.fast",
                 OJ_TRACE_ROOT: True,
                 OJ_TRACE_SCHEMA_VERSION: "1",
                 GEN_AI_OPERATION_NAME: "invoke_agent",
                 OJ_TRAJECTORY_RECORD_KIND: "turn",
-                LANGFUSE_OBSERVATION_TYPE: "agent",
                 OJ_EXECUTION_SUBJECT_ID: "main",
                 OJ_EXECUTION_SUBJECT_DISPLAY_NAME: "Main Agent",
                 OJ_EXECUTION_SUBJECT_KIND: "main_agent",
                 OJ_EXECUTION_SUBJECT_SESSION_ID: "sess-live",
                 GEN_AI_CONVERSATION_ID: "sess-live",
-                OJ_SESSION_ID: "sess-live",
+                GEN_AI_CONVERSATION_ID: "sess-live",
                 OJ_REQUEST_ID: "request-live",
                 OJ_RUN_ID: "run-live",
                 OJ_TURN_ID: "turn-live",
@@ -177,11 +172,10 @@ def test_close_ends_the_span_stamps_the_output_and_clears_the_root(exporter) -> 
 
     finished = exporter.get_finished_spans()
     assert [span.name for span in finished] == ["agent.agent.fast.sess-A"]
-    assert finished[0].attributes[LANGFUSE_SESSION_ID] == "sess-A"
-    assert finished[0].attributes[LANGFUSE_OBSERVATION_OUTPUT] == "final answer"
+    assert finished[0].attributes[OJ_SPAN_OUTPUT] == "final answer"
     assert finished[0].attributes[GEN_AI_CONVERSATION_ID] == "sess-A"
     assert finished[0].attributes[GEN_AI_OPERATION_NAME] == "invoke_agent"
-    assert finished[0].attributes[OJ_SESSION_ID] == "sess-A"
+    assert finished[0].attributes[GEN_AI_CONVERSATION_ID] == "sess-A"
     assert finished[0].attributes[OJ_REQUEST_ID] == "request-A"
     assert finished[0].attributes[OJ_RUN_ID] == "run-A"
     assert finished[0].attributes[OJ_TURN_ID] == "turn-A"
@@ -220,8 +214,8 @@ def test_explicit_empty_output_is_preserved_by_close(exporter) -> None:
     close_agent_run_span(handle, session_id="sess-A", output="")
 
     finished = exporter.get_finished_spans()[0]
-    assert LANGFUSE_OBSERVATION_OUTPUT in finished.attributes
-    assert finished.attributes[LANGFUSE_OBSERVATION_OUTPUT] == ""
+    assert OJ_SPAN_OUTPUT in finished.attributes
+    assert finished.attributes[OJ_SPAN_OUTPUT] == ""
 
 
 def test_structured_in_band_failure_marks_root_error_without_fake_exception(exporter) -> None:

@@ -38,11 +38,8 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
     MemberActionPlanner,
     MemberActionPlannerAgent,
-    _adapt_surface_for_activation_phase,
-    _adapt_surface_for_new_skill_qualification,
     _bind_immutable_hypotheses,
     _validate_action_issue_attribution,
-    _validate_new_skill_qualification,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import (
     _failure_signature_values,
@@ -3610,7 +3607,7 @@ def test_member_executor_default_agent_fails_success_without_real_declared_chang
     assert payload["changed_files"] == []
 
 
-def test_member_executor_scaffolds_prompt_section_when_agent_writes_no_files(
+def test_member_executor_rejects_prompt_add_when_agent_writes_no_files(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
@@ -3652,19 +3649,12 @@ def test_member_executor_scaffolds_prompt_section_when_agent_writes_no_files(
         )
     )
 
-    assert results[0].status == "succeeded"
+    assert results[0].status == "failed"
     integration = integration_worktree_path(run_dir / "wt", "explainer")
-    section_path = integration / "prompt_sections" / "files" / "slide_labeling_rules.md"
-    assert "Always assign every slide" in section_path.read_text(encoding="utf-8")
-    manifest = yaml.safe_load((integration / "prompt_sections" / "sections.yaml").read_text(encoding="utf-8"))
-    assert {
-        "name": "slide_labeling_rules",
-        "file": "prompt_sections/files/slide_labeling_rules.md",
-        "priority": 30,
-    } in manifest["sections"]
+    assert not (integration / "prompt_sections" / "files" / "slide_labeling_rules.md").exists()
 
 
-def test_member_executor_scaffolds_skill_when_agent_writes_no_files(
+def test_member_executor_rejects_skill_add_when_agent_writes_no_files(
     tmp_path: Path,
     two_role_harness_dir: Path,
 ) -> None:
@@ -3706,13 +3696,9 @@ def test_member_executor_scaffolds_skill_when_agent_writes_no_files(
         )
     )
 
-    assert results[0].status == "succeeded"
+    assert results[0].status == "failed"
     integration = integration_worktree_path(run_dir / "wt", "explainer")
-    skill_path = integration / "skills" / "visual_design_spec" / "SKILL.md"
-    skill_text = skill_path.read_text(encoding="utf-8")
-    assert "name: visual_design_spec" in skill_text
-    registry = yaml.safe_load((integration / "skills" / "skills.yaml").read_text(encoding="utf-8"))
-    assert "skills/visual_design_spec" in registry["skills"]
+    assert not (integration / "skills" / "visual_design_spec" / "SKILL.md").exists()
 
 
 def test_member_executor_rejects_file_written_without_final_file_writes_json(
@@ -4361,10 +4347,10 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
-    assert hypotheses[0]["causal_coverage"]["sufficiency_status"] == "task_sufficient"
-    assert hypotheses[0]["decisive_probe"]["causal_coverage"]["counterfactual_prediction"].startswith(
-        "direct next succeeds"
-    )
+    observations = hypotheses[0]["authoritative_observations"]["metadata"]["attribution"]
+    assert observations["causal_coverage"]["sufficiency_status"] == "task_sufficient"
+    assert observations["causal_coverage"]["counterfactual_prediction"].startswith("direct next succeeds")
+    assert "causal_coverage" not in hypotheses[0]["decisive_probe"]
     assert hypotheses[0]["public_trigger"] == [
         {
             "case_id": "case_pydicom",
@@ -4389,10 +4375,6 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
     ("attribution", "affected_cases"),
     [
         ({"evidence_status": "confirmed"}, ["case_1"]),
-        (
-            {"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"},
-            ["case_1"],
-        ),
         ({"target_ref": "member_harness.solver.prompt", "evidence_status": "insufficient"}, ["case_1"]),
         ({"target_ref": "member_harness.solver.prompt", "evidence_status": "confirmed"}, []),
         (
@@ -4405,7 +4387,7 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         ),
     ],
 )
-def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
+def test_optimization_hypothesis_preserves_diagnosis_without_legacy_reaudit(
     tmp_path: Path,
     attribution: dict[str, object],
     affected_cases: list[str],
@@ -4439,7 +4421,12 @@ def test_optimization_hypothesis_rejects_unattributed_or_unresolved_issues(
         output_path=tmp_path / "optimization_hypotheses.yaml",
     )
 
-    assert load_optimization_hypotheses(hypothesis_path) == []
+    hypotheses = load_optimization_hypotheses(hypothesis_path)
+    assert len(hypotheses) == 1
+    assert hypotheses[0]["authoritative_observations"]["metadata"]["attribution"] == attribution
+    assert hypotheses[0]["target_case_ids"] == affected_cases
+    expected_deficiency = "harness_deficiency" if attribution.get("target_ref") else "insufficient_evidence"
+    assert hypotheses[0]["deficiency_class"] == expected_deficiency
 
 
 def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alternative(tmp_path: Path) -> None:
@@ -4500,9 +4487,9 @@ def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alt
 
 @pytest.mark.parametrize(
     ("verification_status", "expected_count"),
-    [(None, 0), ("unresolved", 0), ("verified", 1)],
+    [(None, 1), ("unresolved", 1), ("verified", 1)],
 )
-def test_optimization_hypothesis_requires_explicit_verification(
+def test_supported_diagnosis_does_not_require_a_second_verifier(
     tmp_path: Path,
     verification_status: str | None,
     expected_count: int,
@@ -4579,7 +4566,7 @@ def test_planner_binding_restores_analyzer_semantics_after_model_drift() -> None
     assert action["constraints"]["optimization_contracts"] == hypotheses
 
 
-def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
+def test_planner_binding_uses_behavior_contract_not_retired_search_state() -> None:
     plan_data = {
         "actions": [
             {
@@ -4607,10 +4594,11 @@ def test_planner_binding_persists_only_supported_causal_hypotheses() -> None:
     _bind_immutable_hypotheses(plan_data, hypotheses)
 
     constraints = plan_data["actions"][0]["constraints"]
-    assert constraints["source_causal_hypothesis_ids"] == ["h_supported"]
     contract = constraints["optimization_contracts"][0]
-    assert contract["supported_causal_hypothesis_ids"] == ["h_supported"]
-    assert contract["falsified_causal_hypothesis_ids"] == ["h_falsified"]
+    assert contract["source_issue_id"] == "issue_protocol"
+    assert contract["required_behavior"] == "Use the supported direct-call mechanism."
+    assert "source_causal_hypothesis_ids" not in constraints
+    assert "hypothesis_assessment" not in contract
     assert plan_data["metadata"]["semantic_authority"] == ("immutable_optimization_hypotheses")
 
 
@@ -4787,198 +4775,6 @@ def test_skill_trigger_description_prefers_causal_trigger_over_task_symptom() ->
         "Use when a task requires deciding whether Stream output must be "
         "redirected to logging rather than treated as a Warning object."
     )
-
-
-def test_post_diagnosis_contract_is_deferred_to_runtime_control() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["skill"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="reasoning_policy",
-        failure_signature="stops after diagnosis",
-        confidence=0.9,
-        optimization_surface="skill",
-    )
-
-    targets, report, adaptations = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "post_diagnosis"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == ("control")
-    assert adaptations[0]["reason"] == (
-        "required_action_is_not_knowable_at_task_start_and_must_not_be_recast_as_static_instruction"
-    )
-
-
-def test_post_diagnosis_prompt_contract_is_deferred_to_runtime_control() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["prompt_section"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="instruction",
-        failure_signature="diagnosed_but_did_not_edit",
-        confidence=0.9,
-        optimization_surface="prompt_section",
-    )
-
-    targets, report, _ = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "post_diagnosis"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == "control"
-
-
-def test_investigation_prompt_contract_does_not_infer_skill_reuse() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["prompt_section"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="instruction",
-        failure_signature="wrong_output_channel_hypothesis",
-        confidence=0.9,
-        optimization_surface="prompt_section",
-    )
-
-    targets, report, adaptations = _adapt_surface_for_activation_phase(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "decision_contract": {"activation_phase": "during_investigation"},
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["prompt_section"]
-    assert report.role_mechanisms["solver"][0].optimization_surface == "prompt_section"
-    assert adaptations == []
-
-
-def test_single_case_new_skill_gets_prompt_fallback_and_add_is_rejected() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["skill"],
-    )
-    mechanism = RoleMechanismAttribution(
-        issue_id="issue_1",
-        role="solver",
-        mechanism_type="instruction",
-        failure_signature="range_value_misclassified",
-        confidence=0.9,
-        optimization_surface="skill",
-    )
-
-    targets, report, adaptations = _adapt_surface_for_new_skill_qualification(
-        targets=[target],
-        mechanism_report=MechanismAttributionReport(
-            role_mechanisms={"solver": [mechanism]},
-        ),
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "target_case_ids": ["contract-extract-L3-014"],
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["prompt_section"]
-    assert targets[0].metadata["new_skill_qualification"] == {
-        "status": "insufficient_cross_case_support",
-        "support_case_ids": ["contract-extract-L3-014"],
-        "support_case_count": 1,
-        "required_support_case_count": 2,
-        "fallback_surface": "prompt_section",
-        "reason": "one_observed_subtask_does_not_establish_a_reusable_skill",
-    }
-    assert report.role_mechanisms["solver"][0].optimization_surface == "prompt_section"
-    assert adaptations[0]["reason"] == "one_observed_subtask_does_not_establish_a_reusable_skill"
-    errors = _validate_new_skill_qualification(
-        {
-            "role": "solver",
-            "action_group": "skill",
-            "operation": "add",
-        },
-        {"solver": targets[0]},
-    )
-    assert errors and "at least 2 distinct cases" in errors[0]
-
-
-def test_cross_case_new_skill_remains_eligible() -> None:
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_1"],
-        optimization_surfaces=["skill"],
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="issue_1",
-                    role="solver",
-                    mechanism_type="instruction",
-                    failure_signature="semantic_classification_error",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                )
-            ]
-        },
-    )
-
-    targets, report, adaptations = _adapt_surface_for_new_skill_qualification(
-        targets=[target],
-        mechanism_report=mechanism_report,
-        optimization_hypotheses=[
-            {
-                "source_issue_id": "issue_1",
-                "target_case_ids": ["case_a", "case_b"],
-            }
-        ],
-    )
-
-    assert targets == [target]
-    assert report == mechanism_report
-    assert adaptations == []
 
 
 def test_generated_skill_contract_accepts_bold_capsule_labels() -> None:
@@ -6808,126 +6604,6 @@ def test_member_action_planner_reports_the_latest_action_budget_error() -> None:
                 max_actions_per_plan=1,
             )
         )
-
-
-@pytest.mark.parametrize(
-    "failure_class",
-    ["late_skill_activation", "execution_convergence_failure"],
-)
-def test_planner_turns_unapplied_skill_into_execution_checkpoint(
-    failure_class: str,
-) -> None:
-    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
-        _adapt_recovery_surface_from_history,
-    )
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_owner"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_owner",
-                role="solver",
-                harness_ref_path="solver",
-                confidence=0.9,
-                evidence=[{"case_id": "marshmallow__marshmallow-1359"}],
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="issue_owner",
-                    role="solver",
-                    mechanism_type="workflow",
-                    failure_signature="root_owner_not_applied",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                    rationale="The owner chain was understood but no edit was produced.",
-                )
-            ]
-        }
-    )
-
-    targets, mechanisms, adaptations = _adapt_recovery_surface_from_history(
-        targets=[target],
-        role_report=role_report,
-        mechanism_report=mechanism_report,
-        rejected_capabilities=[
-            {
-                "role": "solver",
-                "action_group": "skill",
-                "runtime_name": "owner_chain",
-                "target_case_ids": ["marshmallow__marshmallow-1359"],
-                "failure_class": failure_class,
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["control"]
-    assert mechanisms.role_mechanisms["solver"][0].optimization_surface == "control"
-    assert adaptations[0]["failure_class"] == failure_class
-
-
-def test_planner_keeps_skill_surface_after_semantic_replay_failure() -> None:
-    from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import (
-        _adapt_recovery_surface_from_history,
-    )
-
-    target = MemberOptimizationTarget(
-        role="solver",
-        harness_ref_path="solver",
-        attributed_issue_ids=["issue_iterator"],
-        optimization_surfaces=["skill"],
-    )
-    role_report = RoleAttributionReport(
-        assigned_role_issues=[
-            RoleIssueAttribution(
-                issue_id="issue_iterator",
-                role="solver",
-                harness_ref_path="solver",
-                confidence=0.9,
-                evidence=[{"case_id": "pydicom__pydicom-1139"}],
-            )
-        ]
-    )
-    mechanism_report = MechanismAttributionReport(
-        role_mechanisms={
-            "solver": [
-                RoleMechanismAttribution(
-                    issue_id="issue_iterator",
-                    role="solver",
-                    mechanism_type="skill",
-                    failure_signature="stateful_next_contract_missing",
-                    confidence=0.9,
-                    optimization_surface="skill",
-                )
-            ]
-        }
-    )
-
-    targets, mechanisms, adaptations = _adapt_recovery_surface_from_history(
-        targets=[target],
-        role_report=role_report,
-        mechanism_report=mechanism_report,
-        rejected_capabilities=[
-            {
-                "role": "solver",
-                "action_group": "skill",
-                "target_case_ids": ["pydicom__pydicom-1139"],
-                "failure_class": "semantic_non_reproduction",
-            }
-        ],
-    )
-
-    assert targets[0].optimization_surfaces == ["skill"]
-    assert mechanisms.role_mechanisms["solver"][0].optimization_surface == "skill"
-    assert adaptations == []
 
 
 def test_member_action_planner_rejects_action_removed_from_run_contract() -> None:

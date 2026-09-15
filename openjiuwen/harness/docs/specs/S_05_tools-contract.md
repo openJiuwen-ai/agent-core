@@ -192,3 +192,20 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 - 任务计划模型（`TaskPlan` / `TodoItem` / `TodoStatus`）—— 本 spec（`schema/task.py`）。
 - goal 工具接 `GoalManager` —— `S_11`；LSP 工具接 `lsp/` —— `S_14`。
 - 工具描述的文本归属 `prompts/tools/` —— `S_06`。
+
+
+## 任务级 Web 配置
+
+WebFreeSearchTool、WebPaidSearchTool、WebFetchWebpageTool 可在构造时接收
+`proxy_url`；该值优先于 WEB_PROXY_URL / FREE_SEARCH_PROXY_URL，不修改进程环境。
+未提供时保留既有环境代理与 NO_PROXY 行为。代理认证由 HTTP transport 处理。
+
+FreeSearch 和 Fetch 可接收 `allowed_domains`，按主机名与子域匹配过滤来源；
+FreeSearch 另接受 `enabled_engines`，用于单个任务选择后端，避免修改全局开关。
+国内学术域范围下使用百度学术、百度网页、知网、万方入口，并过滤返回来源。
+Fetch 在受限来源模式下禁用 jina reader 回退。
+
+域名过滤检查请求入口和返回结果；HTTP 自动重定向仍可能访问域外主机，
+因此该设置不是网络访问隔离边界。严格访问隔离应由网络层实施。
+
+决策与限制见 `../features/F_01_task-scoped-web-research.md`。

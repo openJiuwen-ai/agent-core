@@ -31,7 +31,7 @@ def _attrs(values):
 def _span(span_id, name, *, parent=None, member=None, task=None, start=1, has_team=True):
     attrs = {semconv.AT_TEAM_ID: "team-a"} if has_team else {}
     if member is not None:
-        attrs[semconv.AT_MEMBER_ID] = member
+        attrs[semconv.AT_MEMBER_NAME] = member
     if task is not None:
         attrs[semconv.AT_TASK_ID] = task
     span = {
@@ -66,7 +66,7 @@ def _trajectory():
                         "attributes": _attrs(
                             {
                                 TRAJECTORY_ID: "team-trajectory",
-                                semconv.AT_SESSION_ID: "session-a",
+                                semconv.GEN_AI_CONVERSATION_ID: "session-a",
                             }
                         )
                     },

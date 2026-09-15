@@ -275,6 +275,41 @@ async def test_redis_start_uses_atomic_run_and_sample_claim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_redis_start_can_limit_claim_to_pending_score_window() -> None:
+    redis = InMemoryRedis()
+    store = RedisTrajectoryStore(redis)
+    await _save_samples(store, 4)
+    pending_key, _, _, _ = store.training_run_keyspace("model-1")
+    await redis.zadd(
+        pending_key,
+        {
+            "sample-0": 10.0,
+            "sample-1": 11.0,
+            "sample-2": 20.0,
+            "sample-3": 21.0,
+        },
+    )
+    release = asyncio.Event()
+    runner = TrainingRunner(
+        redis=redis,
+        trajectory_store=store,
+        ppo=_FakePPO(release),
+        activator=_FakeActivator(),
+        model_id="model-1",
+        base_model_path="/models/base",
+        min_samples_for_training=2,
+        max_samples_per_run=2,
+        pending_min_score=20.0,
+    )
+
+    started = await runner.start()
+
+    assert started.run.sample_ids == ("sample-2", "sample-3")
+    release.set()
+    await runner.wait(started.run.training_run_id)
+
+
+@pytest.mark.asyncio
 async def test_success_marks_samples_trained_before_activation() -> None:
     store = InMemoryTrajectoryStore()
     await _save_samples(store, 2)
@@ -316,6 +351,36 @@ async def test_success_marks_samples_trained_before_activation() -> None:
             "expected_lora_name": "model-1:v0",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_sft_success_can_publish_without_auto_activation() -> None:
+    store = InMemoryTrajectoryStore()
+    await _save_samples(store, 2)
+    release = asyncio.Event()
+    release.set()
+    activator = _FailingActivator()
+    runner = TrainingRunner(
+        redis=InMemoryRedis(),
+        trajectory_store=store,
+        ppo=_FakePPO(release),
+        activator=activator,
+        model_id="model-1",
+        base_model_path="/models/base",
+        min_samples_for_training=2,
+        max_samples_per_run=2,
+        auto_activate_lora=False,
+    )
+
+    started = await runner.start()
+    completed = await runner.wait(started.run.training_run_id)
+
+    assert completed.status is RunStatus.SUCCEEDED
+    assert completed.stage is RunStage.ACTIVATING
+    assert completed.lora_name == "model-1:v1"
+    assert completed.lora_path == "/loras/model-1/v1"
+    assert activator.calls == []
+    assert (await store.stats())["trained_samples"] == 2
 
 
 @pytest.mark.asyncio
@@ -629,4 +694,49 @@ async def test_recover_activating_retries_same_artifact_and_parent_cas() -> None
             "expected_lora_name": "model-1:v2",
         }
     ]
+    assert (await store.stats())["trained_samples"] == 2
+
+
+@pytest.mark.asyncio
+async def test_recover_activating_can_finish_without_auto_activation() -> None:
+    store = InMemoryTrajectoryStore()
+    await _save_samples(store, 2)
+    claimed = await store.fetch_and_mark_training("model-1", 2)
+    await store.mark_trained([sample["sample_id"] for sample in claimed])
+    redis = InMemoryRedis()
+    persisted = TrainingRunRecord(
+        training_run_id="run-activating-no-auto",
+        status=RunStatus.RUNNING,
+        stage=RunStage.ACTIVATING,
+        sample_count=2,
+        policy_versions={"model-1:v2": 2},
+        created_at="2026-01-01T00:00:00+00:00",
+        started_at="2026-01-01T00:00:01+00:00",
+        lora_name="model-1:v3",
+        lora_path="/loras/model-1/v3",
+        sample_ids=tuple(sample["sample_id"] for sample in claimed),
+        parent_lora_name="model-1:v2",
+        parent_lora_path="/loras/model-1/v2",
+    )
+    await redis.set("rl:v1:training_run:run-activating-no-auto", persisted.to_json())
+    await redis.set("rl:v1:training_run:active", "run-activating-no-auto")
+    activator = _FailingActivator()
+    runner = TrainingRunner(
+        redis=redis,
+        trajectory_store=store,
+        ppo=_FailingPPO(),
+        activator=activator,
+        model_id="model-1",
+        base_model_path="/models/base",
+        min_samples_for_training=2,
+        max_samples_per_run=2,
+        auto_activate_lora=False,
+    )
+
+    recovered = await runner.recover()
+
+    assert recovered is not None
+    assert recovered.status is RunStatus.SUCCEEDED
+    assert recovered.stage is RunStage.ACTIVATING
+    assert activator.calls == []
     assert (await store.stats())["trained_samples"] == 2

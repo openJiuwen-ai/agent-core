@@ -64,8 +64,8 @@ def _tool_trajectory() -> Trajectory:
                                     "attributes": attributes_from_map(
                                         {
                                             semconv.GEN_AI_TOOL_NAME: "send_message",
-                                            semconv.GEN_AI_TOOL_INPUT: {"to": "reviewer"},
-                                            semconv.GEN_AI_TOOL_OUTPUT: "sent",
+                                            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"to": "reviewer"},
+                                            semconv.GEN_AI_TOOL_CALL_RESULT: "sent",
                                         }
                                     ),
                                 }

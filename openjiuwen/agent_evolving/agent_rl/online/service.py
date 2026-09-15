@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -282,11 +283,16 @@ def build_rl_service_app(  # pylint: disable=too-many-arguments,too-many-locals,
             raise _task_error(exc, "task_conflict") from exc
 
     @app.post("/v1/gateway/upload/batch")
-    async def upload_rail(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    async def upload_trajectory_batch(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        protocol_version = str(payload.get("protocol_version") or "")
         try:
-            result = await trajectory_api.rail_ingestor.ingest_rail_batch(payload)
+            if protocol_version == "rail-v1":
+                result = await trajectory_api.rail_ingestor.ingest_rail_batch(payload)
+            else:
+                result = await trajectory_api.batch_create_trajectories(payload)
         except ValueError as exc:
-            raise _error(400, "invalid_rail_batch", str(exc)) from exc
+            error_code = "invalid_rail_batch" if protocol_version == "rail-v1" else "invalid_trajectory_batch"
+            raise _error(400, error_code, str(exc)) from exc
         return {"ok": True, "result": result}
 
     @app.get("/v1/rl/trajectories/stats")
@@ -333,6 +339,62 @@ def configure_rl_service_logging(*, path: str, max_bytes: int, backup_count: int
     )
 
 
+def _trainer_backend_from_env() -> str:
+    """Return the validated backend chosen for this RL Service process.
+
+    ``TRAINER_BACKEND`` is owned by the independent RL Service.  The original
+    Gateway/Scheduler setting, ``TRAIN_BACKEND``, remains a fallback so the
+    AIGW command can reuse existing online-SFT deployment environments.
+    """
+
+    backend = (
+        os.environ.get("TRAINER_BACKEND", "").strip()
+        or os.environ.get("TRAIN_BACKEND", "").strip()
+        or "PPO"
+    ).upper()
+    if backend == "RL":
+        backend = "PPO"
+    if backend not in {"PPO", "SFT"}:
+        raise ValueError("TRAINER_BACKEND or TRAIN_BACKEND must be PPO or SFT")
+    return backend
+
+
+def _sft_training_user_id_from_env(*, model_id: str) -> str:
+    """Return the SFT queue owner without conflating it with the AIGW model."""
+
+    return os.environ.get("SFT_TRAINING_USER_ID", model_id).strip() or model_id
+
+
+def _sft_dry_run_from_env() -> bool:
+    """Read the explicit artifact-only SFT verification mode."""
+
+    return os.environ.get("SFT_DRY_RUN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sft_auto_activate_lora_from_env() -> bool:
+    """Read whether a completed SFT Run should activate its LoRA automatically."""
+
+    raw = os.environ.get("SFT_AUTO_ACTIVATE_LORA", "").strip().lower()
+    if not raw:
+        return True
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _sft_training_min_pending_score_from_env() -> float | None:
+    """Optionally restrict an SFT Run to samples created after a Redis score."""
+
+    raw = os.environ.get("SFT_TRAINING_MIN_PENDING_SCORE", "").strip()
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError("SFT_TRAINING_MIN_PENDING_SCORE must be a finite number") from exc
+    if not math.isfinite(value):
+        raise ValueError("SFT_TRAINING_MIN_PENDING_SCORE must be a finite number")
+    return value
+
+
 def build_app_from_config(config: Any) -> FastAPI:  # pylint: disable=too-many-locals
     """Assemble production RL Service dependencies from static config."""
 
@@ -341,14 +403,26 @@ def build_app_from_config(config: Any) -> FastAPI:  # pylint: disable=too-many-l
 
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.pending_judge_store import PendingJudgeStore
     from openjiuwen.agent_evolving.agent_rl.online.gateway.trajectory.persistence import GatewayTrajectoryRuntime
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.redis_store import RedisSFTStore
+    from openjiuwen.agent_evolving.agent_rl.online.core.factory import build_training_executor
     from openjiuwen.agent_evolving.agent_rl.online.judge.judge_scorer import JudgeScorer
     from openjiuwen.agent_evolving.agent_rl.online.lora_client import AIGWLoRAClient
-    from openjiuwen.agent_evolving.agent_rl.online.scheduler.ppo_executor import PPOTrainingExecutor
     from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
     from openjiuwen.agent_evolving.agent_rl.storage.redis_trajectory_store import RedisTrajectoryStore
 
+    trainer_backend = _trainer_backend_from_env()
     redis = redis_from_url(config.redis_url, decode_responses=False)
     trajectory_store = RedisTrajectoryStore(redis)
+    sft_store = RedisSFTStore(redis)
+    training_store = trajectory_store
+    sample_owner_id = config.model_id
+    pending_min_score = None
+    auto_activate_lora = True
+    if trainer_backend == "SFT":
+        training_store = sft_store.training_sample_store
+        sample_owner_id = _sft_training_user_id_from_env(model_id=config.model_id)
+        pending_min_score = _sft_training_min_pending_score_from_env()
+        auto_activate_lora = _sft_auto_activate_lora_from_env()
     registry = TaskRegistry(redis=redis)
     http_client = httpx.AsyncClient(timeout=config.judge_timeout)
     judge = None
@@ -372,18 +446,24 @@ def build_app_from_config(config: Any) -> FastAPI:  # pylint: disable=too-many-l
             fixed_user_id=config.model_id,
             fixed_model_id=config.model_id,
         ),
+        redis=redis,
         trajectory_store=trajectory_store,
+        sft_store=sft_store,
         pending_judge_store=pending_judge_store,
     )
     trajectory_api.set_judge_scorer(judge)
     lora_repo = LoRARepository(config.lora_repository_path)
-    ppo = PPOTrainingExecutor(
+    trainer = build_training_executor(
+        train_backend=trainer_backend,
         base_model_path=config.base_model_path,
         lora_repo=lora_repo,
+        notifier=None,
         nproc_per_node=config.nproc_per_node,
         training_gpu_ids=config.training_gpu_ids,
         ppo_config_path=config.ppo_config_path,
         ppo_samples_per_step=config.ppo_samples_per_step,
+        target_model_id=config.model_id,
+        sft_dry_run=_sft_dry_run_from_env(),
     )
     lora_client = AIGWLoRAClient(
         endpoint=config.aigw_endpoint,
@@ -393,18 +473,21 @@ def build_app_from_config(config: Any) -> FastAPI:  # pylint: disable=too-many-l
     )
     runner = TrainingRunner(
         redis=redis,
-        trajectory_store=trajectory_store,
-        ppo=ppo,
+        trajectory_store=training_store,
+        ppo=trainer,
         activator=lora_client,
         model_id=config.model_id,
         base_model_path=config.base_model_path,
         min_samples_for_training=config.min_samples_for_training,
         max_samples_per_run=config.max_samples_per_run,
+        sample_owner_id=sample_owner_id,
         active_policy=lora_client.active_policy,
+        pending_min_score=pending_min_score,
+        auto_activate_lora=auto_activate_lora,
     )
 
     async def close_resources() -> None:
-        await ppo.aclose()
+        await trainer.aclose()
         await http_client.aclose()
         await redis.aclose()
 

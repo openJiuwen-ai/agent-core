@@ -39,6 +39,12 @@ class RedisSFTStore:
             users_set_key=_SAMPLE_USERS_KEY,
         )
 
+    @property
+    def training_sample_store(self) -> RedisTrajectoryStore:
+        """Expose the SFT sample queue to the durable Training Run lifecycle."""
+
+        return self._sample_store
+
     async def save_raw(self, raw: dict[str, Any], *, user_id: str = "online") -> None:
         payload = dict(raw)
         raw_id = str(payload.get("raw_id") or payload.get("trajectory_id") or payload.get("sample_id") or "").strip()

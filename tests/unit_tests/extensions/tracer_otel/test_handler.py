@@ -22,23 +22,20 @@ from openjiuwen.core.foundation.llm.schema.message import (
 from openjiuwen.core.graph.pregel import GraphInterrupt, Interrupt
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
-from openjiuwen.core.session.tracer.span import TraceAgentSpan, SpanManager
+from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_COMPLETION,
+    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_PROMPT,
+    GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_SYSTEM,
-    GEN_AI_SYSTEM_VALUE,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_NAME,
     OJ_AGENT_ERROR_MESSAGE,
-    OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
-    OJ_CHILD_INVOKE_IDS,
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
@@ -99,9 +96,8 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         s = finished[0]
-        assert s.name == "llm.TestModel"
+        assert s.name == "chat TestModel"
         assert s.kind == trace.SpanKind.CLIENT
-        assert s.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
         assert s.attributes[GEN_AI_REQUEST_MODEL] == "TestModel"
         assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
         # Span base attributes (field-completion)
@@ -150,7 +146,8 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_COMPLETION] == "world"
+        output = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert output[0]["parts"][0]["content"] == "world"
 
         # End-time base attributes should be present
         s = finished[0]
@@ -207,7 +204,7 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 2
 
-        child = next(s for s in finished if s.name == "tool.ChildTool")
+        child = next(s for s in finished if s.name == "execute_tool ChildTool")
         parent = next(s for s in finished if s.name == "chain.ParentChain")
 
         # Child's parent should point to parent's span_id
@@ -251,8 +248,10 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        request = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        response = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert request[0]["parts"][0]["content"].startswith("sha256:")
+        assert response[0]["parts"][0]["content"].startswith("sha256:")
 
     async def test_agent_llm_prompt_completion_split_redaction(self):
         """redact_prompts=False, redact_completions=True: prompt not hashed, completion hashed."""
@@ -268,14 +267,16 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         # Prompt not hashed (redact_prompts=False overrides redaction_enabled=True)
-        assert not finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
+        request = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        assert request[0]["parts"][0]["content"] == "visible prompt"
         # Completion hashed (redact_completions=True)
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        response = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert response[0]["parts"][0]["content"].startswith("sha256:")
 
     async def test_agent_llm_inputs_normalized_to_dict(self):
         """Message objects are converted to plain dicts via model_dump().
 
-        Without normalization, GEN_AI_PROMPT would contain class repr like
+        Without normalization, the structured request would contain class repr like
         ``SystemMessage(role='system', ...)``.  After normalization it should
         be standard JSON with ``{"role": "...", "content": "..."}`` entries.
         """
@@ -296,24 +297,48 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        prompt_attr = finished[0].attributes[GEN_AI_PROMPT]
+        instructions_attr = finished[0].attributes[GEN_AI_SYSTEM_INSTRUCTIONS]
+        prompt_attr = finished[0].attributes[GEN_AI_INPUT_MESSAGES]
 
         # Should be valid JSON, not a Python repr
+        instructions = json.loads(instructions_attr)
         parsed = json.loads(prompt_attr)
-        assert "inputs" in parsed
-        assert isinstance(parsed["inputs"], list)
-        assert len(parsed["inputs"]) == 2
-
-        # Each message is a plain dict — no class names in the output
-        sys_msg = parsed["inputs"][0]
-        assert sys_msg["role"] == "system"
-        assert sys_msg["content"] == "you are helpful"
-        user_msg = parsed["inputs"][1]
+        assert instructions == [{"type": "text", "content": "you are helpful"}]
+        assert len(parsed) == 1
+        user_msg = parsed[0]
         assert user_msg["role"] == "user"
-        assert user_msg["content"] == "hello"
+        assert user_msg["parts"][0]["content"] == "hello"
         # No Pydantic class repr leaked into the serialized form
         assert "SystemMessage" not in prompt_attr
         assert "UserMessage" not in prompt_attr
+
+    async def test_agent_llm_system_instructions_bypass_attribute_length_cap(self):
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=8)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        system_prompt = "stable-system-prompt-" * 20
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={
+                "inputs": [
+                    SystemMessage(role="system", content=system_prompt),
+                    UserMessage(role="user", content="long-user-message"),
+                ]
+            },
+            instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs="done")
+
+        finished = _EXPORTER.get_finished_spans()
+        instructions = json.loads(
+            finished[0].attributes[GEN_AI_SYSTEM_INSTRUCTIONS]
+        )
+        messages = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        assert instructions[0]["content"] == system_prompt
+        assert "OTel attribute truncated" not in instructions[0]["content"]
+        assert "OTel attribute truncated" in messages[0]["parts"][0]["content"]
 
     async def test_agent_llm_outputs_normalized_to_dict(self):
         """AssistantMessage outputs are converted to plain dicts via model_dump()."""
@@ -329,11 +354,11 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        completion_attr = finished[0].attributes[GEN_AI_COMPLETION]
+        completion_attr = finished[0].attributes[GEN_AI_OUTPUT_MESSAGES]
 
         parsed = json.loads(completion_attr)
-        assert parsed["role"] == "assistant"
-        assert parsed["content"] == "world"
+        assert parsed[0]["role"] == "assistant"
+        assert parsed[0]["parts"][0]["content"] == "world"
         assert "AssistantMessage" not in completion_attr
 
     async def test_agent_llm_fields_set_when_span_empty(self):
@@ -496,7 +521,6 @@ class TestOtelWorkflowHandler:
         assert len(finished) == 1
         s = finished[0]
         assert s.name == "wf_root"
-        assert s.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
         assert s.attributes[OJ_WORKFLOW_ID] == "wf1"
         # Base attributes (field-completion)
         assert OJ_TRACE_ID in s.attributes
@@ -587,7 +611,7 @@ class TestOtelWorkflowHandler:
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
-        llm_span = next(s for s in finished if s.name == "component.llm_node")
+        llm_span = next(s for s in finished if s.name == "chat")
         assert llm_span.kind == trace.SpanKind.CLIENT
         # LLM components get gen_ai.operation.name="chat"
         assert llm_span.attributes[GEN_AI_OPERATION_NAME] == "chat"
@@ -626,7 +650,7 @@ class TestOtelWorkflowHandler:
             assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
 
     async def test_workflow_tool_component_tagged_as_execute_tool(self):
-        """ToolExecutable → gen_ai.operation.name="execute_tool" (no gen_ai.tool.name).
+        """ToolExecutable uses the standard execute-tool name and attributes.
 
         Tool 真名未通过 TracerWorkflowUtils._get_component_metadata 传递下来
         (metadata 中 component_name 实为 node_id)，故不设置 gen_ai.tool.name。
@@ -653,8 +677,8 @@ class TestOtelWorkflowHandler:
         # Tool components are not LLM → INTERNAL span kind
         assert s.kind == trace.SpanKind.INTERNAL
         assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
-        # gen_ai.tool.name intentionally not set (real tool name not in metadata)
-        assert GEN_AI_TOOL_NAME not in s.attributes
+        assert s.name == "execute_tool tool_node"
+        assert s.attributes[GEN_AI_TOOL_NAME] == "tool_node"
 
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""
@@ -707,7 +731,7 @@ class TestOtelWorkflowHandler:
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
-        comp_span = next(s for s in finished if s.name == "component.comp1")
+        comp_span = next(s for s in finished if s.name == "execute_tool tool1")
         assert comp_span.attributes[OJ_WORKFLOW_COMPONENT_ID] == "comp1"
         assert comp_span.attributes[OJ_WORKFLOW_COMPONENT_TYPE] == "Tool"
 
@@ -865,7 +889,7 @@ class TestOtelWorkflowHandler:
         assert len(finished) == 3
 
         root_wf = next(s for s in finished if s.name == "wf_root")
-        host_comp = next(s for s in finished if s.name == "component.llm_node")
+        host_comp = next(s for s in finished if s.name == "chat")
         sub_wf = next(s for s in finished if s.name == "sub_wf_root")
 
         # root_wf has no parent (or zero span_id parent)
@@ -942,7 +966,7 @@ class TestOtelWorkflowHandler:
         root_wf = next(s for s in finished if s.name == "wf_root")
         host_comp = next(s for s in finished if s.name == "component.sub_wf_node")
         start_node = next(s for s in finished if s.name == "component.sub_wf_node.start")
-        llm_node = next(s for s in finished if s.name == "component.sub_wf_node.llm")
+        llm_node = next(s for s in finished if s.name == "chat")
 
         # root_wf — top level
         assert root_wf.parent is None or root_wf.parent.span_id == 0
@@ -1156,5 +1180,3 @@ class TestMultiRoundConversationTraceContinuity:
         round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
         assert len(round2_spans) == 1
         assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
-
-

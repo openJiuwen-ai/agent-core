@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import warnings
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
@@ -27,11 +28,18 @@ from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
-from openjiuwen.extensions.observability.backend_projection import project_for_backend
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
 from openjiuwen.extensions.observability.context_compression_handler import (
     ContextCompressionObservabilityBridge,
+)
+from openjiuwen.extensions.observability.exporters.langfuse import (
+    LangfuseExporterConfig,
+    build_langfuse_span_exporter,
+    project_langfuse_span,
+)
+from openjiuwen.extensions.observability.exporters.transforming import (
+    TransformingSpanExporter,
 )
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 from openjiuwen.extensions.observability.span_context import (
@@ -145,10 +153,7 @@ class ObservabilityRuntime:
                 )
                 provider.add_span_processor(tracker)
 
-                exporter = project_for_backend(
-                    span_exporter_override or build_span_exporter(config),
-                    config.backend,
-                )
+                exporter = span_exporter_override or build_span_exporter(config)
                 if span_exporter_override is not None or isinstance(exporter, ConsoleSpanExporter):
                     provider.add_span_processor(SimpleSpanProcessor(exporter))
                 else:
@@ -391,14 +396,23 @@ class ObservabilityRuntime:
 
 def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
     """Construct the exporter selected by the configuration."""
-    if config.exporter == "console":
+    resolved = resolve_exporter_selection(config)
+    if resolved == "console":
         return ConsoleSpanExporter()
-    if config.exporter == "file":
-        return TraceFileExporter(
-            root_dir=config.traces_dir,
-            retention_days=config.file_retention_days,
+    if resolved == "file":
+        # The file exporter is the file WAL for Langfuse ingestion: it is
+        # wrapped in the same projection the ``langfuse`` exporter sends, so
+        # its OTLP JSON lines match what Langfuse would receive.
+        return wrap_langfuse_projection(
+            TraceFileExporter(
+                root_dir=config.traces_dir,
+                retention_days=config.file_retention_days,
+            ),
+            LangfuseExporterConfig.from_observability_config(config),
         )
-    if config.exporter == "otlp_grpc":
+    if resolved == "langfuse":
+        return build_langfuse_span_exporter(config)
+    if resolved == "otlp_grpc":
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
         return OTLPSpanExporter(
@@ -406,7 +420,7 @@ def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
             insecure=True,
             headers=build_auth_headers(config),
         )
-    if config.exporter == "otlp_http":
+    if resolved == "otlp_http":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter as HttpExporter,
         )
@@ -414,8 +428,37 @@ def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
         return HttpExporter(endpoint=config.endpoint, headers=build_auth_headers(config))
     raise build_error(
         ErrStatusCode.PARAM_INVALID_ERROR,
-        msg=f"unsupported observability exporter: {config.exporter}",
+        msg=f"unsupported observability exporter: {resolved}",
     )
+
+
+def wrap_langfuse_projection(
+    exporter: SpanExporter,
+    langfuse_config: LangfuseExporterConfig,
+) -> SpanExporter:
+    """Wrap one exporter behind the shared Langfuse span projection."""
+    return TransformingSpanExporter(
+        exporter,
+        transform=lambda span: project_langfuse_span(span, langfuse_config),
+    )
+
+
+def resolve_exporter_selection(config: ObservabilityConfig) -> str:
+    """Resolve the effective exporter, translating the deprecated ``backend``.
+
+    ``backend`` is translated to ``exporter`` exactly once, here in the
+    initialization stage, and emits a deprecation warning. The translated
+    value is never handed to the collection layer (callback/bridge/rail)
+    and never influences telemetry shape.
+    """
+    if config.backend == "langfuse":
+        warnings.warn(
+            "ObservabilityConfig.backend is deprecated; use exporter='langfuse' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return "langfuse"
+    return config.exporter
 
 
 def build_auth_headers(config: ObservabilityConfig) -> dict[str, str]:
@@ -431,4 +474,5 @@ __all__ = [
     "SafeSpanProcessor",
     "build_auth_headers",
     "build_span_exporter",
+    "resolve_exporter_selection",
 ]

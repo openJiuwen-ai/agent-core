@@ -34,6 +34,8 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
     MemberOptimizerAgentProfile,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import (
+    with_rsi_output_budget,
+    with_rsi_reasoning_policy,
     without_inner_sdk_retries,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
@@ -81,7 +83,7 @@ def load_member_optimizer_model(model_config_ref: str) -> Model:
     if not isinstance(model_data, dict):
         raise RuntimeError(f"model_config_ref model block must be a mapping: {path}")
 
-    data = without_inner_sdk_retries(_expand_env_vars(model_data))
+    data = without_inner_sdk_retries(with_rsi_reasoning_policy(with_rsi_output_budget(_expand_env_vars(model_data))))
     client_data = data.get("model_client_config")
     if not isinstance(client_data, dict):
         raise RuntimeError("model_config_ref must contain a mapping field: model_client_config")

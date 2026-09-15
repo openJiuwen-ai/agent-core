@@ -9,8 +9,8 @@ auto-retrying) and a finalized failure (a startup or turn has ended). This
 module holds the shared domain vocabulary for both:
 
 * :data:`ExternalRuntimeFailureCategory` — the closed set of failure
-  categories (auth / quota / rate-limit / server / network / process-start /
-  sdk-error / unknown).
+  categories (auth / quota / rate-limit / request / server / network /
+  process-start / sdk-error / unknown).
 * :data:`USER_ACTION_REQUIRED` / :func:`user_action_required` — whether a
   category needs the user or an external system to act.
 * :class:`ExternalRuntimeFailureReason` — structured reason (raw message, SDK
@@ -30,6 +30,7 @@ ExternalRuntimeFailureCategory = Literal[
     "auth_required",
     "quota_exceeded",
     "rate_limited",
+    "request_rejected",
     "server_unavailable",
     "network_timeout",
     "process_start_failed",
@@ -47,6 +48,7 @@ USER_ACTION_REQUIRED: dict[str, bool] = {
     "auth_required": True,
     "quota_exceeded": True,
     "rate_limited": False,
+    "request_rejected": True,
     "server_unavailable": False,
     "network_timeout": False,
     "process_start_failed": True,
@@ -80,6 +82,8 @@ class ExternalRuntimeFailure(BaseModel):
     team_name: str = Field(..., description="Team name")
     member_name: str = Field(..., description="Failing member name")
     agent_kind: ExternalRuntimeAgentKind = Field(..., description="Which SDK produced the failure")
+    model: str = Field(default="", description="Effective model confirmed by the CLI or SDK, if known")
+    cli_path: str | None = Field(default=None, description="Explicitly configured CLI executable path, if any")
     phase: ExternalRuntimePhase = Field(..., description="Startup or turn")
     category: ExternalRuntimeFailureCategory = Field(..., description="Failure category")
     user_action_required: bool = Field(..., description="Whether the user must act")

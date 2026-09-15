@@ -123,6 +123,7 @@ class WorkflowProgressEvent:
     phase_type: str | None = None
     nested_phase: str | None = None
     parent_phase: str | None = None
+    script_path: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has

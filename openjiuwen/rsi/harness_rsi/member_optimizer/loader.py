@@ -10,7 +10,7 @@ candidate role resolution from harness refs and Team Skill bindings.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +74,29 @@ class AnalysisRef:
 
     issues: list[dict[str, Any]]
     issues_path: str | None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def diagnosis_incomplete(self) -> bool:
+        """Include old artifacts that incorrectly labelled failed diagnosis completed."""
+        return self.metadata.get("analysis_status") in {
+            "failed",
+            "unavailable",
+            "partial",
+            "empty_case_results",
+        } or bool(self.metadata.get("diagnosis_failed_count"))
+
+    def require_usable(self) -> None:
+        if self.diagnosis_incomplete and not self.issues:
+            raise AnalysisUnavailableError(
+                "Analyzer did not complete a usable diagnosis; this is not a no-issues result. "
+                "The evaluation is preserved. Inspect analysis_ref.yaml and per_case_diagnoses.json "
+                "before resuming analysis."
+            )
+
+
+class AnalysisUnavailableError(RuntimeError):
+    """An incomplete diagnosis cannot be treated as an empty optimization result."""
 
 
 @dataclass
@@ -127,9 +150,10 @@ def load_analysis_ref(analysis_result_path: str | Path) -> AnalysisRef:
 
     inline_issues = data.get("issues", [])
     issues_path_str = data.get("issues_path")
+    metadata = data.get("metadata") or {}
 
     if isinstance(inline_issues, list) and inline_issues:
-        return AnalysisRef(issues=inline_issues, issues_path=issues_path_str)
+        return AnalysisRef(issues=inline_issues, issues_path=issues_path_str, metadata=metadata)
 
     if issues_path_str:
         issues_path = Path(str(issues_path_str)).expanduser()
@@ -139,9 +163,9 @@ def load_analysis_ref(analysis_result_path: str | Path) -> AnalysisRef:
                 issues_data = yaml.safe_load(f) or {}
             resolved_issues = issues_data.get("issues", [])
             if isinstance(resolved_issues, list) and resolved_issues:
-                return AnalysisRef(issues=resolved_issues, issues_path=str(issues_file))
+                return AnalysisRef(issues=resolved_issues, issues_path=str(issues_file), metadata=metadata)
 
-    return AnalysisRef(issues=[], issues_path=None)
+    return AnalysisRef(issues=[], issues_path=None, metadata=metadata)
 
 
 def resolve_team_issues(analysis_ref: AnalysisRef) -> list[TeamIssue]:
@@ -581,6 +605,7 @@ def _string_list(value: Any, limit: int) -> list[str]:
 
 __all__ = [
     "AnalysisRef",
+    "AnalysisUnavailableError",
     "BoundedEvidenceBundle",
     "EvalRef",
     "load_analysis_ref",

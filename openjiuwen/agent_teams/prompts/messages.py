@@ -203,7 +203,8 @@ def format_member_line(
     Args:
         member: Member mapping with ``member_name`` / ``display_name`` and
             optional ``desc`` / ``role``.
-        mark_humans: When True, append ``[human]`` to human-agent members.
+        mark_humans: When True, append ``[human]`` to human members
+            (avatar or passive).
         prefix: Optional bracketed marker placed before the fields, used by the
             delta body to say whether the member joined / left / was updated.
 
@@ -215,7 +216,12 @@ def format_member_line(
     desc = member.get("desc", "")
     head = f"- [{prefix}] " if prefix else "- "
     line = f"{head}member_name={member_name} display_name={display_name}"
-    if mark_humans and member.get("role") == TeamRole.HUMAN_AGENT.value:
+    # Both human flavors are real people — peers must know to pace
+    # communication accordingly (and that tools may act on their behalf).
+    if mark_humans and member.get("role") in (
+        TeamRole.HUMAN_AGENT.value,
+        TeamRole.PASSIVE_HUMAN.value,
+    ):
         line += " [human]"
     if desc:
         line += f" :: {desc}"
@@ -427,10 +433,10 @@ def build_roster_snapshot_text(
 
     Args:
         members: Peer members (the caller excludes the member itself).
-        mark_humans: When True, tag ``role == human_agent`` entries ``[human]``.
-            The caller gates this on the viewer role +
-            ``expose_human_agents_to_teammates`` so a teammate's peers stay
-            role-anonymous by default.
+        mark_humans: When True, tag human members (``human_agent`` or
+            ``passive_human``) ``[human]``. The caller gates this on the
+            viewer role + ``expose_human_agents_to_teammates`` so a
+            teammate's peers stay role-anonymous by default.
         language: Body language.
 
     Returns:

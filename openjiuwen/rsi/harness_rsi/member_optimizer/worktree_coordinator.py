@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 import yaml
 
 from openjiuwen.rsi.harness_rsi.member_optimizer.schema import MemberOptimizationAction
+from openjiuwen.rsi.harness_rsi.member_optimizer.plugin_manifest import prepare_plugin_registries
 
 MEMBER_WORKTREES_DIR_NAME = "wt"
 
@@ -152,6 +153,7 @@ class MemberWorktreeCoordinator:
             elif source.is_file():
                 shutil.copy2(source, integration_dir / source.name)
 
+        prepare_plugin_registries(integration_dir)
         return integration_dir
 
     @staticmethod

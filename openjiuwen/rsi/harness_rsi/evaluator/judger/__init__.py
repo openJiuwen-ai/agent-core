@@ -11,6 +11,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.base import (
     JudgeResult,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.judger.exact_match import ExactMatchJudger
+from openjiuwen.rsi.harness_rsi.evaluator.judger.llm_as_judge import LlmAsJudgeJudger
 from openjiuwen.rsi.harness_rsi.evaluator.judger.script_based import ScriptBasedJudger
 
 if TYPE_CHECKING:
@@ -22,6 +23,8 @@ def build_judger(config: EvaluatorConfig) -> EvaluationJudger:
     normalized = config.evaluation_method.strip().lower().replace("-", "_")
     if normalized == "exact_match":
         return ExactMatchJudger()
+    if normalized == "llm_as_judge":
+        return LlmAsJudgeJudger(config)
     if normalized in {"script_based", "rule_based"}:
         return ScriptBasedJudger()
     if normalized in {"", "default", "pass_through"}:
@@ -33,6 +36,7 @@ __all__ = [
     "EvaluationJudger",
     "ExactMatchJudger",
     "JudgeResult",
+    "LlmAsJudgeJudger",
     "ScriptBasedJudger",
     "build_judger",
 ]

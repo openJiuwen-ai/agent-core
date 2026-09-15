@@ -1045,6 +1045,17 @@ async def test_is_team_completed_member_busy_returns_none(agent_team, db):
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_is_team_completed_member_error_returns_none(agent_team, db):
+    """A preserved ERROR member blocks completion until recovery or shutdown."""
+    await _seed_member(db, "leader1", MemberStatus.READY.value)
+    await _seed_member(db, "member1", MemberStatus.ERROR.value)
+    await _drain_one_task(agent_team)
+
+    assert await agent_team.is_team_completed() is None
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_is_team_completed_leader_busy_returns_none(agent_team, db):
     """The leader counts as a member — a busy leader blocks completion."""
@@ -1726,3 +1737,103 @@ async def test_autostart_unstarted_noop_without_callback(db, message_bus):
     assert await backend.autostart_unstarted() == []
     member = await db.member.get_member("dev-1", team_id)
     assert member.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_recover_member_claims_error_before_restart(db, message_bus):
+    """A direct recovery atomically changes ERROR to RESTARTING before spawn."""
+    team_id = "recover_error_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Recover Error Team",
+        leader_member_name="leader1",
+    )
+    on_restarted = AsyncMock(return_value=True)
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_restarted=on_restarted,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    assert await backend.recover_member("dev-1") is True
+    on_restarted.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.RESTARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_recover_member_restores_error_when_restart_fails(db, message_bus):
+    """A failed runtime replacement leaves the member visibly recoverable."""
+    team_id = "recover_error_failure_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Recover Error Failure Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_restarted=AsyncMock(return_value=False),
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    assert await backend.recover_member("dev-1") is False
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.ERROR.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_shutdown_error_member_settles_without_runtime_event(db, message_bus):
+    """An ERROR member reaches SHUTDOWN without waiting for a dead runtime."""
+    team_id = "shutdown_error_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Shutdown Error Team",
+        leader_member_name="leader1",
+    )
+    on_stopped = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_stopped=on_stopped,
+    )
+    card = AgentCard(name="Dev1", description="dev 1", version="1.0.0")
+    await backend.spawn_member(
+        member_name="dev-1",
+        display_name="Dev 1",
+        agent_card=card,
+        status=MemberStatus.ERROR,
+    )
+
+    result = await backend.shutdown_member("dev-1")
+
+    assert result.ok
+    on_stopped.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.SHUTDOWN.value
+    assert await db.message.get_team_messages(team_name=team_id) == []

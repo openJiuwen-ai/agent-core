@@ -23,6 +23,7 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 )
 from openjiuwen.agent_evolving.trajectory.spans import iter_spans, read_tool_call, span_attributes
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs, ToolCallInputs
 
@@ -53,10 +54,10 @@ def _ctx(inputs) -> AgentCallbackContext:
 
 def _llm_attrs(prompt: str = "q", completion: str = "a") -> dict[str, str]:
     return {
-        f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-        f"{semconv.GEN_AI_PROMPT}.0.content": prompt,
-        f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-        f"{semconv.GEN_AI_COMPLETION}.0.content": completion,
+        f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.role": "user",
+        f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content": prompt,
+        f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.role": "assistant",
+        f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.content": completion,
     }
 
 
@@ -95,9 +96,9 @@ async def test_rl_rail_reads_tool_span_without_legacy_step_projection() -> None:
             name="tool.lookup",
             attrs={
                 semconv.GEN_AI_TOOL_NAME: "lookup",
-                semconv.GEN_AI_TOOL_ID: "call-1",
-                semconv.GEN_AI_TOOL_INPUT: '{"q":"x"}',
-                semconv.GEN_AI_TOOL_OUTPUT: '{"ok":true}',
+                semconv.GEN_AI_TOOL_CALL_ID: "call-1",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: '{"q":"x"}',
+                semconv.GEN_AI_TOOL_CALL_RESULT: '{"ok":true}',
             },
         )
     )
@@ -302,5 +303,5 @@ async def test_concurrent_runs_isolate_subscriptions_on_shared_processor() -> No
     first_spans = list(iter_spans(first))
     second_spans = list(iter_spans(second))
     assert len(first_spans) == len(second_spans) == 1
-    assert span_attributes(first_spans[0])[f"{semconv.GEN_AI_PROMPT}.0.content"] == "first"
-    assert span_attributes(second_spans[0])[f"{semconv.GEN_AI_PROMPT}.0.content"] == "second"
+    assert span_attributes(first_spans[0])[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content"] == "first"
+    assert span_attributes(second_spans[0])[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content"] == "second"

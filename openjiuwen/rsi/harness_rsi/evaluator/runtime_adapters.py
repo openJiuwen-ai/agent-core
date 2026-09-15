@@ -10,7 +10,7 @@ import os
 from typing import Any
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner import Runner
+from openjiuwen.core.runner.runner import Runner
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ToolCallInputs
 from openjiuwen.harness.prompts import PromptSection
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
@@ -109,7 +109,7 @@ class RSISysOperationRail(SysOperationRail):
                     EditFileTool(self.sys_operation, lang, agent_id),
                     *shared,
                 ]
-            if os.name == "nt":
+            if os.name == "nt" and not self._read_only:
                 self.tools.append(PowerShellTool(self.sys_operation, lang, agent_id=agent_id))
             if self._with_code_tool and not self._read_only:
                 self.tools.append(CodeTool(self.sys_operation, lang, agent_id))

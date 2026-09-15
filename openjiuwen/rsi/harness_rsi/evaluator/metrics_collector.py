@@ -8,6 +8,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _is_execution_only_evaluation
+
 
 class MetricsCollector:
     """Aggregate case results into summary metrics."""
@@ -17,6 +20,12 @@ class MetricsCollector:
         root = Path(case_results_dir).expanduser().resolve()
         result_files = sorted(root.glob("*/result.json"))
         results = [_load_json(path) for path in result_files]
+        for path, result in zip(result_files, results):
+            evaluation = result.get("evaluation")
+            if isinstance(evaluation, dict) and _is_execution_only_evaluation(evaluation):
+                raise EvaluationInfrastructureError(
+                    f"Cannot aggregate a legacy completion-only grade; reevaluate with a real judger: {path}"
+                )
         total = len(results)
         passed = sum(1 for item in results if _case_passed(item))
         failed = total - passed

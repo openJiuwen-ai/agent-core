@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Behavior tests for the ExternalHarnessProtocol-to-MemberRuntime bridge."""
+"""Behavior tests for the HarnessProtocol-to-MemberRuntime bridge."""
 
 from __future__ import annotations
 
@@ -15,23 +15,28 @@ from openjiuwen.agent_teams.external.member_runtime import (
     ExternalHarnessMemberRuntime,
     TeamContextAwareRuntime,
 )
-from openjiuwen.agent_teams.external.protocol import (
+from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
     EventBufferConfig,
-    ExternalHarnessCard,
-    ExternalHarnessContext,
-    ExternalHarnessInput,
-    ExternalHarnessProtocol,
-    ExternalHarnessStateError,
+    HarnessCard,
+    HarnessContext,
+    HarnessInput,
+    HarnessProtocol,
+    HarnessState,
+    HarnessStateError,
     HarnessCapability,
     HarnessEvent,
+    HostCapability,
+    InteractionResponseStatus,
     ItemEventKind,
     ItemLifecycleEvent,
     OutputChannel,
     OutputEvent,
     OutputKind,
     OutputOperation,
+    ProviderInteractionRequest,
+    ResumePolicy,
     SendReceipt,
     StateChangedEvent,
     TurnEventKind,
@@ -40,7 +45,7 @@ from openjiuwen.agent_teams.external.protocol import (
     TurnStatus,
     UnsupportedHarnessCapabilityError,
 )
-from openjiuwen.agent_teams.harness.state import HarnessState
+from tests.test_logger import logger
 
 
 class _FakeEventCursor:
@@ -85,7 +90,7 @@ class _FakeHarness:
         capabilities: frozenset[HarnessCapability] = frozenset(),
         state: HarnessState = HarnessState.IDLE,
     ) -> None:
-        self._card = ExternalHarnessCard(
+        self._card = HarnessCard(
             name="fake",
             implementation_version="1.0",
             capabilities=capabilities,
@@ -94,17 +99,17 @@ class _FakeHarness:
         self._session_id: str | None = None
         self._cursor = _FakeEventCursor()
         self._sequence = 0
-        self.start_contexts: list[ExternalHarnessContext] = []
+        self.start_contexts: list[HarnessContext] = []
         self.stop_calls = 0
         self.events_calls = 0
-        self.send_calls: list[tuple[ExternalHarnessInput, DeliveryMode]] = []
+        self.send_calls: list[tuple[HarnessInput, DeliveryMode]] = []
         self.abort_calls: list[AbortMode] = []
         self.pause_calls = 0
-        self.resume_calls: list[ExternalHarnessInput | None] = []
+        self.resume_calls: list[HarnessInput | None] = []
         self.fail_first_steer_after_terminal = False
 
     @property
-    def card(self) -> ExternalHarnessCard:
+    def card(self) -> HarnessCard:
         return self._card
 
     @property
@@ -116,14 +121,14 @@ class _FakeHarness:
         self._state = value
 
     @property
-    def session_id(self) -> str | None:
+    def provider_session_id(self) -> str | None:
         return self._session_id
 
     @property
     def event_buffer_config(self) -> EventBufferConfig:
         return EventBufferConfig(capacity=16)
 
-    async def start(self, context: ExternalHarnessContext) -> None:
+    async def start(self, context: HarnessContext) -> None:
         if self._cursor._finished:
             self._cursor = _FakeEventCursor()
         self.start_contexts.append(context)
@@ -145,14 +150,14 @@ class _FakeHarness:
 
     async def send(
         self,
-        content: ExternalHarnessInput,
+        content: HarnessInput,
         *,
         mode: DeliveryMode = DeliveryMode.AUTO,
     ) -> SendReceipt:
         self.send_calls.append((content, mode))
         if self.fail_first_steer_after_terminal and len(self.send_calls) == 1 and mode is DeliveryMode.STEER:
             self._state = HarnessState.IDLE
-            raise ExternalHarnessStateError("turn completed before steer acceptance")
+            raise HarnessStateError("turn completed before steer acceptance")
         return SendReceipt(
             message_id=f"message-{len(self.send_calls)}",
             turn_id="turn-1",
@@ -165,7 +170,7 @@ class _FakeHarness:
     async def pause(self) -> None:
         self.pause_calls += 1
 
-    async def resume(self, *, query: ExternalHarnessInput | None = None) -> None:
+    async def resume(self, *, query: HarnessInput | None = None) -> None:
         self.resume_calls.append(query)
 
     async def export_checkpoint(self) -> None:
@@ -182,9 +187,9 @@ class _FakeHarness:
             sequence=self._sequence,
             timestamp=float(self._sequence),
             event=payload,
-            team_session_id="team-session",
-            member_agent_id="member-agent",
-            session_id=self._session_id,
+            host_session_id="team-session",
+            agent_id="member-agent",
+            provider_session_id=self._session_id,
             turn_id=turn_id,
             item_id=item_id,
         )
@@ -196,12 +201,23 @@ class _FakeMemberSession:
     def __init__(self) -> None:
         self.pre_run_calls = 0
         self.post_run_calls = 0
+        self.commit_calls = 0
+        self.state: dict[str, Any] = {}
 
     async def pre_run(self) -> None:
         self.pre_run_calls += 1
 
     async def post_run(self) -> None:
         self.post_run_calls += 1
+
+    def get_state(self, key: str) -> Any:
+        return self.state.get(key)
+
+    def update_state(self, data: dict[str, Any]) -> None:
+        self.state.update(data)
+
+    async def commit(self) -> None:
+        self.commit_calls += 1
 
 
 class _FakeTeamSession:
@@ -230,13 +246,13 @@ class _OneShotTeamContextTracker:
         self.commits += 1
 
 
-def _context() -> ExternalHarnessContext:
-    return ExternalHarnessContext(
-        team_name="team",
-        member_name="worker",
-        member_agent_id="member-agent",
-        team_session_id="team-session",
+def _context() -> HarnessContext:
+    return HarnessContext(
+        agent_name="worker",
+        agent_id="member-agent",
+        host_session_id="team-session",
         system_prompt="work carefully",
+        metadata={"team_name": "team"},
     )
 
 
@@ -251,7 +267,7 @@ async def test_context_factory_start_stop_and_event_pump() -> None:
     team_session = _FakeTeamSession()
     factory_calls: list[Any] = []
 
-    async def context_factory(received_team_session: Any) -> ExternalHarnessContext:
+    async def context_factory(received_team_session: Any) -> HarnessContext:
         factory_calls.append(received_team_session)
         return _context()
 
@@ -264,7 +280,17 @@ async def test_context_factory_start_stop_and_event_pump() -> None:
     await runtime.stop()
 
     assert factory_calls == [team_session]
-    assert harness.start_contexts == [_context()]
+    assert len(harness.start_contexts) == 1
+    started = harness.start_contexts[0]
+    assert started.agent_name == "worker"
+    assert started.agent_id == "member-agent"
+    assert started.system_prompt == "work carefully"
+    # The runtime installs the host services it owns: the IO adapter answers
+    # user-input requests and the member session persists checkpoints.
+    assert HostCapability.USER_INPUT in started.host_capabilities
+    assert HostCapability.CHECKPOINT_SINK in started.host_capabilities
+    assert started.interactions is not None
+    assert started.checkpoint_sink is not None
     assert harness.events_calls == 1
     assert harness.stop_calls == 1
     assert harness._cursor.close_calls == 1
@@ -301,7 +327,7 @@ async def test_each_runtime_cycle_owns_and_finalizes_a_fresh_member_session() ->
 @pytest.mark.level1
 async def test_failed_harness_start_finalizes_the_member_session() -> None:
     class _FailingStartHarness(_FakeHarness):
-        async def start(self, context: ExternalHarnessContext) -> None:
+        async def start(self, context: HarnessContext) -> None:
             _ = context
             raise RuntimeError("start failed")
 
@@ -561,7 +587,7 @@ async def test_concurrent_sends_deliver_pending_team_context_once() -> None:
 
         async def send(
             self,
-            content: ExternalHarnessInput,
+            content: HarnessInput,
             *,
             mode: DeliveryMode = DeliveryMode.AUTO,
         ) -> SendReceipt:
@@ -600,6 +626,85 @@ def test_runtime_satisfies_member_and_team_context_protocols() -> None:
     harness = _FakeHarness()
     runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
 
-    assert isinstance(harness, ExternalHarnessProtocol)
+    assert isinstance(harness, HarnessProtocol)
     assert isinstance(runtime, MemberRuntime)
     assert isinstance(runtime, TeamContextAwareRuntime)
+
+
+def _auth_fallback_request() -> ProviderInteractionRequest:
+    return ProviderInteractionRequest(
+        request_id="fallback-1",
+        provider="fake",
+        request_type="auth_fallback",
+        schema_version="1",
+        payload={"model": "alt"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auth_fallback_is_ratified_only_when_promotion_persists() -> None:
+    harness = _FakeHarness()
+    outcomes: list[bool] = [True, False]
+
+    async def promote() -> bool:
+        return outcomes.pop(0)
+
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    runtime.bind_fallback_promotion(promote)
+    await runtime.start(team_session=_FakeTeamSession())
+    interactions = harness.start_contexts[0].interactions
+    assert interactions is not None
+    assert HostCapability.PROVIDER_INTERACTION in harness.start_contexts[0].host_capabilities
+
+    persisted = await interactions.handle(_auth_fallback_request())
+    assert persisted.status is InteractionResponseStatus.COMPLETED
+    rejected = await interactions.handle(_auth_fallback_request())
+    assert rejected.status is InteractionResponseStatus.DECLINED
+    unknown = await interactions.handle(
+        ProviderInteractionRequest(request_id="x", provider="fake", request_type="other", schema_version="1", payload={})
+    )
+    assert unknown.status is InteractionResponseStatus.DECLINED
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auth_fallback_is_ratified_without_a_promotion_hook_and_declined_on_errors() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    await runtime.start(team_session=_FakeTeamSession())
+    interactions = harness.start_contexts[0].interactions
+    assert interactions is not None
+    accepted = await interactions.handle(_auth_fallback_request())
+    assert accepted.status is InteractionResponseStatus.COMPLETED
+    await runtime.stop()
+
+    async def broken() -> bool:
+        raise RuntimeError("db down")
+
+    broken_harness = _FakeHarness()
+    failing = ExternalHarnessMemberRuntime(harness=broken_harness, context=_context())
+    failing.bind_fallback_promotion(broken)
+    await failing.start(team_session=_FakeTeamSession())
+    declined = await broken_harness.start_contexts[0].interactions.handle(_auth_fallback_request())
+    assert declined.status is InteractionResponseStatus.DECLINED
+    await failing.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_resume_without_a_saved_checkpoint_starts_a_new_session() -> None:
+    """A member that never checkpointed has no resumable target; recovery starts fresh.
+
+    Failing the member outright instead would strand a recoverable roster entry
+    on nothing more than a missing checkpoint.
+    """
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context(), resume_external_backend=True)
+    await runtime.start(team_session=_FakeTeamSession())
+    started = harness.start_contexts[0]
+    assert started.checkpoint is None
+    assert started.resume_policy is not ResumePolicy.REQUIRE_RESUME
+    await runtime.stop()
+    logger.info("resume without a checkpoint starts a new session")

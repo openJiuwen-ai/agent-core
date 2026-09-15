@@ -371,6 +371,7 @@ class LlmJudgeSignalExtractor:
 
         rationale_missing: list[str] = []
         low_score_behaviors: dict[str, list[str]] = {}
+        triggered_forbidden_behaviors: dict[str, list[str]] = {}
         behavior_score_distribution: dict[str, dict[str, float]] = {}
         behavior_diagnostics: dict[str, dict[str, dict[str, str]]] = {}
         avg_behavior_score: dict[str, float] = {}
@@ -386,6 +387,7 @@ class LlmJudgeSignalExtractor:
 
             cid = case.case_id
             low_score_behaviors[cid] = dimensions.get("low_score_behaviors") or []
+            triggered_forbidden_behaviors[cid] = dimensions.get("triggered_forbidden_behaviors") or []
             behavior_score_distribution[cid] = dimensions.get("per_behavior_scores") or {}
             behavior_diagnostics[cid] = _behavior_diagnostics(dimensions.get("behavior_diagnostics"))
             avg_behavior_score[cid] = float(dimensions.get("avg_behavior_score", 0.0))
@@ -409,6 +411,7 @@ class LlmJudgeSignalExtractor:
 
         method_specific: dict[str, object] = {
             "low_score_behaviors": low_score_behaviors,
+            "triggered_forbidden_behaviors": triggered_forbidden_behaviors,
             "behavior_score_distribution": behavior_score_distribution,
             "behavior_diagnostics": behavior_diagnostics,
             "avg_behavior_score": avg_behavior_score,

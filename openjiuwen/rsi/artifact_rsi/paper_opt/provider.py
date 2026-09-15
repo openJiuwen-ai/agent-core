@@ -52,7 +52,9 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         """Start a new paper optimization task.
 
         Persist state, reporting nodes, reports, and artifacts before invoking
-        ``on_event``.  Emit running status first and a terminal status last.
+        ``on_event``.  Emit running status first, use ``NodeStageEvent`` for
+        subprocess transitions when applicable, and emit a terminal status
+        last.
         """
         ...
 
@@ -61,7 +63,7 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         task_id: str,
         on_event: OnEvent | None = None,
     ) -> EngineResult:
-        """Return ``SCENARIO_NOT_SUPPORTED`` without changing paper task state."""
+        """Pause the active paper task and persist its current checkpoint."""
         ...
 
     async def resume(
@@ -69,7 +71,7 @@ class PaperArtifactProvider(ArtifactProvider, Protocol):
         request: ArtifactEngineRequest,
         on_event: OnEvent | None = None,
     ) -> EngineResult:
-        """Return ``SCENARIO_NOT_SUPPORTED`` without changing paper task state."""
+        """Paper recovery is not exposed yet; return ``SCENARIO_NOT_SUPPORTED``."""
         ...
 
     def read_state(self, task_id: str) -> EngineState:

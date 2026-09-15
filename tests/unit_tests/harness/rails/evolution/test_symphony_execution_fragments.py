@@ -18,7 +18,7 @@ def _span(
     trace_id: int = 1,
     parent_span_id: int | None = None,
     attributes: dict[str, Any] | None = None,
-    status: str = "STATUS_CODE_OK",
+    status: str | int = "STATUS_CODE_OK",
 ) -> dict[str, Any]:
     span: dict[str, Any] = {
         "traceId": f"{trace_id:032x}",
@@ -56,8 +56,8 @@ def _skill_read(span_id: int, skill_name: str, *, parent_span_id: int = 1, succe
         parent_span_id=parent_span_id,
         attributes={
             semconv.GEN_AI_TOOL_NAME: "skill_tool",
-            semconv.GEN_AI_TOOL_INPUT: {"skill_name": skill_name, "relative_file_path": "SKILL.md"},
-            semconv.GEN_AI_TOOL_OUTPUT: {"success": success},
+            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": skill_name, "relative_file_path": "SKILL.md"},
+            semconv.GEN_AI_TOOL_CALL_RESULT: {"success": success},
         },
     )
 
@@ -108,8 +108,8 @@ def test_only_explicit_successful_skill_tool_starts_a_skill_window() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "errored"},
-                        semconv.GEN_AI_TOOL_OUTPUT: {"success": True},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "errored"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
                     },
                     status="STATUS_CODE_ERROR",
                 ),
@@ -119,8 +119,8 @@ def test_only_explicit_successful_skill_tool_starts_a_skill_window() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {},
-                        semconv.GEN_AI_TOOL_OUTPUT: {"success": True},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
                     },
                 ),
             ),
@@ -143,8 +143,8 @@ def test_serialized_tool_output_requires_success_without_an_error() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "alpha"},
-                        semconv.GEN_AI_TOOL_OUTPUT: "success=True data={} error=None",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "alpha"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: "success=True data={} error=None",
                     },
                 ),
                 _span(
@@ -153,8 +153,8 @@ def test_serialized_tool_output_requires_success_without_an_error() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"skill_name": "broken"},
-                        semconv.GEN_AI_TOOL_OUTPUT: "success=True data=None error='failed read'",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "broken"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: "success=True data=None error='failed read'",
                     },
                 ),
             ),
@@ -163,6 +163,56 @@ def test_serialized_tool_output_requires_success_without_an_error() -> None:
 
     assert [(fragment.capability_type, fragment.capability_name) for fragment in fragments] == [
         ("skill", "alpha"),
+    ]
+
+
+def test_authoritative_truncated_skill_output_preserves_success() -> None:
+    truncated_output = '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
+    fragments = _fragments(
+        (
+            0,
+            _trajectory(
+                _span("agent.main", 1),
+                _span(
+                    "tool.skill_tool",
+                    2,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "travel-guide-generator"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
+                        semconv.OJ_TOOL_AUTHORITATIVE: True,
+                    },
+                    status=1,
+                ),
+                _span(
+                    "tool.skill_tool",
+                    3,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "untrusted"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
+                    },
+                ),
+                _span(
+                    "tool.skill_tool",
+                    4,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "errored"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: truncated_output,
+                        semconv.OJ_TOOL_AUTHORITATIVE: True,
+                    },
+                    status="STATUS_CODE_ERROR",
+                ),
+            ),
+        )
+    )
+
+    assert [(fragment.capability_type, fragment.capability_name) for fragment in fragments] == [
+        ("skill", "travel-guide-generator"),
     ]
 
 
@@ -180,8 +230,8 @@ def test_skill_read_accepts_observability_args_kwargs_input_envelope() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: [[], {"skill_name": "alpha"}],
-                        semconv.GEN_AI_TOOL_OUTPUT: "success=True data={} error=None",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: [[], {"skill_name": "alpha"}],
+                        semconv.GEN_AI_TOOL_CALL_RESULT: "success=True data={} error=None",
                     },
                 ),
             ),
@@ -207,8 +257,8 @@ def test_skill_read_accepts_observability_positional_input_envelope() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "skill_tool",
-                        semconv.GEN_AI_TOOL_INPUT: [[{"skill_name": "alpha"}], {}],
-                        semconv.GEN_AI_TOOL_OUTPUT: "success=True data={} error=None",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: [[{"skill_name": "alpha"}], {}],
+                        semconv.GEN_AI_TOOL_CALL_RESULT: "success=True data={} error=None",
                     },
                 ),
             ),
@@ -247,8 +297,8 @@ def test_skill_windows_prefer_explicit_script_ownership_over_read_order() -> Non
             parent_span_id=1,
             attributes={
                 semconv.GEN_AI_TOOL_NAME: "bash",
-                semconv.GEN_AI_TOOL_INPUT: [[{"command": command}], {}],
-                semconv.GEN_AI_TOOL_OUTPUT: {"success": True},
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: [[{"command": command}], {}],
+                semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
             },
         )
 
@@ -281,10 +331,148 @@ def test_skill_windows_prefer_explicit_script_ownership_over_read_order() -> Non
     }
     assert skills == {
         "energy-calculator": tuple(f"{value:016x}" for value in (1, 2, 4)),
-        "pause-detector": tuple(f"{value:016x}" for value in (1, 3, 7)),
-        "silence-detector": tuple(f"{value:016x}" for value in (1, 5, 7)),
+        "pause-detector": tuple(f"{value:016x}" for value in (1, 3)),
+        "silence-detector": tuple(f"{value:016x}" for value in (1, 5)),
         "segment-combiner": tuple(f"{value:016x}" for value in (1, 6, 9)),
         "video-processor": tuple(f"{value:016x}" for value in (1, 8, 10)),
+    }
+
+
+def test_skill_window_supports_relative_script_after_cd_and_keeps_preparation() -> None:
+    def bash(span_id: int, command: str) -> dict[str, Any]:
+        return _span(
+            "tool.bash",
+            span_id,
+            parent_span_id=1,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "bash",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
+            },
+        )
+
+    fragments = _fragments(
+        (
+            0,
+            _trajectory(
+                _span("agent.main", 1),
+                _skill_read(2, "alpha"),
+                _skill_read(3, "beta"),
+                bash(4, "python skills/beta/scripts/run.py"),
+                _span(
+                    "tool.write_file",
+                    5,
+                    parent_span_id=1,
+                    attributes={semconv.GEN_AI_TOOL_NAME: "write_file"},
+                ),
+                bash(6, 'cd "/opt/skills/alpha" && runner scripts/build.py'),
+            ),
+        )
+    )
+
+    skills = {
+        fragment.capability_name: fragment.span_ids for fragment in fragments if fragment.capability_type == "skill"
+    }
+    assert skills == {
+        "alpha": tuple(f"{value:016x}" for value in (1, 2, 5, 6)),
+        "beta": tuple(f"{value:016x}" for value in (1, 3, 4)),
+    }
+
+
+def test_relative_multi_skill_reference_and_children_are_not_assigned() -> None:
+    def bash(span_id: int, command: str, *, parent_span_id: int = 1) -> dict[str, Any]:
+        return _span(
+            "tool.bash",
+            span_id,
+            parent_span_id=parent_span_id,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "bash",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
+            },
+        )
+
+    fragments = _fragments(
+        (
+            0,
+            _trajectory(
+                _span("agent.main", 1),
+                _skill_read(2, "alpha"),
+                _skill_read(3, "beta"),
+                bash(4, "cd /skills/alpha && run scripts/a.py; cd /skills/beta && run scripts/b.py"),
+                bash(5, "nested work", parent_span_id=4),
+                bash(6, "cd /skills/alpha && run scripts/final.py"),
+            ),
+        )
+    )
+
+    skills = {
+        fragment.capability_name: fragment.span_ids for fragment in fragments if fragment.capability_type == "skill"
+    }
+    assert skills == {
+        "alpha": tuple(f"{value:016x}" for value in (1, 2, 6)),
+        "beta": tuple(f"{value:016x}" for value in (1, 3)),
+    }
+
+
+def test_relative_script_uses_latest_sequential_cd_scope() -> None:
+    command = "cd /skills/alpha && echo prep; cd /skills/beta && python scripts/run.py"
+    trajectory = _trajectory(
+        _span("agent.main", 1),
+        _skill_read(2, "alpha"),
+        _skill_read(3, "beta"),
+        _span(
+            "tool.bash",
+            4,
+            parent_span_id=1,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "bash",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"command": command},
+                semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
+            },
+        ),
+    )
+
+    skills = {
+        fragment.capability_name: fragment.span_ids
+        for fragment in _fragments((0, trajectory))
+        if fragment.capability_type == "skill"
+    }
+
+    assert skills == {
+        "alpha": tuple(f"{value:016x}" for value in (1, 2)),
+        "beta": tuple(f"{value:016x}" for value in (1, 3, 4)),
+    }
+
+
+def test_relative_script_after_or_keeps_possible_cwd_ambiguous() -> None:
+    trajectory = _trajectory(
+        _span("agent.main", 1),
+        _skill_read(2, "alpha"),
+        _skill_read(3, "beta"),
+        _span(
+            "tool.bash",
+            4,
+            parent_span_id=1,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "bash",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {
+                    "command": "cd /skills/alpha || cd /skills/beta && python scripts/run.py"
+                },
+                semconv.GEN_AI_TOOL_CALL_RESULT: {"success": True},
+            },
+        ),
+    )
+
+    skills = {
+        fragment.capability_name: fragment.span_ids
+        for fragment in _fragments((0, trajectory))
+        if fragment.capability_type == "skill"
+    }
+
+    assert skills == {
+        "alpha": tuple(f"{value:016x}" for value in (1, 2)),
+        "beta": tuple(f"{value:016x}" for value in (1, 3)),
     }
 
 
@@ -307,7 +495,7 @@ def test_tool_and_subagent_fragments_keep_native_invocation_boundaries() -> None
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "task_tool",
-                        semconv.GEN_AI_TOOL_INPUT: {"subagent_type": "research"},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"subagent_type": "research"},
                     },
                 ),
                 _span(
@@ -345,12 +533,12 @@ def test_team_member_projection_uses_member_ids_not_nested_subagents() -> None:
         _span(
             "agent.leader",
             1,
-            attributes={semconv.AT_MEMBER_ID: "leader", semconv.AT_AGENT_ID: "leader-agent"},
+            attributes={semconv.AT_MEMBER_NAME: "leader", semconv.AT_AGENT_ID: "leader-agent"},
         ),
         _span(
             "agent.writer",
             2,
-            attributes={semconv.AT_MEMBER_ID: "writer", semconv.AT_AGENT_ID: "writer-agent"},
+            attributes={semconv.AT_MEMBER_NAME: "writer", semconv.AT_AGENT_ID: "writer-agent"},
         ),
         _span(
             "agent.inner",
@@ -373,15 +561,15 @@ def test_team_member_projection_uses_member_ids_not_nested_subagents() -> None:
 
 def test_team_branches_and_continuities_do_not_merge_skill_windows() -> None:
     first = _trajectory(
-        _span("agent.member-a", 1, attributes={semconv.AT_MEMBER_ID: "member-a"}),
+        _span("agent.member-a", 1, attributes={semconv.AT_MEMBER_NAME: "member-a"}),
         _skill_read(2, "alpha", parent_span_id=1),
         _span("tool.member-a", 3, parent_span_id=1, attributes={semconv.GEN_AI_TOOL_NAME: "member-a"}),
-        _span("agent.member-b", 10, attributes={semconv.AT_MEMBER_ID: "member-b"}),
+        _span("agent.member-b", 10, attributes={semconv.AT_MEMBER_NAME: "member-b"}),
         _skill_read(11, "beta", parent_span_id=10),
         _span("tool.member-b", 12, parent_span_id=10, attributes={semconv.GEN_AI_TOOL_NAME: "member-b"}),
     )
     second = _trajectory(
-        _span("agent.member-a", 20, attributes={semconv.AT_MEMBER_ID: "member-a"}),
+        _span("agent.member-a", 20, attributes={semconv.AT_MEMBER_NAME: "member-a"}),
         _skill_read(21, "alpha", parent_span_id=20),
     )
 
@@ -409,7 +597,7 @@ def test_subagent_dispatch_accepts_observability_args_kwargs_input_envelope() ->
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "sessions_spawn",
-                        semconv.GEN_AI_TOOL_INPUT: [[], {"subagent_type": "research"}],
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: [[], {"subagent_type": "research"}],
                     },
                 ),
                 _span(
@@ -440,7 +628,7 @@ def test_skill_fallback_window_excludes_dispatched_child_branch() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "sessions_spawn",
-                        semconv.GEN_AI_TOOL_INPUT: {"subagent_type": "research"},
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"subagent_type": "research"},
                     },
                 ),
                 _span("agent.worker", 4, parent_span_id=3),
@@ -471,7 +659,7 @@ def test_explicit_skill_window_excludes_dispatched_child_branch() -> None:
                     parent_span_id=1,
                     attributes={
                         semconv.GEN_AI_TOOL_NAME: "sessions_spawn",
-                        semconv.GEN_AI_TOOL_INPUT: {
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {
                             "subagent_type": "research",
                             "task_description": "Run skills/alpha/scripts/run.py",
                         },
@@ -531,13 +719,13 @@ def test_team_member_projection_selects_a_root_within_each_trace() -> None:
             "agent.trace-a-member",
             10,
             trace_id=10,
-            attributes={semconv.AT_MEMBER_ID: "trace-a-member"},
+            attributes={semconv.AT_MEMBER_NAME: "trace-a-member"},
         ),
         _span(
             "agent.trace-b-member",
             20,
             trace_id=20,
-            attributes={semconv.AT_MEMBER_ID: "trace-b-member"},
+            attributes={semconv.AT_MEMBER_NAME: "trace-b-member"},
         ),
     )
 

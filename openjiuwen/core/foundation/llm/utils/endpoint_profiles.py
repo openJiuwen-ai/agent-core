@@ -30,6 +30,10 @@ class EndpointProfile(BaseModel):
     extensions: dict[str, Any] = Field(default_factory=dict)
 
 
+def model_requires_reasoning_content(model: Any) -> bool:
+    return "deepseek" in str(model or "").strip().lower()
+
+
 def _deepseek_reasoning_content(messages: list[dict]) -> list[dict]:
     for message in messages:
         if message.get("role") == "assistant":
@@ -45,10 +49,7 @@ MESSAGE_TRANSFORMS: dict[str, Callable[[list[dict]], list[dict]]] = {
 ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
     "openai": EndpointProfile(name="openai"),
     "openai_compatible": EndpointProfile(name="openai_compatible"),
-    "deepseek": EndpointProfile(
-        name="deepseek",
-        message_transforms=["deepseek_reasoning_content"],
-    ),
+    "deepseek": EndpointProfile(name="deepseek"),
     "openrouter": EndpointProfile(name="openrouter"),
     "siliconflow": EndpointProfile(name="siliconflow"),
     "dashscope": EndpointProfile(name="dashscope"),

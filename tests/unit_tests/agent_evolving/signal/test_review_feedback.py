@@ -40,8 +40,8 @@ def _tool_trajectory(
                 "attributes": attributes_from_map(
                     {
                         semconv.GEN_AI_TOOL_NAME: tool_name,
-                        semconv.GEN_AI_TOOL_INPUT: tool_input,
-                        semconv.GEN_AI_TOOL_OUTPUT: tool_output,
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: tool_input,
+                        semconv.GEN_AI_TOOL_CALL_RESULT: tool_output,
                     }
                 ),
             }

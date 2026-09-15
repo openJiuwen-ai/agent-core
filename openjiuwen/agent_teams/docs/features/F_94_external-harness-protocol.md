@@ -5,8 +5,8 @@
 | 项 | 值 |
 |---|---|
 | 日期 | 2026-08-20 |
-| 范围 | `openjiuwen/agent_teams/external/protocol`、`docs/dev/agent_teams/external_harness_integration.md` |
-| 协议版本 | `4.0` |
+| 范围 | `openjiuwen/harness_protocol`、`docs/dev/harness_protocol_integration.md` |
+| 协议版本 | `1.0` |
 | Refs | 未关联 issue |
 
 ## 背景
@@ -33,7 +33,7 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
 
 ## 决策
 
-1. **保留高层 Harness 边界**：`ExternalHarnessProtocol` 继续负责 start/stop、send、
+1. **保留高层 Harness 边界**：`HarnessProtocol` 继续负责 start/stop、send、
    abort/pause/resume、cycle-long events 和 checkpoint；不公开厂商单 turn 驱动接口。
 2. **新增独立 interaction control plane**：`HarnessInteractionHandler` 处理 tool approval、user input、
    MCP elicitation、dynamic tool call 和 provider extension。它由 host 注入 context，request/response
@@ -46,18 +46,19 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
    timing，同时用 `provider_data` 保留厂商字段。
 6. **不在协议层依赖 OutputSchema**：三方实现先做无损、provider-neutral 映射；未来
    MemberRuntime adapter 再转换为当前内部 stream schema。
-7. **checkpoint 使用版本化信封和 push/pull 双通道**：`HarnessCheckpoint` 绑定 provider、版本和 member；
+7. **checkpoint 使用版本化信封和 push/pull 双通道**：`HarnessCheckpoint` 绑定 provider、版本、agent 与 host session；
    `HarnessCheckpointSink` 在 session/turn 状态变化时主动持久化；`export_checkpoint()` 保留按需快照。
-8. **协议 major 升级到 2.0**：事件形状、terminal result 和 checkpoint 类型均为破坏性语义变化。
+8. **协议作为根级 1.0 发布**：公共包位于 `openjiuwen.harness_protocol`，不保留此前 team 目录下的
+   import path、`ExternalHarness*` 类型名或 wire 字段兼容逻辑。
 9. **本次不迁移现有 backend**：Claude/Codex runtime、registry、MemberRuntime adapter 和声明式配置
    接线仍留给后续变更。
 10. **提供持续流和单 Turn 流两种视图**：`events()` 跨 Turn 持续到 stop；`turn_events()` 参考
     Claude SDK，从下一个 Turn STARTED 产出到 terminal event（含）后结束。两者共享同一单消费者流，
     不引入隐式多播。
-11. **统一执行层术语并升级到 3.0**：固定 `Session > Turn > Iteration > Step`，Round 只属于
-    multi-agent 协作阶段。删除单 Agent 边界上的 Round 命名，统一为 `turn_id`、
-    `TurnLifecycleEvent`、`TurnEventKind` 和 `turn_events()`。
-12. **闭合 Turn 暂停语义并升级到 4.0**：PAUSED/RESUMED 是同一 Turn 内的非终态转换；只有
+11. **统一执行层术语**：固定 `Session > Turn > Step`，Step 表示一次 Agent Loop 控制循环；原先的
+    原子动作含义不进入协议层级。Round 只属于 multi-agent 协作阶段，单 Agent 边界统一为
+    `turn_id`、`TurnLifecycleEvent`、`TurnEventKind` 和 `turn_events()`。
+12. **闭合 Turn 暂停语义**：PAUSED/RESUMED 是同一 Turn 内的非终态转换；只有
     FINISHED/ABORTED/FAILED 终结 Turn，有限流跨暂停继续消费。
 13. **输入在接受时关联 Turn**：`SendReceipt` 返回 `turn_id`；queued input 预分配后继 Turn ID，
     STEER 关联当前 Turn，`turn_events(turn_id)` 可精确消费已接受输入。
@@ -77,7 +78,7 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
     transport 不接受互相矛盾的 target。
 21. **冻结协议 JSON 边界**：输入、事件、结果、interaction、hook、tool 和 checkpoint 的 JSON 数据在
     构造时递归校验/复制/冻结；拒绝 NaN、Infinity、任意 Python object 和可变别名。
-22. **事件具备明确 scope 与因果关系**：信封携带 team session/member；correlation 表示逻辑 trace，
+22. **事件具备明确 scope 与因果关系**：信封携带 host session/agent；correlation 表示逻辑 trace，
     causation IDs 表示实际触发消息/请求；所有 ID 的作用域在 spec 中固定。
 23. **背压有界且不可丢终态**：Harness 暴露 `EventBufferConfig`；retention 由 payload 推导，required
     事件只能阻塞生产者，snapshot/cumulative 可合并，低级诊断/hook observation 才可 best-effort drop。
@@ -110,7 +111,6 @@ team 已经通过 Claude Agent SDK、Codex Python SDK 和 subprocess CLI adapter
 
 ## 已知遗留
 
-- 实现 `ExternalHarnessProtocol -> MemberRuntime` adapter。
 - 增加 provider registry / Python entry point discovery。
 - 把通用配置接入 `TeamAgentSpec`，并保留 `ExternalCliAgentSpec` 兼容映射。
 - 迁移 Claude Code 和 Codex backend，补齐 server-request handler、event/result 映射和 checkpoint sink。

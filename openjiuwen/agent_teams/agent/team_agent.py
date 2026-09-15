@@ -571,6 +571,8 @@ class TeamAgent(BaseAgent):
             spec,
             ctx,
             on_teammate_created=self._on_teammate_created,
+            on_teammate_restarted=self._restart_teammate_runtime,
+            on_teammate_stopped=self._stop_teammate_runtime,
             on_before_team_cleaned=self._finalize_team_worktrees_before_clean,
             on_team_cleaned=self._mark_team_cleaned,
             on_team_built=self._mark_team_built,
@@ -1595,22 +1597,32 @@ class TeamAgent(BaseAgent):
         )
 
     async def auto_start_member(self, member_name: str) -> bool:
-        """Start a single UNSTARTED member via TeamBackend.startup_member.
+        """Start an UNSTARTED member or recover an ERROR member.
 
         Best-effort: failure is logged but does not raise.
-        Returns True if the member was started.
+        Returns True if the member was started or restarted.
         """
         backend = self.team_backend
         if backend is None or not backend.is_leader:
             return False
         try:
             started = await backend.startup_member(member_name, on_created=self._on_teammate_created)
+            if not started:
+                started = await backend.recover_member(member_name)
         except Exception as exc:
             team_logger.error("auto_start_member({}) failed: {}", member_name, exc)
             return False
         if started:
             team_logger.info("Auto-started member via interact: {}", member_name)
         return started
+
+    async def _restart_teammate_runtime(self, member_name: str) -> bool:
+        """Replace a failed teammate runtime without replaying its first prompt."""
+        return await self._spawn_manager.restart_teammate(member_name)
+
+    async def _stop_teammate_runtime(self, member_name: str) -> None:
+        """Remove a failed teammate's stale runtime handle."""
+        await self._spawn_manager.cleanup_teammate(member_name)
 
     async def auto_start_all(self) -> list[str]:
         """Start all UNSTARTED members via TeamBackend.startup.

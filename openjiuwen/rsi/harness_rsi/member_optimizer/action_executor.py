@@ -171,11 +171,16 @@ def _sync_skill_registry_for_written_files(
         raise ValueError(f"skill action must declare {registry_rel} so the skill can be mounted")
 
     registry_path = action_worktree.resolve() / registry_rel
-    existing = _load_registry_values(registry_path, "skills")
+    registry = _load_yaml_manifest(registry_path) if registry_path.is_file() else []
+    existing = registry.get("skills", []) if isinstance(registry, dict) else registry
+    if not isinstance(existing, list):
+        raise ValueError("skills registry must contain a list")
     merged = list(existing)
+    mounted = {str(value.get("dir", "") if isinstance(value, dict) else value).removeprefix("./") for value in existing}
     for addition in additions:
-        if addition not in merged:
+        if addition not in mounted:
             merged.append(addition)
+            mounted.add(addition)
 
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
@@ -424,9 +429,10 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             "the same trigger. Preserve the meaning and direction of the causal "
             "distinction, required action, acceptance observable, and scope boundary, "
             "but rewrite, combine, or shorten them into the clearest native Skill. "
-            "Do not promote syntax from the failed patch into a "
-            "general rule or prescribe a concrete patch recipe unless the contract's "
-            "observable established it. Include the "
+            "Case-specific code and assertions in the diagnosis are evidence, not "
+            "runtime constants. Express the causal relation using the next task's "
+            "inputs and requirements. Do not promote syntax from the failed patch "
+            "into a general rule or prescribe the literal task patch. Include the "
             "decisive distinction, the observable that ends investigation, the smallest "
             "justified action, and a concrete non-tautological acceptance probe that "
             "checks the positive case and nearest boundary. Merely avoiding an exception "
@@ -446,6 +452,21 @@ def _action_resource_guidance(action: MemberOptimizationAction) -> str:
             f"Keep `{target_path}` a valid package-local skill resource. If "
             "`skills/skills.yaml` is declared, keep it valid YAML and mount the "
             "parent `skills` directory."
+        )
+    if action.action_group == "subagent" and action.operation == "add":
+        return (
+            "This is a `subagent/add` action, not a `tool/add` action. "
+            f"Create the custom subagent package under `{target_path}`. "
+            "Write the subagent system prompt and any package-local resource "
+            "files declared in `constraints.local_resources`. "
+            "Use `constraints.inherited_tools` to choose parent tools that the "
+            "subagent inherits. For subagent-local tools, create the Python "
+            "Tool classes declared under `constraints.local_resources.tools`; "
+            "ToolCard input_params must be a JSON Schema with top-level "
+            "`type: object`. For subagent-local rails, create AgentRail classes "
+            "with hooks such as `before_model_call`. For local skills, create "
+            "`SKILL.md` files with YAML frontmatter. The executor will write "
+            "the package manifests and config from `constraints.local_resources`."
         )
     if action.action_group in {"tool", "rail"}:
         manifest = "tools/tools.yaml" if action.action_group == "tool" else "rails/rails.yaml"
@@ -800,6 +821,8 @@ class MemberActionExecutorAgent:
     async def _invoke_direct_action(self, message: str) -> str:
         async def call_once() -> str:
             model = load_member_optimizer_model(self._model_config_ref)
+            output_budget = model.model_config.max_tokens if model.model_config else None
+            # Keep provider-specific reasoning controls from the model configuration.
             response = await model.invoke(
                 messages=[
                     {"role": "system", "content": _ACTION_EXECUTION_PROMPT},
@@ -807,9 +830,13 @@ class MemberActionExecutorAgent:
                 ],
                 tools=None,
                 temperature=0.0,
-                max_tokens=8192,
-                extra_body={"enable_thinking": False},
+                max_tokens=output_budget if output_budget is not None else 8192,
             )
+            if getattr(response, "finish_reason", None) == "length":
+                raise RuntimeError(
+                    "member action artifact execution was truncated (finish_reason=length); "
+                    "check the configured output budget before retrying"
+                )
             return _extract_model_response_text(response)
 
         return await run_model_call_with_retries(
@@ -900,6 +927,22 @@ class MemberActionExecutorAgent:
         written_files: list[str],
     ) -> list[str]:
         root = action_worktree.resolve()
+        if action.action_group == "prompt" and action.operation == "add":
+            target_rel = _normalize_rel_path(action.target_path)
+            manifest_rel = "prompt_sections/sections.yaml"
+            if target_rel in written_files and target_rel.startswith("prompt_sections/files/"):
+                if not _path_allowed_by_declared(manifest_rel, declared_paths):
+                    raise ValueError(f"prompt/add requires declared manifest {manifest_rel}")
+                _append_manifest_entry(
+                    root / manifest_rel,
+                    list_key="sections",
+                    entry={
+                        "name": str(action.constraints.get("section_name") or Path(target_rel).stem),
+                        "file": target_rel,
+                        "priority": _int_or_default(action.constraints.get("priority"), 30),
+                    },
+                )
+                written_files = sorted(set([*written_files, manifest_rel]))
         written_files = _normalize_skill_frontmatter_name_for_written_files(
             action_worktree=root,
             action=action,
@@ -1777,82 +1820,6 @@ def _execute_deterministic_add_scaffold(
             "error": f"target_path {target_rel!r} is outside declared_write_paths",
         }
 
-    if action.action_group == "prompt":
-        if not target_rel.startswith("prompt_sections/files/") or not target_rel.endswith(".md"):
-            return {
-                "status": "failed",
-                "scaffold": {},
-                "error": "prompt/add scaffold target must be prompt_sections/files/*.md",
-            }
-        manifest_rel = "prompt_sections/sections.yaml"
-        if manifest_rel not in {_normalize_rel_path(path) for path in declared_paths}:
-            return {
-                "status": "failed",
-                "scaffold": {},
-                "error": f"add scaffold requires declared manifest {manifest_rel}",
-            }
-        section_name = str(action.constraints.get("section_name", "") or Path(target_rel).stem).strip()
-        priority = _int_or_default(action.constraints.get("priority"), 30)
-        content = _prompt_section_scaffold(action)
-        target = worktree_dir / target_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-        manifest = worktree_dir / manifest_rel
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        _append_manifest_entry(
-            manifest,
-            list_key="sections",
-            entry={"name": section_name, "file": target_rel, "priority": priority},
-        )
-        return {
-            "status": "succeeded",
-            "scaffold": {
-                "target_path": target_rel,
-                "manifest_path": manifest_rel,
-                "section_name": section_name,
-            },
-        }
-
-    if action.action_group == "skill":
-        if not target_rel.startswith("skills/") or not target_rel.endswith("/SKILL.md"):
-            return {
-                "status": "failed",
-                "scaffold": {},
-                "error": "skill/add scaffold target must be skills/<name>/SKILL.md",
-            }
-        manifest_rel = "skills/skills.yaml"
-        if manifest_rel not in {_normalize_rel_path(path) for path in declared_paths}:
-            return {
-                "status": "failed",
-                "scaffold": {},
-                "error": f"add scaffold requires declared manifest {manifest_rel}",
-            }
-        skill_root = Path(*Path(target_rel).parts[:-1]).as_posix()
-        skill_name = (
-            _skill_name_from_skill_md_path(target_rel)
-            or str(action.constraints.get("skill_name", "") or Path(skill_root).name).strip()
-        )
-        target = worktree_dir / target_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(_skill_scaffold(skill_name, action), encoding="utf-8")
-        manifest = worktree_dir / manifest_rel
-        existing = _load_registry_values(manifest, "skills")
-        if skill_root not in existing:
-            existing.append(skill_root)
-        manifest.parent.mkdir(parents=True, exist_ok=True)
-        manifest.write_text(
-            yaml.safe_dump({"skills": existing}, sort_keys=False, allow_unicode=True),
-            encoding="utf-8",
-        )
-        return {
-            "status": "succeeded",
-            "scaffold": {
-                "target_path": target_rel,
-                "manifest_path": manifest_rel,
-                "skill_root": skill_root,
-            },
-        }
-
     class_name = str(action.constraints.get("class_name", "") or "").strip()
     if not class_name:
         return {
@@ -1872,7 +1839,7 @@ def _execute_deterministic_add_scaffold(
             return {"status": "failed", "scaffold": {}, "error": "rail/add scaffold target must be rails/*.py"}
         manifest_rel = "rails/rails.yaml"
         list_key = "rails"
-        content = _rail_scaffold(class_name)
+        content = _rail_scaffold(class_name, action.description)
 
     if manifest_rel not in {_normalize_rel_path(path) for path in declared_paths}:
         return {
@@ -1973,11 +1940,13 @@ def _is_add_like_scaffold_action(
     worktree_dir: Path,
     action: MemberOptimizationAction,
 ) -> bool:
-    if action.action_group not in {"prompt", "skill", "tool", "rail"}:
+    # Semantic content belongs to the author. A draft copied from diagnosis
+    # would be presented back to it as existing, authoritative package content.
+    if action.action_group not in {"tool", "rail"}:
         return False
     if action.operation == "add":
         return True
-    if action.operation != "modify" or action.action_group not in {"skill", "tool"}:
+    if action.operation != "modify" or action.action_group != "tool":
         return False
     target_rel = _normalize_rel_path(action.target_path)
     return not (worktree_dir / target_rel).exists()
@@ -2023,7 +1992,8 @@ def _tool_scaffold(class_name: str, description: str) -> str:
     )
 
 
-def _rail_scaffold(class_name: str) -> str:
+def _rail_scaffold(class_name: str, description: str) -> str:
+    _ = description
     return "\n".join(
         [
             "from openjiuwen.core.single_agent.rail.base import AgentRail",
@@ -2037,71 +2007,6 @@ def _rail_scaffold(class_name: str) -> str:
             "",
         ]
     )
-
-
-def _prompt_section_scaffold(action: MemberOptimizationAction) -> str:
-    title = str(action.constraints.get("section_name", "") or Path(action.target_path).stem)
-    description = action.description.strip() or "Apply the requested prompt improvement."
-    rationale = action.rationale.strip()
-    expected_effect = action.expected_effect.strip()
-    lines = [
-        f"# {title.replace('_', ' ').title()}",
-        "",
-        description,
-    ]
-    if rationale:
-        lines.extend(["", "## Why This Matters", "", rationale])
-    if expected_effect:
-        lines.extend(["", "## Expected Behavior", "", expected_effect])
-    lines.extend(
-        [
-            "",
-            "## Operating Rule",
-            "",
-            (
-                "Before finalizing the answer, check this rule against the current task and revise the output "
-                "when it is violated."
-            ),
-            "",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _skill_scaffold(skill_name: str, action: MemberOptimizationAction) -> str:
-    safe_name = _canonical_skill_identifier(skill_name)
-    description = _skill_trigger_description(action)
-    rationale = action.rationale.strip()
-    expected_effect = action.expected_effect.strip()
-    lines = [
-        "---",
-        f"name: {safe_name}",
-        f"description: {description}",
-        "---",
-        "",
-        f"# {safe_name.replace('_', ' ').title()}",
-        "",
-        f"Skill ID: `{safe_name}`",
-        "",
-        description,
-    ]
-    if rationale:
-        lines.extend(["", "## When To Use", "", rationale])
-    lines.extend(
-        [
-            "",
-            "## Procedure",
-            "",
-            "1. Identify the task requirements and the evaluation behaviors that apply.",
-            "2. Map each requirement to a concrete output element before drafting.",
-            "3. Produce the artifact with explicit coverage of every mapped requirement.",
-            "4. Review the artifact against the requirements and repair missing elements before finishing.",
-        ]
-    )
-    if expected_effect:
-        lines.extend(["", "## Success Signal", "", expected_effect])
-    lines.append("")
-    return "\n".join(lines)
 
 
 def _skill_trigger_description(action: MemberOptimizationAction) -> str:

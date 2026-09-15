@@ -14,6 +14,19 @@ from google.protobuf import json_format
 from opentelemetry.exporter.otlp.proto.common._internal.trace_encoder import encode_spans
 from opentelemetry.sdk.trace import ReadableSpan
 
+from openjiuwen.extensions.observability.content_addressing import (
+    AddressedSequence,
+    addressable_attributes,
+    build_sequence,
+    sequence_reference,
+)
+from openjiuwen.extensions.observability.gen_ai_semconv import (
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_DEFINITIONS,
+)
+
 
 _HEX_ID_KEYS = frozenset({"traceId", "spanId", "parentSpanId"})
 
@@ -56,14 +69,63 @@ def encode_span_to_otlp_json(span: ReadableSpan) -> bytes:
     return _encode_readable_span(span)
 
 
-def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
-    """Encode the current state of one recording span without an end time.
+# The attributes a conversation restates on every call. Each is a sequence:
+# an array is its own, and a scalar is a sequence of one, so the storage path
+# never branches on which shape an attribute happens to carry.
+ADDRESSED_ATTRIBUTE_KEYS = frozenset({
+    GEN_AI_INPUT_MESSAGES,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_DEFINITIONS,
+})
 
-    The result deliberately has OTLP JSON shape for the local trajectory data
-    plane, but it is not an ended span export. Mutable SDK containers are copied
-    before encoding so an asynchronous consumer never observes later mutation.
+
+def encode_span_with_addressed_sequences(
+    span: ReadableSpan,
+) -> tuple[bytes, tuple[AddressedSequence, ...]]:
+    """Encode one span with its restated attributes replaced by references.
+
+    The exporter path keeps receiving the complete span; this is the storage
+    path, which has no obligation to repeat what it already holds. The encode
+    already builds a decoded document, so addressing costs one pass over its
+    attributes rather than a second parse downstream.
+
+    Args:
+        span: The frozen span to encode.
+
+    Returns:
+        The OTLP JSON carrying references, and every sequence it referenced.
+        A reader needs those sequences to rebuild the span.
     """
-    snapshot = ReadableSpan(
+    request = encode_spans([span])
+    payload = json_format.MessageToDict(request, use_integers_for_enums=True)
+    _fix_hex_ids(payload)
+    sequences: list[AddressedSequence] = []
+    for attribute in addressable_attributes(payload, ADDRESSED_ATTRIBUTE_KEYS):
+        value = attribute.get("value")
+        if not isinstance(value, dict):
+            continue
+        stated = value.get("stringValue")
+        if not isinstance(stated, str):
+            continue
+        sequence = build_sequence(str(attribute.get("key") or ""), stated)
+        if sequence is None:
+            continue
+        sequences.append(sequence)
+        value["stringValue"] = sequence_reference(sequence.seq_hash, sequence.depth)
+    encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    return encoded, tuple(sequences)
+
+
+def snapshot_readable_span(span: Any) -> ReadableSpan:
+    """Freeze the current state of one recording span into a ReadableSpan.
+
+    Mutable SDK containers are copied so an asynchronous consumer never observes
+    later mutation. This is roughly two orders of magnitude cheaper than encoding
+    the span, which lets a caller on a latency-sensitive thread hand the frozen
+    span downstream and let the consumer pay for encoding on its own thread.
+    """
+    return ReadableSpan(
         name=str(span.name),
         context=span.context,
         parent=span.parent,
@@ -77,10 +139,19 @@ def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
         end_time=None,
         instrumentation_scope=getattr(span, "instrumentation_scope", None),
     )
-    return _encode_readable_span(snapshot)
+
+
+def encode_recording_span_snapshot_to_otlp_json(span: Any) -> bytes:
+    """Encode the current state of one recording span without an end time.
+
+    The result deliberately has OTLP JSON shape for the local trajectory data
+    plane, but it is not an ended span export.
+    """
+    return _encode_readable_span(snapshot_readable_span(span))
 
 
 __all__ = [
     "encode_recording_span_snapshot_to_otlp_json",
     "encode_span_to_otlp_json",
+    "snapshot_readable_span",
 ]

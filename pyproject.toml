@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.17"
+version = "0.1.18"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -32,6 +32,14 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.41",
     "sqlmodel>=0.0.37",
     # AI/LLM
+    # Pinned exactly, not floored: `openjiuwen.rsi.artifact_rsi.program_opt`
+    # vendors the PUCT port out of agentdescent's `examples/` (which the wheel
+    # does not package) and imports internals around it (`FlatPuct`,
+    # `Candidate.prior`, `AggregatorConfig`, `vv_staleness`, `Ledger`,
+    # `get_policy`). None of those promise stability across releases, so a
+    # floor would let a minor bump move the algorithm the vendored code is
+    # written against.
+    "agentdescent==0.4.6",
     "anthropic>=0.120.2",
     "openai>=1.108.0",
     "transformers>=4.52.4",
@@ -66,6 +74,7 @@ dependencies = [
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
+    "matplotlib>=3.11.1",
     # OpenTelemetry SDK is imported unconditionally by openjiuwen.agent_evolving;
     # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
     # no longer pulls it, so declare it explicitly to keep imports working.
@@ -97,7 +106,7 @@ claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
 # The SDK has only ever published pre-releases; the lower bound names one so
 # PEP 440 lets a resolver pick it up at all. Import name stays `deepseek_harness`.
-dsh = ["deepseek-harness-sdk>=0.1.1rc1"]
+dsh = ["deepseek-harness-sdk>=0.1.5rc1"]
 ssh = ["asyncssh>=2.24.0"]
 observability = [
     "opentelemetry-api>=1.25.0",

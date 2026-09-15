@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from opentelemetry.sdk.trace import TracerProvider
 
 from openjiuwen.extensions.observability import span_context as shared_span_context
+from openjiuwen.extensions.observability.semconv import GEN_AI_OPERATION_NAME
 from openjiuwen.harness.observability import span_context as agent_span_context
 
 
@@ -175,6 +176,9 @@ def test_llm_span_lookup_falls_back_to_the_run_root() -> None:
 
         def __init__(self, name: str, span_id: int, parent: object = None) -> None:
             self.name = name
+            self.attributes = {
+                GEN_AI_OPERATION_NAME: "chat",
+            } if name == "llm.call" else {}
             self.context = SimpleNamespace(trace_id=trace_id, span_id=span_id)
             self.parent = parent.context if parent is not None else None
 

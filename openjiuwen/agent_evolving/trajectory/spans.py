@@ -579,6 +579,17 @@ def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
         tool_calls = _tool_calls_from_parts(message.get("parts"))
         if tool_calls:
             flat["tool_calls"] = tool_calls
+    if flat.get("role") == "tool":
+        parts = message.get("parts")
+        responses = [
+            part for part in parts
+            if isinstance(part, Mapping) and part.get("type") == "tool_call_response"
+        ] if isinstance(parts, list) else []
+        if responses:
+            response = responses[0]
+            flat.setdefault("content", deepcopy(response.get("response")))
+            if response.get("id") is not None:
+                flat.setdefault("tool_call_id", deepcopy(response["id"]))
     flat.setdefault("role", "unknown")
     return flat
 
@@ -586,15 +597,22 @@ def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
 def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
     """Render one flat role/content message as a structured GenAI message.
 
-    Text and tool calls become ``parts``; every other field a producer carries
-    (``name``, ``tool_call_id``, ``reasoning_content``, ...) stays alongside
-    them, so the round trip through :func:`_flatten_structured_message` is
-    lossless.
+    Text, tool calls, and tool responses become the exact part shapes defined
+    by the OpenTelemetry GenAI JSON schema.
     """
 
     parts: list[dict[str, Any]] = []
     content = message.get("content")
-    if content is not None:
+    role = str(message.get("role") or "unknown")
+    if role == "tool" and content is not None:
+        response: dict[str, Any] = {
+            "type": "tool_call_response",
+            "response": deepcopy(content),
+        }
+        if message.get("tool_call_id") is not None:
+            response["id"] = deepcopy(message["tool_call_id"])
+        parts.append(response)
+    elif content is not None:
         # Recorded even when empty: a message that carried an empty content
         # field is not the same as one that carried none.
         parts.append({"type": "text", "content": deepcopy(content)})
@@ -602,19 +620,25 @@ def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
     if isinstance(tool_calls, list):
         for call in tool_calls:
             if isinstance(call, Mapping):
-                # Carried whole rather than spread: a call has its own ``type``
-                # field, which would otherwise overwrite the part's.
-                parts.append({"type": "tool_call", "call": deepcopy(dict(call))})
+                function = call.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                part: dict[str, Any] = {"type": "tool_call"}
+                call_id = call.get("id", function.get("id"))
+                name = call.get("name", function.get("name"))
+                arguments = call.get("arguments", function.get("arguments"))
+                if call_id is not None:
+                    part["id"] = deepcopy(call_id)
+                if name is not None:
+                    part["name"] = deepcopy(name)
+                if arguments is not None:
+                    part["arguments"] = deepcopy(arguments)
+                parts.append(part)
     structured: dict[str, Any] = {
-        "role": str(message.get("role") or "unknown"),
+        "role": role,
         "parts": parts,
     }
-    for field, value in message.items():
-        if field in ("role", "content", "parts"):
-            continue
-        if field == "tool_calls" and isinstance(tool_calls, list):
-            continue
-        structured[field] = deepcopy(value)
+    if message.get("name") is not None:
+        structured["name"] = deepcopy(message["name"])
     return structured
 
 
@@ -696,7 +720,7 @@ def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], li
         _flatten_structured_message(message)
         for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
     ]
-    tool_calls = _decode_structured_attribute(attrs.get(semconv.GEN_AI_TOOL_CALLS))
+    tool_calls = _decode_structured_attribute(attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS))
     if tool_calls not in (None, ""):
         if completions:
             completions[0].setdefault("tool_calls", tool_calls)
@@ -721,19 +745,19 @@ def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     attrs = span_attributes(span)
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
-    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ID)
+    tool_id = attrs.get(semconv.GEN_AI_TOOL_CALL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_ID)
     if name is not None:
         result["name"] = deepcopy(name)
     if tool_id is not None:
         result["id"] = deepcopy(tool_id)
-    if semconv.GEN_AI_TOOL_INPUT in attrs:
-        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_INPUT])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
-        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS])
-    if semconv.GEN_AI_TOOL_OUTPUT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_OUTPUT])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT])
+    if semconv.GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
+        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT in attrs:
+        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT])
+    if semconv.GEN_AI_TOOL_CALL_RESULT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_RESULT])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT])
     error = read_span_error(span)
     if error is not None:
         result["error"] = error
@@ -747,13 +771,13 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
     mapping = (
         (
             "prompt_tokens",
-            (semconv.GEN_AI_USAGE_PROMPT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_INPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_INPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_PROMPT_TOKENS),
         ),
         (
             "completion_tokens",
-            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_OUTPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_COMPLETION_TOKENS),
         ),
-        ("total_tokens", (semconv.GEN_AI_USAGE_TOTAL_TOKENS,)),
+        ("total_tokens", (legacy_semconv.LEGACY_GEN_AI_USAGE_TOTAL_TOKENS,)),
     )
     result: dict[str, int] = {}
     for output_key, input_keys in mapping:
@@ -764,6 +788,8 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
             result[output_key] = int(value)
         except (TypeError, ValueError):
             continue
+    if "total_tokens" not in result and ("prompt_tokens" in result or "completion_tokens" in result):
+        result["total_tokens"] = result.get("prompt_tokens", 0) + result.get("completion_tokens", 0)
     return result
 
 

@@ -1,7 +1,7 @@
 # Default standalone Harness self-improvement configuration.
 
 workspace_dir: .local/rsi/workspace
-max_epochs: 1
+max_epochs: 5
 
 model_configs:
   evaluation: ""

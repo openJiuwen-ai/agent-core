@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -54,11 +53,6 @@ def _llm_span(
         prompt,
         [] if completion is None else [completion],
     )
-    if completion is not None and completion.get("tool_calls") is not None:
-        attributes[semconv.GEN_AI_TOOL_CALLS] = json.dumps(
-            completion["tool_calls"],
-            ensure_ascii=False,
-        )
     return _span(span_id, start=start, attributes=attributes)
 
 
@@ -71,7 +65,7 @@ def _trajectory(spans: list[dict]) -> Trajectory:
                         "attributes": attributes_from_map(
                             {
                                 "openjiuwen.trajectory_id": "trajectory-1",
-                                semconv.AT_SESSION_ID: "session-1",
+                                semconv.GEN_AI_CONVERSATION_ID: "session-1",
                             }
                         )
                     },
@@ -186,15 +180,15 @@ def test_normalizes_tool_calls_and_links_results_only_by_id() -> None:
         start=20,
         name="tool.search",
         attributes={
-            semconv.GEN_AI_TOOL_ID: "call-1",
-            semconv.GEN_AI_TOOL_OUTPUT: {"ok": True},
+            semconv.GEN_AI_TOOL_CALL_ID: "call-1",
+            semconv.GEN_AI_TOOL_CALL_RESULT: {"ok": True},
         },
     )
     unlinked_tool = _span(
         "tool-2",
         start=30,
         name="tool.search",
-        attributes={semconv.GEN_AI_TOOL_OUTPUT: "same-name output"},
+        attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "same-name output"},
     )
 
     messages = trajectory_to_messages(_trajectory([unlinked_tool, linked_tool, llm]))

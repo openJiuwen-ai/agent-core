@@ -322,6 +322,10 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     成功**之后**拉起——任务已经在板上，才谈得上有人来领）。该方法持有构造期注入的
     `on_member_started` 回调并自带 leader 门与回调门，**调用方不再各自捎带 spawn 回调**；
     幂等由下层 `startup_member` 的 CAS 保证。
+    单播/多播的具体收件人若是 `ERROR`，这次定向投递本身构成显式恢复请求：写库前经
+    `recover_member` 的 `ERROR→RESTARTING` CAS 重建 runtime；广播不批量恢复 ERROR，避免
+    一条泛化消息触发全队 restart storm。ERROR runtime 已经退出时，`shutdown_member` 则直接
+    CAS 到 `SHUTDOWN` 并清理 stale handle，不发送一个永远不会被消费的 shutdown event。
     两点边界：**scheduled 的 `create_task` 不拉人**（交接归 `TeamScheduler`，工具再插一手
     就是双投递，所以差异由 `ScheduledTaskCreateTool` 这个独立类吸收，不是 `invoke` 里的
     模式分支）；**拉起失败不改变工具的成败**——任务/消息已落库，报失败只会诱使模型重建一遍，
@@ -358,7 +362,7 @@ def create_team_tools(
 
 | 参数 | 取值 | 行为 |
 |---|---|---|
-| `role` | `"leader"` / `"teammate"` / `"human_agent"` | 决定基础工具集——分别为 `LEADER_TOOLS` / `MEMBER_TOOLS_BY_DISPATCH[dispatch_mode]` / `HUMAN_AGENT_TOOLS`。其它字符串当作 teammate 走（落入 else 分支）。新增角色必须显式补一个集合常量，不要靠 fall-through。 |
+| `role` | `"leader"` / `"teammate"` / `"human_agent"` | 决定基础工具集——分别为 `LEADER_TOOLS` / `MEMBER_TOOLS_BY_DISPATCH[dispatch_mode]` / `HUMAN_AGENT_TOOLS`。其它字符串当作 teammate 走（落入 else 分支）。新增角色必须显式补一个集合常量，不要靠 fall-through。**`passive_human` 故意不在这里**：被动人类成员没有 harness、没有 LLM 工具表，其许可面 `PASSIVE_HUMAN_TOOLS`（`HUMAN_AGENT_TOOLS \| {"claim_task"}`，scheduled 下减 claim_task）由 `interaction/passive_tool_executor.py` 直接消费——透传执行器按 sender 名构造绑定身份的 manager 与工具实例（先例：scheduler 的 `reviewer_tm`、F_26 external client）。见 F_111。 |
 | `dispatch_mode` | `"autonomous"` / `"scheduled"` | 任务如何到达成员。选择 `create_task` / `send_message` 的形态、`member_complete_task` 的 desc_key，以及成员工具集。未知值抛 `KeyError`。见不变量 18。 |
 | `agent_team` | `TeamBackend` | 后端句柄，所有写操作（`build_team` / `spawn_*` / 任务 / 消息）通过它走，不绕过去直接打数据库或 messager。 |
 | `teammate_mode` | `"build_mode"` / `"plan_mode"` | plan_mode 门禁。非 plan_mode 时从 allowed 集合里减掉 `approve_plan` / `submit_plan`，且未启用 team permissions 时也减掉 `approve_tool`。 |
