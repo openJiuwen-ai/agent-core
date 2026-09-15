@@ -435,7 +435,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 "parent_task_id": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
-                "task_type": {"type": "string"},
                 "required_capabilities": {"type": "array", "items": {"type": "string"}},
                 "output_spec": {"type": "object"},
                 "metadata": {"type": "object"},
@@ -481,7 +480,6 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             parent_task_id=inputs.get("parent_task_id"),
             title=inputs["title"],
             description=inputs["description"],
-            task_type=inputs.get("task_type"),
             required_capabilities=capabilities,
             output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
             metadata=inputs.get("metadata") or {},
@@ -947,56 +945,6 @@ class OrgReviewTaskTool(_OrgLeaderTool):
         return ToolOutput(success=True, data=result.data)
 
 
-class OrgCreateSummaryTaskTool(_OrgLeaderTool):
-    """Create a third-party summary task for HIERARCHICAL aggregation only."""
-
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
-        super().__init__(
-            name="org_create_summary_task",
-            description=(
-                "Create a HIERARCHICAL-aggregation summary task backed by completed sources. "
-                "Do not use this tool for SUMMARY_TEAM mode; use org_create_summary_execution."
-            ),
-            manager=manager,
-            team_id=team_id,
-            leader_id=leader_id,
-        )
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "task_id": {"type": "string"},
-                "title": {"type": "string"},
-                "description": {"type": "string"},
-                "source_task_ids": {"type": "array", "items": {"type": "string"}},
-                "output_spec": {"type": "object"},
-                "metadata": {"type": "object"},
-            },
-            "required": ["title", "description"],
-        }
-
-    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        await self._ensure_registered()
-        if not inputs.get("title") or not inputs.get("description"):
-            return ToolOutput(success=False, error="'title' and 'description' are required")
-        result = await self.manager.create_summary_task(
-            task_id=inputs.get("task_id"),
-            title=inputs["title"],
-            description=inputs["description"],
-            source_task_ids=inputs.get("source_task_ids") or [],
-            output_spec=OrgTaskOutputSpec.model_validate(inputs["output_spec"]) if inputs.get("output_spec") else None,
-            metadata=inputs.get("metadata") or {},
-            created_by=OrgTaskCreator(
-                creator_type="team_leader",
-                creator_id=self.leader_id,
-                organization_id=self.manager.organization_id,
-                team_id=self.team_id,
-            ),
-        )
-        if not result.ok or result.task is None:
-            return ToolOutput(success=False, error=result.reason)
-        return ToolOutput(success=True, data=result.task.brief())
-
-
 class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
     """Create the SUMMARY_TEAM-mode execution bound to the shared Summary Team."""
 
@@ -1106,57 +1054,14 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
             return ToolOutput(success=False, error=reason)
 
 
-class OrgAttachSummarySourcesTool(_OrgLeaderTool):
-    """Attach completed source tasks to a summary task."""
+class OrgSummaryGetInputsTool(_OrgLeaderTool):
+    """Read the current Summary Team's authorized execution inputs."""
 
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+        """Expose a Summary Team-only name for reading bound source snapshots."""
         super().__init__(
-            name="org_attach_summary_sources",
-            description="Attach completed source tasks to an organization summary task.",
-            manager=manager,
-            team_id=team_id,
-            leader_id=leader_id,
-        )
-        self.card.input_params = {
-            "type": "object",
-            "properties": {
-                "summary_task_id": {"type": "string"},
-                "source_task_ids": {"type": "array", "items": {"type": "string"}},
-                "source_role": {"type": "string"},
-                "required": {"type": "boolean"},
-            },
-            "required": ["summary_task_id", "source_task_ids"],
-        }
-
-    async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        await self._ensure_registered()
-        result = await self.manager.attach_summary_sources(
-            summary_task_id=inputs.get("summary_task_id", ""),
-            source_task_ids=inputs.get("source_task_ids") or [],
-            source_role=inputs.get("source_role"),
-            required=inputs.get("required", True),
-        )
-        if not result.ok:
-            return ToolOutput(success=False, error=result.reason)
-        return ToolOutput(success=True, data=result.data)
-
-
-class OrgViewSummarySourcesTool(_OrgLeaderTool):
-    """View source tasks and outputs for a summary task."""
-
-    def __init__(
-        self,
-        manager: OrgTaskManager,
-        team_id: str,
-        leader_id: str,
-        *,
-        name: str = "org_view_summary_sources",
-        description: str = "View source task outputs attached to an organization summary task.",
-    ) -> None:
-        """Create a source-reader tool with its final ToolCard identity."""
-        super().__init__(
-            name=name,
-            description=description,
+            name="org_summary_get_inputs",
+            description="Read only the bound, accepted inputs for this Summary Team execution.",
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -1168,6 +1073,7 @@ class OrgViewSummarySourcesTool(_OrgLeaderTool):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
+        """Return only source snapshots bound to the calling Summary Team execution."""
         await self._ensure_registered()
         summary_task_id = inputs.get("summary_task_id")
         if not summary_task_id:
@@ -1178,23 +1084,10 @@ class OrgViewSummarySourcesTool(_OrgLeaderTool):
         )
         if data is None:
             return ToolOutput(
-                success=False, error=f"summary task not found or not assigned to this team: {summary_task_id}"
+                success=False,
+                error=f"summary task not found or not assigned to this Summary Team: {summary_task_id}",
             )
         return ToolOutput(success=True, data=data)
-
-
-class OrgSummaryGetInputsTool(OrgViewSummarySourcesTool):
-    """Read the current Summary Team's authorized execution inputs."""
-
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
-        """Expose a Summary Team-only name for reading bound source snapshots."""
-        super().__init__(
-            manager,
-            team_id,
-            leader_id,
-            name="org_summary_get_inputs",
-            description="Read only the bound, accepted inputs for this Summary Team execution.",
-        )
 
 
 class OrgSummaryCompleteTool(_OrgLeaderTool):
@@ -1273,14 +1166,11 @@ def create_org_leader_tools(
         OrgViewChildTasksTool(manager, team_id, leader_id),
         OrgViewPendingReviewsTool(manager, team_id, leader_id),
         OrgReviewTaskTool(manager, team_id, leader_id),
-        OrgCreateSummaryTaskTool(manager, team_id, leader_id),
         *(
             [OrgCreateSummaryExecutionTool(manager, team_id, leader_id, runtime_manager, session_id)]
             if runtime_manager is not None and session_id is not None
             else []
         ),
-        OrgAttachSummarySourcesTool(manager, team_id, leader_id),
-        OrgViewSummarySourcesTool(manager, team_id, leader_id),
     ]
 
 
@@ -1316,10 +1206,7 @@ ORG_LEADER_TOOL_NAMES = {
     "org_view_child_tasks",
     "org_view_pending_reviews",
     "org_review_task",
-    "org_create_summary_task",
     "org_create_summary_execution",
-    "org_attach_summary_sources",
-    "org_view_summary_sources",
     "org_summary_get_inputs",
     "org_summary_complete",
 }
@@ -1339,8 +1226,6 @@ __all__ = [
     "OrgClaimTaskTool",
     "OrgCreateTaskTool",
     "OrgDelegateTaskTool",
-    "OrgAttachSummarySourcesTool",
-    "OrgCreateSummaryTaskTool",
     "OrgSummaryCompleteTool",
     "OrgSummaryGetInputsTool",
     "OrgCreateSummaryExecutionTool",
@@ -1352,7 +1237,6 @@ __all__ = [
     "OrgUpdateTaskTool",
     "OrgViewChildTasksTool",
     "OrgViewPendingReviewsTool",
-    "OrgViewSummarySourcesTool",
     "OrgViewTasksTool",
     "create_org_leader_tools",
     "create_summary_leader_tools",

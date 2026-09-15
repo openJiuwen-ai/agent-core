@@ -1453,17 +1453,18 @@ class OrganizationRuntimeManager:
             f"Your team claimed organization task {task_id} in {organization_id}. "
             "Inspect it with org_view_tasks(action='get'). If it is a root task and still CLAIMED, first "
             "call org_update_task(action='set_aggregation_mode') to choose HIERARCHICAL or SUMMARY_TEAM. "
-            "For SUMMARY_TEAM, later create its Summary Task only with org_create_summary_execution; for "
-            "HIERARCHICAL, use the existing responsibility-summary workflow. Then call "
-            "org_update_task(action='start'). Then execute the "
+            "Then call org_update_task(action='start') and execute the "
             "defined scope through your Team workflow. If an independent part requires another organization "
             "team's capabilities, keep this parent task assigned to your team and create a focused OPEN child "
             f"with org_create_task(parent_task_id='{task_id}'). Give each child a clear scope, acceptance "
             "criteria, and only the capabilities it needs; do not set delegated_to_team_id. Track children "
-            "with org_view_child_tasks and do not complete the parent until its direct children are completed "
-            "and accepted. When the task is actually complete, submit one concrete result with "
-            "org_update_task(action='complete'). If the task is already IN_PROGRESS or COMPLETED, do not "
-            "duplicate work."
+            "with org_view_child_tasks and wait until every direct child is completed and accepted. If the "
+            "root uses HIERARCHICAL, integrate those accepted outputs and complete the root yourself with "
+            "org_update_task(action='complete'). If the root uses SUMMARY_TEAM, include every contribution "
+            "(including work your own Team performs) as a direct child, then call "
+            "org_create_summary_execution with all direct child ids after they are accepted. Do not directly "
+            "complete a SUMMARY_TEAM root; its Summary Task completes it. If the task is already IN_PROGRESS "
+            "or COMPLETED, do not duplicate work."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
 
@@ -1487,9 +1488,11 @@ class OrganizationRuntimeManager:
             "If rejected, create a repair with org_create_task "
             f"(set repairs_task_id={child_task_id} on the original sibling; never repair-of-repair; "
             "do not org_delegate_task the rejected child). "
-            "When all direct children are accepted or superseded by an accepted repair, "
-            "complete the parent. For a root task, put the user-facing delivery in "
-            "org_update_task output_context.description and provide output_abstract."
+            "When all direct children are accepted or superseded by an accepted repair, inspect the parent "
+            "task's aggregation mode. Complete it only for HIERARCHICAL (or a non-root parent). For a "
+            "SUMMARY_TEAM root, create its Summary Execution instead; do not call complete on that root. "
+            "For a root completion, put the user-facing delivery in org_update_task output_context.description "
+            "and provide output_abstract."
         )
         self._schedule_leader_turn(
             team_id=team_id,
@@ -1546,9 +1549,11 @@ class OrganizationRuntimeManager:
         prompt = (
             f"All direct child tasks for parent organization task {parent_task_id} "
             f"in {organization_id} are accepted or superseded by an accepted repair. "
-            "Integrate the child outputs and call org_update_task(action='complete') on the "
-            "parent with the final output_context and output_abstract. For a root task, put the "
-            "user-facing delivery in output_context.description."
+            "Inspect the parent's aggregation mode. For HIERARCHICAL (or a non-root parent), integrate the "
+            "child outputs and call org_update_task(action='complete') on the parent with the final "
+            "output_context and output_abstract. For a SUMMARY_TEAM root, call "
+            "org_create_summary_execution with the accepted direct child ids instead; do not complete the "
+            "root yourself. For a root completion, put the user-facing delivery in output_context.description."
         )
         self._schedule_leader_turn(
             team_id=team_id,

@@ -40,7 +40,6 @@ class OrgEvent:
     TASK_REVIEW_REQUESTED = "org_task_review_requested"
     TASK_REVIEWED = "org_task_reviewed"
     SUMMARY_TASK_CREATED = "org_summary_task_created"
-    SUMMARY_SOURCES_UPDATED = "org_summary_sources_updated"
     LEADER_MESSAGE = "org_leader_message"
     TEAM_INVITED = "org_team_invited"
     TEAM_JOINED = "org_team_joined"
@@ -135,12 +134,6 @@ class OrgSummaryTaskCreatedEvent(BaseOrgEvent):
     summary_task_id: str
 
 
-class OrgSummarySourcesUpdatedEvent(BaseOrgEvent):
-    """Published after source tasks are attached to a summary task."""
-
-    summary_task_id: str
-
-
 class OrgLeaderMessageEvent(BaseOrgEvent):
     """Published after a leader-to-leader message row is persisted."""
 
@@ -175,7 +168,6 @@ _EVENT_TYPE_MAP: dict[str, type[BaseOrgEvent]] = {
     OrgEvent.TASK_REVIEW_REQUESTED: OrgTaskReviewRequestedEvent,
     OrgEvent.TASK_REVIEWED: OrgTaskReviewedEvent,
     OrgEvent.SUMMARY_TASK_CREATED: OrgSummaryTaskCreatedEvent,
-    OrgEvent.SUMMARY_SOURCES_UPDATED: OrgSummarySourcesUpdatedEvent,
     OrgEvent.LEADER_MESSAGE: OrgLeaderMessageEvent,
     OrgEvent.TEAM_INVITED: OrgTeamInvitedEvent,
     OrgEvent.TEAM_JOINED: OrgTeamJoinedEvent,
@@ -221,7 +213,6 @@ __all__ = [
     "OrgTaskFailedEvent",
     "OrgTaskReviewedEvent",
     "OrgTaskReviewRequestedEvent",
-    "OrgSummarySourcesUpdatedEvent",
     "OrgSummaryTaskCreatedEvent",
     "OrgTopic",
 ]

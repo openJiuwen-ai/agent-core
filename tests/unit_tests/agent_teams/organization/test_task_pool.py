@@ -43,7 +43,6 @@ from openjiuwen.agent_teams.organization.tools import (
     OrgSummaryGetInputsTool,
     OrgUpdateTaskTool,
     OrgViewChildTasksTool,
-    OrgViewSummarySourcesTool,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
@@ -62,14 +61,11 @@ class FakeMessager:
         self.subscriptions.append((topic_id, handler))
 
 
-def test_summary_input_tools_create_their_final_tool_cards() -> None:
-    """Ensure the Summary Team input tool never mutates its card after construction."""
+def test_summary_input_tool_creates_its_final_tool_card() -> None:
+    """Ensure the Summary Team input tool creates its final card during construction."""
     manager = SimpleNamespace()
-    view_tool = OrgViewSummarySourcesTool(manager, "team-1", "leader-1")
     summary_tool = OrgSummaryGetInputsTool(manager, "team-1", "leader-1")
 
-    assert view_tool.card.id == "team_org.org_view_summary_sources"
-    assert view_tool.card.name == "org_view_summary_sources"
     assert summary_tool.card.id == "team_org.org_summary_get_inputs"
     assert summary_tool.card.name == "org_summary_get_inputs"
 
@@ -676,6 +672,28 @@ async def test_create_task_accepts_summary_team_aggregation(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_generic_task_creation_reserves_summary_task_type(org_manager):
+    """Ensure standalone task creation cannot recreate the removed hierarchical summary path."""
+    manager, _ = org_manager
+    result = await manager.create_task(
+        task_id="standalone-summary",
+        title="Summary",
+        description="Summary",
+        task_type="organization.summary",
+        required_capabilities=["summary"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+
+    assert not result.ok
+    assert "reserved" in result.reason
+
+
+@pytest.mark.asyncio
 async def test_summary_execution_waits_for_accepted_sources_then_completes_root(org_manager):
     """The MVP Summary Task is a root sibling and opens only after source acceptance."""
     manager, _ = org_manager
@@ -717,12 +735,23 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     assert execution.task.parent_task_id is None
     assert execution.task.root_task_id == "summary-root"
     assert execution.task.status is OrgTaskStatus.WAITING_SOURCES
-    assert (await manager.complete_task(task_id="summary-source", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="summary-source",
+            team_id="team-b",
+            output_abstract="Source result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="summary-source", reviewer_team_id="team-a", review_status=OrgTaskReviewStatus.ACCEPTED
         )
     ).ok
+    blocked_root = await manager.complete_task(task_id="summary-root", team_id="team-a")
+    assert not blocked_root.ok
+    assert "Summary Task" in blocked_root.reason
+    root_before_summary = await manager.get_task("summary-root")
+    assert root_before_summary is not None and root_before_summary.status is OrgTaskStatus.CLAIMED
     assert (
         await manager.get_summary_inputs(
             summary_task_id="summary-sibling",
@@ -738,10 +767,83 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     assert summary_inputs["root_task_id"] == "summary-root"
     ready = await manager.get_task("summary-sibling")
     assert ready is not None and ready.status is OrgTaskStatus.DELEGATED
+    reassigned = await manager.delegate_task(
+        task_id="summary-sibling",
+        from_team_id="summary-team",
+        to_team_id="team-a",
+    )
+    assert not reassigned.ok
+    assert "execution binding" in reassigned.reason
     assert (await manager.start_task(task_id="summary-sibling", team_id="summary-team")).ok
     assert (await manager.complete_task(task_id="summary-sibling", team_id="summary-team")).ok
     completed_root = await manager.get_task("summary-root")
     assert completed_root is not None and completed_root.status is OrgTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_hierarchical_root_waits_for_accepted_sources_then_completes(org_manager):
+    """A Root Leader can explicitly choose HIERARCHICAL and complete only after source acceptance."""
+    manager, _ = org_manager
+    client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
+    leader = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    assert (
+        await manager.create_task(
+            task_id="hierarchical-root",
+            title="Root",
+            description="Root",
+            required_capabilities=["analysis"],
+            created_by=client,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="hierarchical-root", team_id="team-a")).ok
+    selected = await manager.set_root_aggregation_mode(
+        task_id="hierarchical-root",
+        team_id="team-a",
+        leader_id="leader-a",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )
+    assert selected.ok
+    assert (await manager.start_task(task_id="hierarchical-root", team_id="team-a")).ok
+    assert (
+        await manager.create_task(
+            task_id="hierarchical-source",
+            parent_task_id="hierarchical-root",
+            title="Source",
+            description="Source",
+            required_capabilities=["analysis"],
+            delegated_to_team_id="team-b",
+            created_by=leader,
+        )
+    ).ok
+    assert (
+        await manager.complete_task(
+            task_id="hierarchical-source",
+            team_id="team-b",
+            output_abstract="Source result",
+        )
+    ).ok
+    blocked_root = await manager.complete_task(task_id="hierarchical-root", team_id="team-a")
+    assert not blocked_root.ok
+    assert "review is not accepted" in blocked_root.reason
+    assert (
+        await manager.review_task(
+            task_id="hierarchical-source",
+            reviewer_team_id="team-a",
+            review_status=OrgTaskReviewStatus.ACCEPTED,
+        )
+    ).ok
+    assert (
+        await manager.complete_task(
+            task_id="hierarchical-root",
+            team_id="team-a",
+            output_context={"description": "Integrated source output."},
+            output_abstract="Integrated output",
+        )
+    ).ok
+    root = await manager.get_task("hierarchical-root")
+    assert root is not None and root.status is OrgTaskStatus.COMPLETED
 
 
 @pytest.mark.asyncio
@@ -784,7 +886,13 @@ async def test_summary_execution_rebind_reschedules_running_summary(active_organ
         created_by=leader,
     )
     assert created.ok
-    assert (await manager.complete_task(task_id="summary-recovery-source", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="summary-recovery-source",
+            team_id="team-b",
+            output_abstract="Recovered source result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="summary-recovery-source",
@@ -1757,6 +1865,23 @@ async def test_child_task_completion_creates_pending_review(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_child_review_requires_a_usable_aggregation_output(org_manager):
+    """Prevent an empty child result from becoming an accepted aggregation source."""
+    manager, _ = org_manager
+    await _seed_org1_parent_child(manager, parent_id="parent-output", child_id="child-output")
+    assert (await manager.complete_task(task_id="child-output", team_id="team-b")).ok
+
+    accepted = await manager.review_task(
+        task_id="child-output",
+        reviewer_team_id="team-a",
+        review_status=OrgTaskReviewStatus.ACCEPTED,
+    )
+
+    assert not accepted.ok
+    assert "needs output_context.description, result_uri, or output_abstract" in accepted.reason
+
+
+@pytest.mark.asyncio
 async def test_view_child_tasks_includes_latest_review_summary(org_manager):
     manager, _ = org_manager
     parent_creator = OrgTaskCreator(
@@ -1795,13 +1920,22 @@ async def test_view_child_tasks_includes_latest_review_summary(org_manager):
         created_by=leader_creator,
     )
     await manager.claim_task(task_id="child-done", team_id="team-b")
-    assert (await manager.complete_task(task_id="child-done", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="child-done",
+            team_id="team-b",
+            output_context={"description": "Evidence supports the risk assessment."},
+            output_abstract="Risk assessment completed.",
+        )
+    ).ok
 
     views = await manager.list_child_task_views(parent_task_id="parent-view", creator_team_id="team-a")
     by_id = {item["task_id"]: item for item in views}
     assert by_id["child-open"]["review"] is None
     assert by_id["child-done"]["review"]["review_status"] == OrgTaskReviewStatus.PENDING.value
     assert "assignment" in by_id["child-done"]
+    assert by_id["child-done"]["output_context"]["description"].startswith("Evidence supports")
+    assert by_id["child-done"]["output_abstract"] == "Risk assessment completed."
 
     assert (
         await manager.review_task(
@@ -2105,7 +2239,13 @@ async def test_review_task_locks_accepted_and_rejected_after_repair(org_manager)
     manager, _ = org_manager
     _, leader_creator = _org1_creators()
     await _seed_org1_parent_child(manager, parent_id="parent-lock-review", child_id="child-lock-review")
-    assert (await manager.complete_task(task_id="child-lock-review", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="child-lock-review",
+            team_id="team-b",
+            output_abstract="Initial result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="child-lock-review",
@@ -2205,7 +2345,13 @@ async def test_superseded_child_unblocks_parent_after_accepted_repair(org_manage
     assert not concurrent.ok
     assert "already has an active repair" in concurrent.reason
 
-    assert (await manager.complete_task(task_id=repair_id, team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id=repair_id,
+            team_id="team-b",
+            output_abstract="Repaired result",
+        )
+    ).ok
     assert not await manager.can_complete_parent_task(parent_task_id=parent_id, team_id="team-a")
     assert (
         await manager.review_task(
@@ -2254,7 +2400,13 @@ async def test_repair_without_repairs_task_id_does_not_unblock_rejected_child(or
         created_by=leader_creator,
     )
     await manager.claim_task(task_id="orphan-fix", team_id="team-b")
-    assert (await manager.complete_task(task_id="orphan-fix", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="orphan-fix",
+            team_id="team-b",
+            output_abstract="Unlinked repair result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="orphan-fix",
@@ -2315,7 +2467,13 @@ async def test_abandoned_repair_allows_next_repair_of_original(org_manager):
     )
     assert fix_a.ok
     await manager.claim_task(task_id="child-d", team_id="team-b")
-    assert (await manager.complete_task(task_id="child-d", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="child-d",
+            team_id="team-b",
+            output_abstract="Accepted repair result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="child-d",
@@ -2325,65 +2483,6 @@ async def test_abandoned_repair_allows_next_repair_of_original(org_manager):
     ).ok
     assert await manager.can_complete_parent_task(parent_task_id="parent-one-level", team_id="team-a")
     assert (await manager.complete_task(task_id="parent-one-level", team_id="team-a")).ok
-
-
-@pytest.mark.asyncio
-async def test_summary_task_sources_read_completed_outputs(org_manager):
-    manager, _ = org_manager
-    await manager.create_task(
-        task_id="source-1",
-        title="Finance analysis",
-        description="Analyze finance.",
-        required_capabilities=["finance"],
-        created_by=OrgTaskCreator(
-            creator_type="client",
-            creator_id="client-1",
-            organization_id="org-1",
-        ),
-    )
-    await manager.claim_task(task_id="source-1", team_id="team-finance")
-
-    early_summary = await manager.create_summary_task(
-        task_id="summary-early",
-        title="Summary",
-        description="Summarize all slices.",
-        source_task_ids=["source-1"],
-        created_by=OrgTaskCreator(
-            creator_type="team_leader",
-            creator_id="leader-root",
-            organization_id="org-1",
-            team_id="team-root",
-        ),
-    )
-    assert not early_summary.ok
-    assert "source task is not completed" in early_summary.reason
-
-    await manager.complete_task(
-        task_id="source-1",
-        team_id="team-finance",
-        output_context={"result_uri": "https://example.com/finance.json", "result_type": "report"},
-        output_abstract="Revenue is growing.",
-    )
-    summary = await manager.create_summary_task(
-        task_id="summary-1",
-        title="Summary",
-        description="Summarize all slices.",
-        source_task_ids=["source-1"],
-        created_by=OrgTaskCreator(
-            creator_type="team_leader",
-            creator_id="leader-root",
-            organization_id="org-1",
-            team_id="team-root",
-        ),
-    )
-    assert summary.ok
-
-    sources = await manager.list_summary_sources(summary_task_id="summary-1")
-    assert sources[0].source_task_id == "source-1"
-    inputs = await manager.get_summary_inputs(summary_task_id="summary-1", requester_team_id="team-root")
-    assert inputs["summary_task"]["task_id"] == "summary-1"
-    assert inputs["source_tasks"][0]["task"]["output_abstract"] == "Revenue is growing."
-    assert inputs["source_tasks"][0]["task"]["output_context"]["result_uri"] == "https://example.com/finance.json"
 
 
 @pytest.mark.asyncio
@@ -2410,7 +2509,15 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     assert {leader["team_id"] for leader in joined_result.data["leaders"]} == {"team-a", "team-b"}
     assert agents["team-b"].team_backend.org_task_manager is agents["team-a"].team_backend.org_task_manager
     member_tool_names = {tool.card.name for tool in agents["team-b"].harness.tools}
-    assert {"org_view_tasks", "org_review_task", "org_create_summary_task"} <= member_tool_names
+    assert {"org_view_tasks", "org_review_task", "org_view_child_tasks"} <= member_tool_names
+    assert (
+        not {
+            "org_create_summary_task",
+            "org_attach_summary_sources",
+            "org_view_summary_sources",
+        }
+        & member_tool_names
+    )
     assert agents["team-b"].team_backend.messager.subscriptions
 
     with pytest.raises(ValueError, match="only the organization owner"):
@@ -2607,6 +2714,27 @@ async def test_summary_execution_prompt_requires_source_aggregation_only(active_
         root_task_id="root-1",
     )
     assert len(prompts) == 1
+
+
+def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization_runtime):
+    """Keep Root Leader guidance aligned with the two mutually exclusive aggregation paths."""
+    runtime, _, session_id = active_organization_runtime
+    prompts: list[str] = []
+    runtime._schedule_leader_turn = lambda **kwargs: prompts.append(kwargs["prompt"])
+
+    runtime._schedule_claimed_task_execution_turn(
+        team_id="team-a",
+        session_id=session_id,
+        task_id="root-task",
+        organization_id="org-1",
+    )
+
+    assert len(prompts) == 1
+    assert "HIERARCHICAL" in prompts[0]
+    assert "complete the root yourself" in prompts[0]
+    assert "SUMMARY_TEAM" in prompts[0]
+    assert "org_create_summary_execution" in prompts[0]
+    assert "Do not directly complete a SUMMARY_TEAM root" in prompts[0]
 
 
 @pytest.mark.asyncio
@@ -2930,7 +3058,13 @@ async def test_rebind_resumes_durable_parent_followups(active_organization_runti
 
     await _create_claimed_parent(manager, org_id=org_id, parent_id="parent-ready")
     await _create_claimed_child(manager, creator=leader, parent_id="parent-ready", child_id="child-ok")
-    assert (await manager.complete_task(task_id="child-ok", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="child-ok",
+            team_id="team-b",
+            output_abstract="Accepted result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="child-ok",
@@ -3048,7 +3182,13 @@ async def test_accepted_review_parent_ready_wake(active_organization_runtime, si
     if siblings_pending:
         await _create_claimed_child(manager, creator=leader, parent_id="parent", child_id="child-b", claim=False)
 
-    assert (await manager.complete_task(task_id="child-a", team_id="team-b")).ok
+    assert (
+        await manager.complete_task(
+            task_id="child-a",
+            team_id="team-b",
+            output_abstract="Accepted result",
+        )
+    ).ok
     assert (
         await manager.review_task(
             task_id="child-a",
