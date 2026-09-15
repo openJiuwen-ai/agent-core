@@ -41,12 +41,18 @@ def _write_terminal(text: str) -> None:
     """Write *text* directly to the terminal (stdout).
 
     This is intentional CLI user-facing output, not
-    diagnostic logging. Uses the active stdout encoding
-    while writing directly to file descriptor 1.
+    diagnostic logging. Uses ``os.write`` on fd 1.
+
+    On Windows, force UTF-8: ``sys.stdout.encoding`` is often still a
+    legacy code page (e.g. GBK/cp936) even when the console is UTF-8
+    (``chcp 65001`` / Windows Terminal), which mojibakes CJK output.
     """
     stdout = sys.stdout
-    encoding = stdout.encoding or "utf-8"
-    errors = stdout.errors or "strict"
+    if sys.platform == "win32":
+        encoding = "utf-8"
+    else:
+        encoding = stdout.encoding or "utf-8"
+    errors = getattr(stdout, "errors", None) or "replace"
     os.write(1, text.encode(encoding, errors=errors))
 
 # Chunk type constants (aligned with SDK OutputSchema.type)
