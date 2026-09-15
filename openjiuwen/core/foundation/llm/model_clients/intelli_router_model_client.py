@@ -5,8 +5,9 @@ IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
 """
 import atexit
 import hashlib
+import inspect
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from threading import Lock
 from typing import List, Optional, AsyncIterator, Union, Dict, Any
 
@@ -22,6 +23,8 @@ from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutp
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error, ModelError, ValidationError
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.runner.callback import trigger
+from openjiuwen.core.runner.callback.events import LLMCallEvents
 from openjiuwen.core.foundation.llm.schema.generation_response import (
     ImageGenerationResponse,
     AudioGenerationResponse,
@@ -38,6 +41,7 @@ except ImportError:
 @dataclass
 class IntelliRouterClientConfig:
     """Typed config extracted from ModelClientConfig"""
+    model_group_id: Optional[str] = None
     deployments: list[dict[str, Any]] = field(default_factory=list)
     strategy: str = "simple-shuffle"
     num_retries: int = 3
@@ -52,8 +56,32 @@ class IntelliRouterClientConfig:
     @classmethod
     def from_model_client_config(cls, config: ModelClientConfig) -> "IntelliRouterClientConfig":
         """Extract IntelliRouter config from ModelClientConfig."""
+        if config.intelli_router is not None:
+            router_config = config.intelli_router
+            return cls(
+                model_group_id=router_config.model_group_id,
+                deployments=[
+                    deployment.model_dump(exclude_none=True)
+                    for deployment in router_config.deployments
+                ],
+                strategy=router_config.strategy,
+                num_retries=(
+                    router_config.num_retries
+                    if router_config.num_retries is not None
+                    else max(len(router_config.deployments) - 1, 0)
+                ),
+                timeout=router_config.timeout,
+                strategy_kwargs=router_config.strategy_kwargs,
+                enable_health_check=router_config.enable_health_check,
+                health_check_interval=router_config.health_check_interval,
+                verify_ssl=config.verify_ssl,
+                enable_observability=router_config.enable_observability,
+                web_dashboard_port=router_config.web_dashboard_port,
+            )
+
         extra = config.__pydantic_extra__ or {}
         return cls(
+            model_group_id=extra.get("intelli_router_model_group_id"),
             deployments=extra.get("intelli_router_deployments", []),
             strategy=extra.get("intelli_router_strategy", "simple-shuffle"),
             num_retries=extra.get("intelli_router_num_retries", 3),
@@ -93,6 +121,67 @@ _GENERATION_SUPPORT: Dict[str, set] = {
 }
 
 
+class _CoreRoutingEventBridge:
+    """Bridge intelli_router routing events into openJiuwen callbacks."""
+
+    _SELECTED_EVENTS = {"request_succeeded", "stream_route_selected"}
+    _FAILED_EVENTS = {"all_deployments_exhausted"}
+    _ROUTE_METADATA_FIELDS = {
+        "model_group_id",
+        "route_id",
+        "model_id",
+        "model_name",
+        "provider",
+        "attempt",
+        "fallback_reason",
+        "ttft",
+    }
+
+    @property
+    def name(self) -> str:
+        return self.__class__.__name__
+
+    async def handle_event(self, event: Any) -> None:
+        payload = self._payload_from_event(event)
+        if payload is None:
+            return
+        await trigger(
+            LLMCallEvents.LLM_ROUTE,
+            route_metadata=payload,
+            routing_event=event,
+        )
+
+    @classmethod
+    def _payload_from_event(cls, event: Any) -> dict[str, Any] | None:
+        event_type = getattr(getattr(event, "event_type", None), "value", None)
+        if event_type is None:
+            event_type = str(getattr(event, "event_type", "") or "")
+
+        if event_type in cls._SELECTED_EVENTS:
+            status = "selected"
+        elif event_type in cls._FAILED_EVENTS:
+            status = "failed"
+        else:
+            return None
+
+        extra = getattr(event, "extra", None)
+        if not isinstance(extra, dict) or not extra.get("model_group_id"):
+            return None
+
+        payload = {
+            key: extra[key]
+            for key in cls._ROUTE_METADATA_FIELDS
+            if extra.get(key) is not None
+        }
+        payload["status"] = status
+        for key in ("attempt", "total_attempts", "error_type", "error_message", "chunk_count"):
+            value = getattr(event, key, None)
+            if value:
+                payload.setdefault(key, value)
+        payload.setdefault("result_type", "error" if status == "failed" else "answer")
+        return payload
+
+
 class IntelliRouterModelClient(BaseModelClient):
     """
     IntelliRouter Model Client — wraps intelli_router.ReliableRouter.
@@ -121,7 +210,7 @@ class IntelliRouterModelClient(BaseModelClient):
         deployments_json = json.dumps(config.deployments, sort_keys=True)
         kwargs_json = json.dumps(config.strategy_kwargs, sort_keys=True)
         raw = (
-            f"{deployments_json}|{config.strategy}|{kwargs_json}|"
+            f"{config.model_group_id}|{deployments_json}|{config.strategy}|{kwargs_json}|"
             f"{config.num_retries}|{config.timeout}|"
             f"{config.enable_health_check}|{config.health_check_interval}|"
             f"{config.verify_ssl}|{config.enable_observability}|"
@@ -144,32 +233,65 @@ class IntelliRouterModelClient(BaseModelClient):
         """Create a ReliableRouter from IntelliRouterClientConfig."""
         if ReliableRouter is None or Deployment is None:
             raise build_error(
-                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                StatusCode.MODEL_RUNTIME_UNAVAILABLE,
                 error_msg="intelli_router package is not installed. Please install it with: pip install intelli-router"
             )
 
         deployments = []
+        deployment_fields = {item.name for item in fields(Deployment)}
+        required_new_fields = {
+            "request_defaults",
+            "endpoint_profile",
+            "custom_headers",
+            "model_id",
+            "fallback_tag",
+            "model_description",
+        }
         for dep_cfg in config.deployments:
-            dep = Deployment(
-                id=dep_cfg.get("id"),
-                model_name=dep_cfg.get("model_name"),
-                api_key=dep_cfg.get("api_key"),
-                api_base=dep_cfg.get("api_base"),
-                provider=dep_cfg.get("provider", "openai"),
-                tpm=dep_cfg.get("tpm"),
-                rpm=dep_cfg.get("rpm"),
-                tags=dep_cfg.get("tags", []),
-                timeout=dep_cfg.get("timeout"),
-                verify_ssl=dep_cfg.get("verify_ssl", config.verify_ssl),
+            unsupported_fields = sorted(
+                key for key in required_new_fields
+                if key in dep_cfg and key not in deployment_fields
             )
+            if unsupported_fields:
+                raise build_error(
+                    StatusCode.MODEL_RUNTIME_UNAVAILABLE,
+                    error_msg=(
+                        "installed intelli_router package does not support deployment fields: "
+                        f"{unsupported_fields}. Please upgrade intelli-router."
+                    )
+                )
+            dep_kwargs = {
+                "id": dep_cfg.get("route_id") or dep_cfg.get("id"),
+                "model_id": dep_cfg.get("model_id"),
+                "model_name": dep_cfg.get("model_name"),
+                "api_key": dep_cfg.get("api_key"),
+                "api_base": dep_cfg.get("api_base"),
+                "provider": dep_cfg.get("provider", "openai"),
+                "tpm": dep_cfg.get("tpm"),
+                "rpm": dep_cfg.get("rpm"),
+                "tags": dep_cfg.get("tags", []),
+                "timeout": dep_cfg.get("timeout"),
+                "verify_ssl": dep_cfg.get("verify_ssl", config.verify_ssl),
+                "request_defaults": dep_cfg.get("request_defaults", {}),
+                "endpoint_profile": dep_cfg.get("endpoint_profile"),
+                "custom_headers": dep_cfg.get("custom_headers"),
+                "fallback_tag": dep_cfg.get("fallback_tag"),
+                "model_description": dep_cfg.get("model_description"),
+            }
+            dep = Deployment(**{
+                key: value for key, value in dep_kwargs.items()
+                if key in deployment_fields
+            })
             deployments.append(dep)
 
-        event_bus = None
+        event_bus = cls._create_event_bus_with_core_bridge()
         metrics_collector = None
         if config.enable_observability:
             try:
                 from intelli_router import EventBus, LoggingHook, MetricsCollector
-                event_bus = EventBus()
+                if event_bus is None:
+                    event_bus = EventBus()
+                    event_bus.register(_CoreRoutingEventBridge())
                 event_bus.register(LoggingHook(format="text"))
                 metrics_collector = MetricsCollector()
                 event_bus.register(metrics_collector)
@@ -189,6 +311,7 @@ class IntelliRouterModelClient(BaseModelClient):
             strategy=config.strategy,
             num_retries=config.num_retries,
             timeout=config.timeout,
+            **cls._router_metadata_kwargs(config),
             enable_health_check=config.enable_health_check,
             health_check_interval=config.health_check_interval,
             event_bus=event_bus,
@@ -210,9 +333,65 @@ class IntelliRouterModelClient(BaseModelClient):
 
         return router
 
+    @staticmethod
+    def _create_event_bus_with_core_bridge() -> Any:
+        try:
+            from intelli_router import EventBus
+        except ImportError:
+            return None
+
+        event_bus = EventBus()
+        event_bus.register(_CoreRoutingEventBridge())
+        return event_bus
+
+    @staticmethod
+    def _router_metadata_kwargs(config: IntelliRouterClientConfig) -> dict[str, Any]:
+        if ReliableRouter is None:
+            return {}
+        init_params = inspect.signature(ReliableRouter).parameters
+        accepts_var_kwargs = any(
+            param.kind == inspect.Parameter.VAR_KEYWORD
+            for param in init_params.values()
+        )
+        metadata = {
+            "model_group_id": config.model_group_id,
+        }
+        unsupported = [
+            key for key, value in metadata.items()
+            if value is not None and key not in init_params and not accepts_var_kwargs
+        ]
+        if unsupported:
+            raise build_error(
+                StatusCode.MODEL_RUNTIME_UNAVAILABLE,
+                error_msg=(
+                    "installed intelli_router package does not support router fields: "
+                    f"{unsupported}. Please upgrade intelli-router."
+                )
+            )
+        return {
+            key: value for key, value in metadata.items()
+            if value is not None and (key in init_params or accepts_var_kwargs)
+        }
+
     def _validate_config(self):
         """Override — intelli_router does not require api_key or api_base at top level."""
         pass
+
+    def _build_call_params(
+        self,
+        *,
+        temperature: Optional[float] = None,
+        top_p: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        stop: Union[Optional[str], None] = None,
+    ) -> dict[str, Any]:
+        params = {
+            "temperature": temperature if temperature is not None else self.model_config.temperature,
+            "top_p": top_p if top_p is not None else self.model_config.top_p,
+            "max_tokens": max_tokens if max_tokens is not None else self.model_config.max_tokens,
+            "stop": stop if stop is not None else self.model_config.stop,
+        }
+        return {key: value for key, value in params.items() if value is not None}
 
     # ------------------------------------------------------------------
     # Chat completion
@@ -234,15 +413,18 @@ class IntelliRouterModelClient(BaseModelClient):
     ) -> AssistantMessage:
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
-
-        result = await self._router.invoke(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
+        params = self._build_call_params(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
+        )
+
+        result = await self._router.invoke(
+            messages=converted_messages,
+            tools=self._convert_tools_to_dict(tools),
             model=model_name,
+            **params,
             **kwargs
         )
 
@@ -266,15 +448,18 @@ class IntelliRouterModelClient(BaseModelClient):
         converted_messages = self._convert_messages_to_dict(messages)
         model_name = model or self.model_config.model_name or "*"
         accumulated_for_parser = ""
-
-        async for chunk in self._router.stream(
-            messages=converted_messages,
-            tools=self._convert_tools_to_dict(tools),
+        params = self._build_call_params(
             temperature=temperature,
             top_p=top_p,
             max_tokens=max_tokens,
             stop=stop,
+        )
+
+        async for chunk in self._router.stream(
+            messages=converted_messages,
+            tools=self._convert_tools_to_dict(tools),
             model=model_name,
+            **params,
             **kwargs
         ):
             converted = self._to_ow_chunk(chunk)
@@ -439,11 +624,6 @@ class IntelliRouterModelClient(BaseModelClient):
 
         return AssistantMessage(
             content=content,
-            metadata=(
-                getattr(msg, "metadata", {})
-                if isinstance(getattr(msg, "metadata", {}), dict)
-                else {}
-            ),
             tool_calls=tool_calls,
             usage_metadata=usage_metadata,
             finish_reason=msg.finish_reason or "stop",
@@ -473,11 +653,6 @@ class IntelliRouterModelClient(BaseModelClient):
             ]
         return AssistantMessageChunk(
             content=chunk.content or "",
-            metadata=(
-                getattr(chunk, "metadata", {})
-                if isinstance(getattr(chunk, "metadata", {}), dict)
-                else {}
-            ),
             tool_calls=tool_calls,
             finish_reason=chunk.finish_reason or "null",
             reasoning_content=chunk.reasoning_content,
@@ -495,8 +670,6 @@ class IntelliRouterModelClient(BaseModelClient):
     @staticmethod
     def _provider_metadata(message: Any) -> dict[str, Any]:
         source = getattr(message, "provider_metadata", None)
-        if not isinstance(source, dict):
-            source = getattr(message, "metadata", None)
         if not isinstance(source, dict):
             return {}
         allowed = (
