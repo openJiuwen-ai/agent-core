@@ -568,7 +568,8 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
             name="org_update_task",
             description=(
                 "Start, complete, or fail an assigned task; set_aggregation_mode lets the Root Leader "
-                "choose HIERARCHICAL or SUMMARY_TEAM immediately after claiming a root task; revise_description lets the creator "
+                "choose HIERARCHICAL or SUMMARY_TEAM immediately after claiming a root task; "
+                "revise_description lets the creator "
                 "supplement an unclaimed task once when requested by the organization."
             ),
             manager=manager,
@@ -1071,22 +1072,21 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
                 raise RuntimeError(bound.reason or "summary execution binding failed")
             execution = await self.manager.get_summary_execution(summary_task_id=bound.task.task_id)
             summary_task = await self.manager.get_task(bound.task.task_id)
-            if (
-                execution is not None
-                and summary_task is not None
-                and execution.status == OrgSummaryExecutionStatus.RUNNING.value
-                and summary_task.status is OrgTaskStatus.DELEGATED
-            ):
-                # ``bind_summary_execution`` may return a pre-activation task snapshot.
-                # Read it again so the initial turn never relies on event delivery.
-                self.runtime_manager.schedule_summary_execution(
-                    team_id=summary_team_id,
-                    session_id=self.session_id,
-                    task_id=bound.task.task_id,
-                    organization_id=self.manager.organization_id,
-                    execution_id=execution.execution_id,
-                    root_task_id=execution.root_task_id,
-                )
+            if execution is not None and summary_task is not None:
+                if (
+                    execution.status == OrgSummaryExecutionStatus.RUNNING.value
+                    and summary_task.status is OrgTaskStatus.DELEGATED
+                ):
+                    # ``bind_summary_execution`` may return a pre-activation task snapshot.
+                    # Read it again so the initial turn never relies on event delivery.
+                    self.runtime_manager.schedule_summary_execution(
+                        team_id=summary_team_id,
+                        session_id=self.session_id,
+                        task_id=bound.task.task_id,
+                        organization_id=self.manager.organization_id,
+                        execution_id=execution.execution_id,
+                        root_task_id=execution.root_task_id,
+                    )
             return ToolOutput(success=True, data=bound.task.brief())
         except Exception as exc:
             reason = f"summary team provisioning failed: {exc}"

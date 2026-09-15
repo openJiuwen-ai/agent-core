@@ -221,19 +221,15 @@ class OrganizationRuntimeManager:
         lock = self._summary_team_locks.setdefault((session_id, organization_id), asyncio.Lock())
         async with lock:
             existing = await manager.task_pool.get_summary_team()
-            if (
-                existing is not None
-                and existing.status == OrgSummaryTeamStatus.READY
-                and existing.summary_team_id
-                and existing.leader_id
-            ):
-                entry = await self._team_runtime_manager.pool.get(existing.summary_team_id)
-                if (
-                    entry is not None
-                    and entry.current_session_id == session_id
-                    and self._team_organizations.get((session_id, existing.summary_team_id)) == organization_id
-                ):
-                    return existing.summary_team_id, existing.leader_id
+            if existing is not None and existing.status == OrgSummaryTeamStatus.READY:
+                if existing.summary_team_id and existing.leader_id:
+                    entry = await self._team_runtime_manager.pool.get(existing.summary_team_id)
+                    if (
+                        entry is not None
+                        and entry.current_session_id == session_id
+                        and self._team_organizations.get((session_id, existing.summary_team_id)) == organization_id
+                    ):
+                        return existing.summary_team_id, existing.leader_id
             await manager.task_pool.reserve_summary_team()
             organization = await manager.get_organization()
             if organization is None or not organization.owner_team_id:
@@ -1398,7 +1394,8 @@ class OrganizationRuntimeManager:
             "claim, review, or modify any source task. Delegate only the two internal analysis/drafting "
             f"tasks to the fixed Summary Team teammates and prefix their internal task titles with {execution_id}, "
             "then produce the final user-facing result. "
-            "Complete this Summary Task with org_summary_complete, placing the deliverable in output_context.description "
+            "Complete this Summary Task with org_summary_complete, placing the deliverable in "
+            "output_context.description "
             "and a concise summary in output_abstract; completing it also completes the root task."
         )
         # MVP permits one active root task only. The execution id is carried in

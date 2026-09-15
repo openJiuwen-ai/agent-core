@@ -2276,12 +2276,13 @@ class OrgTaskManager:
             )
             if execution is None and summary.creator_team_id != requester_team_id:
                 return None
-            if execution is not None and (
-                summary.assigned_team_id != requester_team_id
-                or execution.summary_team_id != requester_team_id
-                or execution.root_task_id != summary.root_task_id
-            ):
-                return None
+            if execution is not None:
+                if summary.assigned_team_id != requester_team_id:
+                    return None
+                if execution.summary_team_id != requester_team_id:
+                    return None
+                if execution.root_task_id != summary.root_task_id:
+                    return None
             stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
             source_rows = (await session.execute(stmt)).scalars().all()
             sources = []
