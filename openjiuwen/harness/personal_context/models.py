@@ -115,8 +115,10 @@ class PersonalContextStatus(BaseModel):
                     raise ValueError("succeeded fetch run progress must be 100 percent")
             elif percent == 100:
                 raise ValueError("only succeeded fetch run progress may be 100 percent")
-            if run_state == "idle" and (percent != 0 or total != 0 or completed != 0):
-                raise ValueError("idle fetch run progress must be empty")
+            if run_state == "idle":
+                has_progress = percent != 0 or total != 0 or completed != 0
+                if has_progress:
+                    raise ValueError("idle fetch run progress must be empty")
             last_error = progress["last_error"]
             if run_state == "failed":
                 if not isinstance(last_error, str) or not last_error.strip() or len(last_error) > 512:

@@ -5615,11 +5615,10 @@ async def _apply_rules_increment(
     )
     retaining_touched_paths: set[str] = set()
     if preserve_existing_paths:
-        retaining_touched_paths.update(
-            relative
-            for source_id in deleted_source_ids
-            if (relative := effective_baseline_path_by_identity.get(source_id)) is not None
-        )
+        for source_id in deleted_source_ids:
+            relative = effective_baseline_path_by_identity.get(source_id)
+            if relative is not None:
+                retaining_touched_paths.add(relative)
     _remove_rules_pages_for_deleted_source_ids(
         context_root,
         deleted_source_ids=deleted_source_ids,

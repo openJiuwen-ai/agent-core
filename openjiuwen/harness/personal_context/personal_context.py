@@ -675,12 +675,9 @@ class PersonalContext:
         def report_pipeline_phase(service_id: str, run_id: str, phase: str) -> None:
             identity = self._fetch_run_identity.get(service_id)
             progress = self._fetch_run_progress.get(service_id)
-            if (
-                identity is None
-                or identity.get("run_id") != run_id
-                or progress is None
-                or progress.get("run_state") != "running"
-            ):
+            is_current_run = identity is not None and identity.get("run_id") == run_id
+            is_running = progress is not None and progress.get("run_state") == "running"
+            if not is_current_run or not is_running:
                 return
             self._fetch_run_progress[service_id] = _fetch_run_status(
                 service_id,
