@@ -892,7 +892,7 @@ class TopicSurveyAdapter:
             max_web_pages=int(survey_cfg.get("max_web_pages", 10)),
             initial_context=bounded_text(
                 state.original_task.initial_prompt,
-                int(manager_cfg.get("max_history_chars", 16_000)),
+                int(manager_cfg.get("max_history_chars", 128_000)),
             ),
         )
         started = time.monotonic()

@@ -163,6 +163,74 @@ def compact_metrics(
     return compact
 
 
+def _metric_leaf(key: str) -> str:
+    return str(key).rsplit(".", 1)[-1].lower()
+
+
+def _is_pinned_score_leaf(leaf: str, plan_metrics: set[str]) -> bool:
+    if leaf in _SCORE_LEAVES or "accuracy" in leaf:
+        return True
+    return leaf in plan_metrics
+
+
+def _collect_numeric_leaves(metrics: dict[str, Any], *, prefix: str = "") -> dict[str, float | int]:
+    """Walk nested dicts for numeric leaves. Skip lists and skipped blobs. No cap."""
+    found: dict[str, float | int] = {}
+
+    def _walk(key: str, value: Any) -> None:
+        if isinstance(value, bool):
+            return
+        if isinstance(value, (int, float)):
+            if key:
+                found[key] = value
+            return
+        if not isinstance(value, dict):
+            return
+        nested_value = value.get("value")
+        if isinstance(nested_value, (int, float)) and not isinstance(nested_value, bool) and key:
+            found[key] = nested_value
+        for child_key, child in value.items():
+            if child_key in _SKIP_METRIC_KEYS:
+                continue
+            next_key = f"{key}.{child_key}" if key else str(child_key)
+            _walk(next_key, child)
+
+    _walk(prefix, metrics)
+    return found
+
+
+def compact_metrics_for_manager(
+    metrics: dict[str, Any],
+    *,
+    plan_metrics: list[str] | None = None,
+    limit: int = _MAX_COMPACT_METRICS,
+) -> dict[str, float | int | str]:
+    """Compact metrics for the manager prompt, pinning scores before the key cap.
+
+    ``compact_metrics`` is insertion-order + limit, so nested accuracy can be
+    dropped behind ``n_questions`` / ``per_question``. Pin ``_SCORE_LEAVES``,
+    any leaf containing ``accuracy``, and names from the experiment plan first.
+    """
+    plan = {str(name).strip().lower() for name in (plan_metrics or []) if str(name).strip()}
+    pinned: dict[str, float | int | str] = {}
+    for key, value in _collect_numeric_leaves(metrics).items():
+        if _is_pinned_score_leaf(_metric_leaf(key), plan):
+            pinned[key] = value
+    rest = compact_metrics(dict(metrics), limit=max(limit, len(pinned) + limit))
+    out: dict[str, float | int | str] = {}
+    for key, value in pinned.items():
+        if len(out) >= limit:
+            return out
+        out[key] = value
+    for key, value in rest.items():
+        if key in out:
+            continue
+        if len(out) >= limit:
+            break
+        out[key] = value
+    return out
+
+
 def _truthy_flag(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
