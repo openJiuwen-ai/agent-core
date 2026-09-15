@@ -10,7 +10,6 @@ Provides default logging implementations, including:
 - ContextFilter: Context filter (adapted for async environments)
 """
 
-
 import json
 import logging
 import os
@@ -29,6 +28,10 @@ from openjiuwen.core.common.logging.base_impl import (
     format_log_filename,
     resolve_log_type_label,
     StructuredLoggerMixin,
+)
+from openjiuwen.core.common.logging.dated_file_handler import (
+    DEFAULT_MAX_BYTES as DEFAULT_DATED_MAX_BYTES,
+    DatedDailyFileHandler,
 )
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -60,6 +63,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
         *args: Any,
         log_file_pattern: Optional[str] = None,
         backup_file_pattern: Optional[str] = None,
+        delay: bool = True,
         **kwargs: Any,
     ) -> None:
         """
@@ -84,17 +88,27 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             except OSError:
                 pass
 
-        super().__init__(filename, *args, **kwargs)
+        super().__init__(filename, *args, delay=delay, **kwargs)
         self.backup_file_pattern = backup_file_pattern or "{baseFilename}.{index}"
 
-        # Set log file permissions
+        # Set log file permissions. With delay=True the file does not exist
+        # yet at construction time; permissions are applied on first open.
+        if os.path.exists(self.baseFilename):
+            try:
+                os.chmod(self.baseFilename, 0o640)
+            except OSError as e:
+                raise build_error(
+                    StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR, error_msg=f"failed to set file permissions: {e}"
+                ) from e
+
+    def _open(self) -> Any:
+        """Open the underlying stream, then enforce secure file permissions."""
+        stream = super()._open()
         try:
             os.chmod(self.baseFilename, 0o640)
-        except OSError as e:
-            raise build_error(
-                StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
-                error_msg=f"failed to set file permissions: {e}"
-            ) from e
+        except OSError:  # File may be locked by another handle; keep logging working
+            pass
+        return stream
 
     def _format_filename(self, base_filename: str, pattern: str) -> str:
         """Format filename according to pattern."""
@@ -113,9 +127,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
 
         if self.backupCount > 0:
             # Restore write permission on oldest backup before deletion
-            oldest_backup = self.backup_file_pattern.format(
-                baseFilename=self.baseFilename, index=self.backupCount
-            )
+            oldest_backup = self.backup_file_pattern.format(baseFilename=self.baseFilename, index=self.backupCount)
             if os.path.exists(oldest_backup):
                 try:
                     os.chmod(oldest_backup, 0o640)
@@ -185,7 +197,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
                 except OSError as e:
                     raise build_error(
                         StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
-                        error_msg=f"failed to set backup file permissions: {e}"
+                        error_msg=f"failed to set backup file permissions: {e}",
                     ) from e
 
         # Apply write permission to active log
@@ -193,8 +205,7 @@ class SafeRotatingFileHandler(RotatingFileHandler):
             os.chmod(self.baseFilename, 0o640)
         except OSError as e:
             raise build_error(
-                StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR,
-                error_msg=f"failed to set log file permissions: {e}"
+                StatusCode.COMMON_LOG_EXECUTION_RUNTIME_ERROR, error_msg=f"failed to set log file permissions: {e}"
             ) from e
 
 
@@ -230,6 +241,7 @@ class ContextFilter(logging.Filter):
         record.trace_id = get_session_id()
 
         from openjiuwen.core.common.logging.utils import get_member_id
+
         record.member_id = get_member_id()
 
         # Set log type, special handling for performance type
@@ -369,6 +381,13 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                 # If path normalization fails, use original path
                 abs_log_file = log_file
 
+            dated_handler = self._build_dated_file_handler(abs_log_file)
+            if dated_handler is not None:
+                dated_handler.addFilter(ContextFilter(self.log_type))
+                dated_handler.setFormatter(self._get_formatter())
+                self._logger.addHandler(dated_handler)
+                return
+
             # Ensure log directory exists
             log_dir = os.path.dirname(abs_log_file)
             if log_dir:
@@ -377,7 +396,7 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
                 except OSError as e:
                     raise build_error(
                         StatusCode.COMMON_LOG_PATH_INIT_FAILED,
-                        error_msg=f"the log_dir is `{log_dir}`, error detail: {e}"
+                        error_msg=f"the log_dir is `{log_dir}`, error detail: {e}",
                     ) from e
 
             # Get configuration parameters
@@ -399,6 +418,68 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             file_handler.setFormatter(self._get_formatter())
             self._logger.addHandler(file_handler)
 
+    def _build_dated_file_handler(self, abs_log_file: str) -> Optional[DatedDailyFileHandler]:
+        """Build a per-day handler when ``log_date_dirs`` is enabled.
+
+        The date directory is inserted under the configured ``log_path``
+        root. With the default layout the date goes directly under the root
+        (``<log_path>/2026-09-12/run/jiuwen.log``); when the desktop pins
+        ``log_path`` to a per-user ``core`` subdirectory, ``log_date_base``
+        names the user-level root so the date lands beside the jiuwenswarm
+        logs instead (``<userRoot>/2026-09-12/core/run/jiuwen.log``).
+        Returns None when the option is off or the log file does not live
+        under ``log_path`` (absolute user overrides keep the flat layout).
+
+        Args:
+            abs_log_file: Absolute path of the configured log file.
+
+        Returns:
+            A configured handler, or None to keep the legacy layout.
+        """
+        if not self.config.get("log_date_dirs"):
+            return None
+
+        log_path = self.config.get("log_path")
+        if not log_path:
+            return None
+
+        try:
+            abs_log_root = os.path.abspath(os.path.expanduser(log_path))
+            relative = os.path.relpath(abs_log_file, abs_log_root)
+        except (OSError, ValueError):
+            return None
+        if relative.startswith(os.pardir) or os.path.isabs(relative):
+            return None
+        if not relative or relative == os.curdir:
+            return None
+
+        # 桌面注入形态：log_path 是用户根下的 core 子目录，日期目录要落在
+        # 用户根（core 的父目录）下，再进 core —— <userRoot>/<date>/core/…
+        date_root = abs_log_root
+        core_subdir = ""
+        log_date_base = self.config.get("log_date_base")
+        if log_date_base:
+            try:
+                abs_date_base = os.path.abspath(os.path.expanduser(log_date_base))
+                base_relative = os.path.relpath(abs_log_root, abs_date_base)
+            except (OSError, ValueError):
+                base_relative = None
+            if base_relative and not base_relative.startswith(os.pardir) and not os.path.isabs(base_relative):
+                date_root = abs_date_base
+                core_subdir = base_relative
+
+        max_bytes = get_log_max_bytes(self.config.get("max_bytes", DEFAULT_DATED_MAX_BYTES))
+        if max_bytes <= 0:
+            max_bytes = DEFAULT_DATED_MAX_BYTES
+        try:
+            return DatedDailyFileHandler(
+                base_dir=date_root,
+                filename=os.path.join(core_subdir, relative) if core_subdir else relative,
+                max_bytes=max_bytes,
+            )
+        except OSError:
+            return None
+
     def _get_formatter(self) -> logging.Formatter:
         """
         Get formatter
@@ -407,8 +488,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
             Configured formatter instance
         """
         log_format = (
-                self.config.get("format")
-                or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s"
+            self.config.get("format")
+            or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s"
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 
@@ -440,10 +521,14 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         if is_browser_agent_log_context():
             browser_logger = logging.getLogger("openjiuwen.browser_agent")
             getattr(browser_logger, level)(processed_msg, stacklevel=stacklevel, **extra)
-            mirror_common = os.getenv(
-                "OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON",
-                "0",
-            ).strip().lower()
+            mirror_common = (
+                os.getenv(
+                    "OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON",
+                    "0",
+                )
+                .strip()
+                .lower()
+            )
             if mirror_common not in {"1", "true", "yes", "on"}:
                 return
         getattr(self._logger, level)(processed_msg, stacklevel=stacklevel, **extra)
