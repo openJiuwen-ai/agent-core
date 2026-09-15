@@ -206,8 +206,6 @@ class RSISkillUseRail(SkillUseRail):
 
     def _build_skills_section(self, skills=None, query: str | None = None):
         skills = self.skills if skills is None else skills
-        if self.skill_mode == self.SKILL_MODE_ALL:
-            skills = self._apply_skill_budget(skills, query)
         if self.skill_mode == self.SKILL_MODE_AUTO_LIST:
             content = (
                 "# Skills\n\nCall list_skill when relevant, then load the selected "
