@@ -15,9 +15,13 @@ from openjiuwen.extensions.tracer_otel.span_manager import (
 class _MockSpan:
     """Minimal mock for opentelemetry.trace.Span."""
 
-    def __init__(self, name: str = "mock"):
+    def __init__(self, name: str = "mock", recording: bool = True):
         self.name = name
         self._ended = False
+        self._recording = recording
+
+    def is_recording(self) -> bool:
+        return self._recording
 
     def end(self):
         self._ended = True
