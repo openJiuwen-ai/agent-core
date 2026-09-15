@@ -37,6 +37,7 @@ override it without standing up a real LLM.
 from __future__ import annotations
 
 import re
+import time
 from typing import Any, Callable, Sequence
 
 from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
@@ -53,8 +54,17 @@ from openjiuwen.agent_teams.workflow.backends._result_text import (
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentBackend, AgentResult
 from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.engine.progress import (
+    ProgressKind,
+    WorkflowProgressEvent,
+)
 from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.single_agent.rail.base import (
+    AgentCallbackContext,
+    AgentRail,
+    ToolCallInputs,
+)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -74,6 +84,38 @@ def _text_from_invoke_result(result: Any, *, member_name: str) -> str:
             raise BackendError(f"worker '{member_name}' failed: {msg}")
         return str(result.get("output", ""))
     return str(result)
+
+
+class SwarmflowActivityRail(AgentRail):
+    """Emit live tool activity from a worker to the run's progress stream.
+
+    A single-shot worker executes as one opaque ``run_once``, so without this
+    rail the run's only visibility into it is started/completed. This rail hooks
+    each tool execution and forwards a short ``agent_activity`` progress event
+    (throttled per worker) so a spectator UI — e.g. the Swarm Map — can show
+    what a worker is doing mid-run instead of just start/finish.
+    """
+
+    priority: int = 500
+
+    def __init__(self, emit: Callable[[str], None], min_interval_s: float = 1.5) -> None:
+        super().__init__()
+        self._emit = emit
+        self._min_interval = min_interval_s
+        self._last = 0.0
+
+    async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
+        inputs = ctx.inputs
+        if not isinstance(inputs, ToolCallInputs):
+            return
+        tool_name = (getattr(inputs, "tool_name", "") or "").strip()
+        if not tool_name:
+            return
+        now = time.monotonic()
+        if now - self._last < self._min_interval:
+            return
+        self._last = now
+        self._emit(tool_name)
 
 
 class TeamWorkerBackend(AgentBackend):
@@ -170,6 +212,12 @@ class TeamWorkerBackend(AgentBackend):
     async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
         member_name = self._next_member_name(opts)
         model = self._resolve_model(opts.get("model"))
+        # The engine tags the worker's started/completed events with the
+        # deterministic call-path key; reuse it so live activity events resolve
+        # to the same worker node downstream.
+        agent_id = opts.get("agent_id")
+        phase = opts.get("phase")
+        label = opts.get("label")
         # One rail per call: it bills this worker's model calls to the run's
         # shared ledger (and cuts the worker short once that ledger is dry),
         # while its own tally is what this ``agent()`` call reports as its cost.
@@ -188,6 +236,9 @@ class TeamWorkerBackend(AgentBackend):
                     has_schema=True,
                     model=model,
                     budget_rail=budget_rail,
+                    agent_id=agent_id,
+                    phase=phase,
+                    label=label,
                 )
                 if not (submit_tool.called and submit_tool.captured is not None):
                     raise BackendError(
@@ -207,6 +258,9 @@ class TeamWorkerBackend(AgentBackend):
                 has_schema=False,
                 model=model,
                 budget_rail=budget_rail,
+                agent_id=agent_id,
+                phase=phase,
+                label=label,
             )
             return AgentResult(text=text, tokens=budget_rail.call_tokens)
         except Exception as e:
@@ -346,6 +400,9 @@ class TeamWorkerBackend(AgentBackend):
         has_schema: bool,
         model: Any,
         budget_rail: SwarmflowBudgetRail | None = None,
+        agent_id: str | None = None,
+        phase: str | None = None,
+        label: str | None = None,
     ) -> str:
         """Build a worker ``TeamHarness`` and run it for one execution.
 
@@ -415,6 +472,12 @@ class TeamWorkerBackend(AgentBackend):
                 product_session_id=self._session_id,
                 evict_on_finish=True,
             )
+            if agent_id:
+                harness.add_rail(
+                    SwarmflowActivityRail(
+                        emit=self._make_activity_emitter(agent_id, phase, label),
+                    )
+                )
             if has_schema:
                 # End the round as soon as structured_output is captured, so the
                 # model can't loop re-calling it (the ack carries no stop signal).
@@ -586,6 +649,38 @@ class TeamWorkerBackend(AgentBackend):
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    def _make_activity_emitter(
+        self, agent_id: str, phase: str | None, label: str | None
+    ) -> Callable[[str], None]:
+        """Return a sink that forwards one worker tool call to the progress stream.
+
+        The rail calls this on (throttled) tool executions; the event carries the
+        node's ``agent_id`` / ``phase`` / ``label`` (mirroring ``agent_started``)
+        plus a short ``tool: <name>`` narration in ``message``. ``None`` when the
+        backend has no bound progress sink (e.g. tests) — the closure no-ops.
+        """
+        sink = self.progress_sink
+
+        def emit(tool_name: str) -> None:
+            if sink is None:
+                return
+            try:
+                sink(
+                    WorkflowProgressEvent(
+                        kind=ProgressKind.AGENT_ACTIVITY,
+                        phase=phase,
+                        label=label,
+                        agent_id=agent_id,
+                        message=f"tool: {tool_name}",
+                    )
+                )
+            except Exception:
+                team_logger.debug(
+                    "[swarmflow] worker activity emit failed: agent_id=%s", agent_id, exc_info=True
+                )
+
+        return emit
 
     def _next_member_name(self, opts: dict) -> str:
         """Mint a unique worker member name from the call label and run prefix.
