@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import unittest
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 import re
@@ -15,6 +16,7 @@ from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
 
@@ -87,6 +89,62 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 called_inputs["conversation_id"],
             ),
         )
+
+    async def test_repeated_concurrent_calls_get_isolated_execution_subjects(self) -> None:
+        observed_subjects = []
+
+        class FakeSubAgent:
+            card = AgentCard(name="Explore Agent", description="test", id="explore")
+
+            async def invoke(self, _inputs):
+                observed_subjects.append(current_execution_subject())
+                await asyncio.sleep(0)
+                return {"output": "done"}
+
+        parent_agent = SimpleNamespace(
+            create_subagent=lambda *_args, **_kwargs: FakeSubAgent(),
+        )
+        tool = TaskTool(
+            card=ToolCard(id="task_tool_test", name="task_tool", description="test"),
+            parent_agent=parent_agent,
+        )
+        session = Session(session_id="parent_session")
+
+        with patch.object(
+            tool,
+            "_build_sub_session_id",
+            return_value="parent_session_sub_sticky",
+        ):
+            await asyncio.gather(
+                tool.invoke(
+                    {"subagent_type": "explore", "task_description": "first"},
+                    session=session,
+                ),
+                tool.invoke(
+                    {"subagent_type": "explore", "task_description": "second"},
+                    session=session,
+                ),
+            )
+
+        self.assertEqual(len(observed_subjects), 2)
+        self.assertTrue(all(subject is not None for subject in observed_subjects))
+        self.assertEqual(
+            len({subject.subject_id for subject in observed_subjects}),
+            2,
+        )
+        self.assertEqual(
+            {subject.display_name for subject in observed_subjects},
+            {"Explore Agent"},
+        )
+        self.assertEqual(
+            {subject.parent_subject_id for subject in observed_subjects},
+            {"main"},
+        )
+        self.assertEqual(
+            {subject.session_id for subject in observed_subjects},
+            {"parent_session_sub_sticky"},
+        )
+        self.assertIsNone(current_execution_subject())
 
     async def test_task_tool_invoke_invalid_session(self) -> None:
         parent_agent = SimpleNamespace(deep_config=None)
@@ -314,4 +372,3 @@ class TestTaskToolSync(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

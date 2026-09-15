@@ -22,6 +22,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     iter_spans,
     read_llm_messages,
     read_tool_call,
+    span_attributes,
 )
 from openjiuwen.extensions.observability import semconv
 
@@ -149,6 +150,23 @@ def test_extractor_generates_genai_and_tool_attributes_without_mutating_response
     attrs = trajectory.resource_attributes
     assert attrs[CASE_ID] == "case-1"
     assert attrs[SESSION_ID] == "case-1"
+
+
+def test_extractor_bounds_top_level_tool_calls_without_mutating_response() -> None:
+    response = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"id": "call-1", "arguments": {"text": "x" * 1001}}],
+    }
+    llm = _legacy_span(outputs={"outputs": response})
+
+    trajectory = TrajectoryExtractor().extract(_session_with_spans([llm]))
+    attributes = span_attributes(next(iter(iter_spans(trajectory))))
+
+    assert attributes[semconv.GEN_AI_TOOL_CALLS] == [
+        {"id": "call-1", "arguments": {"text": f"{'x' * 1000}..."}},
+    ]
+    assert response["tool_calls"][0]["arguments"]["text"] == "x" * 1001
 
 
 def test_extractor_handles_missing_tracer_with_canonical_empty_payload() -> None:

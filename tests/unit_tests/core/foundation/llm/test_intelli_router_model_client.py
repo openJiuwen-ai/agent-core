@@ -895,6 +895,43 @@ class TestIntelliRouterConvertResponse:
         assert result.usage_metadata.cache_tokens == 5
 
     @pytest.mark.asyncio
+    async def test_to_ow_assistant_message_preserves_trace_facts(
+        self, model_request_config, intelli_router_client_config
+    ):
+        with (
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+        ):
+            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+        usage = MagicMock(
+            input_tokens=10, output_tokens=2, total_tokens=12, cache_tokens=3,
+            cache_read_tokens=3, cache_miss_tokens=7, cache_write_tokens=1,
+            cache_creation_input_tokens=1, cache_status="observed",
+            cache_source="provider_usage", cache_authoritative=True,
+            reasoning_tokens=0, model_name="routed-model", input_cost=0.1,
+            output_cost=0.2, total_cost=0.3, spec=[],
+        )
+        message = MagicMock(
+            content="answer", tool_calls=None, usage_metadata=usage,
+            finish_reason="stop", reasoning_content=None,
+            response_id="resp-1", response_model="actual-model",
+            provider_metadata={"service_tier": "priority", "api_key": "secret"},
+            metadata={"local": "kept"}, prompt_token_ids=[1],
+            completion_token_ids=[2], logprobs={"ok": True},
+            parser_content=None, provider_content=None, spec=[],
+        )
+
+        result = await client._to_ow_assistant_message(message)
+
+        assert result.response_id == "resp-1"
+        assert result.response_model == "actual-model"
+        assert result.provider_metadata == {"service_tier": "priority"}
+        assert result.metadata == {"local": "kept"}
+        assert result.usage_metadata.cache_creation_input_tokens == 1
+        assert result.usage_metadata.total_cost == 0.3
+
+    @pytest.mark.asyncio
     async def test_to_ow_assistant_message_with_reasoning(self, model_request_config, intelli_router_client_config):
         """reasoning_content should be passed through."""
         with (

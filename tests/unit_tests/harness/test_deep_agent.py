@@ -37,6 +37,7 @@ from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.harness import Workspace, create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
+from openjiuwen.harness.observability.rail import AgentObservabilityRail
 from openjiuwen.harness.prompts.sections import SectionName
 from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
@@ -1484,6 +1485,36 @@ def test_create_subagent_passes_configured_runtime_fields(tmp_path) -> None:
     assert call_kwargs["prompt_mode"] == "concise"
     assert call_kwargs["language"] == "en"
     assert call_kwargs["sandbox"] is True
+
+
+def test_create_subagent_forks_stateful_observability_rail_per_instance(tmp_path) -> None:
+    template_rail = AgentObservabilityRail()
+    subagent_config = SubAgentConfig(
+        agent_card=AgentCard(name="reviewer", description="reviewer"),
+        system_prompt="Review strictly.",
+        rails=[template_rail],
+    )
+    parent = create_deep_agent(
+        model=_create_dummy_model(),
+        card=AgentCard(name="parent", description="parent"),
+        workspace=Workspace(root_path=str(tmp_path / "parent_workspace")),
+        subagents=[subagent_config],
+    )
+
+    first = parent.create_subagent("reviewer", "sub_session_1")
+    second = parent.create_subagent("reviewer", "sub_session_2")
+    first_rail = next(
+        rail for rail in first.configured_rails()
+        if isinstance(rail, AgentObservabilityRail)
+    )
+    second_rail = next(
+        rail for rail in second.configured_rails()
+        if isinstance(rail, AgentObservabilityRail)
+    )
+
+    assert first_rail is not template_rail
+    assert second_rail is not template_rail
+    assert first_rail is not second_rail
 
 
 def test_create_subagent_keeps_parent_work_dir_restriction_when_stricter(tmp_path) -> None:

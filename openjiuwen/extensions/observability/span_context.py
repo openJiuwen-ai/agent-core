@@ -5,7 +5,10 @@
 
 from __future__ import annotations
 
+import json
 import threading
+import uuid
+from copy import deepcopy
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, cast
@@ -15,6 +18,11 @@ from opentelemetry.trace import Span
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.call_scope import get_current_llm_call_id
+from openjiuwen.extensions.observability.semconv import (
+    OJ_SPAN_FORCED_CLOSE,
+    OJ_SPAN_FORCED_CLOSE_REASON,
+    OJ_TRACE_FORCED_CLOSE,
+)
 
 
 def _is_root_span(span: Span, root_span: Span | None) -> bool:
@@ -48,6 +56,24 @@ def _is_open_llm_call_of(span: Span, parent_id: int) -> bool:
     if span.name != "llm.call" or not span.is_recording():
         return False
     return span.parent is not None and span.parent.span_id == parent_id
+
+
+def mark_span_forced_close(span: Span, reason: str) -> None:
+    """Mark a safety-net child close and immediately surface it on its root.
+
+    Args:
+        span: Recording child span ended by a lifecycle safety net.
+        reason: Stable machine-readable reason for the forced close.
+    """
+    span.set_attribute(OJ_SPAN_FORCED_CLOSE, True)
+    span.set_attribute(OJ_SPAN_FORCED_CLOSE_REASON, reason)
+    root_span = _resolve_root_span()
+    if (
+        root_span is not None
+        and root_span.is_recording()
+        and root_span.context.trace_id == span.context.trace_id
+    ):
+        root_span.set_attribute(OJ_TRACE_FORCED_CLOSE, True)
 
 
 class ActiveSpanTracker(SpanProcessor):
@@ -141,10 +167,9 @@ class ActiveSpanTracker(SpanProcessor):
         """End recording llm.call spans whose parent matches *parent_span_id*.
 
         An llm span reaching this path means its normal close callback did
-        not fire — logged at error level.
+        not fire. It is explicitly marked as forced-close and retains UNSET
+        status rather than being misreported as a successful model call.
         """
-        from opentelemetry.trace import Status, StatusCode
-
         root_span = _resolve_root_span()
         if root_span is None:
             return 0
@@ -165,7 +190,7 @@ class ActiveSpanTracker(SpanProcessor):
                     "parent_span_id={:016x} — close callback did not fire",
                     span.context.span_id, parent_span_id,
                 )
-                span.set_status(Status(StatusCode.OK))
+                mark_span_forced_close(span, "missing_llm_terminal_callback")
                 span.end()
                 closed += 1
             except Exception as exc:
@@ -298,8 +323,6 @@ class ActiveSpanTracker(SpanProcessor):
         the caller's to end, and closing it here would both steal its end time
         and report it as leaked.
         """
-        from opentelemetry.trace import Status, StatusCode
-
         closed_count = 0
         root_span = _resolve_root_span() if exclude_root_span else None
 
@@ -321,8 +344,8 @@ class ActiveSpanTracker(SpanProcessor):
                 if exclude_root_span and _is_root_span(span, root_span):
                     continue
 
-                # Spans with _llm_state are leaked LLM spans — log, don't
-                # stamp (silent fixups mask real bugs).
+                # Spans with _llm_state are leaked LLM spans. Log and stamp an
+                # explicit forced-close fact; never manufacture normal output.
                 state = getattr(span, "otel_llm_state", None)
                 if state is not None:
                     _log_orphan_llm_span(span, state)
@@ -333,7 +356,7 @@ class ActiveSpanTracker(SpanProcessor):
                         span.name if hasattr(span, 'name') else '<no-name>',
                         span.context.span_id if hasattr(span, 'context') and span.context else 0,
                     )
-                span.set_status(Status(StatusCode.OK))
+                mark_span_forced_close(span, "trace_safety_flush")
                 span.end()
                 closed_count += 1
             except Exception as exc:
@@ -346,20 +369,19 @@ class ActiveSpanTracker(SpanProcessor):
 
     def flush_all_spans(self, exclude_root_span: bool = True) -> int:
         """Close all remaining active spans (finalize / shutdown)."""
-        from opentelemetry.trace import Status, StatusCode
-
         closed_count = 0
         root_span = _resolve_root_span() if exclude_root_span else None
 
         with self._lock:
             all_traces = list(self._spans_by_trace.items())
             self._spans_by_trace.clear()
-            logger.info(
-                "ActiveSpanTracker.flush_all_spans BEFORE: traces={} "
-                "trace_ids=[{}]",
-                len(all_traces),
-                ", ".join("{:032x}".format(tid) for tid, _ in all_traces),
-            )
+            if all_traces:
+                logger.info(
+                    "ActiveSpanTracker.flush_all_spans BEFORE: traces={} "
+                    "trace_ids=[{}]",
+                    len(all_traces),
+                    ", ".join("{:032x}".format(tid) for tid, _ in all_traces),
+                )
 
         for trace_id, span_set in all_traces:
             for span in list(span_set):
@@ -380,7 +402,7 @@ class ActiveSpanTracker(SpanProcessor):
                             span.name if hasattr(span, 'name') else '<no-name>',
                             span.context.span_id if hasattr(span, 'context') and span.context else 0,
                         )
-                    span.set_status(Status(StatusCode.OK))
+                    mark_span_forced_close(span, "provider_shutdown_flush")
                     span.end()
                     closed_count += 1
                 except Exception as exc:
@@ -423,6 +445,8 @@ class LlmSpanState:
         is_streaming: Whether this is a streaming (chunk-by-chunk) call.
         first_chunk_ns: Monotonic-ns of the first stream chunk; None until
             the first chunk arrives.
+        last_chunk_ns: Monotonic-ns of the most recent stream chunk.
+        stream_event_sequence: Sequence number for additive stream events.
         reasoning_first_ns: Monotonic-ns of the first reasoning chunk.
         reasoning_last_ns: Monotonic-ns of the last reasoning chunk.
         reasoning_start_wall_ns: Wall-clock epoch (time.time_ns) captured
@@ -434,6 +458,13 @@ class LlmSpanState:
     call_id: str = ""
     is_streaming: bool = False
     first_chunk_ns: int | None = None
+    last_chunk_ns: int | None = None
+    stream_event_sequence: int = 0
+    request_purpose: str = "assistant"
+    message_occurrence_ids: tuple[str, ...] = ()
+    message_metadata: tuple[Any, ...] = ()
+    initial_trajectory_messages: tuple[dict[str, Any], ...] = ()
+    context_window_committed: bool = False
     reasoning_first_ns: int | None = None
     reasoning_last_ns: int | None = None
     # Wall-clock epoch (time.time_ns) captured at the first reasoning chunk.
@@ -449,6 +480,20 @@ _current_session_ctx: ContextVar[str] = ContextVar("observability_session_id", d
 
 _root_registry: dict[str, Span] = {}
 _root_registry_lock = threading.RLock()
+_execution_subject_request_sequences: dict[tuple[str, str], int] = {}
+_execution_subject_request_sequence_lock = threading.Lock()
+_trajectory_sequence_epoch = uuid.uuid4().hex
+_trajectory_subject_sequences: dict[tuple[str, str], int] = {}
+_trajectory_subject_states: dict[
+    tuple[str, str],
+    tuple[str, tuple[tuple[str, str], ...]],
+] = {}
+_trajectory_subject_state_lock = threading.Lock()
+_pending_context_window_compactions: dict[
+    tuple[str, str, str, str],
+    list[str],
+] = {}
+_pending_context_window_compactions_lock = threading.Lock()
 _ambient_root_span: Span | None = None
 
 
@@ -467,6 +512,173 @@ def get_current_session_id() -> str:
 
 def clear_current_session_id() -> None:
     _current_session_ctx.set("")
+
+
+def next_execution_subject_request_number(
+    *,
+    session_id: str,
+    subject_id: str,
+) -> int:
+    """Allocate the next request number for one subject within one session."""
+    key = (_normalize_session_id(session_id), str(subject_id))
+    with _execution_subject_request_sequence_lock:
+        request_number = _execution_subject_request_sequences.get(key, 0) + 1
+        _execution_subject_request_sequences[key] = request_number
+    return request_number
+
+
+def queue_context_window_compaction(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+    operation_id: str,
+) -> bool:
+    """Queue one completed compaction for its next matching context window."""
+    key = _context_window_transition_key(
+        session_id=session_id,
+        subject_id=subject_id,
+        request_id=request_id,
+        step_id=step_id,
+    )
+    resolved_operation_id = str(operation_id or "").strip()
+    if key is None or not resolved_operation_id:
+        return False
+    with _pending_context_window_compactions_lock:
+        pending = _pending_context_window_compactions.setdefault(key, [])
+        if resolved_operation_id not in pending:
+            pending.append(resolved_operation_id)
+    return True
+
+
+def consume_context_window_compaction(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+) -> str | None:
+    """Consume the oldest compaction for exactly one routed context window."""
+    key = _context_window_transition_key(
+        session_id=session_id,
+        subject_id=subject_id,
+        request_id=request_id,
+        step_id=step_id,
+    )
+    if key is None:
+        return None
+    with _pending_context_window_compactions_lock:
+        pending = _pending_context_window_compactions.get(key)
+        if not pending:
+            return None
+        operation_id = pending.pop(0)
+        if not pending:
+            _pending_context_window_compactions.pop(key, None)
+        return operation_id
+
+
+def _context_window_transition_key(
+    *,
+    session_id: str,
+    subject_id: str,
+    request_id: str,
+    step_id: str,
+) -> tuple[str, str, str, str] | None:
+    values = tuple(
+        str(value or "").strip()
+        for value in (session_id, subject_id, request_id, step_id)
+    )
+    if any(not value for value in values):
+        return None
+    return cast(tuple[str, str, str, str], values)
+
+
+def advance_context_window(
+    *,
+    session_id: str,
+    subject_id: str,
+    window_id: str,
+    messages: list[dict[str, Any]],
+) -> tuple[str, int, str | None, list[dict[str, Any]], bool]:
+    """Atomically advance one subject's canonical context-window state.
+
+    Occurrence identity is the message_id carried by each canonical message.
+    Content equality is deliberately never used to join occurrences.
+    """
+    key = (_normalize_session_id(session_id), str(subject_id))
+    current: tuple[tuple[str, str], ...] = tuple(
+        (
+            str(message.get("message_id", "")),
+            json.dumps(message, ensure_ascii=False, sort_keys=True, default=str),
+        )
+        for message in messages
+    )
+    with _trajectory_subject_state_lock:
+        previous = _trajectory_subject_states.get(key)
+        is_epoch_baseline = previous is None
+        sequence_epoch = _trajectory_sequence_epoch
+        sequence = _next_trajectory_subject_sequence_locked(key)
+        base_window_id = previous[0] if previous is not None else None
+        before = previous[1] if previous is not None else ()
+
+        before_by_id = {
+            message_id: (index, fingerprint)
+            for index, (message_id, fingerprint) in enumerate(before)
+        }
+        current_by_id = {
+            message_id: (index, fingerprint, messages[index])
+            for index, (message_id, fingerprint) in enumerate(current)
+        }
+        delta: list[dict[str, Any]] = []
+
+        if not is_epoch_baseline:
+            for message_id, (index, _fingerprint) in before_by_id.items():
+                if message_id not in current_by_id:
+                    delta.append({"op": "remove", "message_id": message_id, "index": index})
+
+            for message_id, (index, fingerprint, message) in current_by_id.items():
+                prior = before_by_id.get(message_id)
+                if prior is None:
+                    delta.append({
+                        "op": "insert",
+                        "message_id": message_id,
+                        "index": index,
+                        "message": deepcopy(message),
+                    })
+                    continue
+                prior_index, prior_fingerprint = prior
+                if prior_index != index:
+                    delta.append({
+                        "op": "move",
+                        "message_id": message_id,
+                        "from_index": prior_index,
+                        "index": index,
+                    })
+                if prior_fingerprint != fingerprint:
+                    delta.append({
+                        "op": "replace",
+                        "message_id": message_id,
+                        "index": index,
+                        "message": deepcopy(message),
+                    })
+
+        _trajectory_subject_states[key] = (str(window_id), current)
+        return sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline
+
+
+def next_trajectory_subject_position(*, session_id: str, subject_id: str) -> tuple[str, int]:
+    """Allocate one epoch-scoped sequence shared by every v2 event kind."""
+    key = (_normalize_session_id(session_id), str(subject_id))
+    with _trajectory_subject_state_lock:
+        sequence = _next_trajectory_subject_sequence_locked(key)
+        return _trajectory_sequence_epoch, sequence
+
+
+def _next_trajectory_subject_sequence_locked(key: tuple[str, str]) -> int:
+    sequence = _trajectory_subject_sequences.get(key, 0) + 1
+    _trajectory_subject_sequences[key] = sequence
+    return sequence
 
 
 def set_root_span(span: Span, *, session_id: str | None = None) -> None:
@@ -611,31 +823,55 @@ def _log_orphan_llm_span(span: Span, state: LlmSpanState) -> None:
     )
 
 
-def cascade_close_children() -> None:
+def cascade_close_children() -> int:
     """End all open child llm/tool spans on the current context.
 
     The single source of truth for cascade-close — called from
     ``AgentSpanScope.close`` (rail) and ``close_current_agent_span`` below.
-    Spans reaching this path had their normal close callback fail to fire
-    — this is a real bug, logged at error level without any silent stamping.
+    Spans reaching this path had their normal close callback fail to fire.
+    They retain UNSET status, receive an explicit forced-close marker, and
+    immediately mark the recording trace root so a later flush cannot erase
+    the fact by removing them from the tracker first.
+
+    Returns:
+        Number of child spans ended by this safety net.
     """
-    for bucket in _tool_span_map.get().values():
+    closed_count = 0
+    agent_span = _current_agent_span.get()
+    agent_span_id = (
+        agent_span.context.span_id
+        if agent_span is not None and agent_span.context is not None
+        else None
+    )
+    remaining_tool_spans: dict[str, list[Span]] = {}
+    for tool_name, bucket in _tool_span_map.get().items():
+        remaining_bucket: list[Span] = []
         for ts in bucket:
-            if ts.is_recording():
+            parent_span_id = getattr(getattr(ts, "parent", None), "span_id", None)
+            belongs_to_current_agent = (
+                agent_span_id is None or parent_span_id == agent_span_id
+            )
+            if ts.is_recording() and belongs_to_current_agent:
                 logger.warning(
                     "ORPHAN tool span in cascade-close: name={} span_id={:016x} — "
                     "on_tool_call_finished/on_tool_call_error did not fire",
                     ts.name if hasattr(ts, 'name') else '<no-name>',
                     ts.context.span_id if hasattr(ts, 'context') and ts.context else 0,
                 )
+                mark_span_forced_close(ts, "missing_tool_terminal_callback")
                 ts.end()
-    _tool_span_map.set({})
+                closed_count += 1
+            elif ts.is_recording():
+                remaining_bucket.append(ts)
+        if remaining_bucket:
+            remaining_tool_spans[tool_name] = remaining_bucket
+    _tool_span_map.set(remaining_tool_spans)
 
     # Close llm.call spans belonging to the current agent span.
     tracker = get_active_span_tracker()
-    agent_span = _current_agent_span.get()
     if tracker is not None and agent_span is not None:
-        tracker.close_llm_spans_by_parent(agent_span.context.span_id)
+        closed_count += tracker.close_llm_spans_by_parent(agent_span.context.span_id)
+    return closed_count
 
 
 def close_current_agent_span() -> None:
@@ -750,6 +986,8 @@ def pop_any_tool_span() -> Span | None:
 
 def reset_state() -> None:
     """Reset all per-task span trackers. Used by tests between cases."""
+    global _trajectory_sequence_epoch
+
     clear_root_span()
     _current_agent_span.set(None)
     _tool_span_map.set({})
@@ -757,9 +995,17 @@ def reset_state() -> None:
     clear_ambient_root_span()
     with _root_registry_lock:
         _root_registry.clear()
+    with _execution_subject_request_sequence_lock:
+        _execution_subject_request_sequences.clear()
+    with _trajectory_subject_state_lock:
+        _trajectory_sequence_epoch = uuid.uuid4().hex
+        _trajectory_subject_sequences.clear()
+        _trajectory_subject_states.clear()
+    with _pending_context_window_compactions_lock:
+        _pending_context_window_compactions.clear()
 
 
-def flush_child_spans(*, trace_id: int | None = None) -> None:
+def flush_child_spans(*, trace_id: int | None = None) -> int:
     """Flush pending child spans for a specific trace.
 
     When *trace_id* is provided explicitly, only that trace's spans are
@@ -776,7 +1022,7 @@ def flush_child_spans(*, trace_id: int | None = None) -> None:
     """
     tracker = get_active_span_tracker()
     if tracker is None:
-        return
+        return 0
 
     try:
         effective_trace_id: int | None = trace_id
@@ -800,10 +1046,13 @@ def flush_child_spans(*, trace_id: int | None = None) -> None:
                     "flush_child_spans: closed {} spans for trace {:032x}",
                     closed, effective_trace_id,
                 )
+            return closed
         else:
             logger.warning(
                 "flush_child_spans: cannot determine trace_id — no root span in "
                 "ContextVar and no explicit trace_id provided; skipping flush"
             )
+            return 0
     except Exception as exc:
         logger.warning("flush_child_spans: ActiveSpanTracker failed: {}", exc)
+        return 0

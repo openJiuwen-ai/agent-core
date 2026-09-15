@@ -286,6 +286,8 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
                             "role": "user",
                             "content": [{"type": "input_text", "text": "inspect task"}],
                         },
+                        {"type": "function_call", "name": "view_task", "call_id": "call-1", "arguments": "{}"},
+                        {"type": "function_call_output", "name": "view_task", "call_id": "call-1", "output": "ok"},
                     ],
                 },
             },
@@ -363,6 +365,11 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     assert llm_span.attributes["codex.inference.call_id"] == "inference-1"
     assert llm_span.attributes["codex.model.call.paired"] is True
     assert llm_span.attributes["gen_ai.request.model"] == "gpt-rollout"
+    request_messages = json.loads(llm_span.attributes["gen_ai.input.messages"])
+    assert [(item.get("name"), item.get("call_id")) for item in request_messages[-2:]] == [
+        ("view_task", "call-1"),
+        ("view_task", "call-1"),
+    ]
     assert "inspect task" in llm_span.attributes[LANGFUSE_OBSERVATION_INPUT]
     assert "I will inspect it." in llm_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
 

@@ -31,8 +31,10 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SOURCE,
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
+    _trace_safe_value,
     attributes_from_map,
     attributes_to_map,
+    write_llm_exchange,
 )
 
 
@@ -129,19 +131,34 @@ def _span_id(value: Any, index: int) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
 
 
-def _message_attributes(base: str, messages: Any) -> dict[str, Any]:
-    if messages is None:
-        return {}
-    values = messages if isinstance(messages, list) else [messages]
-    attributes: dict[str, Any] = {}
-    for index, message in enumerate(values):
-        item = dict(message) if isinstance(message, Mapping) else {"content": str(message)}
-        for field, value in item.items():
-            if field == "tool_calls":
-                continue
-            attributes[f"{base}.{index}.{field}"] = deepcopy(value)
-        if index == 0 and item.get("tool_calls") is not None:
-            attributes[semconv.GEN_AI_TOOL_CALLS] = deepcopy(item["tool_calls"])
+def _as_message_list(value: Any) -> list[dict[str, Any]]:
+    """Normalize a legacy messages field onto a list of flat messages."""
+
+    if value is None:
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [
+        dict(item) if isinstance(item, Mapping) else {"content": str(item)}
+        for item in values
+    ]
+
+
+def _llm_exchange_attributes(detail: Mapping[str, Any]) -> dict[str, Any]:
+    """Convert one legacy LLM step into the standard GenAI attributes.
+
+    The first reply's tool calls also keep a top-level attribute for legacy
+    readers. It carries the same bounded data as the structured output.
+    """
+
+    prompts = _as_message_list(detail.get("messages"))
+    completions = _as_message_list(detail.get("response"))
+    attributes = write_llm_exchange(prompts, completions)
+    if completions:
+        calls = completions[0].get("tool_calls")
+        if isinstance(calls, list):
+            valid_calls = [_trace_safe_value(dict(call)) for call in calls if isinstance(call, Mapping)]
+            if valid_calls:
+                attributes[semconv.GEN_AI_TOOL_CALLS] = valid_calls
     return attributes
 
 
@@ -170,8 +187,7 @@ def _legacy_step_span(value: Any, index: int, execution_id: str) -> dict[str, An
         attributes[semconv.GEN_AI_OPERATION_NAME] = "chat"
         if detail.get("model") is not None:
             attributes[semconv.GEN_AI_REQUEST_MODEL] = deepcopy(detail["model"])
-        attributes.update(_message_attributes(semconv.GEN_AI_PROMPT, detail.get("messages")))
-        attributes.update(_message_attributes(semconv.GEN_AI_COMPLETION, detail.get("response")))
+        attributes.update(_llm_exchange_attributes(detail))
         if detail.get("tools") is not None:
             attributes[semconv.GEN_AI_TOOL_DEFINITIONS] = deepcopy(detail["tools"])
         usage = detail.get("usage") if isinstance(detail.get("usage"), Mapping) else {}

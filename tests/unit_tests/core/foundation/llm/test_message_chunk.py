@@ -307,6 +307,41 @@ def test_assistant_add_handles_none_reasoning_content():
     assert result.reasoning_content == "Some reasoning"
 
 
+@pytest.mark.parametrize(
+    "parser_content",
+    [False, 0, "", [], {}],
+    ids=["false", "zero", "empty-string", "empty-list", "empty-dict"],
+)
+def test_assistant_add_preserves_falsy_parser_content(parser_content: object) -> None:
+    result = AssistantMessageChunk(content="first") + AssistantMessageChunk(
+        content="second", parser_content=parser_content
+    )
+    assert type(result.parser_content) is type(parser_content)
+    assert result.parser_content == parser_content
+
+
+def test_assistant_add_preserves_trace_response_facts() -> None:
+    first = AssistantMessageChunk(
+        content="a",
+        response_id="resp-1",
+        response_model="model-1",
+        provider_metadata={"service_tier": "default", "status": "running"},
+        provider_content="raw-a",
+    )
+    second = AssistantMessageChunk(
+        content="b",
+        provider_metadata={"status": "completed"},
+        provider_content="raw-b",
+    )
+
+    result = first + second
+
+    assert result.response_id == "resp-1"
+    assert result.response_model == "model-1"
+    assert result.provider_metadata == {"service_tier": "default", "status": "completed"}
+    assert result.provider_content == "raw-b"
+
+
 def test_assistant_add_merges_finish_reason():
     """Test that __add__ handles finish_reason."""
     chunk1 = AssistantMessageChunk(
