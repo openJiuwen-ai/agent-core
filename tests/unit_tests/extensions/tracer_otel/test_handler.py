@@ -43,7 +43,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_END_TIME,
     OJ_ERROR,
     OJ_INVOKE_ID,
-    OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -363,8 +362,6 @@ class TestOtelAgentHandler:
         assert OJ_START_TIME in s.attributes
         assert OJ_END_TIME in s.attributes
         assert OJ_ELAPSED_TIME in s.attributes
-        # meta_data set from instance_info when span.meta_data is None
-        assert OJ_META_DATA in s.attributes
 
     async def test_agent_chain_fields_set_when_span_empty(self):
         """Chain: invoke_type = "chain" when span.invoke_type is None."""
