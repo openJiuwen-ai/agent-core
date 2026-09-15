@@ -94,11 +94,23 @@ class ReadWriteLockManager:
         task = cls._cleanup_task
         cls._cleanup_task = None
         if task is not None and not task.done():
-            task.cancel()
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                task_loop = task.get_loop()
+            except RuntimeError:
+                task_loop = None
+            if task_loop is asyncio.get_running_loop():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                # Stale cleanup task bound to a closed or foreign loop:
+                # cancelling/awaiting it from this loop would raise or hang.
+                # The owning loop's teardown (or its death) handles it; drop it.
+                sys_operation_logger.warning(
+                    "Dropping read-write lock cleanup task bound to a stale event loop"
+                )
 
         await cls.close_locks()
         await cls.cleanup_expired_locks()
