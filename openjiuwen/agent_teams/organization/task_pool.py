@@ -1590,7 +1590,10 @@ class OrgTaskManager:
             ):
                 return OrgTaskOpResult(
                     ok=False,
-                    reason="a child task needs output_context.description, result_uri, or output_abstract before ACCEPTED",
+                    reason=(
+                        "a child task needs output_context.description, result_uri, "
+                        "or output_abstract before ACCEPTED"
+                    ),
                 )
             if row is None:
                 row = OrgTaskReviewRecord(
