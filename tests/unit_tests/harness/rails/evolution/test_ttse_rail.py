@@ -595,6 +595,7 @@ async def test_constructor_embedding_syncs_to_config(tmp_path):
         trajectory_span_processor=_PROCESSOR,
     )
     assert rail._ttse_config.embedding is provider
+    assert cfg.embedding is None
     assert rail._ttse_store.has_embedding_provider()
 
 
@@ -758,6 +759,30 @@ async def test_rail_flush_induces_partial_buffer(tmp_path):
     assert len(llm.calls) == 2  # induce_batch + classify
     await rail.flush()  # empty buffer -> no-op
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_keeps_buffer_when_induce_fails(tmp_path, monkeypatch):
+    cfg = TTSEConfig(store_path=str(tmp_path / "b.json"), batch_size=5)
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=cfg)
+    snap = {
+        "messages": [{"role": "user", "content": "q"}],
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "q",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert len(rail._batch_buffer) == 1
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("llm down")
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.evolution.ttse_rail.induce_batch",
+        boom,
+    )
+    with pytest.raises(RuntimeError, match="llm down"):
+        await rail.flush()
+    assert len(rail._batch_buffer) == 1
 
 
 # ----------------------------------------------------------------------

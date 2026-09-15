@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, List, Optional
@@ -93,7 +93,8 @@ class TTSERail(EvolutionRail):
     ) -> None:
         self._ttse_llm = llm
         self._ttse_model = model
-        self._ttse_config = ttse_config or TTSEConfig()
+        # Shallow-copy so resolving embedding does not mutate the caller's config.
+        self._ttse_config = TTSEConfig() if ttse_config is None else copy(ttse_config)
         resolved = embedding if embedding is not None else self._ttse_config.embedding
         self._ttse_config.embedding = resolved
         self._ttse_store = shared_store(self._ttse_config, embedding=resolved)
@@ -527,7 +528,6 @@ class TTSERail(EvolutionRail):
             return
         await self._synthesize_resolving(capabilities)
         group = list(self._batch_buffer)
-        self._batch_buffer.clear()
         facts, tips = await induce_batch(
             llm=self._ttse_llm,
             model=self._ttse_model,
@@ -538,6 +538,8 @@ class TTSERail(EvolutionRail):
             existing_tips=self._ttse_store.tips_texts(),
         )
         added = await self._add_rules(facts, tips)
+        # Drop only after induce + bank write succeed; otherwise retry flush.
+        self._batch_buffer.clear()
         if added:
             logger.info(
                 "[TTSERail] batch-induced %s new rule(s) over %s task(s); bank stats=%s",
