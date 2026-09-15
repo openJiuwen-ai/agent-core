@@ -40,7 +40,7 @@ ReliableRouter (intelli_router 包)
 IntelliRouter 是 agent-core 的**可选依赖**，需要单独安装：
 
 ```bash
-pip install intelli-router
+pip install "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router"
 ```
 
 验证安装是否成功：
@@ -602,7 +602,7 @@ model_client_config = ModelClientConfig(
 
 **Q: `intelli-router` 包未安装会怎样？**
 
-A: agent-core 模块可正常加载（import 不会失败），但在实际创建 IntelliRouter 客户端时会抛出 `MODEL_SERVICE_CONFIG_ERROR` 错误，并提示 `pip install intelli-router`。
+A: agent-core 模块可正常加载（import 不会失败），但在实际创建 IntelliRouter 客户端时会抛出 `MODEL_SERVICE_CONFIG_ERROR` 错误，并提示 `pip install "intelli-router @ git+https://gitcode.com/openJiuwen/agent-protocol.git@feature/intelliRouter#subdirectory=intelli_router"`。
 
 **Q: `api_key` 和 `api_base` 为什么要填 placeholder？**
 
