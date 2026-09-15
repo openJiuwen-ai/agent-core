@@ -298,8 +298,28 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 trusted_dirs=trusted_dirs,
             )
             if checker is None:
-                return []
-            return list(checker.collect_ask_accesses(normalized_name, tool_args))
+                accesses: list[tuple[str, str]] = []
+            else:
+                accesses = list(checker.collect_ask_accesses(normalized_name, tool_args))
+                accesses.extend(
+                    checker.collect_extra_persist_accesses(normalized_name, tool_args)
+                )
+            from openjiuwen.harness.security.permission_engine.access_extra import (
+                extra_paths_file_action,
+                extract_extra_paths,
+            )
+            if checker is None:
+                action = extra_paths_file_action(normalized_name)
+                accesses.extend((path, action) for path in extract_extra_paths(tool_args))
+            # de-dupe (path, action)
+            seen: set[tuple[str, str]] = set()
+            unique: list[tuple[str, str]] = []
+            for item in accesses:
+                if item in seen:
+                    continue
+                seen.add(item)
+                unique.append(item)
+            return unique
         except Exception:
             logger.warning(
                 "[PermissionEngine] permission.persist.external.check_failed",

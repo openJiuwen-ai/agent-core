@@ -361,14 +361,37 @@ def _specs_for_tool(tool_name: str) -> list[FileToolSpec] | None:
     return lookup_file_tool_specs(tool_name)
 
 
+def _extra_paths_accesses(
+    tool_name: str,
+    tool_args: Mapping[str, Any],
+    workspace: Path,
+) -> list[tuple[Path, FileAction, str]]:
+    """Model-declared ``extra.paths`` become file_guard accesses (and HITL ASK)."""
+    from openjiuwen.harness.security.permission_engine.access_extra import (
+        extract_extra_paths,
+        extra_paths_file_action,
+    )
+
+    action: FileAction = extra_paths_file_action(tool_name)
+    out: list[tuple[Path, FileAction, str]] = []
+    for raw in extract_extra_paths(tool_args):
+        rp = _resolve_path_str(raw, workspace)
+        if rp is None:
+            continue
+        out.append((rp, action, "extra.paths"))
+    return out
+
+
 def extract_accesses_native(
     tool_name: str,
     tool_args: Mapping[str, Any],
     workspace: Path,
     permission_config: Mapping[str, Any] | None = None,
 ) -> list[tuple[Path, FileAction, str]]:
-    """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex``。"""
-    out: list[tuple[Path, FileAction, str]] = []
+    """Native 抽取：``(path, action, source)``；source 为 ``tool_arg`` / ``shlex`` / ``extra.paths``。"""
+    out: list[tuple[Path, FileAction, str]] = _extra_paths_accesses(
+        tool_name, tool_args, workspace,
+    )
 
     from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
         is_shell_tool,

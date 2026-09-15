@@ -156,7 +156,8 @@ class BaseFSProvider(BaseFsProtocal, ABC):
             self,
             path: str,
             pattern: str,
-            exclude_patterns: Optional[List[str]] = None
+            exclude_patterns: Optional[List[str]] = None,
+            options: Optional[Dict[str, Any]] = None
     ) -> SearchFilesResult:
         raise NotImplementedError(f"{self.__class__.__name__}.search_files is not implemented")
 

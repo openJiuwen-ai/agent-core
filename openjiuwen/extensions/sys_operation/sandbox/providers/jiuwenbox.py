@@ -116,6 +116,13 @@ def _normalize_exec_timeout(timeout: Optional[int]) -> Optional[int]:
     return normalized if normalized > 0 else None
 
 
+# Windows create waits for two-hop + runner listen. A 30s HTTP timeout
+# abandons the client while box-server still finishes the sandbox, then the
+# next skill/prewarm call POSTs another one.
+_SANDBOX_CREATE_TIMEOUT_SECONDS = 180.0
+_SANDBOX_CREATE_WAIT_SECONDS = 185.0
+
+
 def _normalize_read_params(
     *,
     head: Optional[int],
@@ -320,11 +327,40 @@ class _JiuwenBoxClient:
         timeout_seconds: float = 30.0,
         api_token: str | None = None,
     ) -> None:
+        self._timeout_seconds = float(timeout_seconds)
         self._client = build_jiuwenbox_http_client(
             base_url,
             timeout_seconds=timeout_seconds,
             api_token=api_token,
         )
+        self._platform: str | None = None
+
+    def server_platform(self) -> str:
+        """Cached ``/health.platform`` (windows|linux). Fail closed if missing."""
+        if self._platform in ("windows", "linux"):
+            return self._platform
+        response = self._client.get("/health")
+        _raise_for_status(response)
+        payload = response.json() if response.content else {}
+        plat = payload.get("platform") if isinstance(payload, dict) else None
+        if plat not in ("windows", "linux"):
+            raise RuntimeError(
+                "box-server did not report a stable health.platform field; upgrade required"
+            )
+        self._platform = plat
+        return plat
+
+    def _is_windows_server(self) -> bool:
+        return self.server_platform() == "windows"
+
+    @staticmethod
+    def _normalize_access_extra(options: dict[str, Any] | None) -> dict[str, list[str]]:
+        """Copy extra.paths from options only. Never fill from the target path."""
+        extra = (options or {}).get("extra") if isinstance(options, dict) else None
+        paths: list[str] = []
+        if isinstance(extra, dict) and isinstance(extra.get("paths"), list):
+            paths = [str(p) for p in extra["paths"] if isinstance(p, str) and p.strip()]
+        return {"paths": list(paths)}
 
     def create_sandbox(
         self,
@@ -338,7 +374,8 @@ class _JiuwenBoxClient:
         if policy_mode is not None:
             body["policy_mode"] = policy_mode
 
-        response = self._client.post("/api/v1/sandboxes", json=body)
+        timeout = max(self._timeout_seconds, _SANDBOX_CREATE_TIMEOUT_SECONDS)
+        response = self._client.post("/api/v1/sandboxes", json=body, timeout=timeout)
         _raise_for_status(response)
         return response.json()["id"]
 
@@ -377,6 +414,7 @@ class _JiuwenBoxClient:
         timeout: int | None = None,
         environment: Dict[str, str] | None = None,
         stdin: str | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         timeout_seconds = _normalize_exec_timeout(timeout)
         body: dict[str, Any] = {
@@ -385,6 +423,7 @@ class _JiuwenBoxClient:
             "env": environment,
             "stdin": stdin,
             "timeout_seconds": timeout_seconds,
+            "extra": extra if extra is not None else {"paths": []},
         }
         body = {key: value for key, value in body.items() if value is not None}
         response = self._client.post(
@@ -395,15 +434,32 @@ class _JiuwenBoxClient:
         _raise_for_status(response)
         return dict(response.json())
 
-    def upload_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
+    def upload_bytes(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        content: bytes,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        files = {"file": (Path(sandbox_path).name or "upload.bin", content)}
+        data: dict[str, str] = {}
+        if self._is_windows_server():
+            data["extra"] = json.dumps(extra if extra is not None else {"paths": []})
         response = self._client.post(
             f"/api/v1/sandboxes/{sandbox_id}/upload",
             params={"sandbox_path": sandbox_path},
-            files={"file": (Path(sandbox_path).name or "upload.bin", content)},
+            files=files,
+            data=data or None,
         )
         _raise_for_status(response)
 
-    def append_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
+    def append_bytes(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        content: bytes,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
         encoded_content = base64.b64encode(content).decode("ascii")
         result = self.exec(
             sandbox_id,
@@ -421,15 +477,28 @@ class _JiuwenBoxClient:
                 sandbox_path,
             ],
             stdin=encoded_content,
+            extra=extra,
         )
         if int(result.get("exit_code") or 0) != 0:
             raise RuntimeError(result.get("stderr") or result.get("stdout") or "append file failed")
 
-    def download_bytes(self, sandbox_id: str, sandbox_path: str) -> bytes:
-        response = self._client.get(
-            f"/api/v1/sandboxes/{sandbox_id}/download",
-            params={"sandbox_path": sandbox_path},
-        )
+    def download_bytes(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        extra: dict[str, Any] | None = None,
+    ) -> bytes:
+        payload = extra if extra is not None else {"paths": []}
+        if self._is_windows_server():
+            response = self._client.post(
+                f"/api/v1/sandboxes/{sandbox_id}/download",
+                json={"sandbox_path": sandbox_path, "extra": payload},
+            )
+        else:
+            response = self._client.get(
+                f"/api/v1/sandboxes/{sandbox_id}/download",
+                params={"sandbox_path": sandbox_path},
+            )
         _raise_for_status(response)
         return response.content
 
@@ -442,16 +511,25 @@ class _JiuwenBoxClient:
         max_depth: Optional[int],
         include_files: bool,
         include_dirs: bool,
+        extra: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {
+        payload: dict[str, Any] = {
             "sandbox_path": path,
             "recursive": recursive,
             "include_files": include_files,
             "include_dirs": include_dirs,
+            "extra": extra if extra is not None else {"paths": []},
         }
         if max_depth is not None:
-            params["max_depth"] = max_depth
-        response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/files", params=params)
+            payload["max_depth"] = max_depth
+        if self._is_windows_server():
+            response = self._client.post(
+                f"/api/v1/sandboxes/{sandbox_id}/files/list",
+                json=payload,
+            )
+        else:
+            params = {k: v for k, v in payload.items() if k != "extra"}
+            response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/files", params=params)
         _raise_for_status(response)
         return list(response.json().get("items", []))
 
@@ -461,15 +539,33 @@ class _JiuwenBoxClient:
         path: str,
         pattern: str,
         exclude_patterns: Optional[List[str]],
+        extra: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        params: list[tuple[str, Any]] = [("sandbox_path", path), ("pattern", pattern)]
-        for item in exclude_patterns or []:
-            params.append(("exclude_patterns", item))
-        response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/search", params=params)
+        payload: dict[str, Any] = {
+            "sandbox_path": path,
+            "pattern": pattern,
+            "exclude_patterns": exclude_patterns or [],
+            "extra": extra if extra is not None else {"paths": []},
+        }
+        if self._is_windows_server():
+            response = self._client.post(
+                f"/api/v1/sandboxes/{sandbox_id}/files/search",
+                json=payload,
+            )
+        else:
+            params: list[tuple[str, Any]] = [("sandbox_path", path), ("pattern", pattern)]
+            for item in exclude_patterns or []:
+                params.append(("exclude_patterns", item))
+            response = self._client.get(f"/api/v1/sandboxes/{sandbox_id}/search", params=params)
         _raise_for_status(response)
         return list(response.json().get("items", []))
 
-    def path_exists(self, sandbox_id: str, sandbox_path: str) -> bool:
+    def path_exists(
+        self,
+        sandbox_id: str,
+        sandbox_path: str,
+        extra: dict[str, Any] | None = None,
+    ) -> bool:
         path = PurePosixPath(sandbox_path)
         parent = path.parent.as_posix()
         try:
@@ -480,6 +576,7 @@ class _JiuwenBoxClient:
                 max_depth=None,
                 include_files=True,
                 include_dirs=True,
+                extra=extra,
             )
         except httpx.HTTPStatusError as exc:
             # Re-raise sandbox-not-found 404 for retry wrapper; other 404s mean path missing.
@@ -536,6 +633,10 @@ class _JiuwenBoxProviderMixin:
     # Lazy class-level asyncio.Lock serializes sandbox recreate under concurrent ops.
     _recreate_lock: ClassVar[Optional[asyncio.Lock]] = None
     _recreate_lock_init: ClassVar[threading.Lock] = threading.Lock()
+    # One in-flight POST /sandboxes per shared_key. Waiters must not POST again
+    # after a 30s client timeout while box-server is still creating.
+    _create_inflight: ClassVar[Dict[str, threading.Event]] = {}
+    _create_error: ClassVar[Dict[str, BaseException]] = {}
 
     # Dedupe PUT /api/v1/timeout per base_url across provider instances.
     _idle_timeout_cache: ClassVar[Dict[str, Tuple[Optional[int], Optional[int]]]] = {}
@@ -561,6 +662,12 @@ class _JiuwenBoxProviderMixin:
             self._client = _JiuwenBoxClient(base_url=base_url, timeout_seconds=self._timeout_seconds)
         return self._client
 
+    def _sandbox_is_windows(self) -> bool:
+        try:
+            return self._get_client()._is_windows_server()
+        except Exception:
+            return os.name == "nt"
+
     def _launcher_extra_params(self, *, create: bool = False) -> dict[str, Any]:
         launcher_config = getattr(self.config, "launcher_config", None) if self.config is not None else None
         if launcher_config is None:
@@ -576,6 +683,46 @@ class _JiuwenBoxProviderMixin:
         extra_params = {}
         setattr(launcher_config, "extra_params", extra_params)
         return extra_params
+
+    def _access_extra_payload(self, *overlays: Any, **kwargs: Any) -> dict[str, list[str]]:
+        """Call extra.paths: model-declared paths first, then launcher snapshot.
+
+        Never derived from the target file path. When the model fills extra.paths,
+        union with the frozen sandbox roots so workspace stays in range.
+
+        Callers often pass ``kwargs.get("options"), **kwargs``. ``options`` must
+        not be a named parameter, or that pattern raises TypeError.
+        """
+        from openjiuwen.harness.security.permission_engine.access_extra import (
+            current_tool_access_extra,
+            extract_extra_paths,
+        )
+
+        merged: dict[str, Any] = {}
+        for part in (*overlays, kwargs):
+            if not isinstance(part, dict):
+                continue
+            merged.update(part)
+            nested = part.get("options")
+            if isinstance(nested, dict):
+                merged.update(nested)
+        scoped = current_tool_access_extra()
+        if scoped:
+            merged.update(scoped)
+        llm_paths = extract_extra_paths(merged)
+        frozen_raw = self._launcher_extra_params().get("access_extra_paths")
+        frozen = [str(p) for p in frozen_raw if p] if isinstance(frozen_raw, list) else []
+        if not llm_paths:
+            return {"paths": frozen}
+        seen: set[str] = set()
+        paths: list[str] = []
+        for item in frozen + llm_paths:
+            key = item.replace("\\", "/").rstrip("/").lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            paths.append(item)
+        return {"paths": paths}
 
     def _sandbox_create_options_from_launcher_extra_params(self) -> dict[str, Any]:
         extra_params = self._launcher_extra_params()
@@ -782,30 +929,13 @@ class _JiuwenBoxProviderMixin:
             lifecycle_hook = self._lifecycle_hook()
             shared_key = self._shared_scope_key()
             self.register_lifecycle_hook(shared_key, lifecycle_hook)
-            with self._shared_lock:
-                self._sandbox_id = self._shared_sandbox_ids.get(shared_key)
-                newly_created = False
-                if self._sandbox_id is None:
-                    # before_create under _shared_lock before first lazy create.
-                    _invoke_lifecycle_hook(
-                        lifecycle_hook, "before_create", {"reason": "initial"},
-                    )
-                    # PUT root idle policy before create (reaper ignores per-sandbox timeout).
-                    self._configure_server_idle_timeout()
-                    self._sandbox_id = self._get_client().create_sandbox(
-                        **self._sandbox_create_options_from_launcher_extra_params(),
-                    )
-                    newly_created = True
-                self._shared_sandbox_ids[shared_key] = self._sandbox_id
-                self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
-            # Sync upload preserve_files only when this process just created the sandbox.
+            newly_created = self._create_shared_sandbox(shared_key, lifecycle_hook)
             if newly_created:
                 _try_upload_preserve_files(
                     self._get_client(),
                     self._sandbox_id,
                     self._launcher_extra_params().get("preserve_files_upload"),
                 )
-                # after_create after preserve_files upload completes.
                 _invoke_lifecycle_hook(
                     lifecycle_hook,
                     "after_create",
@@ -817,6 +947,67 @@ class _JiuwenBoxProviderMixin:
                 self._shared_sandbox_ids[shared_key] = self._sandbox_id
                 self._launcher_extra_params(create=True)["sandbox_id"] = self._sandbox_id
         return self._sandbox_id
+
+    def _bind_shared_sandbox_id(self, shared_key: str, sandbox_id: str) -> None:
+        self._sandbox_id = sandbox_id
+        with self._shared_lock:
+            self._shared_sandbox_ids[shared_key] = sandbox_id
+            self._launcher_extra_params(create=True)["sandbox_id"] = sandbox_id
+
+    def _create_shared_sandbox(
+        self,
+        shared_key: str,
+        lifecycle_hook: Optional[Callable[[str, dict], None]],
+    ) -> bool:
+        """Create or wait for the sandbox for ``shared_key``. HTTP is off the lock.
+
+        Returns True when this caller performed the create.
+        """
+        creator = False
+        waiter: Optional[threading.Event] = None
+        with self._shared_lock:
+            cached = self._shared_sandbox_ids.get(shared_key)
+            if cached:
+                self._sandbox_id = cached
+                self._launcher_extra_params(create=True)["sandbox_id"] = cached
+                return False
+            waiter = self._create_inflight.get(shared_key)
+            if waiter is None:
+                waiter = threading.Event()
+                self._create_inflight[shared_key] = waiter
+                self._create_error.pop(shared_key, None)
+                creator = True
+        if not creator:
+            waiter.wait(timeout=_SANDBOX_CREATE_WAIT_SECONDS)
+            with self._shared_lock:
+                cached = self._shared_sandbox_ids.get(shared_key)
+                err = self._create_error.get(shared_key)
+            if cached:
+                self._bind_shared_sandbox_id(shared_key, cached)
+                return False
+            if err is not None:
+                raise err
+            raise TimeoutError(
+                f"timed out waiting for in-flight sandbox create ({shared_key})"
+            )
+        try:
+            _invoke_lifecycle_hook(
+                lifecycle_hook, "before_create", {"reason": "initial"},
+            )
+            self._configure_server_idle_timeout()
+            new_id = self._get_client().create_sandbox(
+                **self._sandbox_create_options_from_launcher_extra_params(),
+            )
+            self._bind_shared_sandbox_id(shared_key, new_id)
+            return True
+        except BaseException as exc:
+            with self._shared_lock:
+                self._create_error[shared_key] = exc
+            raise
+        finally:
+            with self._shared_lock:
+                self._create_inflight.pop(shared_key, None)
+            waiter.set()
 
     @classmethod
     def _get_recreate_lock(cls) -> asyncio.Lock:
@@ -831,7 +1022,7 @@ class _JiuwenBoxProviderMixin:
         """Run op with auto sandbox recreate on sandbox-not-found 404."""
         max_retries = _resolve_recreate_retries()
         last_exc: Optional[httpx.HTTPStatusError] = None
-        stale_sandbox_id = self._get_sandbox_id()
+        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
         for attempt in range(max_retries + 1):
             if attempt == 0:
                 sandbox_id = stale_sandbox_id
@@ -917,7 +1108,7 @@ class _JiuwenBoxProviderMixin:
         when the pipeline failed and local fallback was not used.
         """
         max_retries = _resolve_recreate_retries()
-        stale_sandbox_id = self._get_sandbox_id()
+        stale_sandbox_id = await asyncio.to_thread(self._get_sandbox_id)
         last_error: Optional[str] = None
 
         for attempt in range(max_retries + 1):
@@ -1385,6 +1576,37 @@ def _read_excluded_commands(extra: Any) -> list[str] | None:
     return None
 
 
+_POWERSHELL_ARGV_TOKENS = (
+    "get-childitem", "set-location", "remove-item", "test-path",
+    "select-object", "where-object", "foreach-object", "invoke-",
+    "$psversiontable", "write-output", "new-item", "copy-item",
+)
+
+
+def _looks_like_powershell_command(command: str) -> bool:
+    low = (command or "").strip().lower()
+    return bool(low) and any(tok in low for tok in _POWERSHELL_ARGV_TOKENS)
+
+
+def _sandbox_shell_argv(
+    command: str,
+    shell_type: str | None = None,
+    *,
+    windows: bool = False,
+) -> list[str]:
+    """Pick sandbox exec argv. Windows PowerShell must not go through bash."""
+    kind = (shell_type or "auto").strip().lower()
+    if not windows:
+        return ["bash", "-lc", command]
+    if kind == "cmd":
+        return ["cmd", "/c", command]
+    if kind == "powershell" or (
+        kind in ("auto", "bash", "sh") and _looks_like_powershell_command(command)
+    ):
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    return ["bash", "-lc", command]
+
+
 def _command_matches_exclude(command: str, patterns: list[str] | None) -> bool:
     """Return True if command matches any fnmatch exclude pattern."""
     if not command or not patterns:
@@ -1432,8 +1654,9 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         if validation_error:
             return _build_fs_error_result("read_file", validation_error, ReadFileResult)
         try:
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             raw = await self._execute_with_sandbox_retry(
-                lambda sid: self._get_client().download_bytes(sid, path)
+                lambda sid: self._get_client().download_bytes(sid, path, extra=extra)
             )
             if mode == "bytes":
                 content: str | bytes = raw
@@ -1463,13 +1686,14 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 if append_newline:
                     text += "\n"
                 raw = text.encode("utf-8")
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             if append:
                 await self._execute_with_sandbox_retry(
-                    lambda sid: self._get_client().append_bytes(sid, path, raw)
+                    lambda sid: self._get_client().append_bytes(sid, path, raw, extra=extra)
                 )
             else:
                 await self._execute_with_sandbox_retry(
-                    lambda sid: self._get_client().upload_bytes(sid, path, raw)
+                    lambda sid: self._get_client().upload_bytes(sid, path, raw, extra=extra)
                 )
             return WriteFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -1491,6 +1715,7 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         **kwargs,
     ) -> ListFilesResult:
         try:
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             raw_items = await self._execute_with_sandbox_retry(
                 lambda sid: self._get_client().list_files(
                     sid,
@@ -1499,6 +1724,7 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                     max_depth=max_depth,
                     include_files=True,
                     include_dirs=False,
+                    extra=extra,
                 )
             )
             items = [_item_from_payload(item) for item in raw_items]
@@ -1530,6 +1756,7 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         **kwargs,
     ) -> ListDirsResult:
         try:
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             raw_items = await self._execute_with_sandbox_retry(
                 lambda sid: self._get_client().list_files(
                     sid,
@@ -1538,6 +1765,7 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                     max_depth=max_depth,
                     include_files=False,
                     include_dirs=True,
+                    extra=extra,
                 )
             )
             items = _sort_fs_items([_item_from_payload(item) for item in raw_items], sort_by, sort_descending)
@@ -1654,15 +1882,16 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         **kwargs,
     ) -> UploadFileResult:
         try:
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             if not overwrite:
                 exists = await self._execute_with_sandbox_retry(
-                    lambda sid: self._get_client().path_exists(sid, target_path)
+                    lambda sid: self._get_client().path_exists(sid, target_path, extra=extra)
                 )
                 if exists:
                     raise FileExistsError(f"File already exists: {target_path}")
             raw = Path(local_path).read_bytes()
             await self._execute_with_sandbox_retry(
-                lambda sid: self._get_client().upload_bytes(sid, target_path, raw)
+                lambda sid: self._get_client().upload_bytes(sid, target_path, raw, extra=extra)
             )
             return UploadFileResult(
                 code=StatusCode.SUCCESS.code,
@@ -1715,8 +1944,9 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
                 target.parent.mkdir(parents=True, exist_ok=True)
             if target.exists() and not overwrite:
                 raise FileExistsError(f"File already exists: {local_path}")
+            extra = self._access_extra_payload(kwargs.get("options"), **kwargs)
             raw = await self._execute_with_sandbox_retry(
-                lambda sid: self._get_client().download_bytes(sid, source_path)
+                lambda sid: self._get_client().download_bytes(sid, source_path, extra=extra)
             )
             target.write_bytes(raw)
             return DownloadFileResult(
@@ -1758,14 +1988,18 @@ class JiuwenBoxFSProvider(_JiuwenBoxProviderMixin, BaseFSProvider):
         path: str,
         pattern: str,
         exclude_patterns: Optional[List[str]] = None,
+        options: Optional[Dict[str, Any]] = None,
+        **kwargs,
     ) -> SearchFilesResult:
         try:
+            extra = self._access_extra_payload(options, **kwargs)
             raw_items = await self._execute_with_sandbox_retry(
                 lambda sid: self._get_client().search_files(
                     sid,
                     path,
                     pattern,
                     exclude_patterns,
+                    extra=extra,
                 )
             )
             items = _sort_fs_items([_item_from_payload(item) for item in raw_items], "name", False)
@@ -1806,6 +2040,11 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         extra = self._launcher_extra_params()
         exclude_patterns = _read_excluded_commands(extra)
         fallback_on_failure = bool(extra.get("fallback_on_failure", False)) if isinstance(extra, dict) else False
+        argv = _sandbox_shell_argv(
+            command,
+            kwargs.get("shell_type"),
+            windows=self._sandbox_is_windows(),
+        )
 
         # (a) Pre-route excluded commands to local execution
         if _command_matches_exclude(command, exclude_patterns):
@@ -1814,23 +2053,25 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 command,
             )
             local_result = await _run_local_subprocess(
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,
             )
             return self._wrap_shell_local_result(command, cwd, timeout, local_result)
 
+        extra_payload = self._access_extra_payload(kwargs.get("options"), **kwargs)
         result, pipeline_error = await self._run_exec_pipeline(
             sandbox_op=lambda sid: self._get_client().exec(
                 sid,
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 timeout=exec_timeout,
                 environment=environment,
+                extra=extra_payload,
             ),
             local_op=lambda: _run_local_subprocess(
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,
@@ -1897,7 +2138,9 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         environment: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
-        result = await self.execute_cmd(command, cwd=cwd, timeout=timeout, environment=environment)
+        result = await self.execute_cmd(
+            command, cwd=cwd, timeout=timeout, environment=environment, **kwargs,
+        )
         if result.code != StatusCode.SUCCESS.code:
             yield _build_shell_error_result(
                 "execute_cmd_stream",
@@ -2007,6 +2250,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
             )
             return self._wrap_code_local_result(code, language, timeout, local_result)
 
+        extra_payload = self._access_extra_payload(options, **kwargs)
         result, pipeline_error = await self._run_exec_pipeline(
             sandbox_op=lambda sid: self._get_client().exec(
                 sid,
@@ -2014,6 +2258,7 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
                 cwd="/tmp",
                 timeout=exec_timeout,
                 environment=merged_env,
+                extra=extra_payload,
             ),
             local_op=lambda: _run_local_subprocess(
                 command,
@@ -2091,7 +2336,9 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
             language=language,
             timeout=timeout,
             environment=environment,
+            cwd=cwd,
             options=options,
+            **kwargs,
         )
         if result.code != StatusCode.SUCCESS.code:
             yield _build_code_error_result(

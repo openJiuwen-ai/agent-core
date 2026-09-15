@@ -8,6 +8,7 @@ from typing import Any, Dict
 from openjiuwen.harness.prompts.tools.base import (
     ToolMetadataProvider,
 )
+from openjiuwen.harness.security.permission_engine.access_extra import attach_extra_paths_param
 
 # ---------------------------------------------------------------------------
 # Tool-level descriptions
@@ -23,13 +24,15 @@ READ_FILE_DESCRIPTION: Dict[str, str] = {
         "file_path 必须是绝对路径。默认从文件开头最多读取 2000 行，结果带行号返回。"
         "支持图片、PDF 和 Jupyter Notebook。只能读取文件，不能读取目录。"
         "大文件请用 offset/limit 读取指定部分，或用 grep 搜索具体内容。"
+        "访问工作区以外的路径时，必须先分析路径并填进 extra.paths，执行前会弹窗审批。"
     ),
     "en": (
         "Read a file from the local filesystem. "
         "file_path must be an absolute path. By default, reads up to 2000 lines "
         "from the beginning and returns results with line numbers. "
         "Supports images, PDFs, and Jupyter notebooks. Can read files only, not directories. "
-        "For large files, use offset/limit to read a specific portion, or use grep to search for specific content."
+        "For large files, use offset/limit to read a specific portion, or use grep to search for specific content. "
+        "When accessing paths outside the workspace, analyze them first and put them in extra.paths; a popup asks the user to approve before the tool runs."
     ),
 }
 
@@ -40,7 +43,8 @@ WRITE_FILE_DESCRIPTION: Dict[str, str] = {
         "- 如果目标路径已有文件，本工具会覆盖该文件。\n"
         "- 如果目标文件已存在，必须先使用 read_file 读取文件内容；否则本工具会失败。\n"
         "- 修改已有文件时优先使用 edit_file；edit_file 只提交差异。write_file 主要用于创建新文件或完整重写文件。\n"
-        "- 除非用户明确要求，不要创建文档文件（*.md）或 README 文件。"
+        "- 除非用户明确要求，不要创建文档文件（*.md）或 README 文件。\n"
+        "- 访问工作区以外的路径时，先分析路径并填进 extra.paths，执行前会弹窗审批。"
     ),
     "en": (
         "Writes a file to the local filesystem.\n\n"
@@ -50,7 +54,8 @@ WRITE_FILE_DESCRIPTION: Dict[str, str] = {
         "This tool will fail if you did not read the file first.\n"
         "- Prefer edit_file for modifying existing files; it only sends the diff. "
         "Only use write_file to create new files or for complete rewrites.\n"
-        "- NEVER create documentation files (*.md) or README files unless explicitly requested by the User."
+        "- NEVER create documentation files (*.md) or README files unless explicitly requested by the User.\n"
+        "- When accessing paths outside the workspace, analyze them first and put them in extra.paths; a popup asks the user to approve before the tool runs."
     ),
 }
 
@@ -66,13 +71,15 @@ EDIT_FILE_DESCRIPTION: Dict[str, str] = {
         "old_string 必须唯一匹配；如果有多个匹配，请提供更多上下文或设置 replace_all=true。"
         "old_string 为空且目标文件不存在时，可创建新文件。"
         "不支持编辑 .ipynb 文件。"
+        "访问工作区以外的路径时，先分析路径并填进 extra.paths，执行前会弹窗审批。"
     ),
     "en": (
         "Performs exact string replacements in files. "
         "Existing files must be fully read with read_file before editing. "
         "old_string must match exactly once; if multiple matches exist, provide more context or set replace_all=true. "
         "Creates a new file when old_string is empty and the target file does not exist. "
-        "Does not support editing .ipynb files."
+        "Does not support editing .ipynb files. "
+        "When accessing paths outside the workspace, analyze them first and put them in extra.paths; a popup asks the user to approve before the tool runs."
     ),
 }
 
@@ -248,7 +255,7 @@ def _desc(params: Dict[str, Dict[str, str]], key: str, lang: str) -> str:
 
 def get_read_file_input_params(language: str = "cn") -> Dict[str, Any]:
     p = READ_FILE_PARAMS
-    return {
+    schema = {
         "type": "object",
         "properties": {
             "file_path": {"type": "string", "description": _desc(p, "file_path", language)},
@@ -259,23 +266,24 @@ def get_read_file_input_params(language: str = "cn") -> Dict[str, Any]:
         },
         "required": ["file_path"],
     }
+    return attach_extra_paths_param(schema, language)
 
 
 def get_write_file_input_params(language: str = "cn") -> Dict[str, Any]:
     p = WRITE_FILE_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "file_path": {"type": "string", "description": _desc(p, "file_path", language)},
             "content": {"type": "string", "description": _desc(p, "content", language)},
         },
         "required": ["file_path", "content"],
-    }
+    }, language)
 
 
 def get_edit_file_input_params(language: str = "cn") -> Dict[str, Any]:
     p = EDIT_FILE_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "file_path": {"type": "string", "description": _desc(p, "file_path", language)},
@@ -284,36 +292,36 @@ def get_edit_file_input_params(language: str = "cn") -> Dict[str, Any]:
             "replace_all": {"type": "boolean", "description": _desc(p, "replace_all", language)},
         },
         "required": ["file_path", "old_string", "new_string"],
-    }
+    }, language)
 
 
 def get_glob_input_params(language: str = "cn") -> Dict[str, Any]:
     p = GLOB_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": _desc(p, "pattern", language)},
             "path": {"type": "string", "description": _desc(p, "path", language)},
         },
         "required": ["pattern"],
-    }
+    }, language)
 
 
 def get_list_dir_input_params(language: str = "cn") -> Dict[str, Any]:
     p = LIST_DIR_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": _desc(p, "path", language)},
             "show_hidden": {"type": "boolean", "description": _desc(p, "show_hidden", language)},
         },
         "required": [],
-    }
+    }, language)
 
 
 def get_grep_input_params(language: str = "cn") -> Dict[str, Any]:
     p = GREP_PARAMS
-    return {
+    return attach_extra_paths_param({
         "type": "object",
         "properties": {
             "pattern": {"type": "string", "description": _desc(p, "pattern", language)},
@@ -337,7 +345,7 @@ def get_grep_input_params(language: str = "cn") -> Dict[str, Any]:
             "multiline": {"type": "boolean", "description": _desc(p, "multiline", language)},
         },
         "required": ["pattern"],
-    }
+    }, language)
 
 
 class ReadFileMetadataProvider(ToolMetadataProvider):

@@ -488,7 +488,8 @@ class LocalFSProvider(BaseFSProvider):
             self,
             path: str,
             pattern: str,
-            exclude_patterns: Optional[list[str]] = None
+            exclude_patterns: Optional[list[str]] = None,
+            options: Optional[dict] = None,
     ) -> SearchFilesResult:
         root = self._resolve_sandbox_path(path)
         excluded = exclude_patterns or []

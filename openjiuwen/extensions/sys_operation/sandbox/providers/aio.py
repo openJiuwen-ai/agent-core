@@ -741,7 +741,8 @@ class AIOFSProvider(BaseFSProvider):
                                                    ))
 
     async def search_files(self, path: str, pattern: str,
-                           exclude_patterns: Optional[List[str]] = None) -> SearchFilesResult:
+                           exclude_patterns: Optional[List[str]] = None,
+                           options: Optional[Dict[str, Any]] = None) -> SearchFilesResult:
         client = await asyncio.to_thread(self._get_client)
         deadline = time.time() + max(1, int(self._timeout_seconds))
         delay = 0.5

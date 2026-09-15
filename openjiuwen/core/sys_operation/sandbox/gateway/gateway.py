@@ -1,5 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+import asyncio
 import time
 from typing import Any, AsyncIterator, Dict, Optional
 
@@ -59,6 +60,7 @@ class SandboxGateway:
     ) -> None:
         self._config = config or GatewayConfig()
         self._provider_cache: Dict[str, Any] = {}
+        self._endpoint_locks: Dict[str, asyncio.Lock] = {}
         self._store = InMemorySandboxStore()
 
         self._register_builtin_launchers()
@@ -125,15 +127,23 @@ class SandboxGateway:
         if cache_key in self._provider_cache:
             return self._provider_cache[cache_key]
 
-        endpoint = await self._get_endpoint(config=config, isolation_key=isolation_key)
-        provider = SandboxRegistry.create_provider(
-            sandbox_type=config.launcher_config.sandbox_type,
-            operation_type=op_type,
-            endpoint=endpoint,
-            config=config,
-        )
-        self._provider_cache[cache_key] = provider
-        return provider
+        lock_key = isolation_key or ""
+        lock = self._endpoint_locks.get(lock_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._endpoint_locks[lock_key] = lock
+        async with lock:
+            if cache_key in self._provider_cache:
+                return self._provider_cache[cache_key]
+            endpoint = await self._get_endpoint(config=config, isolation_key=isolation_key)
+            provider = SandboxRegistry.create_provider(
+                sandbox_type=config.launcher_config.sandbox_type,
+                operation_type=op_type,
+                endpoint=endpoint,
+                config=config,
+            )
+            self._provider_cache[cache_key] = provider
+            return provider
 
     def _evict_provider_cache(self, isolation_key: str) -> None:
         """Remove all cached providers for a given isolation_key."""

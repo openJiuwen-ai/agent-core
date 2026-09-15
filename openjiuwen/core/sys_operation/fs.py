@@ -328,7 +328,8 @@ class BaseFsOperation(BaseOperation, ABC):
             self,
             path: str,
             pattern: str,
-            exclude_patterns: Optional[List[str]] = None
+            exclude_patterns: Optional[List[str]] = None,
+            options: Optional[Dict[str, Any]] = None
     ) -> SearchFilesResult:
         """
         Asynchronously search files under the specified path.
@@ -337,6 +338,7 @@ class BaseFsOperation(BaseOperation, ABC):
             path: Base directory path to start the search (required).
             pattern: Search pattern to match file names.
             exclude_patterns: Optional list of patterns to exclude from results.
+            options: Extended configuration options (dict, optional).
 
         Returns:
             SearchFilesResult: Structured result.

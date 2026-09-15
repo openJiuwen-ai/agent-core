@@ -29,6 +29,7 @@ from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.security.permission_engine.access_extra import with_access_extra
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
@@ -885,6 +886,7 @@ class ReadFileTool(Tool):
     # invoke / stream
     # ------------------------------------------------------------------
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         file_path = inputs.get("file_path")
         if not file_path:
@@ -1075,6 +1077,7 @@ class WriteFileTool(Tool):
         encoding = self._detect_encoding(raw)
         return raw.decode(encoding, errors="replace"), encoding
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path: Optional[str] = inputs.get("file_path")
         content = inputs.get("content")
@@ -1431,6 +1434,7 @@ class EditFileTool(Tool):
     # invoke
     # ------------------------------------------------------------------
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Serialize the complete read-modify-write transaction per file."""
         file_path = inputs.get("file_path")
@@ -1725,6 +1729,7 @@ class GlobTool(Tool):
 
         return expand_group(pattern)
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
         if not pattern:
@@ -1786,6 +1791,7 @@ class ListDirTool(Tool):
         )
         self.operation = operation
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         path = inputs.get("path", ".")
         show_hidden = inputs.get("show_hidden", False)
@@ -2189,6 +2195,7 @@ class GrepTool(Tool):
         })
         return data
 
+    @with_access_extra
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
         if not pattern:
