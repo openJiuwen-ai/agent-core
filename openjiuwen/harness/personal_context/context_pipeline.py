@@ -996,10 +996,6 @@ async def _cancel_safe_to_thread(
     return task.result()
 
 
-class _CooperativeThreadCancellation(Exception):
-    """Stop one read-only worker after its owning coroutine is cancelled."""
-
-
 _COOPERATIVE_THREAD_CANCELLATIONS: dict[asyncio.Task[object], threading.Event] = {}
 
 
@@ -1011,7 +1007,7 @@ def _request_cooperative_thread_cancel(task: asyncio.Task[None]) -> None:
 
 def _raise_if_thread_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
     if cancel_requested is not None and cancel_requested():
-        raise _CooperativeThreadCancellation
+        raise asyncio.CancelledError
 
 
 async def _cancel_cooperative_to_thread(function: Callable[[Callable[[], bool]], _T], /) -> _T:

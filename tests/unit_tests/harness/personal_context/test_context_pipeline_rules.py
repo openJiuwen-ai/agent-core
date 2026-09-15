@@ -192,7 +192,7 @@ def test_page_source_distribution_propagates_cooperative_cancellation(tmp_path: 
         checks += 1
         return checks >= 2
 
-    with pytest.raises(context_pipeline._CooperativeThreadCancellation):
+    with pytest.raises(asyncio.CancelledError):
         context_pipeline._page_source_distribution(
             page,
             context_root=context_root,
