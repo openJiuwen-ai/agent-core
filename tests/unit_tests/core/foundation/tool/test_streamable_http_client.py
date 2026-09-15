@@ -326,6 +326,58 @@ class TestMcpToolResultExtraction(unittest.TestCase):
 
         self.assertIsNone(extract_mcp_tool_result_content(tool_result))
 
+    def test_explicit_error_without_content_retains_failure(self):
+        from mcp.types import CallToolResult
+
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        result = extract_mcp_tool_result_content(CallToolResult(content=[], isError=True))
+
+        self.assertIsInstance(result, McpToolResult)
+        self.assertFalse(result.success)
+        self.assertEqual(result.data, {"result": None})
+        self.assertTrue(result.error)
+
+    def test_explicit_error_retains_single_non_text_payload(self):
+        from mcp.types import AudioContent, ResourceLink
+
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        class OpaqueContent:
+            def __str__(self):
+                return "No details available"
+
+        cases = [
+            (AudioContent(type="audio", mimeType="audio/wav", data="YQ=="), "YQ=="),
+            (
+                ResourceLink(type="resource_link", uri="file:///error.txt", name="Error details"),
+                {"type": "resource_link", "uri": "file:///error.txt", "name": "Error details"},
+            ),
+            (OpaqueContent(), "No details available"),
+        ]
+        for content, expected in cases:
+            with self.subTest(content_type=type(content).__name__):
+                # Preserve each existing successful conversion, including its data type.
+                successful = extract_mcp_tool_result_content(SimpleNamespace(content=[content], isError=False))
+                failed = extract_mcp_tool_result_content(SimpleNamespace(content=[content], isError=True))
+
+                self.assertIsInstance(failed, McpToolResult)
+                self.assertFalse(failed.success)
+                self.assertEqual(failed.data, {"result": successful})
+                self.assertTrue(failed.error)
+                if isinstance(expected, dict):
+                    self.assertEqual({key: str(value) for key, value in successful.items()}, expected)
+                else:
+                    self.assertEqual(successful, expected)
+
+    def test_error_shaped_success_text_keeps_legacy_value(self):
+        from mcp.types import CallToolResult, TextContent
+
+        message = "### Error\nAn example error shown in the documentation."
+        raw = CallToolResult(content=[TextContent(type="text", text=message)], isError=False)
+
+        self.assertEqual(extract_mcp_tool_result_content(raw), message)
+
 
 class TestMcpModelToolNameHelpers(unittest.TestCase):
     def test_helpers_pin_the_ability_manager_naming_convention(self):
@@ -410,6 +462,37 @@ class TestMcpToolResultImageBridge(unittest.TestCase):
 
         self.assertEqual(result, "no screenshot here")
 
+    def test_failed_image_response_preserves_text_and_multimodal_input(self):
+        from mcp.types import CallToolResult, ImageContent, TextContent
+
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        message = "The requested window is unavailable."
+        raw = CallToolResult(
+            content=[
+                ImageContent(type="image", mimeType="image/png", data="YQ=="),
+                TextContent(type="text", text=message),
+            ],
+            isError=True,
+        )
+
+        result = extract_mcp_tool_result_content(raw, include_image_content=True, tool_name="get_window_state")
+
+        self.assertIsInstance(result, McpToolResult)
+        self.assertFalse(result.success)
+        self.assertIn(message, result.error)
+        self.assertEqual(result.data["content"], message + "\n\n1 image(s) attached as multimodal input.")
+        self.assertEqual(
+            result.data["multimodal"],
+            [{
+                "type": "image",
+                "source": "mcp",
+                "source_path": "get_window_state",
+                "mime_type": "image/png",
+                "data_url": "data:image/png;base64,YQ==",
+            }],
+        )
+
 
 class TestMcpToolInvokeMultimodalWrapping(unittest.IsolatedAsyncioTestCase):
     @staticmethod
@@ -466,3 +549,25 @@ class TestMcpToolInvokeMultimodalWrapping(unittest.IsolatedAsyncioTestCase):
         result = await tool.invoke({})
 
         self.assertEqual(result, {"result": "snapshotted"})
+
+    async def test_explicit_mcp_failures_survive_extraction_and_invoke(self):
+        from mcp.types import CallToolResult, TextContent
+
+        from openjiuwen.core.foundation.tool import McpToolResult
+
+        for message in (
+            '### Error\nError: "#missing" does not match any elements.',
+            "Search could not be completed. Please try again.",
+        ):
+            with self.subTest(message=message):
+                raw = CallToolResult(content=[TextContent(type="text", text=message)], isError=True)
+                extracted = extract_mcp_tool_result_content(raw)
+                tool = self._make_tool(extracted)
+
+                result = await tool.invoke({})
+
+                self.assertIsInstance(result, McpToolResult)
+                self.assertIs(result, extracted)
+                self.assertFalse(result.success)
+                self.assertEqual(result.data, {"result": message})
+                self.assertIn(message, result.error)

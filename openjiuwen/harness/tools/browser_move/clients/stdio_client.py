@@ -6,7 +6,7 @@ from typing import Any, List, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import McpToolCard
-from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT
+from openjiuwen.core.foundation.tool.mcp.base import NO_TIMEOUT, preserve_mcp_tool_result_status
 from openjiuwen.core.foundation.tool.mcp.client.stdio_client import StdioClient
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
     browser_agent_log_info,
@@ -355,7 +355,7 @@ class BrowserMoveStdioClient(StdioClient):
                     if chunks:
                         result_content = "\n".join(chunks)
                 browser_agent_log_info(f"Tool '{tool_name}' call completed via Stdio")
-                return result_content
+                return preserve_mcp_tool_result_status(tool_result, result_content)
             except asyncio.TimeoutError as e:
                 if attempt == 0:
                     browser_agent_log_warning(
