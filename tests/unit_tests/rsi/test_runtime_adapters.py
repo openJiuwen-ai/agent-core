@@ -20,6 +20,52 @@ from openjiuwen.rsi.harness_rsi.evaluator.runtime_adapters import (
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", [None, "beta"])
+async def test_rsi_skill_before_model_call_accepts_query(query, monkeypatch):
+    from openjiuwen.core.foundation.llm import UserMessage
+    from openjiuwen.harness.prompts.builder import SystemPromptBuilder
+
+    rail = RSISkillUseRail(skills_dir=".", skill_mode="all", max_skills=1)
+    rail.skills = [
+        SimpleNamespace(name="alpha", description="alpha tasks"),
+        SimpleNamespace(name="beta", description="beta tasks"),
+    ]
+    rail.system_prompt_builder = SystemPromptBuilder()
+    # Isolate discovery/storage, but exercise the inherited prompt-sync path.
+    monkeypatch.setattr(rail, "_refresh_skill_prompt_if_changed", AsyncMock())
+    monkeypatch.setattr(rail, "_fetch_evolution_texts", AsyncMock())
+    monkeypatch.setattr(rail, "_update_runtime_skill_attachment", AsyncMock())
+    ctx = SimpleNamespace(
+        session=None,
+        inputs=SimpleNamespace(messages=[UserMessage(content=query)] if query else []),
+    )
+
+    await rail.before_model_call(ctx)
+
+    prompt = rail.system_prompt_builder.build()
+    assert "decision capsule" in prompt
+    if query:
+        assert "beta" in prompt
+        assert "alpha" not in prompt
+
+
+@pytest.mark.parametrize("mode", ["all", "auto_list"])
+@pytest.mark.parametrize("empty", [False, True])
+def test_rsi_skill_section_preserves_delivery_protocol(mode, empty):
+    rail = RSISkillUseRail(skills_dir=".", skill_mode=mode)
+    rail.skills = [] if empty else [SimpleNamespace(name="alpha", description="alpha tasks")]
+    original = rail._build_skills_section().render("en")
+    assert rail._build_skills_section(query="alpha").render("en") == original
+    if mode == "auto_list":
+        assert "Call list_skill" in original
+    elif empty:
+        assert "No skills are available" in original
+    else:
+        assert "alpha" in original
+        assert "decision capsule" in original
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("shell_only", [False, True])
 async def test_empty_baseline_supports_candidate_skill_through_native_plugin_loader(tmp_path: Path, shell_only):
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
