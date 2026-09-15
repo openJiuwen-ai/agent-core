@@ -298,6 +298,7 @@ async def run_workflow(
     backend: AgentBackend | None = None,
     resume: str | None = None,
     journal_path: str | None = None,
+    wal_path: str | None = None,
     strict: bool = False,
     log_sink: Callable[[str], None] | None = None,
     progress_sink: ProgressSink | None = None,
@@ -321,12 +322,15 @@ async def run_workflow(
 
         raise LintError(f"{len(loaded.warnings)} lint warning(s) in strict mode")
 
-    # The WAL is a sidecar of the canonical journal write-path (``<journal>.wal``):
-    # fresh records are appended to it as they complete, so a mid-run crash (no
-    # save) stays recoverable, and a residual WAL is replayed on the next load.
-    # Derived in-engine from the given path (no agent_teams import — engine stays
-    # business-agnostic); the journal path itself comes from the caller (paths.py).
-    wal_path = f"{journal_path}.wal" if journal_path else None
+    # The WAL is a sidecar of the canonical journal write-path: fresh records
+    # are appended to it as they complete, so a mid-run crash (no save) stays
+    # recoverable, and the WAL is replayed on the next load. The swarmflow
+    # integration threads a per-run WAL path (``wal/{run_id}.wal``) so two
+    # concurrent runs of the same workflow never share one append log; absent
+    # that, derive the legacy shared sidecar ``<journal>.wal`` in-engine (no
+    # agent_teams import — engine stays business-agnostic).
+    if wal_path is None and journal_path:
+        wal_path = f"{journal_path}.wal"
     journal = await Journal.load(resume, wal_path=wal_path)
     log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
     # Cold-start resume recovers the launch args: the advisory template carries
@@ -383,9 +387,9 @@ async def run_workflow(
             log(f"[wf] backend.aclose() failed: {exc}")
     if journal_path:
         # Reached only when the workflow ran to normal completion (any
-        # interrupt / crash / cancellation re-raises and skips this line, leaving
-        # the WAL for recovery). finalize = atomic journal write + terminal WAL
-        # removal; a future mid-run checkpoint must call save() (keeps the WAL).
-        # The seal record was already written by _exec_loaded's completed branch.
+        # interrupt / crash / cancellation re-raises and skips this line).
+        # finalize = atomic journal write only — the WAL is an append-only log
+        # that is never actively deleted. The seal record was already written
+        # by _exec_loaded's completed branch.
         await rt.journal.finalize(journal_path)
     return result
