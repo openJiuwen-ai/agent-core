@@ -23,6 +23,10 @@ from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import UserMessageInputs
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
+from openjiuwen.harness.prompts.prompt_attachment_manager import (
+    PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY,
+    PromptAttachmentManager,
+)
 from tests.test_logger import logger
 
 # Session id the team-context tests bind their context to.
@@ -91,6 +95,7 @@ class _StubContext:
         self.session = session if session is not None else _StubSession()
         self.context = _StubModelContext(messages)
         self.inputs = None
+        self.extra: dict = {}
 
 
 async def _admit(
@@ -325,6 +330,14 @@ class _StubAgent:
         self.system_prompt_builder = builder
 
 
+class _AttachmentStubAgent(_StubAgent):
+    """Production-shaped stub with the shared attachment manager installed."""
+
+    def __init__(self, builder: SystemPromptBuilder) -> None:
+        super().__init__(builder)
+        self.prompt_attachment_manager = PromptAttachmentManager(language="cn")
+
+
 class _StubMember:
     """Lightweight stand-in for the SQLModel TeamMember row."""
 
@@ -496,11 +509,67 @@ class TestTeamPolicyRailStaticSections:
 class TestTeamPolicyRailTeamContext:
     """Team state is delivered into the conversation, not the system prompt.
 
-    Two lanes, and neither ever rewrites a message that is already history:
-    state normally rides the input being admitted (``on_user_message``), and
-    when it appears mid tool-loop with no input to ride it is appended at the
-    tail (``before_model_call``).
+    Production uses role=system attachment snapshot/delta history. The legacy
+    no-manager stubs below retain their user-message fallback coverage.
     """
+
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_production_manager_uses_system_history_without_a_second_user_message(self):
+        backend = _FakeTeamBackend(
+            team=_StubTeam("Beta", "Test team"),
+            members=[_StubMember("dev1", "Dev", "Coder")],
+            self_member_name="leader1",
+        )
+        builder = SystemPromptBuilder(language="cn")
+        agent = _AttachmentStubAgent(builder)
+        rail = _leader_rail(backend)
+        rail.init(agent)
+        ctx = _StubContext()
+        batch = ["ship it"]
+        ctx.inputs = UserMessageInputs(parts=batch, source="query")
+
+        await rail.on_user_message(ctx)
+        snapshot = await agent.prompt_attachment_manager.sync_to_context(
+            ctx.context,
+            _SESSION_ID,
+        )
+        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
+            await callback()
+        user_message = UserMessage(content="\n".join(batch))
+        await ctx.context.add_messages(user_message)
+
+        assert batch == ["ship it"]
+        assert ctx.context.messages == [snapshot, user_message]
+        assert isinstance(snapshot, UserMessage)
+        assert snapshot.content.startswith("<system-reminder>\n")
+        assert "以下内容不是用户的意图" in snapshot.content
+        assert snapshot.content.endswith("\n</system-reminder>")
+        assert "<prompt-attachment" not in snapshot.content
+        assert "<team-context>" in snapshot.content
+        assert "member_name: leader1" in snapshot.content
+
+        snapshot_content = snapshot.content
+        await ctx.context.add_messages(AssistantMessage(content="calling tool"))
+        await ctx.context.add_messages(ToolMessage(content="done", tool_call_id="c1"))
+        backend.add_member(_StubMember("dev2", "Newbie"), mtime=2)
+        await rail.before_model_call(ctx)
+        delta = await agent.prompt_attachment_manager.sync_to_context(
+            ctx.context,
+            _SESSION_ID,
+        )
+        for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
+            await callback()
+
+        assert isinstance(delta, UserMessage)
+        assert ctx.context.messages[-2].role == "tool"
+        assert ctx.context.messages[-1] == delta
+        assert "<prompt-attachment" not in delta.content
+        assert delta.content.startswith("<system-reminder>\n")
+        assert delta.content.endswith("\n</system-reminder>")
+        assert "动态上下文已经变化" in delta.content
+        assert "roster-change" in delta.content
+        assert snapshot.content == snapshot_content
 
     @pytest.mark.asyncio
     @pytest.mark.level1
