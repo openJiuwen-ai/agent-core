@@ -120,8 +120,6 @@ worktree 对后续 run 不可寻址，与 journal 缓存命中毫无关系，只
   当时的 head_commit 也能判）。脏的、不可验证的、无 git root 的一律保留。这与既有
   "保留的 worktree 交由 leader 集成"语义一致：删干净残留无损，删脏的会丢工作。
 - **修复收益**：磁盘止血（孤儿不再无限累积）；每轮 relaunch 对上一 run 的干净残留不再重复
-  占用 checkout 空间。**没有**做跨 run worktree 复用（slug 去 run_id 化）——那会引入
-  "上一 run 脏状态被本 run 继承"的语义问题，留给后续设计。
+  占用 checkout 空间。
 - **验证**：`test_reconcile_removes_clean_orphan_and_keeps_dirty`（真 git 仓 + stub
-  manager：干净孤儿进 removed、脏孤儿保留、第二次调用幂等 no-op）。另有真实 LLM ST
-  （本地不提交）实证 relaunch 后两个 slug 去 run_id 段后逐字相同（零复用的字面证据）。
+  manager：干净孤儿进 removed、脏孤儿保留、第二次调用幂等 no-op）。
