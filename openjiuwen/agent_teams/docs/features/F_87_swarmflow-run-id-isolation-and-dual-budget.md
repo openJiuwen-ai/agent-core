@@ -81,6 +81,14 @@ per-run 上限的场景）。
    `(team, session, workflow_name)` 决定（S_18 不变量），多 run 同名脚本共享同一 journal 文件；
    `run_id` 只参与**记录级**的命中判定（`get_cached` 的第三参数）。这样既隔离了 run，又不破坏
    resume 的路径稳定性。
+   > **2026-09-15 修订（F_40 修订 3 撤销本决策的"不进路径"半边）**：并发 ST 实证共享
+   > journal/WAL 文件存在三个竞争（compaction 覆盖并发 append / finalize 误删并发 run 的
+   > WAL / save 互相覆盖），record 级 run_id 隔离挡不住文件级竞争。journal 与 WAL 已改为
+   > **per-run_id 文件**（`journal-{run_id}.jsonl` + `wal/{run_id}.wal`）。原担忧"路径变则
+   > resume 命中不了前缀"不成立：resume 本就携带 run_id（resume_id 即 run_id），per-run
+   > 路径由 run_id 直接定位；跨 run_id（seal 后 relaunch）新 run_id → 新文件 → 全 miss，
+   > 本特性定义的隔离语义原样保留。记录级 `get_cached` 三重检查**不变**——路径隔离是文件级
+   > 加固，不替代记录级判定。
 3. **两层 budget 同源注入、独立计数**。`agent_configurator` 在 `enable_swarmflow` 时给 leader
    挂 `SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None)`；run 启动时引擎按
    `META.workflow_token_limit` 建 per-run `BudgetLedger` 注入 rail 的 `workflow_budget`。
@@ -94,8 +102,10 @@ per-run 上限的场景）。
 
 ## 拒绝的方案
 
-- **journal 路径加 run_id 段**：拒绝。破坏 resume 的路径稳定性——同一名脚本每次 run 一个目录，
-  resume 命中不了前缀。run_id 只进记录级查询，不进路径。
+- **journal 路径加 run_id 段**：最初拒绝（破坏 resume 的路径稳定性——同一名脚本每次 run
+  一个目录，resume 命中不了前缀）。**2026-09-15 已推翻**（见决策 2 修订）：per-run_id
+  **目录**确实错（改了 workflow 目录布局），但 per-run_id **文件**（journal/wal 文件名拼
+  run_id，目录不变）既保住目录稳定又根治并发竞争。已按后者落地。
 - **缓存命中不重建花费**：拒绝。撞顶检测会失灵，budget gate 形同虚设。
 - **单层 budget + 标记撞顶来源**：拒绝。单账本无法区分"本次 run 烧了多少"与"session 烧了多少"，
   撞顶后无法判断可重试还是终端，必须两层。

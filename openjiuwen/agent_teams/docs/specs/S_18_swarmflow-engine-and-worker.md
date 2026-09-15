@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-09-11 |
+| 最近一次修订日期 | 2026-09-15 |
 | 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md` |
 
 ## 范围 / 边界
@@ -80,9 +80,11 @@
 - **缓存命中必须重建花费**：`journal.get_cached(ks, sig, run_id)` 命中后，用记录里的 `tokens`
   字段调 `rt.workflow_budget.add(cached_tokens)` 把当初那笔消耗加回本次 run 的 per-run 账本——
   否则撞顶检测会把命中缓存当"免费"而失灵。
-- **`run_id` 进 journal 查询，不进 journal 路径**：journal 落盘路径仍由
-  `(team, session, workflow_name)` 决定（不变量），多 run 同名脚本共享同一 journal 文件；
-  `run_id` 只参与记录级的命中判定（`get_cached` 第三参数）。旧 run（无 run_id 字段）自然失效。
+- **`run_id` 进 journal 查询与 journal/WAL 路径**(2026-09-15 修订):journal/WAL 路径由
+  `(team, session, workflow_name, run_id)` 决定(per-run 文件,见「落盘顺序、WAL 与异步 I/O」节);
+  `run_id` 同时参与记录级的命中判定(`get_cached` 第三参数)。resume 携带 run_id(resume_id 即
+  run_id),per-run 路径由 run_id 直接定位——resume 路径稳定性不降反升。旧 run(无 run_id 字段)
+  自然失效。
 - **Progress 可观测（结果回路与终态）**：
   - per-agent `tokens`：`AgentResult.tokens` → `_BackendCallResult.tokens` → `_emit_agent_completed` / `_emit_agent_failed`（cache-hit 时 `tokens=None`，budget 快照仍带）
   - `budget`：`_budget_snapshot(rt.budget)` → `{total, spent, remaining, scope="leader", exhausted}`
@@ -115,18 +117,21 @@
 
 ## Resume Journal 持久化（`run_swarmflow`）
 
-引擎 `run_workflow` 暴露 `resume`（读旧）/ `journal_path`（写新）两个入参（content-addressed
-journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把两者指向**同一**文件，
-使同一 `(team, session, workflow)` 的再次运行命中缓存、跳过未变的 agent 调用。
+引擎 `run_workflow` 暴露 `resume`（读旧）/ `journal_path`（写新）/ `wal_path`（WAL sidecar）
+三个入参（content-addressed journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow`
+把 journal 两者指向**同一** per-run 文件、WAL 指向 `wal/{run_id}.wal`，使同一
+`(team, session, workflow, run_id)` 的 resume 命中缓存、跳过未变的 agent 调用。
 
 - **落盘路径**（单一真相源 `paths.py`）：
-  `{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal.jsonl`。
-  `session_id` / `workflow_name` 经 `_safe_segment` sanitize（`[^A-Za-z0-9_.-]` 折成 `_`、
-  strip 首尾分隔符）防目录穿越；`session_id` 为空回退 `"default"`。`Journal.save` 不建父目录，
-  故 `run_swarmflow` 先 `mkdir(parents=True)`。
+  `{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal-{run_id}.jsonl` +
+  `.../wal/{run_id}.wal`（`run_id` 缺省时回退共享 `journal.jsonl` + `journal.jsonl.wal`）。
+  `session_id` / `workflow_name` / `run_id` 经 `_safe_segment` sanitize（`[^A-Za-z0-9_.-]` 折成
+  `_`、strip 首尾分隔符）防目录穿越；`session_id` 为空回退 `"default"`。`Journal.save` 不建父
+  目录，故 `run_swarmflow` 的 `_resolve_journal_path` / `_resolve_wal_path` 先 `mkdir(parents=True)`。
 - **workflow_name 必填**：由脚本 `META["name"]` 提供，经 `load_workflow_meta`（纯 AST 取 META，
   **不** importlib 导入脚本）在调 `run_workflow` 前读取；缺失 →
-  `raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID)`。
+  `raise_error(StatusCode.AGENT_TEAM_CONFIG_INVALID)`（WAL 路径解析对不可读 META 降级返回
+  `None` 而非中断启动）。
 - **resume = journal_path 同路径**：首跑文件不存在 → 空 prior（冷启动）；跑完 `finalize` 写入；
   次跑命中 → cache-hit 短路。`preprocess_swarmflow`（MockBackend 预演）**不**落 journal。
 
@@ -135,23 +140,27 @@ journal，`engine/journal.py`，JSONL 格式）。集成层 `run_swarmflow` 把�
 - **program order 落盘**：`save` 按**结构序号**(`_program_order`：每段 call-path 的序号 + 子索引
   数值元组)排序写出,文件逐行即脚本执行顺序(构思→征询嘉宾→…),且因序号确定而**字节稳定**
   (与并发完成时序无关)。不再按 key 字符串字典序。
-- **WAL 崩溃恢复**：journal 有 sidecar WAL `<journal>.wal`(引擎内由 `journal_path + ".wal"`
-  派生)。`use` 对**新鲜**记录(cache-miss)立即 append 写 WAL(cache-hit 复用 prior 对象、
+- **WAL/journal 按 run_id 拆分**(2026-09-15 修订,`F_40` 修订 3):journal 与 WAL 的路径由
+  `(team, session, workflow_name, run_id)` 四元组决定——
+  `{workflow_dir}/journal-{run_id}.jsonl`(每 run 自己的快照)+ `{workflow_dir}/wal/{run_id}.wal`
+  (每 run 自己的 WAL)。单一真相源 `paths.workflow_run_journal_path` /
+  `workflow_run_wal_path`;`_resolve_journal_path` / `_resolve_wal_path`(`workflow/runner.py`)
+  拼路径并建目录;engine `run_workflow(…, wal_path=)` 透传(缺省回退 legacy 共享 sidecar,
+  engine 保持业务无关)。并发 run 各写各的文件,三个共享文件竞争(compaction 覆盖 append /
+  finalize 误删 / save 互相覆盖)根治。seal guard 按 `resume_id` 拼 per-run 路径读 seal 记录。
+  `run_id=None`(离线/预演)回退共享 `journal.jsonl` + `journal.jsonl.wal`。
+- **WAL 崩溃恢复**:`use` 对**新鲜**记录(cache-miss)立即 append 写 WAL(cache-hit 复用 prior 对象、
   不重写);`load` 先读 journal、再用 WAL **覆盖/补全**(WAL 较新,last-wins),并**容忍尾部
   半行**(崩溃中途 append);故进程中途崩溃(没机会 commit)仍可恢复,journal 缺失/不完整时
   可纯靠 WAL 恢复。
-- **写/删分离 + 终态删 WAL**(不变量):`save` 是**纯写**(原子,见下),**绝不删 WAL**,可重复
-  调(供未来 mid-run checkpoint);只有 `finalize`(workflow 完全跑完后,`run_workflow` 在
-  `_exec_loaded` 正常返回**之后**调,任何异常/取消都会跳过)写 journal 后**校验 `used ⊆ 已落盘
-  journal`(key+sig)** 才删 WAL,不一致则保留兜底。
-- **load 时 WAL compaction**(2026-09-11,F_40 修订):`load` 重放 WAL 后把 **sealed run 的
-  call 记录**从 WAL 删除——seal guard 强制 relaunch 换新 run_id、`get_cached` 又要求 run_id
-  匹配,这类记录永远不可能再命中,纯膨胀。pause/seal run 级记录与 unsealed run 的 call 记录
-  一律保留;无 seal 时 WAL 字节不动。`finalize` 仍是唯一整文件级删除,崩溃 durability 不变。
+- **WAL 永不主动删除**(不变量,2026-09-15 修订):WAL 是日志,像日志一样自然老化——`finalize`
+  只做 `save()`(写 journal 快照),**不删 WAL**;compaction(`_compact_wal`)已移除;任何路径都
+  不 `unlink` WAL。清理兜底是 `delete_team` 整树删除;未来若需清理按日志 rolling 策略(按
+  时间/大小淘汰旧文件),不按 run 终态删。per-run_id 下每 run 一个 WAL 文件,不跨 run 累积。
 - **原子写**:`save` 写 `<journal>.tmp` 后 `os.replace` 原子改名,崩溃中途不产生半截 journal。
 - **异步 I/O**:journal/WAL 的读写经 `aiofiles`(`load`/`use`/`save`/`finalize` 均 async),不阻塞
   共享事件循环(swarmflow 在 leader 进程内与其它团队协程同 loop);WAL append 由 `asyncio.Lock`
-  串行化防并发交错。(引擎可用通用三方库,见「引擎契约」业务无关条;`os.replace`/`unlink` 是快元
+  串行化防并发交错。(引擎可用通用三方库,见「引擎契约」业务无关条;`os.replace` 是快元
   数据 syscall,保持同步。)
 
 详见 `F_38`(路径接线)、`F_40`(落盘顺序 / WAL / 原子 / 异步)。
@@ -218,8 +227,8 @@ journal 在 call-path 记录（`__call__:` 前缀）之外，新增 run 级记�
 - **resume（`F_43`）**：`relaunch` 复用 inputs 内 ticket/gate，**不**二次 admit。注：`run_background.finally`
   对 `WorkflowAborted→CancelledError` 也会 release（pause 退出即释 L1）；resume 复用同 ticket 但不重新 admit，
   故 resume 期间不占 L1 槽（详见 `S_21` 错误语义）。
-- **`run_id`**：进程内身份 + Leader 播报 + worker 命名前缀；**不改变** journal 路径（仍
-  `(team, session, workflow_name)`）。
+- **`run_id`**：进程内身份 + Leader 播报 + worker 命名前缀 + journal/WAL 文件名
+  （`journal-{run_id}.jsonl` / `wal/{run_id}.wal`，见「Resume Journal 持久化」节）。
 
 配置：`TeamAgentSpec.swarmflow_concurrency`；详见 `S_21_swarmflow-concurrency-governor.md`。
 
