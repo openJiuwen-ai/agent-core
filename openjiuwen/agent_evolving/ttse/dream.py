@@ -1,0 +1,636 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Auto-dream: TTSE bank hygiene (TTL prune, soft-cluster merge, TIP purge).
+
+Runs offline from the user turn: prune stale rules, LLM-merge near-duplicates
+within each track (grouped by existing category, then soft-clustered by
+similarity), then deterministically delete low-quality TIPs.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from collections import defaultdict
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+
+from openjiuwen.agent_evolving.optimizer.llm_resilience import (
+    LLMInvokePolicy,
+    invoke_text_with_retry,
+)
+from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.model import Model
+
+from .config import TTSEConfig
+from .prompts import DREAM_MERGE_SYSTEM, dream_merge_prompt
+from .stores import TTSERecordStore
+from .tip_parse import is_valid_tip_shape, tip_purge_reason
+
+
+SECONDS_PER_DAY = 86400.0
+
+
+@dataclass
+class DreamState:
+    """Persisted Auto-dream counters / timestamps."""
+
+    last_dream_at: float = 0.0
+    last_pruned: int = 0
+    last_merged_clusters: int = 0
+    last_purged_tips: int = 0
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "last_dream_at": self.last_dream_at,
+            "last_pruned": self.last_pruned,
+            "last_merged_clusters": self.last_merged_clusters,
+            "last_purged_tips": self.last_purged_tips,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Optional[Dict[str, Any]]) -> "DreamState":
+        data = data or {}
+        return cls(
+            last_dream_at=float(data.get("last_dream_at") or 0.0),
+            last_pruned=int(data.get("last_pruned") or 0),
+            last_merged_clusters=int(data.get("last_merged_clusters") or 0),
+            last_purged_tips=int(data.get("last_purged_tips") or 0),
+        )
+
+
+@dataclass
+class DreamResult:
+    """Summary of one dream pass."""
+
+    skipped: bool = False
+    skip_reason: str = ""
+    pruned_facts: int = 0
+    pruned_tips: int = 0
+    merged_clusters: int = 0
+    kept_clusters: int = 0
+    purged_tips: int = 0
+    elapsed_secs: float = 0.0
+    added_items: List[Tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class MergeVerdict:
+    verdict: str  # MERGE | KEEP_DISTINCT | REWRITE
+    canonical: str = ""
+    keep_indices: List[int] = field(default_factory=list)
+    reason: str = ""
+    thinking: str = ""
+
+
+_MERGE_FIELD_HEADERS = ("THINKING", "REASON", "VERDICT", "CANONICAL", "KEEP_INDICES")
+_THINKING_LOG_MAX = 300
+
+
+def _truncate_thinking(text: str, limit: int = _THINKING_LOG_MAX) -> str:
+    s = (text or "").strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + "..."
+
+
+def _is_merge_field_header(line: str) -> bool:
+    up = line.strip().upper()
+    for header in _MERGE_FIELD_HEADERS:
+        if up == header or up.startswith(header + ":") or up.startswith(header + " "):
+            return True
+    return False
+
+
+def load_dream_state(path: str) -> DreamState:
+    if not path or not os.path.exists(path):
+        return DreamState()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return DreamState.from_dict(json.load(f))
+    except (OSError, ValueError) as exc:
+        logger.warning("[TTSERail] dream-state load failed at %s: %s", path, exc)
+        return DreamState()
+
+
+def save_dream_state(path: str, state: DreamState) -> None:
+    if not path:
+        return
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    tmp = f"{path}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(state.to_dict(), f, ensure_ascii=False, indent=1)
+        os.replace(tmp, path)
+    except OSError as exc:
+        logger.warning("[TTSERail] dream-state save failed at %s: %s", path, exc)
+
+
+def should_run_dream(
+    config: TTSEConfig,
+    state: DreamState,
+    *,
+    now: Optional[float] = None,
+) -> Tuple[bool, str]:
+    """Gate Auto-dream (enabled + min_hours). ``min_rules`` only gates merge."""
+    if not config.dream_enabled:
+        return False, "dream_enabled=False"
+    ts = now if now is not None else time.time()
+    if state.last_dream_at > 0:
+        hours = (ts - state.last_dream_at) / 3600.0
+        if hours < config.dream_min_hours:
+            return False, f"min_hours not met ({hours:.2f}<{config.dream_min_hours})"
+    return True, ""
+
+
+def _display_ts(record: Dict[str, Any]) -> float:
+    value = record.get("last_injected_at")
+    if value is None:
+        value = record.get("created_at")
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+async def prune_stale(
+    store: TTSERecordStore,
+    config: TTSEConfig,
+    *,
+    now: Optional[float] = None,
+) -> Tuple[int, int]:
+    """Delete rules not injected within ``dream_ttl_days``."""
+    if not config.dream_prune_enabled:
+        return 0, 0
+    ts = now if now is not None else time.time()
+    ttl = float(config.dream_ttl_days) * SECONDS_PER_DAY
+    pruned_facts = 0
+    pruned_tips = 0
+
+    async def _prune_track(rtype: str, records: Sequence[Dict[str, Any]]) -> int:
+        removed = 0
+        # Snapshot texts first — mutate while iterating is unsafe.
+        stale = [r for r in list(records) if (ts - _display_ts(r)) > ttl]
+        for record in stale:
+            text = record.get("text", "")
+            if not text:
+                continue
+            logger.info(
+                "[TTSERail] dream prune before_delete rtype=%s text=%s",
+                rtype,
+                text,
+            )
+            n = await store.delete_record(text, rtype, save=False)
+            removed += n
+        return removed
+
+    pruned_facts = await _prune_track("fact", store.facts)
+    pruned_tips = await _prune_track("tip", store.tips)
+    if pruned_facts or pruned_tips:
+        logger.info(
+            "[TTSERail] dream prune done ttl_days=%s pruned_facts=%s pruned_tips=%s",
+            config.dream_ttl_days,
+            pruned_facts,
+            pruned_tips,
+        )
+    else:
+        logger.debug(
+            "[TTSERail] dream prune idle ttl_days=%s",
+            config.dream_ttl_days,
+        )
+    return pruned_facts, pruned_tips
+
+
+def parse_merge_verdict(text: str, cluster_size: int) -> Optional[MergeVerdict]:
+    """Parse THINKING/REASON/VERDICT/CANONICAL/KEEP_INDICES from LLM merge output.
+
+    THINKING and REASON must be non-empty; otherwise returns ``None``.
+    """
+    if not text:
+        return None
+    verdict = ""
+    canonical = ""
+    keep_indices: List[int] = []
+    reason = ""
+    thinking_lines: List[str] = []
+    in_thinking = False
+    for line in str(text).splitlines():
+        s = line.strip()
+        up = s.upper()
+        if up.startswith("THINKING"):
+            in_thinking = True
+            # Inline body on the same line: "THINKING: ..."
+            if ":" in s:
+                inline = s.split(":", 1)[-1].strip()
+                if inline:
+                    thinking_lines.append(inline)
+            continue
+        if in_thinking:
+            if _is_merge_field_header(s) and not up.startswith("THINKING"):
+                in_thinking = False
+            else:
+                thinking_lines.append(line.rstrip())
+                continue
+        if up.startswith("VERDICT"):
+            payload = s.split(":", 1)[-1].strip() if ":" in s else s
+            token = payload.split()[0].upper() if payload else ""
+            if token in ("MERGE", "KEEP_DISTINCT", "REWRITE"):
+                verdict = token
+        elif up.startswith("CANONICAL"):
+            canonical = s.split(":", 1)[-1].strip() if ":" in s else ""
+        elif up.startswith("KEEP_INDICES"):
+            payload = s.split(":", 1)[-1].strip() if ":" in s else ""
+            for tok in payload.replace(",", " ").split():
+                if tok.isdigit():
+                    idx = int(tok)
+                    if 0 <= idx < cluster_size:
+                        keep_indices.append(idx)
+        elif up.startswith("REASON"):
+            reason = s.split(":", 1)[-1].strip() if ":" in s else s
+    thinking = "\n".join(thinking_lines).strip()
+    if not verdict or not thinking or not reason:
+        return None
+    return MergeVerdict(
+        verdict=verdict,
+        canonical=canonical,
+        keep_indices=keep_indices,
+        reason=reason,
+        thinking=thinking,
+    )
+
+
+def _best_count_text(cluster: Sequence[Dict[str, Any]]) -> str:
+    return max(cluster, key=lambda r: int(r.get("count", 0))).get("text", "")
+
+
+def _format_cluster_members(cluster: Sequence[Dict[str, Any]]) -> str:
+    """Human-readable cluster members for dream logs (full text, no truncation)."""
+    parts: List[str] = []
+    for i, record in enumerate(cluster):
+        parts.append(f"[{i}] count={int(record.get('count', 0))} text={record.get('text', '')}")
+    return " || ".join(parts)
+
+
+async def _llm_merge_cluster(
+    *,
+    llm: Model,
+    model: str,
+    policy: LLMInvokePolicy,
+    track: str,
+    cluster: Sequence[Dict[str, Any]],
+    sims: Sequence[Tuple[int, int, float]],
+    capabilities: str,
+) -> Optional[MergeVerdict]:
+    rules_block = "\n".join(f"{i}. count={int(r.get('count', 0))} | {r.get('text', '')}" for i, r in enumerate(cluster))
+    sim_table = "\n".join(f"{i},{j},{sim:.3f}" for i, j, sim in sims) if sims else "(none)"
+    prompt = f"{DREAM_MERGE_SYSTEM}\n\n{dream_merge_prompt(track, rules_block, sim_table, capabilities=capabilities)}"
+    try:
+        out = await invoke_text_with_retry(llm, model, prompt, policy=policy, temperature=0.2)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[TTSERail] dream merge LLM failed: %s", exc)
+        return None
+    return parse_merge_verdict(out, len(cluster))
+
+
+async def _apply_merge_verdict(
+    store: TTSERecordStore,
+    track: str,
+    cluster: Sequence[Dict[str, Any]],
+    verdict: MergeVerdict,
+    *,
+    capability_names: Optional[Set[str]] = None,
+) -> Tuple[str, Optional[Tuple[str, str]]]:
+    """Apply MERGE/REWRITE/KEEP. Returns (action, new rule or None)."""
+    if verdict.verdict == "KEEP_DISTINCT":
+        return "keep", None
+
+    canonical = (verdict.canonical or "").strip()
+    if not canonical:
+        canonical = _best_count_text(cluster)
+
+    if track == "tip":
+        if not is_valid_tip_shape(canonical, capability_names):
+            logger.info(
+                "[TTSERail] dream merge TIP canonical invalid (%s); keeping distinct",
+                verdict.verdict,
+            )
+            return "keep_invalid_tip", None
+
+    total_count = sum(int(r.get("count", 0)) for r in cluster)
+    category = store.record_category(cluster[0])
+    reason = "dream_merge" if verdict.verdict == "MERGE" else "dream_rewrite"
+    logger.info(
+        "[TTSERail] dream before_%s track=%s category=%s members=%s canonical=%s llm_reason=%s thinking=%s",
+        verdict.verdict.lower(),
+        track,
+        category,
+        _format_cluster_members(cluster),
+        canonical,
+        verdict.reason or "",
+        _truncate_thinking(verdict.thinking),
+    )
+    if verdict.thinking:
+        logger.debug(
+            "[TTSERail] dream before_%s full_thinking=%s",
+            verdict.verdict.lower(),
+            verdict.thinking,
+        )
+    for record in cluster:
+        logger.info(
+            "[TTSERail] dream before_delete track=%s action=%s text=%s",
+            track,
+            reason,
+            record.get("text", ""),
+        )
+        await store.delete_record(record["text"], track, save=False)
+    merged_count = max(total_count, 1)
+    await store.add_record_direct(track, canonical, count=merged_count, category=category, save=False)
+    logger.info(
+        "[TTSERail] dream after_%s track=%s category=%s members=%s canonical=%s count=%s llm_reason=%s thinking=%s",
+        verdict.verdict.lower(),
+        track,
+        category,
+        _format_cluster_members(cluster),
+        canonical,
+        merged_count,
+        verdict.reason or "",
+        _truncate_thinking(verdict.thinking),
+    )
+    return verdict.verdict.lower(), (canonical, track)
+
+
+async def dream_merge(
+    store: TTSERecordStore,
+    track: str,
+    *,
+    llm: Model,
+    model: str,
+    policy: LLMInvokePolicy,
+    config: TTSEConfig,
+    capabilities: str = "",
+    capability_names: Optional[Set[str]] = None,
+) -> Tuple[int, int, List[Tuple[str, str]]]:
+    """Category-bucket then soft-cluster + LLM merge one track.
+
+    Returns (merged, kept, new rules). Clusters never cross category boundaries.
+    """
+    records = store.facts if track == "fact" else store.tips
+    if len(records) < config.dream_cluster_min_size:
+        return 0, 0, []
+    if not store.has_embedding_provider():
+        logger.info("[TTSERail] dream merge skipped for %s: no embedding provider", track)
+        return 0, 0, []
+
+    by_category: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    for record in records:
+        by_category[store.record_category(record)].append(record)
+
+    clusters: List[List[Dict[str, Any]]] = []
+    min_size = config.dream_cluster_min_size
+    for cid, group in by_category.items():
+        if len(group) < min_size:
+            continue
+        cat_clusters = await store.soft_cluster(
+            group,
+            soft_lo=config.dream_soft_lo,
+            min_size=min_size,
+        )
+        logger.info(
+            "[TTSERail] dream merge category bucket track=%s category=%s rules=%s clusters=%s",
+            track,
+            cid,
+            len(group),
+            len(cat_clusters),
+        )
+        clusters.extend(cat_clusters)
+    clusters.sort(key=lambda c: -len(c))
+
+    if not clusters:
+        logger.info(
+            "[TTSERail] dream merge no clusters track=%s rules=%s categories=%s soft_lo=%s",
+            track,
+            len(records),
+            len(by_category),
+            config.dream_soft_lo,
+        )
+        return 0, 0, []
+
+    merged = 0
+    kept = 0
+    added_items: List[Tuple[str, str]] = []
+    budget = max(0, int(config.dream_max_llm_merges))
+    logger.info(
+        "[TTSERail] dream merge start track=%s rules=%s categories=%s clusters=%s llm_budget=%s",
+        track,
+        len(records),
+        len(by_category),
+        len(clusters),
+        budget,
+    )
+    for idx, cluster in enumerate(clusters):
+        logger.info(
+            "[TTSERail] dream cluster track=%s idx=%s/%s size=%s members=%s",
+            track,
+            idx + 1,
+            len(clusters),
+            len(cluster),
+            _format_cluster_members(cluster),
+        )
+    for cluster in clusters:
+        if budget <= 0:
+            break
+        budget -= 1
+        sims = await store.pairwise_sims(cluster)
+        verdict = await _llm_merge_cluster(
+            llm=llm,
+            model=model,
+            policy=policy,
+            track=track,
+            cluster=cluster,
+            sims=sims,
+            capabilities=capabilities,
+        )
+        if verdict is None:
+            logger.info(
+                "[TTSERail] dream merge cluster skipped (LLM/parse failure) track=%s size=%s", track, len(cluster)
+            )
+            continue
+
+        # TIP: one rewrite retry when MERGE/REWRITE yields invalid shape.
+        effective = verdict
+        action, added = await _apply_merge_verdict(store, track, cluster, verdict, capability_names=capability_names)
+        if action == "keep_invalid_tip" and verdict.verdict in ("MERGE", "REWRITE"):
+            retry = await _llm_merge_cluster(
+                llm=llm,
+                model=model,
+                policy=policy,
+                track=track,
+                cluster=cluster,
+                sims=sims,
+                capabilities=capabilities
+                + "\n\nPrevious CANONICAL was invalid; rewrite as a valid TIP or KEEP_DISTINCT.",
+            )
+            if retry is not None:
+                effective = retry
+                action, added = await _apply_merge_verdict(
+                    store, track, cluster, retry, capability_names=capability_names
+                )
+
+        if added is not None:
+            added_items.append(added)
+        if action in ("merge", "rewrite"):
+            merged += 1
+            logger.info(
+                "[TTSERail] dream %s track=%s size=%s reason=%s thinking=%s",
+                action,
+                track,
+                len(cluster),
+                effective.reason or "",
+                _truncate_thinking(effective.thinking),
+            )
+        else:
+            kept += 1
+            logger.info(
+                "[TTSERail] dream keep_distinct track=%s size=%s reason=%s thinking=%s",
+                track,
+                len(cluster),
+                effective.reason or "",
+                _truncate_thinking(effective.thinking),
+            )
+    return merged, kept, added_items
+
+
+async def dream_purge_tips(
+    store: TTSERecordStore,
+    capability_names: Set[str],
+) -> int:
+    """Deterministically delete malformed / unknown / over-generic TIPs."""
+    purged = 0
+    for record in list(store.tips):
+        text = record.get("text", "")
+        reason = tip_purge_reason(text, capability_names)
+        if reason is None:
+            continue
+        logger.info(
+            "[TTSERail] dream before_purge tip reason=%s text=%s",
+            reason,
+            text,
+        )
+        removed = await store.delete_record(text, "tip", save=False)
+        if removed:
+            purged += 1
+            logger.info("[TTSERail] dream purged tip (%s): %s", reason, text)
+    return purged
+
+
+async def run_dream_pass(
+    store: TTSERecordStore,
+    config: TTSEConfig,
+    *,
+    llm: Model,
+    model: str,
+    capabilities: str = "",
+    capability_names: Optional[Set[str]] = None,
+    state: Optional[DreamState] = None,
+    now: Optional[float] = None,
+) -> Tuple[DreamResult, DreamState]:
+    """Full dream pipeline: prune → merge → purge. Caller holds evolution lock."""
+    started = time.time()
+    ts = now if now is not None else started
+    path = config.resolved_dream_state_path()
+    dream_state = state if state is not None else load_dream_state(path)
+
+    ok, reason = should_run_dream(config, dream_state, now=ts)
+    if not ok:
+        logger.info("[TTSERail] dream skipped: %s", reason)
+        return DreamResult(skipped=True, skip_reason=reason), dream_state
+
+    logger.info(
+        "[TTSERail] dream pass start bank=%s caps=%s state_path=%s last_dream_at=%s",
+        store.stats(),
+        len(capability_names or set()),
+        path,
+        dream_state.last_dream_at,
+    )
+    result = DreamResult()
+    names = capability_names or set()
+
+    pruned_facts, pruned_tips = await prune_stale(store, config, now=ts)
+    result.pruned_facts = pruned_facts
+    result.pruned_tips = pruned_tips
+
+    n_rules = len(store.facts) + len(store.tips)
+    if n_rules >= config.dream_min_rules:
+        mf, kf, items_f = await dream_merge(
+            store,
+            "fact",
+            llm=llm,
+            model=model,
+            policy=config.induce_llm_policy,
+            config=config,
+            capabilities=capabilities,
+            capability_names=names,
+        )
+        mt, kt, items_t = await dream_merge(
+            store,
+            "tip",
+            llm=llm,
+            model=model,
+            policy=config.induce_llm_policy,
+            config=config,
+            capabilities=capabilities,
+            capability_names=names,
+        )
+        result.merged_clusters = mf + mt
+        result.kept_clusters = kf + kt
+        result.added_items = items_f + items_t
+    else:
+        logger.info(
+            "[TTSERail] dream merge skipped: rules=%s < min_rules=%s",
+            n_rules,
+            config.dream_min_rules,
+        )
+
+    if config.dream_purge_tips_enabled:
+        result.purged_tips = await dream_purge_tips(store, names)
+
+    await store.save()
+
+    dream_state.last_dream_at = ts
+    dream_state.last_pruned = result.pruned_facts + result.pruned_tips
+    dream_state.last_merged_clusters = result.merged_clusters
+    dream_state.last_purged_tips = result.purged_tips
+    save_dream_state(path, dream_state)
+
+    result.elapsed_secs = time.time() - started
+    logger.info(
+        "[TTSERail] dream done pruned_facts=%s pruned_tips=%s merged=%s kept=%s purged_tips=%s elapsed=%.2fs bank=%s",
+        result.pruned_facts,
+        result.pruned_tips,
+        result.merged_clusters,
+        result.kept_clusters,
+        result.purged_tips,
+        result.elapsed_secs,
+        store.stats(),
+    )
+    return result, dream_state
+
+
+__all__ = [
+    "DreamState",
+    "DreamResult",
+    "MergeVerdict",
+    "load_dream_state",
+    "save_dream_state",
+    "should_run_dream",
+    "prune_stale",
+    "parse_merge_verdict",
+    "dream_merge",
+    "dream_purge_tips",
+    "run_dream_pass",
+]
