@@ -5,9 +5,9 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/rails/`（61 文件，7 个子目录） |
-| 最近一次修订日期 | 2026-09-07 |
-| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md` |
+| 关联模块 | `openjiuwen/harness/rails/`（67 文件，7 个子目录） |
+| 最近一次修订日期 | 2026-09-15 |
+| 关联 feature | `F_01_ask-user-otel-events.md`、`F_02_genai-semconv-tool-spans.md`、`F_04_task-description-rail.md` |
 
 ## 范围 / 边界
 
@@ -52,7 +52,7 @@
    `90 TaskPlanningRail / ProgressiveToolRail / BaseInterruptRail / PermissionInterruptRail /
    BaseSecurityRail / VerificationRail` → `85 AgentModeRail / SafetyPromptRail /
    ContextAssembleRail / Context*ProcessorRail / Skill*CreateRail` →
-   `80 MemoryRail / CodingMemoryRail / HeartbeatRail / Skill*EvolutionRail` →
+   `80 MemoryRail / CodingMemoryRail / HeartbeatRail / TaskDescriptionRail / Skill*EvolutionRail` →
    `70 LLMRetryRail / ToolCallResilienceRail` → `60 EvolutionRail / LspRail` →
    `50 core 默认` → `10 TrajectoryRail / TaskCompletionRail`。
 5. **`init` 从不被回调框架调用**，只由 core 模块级 `init_rail(rail, agent)` 调用（>0.1s 升
@@ -104,7 +104,7 @@ ModelAnomalyDetectionRail, LspRail, McpRail, MemoryRail, MemberSkillEvolutionRai
 PermissionInterruptRail, ProgressiveToolRail, SafetyPromptRail, SecurityAllow,
 SecurityCheckContext, SecurityDecision, SecurityInterrupt, SecurityReject, SecurityRail,
 SessionRail, SkillCreateRail, SkillEvolutionRail, SkillUseRail, SubagentRail,
-SysOperationRail, TaskCompletionRail, TaskPlanningRail, Team*Rail, TrajectoryRail,
+SysOperationRail, TaskCompletionRail, TaskDescriptionRail, TaskPlanningRail, Team*Rail, TrajectoryRail,
 VerificationContractRail, VerificationRail, ...
 
 class DeepAgentRail(AgentRail):
