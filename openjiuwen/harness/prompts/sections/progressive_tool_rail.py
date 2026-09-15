@@ -128,7 +128,7 @@ def build_navigation_section(
     return PromptSection(
         name=SectionName.TOOL_NAVIGATION,
         content={language: build_navigation_prompt(entries, language)},
-        priority=70,
+        priority=72,
         category="system_prompt",
     )
 
@@ -332,7 +332,7 @@ def build_multilingual_navigation_section(
             "cn": build_navigation_prompt(entries_cn, "cn"),
             "en": build_navigation_prompt(entries_en, "en"),
         },
-        priority=70,
+        priority=72,
         category="system_prompt",
     )
 

@@ -248,21 +248,40 @@ class SubagentRail(DeepAgentRail):
                 ):
                     extension_content = self.task_prompt_extension(ctx, language)
                 if "subagent_spawn" in tool_names:
+                    if "task_tool" in tool_names:
+                        # Re-add the runtime section after the task section so
+                        # the runtime guidance is rendered below the common
+                        # subagent usage rules.
+                        self.system_prompt_builder.remove_section(SectionName.SUBAGENT_TOOLS)
+                        self._inject_task_tool_section(ctx)
+                    else:
+                        # Runtime tools replace task_tool, but still reuse its
+                        # system guidance as the parent heading.
+                        self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
+
                     section = build_subagent_tools_section(
                         language=language,
                         extension_content=extension_content,
                     )
                     if section is not None:
+                        if "task_tool" not in tool_names:
+                            from openjiuwen.harness.prompts.sections.task_tool import (
+                                build_task_system_prompt,
+                            )
+
+                            section.content[language] = (
+                                f"{build_task_system_prompt(language).rstrip()}\n\n"
+                                f"{section.content[language].lstrip()}"
+                            )
                         self.system_prompt_builder.add_section(section)
                 else:
                     self.system_prompt_builder.remove_section(SectionName.SUBAGENT_TOOLS)
+                    if "task_tool" in tool_names:
+                        self._inject_task_tool_section(ctx)
+                    else:
+                        self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             except ImportError:
                 logger.warning("[SubagentRail] subagent_tools prompt section not available, skipping")
-
-            if "task_tool" in tool_names:
-                self._inject_task_tool_section(ctx)
-            else:
-                self.system_prompt_builder.remove_section(SectionName.TASK_TOOL)
             return
 
         if not self.enable_async_subagent:

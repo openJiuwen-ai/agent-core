@@ -33,7 +33,7 @@ _PROMISE_GUIDANCE: Dict[str, str] = {
     ),
 }
 
-_COMPLETION_SIGNAL_PRIORITY = 85
+_COMPLETION_SIGNAL_PRIORITY = 83
 
 
 def build_completion_signal_section(

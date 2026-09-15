@@ -154,7 +154,7 @@ async def test_build_context_section(tmp_path: Path):
 
     workspace = Workspace(root_path=str(tmp_path))
     section_cn = await build_context_section(sys_operation, workspace, "cn", timezone="Asia/Shanghai")
-    assert section_cn.priority == 80
+    assert section_cn.priority == 100
     cn_content = section_cn.render("cn")
     assert "## AGENT.md - 智能体配置" in cn_content
     assert "以下文件已加载到上下文中，无需再次读取。" in cn_content

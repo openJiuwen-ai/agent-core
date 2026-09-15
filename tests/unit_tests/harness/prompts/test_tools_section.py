@@ -18,7 +18,7 @@ class TestBuildToolsSection:
         s = build_tools_section(descs, language="cn")
         assert s is not None
         assert s.name == "tools"
-        assert s.priority == 40
+        assert s.priority == 30
         rendered = s.render("cn")
         assert "todo_create" in rendered
         assert "todo_list" in rendered
