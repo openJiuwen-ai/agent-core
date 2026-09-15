@@ -1825,6 +1825,22 @@ async def test_run_dream_swallows_corrupt_state(tmp_path, monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_dream_does_not_swallow_cancellation(tmp_path, monkeypatch) -> None:
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), dream_enabled=True)
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=cfg)
+
+    async def boom(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.rails.evolution.ttse_rail.run_dream_pass",
+        boom,
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await rail.run_dream(capabilities="")
+
+
+@pytest.mark.asyncio
 async def test_configure_skips_only_exact_ttse_rail_class(tmp_path) -> None:
     class SubTTSERail(TTSERail):
         pass

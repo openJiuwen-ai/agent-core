@@ -668,8 +668,6 @@ class TTSERail(EvolutionRail):
                     if need_classify:
                         await self._classify_added_rules(need_classify)
                     await self._maybe_project_catalog()
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:  # noqa: BLE001
             logger.warning("[TTSERail] dream failed: %s", exc)
 
