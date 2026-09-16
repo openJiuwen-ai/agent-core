@@ -25,6 +25,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.context_graph import (
@@ -113,6 +114,17 @@ def _redact_text(value: object, *, limit: int = 512) -> str:
         text,
     )
     return text[:limit]
+
+
+def _describe_error(value: object) -> str:
+    """Return a non-empty, redacted error description."""
+
+    text = _redact_text(value)
+    if text:
+        return text
+    # Message-less exceptions (for example a bare TimeoutError) would otherwise be
+    # recorded as an empty last_error, leaving the failure undiagnosable.
+    return f"{type(value).__name__} (no message)"
 
 
 def _fetch_run_status(
@@ -1899,6 +1911,16 @@ class PersonalContext:
                 )
                 raise
             except BaseError as exc:
+                logger.warning(
+                    "PersonalContext fetch run cancellation finalization failed "
+                    "service_id=%s run_id=%s total_items=%d completed_items=%d error=%s: %s",
+                    service_id,
+                    run_id,
+                    total_items,
+                    completed_items,
+                    type(exc).__name__,
+                    _describe_error(exc),
+                )
                 await abort_run(discard_new_source_metadata=True)
                 self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                     service_id,
@@ -1906,10 +1928,20 @@ class PersonalContext:
                     run_state="failed",
                     total_items=total_items,
                     completed_items=completed_items,
-                    last_error=_redact_text(exc),
+                    last_error=_describe_error(exc),
                 )
                 raise
             except Exception as exc:
+                logger.warning(
+                    "PersonalContext fetch run cancellation finalization failed "
+                    "service_id=%s run_id=%s total_items=%d completed_items=%d error=%s: %s",
+                    service_id,
+                    run_id,
+                    total_items,
+                    completed_items,
+                    type(exc).__name__,
+                    _describe_error(exc),
+                )
                 await abort_run(discard_new_source_metadata=True)
                 self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                     service_id,
@@ -1917,10 +1949,20 @@ class PersonalContext:
                     run_state="failed",
                     total_items=total_items,
                     completed_items=completed_items,
-                    last_error=_redact_text(exc),
+                    last_error=_describe_error(exc),
                 )
                 raise _fetch_error("fetch run cancellation finalization failed", cause=exc) from exc
         except BaseError as exc:
+            logger.warning(
+                "PersonalContext fetch run failed service_id=%s run_id=%s "
+                "total_items=%d completed_items=%d error=%s: %s",
+                service_id,
+                run_id,
+                total_items,
+                completed_items,
+                type(exc).__name__,
+                _describe_error(exc),
+            )
             await abort_run()
             self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                 service_id,
@@ -1928,10 +1970,20 @@ class PersonalContext:
                 run_state="failed",
                 total_items=total_items,
                 completed_items=completed_items,
-                last_error=_redact_text(exc),
+                last_error=_describe_error(exc),
             )
             raise
         except Exception as exc:
+            logger.warning(
+                "PersonalContext fetch run failed service_id=%s run_id=%s "
+                "total_items=%d completed_items=%d error=%s: %s",
+                service_id,
+                run_id,
+                total_items,
+                completed_items,
+                type(exc).__name__,
+                _describe_error(exc),
+            )
             await abort_run()
             self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                 service_id,
@@ -1939,7 +1991,7 @@ class PersonalContext:
                 run_state="failed",
                 total_items=total_items,
                 completed_items=completed_items,
-                last_error=_redact_text(exc),
+                last_error=_describe_error(exc),
             )
             raise _fetch_error("fetch run failed", cause=exc) from exc
 

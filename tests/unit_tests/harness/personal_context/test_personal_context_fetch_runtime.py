@@ -731,6 +731,39 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_run_progress_names_message_less_failure(tmp_path: Path) -> None:
+    class MessageLessProvider(_ProgressProvider):
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="completed", items=tuple(_run_item(index) for index in range(2)))
+            raise TimeoutError
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    service_config = personal_context._config.fetch_services[0]
+
+    async def submit_batch(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+
+    provider = MessageLessProvider(service_config, home=tmp_path)
+    provider.release_prepare.set()
+    with pytest.raises(Exception):
+        await personal_context._run_fetch_once("notes", provider)
+    status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert status["run_state"] == "failed"
+    assert status["last_error"] == "TimeoutError (no message)"
+
+
+@pytest.mark.asyncio
 async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_path: Path) -> None:
     class EmptyProvider(ContextFetchService):
         async def prepare_run(

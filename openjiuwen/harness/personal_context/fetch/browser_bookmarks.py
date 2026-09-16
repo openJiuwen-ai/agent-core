@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -30,6 +31,8 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 20
@@ -135,10 +138,16 @@ def _date_sort_value(value: str) -> int:
         return -1
 
 
-def _bookmark_candidate_time(value: str) -> str:
+def _bookmark_candidate_time(value: str) -> str | None:
+    """Resolve a bookmark's ``date_added`` (a 1601-epoch microsecond count) to an ISO time.
+
+    Returns ``None`` for a value that cannot be read: Edge leaves ``date_added`` out of some
+    nodes, and dropping that one bookmark is better than failing the whole collection run.
+    """
+
     microseconds = _date_sort_value(value)
     if microseconds < 0:
-        raise ValueError("bookmark date_added is invalid")
+        return None
     epoch = datetime(1601, 1, 1, tzinfo=UTC)
     return (epoch + timedelta(microseconds=microseconds)).isoformat().replace("+00:00", "Z")
 
@@ -534,6 +543,18 @@ class BrowserBookmarksFetchService(ContextFetchService):
                     bookmark["date_added"],
                 )
                 candidate_time = _bookmark_candidate_time(bookmark["date_added"])
+                if candidate_time is None:
+                    # Same rule as every other provider: a time-less item is dropped from a
+                    # filtered run, and an unfiltered run keeps an explicit "unknown, assume
+                    # oldest" marker. The warning keeps the skip visible instead of a silent
+                    # empty run.
+                    if self._config.time_range.get("mode") != "all":
+                        _LOGGER.warning(
+                            "browser_bookmarks bookmark %s has no usable date_added; skipping it",
+                            bookmark["bookmark_id"],
+                        )
+                        continue
+                    candidate_time = "1970-01-01T00:00:00Z"
                 candidate = {
                     "stable_id": logical_id,
                     "revision_id": fingerprint,
