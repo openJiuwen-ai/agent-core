@@ -89,6 +89,12 @@ per-run 上限的场景）。
    > 路径由 run_id 直接定位；跨 run_id（seal 后 relaunch）新 run_id → 新文件 → 全 miss，
    > 本特性定义的隔离语义原样保留。记录级 `get_cached` 三重检查**不变**——路径隔离是文件级
    > 加固，不替代记录级判定。
+   >
+   > **2026-09-16 补证（legacy 只读种子）**：老布局共享文件重新进入读路径（`F_40` 修订 4）
+   > 后，"记录级三重检查仍是最后防线"有了实战证据——ST 在共享 WAL 里伪造与 node-k
+   > **同 key 同 sig 仅 run_id 不同**的 foreign 记录，relaunch 后该记录进 prior 但被
+   > `get_cached` 拒掉（node-k 照常 MISS 重跑，foreign 结果未出现在快照）。文件级拆分与
+   > 记录级检查是两层正交防御，任何一层单独成立。
 3. **两层 budget 同源注入、独立计数**。`agent_configurator` 在 `enable_swarmflow` 时给 leader
    挂 `SwarmflowBudgetRail(swarmflow_budget, workflow_budget=None)`；run 启动时引擎按
    `META.workflow_token_limit` 建 per-run `BudgetLedger` 注入 rail 的 `workflow_budget`。
