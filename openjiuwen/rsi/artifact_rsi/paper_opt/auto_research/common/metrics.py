@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import math
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import VariantResult
 
-
-_SKIP_METRIC_KEYS = frozenset(
+# Noisy containers omitted from *display* compaction only. Authoritative
+# metric resolution walks the full payload, including these keys.
+_DISPLAY_SKIP_METRIC_KEYS = frozenset(
     {
         "records",
         "task_records",
@@ -30,6 +32,9 @@ _MAX_COMPACT_METRICS = 40
 _MAX_METRIC_STRING = 120
 _MAX_EVENT_CLASSES = 12
 _MAX_EXAMPLE_TASKS = 3
+_MAX_RESOLVE_DEPTH = 16
+_MAX_RESOLVE_NODES = 10_000
+_CANONICAL_METRICS_KEY = "metrics"
 _BACKTICK_IDENT = re.compile(r"`([a-z][a-z0-9_]{2,})`")
 _SKIP_BASELINE_NAMES = frozenset(
     {
@@ -92,7 +97,10 @@ _UNSAFE_DIAGNOSTIC_KEYS = frozenset(
         "explanation",
     }
 )
-_SCORE_LEAVES = frozenset(
+# Compatibility defaults for pairing and manager display when the plan
+# does not name a primary score. Authoritative plan-metric reads do not
+# search this set.
+_COMPAT_SCORE_LEAVES = frozenset(
     {
         "accuracy",
         "exact_match",
@@ -104,6 +112,18 @@ _SCORE_LEAVES = frozenset(
     }
 )
 _PAIR_METRIC_STATUS = "computed_from_last_measured_rows"
+MetricResolutionStatus = Literal["resolved", "missing", "ambiguous"]
+
+
+@dataclass(frozen=True)
+class MetricResolution:
+    """One plan-metric lookup against a raw metrics JSON object."""
+
+    name: str
+    status: MetricResolutionStatus
+    value: float | int | None = None
+    path: str = ""
+    candidates: tuple[str, ...] = ()
 
 
 def infer_baseline_names(*texts: str) -> list[str]:
@@ -124,13 +144,248 @@ def infer_baseline_names(*texts: str) -> list[str]:
     return found
 
 
+def _join_metric_path(prefix: str, key: str) -> str:
+    return f"{prefix}.{key}" if prefix else str(key)
+
+
+def _metric_path_leaf(path: str) -> str:
+    return str(path).rsplit(".", 1)[-1]
+
+
+def _coerce_finite_number(value: Any) -> float | int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        lowered = text.lower()
+        if lowered in {"nan", "inf", "+inf", "-inf"}:
+            return None
+        try:
+            number = float(text)
+        except ValueError:
+            return None
+        if not math.isfinite(number):
+            return None
+        if all(char.isdigit() or char in "+-" for char in text):
+            return int(number)
+        return number
+    return None
+
+
+def _numeric_cell(value: Any) -> float | int | None:
+    direct = _coerce_finite_number(value)
+    if direct is not None:
+        return direct
+    if isinstance(value, dict) and "value" in value:
+        return _coerce_finite_number(value.get("value"))
+    return None
+
+
+def _follow_dotted_path(payload: Any, path: str) -> float | int | None:
+    current: Any = payload
+    for part in path.split("."):
+        if isinstance(current, dict) and part in current:
+            current = current[part]
+            continue
+        if isinstance(current, list) and part.isdigit():
+            index = int(part)
+            if 0 <= index < len(current):
+                current = current[index]
+                continue
+        return None
+    return _numeric_cell(current)
+
+
+def _collect_numeric_paths(
+    node: Any,
+    *,
+    prefix: str = "",
+    depth: int = 0,
+    remaining: list[int] | None = None,
+) -> list[tuple[str, float | int]]:
+    """Uncapped walk of mappings and sequences for numeric leaves."""
+    found: list[tuple[str, float | int]] = []
+    if remaining is None:
+        remaining = [_MAX_RESOLVE_NODES]
+    if depth > _MAX_RESOLVE_DEPTH or remaining[0] <= 0:
+        return found
+    remaining[0] -= 1
+    if isinstance(node, dict):
+        cell = _numeric_cell(node) if prefix else None
+        if cell is not None and "value" in node:
+            found.append((prefix, cell))
+            for child_key, child in node.items():
+                if child_key == "value":
+                    continue
+                found.extend(
+                    _collect_numeric_paths(
+                        child,
+                        prefix=_join_metric_path(prefix, str(child_key)),
+                        depth=depth + 1,
+                        remaining=remaining,
+                    )
+                )
+            return found
+        for child_key, child in node.items():
+            found.extend(
+                _collect_numeric_paths(
+                    child,
+                    prefix=_join_metric_path(prefix, str(child_key)),
+                    depth=depth + 1,
+                    remaining=remaining,
+                )
+            )
+        return found
+    if isinstance(node, list):
+        for index, child in enumerate(node):
+            found.extend(
+                _collect_numeric_paths(
+                    child,
+                    prefix=_join_metric_path(prefix, str(index)),
+                    depth=depth + 1,
+                    remaining=remaining,
+                )
+            )
+        return found
+    number = _numeric_cell(node)
+    if number is not None and prefix:
+        found.append((prefix, number))
+    return found
+
+
+def _unique_or_ambiguous(
+    name: str, hits: list[tuple[str, float | int]]
+) -> MetricResolution:
+    if not hits:
+        return MetricResolution(name=name, status="missing")
+    paths = tuple(path for path, _value in hits)
+    values = {hit[1] for hit in hits}
+    if len(values) > 1:
+        return MetricResolution(
+            name=name,
+            status="ambiguous",
+            candidates=paths,
+        )
+    path, value = sorted(hits, key=lambda item: item[0])[0]
+    return MetricResolution(name=name, status="resolved", value=value, path=path, candidates=paths)
+
+
+def resolve_metric(metrics: dict[str, Any] | None, name: str) -> MetricResolution:
+    """Resolve one declared metric from canonical, root, path, or unique leaf.
+
+    Order: ``metrics.<name>``, root ``<name>``, exact dotted path, then a
+    unique recursive leaf whose final path segment equals ``name``. Conflicting
+    numeric values are ``ambiguous`` rather than first-match.
+    """
+    cleaned = str(name).strip()
+    if not cleaned:
+        return MetricResolution(name=name, status="missing")
+    payload = metrics if isinstance(metrics, dict) else {}
+    if not payload:
+        return MetricResolution(name=cleaned, status="missing")
+
+    hits: list[tuple[str, float | int]] = []
+    nested = payload.get(_CANONICAL_METRICS_KEY)
+    if isinstance(nested, dict) and cleaned in nested:
+        canonical = _numeric_cell(nested.get(cleaned))
+        if canonical is not None:
+            hits.append((_join_metric_path(_CANONICAL_METRICS_KEY, cleaned), canonical))
+    if cleaned in payload:
+        root = _numeric_cell(payload.get(cleaned))
+        if root is not None:
+            hits.append((cleaned, root))
+    if hits:
+        return _unique_or_ambiguous(cleaned, hits)
+
+    if "." in cleaned:
+        dotted = _follow_dotted_path(payload, cleaned)
+        if dotted is not None:
+            return MetricResolution(name=cleaned, status="resolved", value=dotted, path=cleaned)
+
+    leaf_hits = [
+        (path, value)
+        for path, value in _collect_numeric_paths(payload)
+        if _metric_path_leaf(path) == cleaned
+    ]
+    return _unique_or_ambiguous(cleaned, leaf_hits)
+
+
+def resolve_plan_metrics(
+    metrics: dict[str, Any] | None,
+    names: list[str] | None = None,
+) -> dict[str, MetricResolution]:
+    """Resolve each declared plan metric against a raw payload."""
+    resolved: dict[str, MetricResolution] = {}
+    for name in names or []:
+        cleaned = str(name).strip()
+        if not cleaned or cleaned in resolved:
+            continue
+        resolved[cleaned] = resolve_metric(metrics, cleaned)
+    return resolved
+
+
+def metric_resolution_diagnostic(
+    resolutions: dict[str, MetricResolution],
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Bounded provenance for missing/ambiguous/resolved plan metrics."""
+    resolved: dict[str, str] = {}
+    missing: list[str] = []
+    ambiguous: dict[str, list[str]] = {}
+    for name, hit in resolutions.items():
+        if hit.status == "resolved" and len(resolved) < limit:
+            resolved[name] = hit.path
+        elif hit.status == "missing" and len(missing) < limit:
+            missing.append(name)
+        elif hit.status == "ambiguous" and len(ambiguous) < limit:
+            ambiguous[name] = list(hit.candidates)[:8]
+    diagnostic: dict[str, Any] = {}
+    if resolved:
+        diagnostic["resolved"] = resolved
+    if missing:
+        diagnostic["missing"] = missing
+    if ambiguous:
+        diagnostic["ambiguous"] = ambiguous
+    return diagnostic
+
+
+def materialize_handoff_metrics(
+    metrics: dict[str, Any] | None,
+    *,
+    plan_metrics: list[str] | None = None,
+    limit: int = _MAX_COMPACT_METRICS,
+) -> tuple[dict[str, float | int | str], dict[str, Any]]:
+    """Compact display scalars plus uncapped resolved plan metrics."""
+    raw = dict(metrics) if isinstance(metrics, dict) else {}
+    compact = compact_metrics(raw, limit=limit)
+    resolutions = resolve_plan_metrics(raw, plan_metrics)
+    for name, hit in resolutions.items():
+        if hit.status == "resolved" and hit.value is not None:
+            compact[name] = hit.value
+            if hit.path and hit.path not in compact:
+                compact[hit.path] = hit.value
+        elif hit.status == "ambiguous":
+            compact[f"{name}_status"] = "ambiguous"
+    return compact, metric_resolution_diagnostic(resolutions)
+
+
 def compact_metrics(
     metrics: dict[str, Any],
     *,
     prefix: str = "",
     limit: int = _MAX_COMPACT_METRICS,
 ) -> dict[str, float | int | str]:
-    """Keep only scalar routing metrics; drop per-item traces and nested blobs."""
+    """Keep only scalar routing metrics; drop per-item traces and nested blobs.
+
+    Display-only. Scientific reads use :func:`resolve_metric`.
+    """
     compact: dict[str, float | int | str] = {}
 
     def _walk(key: str, value: Any) -> None:
@@ -152,7 +407,7 @@ def compact_metrics(
                 compact[key] = nested_value
                 return
             for child_key, child in value.items():
-                if child_key in _SKIP_METRIC_KEYS:
+                if child_key in _DISPLAY_SKIP_METRIC_KEYS:
                     continue
                 next_key = f"{key}.{child_key}" if key else str(child_key)
                 _walk(next_key, child)
@@ -168,7 +423,7 @@ def _metric_leaf(key: str) -> str:
 
 
 def _is_pinned_score_leaf(leaf: str, plan_metrics: set[str]) -> bool:
-    if leaf in _SCORE_LEAVES or "accuracy" in leaf:
+    if leaf in _COMPAT_SCORE_LEAVES or "accuracy" in leaf:
         return True
     return leaf in plan_metrics
 
@@ -190,7 +445,7 @@ def _collect_numeric_leaves(metrics: dict[str, Any], *, prefix: str = "") -> dic
         if isinstance(nested_value, (int, float)) and not isinstance(nested_value, bool) and key:
             found[key] = nested_value
         for child_key, child in value.items():
-            if child_key in _SKIP_METRIC_KEYS:
+            if child_key in _DISPLAY_SKIP_METRIC_KEYS:
                 continue
             next_key = f"{key}.{child_key}" if key else str(child_key)
             _walk(next_key, child)
@@ -205,29 +460,37 @@ def compact_metrics_for_manager(
     plan_metrics: list[str] | None = None,
     limit: int = _MAX_COMPACT_METRICS,
 ) -> dict[str, float | int | str]:
-    """Compact metrics for the manager prompt, pinning scores before the key cap.
+    """Compact metrics for the manager prompt, pinning plan values first.
 
-    ``compact_metrics`` is insertion-order + limit, so nested accuracy can be
-    dropped behind ``n_questions`` / ``per_question``. Pin ``_SCORE_LEAVES``,
-    any leaf containing ``accuracy``, and names from the experiment plan first.
+    Display compaction is insertion-order + limit. Resolved plan metrics are
+    written under their declared names before the cap so nested endpoints
+    survive noisy payloads.
     """
-    plan = {str(name).strip().lower() for name in (plan_metrics or []) if str(name).strip()}
+    names = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
+    plan = {name.lower() for name in names}
+    out: dict[str, float | int | str] = {}
+    for name in names:
+        hit = resolve_metric(metrics, name)
+        if len(out) >= limit:
+            return out
+        if hit.status == "resolved" and hit.value is not None:
+            out[name] = hit.value
+            if hit.path and hit.path not in out and len(out) < limit:
+                out[hit.path] = hit.value
+        elif hit.status == "ambiguous":
+            out[f"{name}_status"] = "ambiguous"
     pinned: dict[str, float | int | str] = {}
     for key, value in _collect_numeric_leaves(metrics).items():
         if _is_pinned_score_leaf(_metric_leaf(key), plan):
             pinned[key] = value
     rest = compact_metrics(dict(metrics), limit=max(limit, len(pinned) + limit))
-    out: dict[str, float | int | str] = {}
-    for key, value in pinned.items():
-        if len(out) >= limit:
-            return out
-        out[key] = value
-    for key, value in rest.items():
-        if key in out:
-            continue
-        if len(out) >= limit:
-            break
-        out[key] = value
+    for source in (pinned, rest):
+        for key, value in source.items():
+            if key in out:
+                continue
+            if len(out) >= limit:
+                return out
+            out[key] = value
     return out
 
 
@@ -249,14 +512,11 @@ def _truthy_flag(value: Any) -> bool | None:
     return None
 
 
-def _score_below_one(compact: dict[str, float | int | str]) -> bool:
-    for key, value in compact.items():
-        if not isinstance(value, (int, float)) or isinstance(value, bool):
-            continue
-        leaf = key.rsplit(".", 1)[-1].lower()
-        if leaf in _SCORE_LEAVES or any(leaf.endswith(part) for part in _SCORE_LEAVES):
-            if float(value) < 1.0:
-                return True
+def _score_below_one(metrics: dict[str, Any]) -> bool:
+    for leaf in _COMPAT_SCORE_LEAVES:
+        hit = resolve_metric(metrics, leaf)
+        if hit.status == "resolved" and hit.value is not None and float(hit.value) < 1.0:
+            return True
     return False
 
 
@@ -578,52 +838,38 @@ def scientific_status_from_metrics(metrics: dict[str, Any]) -> str:
         return "unknown"
     if harness_failed(metrics):
         return "unknown"
-    compact = compact_metrics(dict(metrics))
-    flagged = _truthy_flag(compact.get("acceptance"))
+    flagged = _truthy_flag(metrics.get("acceptance"))
     if flagged is None:
-        for key, value in compact.items():
-            leaf = str(key).rsplit(".", 1)[-1].lower()
-            if leaf in {"acceptance", "eligible_for_acceptance"}:
-                flagged = _truthy_flag(value)
-                if flagged is not None:
-                    break
+        nested = metrics.get(_CANONICAL_METRICS_KEY)
+        if isinstance(nested, dict):
+            flagged = _truthy_flag(nested.get("acceptance"))
+            if flagged is None:
+                flagged = _truthy_flag(nested.get("eligible_for_acceptance"))
+    if flagged is None:
+        flagged = _truthy_flag(metrics.get("eligible_for_acceptance"))
     if flagged is not None:
         return "accepted" if flagged else "below_threshold"
-    status = str(compact.get("status", "")).strip().lower()
+    status = _metric_str(metrics, "status").lower()
     if status in _FAILED_STATUSES:
         return "below_threshold"
     if status in _ACCEPTED_STATUSES:
         return "accepted"
-    if _score_below_one(compact):
+    if _score_below_one(metrics):
         return "below_threshold"
     return "unknown"
 
 
 def metric_number(metrics: dict[str, Any], name: str) -> float | int | None:
     """Read a numeric plan metric from a raw or compact payload."""
-    if not name:
+    hit = resolve_metric(metrics, name)
+    if hit.status != "resolved":
         return None
-    direct = metrics.get(name)
-    if isinstance(direct, (int, float)) and not isinstance(direct, bool):
-        return direct
-    nested = metrics.get("metrics")
-    if isinstance(nested, dict):
-        nested_value = nested.get(name)
-        if isinstance(nested_value, (int, float)) and not isinstance(nested_value, bool):
-            return nested_value
-    compact = compact_metrics(dict(metrics))
-    suffix = f".{name}"
-    for key, value in compact.items():
-        if key != name and not key.endswith(suffix):
-            continue
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return value
-    return None
+    return hit.value
 
 
 def score_number(metrics: dict[str, Any]) -> float | None:
     """Primary score used to pair subset runs (accuracy, then correct/n)."""
-    for leaf in _SCORE_LEAVES:
+    for leaf in _COMPAT_SCORE_LEAVES:
         value = metric_number(metrics, leaf)
         if value is not None:
             return float(value)
@@ -737,8 +983,16 @@ def overlay_paired_metrics(
         ):
             overlaid.append(item)
             continue
-        missing = [name for name in metric_names if metric_number(item.metrics, name) is None]
-        if not missing:
+        missing: list[str] = []
+        blocked = False
+        for metric_name in metric_names:
+            hit = resolve_metric(item.metrics, metric_name)
+            if hit.status == "ambiguous":
+                blocked = True
+                break
+            if hit.status == "missing":
+                missing.append(metric_name)
+        if blocked or not missing:
             overlaid.append(item)
             continue
         proposed_score = score_number(item.metrics)
@@ -810,14 +1064,20 @@ def scientific_status_from_comparison(
     strictly_better = False
     compared = False
     for metric in metric_names:
-        p_val = metric_number(proposed.metrics, metric)
+        proposed_hit = resolve_metric(proposed.metrics, metric)
+        if proposed_hit.status == "ambiguous":
+            return "unknown"
+        p_val = proposed_hit.value if proposed_hit.status == "resolved" else None
         if p_val is None:
             continue
         shared = False
         for baseline in baseline_rows:
-            b_val = metric_number(baseline.metrics, metric)
-            if b_val is None:
+            baseline_hit = resolve_metric(baseline.metrics, metric)
+            if baseline_hit.status == "ambiguous":
+                return "unknown"
+            if baseline_hit.status != "resolved" or baseline_hit.value is None:
                 continue
+            b_val = baseline_hit.value
             shared = True
             compared = True
             if p_val < b_val:
