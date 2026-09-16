@@ -3,8 +3,8 @@
 """Goal mode prompt section and dynamic prompt builders.
 
 Contains:
-- Static ``<goal_protocol>`` section injected into the system prompt
-  during goal rounds (via ``build_goal_protocol_section``).
+- ``goal_protocol`` section content (via ``build_goal_protocol_section``),
+  injected as a PromptAttachment on goal rounds.
 - Dynamic ``<goal_task>`` XML builder (``build_goal_task_query``)
   injected as the user query for each goal attempt round.
 - Transcript assessor prompt builder (``build_transcript_assessor_prompt``)
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from openjiuwen.harness.goal.schema import GoalAssessment, GoalRecord
 
 # ===================================================================
-# Goal protocol — static system prompt section
+# Goal protocol — prompt attachment section for goal rounds
 # ===================================================================
 
 _GOAL_PROTOCOL_PRIORITY = 88
@@ -81,53 +81,14 @@ _GOAL_PROTOCOL: Dict[str, str] = {
 }
 
 
-_GOAL_REMINDER: Dict[str, str] = {
-    "cn": (
-        "\n\n## 会话存在持续目标\n\n"
-        "本会话设置了一个持续目标（goal），当前状态为 {status}。"
-        "本次不是 goal 执行轮，请正常回应用户当前消息。"
-        "如果用户提到「目标 / 继续目标 / 那个任务」，或你需要了解目标内容，"
-        "请调用 get_current_goal 获取权威的目标信息，不要凭旧对话猜测。"
-    ),
-    "en": (
-        "\n\n## An active goal exists in this session\n\n"
-        "This session has a persistent goal (status: {status}). "
-        "This turn is not a goal-execution round; respond to the user's current "
-        "message normally. If the user refers to \"the goal / continue the goal / "
-        "that task\", or you need the goal details, call get_current_goal to fetch "
-        "the authoritative goal information instead of guessing from old turns."
-    ),
-}
-
-_GOAL_REMINDER_PRIORITY = 86
-
-
-def build_goal_reminder_section(
-    language: str, status: str = "active",
-) -> PromptSection:
-    """Build a lightweight reminder that a session goal exists.
-
-    Injected on *non-goal* turns while a goal is active/paused so the main
-    model knows to call ``get_current_goal`` instead of relying on stale
-    conversation history for the objective.
-    """
-    template = _GOAL_REMINDER.get(language, _GOAL_REMINDER["cn"])
-    content = template.format(status=status)
-    return PromptSection(
-        name=SectionName.GOAL_PROTOCOL,
-        content={language: content},
-        priority=_GOAL_REMINDER_PRIORITY,
-    )
-
-
 def build_goal_protocol_section(language: str) -> PromptSection:
-    """Build the static Goal mode protocol prompt section.
+    """Build the Goal mode protocol prompt section.
 
     Args:
         language: ``"cn"`` or ``"en"``.
 
     Returns:
-        A ``PromptSection`` ready to inject into the system prompt.
+        A ``PromptSection`` for PromptAttachment injection on goal rounds.
     """
     content = _GOAL_PROTOCOL.get(language, _GOAL_PROTOCOL["cn"])
     return PromptSection(
@@ -354,7 +315,6 @@ def build_transcript_assessor_prompt(
 __all__ = [
     "TRANSCRIPT_ASSESSOR_SYSTEM",
     "build_goal_protocol_section",
-    "build_goal_reminder_section",
     "build_goal_current_instruction",
     "build_goal_task_query",
     "build_transcript_assessor_prompt",
