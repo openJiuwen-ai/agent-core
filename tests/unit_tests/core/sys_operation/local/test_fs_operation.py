@@ -953,20 +953,42 @@ async def test_orphan_sweep_queues_stale_databases_for_deletion(rw_lock_dir):
 
 
 @pytest.mark.asyncio
-async def test_last_local_lease_closes_process_shared_lock(work_dir):
-    """The last local lease detaches and closes the process-shared lock."""
+async def test_last_local_lease_keeps_lock_cached_for_reuse(work_dir):
+    """The last local lease keeps the lock cached with a live connection."""
     file_path = Path(work_dir) / "recreated_lock_target.txt"
     lock_file = ReadWriteLockManager.get_lock_file(file_path)
 
     async with FsOperation._file_lock(file_path, "write", timeout=1.0):
         lock = ReadWriteLockManager.get_lock(file_path)
 
-    assert lock._closed
-    assert lock_file not in ReadWriteLockManager._locks
+    assert not lock._closed
+    assert lock_file in ReadWriteLockManager._locks
 
     async with FsOperation._file_lock(file_path, "write", timeout=1.0):
         replacement = ReadWriteLockManager.get_lock(file_path)
-        assert replacement is not lock
+        assert replacement is lock
+
+
+@pytest.mark.asyncio
+async def test_idle_lock_cache_bounded_with_hot_path_reuse(work_dir, monkeypatch):
+    """Exceeding _max_idle_locks closes the oldest idle entries while hot paths keep reusing one lock."""
+    monkeypatch.setattr(ReadWriteLockManager, "_max_idle_locks", 4)
+    locks = []
+    for i in range(6):
+        file_path = Path(work_dir) / f"bounded_idle_{i}.txt"
+        async with FsOperation._file_lock(file_path, "write", timeout=1.0):
+            locks.append(ReadWriteLockManager.get_lock(file_path))
+
+    assert len(ReadWriteLockManager._locks) == 4
+    assert len(ReadWriteLockManager._idle_lru) == 4
+    assert locks[0]._closed
+    assert locks[1]._closed
+    assert all(not lock._closed for lock in locks[2:])
+
+    hot_path = Path(work_dir) / "bounded_idle_2.txt"
+    async with FsOperation._file_lock(hot_path, "write", timeout=1.0):
+        assert ReadWriteLockManager.get_lock(hot_path) is locks[2]
+    assert not locks[2]._closed
 
 
 @pytest.mark.asyncio
@@ -1078,7 +1100,7 @@ finally:
 
 @pytest.mark.asyncio
 async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
-    """Idle cleanup deletes a closed database after acquiring it exclusively."""
+    """Idle cleanup closes cached lock and deletes its database after acquiring it exclusively."""
     monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
     file_path = Path(work_dir) / "idle_lock_target.txt"
     lock_file = ReadWriteLockManager.get_lock_file(file_path)
@@ -1087,11 +1109,12 @@ async def test_idle_lock_cleanup_deletes_database(work_dir, monkeypatch):
         lock = ReadWriteLockManager.get_lock(file_path)
 
     assert lock_file.exists()
-    assert lock_file not in ReadWriteLockManager._locks
-    assert lock._closed
+    assert not lock._closed
+    assert lock_file in ReadWriteLockManager._locks
 
     await ReadWriteLockManager.cleanup_expired_locks()
 
+    assert lock._closed
     assert not lock_file.exists()
 
 
@@ -1183,7 +1206,7 @@ async def test_due_cleanup_rechecks_latest_database_mtime(work_dir, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_idle_lock_cleanup_evicts_multiple_cached_locks(work_dir, monkeypatch):
-    """Last leases close all resources before cleanup removes their databases."""
+    """Idle cleanup closes all cached locks and removes their databases."""
     monkeypatch.setattr(ReadWriteLockManager, "_idle_ttl", 0.0)
     locks = []
     lock_files = []
@@ -1194,11 +1217,12 @@ async def test_idle_lock_cleanup_evicts_multiple_cached_locks(work_dir, monkeypa
         async with FsOperation._file_lock(file_path, "write", timeout=1.0):
             locks.append(ReadWriteLockManager.get_lock(file_path))
 
-    assert not ReadWriteLockManager._locks
-    assert all(lock._closed for lock in locks)
+    assert len(ReadWriteLockManager._locks) == 32
+    assert all(not lock._closed for lock in locks)
 
     await ReadWriteLockManager.cleanup_expired_locks()
 
+    assert all(lock._closed for lock in locks)
     assert all(not lock_file.exists() for lock_file in lock_files)
 
 

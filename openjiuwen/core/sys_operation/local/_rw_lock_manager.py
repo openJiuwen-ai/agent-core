@@ -8,6 +8,7 @@ import os
 import pathlib
 import tempfile
 import time
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Literal
@@ -37,6 +38,13 @@ class ReadWriteLockManager:
     _idle_deadlines: dict[pathlib.Path, float] = {}
     _idle_ttl = 2 * 60
     _cleanup_interval = 60
+    # Each idle entry retains a live SQLite connection and a dedicated
+    # single-thread executor, so the idle set must be bounded: one burst over
+    # many distinct paths would otherwise retain O(N) threads and connections
+    # until the TTL cleanup runs. Overflow closes the least recently released
+    # idle entries immediately; hot working sets stay cached for reuse.
+    _max_idle_locks = 32
+    _idle_lru: OrderedDict[pathlib.Path, _RwLockEntry] = OrderedDict()
     # Databases left behind by an earlier process are only reclaimed once they
     # have been untouched for far longer than any live process leaves its own
     # lock idle. The mtime is a *candidate filter*, never proof of death:
@@ -79,6 +87,7 @@ class ReadWriteLockManager:
         async with cls._get_state_lock():
             entries = tuple(cls._locks.values())
             cls._locks.clear()
+            cls._idle_lru.clear()
             for entry in entries:
                 entry.lock.evict_singleton()
                 await entry.lock.close()
@@ -277,6 +286,23 @@ class ReadWriteLockManager:
                 cls._schedule_idle_lock(lock_file, loop.time() + remaining)
                 continue
 
+            # Close and evict cached idle entries before attempting deletion
+            entry_to_close: _RwLockEntry | None = None
+            async with cls._get_state_lock():
+                entry = cls._locks.get(lock_file)
+                if entry is not None:
+                    if entry.lease_count == 0:
+                        cls._locks.pop(lock_file, None)
+                        cls._idle_lru.pop(lock_file, None)
+                        entry.lock.evict_singleton()
+                        entry_to_close = entry
+                    else:
+                        cls._schedule_idle_lock(lock_file, loop.time())
+                        continue
+
+            if entry_to_close is not None:
+                await entry_to_close.lock.close()
+
             if await cls._try_delete_database(lock_file):
                 deleted_count += 1
             elif lock_file.exists() and lock_file not in cls._idle_deadlines:
@@ -306,26 +332,40 @@ class ReadWriteLockManager:
         async with cls._get_state_lock():
             entry = cls._get_or_create_lock(lock_file)
             entry.lease_count += 1
+            cls._idle_lru.pop(lock_file, None)
             return lock_file, entry
 
     @classmethod
     async def _release_lease(cls, lock_file: pathlib.Path, entry: _RwLockEntry) -> None:
+        overflow: list[_RwLockEntry] = []
         async with cls._get_state_lock():
             entry.lease_count -= 1
             if entry.lease_count:
                 return
+            cls._idle_lru[lock_file] = entry
+            cls._idle_lru.move_to_end(lock_file)
+            while len(cls._idle_lru) > cls._max_idle_locks:
+                oldest_file, oldest_entry = cls._idle_lru.popitem(last=False)
+                if oldest_entry.lease_count or cls._locks.get(oldest_file) is not oldest_entry:
+                    continue
+                cls._locks.pop(oldest_file, None)
+                oldest_entry.lock.evict_singleton()
+                overflow.append(oldest_entry)
 
-            if cls._locks.get(lock_file) is entry:
-                cls._locks.pop(lock_file, None)
-            entry.lock.evict_singleton()
-            try:
-                await entry.lock.close()
-            finally:
-                lock_file.touch(exist_ok=True)
-                cls._schedule_idle_lock(
-                    lock_file,
-                    asyncio.get_running_loop().time() + cls._idle_ttl,
-                )
+        # Keep idle entries cached with live SQLite connections; idle cleanup
+        # closes them after _idle_ttl. This avoids connection churn during burst
+        # read/write patterns (e.g. P8.1 page generation) where the same files
+        # are accessed in rapid succession. The idle set is bounded by
+        # _max_idle_locks so a burst over many distinct paths only retains a
+        # hot working set worth of threads and connections.
+        lock_file.touch(exist_ok=True)
+        cls._schedule_idle_lock(
+            lock_file,
+            asyncio.get_running_loop().time() + cls._idle_ttl,
+        )
+
+        for oldest_entry in overflow:
+            await oldest_entry.lock.close()
 
     @classmethod
     @asynccontextmanager
