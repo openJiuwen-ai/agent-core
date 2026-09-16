@@ -24,7 +24,6 @@ from openjiuwen.agent_teams.organization.events import (
     BaseOrgEvent,
     OrgEventMessage,
     OrgLeaderMessageEvent,
-    OrgSummarySourcesUpdatedEvent,
     OrgSummaryTaskCreatedEvent,
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
@@ -67,6 +66,10 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskSource,
     OrgTaskSourceRecord,
     OrgTaskStatus,
+    OrgSummaryExecutionRecord,
+    OrgSummaryExecutionStatus,
+    OrgSummaryTeamRecord,
+    OrgSummaryTeamStatus,
     OrgUnclaimedPhase,
     OrgUnclaimedTaskPolicy,
     OrgUnclaimedTaskState,
@@ -99,6 +102,18 @@ def _is_accepted_task(status: str, review: Any) -> bool:
         status == OrgTaskStatus.COMPLETED.value
         and review is not None
         and str(review.review_status) == OrgTaskReviewStatus.ACCEPTED.value
+    )
+
+
+def _has_aggregation_source_output(task: OrgTaskRecord) -> bool:
+    """Return whether a child task persisted content that its parent can aggregate."""
+    if isinstance(task.output_abstract, str) and task.output_abstract.strip():
+        return True
+    context = _json_loads(task.output_context_json, {})
+    if not isinstance(context, dict):
+        return False
+    return any(
+        isinstance(context.get(field), str) and context[field].strip() for field in ("description", "result_uri")
     )
 
 
@@ -371,6 +386,11 @@ class OrgTaskManager:
         capabilities = required_capabilities or []
         if created_by.organization_id != self.organization_id:
             return OrgTaskOpResult(ok=False, reason="task creator belongs to another organization")
+        if task_type == "organization.summary":
+            return OrgTaskOpResult(
+                ok=False,
+                reason="organization.summary is reserved for SUMMARY_TEAM executions",
+            )
         if not capabilities or any(
             not isinstance(capability, str) or not capability.strip() for capability in capabilities
         ):
@@ -399,17 +419,16 @@ class OrgTaskManager:
             task_metadata[ORG_TASK_REPAIRS_TASK_ID_KEY] = repairs_target
         if parent_task_id and aggregation_mode is not None:
             return OrgTaskOpResult(ok=False, reason="aggregation_mode is only allowed on root tasks")
+        mode: OrgTaskAggregationMode | None = None
         if aggregation_mode is not None:
             try:
                 mode = OrgTaskAggregationMode(aggregation_mode)
             except ValueError:
                 return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
-            if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
-                return OrgTaskOpResult(
-                    ok=False,
-                    reason="SUMMARY_TEAM aggregation is not supported yet",
-                )
-            if mode is not OrgTaskAggregationMode.HIERARCHICAL:
+            if mode not in {
+                OrgTaskAggregationMode.HIERARCHICAL,
+                OrgTaskAggregationMode.SUMMARY_TEAM,
+            }:
                 return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
@@ -502,6 +521,34 @@ class OrgTaskManager:
                         reason=f"root task root_task_id must equal task_id ({task_id!r}); got {root_task_id!r}",
                     )
                 root_task_id = task_id
+                # The MVP serializes only SUMMARY_TEAM roots. Existing
+                # HIERARCHICAL callers retain their established multi-root behavior.
+                if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
+                    active_root = (
+                        (
+                            await session.execute(
+                                select(OrgTaskRecord).where(
+                                    OrgTaskRecord.organization_id == self.organization_id,
+                                    OrgTaskRecord.parent_task_id.is_(None),
+                                    or_(
+                                        OrgTaskRecord.task_type.is_(None),
+                                        OrgTaskRecord.task_type != "organization.summary",
+                                    ),
+                                    OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
+                                )
+                            )
+                        )
+                        .scalars()
+                        .first()
+                    )
+                    if active_root is not None:
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason=(
+                                "only one non-terminal root task is supported per organization; "
+                                f"active root is {active_root.task_id}"
+                            ),
+                        )
             if repairs_target is not None:
                 repaired = await session.get(OrgTaskRecord, repairs_target)
                 if repaired is None or repaired.organization_id != self.organization_id:
@@ -549,7 +596,10 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"org task already exists: {task_id}")
             aggregation_json = None
             if parent_task_id is None:
-                aggregation_json = _json_dumps(default_root_aggregation(task_id).model_dump())
+                aggregation = default_root_aggregation(task_id)
+                if mode is not None:
+                    aggregation.mode = mode
+                aggregation_json = _json_dumps(aggregation.model_dump())
             row = OrgTaskRecord(
                 recreation_request_id=recreation_request_id,
                 recreated_from_task_id=recreated_from,
@@ -1067,8 +1117,35 @@ class OrgTaskManager:
             return False
 
     async def claim_task(self, *, task_id: str, team_id: str) -> OrgTaskOpResult:
+        """Claim an open task while preserving each summary mode's ownership boundary."""
         await self.initialize()
         async with self._write() as session:
+            row = await session.get(OrgTaskRecord, task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if row.task_type == "organization.summary":
+                execution = (
+                    (
+                        await session.execute(
+                            select(OrgSummaryExecutionRecord).where(
+                                OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                                OrgSummaryExecutionRecord.summary_task_id == task_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if execution is not None:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="SUMMARY_TEAM summary tasks are assigned only by their execution binding",
+                    )
+                if row.creator_team_id != team_id:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="only the HIERARCHICAL summary task creator can claim it",
+                    )
             now = get_current_time()
             result = await session.execute(
                 update(OrgTaskRecord)
@@ -1092,11 +1169,11 @@ class OrgTaskManager:
                     unclaimed_deadline_at=None,
                 )
             )
-            await session.commit()
             if result.rowcount != 1:
                 return OrgTaskOpResult(ok=False, reason=f"task is not open/unassigned: {task_id}")
-            row = await session.get(OrgTaskRecord, task_id)
-        task = self._to_task(row)
+            await session.refresh(row)
+            task = self._to_task(row)
+            await session.commit()
         await self._publish_event(
             OrgTaskClaimedEvent(
                 organization_id=self.organization_id,
@@ -1114,8 +1191,34 @@ class OrgTaskManager:
         from_team_id: str,
         to_team_id: str,
     ) -> OrgTaskOpResult:
+        """Delegate a normal task without allowing a Summary Task to change its responsible team."""
         await self.initialize()
         async with self._write() as session:
+            row = await session.get(OrgTaskRecord, task_id)
+            if row is None or row.organization_id != self.organization_id:
+                return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if row.task_type == "organization.summary":
+                execution = (
+                    (
+                        await session.execute(
+                            select(OrgSummaryExecutionRecord).where(
+                                OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                                OrgSummaryExecutionRecord.summary_task_id == task_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if execution is not None:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="SUMMARY_TEAM summary tasks are assigned only by their execution binding",
+                    )
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="HIERARCHICAL summary tasks must remain with their creator team",
+                )
             now = get_current_time()
             result = await session.execute(
                 update(OrgTaskRecord)
@@ -1142,11 +1245,7 @@ class OrgTaskManager:
                     unclaimed_deadline_at=None,
                 )
             )
-            await session.commit()
             if result.rowcount != 1:
-                row = await session.get(OrgTaskRecord, task_id)
-                if row is None or row.organization_id != self.organization_id:
-                    return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
                 if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                     return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
                 if row.assigned_team_id and row.assigned_team_id != from_team_id:
@@ -1155,8 +1254,9 @@ class OrgTaskManager:
                         reason=f"task is assigned to another team: {row.assigned_team_id}",
                     )
                 return OrgTaskOpResult(ok=False, reason=f"task delegate failed: {task_id}")
-            row = await session.get(OrgTaskRecord, task_id)
-        task = self._to_task(row)
+            await session.refresh(row)
+            task = self._to_task(row)
+            await session.commit()
         await self._publish_task_delegated(task, from_team_id, to_team_id)
         return OrgTaskOpResult(ok=True, task=task)
 
@@ -1194,6 +1294,7 @@ class OrgTaskManager:
         await self.initialize()
         now = get_current_time()
         context_model = self._coerce_output_context(output_context)
+        completed_root_task_id: str | None = None
         async with self._write() as session:
             row = await session.get(OrgTaskRecord, task_id)
             if row is None or row.organization_id != self.organization_id:
@@ -1202,6 +1303,13 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
             if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
+            if row.parent_task_id is None and row.task_type != "organization.summary":
+                aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(row.aggregation_json, {}))
+                if aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="SUMMARY_TEAM root tasks can only be completed by their Summary Task",
+                    )
             child_stmt = select(OrgTaskRecord).where(
                 OrgTaskRecord.organization_id == self.organization_id,
                 OrgTaskRecord.parent_task_id == task_id,
@@ -1216,6 +1324,32 @@ class OrgTaskManager:
                 row.output_context_json = _json_dumps(context_model.model_dump())
             row.output_abstract = output_abstract if output_abstract is not None else row.output_abstract
             row.updated_at = now
+            if row.task_type == "organization.summary":
+                execution = (
+                    (
+                        await session.execute(
+                            select(OrgSummaryExecutionRecord).where(
+                                OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                                OrgSummaryExecutionRecord.summary_task_id == row.task_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+                if execution is not None:
+                    root = await session.get(OrgTaskRecord, row.root_task_id)
+                    if root is None:
+                        return OrgTaskOpResult(ok=False, reason="summary execution root task is missing")
+                    if execution.status != OrgSummaryExecutionStatus.RUNNING.value:
+                        return OrgTaskOpResult(ok=False, reason="summary sources are not ready")
+                    root.status = OrgTaskStatus.COMPLETED.value
+                    root.output_context_json = row.output_context_json
+                    root.output_abstract = row.output_abstract
+                    root.updated_at = now
+                    completed_root_task_id = root.task_id
+                    execution.status = OrgSummaryExecutionStatus.COMPLETED.value
+                    execution.updated_at = now
             review_event: OrgTaskReviewRequestedEvent | None = None
             if row.parent_task_id and row.creator_team_id:
                 review = await self._get_latest_review_row(session, row.task_id)
@@ -1250,8 +1384,17 @@ class OrgTaskManager:
                 task_id=task_id,
             )
         )
+        if completed_root_task_id is not None:
+            await self._publish_event(
+                OrgTaskCompletedEvent(
+                    organization_id=self.organization_id,
+                    team_id=team_id,
+                    task_id=completed_root_task_id,
+                )
+            )
         if review_event is not None:
             await self._publish_event(review_event)
+        await self.activate_ready_summary_tasks()
         return OrgTaskOpResult(ok=True, task=task)
 
     async def fail_task(
@@ -1326,7 +1469,7 @@ class OrgTaskManager:
         parent_task_id: str,
         creator_team_id: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Direct children with brief + latest review summary (for org_view_child_tasks)."""
+        """Direct children with their output context, abstract, and latest review summary."""
         await self.initialize()
         stmt = select(OrgTaskRecord).where(
             OrgTaskRecord.organization_id == self.organization_id,
@@ -1341,6 +1484,8 @@ class OrgTaskManager:
             for row in rows:
                 task = self._to_task(row)
                 payload = task.brief()
+                payload["output_context"] = task.output_context.model_dump() if task.output_context else None
+                payload["output_abstract"] = task.output_abstract
                 review_row = await self._get_latest_review_row(session, row.task_id)
                 if review_row is None:
                     payload["review"] = None
@@ -1438,6 +1583,18 @@ class OrgTaskManager:
                                 f"({repair_siblings[0].task_id} repairs {task_id})"
                             ),
                         )
+            if (
+                status is OrgTaskReviewStatus.ACCEPTED
+                and task_row.parent_task_id is not None
+                and not _has_aggregation_source_output(task_row)
+            ):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        "a child task needs output_context.description, result_uri, "
+                        "or output_abstract before ACCEPTED"
+                    ),
+                )
             if row is None:
                 row = OrgTaskReviewRecord(
                     review_id=f"org-review-{uuid.uuid4().hex[:12]}",
@@ -1467,6 +1624,8 @@ class OrgTaskManager:
                 review_status=review.review_status.value,
             )
         )
+        if status is OrgTaskReviewStatus.ACCEPTED:
+            await self.activate_ready_summary_tasks()
         return OrgTaskOpResult(ok=True, task=self._to_task(task_row), data={"review": review.model_dump()})
 
     async def can_complete_parent_task(self, *, parent_task_id: str, team_id: str) -> bool:
@@ -1612,113 +1771,484 @@ class OrgTaskManager:
         repaired.updated_at = now
         return None
 
-    async def create_summary_task(
+    async def create_summary_execution(
         self,
         *,
+        root_task_id: str,
         title: str,
         description: str,
         created_by: OrgTaskCreator,
+        summary_team_id: str | None = None,
         task_id: str | None = None,
-        source_task_ids: list[str] | None = None,
+        source_task_ids: list[str],
         output_spec: OrgTaskOutputSpec | dict[str, Any] | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> OrgTaskOpResult:
-        result = await self.create_task(
-            task_id=task_id,
-            title=title,
-            description=description,
-            task_type="organization.summary",
-            required_capabilities=["summary"],
-            output_spec=output_spec,
-            metadata=metadata,
-            created_by=created_by,
-        )
-        if not result.ok or result.task is None:
-            return result
-        if source_task_ids:
-            attach = await self.attach_summary_sources(
-                summary_task_id=result.task.task_id,
-                source_task_ids=source_task_ids,
-            )
-            if not attach.ok:
-                return attach
-        await self._publish_event(
-            OrgSummaryTaskCreatedEvent(
-                organization_id=self.organization_id,
-                team_id=created_by.team_id,
-                leader_id=created_by.creator_id if created_by.creator_type == "team_leader" else None,
-                summary_task_id=result.task.task_id,
-            )
-        )
-        return result
+        """Create the one waiting Summary Task for a claimed SUMMARY_TEAM root.
 
-    async def attach_summary_sources(
-        self,
-        *,
-        summary_task_id: str,
-        source_task_ids: list[str],
-        source_role: str | None = None,
-        required: bool = True,
-    ) -> OrgTaskOpResult:
+        Sources are bound atomically here rather than through a general-purpose
+        summary-source attachment API.
+        """
         await self.initialize()
+        if not source_task_ids or len(set(source_task_ids)) != len(source_task_ids):
+            return OrgTaskOpResult(ok=False, reason="source_task_ids must be non-empty and unique")
+        if created_by.organization_id != self.organization_id or not created_by.team_id:
+            return OrgTaskOpResult(ok=False, reason="summary execution creator must be an organization team leader")
+        summary_task_id = task_id or f"org-summary-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
         async with self._write() as session:
-            summary = await session.get(OrgTaskRecord, summary_task_id)
-            if summary is None or summary.organization_id != self.organization_id:
-                return OrgTaskOpResult(ok=False, reason=f"summary task not found: {summary_task_id}")
-            if summary.task_type != "organization.summary":
-                return OrgTaskOpResult(ok=False, reason=f"task is not a summary task: {summary_task_id}")
+            root = await session.get(OrgTaskRecord, root_task_id)
+            if root is None or root.organization_id != self.organization_id or root.parent_task_id is not None:
+                return OrgTaskOpResult(ok=False, reason=f"root task not found: {root_task_id}")
+            aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(root.aggregation_json, {}))
+            if aggregation.mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
+                return OrgTaskOpResult(ok=False, reason="root task is not configured for SUMMARY_TEAM aggregation")
+            if root.assigned_team_id != created_by.team_id:
+                return OrgTaskOpResult(
+                    ok=False, reason="only the root task's claimed team leader can create its summary"
+                )
+            if (
+                aggregation.controller_team_id != created_by.team_id
+                or aggregation.controller_leader_id != created_by.creator_id
+            ):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="the Root Leader must select SUMMARY_TEAM aggregation after claiming the root task",
+                )
+            if aggregation.summary_task_id:
+                existing = await session.get(OrgTaskRecord, aggregation.summary_task_id)
+                return OrgTaskOpResult(ok=True, task=self._to_task(existing) if existing else None)
             for source_task_id in source_task_ids:
                 source = await session.get(OrgTaskRecord, source_task_id)
                 if source is None or source.organization_id != self.organization_id:
                     return OrgTaskOpResult(ok=False, reason=f"source task not found: {source_task_id}")
-                if source.status != OrgTaskStatus.COMPLETED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"source task is not completed: {source_task_id}")
-                review = await self._get_latest_review_row(session, source_task_id)
-                if review is not None and review.review_status != OrgTaskReviewStatus.ACCEPTED.value:
-                    return OrgTaskOpResult(ok=False, reason=f"source task review is not accepted: {source_task_id}")
-                existing = await session.get(OrgTaskSourceRecord, (summary_task_id, source_task_id))
-                if existing is None:
-                    session.add(
-                        OrgTaskSourceRecord(
-                            summary_task_id=summary_task_id,
-                            source_task_id=source_task_id,
-                            source_role=source_role,
-                            required=required,
-                            created_at=now,
-                        )
+                if source.root_task_id != root_task_id or source.parent_task_id != root_task_id:
+                    return OrgTaskOpResult(
+                        ok=False, reason="summary sources must be direct children of the same root task"
                     )
-                else:
-                    existing.source_role = source_role
-                    existing.required = required
+            if await session.get(OrgTaskRecord, summary_task_id) is not None:
+                return OrgTaskOpResult(ok=False, reason=f"org task already exists: {summary_task_id}")
+            summary = OrgTaskRecord(
+                task_id=summary_task_id,
+                organization_id=self.organization_id,
+                parent_task_id=None,
+                root_task_id=root_task_id,
+                creator_type=created_by.creator_type,
+                creator_id=created_by.creator_id,
+                creator_team_id=created_by.team_id,
+                status=OrgTaskStatus.WAITING_SOURCES.value,
+                created_at=now,
+                updated_at=now,
+                title=title,
+                description=description,
+                task_type="organization.summary",
+                required_capabilities_json=_json_dumps(["summary"]),
+                assignment_type=OrgAssignmentType.DELEGATED.value
+                if summary_team_id
+                else OrgAssignmentType.UNASSIGNED.value,
+                assigned_team_id=summary_team_id,
+                assigned_by_team_id=created_by.team_id if summary_team_id else None,
+                assigned_at=now if summary_team_id else None,
+                output_spec_json=_json_dumps(
+                    self._coerce_output_spec(output_spec).model_dump() if output_spec else None
+                ),
+                metadata_json=_json_dumps(metadata or {}),
+            )
+            session.add(summary)
+            for source_task_id in source_task_ids:
+                session.add(
+                    OrgTaskSourceRecord(
+                        summary_task_id=summary_task_id,
+                        source_task_id=source_task_id,
+                        required=True,
+                        created_at=now,
+                    )
+                )
+            session.add(
+                OrgSummaryExecutionRecord(
+                    execution_id=f"org-summary-execution-{uuid.uuid4().hex[:12]}",
+                    organization_id=self.organization_id,
+                    root_task_id=root_task_id,
+                    summary_task_id=summary_task_id,
+                    summary_team_id=summary_team_id,
+                    status=(
+                        OrgSummaryExecutionStatus.WAITING_SOURCES.value
+                        if summary_team_id
+                        else OrgSummaryExecutionStatus.PROVISIONING.value
+                    ),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            aggregation.summary_task_id = summary_task_id
+            aggregation.summary_team_id = summary_team_id
+            aggregation.controller_team_id = created_by.team_id
+            aggregation.controller_leader_id = created_by.creator_id
+            root.aggregation_json = _json_dumps(aggregation.model_dump())
+            root.updated_at = now
             await session.commit()
         await self._publish_event(
-            OrgSummarySourcesUpdatedEvent(
+            OrgSummaryTaskCreatedEvent(
                 organization_id=self.organization_id,
+                team_id=created_by.team_id,
+                leader_id=created_by.creator_id,
                 summary_task_id=summary_task_id,
             )
         )
-        return OrgTaskOpResult(
-            ok=True,
-            task=await self.get_task(summary_task_id),
-            data={"source_task_ids": source_task_ids},
+        return OrgTaskOpResult(ok=True, task=self._to_task(summary))
+
+    async def set_root_aggregation_mode(
+        self,
+        *,
+        task_id: str,
+        team_id: str,
+        leader_id: str,
+        aggregation_mode: OrgTaskAggregationMode | str | None,
+    ) -> OrgTaskOpResult:
+        """Persist the Root Leader's one-time aggregation choice before decomposition starts."""
+        try:
+            mode = OrgTaskAggregationMode(aggregation_mode)
+        except (TypeError, ValueError):
+            return OrgTaskOpResult(ok=False, reason="aggregation_mode must be HIERARCHICAL or SUMMARY_TEAM")
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            root = await session.get(OrgTaskRecord, task_id)
+            if root is None or root.organization_id != self.organization_id or root.parent_task_id is not None:
+                return OrgTaskOpResult(ok=False, reason="aggregation mode can only be selected for a root task")
+            if root.assigned_team_id != team_id:
+                return OrgTaskOpResult(ok=False, reason="current team has not claimed this root task")
+            aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(root.aggregation_json, {}))
+            if aggregation.controller_team_id:
+                if (
+                    aggregation.controller_team_id == team_id
+                    and aggregation.controller_leader_id == leader_id
+                    and aggregation.mode is mode
+                ):
+                    return OrgTaskOpResult(ok=True, task=self._to_task(root))
+                return OrgTaskOpResult(ok=False, reason="root task aggregation mode is already selected")
+            if root.status not in {OrgTaskStatus.CLAIMED.value, OrgTaskStatus.IN_PROGRESS.value}:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason="aggregation mode must be selected while the root task is CLAIMED or IN_PROGRESS",
+                )
+            if root.status == OrgTaskStatus.IN_PROGRESS.value:
+                child = (
+                    await session.execute(
+                        select(OrgTaskRecord.task_id).where(
+                            OrgTaskRecord.organization_id == self.organization_id,
+                            OrgTaskRecord.parent_task_id == root.task_id,
+                        )
+                    )
+                ).first()
+                if child is not None:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason="aggregation mode must be selected before starting root-task decomposition",
+                    )
+            if aggregation.summary_task_id:
+                return OrgTaskOpResult(ok=False, reason="root task already has a Summary Task")
+            if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
+                active_root = (
+                    await session.execute(
+                        select(OrgTaskRecord.task_id).where(
+                            OrgTaskRecord.organization_id == self.organization_id,
+                            OrgTaskRecord.task_id != root.task_id,
+                            OrgTaskRecord.parent_task_id.is_(None),
+                            or_(
+                                OrgTaskRecord.task_type.is_(None),
+                                OrgTaskRecord.task_type != "organization.summary",
+                            ),
+                            OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
+                        )
+                    )
+                ).first()
+                if active_root is not None:
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "only one non-terminal root task is supported for SUMMARY_TEAM aggregation; "
+                            f"active root is {active_root[0]}"
+                        ),
+                    )
+            aggregation.mode = mode
+            aggregation.controller_team_id = team_id
+            aggregation.controller_leader_id = leader_id
+            aggregation.final_output_task_id = root.task_id
+            root.aggregation_json = _json_dumps(aggregation.model_dump())
+            root.updated_at = now
+            await session.commit()
+        return OrgTaskOpResult(ok=True, task=self._to_task(root))
+
+    async def bind_summary_execution(self, *, summary_task_id: str, summary_team_id: str) -> OrgTaskOpResult:
+        """Bind a provisioned Summary Task to its ready shared Summary Team."""
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            execution = (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if execution is None or summary is None:
+                return OrgTaskOpResult(ok=False, reason="summary execution not found")
+            if execution.status == OrgSummaryExecutionStatus.FAILED.value:
+                return OrgTaskOpResult(ok=False, reason="summary execution provisioning failed")
+            execution.summary_team_id = summary_team_id
+            execution.status = OrgSummaryExecutionStatus.WAITING_SOURCES.value
+            execution.updated_at = now
+            summary.assignment_type = OrgAssignmentType.DELEGATED.value
+            summary.assigned_team_id = summary_team_id
+            summary.assigned_at = now
+            summary.updated_at = now
+            root = await session.get(OrgTaskRecord, execution.root_task_id)
+            if root is not None:
+                aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(root.aggregation_json, {}))
+                aggregation.summary_team_id = summary_team_id
+                root.aggregation_json = _json_dumps(aggregation.model_dump())
+                root.updated_at = now
+            await session.commit()
+        await self.activate_ready_summary_tasks()
+        return OrgTaskOpResult(ok=True, task=self._to_task(summary), data={"execution_id": execution.execution_id})
+
+    async def fail_summary_execution(self, *, summary_task_id: str, failure_reason: str) -> OrgTaskOpResult:
+        """Persist a provisioning failure so the Root Leader can decide how to proceed."""
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            execution = (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            summary = await session.get(OrgTaskRecord, summary_task_id)
+            if execution is None or summary is None:
+                return OrgTaskOpResult(ok=False, reason="summary execution not found")
+            execution.status = OrgSummaryExecutionStatus.FAILED.value
+            execution.updated_at = now
+            summary.status = OrgTaskStatus.FAILED.value
+            summary.failure_code = OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value
+            summary.failure_reason = failure_reason
+            summary.failed_at = now
+            summary.updated_at = now
+            await session.commit()
+        await self._publish_event(
+            OrgTaskFailedEvent(
+                organization_id=self.organization_id,
+                team_id=summary.creator_team_id,
+                task_id=summary_task_id,
+                failure_code=OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value,
+                failure_reason=failure_reason,
+            )
         )
+        return OrgTaskOpResult(ok=True, task=self._to_task(summary), data={"execution_id": execution.execution_id})
 
-    async def list_summary_sources(self, *, summary_task_id: str) -> list[OrgTaskSource]:
+    async def get_summary_execution(self, *, summary_task_id: str) -> OrgSummaryExecutionRecord | None:
+        """Return the execution row used to scope one Summary Task invocation."""
+        await self.initialize()
+        async with self._read() as session:
+            return (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+
+    async def list_incomplete_summary_executions(self) -> list[OrgSummaryExecutionRecord]:
+        """Return durable Summary Team executions that need recovery after a team rebind."""
+        await self.initialize()
+        active_statuses = (
+            OrgSummaryExecutionStatus.PROVISIONING.value,
+            OrgSummaryExecutionStatus.WAITING_SOURCES.value,
+            OrgSummaryExecutionStatus.RUNNING.value,
+        )
+        async with self._read() as session:
+            return (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.status.in_(active_statuses),
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+
+    async def get_summary_team(self) -> OrgSummaryTeamRecord | None:
+        """Return the durable organization-wide Summary Team record, if provisioned."""
+        await self.initialize()
+        async with self._read() as session:
+            return await session.get(OrgSummaryTeamRecord, self.organization_id)
+
+    async def reserve_summary_team(self) -> OrgSummaryTeamRecord:
+        """Create or return the singleton Summary Team record in PROVISIONING state."""
+        await self.initialize()
+        now = get_current_time()
+        async with self._write() as session:
+            row = await session.get(OrgSummaryTeamRecord, self.organization_id)
+            if row is None:
+                row = OrgSummaryTeamRecord(
+                    organization_id=self.organization_id,
+                    status=OrgSummaryTeamStatus.PROVISIONING.value,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                await session.commit()
+            return row
+
+    async def mark_summary_team_ready(self, *, team_id: str, leader_id: str) -> None:
+        """Persist the launched singleton team identity after it has joined the organization."""
+        await self.initialize()
+        async with self._write() as session:
+            row = await session.get(OrgSummaryTeamRecord, self.organization_id)
+            if row is None:
+                raise ValueError("summary team was not reserved")
+            row.summary_team_id = team_id
+            row.leader_id = leader_id
+            row.status = OrgSummaryTeamStatus.READY.value
+            row.updated_at = get_current_time()
+            await session.commit()
+
+    async def mark_summary_team_failed(self) -> None:
+        """Record that the shared Summary Team could not be provisioned."""
+        await self.initialize()
+        async with self._write() as session:
+            row = await session.get(OrgSummaryTeamRecord, self.organization_id)
+            if row is None:
+                now = get_current_time()
+                row = OrgSummaryTeamRecord(
+                    organization_id=self.organization_id,
+                    status=OrgSummaryTeamStatus.FAILED.value,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+                await session.commit()
+                return
+            row.status = OrgSummaryTeamStatus.FAILED.value
+            row.updated_at = get_current_time()
+            await session.commit()
+
+    async def activate_ready_summary_tasks(self) -> list[OrgTask]:
+        """Open waiting Summary Tasks whose bound sources are all accepted.
+
+        The caller publishes normal task-created events after the transaction so
+        the shared Summary Team can claim and execute the task through existing
+        organization scheduling machinery.
+        """
+        await self.initialize()
+        ready: list[OrgTask] = []
+        async with self._write() as session:
+            executions = (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.status == OrgSummaryExecutionStatus.WAITING_SOURCES.value,
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+            for execution in executions:
+                sources = (
+                    (
+                        await session.execute(
+                            select(OrgTaskSourceRecord).where(
+                                OrgTaskSourceRecord.summary_task_id == execution.summary_task_id,
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                if not sources:
+                    continue
+                all_ready = True
+                for source in sources:
+                    if not source.required:
+                        continue
+                    source_task = await session.get(OrgTaskRecord, source.source_task_id)
+                    review = await self._get_latest_review_row(session, source.source_task_id)
+                    if source_task is None or not _is_accepted_task(source_task.status, review):
+                        all_ready = False
+                        break
+                if not all_ready:
+                    continue
+                summary = await session.get(OrgTaskRecord, execution.summary_task_id)
+                if summary is None or summary.status != OrgTaskStatus.WAITING_SOURCES.value:
+                    continue
+                summary.status = OrgTaskStatus.DELEGATED.value
+                summary.updated_at = get_current_time()
+                execution.status = OrgSummaryExecutionStatus.RUNNING.value
+                execution.updated_at = summary.updated_at
+                ready.append(self._to_task(summary))
+            await session.commit()
+        for task in ready:
+            await self._publish_task_created(task)
+            await self._publish_task_delegated(task, task.created_by.team_id or "", task.assignment.team_id or "")
+        return ready
+
+    async def get_summary_inputs(
+        self,
+        *,
+        summary_task_id: str,
+        requester_team_id: str,
+    ) -> dict[str, Any] | None:
+        """Return bound source outputs only to the Summary Team assigned to this execution."""
         await self.initialize()
         async with self._read() as session:
             summary = await session.get(OrgTaskRecord, summary_task_id)
-            if summary is None or summary.organization_id != self.organization_id:
-                return []
-            stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
-            rows = (await session.execute(stmt)).scalars().all()
-            return [self._to_source(row) for row in rows]
-
-    async def get_summary_inputs(self, *, summary_task_id: str) -> dict[str, Any] | None:
-        await self.initialize()
-        async with self._read() as session:
-            summary = await session.get(OrgTaskRecord, summary_task_id)
-            if summary is None or summary.organization_id != self.organization_id:
+            if (
+                summary is None
+                or summary.organization_id != self.organization_id
+                or summary.task_type != "organization.summary"
+            ):
+                return None
+            execution = (
+                (
+                    await session.execute(
+                        select(OrgSummaryExecutionRecord).where(
+                            OrgSummaryExecutionRecord.organization_id == self.organization_id,
+                            OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        )
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if execution is None:
+                return None
+            if summary.assigned_team_id != requester_team_id:
+                return None
+            if execution.summary_team_id != requester_team_id:
+                return None
+            if execution.root_task_id != summary.root_task_id:
                 return None
             stmt = select(OrgTaskSourceRecord).where(OrgTaskSourceRecord.summary_task_id == summary_task_id)
             source_rows = (await session.execute(stmt)).scalars().all()
@@ -1735,7 +2265,12 @@ class OrgTaskManager:
                         "review": self._to_review(review_row).model_dump() if review_row is not None else None,
                     }
                 )
-            return {"summary_task": self._to_task(summary).model_dump(), "source_tasks": sources}
+            return {
+                "execution_id": execution.execution_id,
+                "root_task_id": execution.root_task_id,
+                "summary_task": self._to_task(summary).model_dump(),
+                "source_tasks": sources,
+            }
 
     async def _publish_task_created(self, task: OrgTask) -> None:
         await self._publish_event(
@@ -1815,7 +2350,6 @@ class OrgTaskManager:
                     OrgTaskReviewRequestedEvent,
                     OrgTaskReviewedEvent,
                     OrgSummaryTaskCreatedEvent,
-                    OrgSummarySourcesUpdatedEvent,
                 ),
             ):
                 await self.messager.publish(OrgTopic.TASK.build(session_id, self.organization_id), message)
