@@ -156,18 +156,30 @@ class Journal:
         return records
 
     @classmethod
-    async def load(cls, path: str | None, wal_path: str | None = None) -> "Journal":
+    async def load(
+        cls,
+        path: str | None,
+        wal_path: str | None = None,
+        legacy_path: str | None = None,
+    ) -> "Journal":
         """Load prior records, replaying the run's WAL on top (WAL is newer).
 
         Reads the canonical journal first, then overlays this run's WAL — so if
         the journal is missing or incomplete (a pause, a crash before save),
         the WAL's records still seed ``prior`` (last record wins across both
-        sources). Reads are async (``aiofiles``) so they never stall the shared
-        event loop. The WAL itself is left untouched: it is an append-only log
-        that is never actively cleaned (see the class docstring).
+        sources). ``legacy_path`` (the pre-per-run shared ``journal.jsonl``)
+        and its ``.wal`` sidecar are read FIRST and only seed ``prior`` —
+        new records still append to the per-run WAL only, so an upgraded
+        session never writes the frozen legacy file. Reads are async
+        (``aiofiles``) so they never stall the shared event loop. The WAL
+        itself is left untouched: it is an append-only log that is never
+        actively cleaned (see the class docstring).
         """
+        legacy_sources: tuple[str, ...] = ()
+        if legacy_path:
+            legacy_sources = (legacy_path, f"{legacy_path}.wal")
         prior: dict[str, dict] = {}
-        for src in (path, wal_path):
+        for src in (*legacy_sources, path, wal_path):
             if not (src and Path(src).exists()):
                 continue
             async with aiofiles.open(src, "r", encoding="utf-8") as f:

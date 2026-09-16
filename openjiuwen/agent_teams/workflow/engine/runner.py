@@ -299,6 +299,7 @@ async def run_workflow(
     resume: str | None = None,
     journal_path: str | None = None,
     wal_path: str | None = None,
+    legacy_resume: str | None = None,
     strict: bool = False,
     log_sink: Callable[[str], None] | None = None,
     progress_sink: ProgressSink | None = None,
@@ -331,7 +332,7 @@ async def run_workflow(
     # agent_teams import — engine stays business-agnostic).
     if wal_path is None and journal_path:
         wal_path = f"{journal_path}.wal"
-    journal = await Journal.load(resume, wal_path=wal_path)
+    journal = await Journal.load(resume, wal_path=wal_path, legacy_path=legacy_resume)
     log(f"[wf] journal loaded: prior_records={len(journal.prior)} path={resume} wal={wal_path}")
     # Cold-start resume recovers the launch args: the advisory template carries
     # resume_id + script_path but no args, so a resume would otherwise run

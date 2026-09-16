@@ -137,6 +137,45 @@ def _resolve_wal_path(
     return str(wal)
 
 
+def _resolve_legacy_resume(
+    script_path: str,
+    team_name: str,
+    session_id: str | None,
+    run_id: str | None,
+) -> str | None:
+    """Compute the pre-per-run shared journal path, for read-side back-compat.
+
+    Sessions created before the per-run split kept every run's records in one
+    shared ``journal.jsonl`` (+ its ``.wal`` sidecar). A resume of such a
+    session must still be able to replay those records, so the shared path is
+    returned here and read by ``Journal.load`` as a seed under the per-run
+    sources (per-run wins on key conflicts). It is strictly read-only: new
+    records always append to the per-run WAL / snapshot, so the legacy file is
+    frozen the moment the upgrade happens. Only meaningful with a ``run_id``
+    (no run_id means the caller already reads/writes the shared path itself).
+
+    Args:
+        script_path: Path to the swarmflow script (``META`` names the workflow).
+        team_name: Team identifier.
+        session_id: Current session id; falls back to ``"default"`` when empty.
+        run_id: Workflow run id; ``None`` / an unreadable ``META`` yields None.
+
+    Returns:
+        Absolute shared journal path as a string, or ``None``.
+    """
+    if not run_id:
+        return None
+    try:
+        meta = load_workflow_meta(script_path)
+    except Exception:  # noqa: BLE001 - back-compat seed must never break the launch
+        return None
+    name = meta.get("name")
+    if not name:
+        return None
+    sid = session_id or "default"
+    return str(paths.workflow_journal_path(team_name, sid, name))
+
+
 async def materialize_swarmflow_script(
     source: str,
     *,
@@ -297,6 +336,7 @@ async def run_swarmflow(
         on_backend_ready(backend)
     journal_path = _resolve_journal_path(script_path, team_name, session_id, run_id)
     wal_path = _resolve_wal_path(script_path, team_name, session_id, run_id)
+    legacy_resume = _resolve_legacy_resume(script_path, team_name, session_id, run_id)
     return await run_workflow(
         script_path,
         args=args,
@@ -306,6 +346,7 @@ async def run_swarmflow(
         resume=journal_path,
         journal_path=journal_path,
         wal_path=wal_path,
+        legacy_resume=legacy_resume,
         abort_event=abort_event,
         agent_gate=agent_gate,
         budget=budget,

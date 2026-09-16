@@ -481,12 +481,17 @@ class SwarmflowTool(AsyncTool):
         try:
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.workflow.engine.journal import Journal
-            from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path, _resolve_wal_path
+            from openjiuwen.agent_teams.workflow.runner import (
+                _resolve_journal_path,
+                _resolve_legacy_resume,
+                _resolve_wal_path,
+            )
 
             session_id = get_session_id()
             journal_path = _resolve_journal_path(script_path, self._team_name, session_id, resume_id)
             wal_path = _resolve_wal_path(script_path, self._team_name, session_id, resume_id)
-            journal = await Journal.load(journal_path, wal_path=wal_path)
+            legacy_path = _resolve_legacy_resume(script_path, self._team_name, session_id, resume_id)
+            journal = await Journal.load(journal_path, wal_path=wal_path, legacy_path=legacy_path)
             if journal.find_run_record(resume_id, "seal") is not None:
                 team_logger.warning(
                     "[swarmflow] resume_id %s is terminal (sealed); forcing a fresh run_id", resume_id
