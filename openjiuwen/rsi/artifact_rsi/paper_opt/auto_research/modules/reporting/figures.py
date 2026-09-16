@@ -14,10 +14,27 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_metric
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
 
 
-def numeric_metric_names(result: ExperimentResult) -> list[str]:
+def numeric_metric_names(
+    result: ExperimentResult,
+    *,
+    plan_metrics: list[str] | None = None,
+) -> list[str]:
+    declared = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
+    if declared:
+        names = [
+            name
+            for name in declared
+            if any(
+                resolve_metric(dict(variant.metrics), name).status == "resolved"
+                for variant in result.variants
+            )
+        ]
+        if names:
+            return names
     names: list[str] = []
     for variant in result.variants:
         for name, value in variant.metrics.items():
@@ -28,12 +45,27 @@ def numeric_metric_names(result: ExperimentResult) -> list[str]:
     return names
 
 
-def build_results_figure(result: ExperimentResult, output_path: Path) -> Path | None:
+def _variant_metric_value(metrics: dict, name: str) -> float | int | None:
+    hit = resolve_metric(metrics, name)
+    if hit.status == "resolved":
+        return hit.value
+    value = metrics.get(name)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
+
+
+def build_results_figure(
+    result: ExperimentResult,
+    output_path: Path,
+    *,
+    plan_metrics: list[str] | None = None,
+) -> Path | None:
     """Grouped bar chart of every numeric metric across every variant.
     Returns ``None`` (writes nothing) if there's no numeric data to plot —
     never fabricates a chart from missing data.
     """
-    metric_names = numeric_metric_names(result)
+    metric_names = numeric_metric_names(result, plan_metrics=plan_metrics)
     if not metric_names or not result.variants:
         return None
 
@@ -51,9 +83,8 @@ def build_results_figure(result: ExperimentResult, output_path: Path) -> Path | 
     for i, variant in enumerate(variants):
         values = []
         for name in metric_names:
-            value = variant.metrics.get(name)
-            is_numeric = isinstance(value, (int, float)) and not isinstance(value, bool)
-            values.append(value if is_numeric else 0)
+            value = _variant_metric_value(dict(variant.metrics), name)
+            values.append(value if value is not None else 0)
         ax.bar(x + i * width, values, width, label=variant.name)
 
     ax.set_xticks(x + width * (len(variants) - 1) / 2)

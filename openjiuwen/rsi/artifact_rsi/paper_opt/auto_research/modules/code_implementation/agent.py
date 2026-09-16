@@ -677,9 +677,8 @@ class CodeImplementationAgent:
     def _build_coding_agent(self, agent_workspace: Path, *, run_id: str, cycle: int = 1):
         from openjiuwen.core.foundation.llm import init_model
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
-        from openjiuwen.harness.subagents import create_code_agent
         from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
-
+        from openjiuwen.harness.subagents import create_code_agent
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
         )
@@ -1040,7 +1039,12 @@ class CodeImplementationAgent:
             "Do not require `--method all`. Do not refuse a full (non-smoke) "
             "`--method proposed` or `--method <baseline>` run. Each invocation "
             "must write exactly that variant's JSON to `--output`.\n\n"
-            f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n\n"
+            f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n"
+            "Write every declared plan metric under a top-level `metrics` object keyed by "
+            "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
+            "metadata (`method`, `status`, `n_questions`, `model_call_count`, item records) "
+            "stays at the root. You may also duplicate scalars at the root, but "
+            "`metrics.<name>` is the canonical location the host reads.\n\n"
             "If the non-smoke path fails, still write `--output` as JSON so the host can "
             "diagnose it, and print one stderr line: "
             "`Harness failed at {failure_stage}/{failure_substage}: {detail}`. "
