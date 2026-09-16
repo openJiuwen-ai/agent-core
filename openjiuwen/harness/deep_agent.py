@@ -3563,8 +3563,6 @@ class DeepAgent(BaseAgent):
                 raise RuntimeError("interaction_terminated")
 
             if session is None:
-                from openjiuwen.core.session.agent import create_agent_session
-
                 session = create_agent_session(
                     session_id="default",
                     card=getattr(self, "card", None),
