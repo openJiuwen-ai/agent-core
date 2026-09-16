@@ -364,7 +364,7 @@ async def test_zhihu_uses_latest_published_or_updated_time_for_ranges(
 
 
 @pytest.mark.asyncio
-async def test_zhihu_missing_time_fails_filtered_run_but_allows_all(
+async def test_zhihu_missing_time_is_skipped_but_allows_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,13 +375,24 @@ async def test_zhihu_missing_time_fails_filtered_run_but_allows_all(
         _config(time_range={"mode": "recent", "recent_days": 3}),
         home=tmp_path,
     )
-    with pytest.raises(BaseError):
-        await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None)
+    assert await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None) == ()
 
     _set_responses(monkeypatch, {url: [Response({"data": [article], "paging": {"is_end": True}})]})
     all_time = ZhihuReaderFetchService(_config(), home=tmp_path)
     candidates = await all_time.prepare_run(run_id="all", run_started_at=datetime.now(UTC), cursor=None)
     assert candidates[0]["candidate_time"] == "1970-01-01T00:00:00Z"
+
+    kept = _article("kept", int(datetime.now(UTC).timestamp()))
+    _set_responses(
+        monkeypatch,
+        {url: [Response({"data": [article, kept], "paging": {"is_end": True}})]},
+    )
+    mixed = ZhihuReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+    candidates = await mixed.prepare_run(run_id="mixed", run_started_at=datetime.now(UTC), cursor=None)
+    assert [candidate["stable_id"] for candidate in candidates] == ["kept"]
 
 
 @pytest.mark.asyncio

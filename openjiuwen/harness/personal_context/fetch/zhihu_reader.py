@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import html
 import json
+import logging
 import math
 import re
 from collections.abc import AsyncIterator, Mapping
@@ -29,6 +30,8 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 20
@@ -209,8 +212,16 @@ def _candidate(
         raise _fetch_error("Zhihu article has no stable ID")
     timestamp = _effective_timestamp(article)
     if timestamp <= 0:
+        # A single time-less entry must not abort the whole run: dropping one article
+        # is better than losing the batch. The warning keeps the skip visible instead
+        # of a silent empty run. Unfiltered runs keep an explicit "unknown, assume
+        # oldest" marker.
         if time_range.get("mode") != "all":
-            raise _fetch_error("Zhihu article has no usable published or updated time")
+            _LOGGER.warning(
+                "Zhihu article %s has no usable published or updated time; skipping it",
+                article_id,
+            )
+            return None
         candidate_time = "1970-01-01T00:00:00Z"
     else:
         candidate_time = datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
