@@ -46,6 +46,7 @@ def _jiuwenswarm_llm_record(
     start: int,
     prompt: list[dict],
     completion: dict | None = None,
+    trace_id: str = "a" * 32,
 ) -> dict:
     attributes: dict = {
         "session.id": session_id,
@@ -66,7 +67,7 @@ def _jiuwenswarm_llm_record(
                     {
                         "spans": [
                             {
-                                "traceId": "a" * 32,
+                                "traceId": trace_id,
                                 "spanId": span_id,
                                 "name": "llm.call",
                                 "startTimeUnixNano": str(start),
@@ -87,7 +88,9 @@ def _jiuwenswarm_tool_record(
     span_id: str,
     start: int,
     tool_name: str,
-    tool_input: dict,
+    tool_input: dict | list,
+    tool_output: str | None = None,
+    trace_id: str = "a" * 32,
 ) -> dict:
     attributes = {
         "session.id": session_id,
@@ -95,6 +98,8 @@ def _jiuwenswarm_tool_record(
         "gen_ai.tool.name": tool_name,
         "gen_ai.tool.input": json.dumps(tool_input, ensure_ascii=False),
     }
+    if tool_output is not None:
+        attributes["gen_ai.tool.output"] = tool_output
     return {
         "resourceSpans": [
             {
@@ -103,7 +108,7 @@ def _jiuwenswarm_tool_record(
                     {
                         "spans": [
                             {
-                                "traceId": "a" * 32,
+                                "traceId": trace_id,
                                 "spanId": span_id,
                                 "name": f"tool.{tool_name}",
                                 "startTimeUnixNano": str(start),
@@ -174,8 +179,9 @@ def test_harvest_jiuwenswarm_traces_by_session(tmp_path: Path) -> None:
             start=5,
             prompt=[{"role": "user", "content": _envelope("hello", source="__prewarm__")}],
             completion={"role": "assistant", "content": "hi"},
+            trace_id="c" * 32,
         ),
-        # No session.id → ignored.
+        # Spans without session.id still join via shared traceId.
         {
             "resourceSpans": [
                 {
@@ -184,16 +190,11 @@ def test_harvest_jiuwenswarm_traces_by_session(tmp_path: Path) -> None:
                         {
                             "spans": [
                                 {
-                                    "traceId": "b" * 32,
+                                    "traceId": "a" * 32,
                                     "spanId": "6",
-                                    "name": "llm.call",
-                                    "startTimeUnixNano": "1",
-                                    "attributes": attributes_from_map(
-                                        {
-                                            "langfuse.gen_ai.prompt.0.role": "user",
-                                            "langfuse.gen_ai.prompt.0.content": "x",
-                                        }
-                                    ),
+                                    "name": "context.window.commit",
+                                    "startTimeUnixNano": "25",
+                                    "attributes": attributes_from_map({}),
                                 }
                             ]
                         }
@@ -210,7 +211,7 @@ def test_harvest_jiuwenswarm_traces_by_session(tmp_path: Path) -> None:
     digests = harvest_otlp_trajectories(cfg)
     assert len(digests) == 1
     digest = digests[0]
-    assert digest.session_id == session
+    assert digest.trace_id == ("a" * 32)
     assert digest.user_prompts == ["上海的天气", "那明天呢"]
     assert digest.assistant_finals[-1] == "明天多云"
     assert "weather-zh" in digest.skills_used
@@ -220,6 +221,274 @@ def test_harvest_jiuwenswarm_traces_by_session(tmp_path: Path) -> None:
     assert len(tasks) == 1
     assert tasks[0].intent == "上海的天气"
     assert tasks[0].skill_hint == "weather-zh"
+
+
+
+def test_harvest_groups_by_trace_id_not_session_attr(tmp_path: Path) -> None:
+    """Same session.id across two traceIds → two digests (one conversation each)."""
+    traces = tmp_path / "traces-2026-09-17.jsonl"
+    session = "web_shared"
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="1",
+            start=10,
+            prompt=[{"role": "user", "content": _envelope("杭州天气")}],
+            completion={"role": "assistant", "content": "多云"},
+            trace_id="1" * 32,
+        ),
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="2",
+            start=20,
+            prompt=[{"role": "user", "content": _envelope("推荐啤酒")}],
+            completion={"role": "assistant", "content": "皮尔森"},
+            trace_id="2" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert {d.trace_id for d in digests} == {"1" * 32, "2" * 32}
+    by_id = {d.trace_id: d for d in digests}
+    assert by_id["1" * 32].user_prompts == ["杭州天气"]
+    assert by_id["2" * 32].user_prompts == ["推荐啤酒"]
+
+
+def test_harvest_ignores_skill_optimizer_meta_user_prompt(tmp_path: Path) -> None:
+    """Internal skill-optimize prompts must not become SessionDigest user turns.
+
+    A later, longer ``llm.call`` with a plain ``role=user`` meta brief used to win
+    ``_select_main_llm_span`` via max ``prompt_len`` and pollute ``intent``.
+    """
+    traces = tmp_path / "traces-2026-09-18.jsonl"
+    session = "web_beer"
+    real_user = _envelope("想吃火锅，推荐几种啤酒")
+    meta_user = (
+        "你是一个 Skill 优化分析专家。根据信号、结构化执行轨迹和对话历史，"
+        "完成根因归因并产出候选演进经验（自然语言草稿）。\n\n"
+        "## 输入信息\n\n### 当前 Skill 内容\n"
+        + ("啤酒技能正文 " * 80)
+    )
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="1",
+            start=10,
+            prompt=[
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": real_user},
+            ],
+            completion={"role": "assistant", "content": "推荐小麦啤"},
+            trace_id="b" * 32,
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=15,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "beer"}], {"session": f"session:{session}"}],
+            tool_output=(
+                "success=True data={'skill_directory': 'D:\\\\skills\\\\beer', "
+                "'skill_content': '---\\nname: beer\\n---\\n'}"
+            ),
+            trace_id="b" * 32,
+        ),
+        # Later mega meta call — must not replace the real user turn.
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="3",
+            start=40,
+            prompt=[{"role": "user", "content": meta_user}],
+            completion={"role": "assistant", "content": '{"edits":[]}'},
+            trace_id="b" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    digest = digests[0]
+    assert digest.user_prompts == ["想吃火锅，推荐几种啤酒"]
+    assert all("优化分析专家" not in prompt for prompt in digest.user_prompts)
+
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    assert tasks[0].intent == "想吃火锅，推荐几种啤酒"
+    assert tasks[0].skill_hint == "beer"
+
+
+def test_harvest_plain_user_not_outranked_by_longer_meta_prompt(tmp_path: Path) -> None:
+    """Without envelopes, do not pick the longest plain user llm.call as main."""
+    traces = tmp_path / "traces-2026-09-18-plain.jsonl"
+    session = "plain_chat"
+    meta_user = (
+        "你是一个 Skill 优化分析专家。根据信号、结构化执行轨迹和对话历史，"
+        "完成根因归因并产出候选演进经验（自然语言草稿）。\n"
+        + ("x" * 2000)
+    )
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="1",
+            start=10,
+            prompt=[{"role": "user", "content": "上海的天气"}],
+            completion={"role": "assistant", "content": "晴"},
+            trace_id="d" * 32,
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=12,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "tianqi"}]],
+            tool_output=(
+                "success=True data={'skill_directory': 'D:\\\\skills\\\\tianqi', "
+                "'skill_content': '---\\nname: tianqi\\n---\\n'}"
+            ),
+            trace_id="d" * 32,
+        ),
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="3",
+            start=50,
+            prompt=[{"role": "user", "content": meta_user}],
+            completion={"role": "assistant", "content": "{}"},
+            trace_id="d" * 32,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    assert digests[0].user_prompts == ["上海的天气"]
+    tasks = mine(digests, max_tasks=5, val_fraction=0.0, seed=1)
+    assert tasks[0].intent == "上海的天气"
+    assert tasks[0].skill_hint == "tianqi"
+
+
+def test_harvest_prefers_skills_directory_slug(tmp_path: Path) -> None:
+    """EvolutionStore identity is skills/<dir> (tianqi), not display name (天气)."""
+    traces = tmp_path / "traces-2026-09-14.jsonl"
+    session = "officeclaw_demo"
+    user = _envelope("郑州的天气")
+    tool_output = (
+        "success=True data={'skill_directory': "
+        "'E:\\\\jiuwen\\\\skills\\\\tianqi', "
+        "'skill_content': '---\\nname: 天气\\ndescription: \"获取天气预报\"\\n---\\n\\n# 天气'}"
+    )
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="1",
+            start=10,
+            prompt=[
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": user},
+            ],
+            completion={"role": "assistant", "content": "郑州晴 26°C"},
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=11,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": "天气"}], {"session": f"session:{session}"}],
+            tool_output=tool_output,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert len(digests) == 1
+    assert digests[0].skills_used == ["tianqi"]
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert len(tasks) == 1
+    assert tasks[0].skill_hint == "tianqi"
+
+
+def test_harvest_prefers_beer_directory_over_display_title(tmp_path: Path) -> None:
+    """Long beer frontmatter title must not become EvolutionStore skill name."""
+    traces = tmp_path / "traces-2026-09-16.jsonl"
+    session = "beer_demo"
+    display = "Beer — Styles Encyclopedia, Food Pairing & Homebrew Guide"
+    user = _envelope("使用 beer 技能 想吃火锅，推荐几种啤酒")
+    tool_output = (
+        "success=True data={'skill_directory': 'skills/beer', "
+        "'skill_content': '---\\nname: \""
+        + display
+        + "\"\\ndescription: \"x\"\\n---\\n\\n# Beer'}"
+    )
+    records = [
+        _jiuwenswarm_llm_record(
+            session_id=session,
+            span_id="1",
+            start=10,
+            prompt=[
+                {"role": "system", "content": "be helpful"},
+                {"role": "user", "content": user},
+            ],
+            completion={"role": "assistant", "content": "德式小麦白啤"},
+        ),
+        _jiuwenswarm_tool_record(
+            session_id=session,
+            span_id="2",
+            start=11,
+            tool_name="skill_tool",
+            tool_input=[[{"skill_name": display}], {"session": f"session:{session}"}],
+            tool_output=tool_output,
+        ),
+    ]
+    with traces.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    digests = harvest_otlp_trajectories(
+        SleepConfig(trajectory_store_dir=str(tmp_path), project="demo", max_trajectories=10)
+    )
+    assert digests[0].skills_used == ["beer"]
+    tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
+    assert tasks[0].skill_hint == "beer"
+
+
+def test_skills_from_tool_output_prefers_directory_slug() -> None:
+    from openjiuwen.agent_evolving.skill_train.sleep.jiuwenswarm_traces import (
+        _prefer_evolution_store_skill_names,
+        _skills_from_tool_input,
+        _skills_from_tool_output,
+    )
+
+    tool_input = [[{"skill_name": "天气"}], {"session": "session:x"}]
+    assert _skills_from_tool_input(json.dumps(tool_input, ensure_ascii=False)) == ["天气"]
+
+    dirty = (
+        "success=True data={'skill_directory': 'E:\\\\skills\\\\tianqi', "
+        "'skill_content': '---\\nname: 天气\\ndescription: \"x\"\\n---\\nbody'}"
+    )
+    # When literal_eval fails on messy blobs, string scan must not emit polluted names.
+    assert "skill_content" not in "".join(_skills_from_tool_output(dirty))
+    names = _skills_from_tool_output(dirty)
+    assert names
+    assert names[0] == "tianqi"
+    assert all("'" not in n and "skill_content" not in n for n in names)
+    assert _prefer_evolution_store_skill_names(["天气", "tianqi", "Beer — x"]) == ["tianqi"]
+    assert _prefer_evolution_store_skill_names(["天气", "Beer — x"]) == []
 
 
 def test_harvest_returns_empty_without_trace_files(tmp_path: Path) -> None:
@@ -232,35 +501,70 @@ def test_harvest_returns_empty_without_trace_files(tmp_path: Path) -> None:
 def test_mine_accepts_short_cjk_intent() -> None:
     digests = [
         SessionDigest(
-            session_id="s1",
+            trace_id="s1",
             project="p",
             user_prompts=["上海的天气"],
             assistant_finals=["晴"],
             skills_used=["weather-zh"],
             n_user_turns=1,
             n_assistant_turns=1,
+            turns=[
+                _turn("user", "上海的天气"),
+                _turn("tool", "skill_tool", ["weather-zh"]),
+                _turn("assistant", "晴"),
+            ],
         )
     ]
     tasks = mine(digests, max_tasks=10, val_fraction=0.0, seed=1)
     assert len(tasks) == 1
     assert tasks[0].intent == "上海的天气"
+    assert tasks[0].skill_hint == "weather-zh"
+
+
+def test_mine_skips_segments_without_skill_name() -> None:
+    digests = [
+        SessionDigest(
+            trace_id="s1",
+            project="p",
+            user_prompts=["你好", "随便聊聊"],
+            assistant_finals=["你好", "好的"],
+            skills_used=["weather-zh"],
+            n_user_turns=2,
+            n_assistant_turns=2,
+            turns=[
+                _turn("user", "你好"),
+                _turn("assistant", "你好"),
+                _turn("user", "随便聊聊"),
+                _turn("assistant", "好的"),
+            ],
+        )
+    ]
+    # Session has a skill, but neither segment called it → do not invent skill_hint.
+    assert mine(digests, max_tasks=10, val_fraction=0.0, seed=1) == []
 
 
 def test_mine_and_splits() -> None:
     digests = [
         SessionDigest(
-            session_id="s1",
+            trace_id="s1",
             project="p",
             user_prompts=["Please wrap the final answer in tags for reproducibility"],
             assistant_finals=["ok"],
             feedback_signals=["neg:user_feedback"],
+            skills_used=["wrap-answer"],
             n_user_turns=1,
             n_assistant_turns=1,
+            turns=[
+                _turn("user", "Please wrap the final answer in tags for reproducibility"),
+                _turn("tool", "skill_tool", ["wrap-answer"]),
+                _turn("assistant", "ok"),
+            ],
         )
     ]
     tasks = mine(digests, max_tasks=10, val_fraction=0.5, seed=1)
     assert tasks
     assert tasks[0].outcome == "fail"
+    assert tasks[0].skill_hint == "wrap-answer"
     assign_splits(tasks, val_fraction=0.5, seed=1)
 
 
@@ -383,6 +687,54 @@ def test_staging_does_not_touch_skill_root(tmp_path: Path) -> None:
     assert list(skill_root.iterdir()) == []
 
 
+def test_staging_accepts_unicode_and_titled_skill_names(tmp_path: Path) -> None:
+    from openjiuwen.agent_evolving.skill_train.sleep.staging import (
+        list_skill_proposals,
+        proposed_skill_filename,
+    )
+
+    weather = "天气"
+    beer = "Beer — Styles Encyclopedia, Food Pairing & Homebrew Guide"
+    weather_file = proposed_skill_filename(weather)
+    beer_file = proposed_skill_filename(beer)
+    assert weather_file.startswith("proposed_SKILL.")
+    assert weather_file.endswith(".md")
+    assert "天气" in weather_file
+    assert beer_file.startswith("proposed_SKILL.")
+    assert ":" not in beer_file and "/" not in beer_file and "\\" not in beer_file
+
+    path = write_staging(
+        tmp_path / "staging" / "n1",
+        report=SleepReport(night=1, project="p", accepted=True, gate_action="greedy_applied"),
+        skill_proposals={
+            weather: "---\nname: 天气\nversion: 1.0.0\n---\n\n# 天气\n\nrule\n",
+            beer: "---\nname: beer\nversion: 1.0.0\n---\n\n# beer\n\nrule\n",
+        },
+    )
+    assert (path / weather_file).exists()
+    assert (path / beer_file).exists()
+    proposals = list_skill_proposals(path)
+    assert set(proposals) == {weather, beer}
+    assert "rule" in proposals[weather]
+
+
+def test_edits_to_evolution_records_drive_minor_bump() -> None:
+    from openjiuwen.agent_evolving.checkpointing.versioning import VersionBump, aggregate_version_bump
+    from openjiuwen.agent_evolving.skill_train.sleep.evolution_records import (
+        edits_to_evolution_records,
+    )
+
+    records = edits_to_evolution_records(
+        [EditRecord(target="skill", op="add", content="Prefer Celsius.", rationale="units")],
+        skill_name="tianqi",
+    )
+    assert len(records) == 1
+    assert records[0].change.section == "Instructions"
+    assert aggregate_version_bump(records) is VersionBump.MINOR
+    assert edits_to_evolution_records([], skill_name="tianqi")
+    assert aggregate_version_bump(edits_to_evolution_records([], skill_name="tianqi")) is VersionBump.MINOR
+
+
 @pytest.mark.asyncio
 async def test_adopt_archives_and_bumps_semver(tmp_path: Path) -> None:
     skills_root = tmp_path / "skills"
@@ -400,6 +752,22 @@ async def test_adopt_archives_and_bumps_semver(tmp_path: Path) -> None:
         proposed_skill="---\nname: demo-skill\ndescription: desc\nversion: 1.0.0\n---\n\n# demo-skill\n\nlearned rule\n",
         baseline_skill=before,
         skill_name="demo-skill",
+        skill_proposals={
+            "demo-skill": (
+                "---\nname: demo-skill\ndescription: desc\nversion: 1.0.0\n---\n\n"
+                "# demo-skill\n\nlearned rule\n"
+            ),
+        },
+        skill_proposal_edits={
+            "demo-skill": [
+                EditRecord(
+                    target="skill",
+                    op="add",
+                    content="Always ask for location when missing.",
+                    rationale="fill missing city",
+                )
+            ],
+        },
     )
     result = await adopt_staged_skill_async(staging, store=store, skill_name="demo-skill")
     assert result.previous_version == "1.0.0"
@@ -411,6 +779,50 @@ async def test_adopt_archives_and_bumps_semver(tmp_path: Path) -> None:
     assert await store.resolve_current_version("demo-skill") == "1.1.0"
     archives = store.list_archives("demo-skill")
     assert any("1.0.0" in name for name in archives)
+
+    skill_dir = store.resolve_skill_dir("demo-skill")
+    assert skill_dir is not None
+    changelog = (skill_dir / "changelog.md").read_text(encoding="utf-8")
+    assert "## [1.1.0]" in changelog
+    assert "ev_" in changelog
+    evo = await store.load_full_evolution_log("demo-skill")
+    assert evo.version == "1.1.0"
+    assert evo.entries == []
+
+
+@pytest.mark.asyncio
+async def test_adopt_writes_isolated_changelogs_per_skill(tmp_path: Path) -> None:
+    from openjiuwen.agent_evolving.skill_train.sleep.adopt import adopt_all_staged_skills_async
+
+    skills_root = tmp_path / "skills"
+    store = EvolutionStore(str(skills_root))
+    await store.create_skill("skill-a", "a", "body-a")
+    await store.create_skill("skill-b", "b", "body-b")
+    staging = tmp_path / "staging" / "n2"
+    write_staging(
+        staging,
+        report=SleepReport(night=2, project="p", accepted=True, gate_action="multi_skill_accept"),
+        skill_name="",
+        skill_proposals={
+            "skill-a": "---\nname: skill-a\nversion: 1.0.0\n---\n\n# skill-a\n\nrule-a\n",
+            "skill-b": "---\nname: skill-b\nversion: 1.0.0\n---\n\n# skill-b\n\nrule-b\n",
+        },
+        skill_proposal_edits={
+            "skill-a": [EditRecord(target="skill", op="add", content="alpha-only rule", rationale="a")],
+            "skill-b": [EditRecord(target="skill", op="add", content="beta-only rule", rationale="b")],
+        },
+    )
+    results = await adopt_all_staged_skills_async(staging, store=store)
+    assert {r.skill_name for r in results} == {"skill-a", "skill-b"}
+    assert all(r.new_version == "1.1.0" for r in results)
+
+    log_a = (store.resolve_skill_dir("skill-a") / "changelog.md").read_text(encoding="utf-8")
+    log_b = (store.resolve_skill_dir("skill-b") / "changelog.md").read_text(encoding="utf-8")
+    assert "alpha-only rule" in log_a or "a" in log_a
+    assert "beta-only rule" not in log_a
+    assert "beta-only rule" in log_b or "b" in log_b
+    assert "alpha-only rule" not in log_b
+
 
 
 def test_run_sleep_cycle_dry_run_with_seed_tasks(tmp_path: Path) -> None:
@@ -573,6 +985,11 @@ async def test_multi_skill_adopt_from_staging(tmp_path: Path) -> None:
     assert {r.skill_name for r in results} == {"skill-a", "skill-b"}
     assert "rule-a" in await store.read_skill_content("skill-a")
     assert "rule-b" in await store.read_skill_content("skill-b")
+    # New skills still get MINOR bump + changelog via consolidation fallback record.
+    assert {r.new_version for r in results} == {"1.1.0"}
+    for name in ("skill-a", "skill-b"):
+        changelog = (store.resolve_skill_dir(name) / "changelog.md").read_text(encoding="utf-8")
+        assert "## [1.1.0]" in changelog
 
 
 # --- multi-turn segmentation + structured rubric -------------------------------
@@ -600,7 +1017,7 @@ def test_classify_user_turn() -> None:
 
 def test_segment_mine_skips_greeting_and_uses_real_request() -> None:
     digest = SessionDigest(
-        session_id="s1",
+        trace_id="s1",
         project="p",
         user_prompts=["你好", "郑州的天气"],
         assistant_finals=["你好！有什么可以帮你？", "郑州：多云 28°C"],
@@ -628,7 +1045,7 @@ def test_segment_mine_skips_greeting_and_uses_real_request() -> None:
 
 def test_segment_mine_builds_rubric_from_follow_ups() -> None:
     digest = SessionDigest(
-        session_id="s2",
+        trace_id="s2",
         project="p",
         user_prompts=["上海的天气", "查天气用的什么skill", "这个不对，缺少紫外线指数", "需要"],
         assistant_finals=["上海：晴 26°C", "用的是 weather-zh", "已补充", "好的"],
@@ -666,7 +1083,7 @@ def test_segment_mine_builds_rubric_from_follow_ups() -> None:
 
 def test_segment_mine_splits_multiple_requests_and_prefers_segment_skill() -> None:
     digest = SessionDigest(
-        session_id="s3",
+        trace_id="s3",
         project="p",
         user_prompts=["郑州的天气", "帮我把这份表格转成 markdown"],
         assistant_finals=["郑州：多云", "| a | b |"],
@@ -691,9 +1108,9 @@ def test_segment_mine_splits_multiple_requests_and_prefers_segment_skill() -> No
     assert by_intent["郑州的天气"].attempted_solution == "郑州：多云"
 
 
-def test_segment_mine_falls_back_to_user_prompts_without_turns() -> None:
+def test_segment_mine_requires_skill_on_turns_without_inventing_session_hint() -> None:
     digest = SessionDigest(
-        session_id="s4",
+        trace_id="s4",
         project="p",
         user_prompts=["你好", "上海的天气", "这个不对，缺少风速"],
         assistant_finals=["你好", "上海：晴", "已补充风速"],
@@ -701,7 +1118,28 @@ def test_segment_mine_falls_back_to_user_prompts_without_turns() -> None:
         n_user_turns=3,
         n_assistant_turns=3,
     )
-    tasks = mine([digest], max_tasks=10, val_fraction=0.0, seed=1)
+    # Legacy digests without ordered tool turns cannot attribute a skill name.
+    assert mine([digest], max_tasks=10, val_fraction=0.0, seed=1) == []
+
+    digest_with_tool = SessionDigest(
+        trace_id="s4b",
+        project="p",
+        user_prompts=["你好", "上海的天气", "这个不对，缺少风速"],
+        assistant_finals=["你好", "上海：晴", "已补充风速"],
+        skills_used=["weather-zh"],
+        n_user_turns=3,
+        n_assistant_turns=3,
+        turns=[
+            _turn("user", "你好"),
+            _turn("assistant", "你好"),
+            _turn("user", "上海的天气"),
+            _turn("tool", "skill_tool", ["weather-zh"]),
+            _turn("assistant", "上海：晴"),
+            _turn("user", "这个不对，缺少风速"),
+            _turn("assistant", "已补充风速"),
+        ],
+    )
+    tasks = mine([digest_with_tool], max_tasks=10, val_fraction=0.0, seed=1)
     assert len(tasks) == 1
     assert tasks[0].intent == "上海的天气"
     assert "必须包含：风速" in tasks[0].reference

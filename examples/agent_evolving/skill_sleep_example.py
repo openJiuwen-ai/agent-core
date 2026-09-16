@@ -4,7 +4,7 @@
 
 Prerequisite (daytime): a JiuwenSwarm observation dir with ``traces-*.jsonl``
 (for example ``%USERPROFILE%\\.jiuwenswarm\\.trace``). Sleep groups spans by
-``session.id`` and harvests one SessionDigest per session.
+OTLP ``traceId`` and harvests one SessionDigest per complete conversation.
 
 Gate 通过后自动经 EvolutionStore 归档并写入新 skill 版本。
 仅更新轨迹中检测到的 skill（skill_tool 等）；无 hint 的任务会被跳过，不再创建兜底 skill。
@@ -100,7 +100,11 @@ def main() -> None:
         default="",
         help="可选：与 --skill-name 配套的初始 SKILL.md 路径",
     )
-    parser.add_argument("--session-id", default=None, help="可选：只 harvest 该 session")
+    parser.add_argument(
+        "--trace-id",
+        default=None,
+        help="可选：只 harvest 该 OTLP traceId（完整对话轨迹）",
+    )
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--staging-root", default="")
     parser.add_argument("--backend", default="model", choices=["mock", "model"])
@@ -109,6 +113,12 @@ def main() -> None:
         default="off",
         choices=["off", "llm"],
         help="off: 仅用 follow-up 启发式拼 rubric；llm: 额外调用 optimizer 模型合成可核查的 rubric 清单",
+    )
+    parser.add_argument(
+        "--gate-mode",
+        default="on",
+        choices=["on", "off", "none", "false", "greedy"],
+        help="on: holdout gate 验收后才写 skill；off/greedy/none/false: 跳过 gate，有 edits 就直接更新 skill",
     )
     parser.add_argument(
         "--dry-run",
@@ -135,11 +145,12 @@ def main() -> None:
         skills_base_dir=args.skills_base_dir,
         skill_name=args.skill_name,
         skill_init=args.skill_init,
-        session_id=args.session_id,
+        trace_id=args.trace_id,
         state_dir=args.state_dir or str(Path("./outputs/skill_sleep_state").resolve()),
         staging_root=args.staging_root or "",
         backend=args.backend,
         rubric_synthesis=args.rubric_synthesis,
+        gate_mode=args.gate_mode,
         progress=True,
     )
     outcome = run_sleep_cycle(
