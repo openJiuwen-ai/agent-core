@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `workflow/`（engine / backends / observer / schema / runner / tool_swarmflow）、`schema/team.py`、`schema/events.py`、`schema/blueprint.py`、`agent/team_agent.py`、`agent/coordination/handlers/workflow.py`、`rails/team_policy_rail.py`、`prompts/sections.py` |
-| 最近一次修订日期 | 2026-09-15 |
+| 最近一次修订日期 | 2026-09-16 |
 | 关联 feature | `F_27_swarmflow-workflow-orchestration.md`、`F_31_swarmflow-per-call-model-routing.md`、`F_35_native-harness-async-tool-framework.md`、`F_37_swarmflow-stateful-sessions-and-human.md`、`F_38_swarmflow-journal-persistence.md`、`F_39_swarmflow-agent-worktree-isolation.md`、`F_39_swarmflow-e2e-hardening.md`、`F_40_swarmflow-journal-wal-and-program-order.md`、`F_42_swarmflow-tool-claude-code-alignment.md`、`F_43_swarmflow-pause-resume.md`、`F_47_swarmflow-concurrency-governor.md`、`F_66_swarmflow-real-token-budget-enforcement.md`、`F_69_cwd-workspace-project-root-separation.md`、`F_81_swarmflow-session-fork.md`、`F_87_swarmflow-run-id-isolation-and-dual-budget.md`、`F_88_swarmflow-relaunch-kind-and-seal-pause-semantics.md`、`F_96_swarmflow-worker-name-stability-and-isolation-sig.md` |
 
 ## 范围 / 边界
@@ -149,6 +149,16 @@
   engine 保持业务无关)。并发 run 各写各的文件,三个共享文件竞争(compaction 覆盖 append /
   finalize 误删 / save 互相覆盖)根治。seal guard 按 `resume_id` 拼 per-run 路径读 seal 记录。
   `run_id=None`(离线/预演)回退共享 `journal.jsonl` + `journal.jsonl.wal`。
+- **老布局读侧兼容**(2026-09-16 修订,`F_40` 修订 4):升级前 session 的全部记录在共享
+  `journal.jsonl`(+`.wal` sidecar)里。带 `run_id` 的 resume 经 `_resolve_legacy_resume`
+  (`workflow/runner.py`)把共享 journal 路径作为**只读种子**传给
+  `Journal.load(…, legacy_path=)`(engine `run_workflow(…, legacy_resume=)` 透传),读取顺序
+  legacy journal → legacy WAL → per-run journal → per-run WAL(last-wins,per-run 优先)。
+  **写侧不变**:新记录只 append per-run WAL / 快照 per-run journal,legacy 文件升级后字节
+  冻结(永不再写)。同 run_id 的老记录照常 HIT;老文件里混居的异 run_id 记录读进 prior 但
+  被 `get_cached` 三重检查自然 MISS,`find_run_record`(pause/seal)同样跨布局可见——
+  seal guard 对老布局 sealed run 照样拦截。不做写侧迁移:把老文件拆成 per-run 文件会重新
+  引入共享文件写竞争(本修订要根治的类别),且异 run 记录本就 miss,迁移无收益。
 - **WAL 崩溃恢复**:`use` 对**新鲜**记录(cache-miss)立即 append 写 WAL(cache-hit 复用 prior 对象、
   不重写);`load` 先读 journal、再用 WAL **覆盖/补全**(WAL 较新,last-wins),并**容忍尾部
   半行**(崩溃中途 append);故进程中途崩溃(没机会 commit)仍可恢复,journal 缺失/不完整时

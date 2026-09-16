@@ -141,3 +141,28 @@ review(ST 复现三个并发竞争)后的一次方向修正,三个决策:
   journal 并发隔离);`test_runner.py` 增 per-run journal/wal 路径 3 例;`test_paths.py` 增
   per-run 布局 1 例。ST(`wal_concurrency` / `journal_residue` / `cache_opt`,本地不提交)
   断言随 per-run 路径适配。
+## 修订 2026-09-16:老布局读侧兼容(legacy shared journal 只读种子)
+
+per-run 拆分合入后的 review 遗留项:升级前 pause 中的老 session resume 时,per-run 路径
+下没有任何文件,全 miss 重跑。本次补齐读侧兼容,三个决策:
+
+1. **legacy 只读种子**:`Journal.load` 新增 `legacy_path` 参数,读取顺序为 legacy journal →
+   legacy WAL → per-run journal → per-run WAL(last-wins,per-run 优先)。swarmflow 集成层
+   `_resolve_legacy_resume(script, team, session, run_id)` 在 run_id 非空时返回共享
+   `journal.jsonl` 路径(`paths.workflow_journal_path`),`run_swarmflow` 经 engine
+   `run_workflow(…, legacy_resume=)` 透传;seal guard 同样带上 legacy 种子(老布局的
+   seal 记录在共享 WAL 里,不读就拦不住)。
+2. **写侧不迁移,legacy 文件冻结**:新记录只写 per-run 文件,共享文件升级后永不再写。
+   拒绝"把老文件按 run_id 拆开迁移"——写侧迁移要动共享文件,重新引入刚根治的共享文件
+   写竞争;且记录级 `get_cached(ks, sig, run_id)` 三重检查对混居的老文件天然隔离(异
+   run_id 记录 miss),迁移无正确性收益,只有风险。
+3. **同 run_id 照常 HIT**:老 session pause 的 run resume 后,其已完成前缀从共享文件种子
+   命中缓存(不重跑、不重花钱),后续节点照常执行,最终快照落 per-run 文件。
+
+- **验证**:`test_journal.py` 新增 3 例(legacy 种子 + 三重检查隔离 + per-run 优先 +
+  legacy 冻结 + 新记录只进 per-run);`test_runner.py` 新增 2 例(`_resolve_legacy_resume`
+  路径映射 / 无 META 返回 None)。ST `agent_team_swarmflow_legacy_compat_st.py`(本地
+  untracked):真 LLM 跑 run1 → pause → 伪造老布局(共享 WAL 混居异 run 记录 + pause
+  记录,删 per-run 文件)→ 同 run_id relaunch → 断言 fresh WAL 只有 node-2(HIT 证据)、
+  legacy 文件 md5 冻结、快照 3 call + seal、异 run 结果未被服务、seal guard 不被 pause
+  记录误触发。
