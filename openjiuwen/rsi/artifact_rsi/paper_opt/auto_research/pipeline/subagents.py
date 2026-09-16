@@ -15,6 +15,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     compact_metrics,
     failure_class_from_metrics,
     failure_fingerprint,
+    materialize_handoff_metrics,
     metric_diagnostics,
     overlay_paired_metrics,
     sanitize_diagnostic_payload,
@@ -939,6 +940,18 @@ class TopicSurveyAdapter:
         )
 
 
+def _prefixed_observed(
+    metrics: dict[str, Any],
+    *,
+    prefix: str,
+    plan_metrics: list[str] | None = None,
+) -> dict[str, float | int | str]:
+    compact, _diag = materialize_handoff_metrics(dict(metrics), plan_metrics=plan_metrics)
+    if not prefix:
+        return compact
+    return {f"{prefix}.{key}": value for key, value in compact.items()}
+
+
 def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedback:
     """Host-synthesized feedback so design/update can follow a simple completed run."""
     plan = state.task_state.latest_plan
@@ -946,9 +959,13 @@ def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedba
     observed: dict[str, float | int | str] = {}
     paths: list[str] = []
     result = state.latest_execution
+    plan_metrics = list(plan.metrics) if plan is not None else []
     if result is not None:
         for variant in result.variants:
-            observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+            compact = _prefixed_observed(
+                dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+            )
+            observed.update(compact)
             if variant.log_path:
                 rel = _safe_rel(variant.log_path)
                 if rel:
@@ -972,7 +989,11 @@ def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedba
             if rel and rel not in paths:
                 paths.append(rel)
         for variant in last_exec.handoff.variants:
-            observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+            observed.update(
+                _prefixed_observed(
+                    dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+                )
+            )
     if not paths:
         paths = [f"experiments/{run_id}/results/proposed.metrics.json"]
     if observed:
@@ -1576,8 +1597,12 @@ class ExperimentExecutionAdapter:
         sciences: list[str] = []
         diagnostic_paths: list[str] = []
         failure_excerpts: list[str] = []
+        plan = state.task_state.latest_plan
+        plan_metrics = list(plan.metrics) if plan is not None else []
         for source in ordered:
-            compact = compact_metrics(dict(source.metrics))
+            compact, resolution_diag = materialize_handoff_metrics(
+                dict(source.metrics), plan_metrics=plan_metrics
+            )
             science = scientific_status_from_metrics(dict(source.metrics))
             if source.name in this_run_names:
                 sciences.append(science)
@@ -1588,6 +1613,8 @@ class ExperimentExecutionAdapter:
                 duration_ms=source.duration_ms,
                 exit_code=source.exit_code,
             )
+            if resolution_diag:
+                diagnostic["metric_resolution"] = resolution_diag
             process_status = source.process_status or (
                 "completed"
                 if source.exit_code == 0 and source.metrics_state == "present"
@@ -1663,11 +1690,10 @@ class ExperimentExecutionAdapter:
             if state.latest_execution is not None and state.latest_execution.variants
             else result.variants
         )
-        plan = state.task_state.latest_plan
         scientific = scientific_status_from_comparison(
-            plan.metrics,
+            plan_metrics,
             compare_variants,
-            baselines=list(plan.baselines),
+            baselines=list(plan.baselines) if plan is not None else None,
         )
         if scientific == "unknown":
             if "proposed" in status_by_name:
@@ -1790,8 +1816,13 @@ def _reflection_feedback(
     summary: str,
 ) -> EvaluationFeedback:
     observed: dict[str, float | int | str] = {}
+    plan_metrics = list(plan.metrics) if plan is not None else []
     for variant in result.variants:
-        observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+        observed.update(
+            _prefixed_observed(
+                dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+            )
+        )
     return EvaluationFeedback(
         verdict="accept" if verdict == "supported" else "continue",
         summary=summary,

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_metric
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     paper_figures_dir,
     paper_output_path,
@@ -47,6 +48,11 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting import bibliography, figures, lint
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.bibliography import Bibliography
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evidence import (
+    classify_prior_vs_current,
+    normalize_current_run_evidence,
+    normalize_prior_paper_evidence,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import (
     escape_latex,
     render_prior_results_table,
@@ -57,11 +63,6 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex
     LatexRuntimeError,
     discover_latex_runtime,
     preflight_latex_runtime,
-)
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evidence import (
-    classify_prior_vs_current,
-    normalize_current_run_evidence,
-    normalize_prior_paper_evidence,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schemas import (
     ReportingInput,
@@ -141,6 +142,16 @@ def _format_metric(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "--"
     return f"{value:.4g}"
+
+
+def _resolved_metric_value(metrics: dict[str, Any], name: str) -> float | int | None:
+    hit = resolve_metric(metrics, name)
+    if hit.status == "resolved":
+        return hit.value
+    value = metrics.get(name)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
 
 
 class ReportingAgent:
@@ -229,7 +240,11 @@ class ReportingAgent:
         refs_bib_path = paper_refs_bib_path(run_id)
         refs_bib_path.write_text(bib.bib_text, encoding="utf-8")
 
-        figure_path = figures.build_results_figure(inputs.result, figures_dir / "results.pdf")
+        figure_path = figures.build_results_figure(
+            inputs.result,
+            figures_dir / "results.pdf",
+            plan_metrics=list(inputs.plan.metrics),
+        )
         figure_paths = [str(figure_path)] if figure_path else []
 
         # Data for the skill scripts (ts-review/ts-latex) — the agent's own
@@ -451,16 +466,18 @@ class ReportingAgent:
         )
         evidence_only_list = "\n".join(f"- {item}" for item in bib.evidence_only_sources) or "(none)"
 
-        metric_name_set: set[str] = set()
-        for variant in result.variants:
-            for name, value in variant.metrics.items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    metric_name_set.add(name)
-        metric_names = sorted(metric_name_set)
+        metric_names = figures.numeric_metric_names(
+            result, plan_metrics=list(inputs.plan.metrics)
+        )
         rows = [
             (
                 escape_latex(variant.name),
-                {escape_latex(name): _format_metric(variant.metrics.get(name)) for name in metric_names},
+                {
+                    escape_latex(name): _format_metric(
+                        _resolved_metric_value(variant.metrics, name)
+                    )
+                    for name in metric_names
+                },
             )
             for variant in result.variants
         ]
@@ -485,7 +502,10 @@ class ReportingAgent:
         variant_lines = [
             f"- {escape_latex(variant.name)} (exit_code={variant.exit_code}): "
             + (
-                ", ".join(f"{escape_latex(k)}={_format_metric(v)}" for k, v in variant.metrics.items())
+                ", ".join(
+                    f"{escape_latex(name)}={_format_metric(_resolved_metric_value(variant.metrics, name))}"
+                    for name in metric_names
+                )
                 or "(no metrics)"
             )
             for variant in result.variants
@@ -533,7 +553,9 @@ class ReportingAgent:
             prior_lines = []
             pairs = classify_prior_vs_current(
                 normalize_prior_paper_evidence(prior),
-                normalize_current_run_evidence(result),
+                normalize_current_run_evidence(
+                    result, plan_metrics=list(inputs.plan.metrics)
+                ),
             )
             for old, new, status in pairs:
                 if old is None:
@@ -721,7 +743,6 @@ class ReportingAgent:
         from openjiuwen.harness import create_deep_agent
         from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
         from openjiuwen.harness.schema.config import SubAgentConfig
-
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
             with_observability,
         )

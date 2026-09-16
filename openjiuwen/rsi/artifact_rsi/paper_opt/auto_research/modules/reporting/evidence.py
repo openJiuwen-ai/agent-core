@@ -16,6 +16,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_plan_metrics
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     ExperimentResult,
     VariantResult,
@@ -69,7 +70,11 @@ def _cell_numeric_items(cell: dict) -> dict[str, float]:
     return {name: value for name, value in cell.items() if _is_reportable_numeric(name, value)}
 
 
-def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
+def normalize_current_run_evidence(
+    result: ExperimentResult,
+    *,
+    plan_metrics: list[str] | None = None,
+) -> list[Evidence]:
     """Flatten ``ExperimentResult.variants`` into ``Evidence`` rows with
     ``source="current_run"``. Handles both a flat single-condition variant
     (metrics as top-level scalars) and a multi-condition variant (metrics
@@ -80,9 +85,33 @@ def normalize_current_run_evidence(result: ExperimentResult) -> list[Evidence]:
     make for the same reason.
     """
     evidence: list[Evidence] = []
+    declared = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
     for variant in result.variants:
+        if declared:
+            planned = _plan_metric_evidence(variant, declared)
+            if planned:
+                evidence.extend(planned)
+                continue
         evidence.extend(_variant_evidence(variant))
     return evidence
+
+
+def _plan_metric_evidence(variant: VariantResult, names: list[str]) -> list[Evidence]:
+    rows: list[Evidence] = []
+    for name, hit in resolve_plan_metrics(dict(variant.metrics), names).items():
+        if hit.status != "resolved" or hit.value is None:
+            continue
+        rows.append(
+            Evidence(
+                evidence_id=f"{variant.name}:{name}",
+                source="current_run",
+                method=variant.name,
+                metric=name,
+                value=hit.value,
+                provenance={"variant": variant.name, "path": hit.path},
+            )
+        )
+    return rows
 
 
 def _variant_evidence(variant: VariantResult) -> list[Evidence]:
