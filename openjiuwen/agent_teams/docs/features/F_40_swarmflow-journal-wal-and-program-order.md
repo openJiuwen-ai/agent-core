@@ -80,6 +80,12 @@ journal 落地后(`F_38`)在使用中暴露三个问题,均由实跑 + 评审发
   `os.fsync`,代价是每次写的 fsync 延迟。首期不做(swarmflow 场景进程崩溃是主要威胁)。
 - **`os.replace`/`unlink` 仍同步**:元数据 syscall 通常 µs 级;极端慢 FS 上仍可能微阻塞,但
   `aiofiles` 不封装 rename/unlink,且不可用 `to_thread`(owner 否决),暂保持同步。
+- **per-run 文件对按 run 数线性累积**(2026-09-16 review 复核确认):seal 后 relaunch 强制新
+  run_id,每个 run 留一对 `journal-{run_id}.jsonl` + `wal/{run_id}.wal`(含完整 LLM 输出)。
+  修订 3 的"膨胀问题消失"只对**单 run 内死记录堆积**成立;**文件数增长**是新膨胀面,清理仅
+  `delete_team` 整树兜底。治理方案已设计未实施(L1 journal 覆盖收缩 / L2 配额淘汰 / L3 全局
+  sweep,见 `doc/plan/2026-09/2026-09-15-wal-rolling-aging-design.md`),按 owner 决策留待
+  下一阶段;实施前长寿命 session 磁盘占用 = O(runs × 平均 run 体积)。
 
 ## 修订 2026-09-11:load 时 compaction(WAL 只增不自清的止血)
 
