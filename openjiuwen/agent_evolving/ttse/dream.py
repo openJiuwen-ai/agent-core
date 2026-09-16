@@ -382,9 +382,12 @@ async def dream_merge(
     records = store.facts if track == "fact" else store.tips
     if len(records) < config.dream_cluster_min_size:
         return 0, 0, []
-    if not store.has_embedding_provider():
-        logger.info("[TTSERail] dream merge skipped for %s: no embedding provider", track)
-        return 0, 0, []
+
+    use_bm25 = not store.has_embedding_provider()
+    sim_mode = "bm25" if use_bm25 else "cosine"
+    soft_threshold = (
+        float(config.bm25_sim_threshold) if use_bm25 else float(config.dream_soft_lo)
+    )
 
     by_category: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -401,22 +404,27 @@ async def dream_merge(
             min_size=min_size,
         )
         logger.info(
-            "[TTSERail] dream merge category bucket track=%s category=%s rules=%s clusters=%s",
+            "[TTSERail] dream merge category bucket track=%s category=%s rules=%s "
+            "clusters=%s similarity=%s threshold=%.3f",
             track,
             cid,
             len(group),
             len(cat_clusters),
+            sim_mode,
+            soft_threshold,
         )
         clusters.extend(cat_clusters)
     clusters.sort(key=lambda c: -len(c))
 
     if not clusters:
         logger.info(
-            "[TTSERail] dream merge no clusters track=%s rules=%s categories=%s soft_lo=%s",
+            "[TTSERail] dream merge no clusters track=%s rules=%s categories=%s "
+            "similarity=%s threshold=%.3f",
             track,
             len(records),
             len(by_category),
-            config.dream_soft_lo,
+            sim_mode,
+            soft_threshold,
         )
         return 0, 0, []
 
@@ -425,12 +433,15 @@ async def dream_merge(
     added_items: List[Tuple[str, str]] = []
     budget = max(0, int(config.dream_max_llm_merges))
     logger.info(
-        "[TTSERail] dream merge start track=%s rules=%s categories=%s clusters=%s llm_budget=%s",
+        "[TTSERail] dream merge start track=%s rules=%s categories=%s clusters=%s "
+        "llm_budget=%s similarity=%s threshold=%.3f",
         track,
         len(records),
         len(by_category),
         len(clusters),
         budget,
+        sim_mode,
+        soft_threshold,
     )
     for idx, cluster in enumerate(clusters):
         logger.info(

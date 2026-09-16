@@ -29,10 +29,11 @@ class TTSEConfig:
 
     Attributes:
         store_path: JSON path for the shared FACT/TIP bank (created on first write).
-        embedding: Optional embedding provider. When set, dedup uses cosine
-            similarity (semantic). When ``None``, dedup falls back to substring
-            matching. FACT/TIP are disclosed via ``ttse_consult``, not dumped
-            into the system prompt.
+        embedding: Optional embedding provider. When set, induction dedup and
+            Auto-dream soft clustering use cosine similarity. When ``None``
+            (or embedding fails), both fall back to self-normalized BM25 with
+            ``bm25_sim_threshold`` (default ``0.5``). FACT/TIP are disclosed
+            via ``ttse_consult``, not dumped into the system prompt.
             Semantic dedup / consult recall scan the in-memory bank in O(n)
             (n <= max_facts or max_tips, default 400). After the process-local
             embedding cache is warm this is CPU cosine only; a cold bank is
@@ -48,7 +49,10 @@ class TTSEConfig:
             only, including each ``embed_documents`` chunk). Default ``4.0``
             matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
-            duplicates during induction. Ignored when ``embedding`` is None.
+            duplicates during induction. Only used when ``embedding`` is set.
+        bm25_sim_threshold: Self-normalized BM25 similarity floor for
+            induction dedup and dream soft clustering when no embedding
+            provider is available. Default ``0.5``.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
             Also the O(n) bound for semantic dedup / consult embedding scans.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
@@ -92,7 +96,9 @@ class TTSEConfig:
         dream_interval: Non-follow-up task iterations between dream attempts.
         dream_min_hours: Min hours since last successful dream.
         dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
-        dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates.
+        dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates
+            when an embedding provider is set. Ignored for the BM25 fallback
+            path (uses ``bm25_sim_threshold`` instead).
         dream_cluster_min_size: Min cluster size to consider for merge.
         dream_max_llm_merges: Cap LLM merge calls per dream run.
         dream_ttl_days: Delete rules not injected for this many days.
@@ -108,6 +114,7 @@ class TTSEConfig:
     embedding: Optional[EmbeddingProvider] = None
     embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
+    bm25_sim_threshold: float = 0.5
     max_facts: int = 400
     max_tips: int = 400
     traj_char_budget: Optional[int] = None

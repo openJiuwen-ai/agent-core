@@ -591,7 +591,8 @@ async def test_dream_skipped_when_min_hours(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dream_merge_skipped_without_embedding_still_prunes(tmp_path):
+async def test_dream_without_embedding_still_prunes(tmp_path):
+    """No embedding: prune still runs; single stale rule yields no BM25 merge."""
     cfg = TTSEConfig(
         store_path=str(tmp_path / "bank.json"),
         dream_min_hours=0,
@@ -615,6 +616,122 @@ async def test_dream_merge_skipped_without_embedding_still_prunes(tmp_path):
     assert not result.skipped
     assert result.pruned_facts == 1
     assert result.merged_clusters == 0
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_bm25_without_embedding(tmp_path):
+    """Near-duplicate facts cluster via BM25 when no embedding provider is set."""
+
+    def handler(prompt: str):
+        return (
+            "THINKING:\n"
+            "Two facts describe PresentBench slide grading with high BM25 overlap.\n"
+            "REASON: near duplicates\n"
+            "VERDICT: MERGE\n"
+            "CANONICAL: PresentBench grades slides.md not a pptx file\n"
+            "KEEP_INDICES:\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        bm25_sim_threshold=0.5,
+        dream_max_llm_merges=5,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(handler)
+    for text, count in (
+        ("PresentBench grades slides.md not a pptx file", 2),
+        ("PresentBench grades slides.md rather than pptx", 2),
+    ):
+        await store.add_record_direct("fact", text, count=count, save=False)
+    await store.save()
+    assert len(store.facts) == 2
+
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters >= 1
+    assert len(store.facts) == 1
+    assert store.facts[0]["count"] >= 4
+    assert llm.calls
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_bm25_skips_cross_category(tmp_path):
+    """BM25-near-duplicate facts in different categories must not share a cluster."""
+
+    def handler(prompt: str):
+        raise AssertionError("LLM merge must not run across categories")
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        bm25_sim_threshold=0.5,
+        dream_max_llm_merges=5,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(handler)
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md not a pptx file",
+        count=2,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md rather than pptx",
+        count=2,
+        category="software-engineering-devops",
+        save=False,
+    )
+    await store.save()
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters == 0
+    assert len(store.facts) == 2
+    assert not llm.calls
+
+
+@pytest.mark.asyncio
+async def test_induction_bm25_dedup_merges_near_duplicate(tmp_path):
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
+    )
+    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
+    assert await store.add_fact("PresentBench grades slides.md rather than pptx") is False
+    assert len(store.facts) == 1
+    assert store.facts[0]["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_induction_bm25_dedup_keeps_unrelated(tmp_path):
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
+    )
+    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
+    assert await store.add_fact("compile cxx with cl utf-8 flag on windows") is True
+    assert len(store.facts) == 2
 
 
 @pytest.mark.asyncio
