@@ -48,14 +48,7 @@ from openjiuwen.harness.prompts.tools.compression_recall import (
     CompressionRecallMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.cron import (
-    CronCreateJobMetadataProvider,
-    CronDeleteJobMetadataProvider,
-    CronGetJobMetadataProvider,
-    CronListJobsMetadataProvider,
     CronMetadataProvider,
-    CronPreviewJobMetadataProvider,
-    CronToggleJobMetadataProvider,
-    CronUpdateJobMetadataProvider,
 )
 from openjiuwen.harness.prompts.tools.enter_worktree import (
     EnterWorktreeMetadataProvider,
@@ -143,13 +136,6 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     AudioMetadataMetadataProvider(),
     CodeMetadataProvider(),
     CronMetadataProvider(),
-    CronListJobsMetadataProvider(),
-    CronGetJobMetadataProvider(),
-    CronCreateJobMetadataProvider(),
-    CronUpdateJobMetadataProvider(),
-    CronDeleteJobMetadataProvider(),
-    CronToggleJobMetadataProvider(),
-    CronPreviewJobMetadataProvider(),
     ReadFileMetadataProvider(),
     WriteFileMetadataProvider(),
     EditFileMetadataProvider(),
