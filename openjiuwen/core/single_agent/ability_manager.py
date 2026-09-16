@@ -221,6 +221,10 @@ class AbilityManager:
         if success is False and error:
             return str(error)
 
+        # Recall envelopes carry paging and lookup status even when content is empty.
+        if isinstance(data, dict) and {"handle", "found", "content"}.issubset(data):
+            return str(result)
+
         if isinstance(data, dict) and "content" in data:
             content = str(data.get("content") or "")
             if content:

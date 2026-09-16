@@ -14,6 +14,7 @@ from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 from openjiuwen.harness.tools.subagent.task_tool import TaskTool
 
@@ -182,8 +183,9 @@ async def test_affinity_disabled_preserves_baseline_invoke() -> None:
     assert subagent.sessions == [None]
     assert len(subagent.inputs) == 1
     assert subagent.inputs[0]["query"] == "run task"
-    assert subagent.inputs[0]["run_context"]["browser_query_budget_s"] == 240.0
-    assert subagent.inputs[0]["run_context"]["browser_resume"] is False
+    normalized = DeepAgent(AgentCard(name="normalizer"))._normalize_inputs(subagent.inputs[0])
+    assert normalized.run_context.extra["browser_query_budget_s"] == 240.0
+    assert normalized.run_context.extra["browser_resume"] is False
     assert re.fullmatch(
         r"parent_session_sub_browser_agent_[0-9a-f]{8}",
         subagent.inputs[0]["conversation_id"],

@@ -2932,7 +2932,7 @@ class ReActAgent(BaseAgent):
             await session.write_stream(OutputSchema(
                 type="answer",
                 index=0,
-                payload={"output": result.get("output", ""), "result_type": result_type},
+                payload={**result, "output": result.get("output", ""), "result_type": result_type},
             ))
 
     async def stream(

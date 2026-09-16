@@ -8,7 +8,7 @@ import asyncio
 import shutil
 import subprocess
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -86,6 +86,41 @@ def test_build_card_probe_js_contains_card_extraction_terms() -> None:
     assert "visible" in js
     assert "enabled" in js
     assert "generation_id" in js
+
+
+@pytest.mark.parametrize("error", [
+    "### Error\nReferenceError: missingHelper is not defined",
+    {"isError": True, "content": [{"type": "text", "text": "ReferenceError: missingHelper is not defined"}]},
+])
+def test_probe_reports_executor_error_without_repeating_identical_script(error) -> None:
+    runtime = _make_runtime()
+    runtime._code_executor = AsyncMock(return_value=error)
+    parsed, _, retries = _run(runtime._execute_probe_json(
+        "async (page) => missingHelper(page)", artifact_kind="card_probe"
+    ))
+    assert parsed["ok"] is False
+    assert "ReferenceError" in parsed["error"]
+    assert retries == 0
+    runtime._code_executor.assert_awaited_once()
+
+
+@pytest.mark.parametrize("probe,registry", [
+    ("probe_cards", "register_cards"), ("probe_interactives", "register_interactives"),
+])
+def test_failed_probe_keeps_existing_page_targets(probe, registry) -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._code_executor = AsyncMock(return_value="### Error\nReferenceError: unavailable helper")
+    page = runtime._ensure_page_state()
+    page.observe(url="https://example.test/current", title="Current page")
+    previous = page.export()
+    with patch.object(page, registry, wraps=getattr(page, registry)) as register:
+        result = _run(getattr(runtime, probe)())
+    assert result["ok"] is False
+    assert "ReferenceError" in result["error"]
+    assert page.export() == previous
+    register.assert_not_called()
+    runtime._code_executor.assert_awaited_once()
 
 
 def test_generated_probe_scripts_parse_as_javascript(tmp_path: Path) -> None:

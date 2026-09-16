@@ -118,8 +118,12 @@ async def _run_subagent_with_observable_stream(
             "output": "".join(output_parts),
             "result_type": "answer",
         }
-    if terminal_result.get("result_type") == "error":
-        raise RuntimeError(str(terminal_result.get("output") or "subagent failed"))
+    has_browser_result = isinstance(terminal_result.get("authoritative_browser_result"), dict)
+    if terminal_result.get("result_type") == "error" and not has_browser_result:
+        raise build_error(
+            StatusCode.TOOL_TASK_TOOL_INVOKED,
+            reason=str(terminal_result.get("output") or "subagent failed"),
+        )
     return terminal_result
 
 
@@ -358,6 +362,8 @@ class TaskTool(Tool):
     ) -> ToolOutput:
         browser_result = record.get("browser_result")
         browser_result = dict(browser_result) if isinstance(browser_result, dict) else {}
+        if code == "browser_query_resume_not_allowed":
+            browser_result["retryable"] = False
         payload = {
             "status": str(browser_result.get("status") or "in_progress"),
             "code": code,
@@ -377,14 +383,18 @@ class TaskTool(Tool):
 
     @staticmethod
     def _failed_browser_result(reason: str) -> dict[str, Any]:
+        transport_failure = reason == "authoritative_browser_result_missing"
         return {
             "status": "failed",
             "retryable": False,
             "missing_fields": [],
             "missing_slots": [],
-            "blockers": [str(reason or "browser_subagent_failed")[:300]],
+            "blockers": [] if transport_failure else [str(reason or "browser_subagent_failed")[:300]],
             "evidence": [],
-            "terminal_reason": str(reason or "browser_subagent_failed")[:120],
+            "terminal_reason": (
+                "browser_result_transport_failure" if transport_failure
+                else str(reason or "browser_subagent_failed")[:120]
+            ),
         }
 
     def _parse_invocation_inputs(
@@ -653,7 +663,9 @@ class TaskTool(Tool):
             "conversation_id": context.sub_session_id,
         }
         if context.browser_query is not None:
-            subagent_inputs["run_context"] = TaskTool._browser_run_context(context.browser_query)
+            subagent_inputs["run"] = {
+                "context": {"extra": TaskTool._browser_run_context(context.browser_query)},
+            }
         if not context.affinity_enabled:
             return subagent_inputs
         subagent_inputs.update(
@@ -732,6 +744,10 @@ class TaskTool(Tool):
             return ToolOutput(success=True, data=data, error=None)
         browser_result = data.get("browser_result")
         if not isinstance(browser_result, dict):
+            logger.error(
+                "[TaskTool] browser result transport failure: missing authoritative_browser_result; keys=%s",
+                sorted(str(key) for key in result) if isinstance(result, dict) else [],
+            )
             browser_result = self._failed_browser_result("authoritative_browser_result_missing")
             data.update(
                 {

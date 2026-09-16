@@ -344,13 +344,13 @@ def test_default_wiring_adds_browser_state_and_windows_large_tool_results() -> N
         "browser_find",
         "browser_evaluate",
     ]
-    assert config.keep_last_k == 1
+    assert config.keep_last_k == 2
     assert processor_map["BrowserWorkingContextProcessor"].max_recent_steps > 0
     assert processor_map["BrowserWorkingContextProcessor"].runtime_projection_only is True
     assert processor_map["BrowserStateContextProcessor"].provider is not None
     assert config.trim_size == 1000
-    assert config.min_offload_chars == 4096
-    assert config.small_result_trim_size == 800
+    assert config.min_offload_chars == 1000
+    assert config.small_result_trim_size == 1000
 
 
 def test_working_context_processor_uses_browser_agent_language() -> None:
@@ -384,7 +384,7 @@ def test_caller_context_processor_rail_is_augmented_with_browser_state() -> None
         "BrowserWorkingContextProcessor",
     ]
     processor_map = dict(caller_rail._user_processors)
-    assert processor_map["ToolResultWindowProcessor"].keep_last_k == 1
+    assert processor_map["ToolResultWindowProcessor"].keep_last_k == 2
     assert "browser_find" in processor_map["ToolResultWindowProcessor"].tool_names
 
 
