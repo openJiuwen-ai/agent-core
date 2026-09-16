@@ -438,3 +438,119 @@ def test_two_journals_on_separate_wal_files_never_interfere(tmp_path):
     assert rec_a.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
     assert rec_a.get_cached(key_str([["call", 1]]), "s", "run-A") is None
 
+
+
+# ---------------------------------------------------------------------------
+# legacy shared-journal read-side back-compat (pre-per-run sessions)
+# ---------------------------------------------------------------------------
+
+def test_load_seeds_prior_from_legacy_shared_files(tmp_path):
+    """A per-run resume still replays records from the pre-split shared journal.
+
+    Sessions created before the per-run split kept everything in one shared
+    ``journal.jsonl`` (+ ``.wal`` sidecar). The upgraded run reads those as a
+    seed under the per-run sources: same-key conflicts resolve per-run-first,
+    and records of a *different* run_id load into prior but naturally miss
+    get_cached's triple check.
+    """
+    legacy_journal = tmp_path / "journal.jsonl"
+    legacy_wal = tmp_path / "journal.jsonl.wal"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed():
+        # Legacy shared files: run-A records + a foreign run-B record + a seal
+        # for run-A (old layout also kept seal records in the shared WAL).
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]], [["call", 1]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        lw = Journal(wal_path=str(legacy_wal))
+        await _use_all(lw, [[["call", 2]]], run_id="run-B")
+        await lw.write_run_record("run-A", "seal", {"terminal_status": "completed"})
+
+    asyncio.run(_seed())
+    assert not run_journal.exists() and not run_wal.exists()
+
+    loaded = asyncio.run(
+        Journal.load(
+            str(run_journal),
+            wal_path=str(run_wal),
+            legacy_path=str(legacy_journal),
+        )
+    )
+    # run-A call records from the legacy shared journal are replayable.
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None
+    # The legacy WAL sidecar seeds too — the foreign run-B record is visible
+    # to its own run_id but never serves a run-A query (triple check).
+    assert loaded.get_cached(key_str([["call", 2]]), "s", "run-B") is not None
+    assert loaded.get_cached(key_str([["call", 2]]), "s", "run-A") is None
+    # The seal of run-A is found through the legacy path (seal-guard back-compat).
+    assert loaded.find_run_record("run-A", "seal") is not None
+
+
+def test_load_per_run_sources_win_over_legacy_on_key_conflict(tmp_path):
+    """Per-run journal/WAL records overlay the legacy seed on key conflicts."""
+    legacy_journal = tmp_path / "journal.jsonl"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed():
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        # The per-run snapshot exists with a NEWER sig for the same key.
+        rj = Journal(wal_path=None)
+        await _use_all(rj, [[["call", 0]]], run_id="run-A")
+        await rj.save(str(run_journal))
+
+    asyncio.run(_seed())
+
+    loaded = asyncio.run(
+        Journal.load(
+            str(run_journal),
+            wal_path=str(run_wal),
+            legacy_path=str(legacy_journal),
+        )
+    )
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    # legacy-only file is never written by the per-run journal (frozen read-only).
+    assert legacy_journal.read_text(encoding="utf-8").count('"key"') == 1
+
+
+def test_new_records_go_to_per_run_wal_not_legacy(tmp_path):
+    """After a legacy-seeded load, fresh records append to the per-run WAL only."""
+    legacy_journal = tmp_path / "journal.jsonl"
+    legacy_wal = tmp_path / "journal.jsonl.wal"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed_and_extend():
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        j = await Journal.load(
+            str(run_journal), wal_path=str(run_wal), legacy_path=str(legacy_journal)
+        )
+        assert j.get_cached(key_str([["call", 0]]), "s", "run-A") is not None  # HIT
+        await _use_all(j, [[["call", 1]]], run_id="run-A")  # fresh record
+        await j.save(str(run_journal))
+
+    asyncio.run(_seed_and_extend())
+
+    # New record went to the per-run WAL; the legacy files are byte-frozen.
+    assert not legacy_wal.exists()
+    assert _keys_in_file(run_wal) == [key_str([["call", 1]])]
+    # The per-run snapshot carries the fresh call (hit records enter it only
+    # via journal.use, which is agent()'s job — this test drives the journal
+    # layer directly, so only the explicitly used record is snapshotted).
+    assert _keys_in_file(run_journal) == [key_str([["call", 1]])]
+    # And the next load (with legacy seed) still resolves both.
+    reloaded = asyncio.run(
+        Journal.load(str(run_journal), wal_path=str(run_wal), legacy_path=str(legacy_journal))
+    )
+    assert reloaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    assert reloaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None

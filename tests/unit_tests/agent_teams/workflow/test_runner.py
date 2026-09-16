@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from openjiuwen.agent_teams import paths
-from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path, _resolve_wal_path
+from openjiuwen.agent_teams.workflow.runner import (
+    _resolve_journal_path,
+    _resolve_legacy_resume,
+    _resolve_wal_path,
+)
 from openjiuwen.core.common.exception.errors import BaseError
 
 
@@ -95,3 +99,28 @@ def test_resolve_journal_path_requires_meta_name(tmp_path):
 
     with pytest.raises(BaseError):
         _resolve_journal_path(script, "demo-team", "sess-1")
+
+
+# ---------------------------------------------------------------------------
+# legacy shared-journal read-side back-compat
+# ---------------------------------------------------------------------------
+
+def test_resolve_legacy_resume_maps_to_shared_journal_with_run_id(tmp_path):
+    """With a run_id the legacy seed is the shared journal.jsonl; without one None."""
+    script = _write_script(tmp_path, "demo")
+    paths.configure_openjiuwen_home(tmp_path / "home")
+
+    legacy = _resolve_legacy_resume(script, "demo-team", "sess-1", "wf_abc123")
+    shared_journal = paths.workflow_journal_path("demo-team", "sess-1", "demo")
+    assert legacy == str(shared_journal)
+
+    # No run_id → the caller already uses the shared path itself; no seed.
+    assert _resolve_legacy_resume(script, "demo-team", "sess-1", None) is None
+
+
+def test_resolve_legacy_resume_returns_none_without_meta_name(tmp_path):
+    """An unreadable META yields None (the seed must never break the launch)."""
+    script = tmp_path / "broken.py"
+    script.write_text("META = {}\n", encoding="utf-8")
+    paths.configure_openjiuwen_home(tmp_path / "home")
+    assert _resolve_legacy_resume(str(script), "demo-team", "sess-1", "wf_abc123") is None
