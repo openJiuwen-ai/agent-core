@@ -629,3 +629,62 @@ async def test_context_window_mutator_runs_before_window_statistics():
 
     assert window.get_messages()[-1].content == "query\n\nattached"
     assert window.statistic.total_messages == 2
+
+
+@pytest.mark.asyncio
+async def test_prompt_attachment_delta_suppressed_when_only_datetime_changes():
+    """Date/timestamp-only drift must not append a new delta UserMessage.
+
+    The snapshot stays at its original position; subsequent turns whose only
+    change is a clock value (date or full ISO timestamp) produce no delta.
+    A real content change afterwards still produces a delta as usual.
+    """
+    manager = PromptAttachmentManager(language="en")
+    item = await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="test",
+        content="state (updated: 2026-09-16T10:00:00Z)",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+
+    snapshot = await manager.sync_to_context(context, "sess1")
+    assert snapshot is not None
+    assert len(context.get_messages()) == 1
+
+    # Same content, only the timestamp changes — must NOT produce a delta.
+    await manager.update_content_by_id(
+        item.id,
+        content="state (updated: 2026-09-17T11:30:00Z)",
+        session_id="sess1",
+    )
+    delta = await manager.sync_to_context(context, "sess1")
+    assert delta is None
+    assert len(context.get_messages()) == 1
+
+    # Same content, only the date changes — must NOT produce a delta either.
+    await manager.update_content_by_id(
+        item.id,
+        content="state (updated: 2026-09-18)",
+        session_id="sess1",
+    )
+    delta = await manager.sync_to_context(context, "sess1")
+    assert delta is None
+    assert len(context.get_messages()) == 1
+
+    # Real content change still produces a delta as usual.
+    await manager.update_content_by_id(
+        item.id,
+        content="state v2 (updated: 2026-09-18T11:30:00Z)",
+        session_id="sess1",
+    )
+    delta = await manager.sync_to_context(context, "sess1")
+    assert delta is not None
+    assert len(context.get_messages()) == 2
