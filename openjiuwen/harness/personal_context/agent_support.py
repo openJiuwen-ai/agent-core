@@ -113,12 +113,13 @@ def _drop_unwanted_default_rails(agent: object) -> None:
     """Remove factory-defaulted rails before lazy init.
 
     Rails queued by ``create_deep_agent`` sit in the agent's pending list
-    until ``ensure_initialized``; filtering the list synchronously keeps the
-    disposable sandbox agent's rail set exactly as designed.
+    until ``ensure_initialized``; the public ``strip_rails_by_type`` filters
+    that list synchronously so the disposable sandbox agent's rail set stays
+    exactly as designed.
     """
-    pending = getattr(agent, "_pending_rails", None)
-    if pending is not None:
-        agent._pending_rails = [rail for rail in pending if not isinstance(rail, _UNREGISTER_DEFAULT_RAIL_TYPES)]
+    strip_rails = getattr(agent, "strip_rails_by_type", None)
+    if callable(strip_rails):
+        strip_rails(_UNREGISTER_DEFAULT_RAIL_TYPES)
 
 # Only model/Agent/tool execution failures may be handed back to a live
 # session as a bounded repair instruction.  Configuration, DeepAgent runtime,
