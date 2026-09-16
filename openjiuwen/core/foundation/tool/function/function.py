@@ -1,8 +1,10 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 import inspect
-from functools import wraps
+from functools import partial, wraps
 from typing import Callable, AsyncIterator
+
+import anyio
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -10,6 +12,24 @@ from openjiuwen.core.common.utils.schema_utils import SchemaUtils
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard, Input, Output
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import ToolCallEvents
+
+#: Sentinel distinguishing "generator exhausted" from a legitimately yielded
+#: value inside _aiter_sync_in_threadpool (module-private, unreachable by user
+#: functions, so a false positive is impossible).
+_STREAM_DONE = object()
+
+
+async def _aiter_sync_in_threadpool(gen):
+    """Drive a sync generator from the event loop without blocking it.
+
+    Each next() runs in the default worker pool via anyio.to_thread, so a
+    slow-producing generator no longer stalls the loop between items.
+    """
+    while True:
+        item = await anyio.to_thread.run_sync(next, gen, _STREAM_DONE)
+        if item is _STREAM_DONE:
+            return
+        yield item
 
 
 def support_args_param(arg_param_name: str, parameters, func: Callable) -> Callable:
@@ -82,7 +102,13 @@ class LocalFunction(Tool):
         if inspect.iscoroutinefunction(self._func):
             res = await self._func(**inputs)
         else:
-            res = self._func(**inputs)
+            # Run sync functions in the default worker pool so long-running
+            # tools (sync IO, CPU-bound work) do not block the event loop.
+            # anyio propagates the current context (contextvars) to the worker
+            # thread and re-raises exceptions on the awaiting side, so
+            # call-site semantics (return value, error propagation) are
+            # unchanged.
+            res = await anyio.to_thread.run_sync(partial(self._func, **inputs))
         return res
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
@@ -102,7 +128,9 @@ class LocalFunction(Tool):
             async for item in self._func(**inputs):
                 yield item
         elif inspect.isgeneratorfunction(self._func):
-            for item in self._func(**inputs):
+            # Drive the sync generator from a worker pool so each next()
+            # does not block the event loop.
+            async for item in _aiter_sync_in_threadpool(self._func(**inputs)):
                 yield item
         else:
             raise build_error(StatusCode.TOOL_LOCAL_FUNCTION_EXECUTION_ERROR, method="stream",
