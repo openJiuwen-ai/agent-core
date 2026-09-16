@@ -13,7 +13,10 @@ A separate test exercises the real ``_execute_worker`` spec-derivation path with
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import subprocess
+from pathlib import Path
 from typing import Any, Sequence
 
 import pytest
@@ -185,7 +188,7 @@ async def run(args):
     seen: list[dict] = []
 
     class _Backend(AgentBackend):
-        async def run(self, prompt, opts, schema_json):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
             seen.append(dict(opts))
             return AgentResult(text="ok")
 
@@ -519,6 +522,30 @@ def test_long_run_id_slug_is_not_truncated_in_member_names():
     assert len(name) > 50
 
 
+def test_member_name_is_stable_across_backend_instances_with_same_call_key():
+    """Same call key + run id → same member name, regardless of instance.
+
+    A resume builds a fresh TeamWorkerBackend whose counter restarts at zero;
+    hashing the engine's call-path key instead keeps the name (and thus the
+    worktree slug) identical so the create fast-recovery can find the
+    paused run's kept worktree.
+    """
+    run_id = "wf_abc123def456"
+    backend_a = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    backend_b = TeamWorkerBackend(model=None, team_name="t", run_id=run_id)
+    name_a = backend_a._next_member_name({"label": "compute"}, "call-0")
+    name_b = backend_b._next_member_name({"label": "compute"}, "call-0")
+    assert name_a == name_b
+    assert name_a == "wf-abc123def456-compute-" + hashlib.sha256(b"call-0").hexdigest()[:12]
+
+    # Different call sites in the same run stay distinct.
+    name_other = backend_a._next_member_name({"label": "compute"}, "par-0-1")
+    assert name_other != name_a
+
+    # Without a call key the legacy counter path still works (direct callers).
+    assert backend_a._next_member_name({"label": "compute"}) == "wf-abc123def456-compute-0"
+
+
 def test_execute_worker_surfaces_task_loop_model_error():
     """Task-loop failures return {"error": ...}; worker must raise, not empty output."""
     from openjiuwen.agent_teams.workflow.backends.team_worker_backend import (
@@ -566,3 +593,74 @@ async def run(args):
     failed = next(ev for ev in events if ev.kind == ProgressKind.AGENT_FAILED)
     assert "ReadError" in (failed.message or "")
     assert ProgressKind.AGENT_COMPLETED not in kinds
+
+
+# ---------------------------------------------------------------------------
+# SwarmflowWorkerWorktrees orphan reconcile
+# ---------------------------------------------------------------------------
+def _stub_manager(removed: list[str]):
+    class _StubManager:
+        async def create_owner_worktree(self, slug, *, source_dir=None):
+            raise AssertionError("stub reconcile manager should not create")
+
+        async def remove_worktree(self, worktree_path, repo_root):
+            removed.append(worktree_path)
+            return True
+
+    return _StubManager()
+
+
+def _make_repo(tmp_path: Path, name: str) -> Path:
+    repo = tmp_path / name
+    repo.mkdir()
+    for cmd in (
+        # no `-b main`: git < 2.28 (older CI) rejects it and the branch name is never asserted
+        ["git", "init", str(repo)],
+        ["git", "-C", str(repo), "config", "user.email", "st@example.com"],
+        ["git", "-C", str(repo), "config", "user.name", "st"],
+        ["git", "-C", str(repo), "add", "-A"],
+        ["git", "-C", str(repo), "commit", "-m", "init", "--allow-empty"],
+    ):
+        subprocess.run(cmd, check=True, capture_output=True)
+    return repo
+
+
+def _seed_orphan(tmp_path: Path, repo: Path, slug: str, *, dirty: bool) -> Path:
+    wt = tmp_path / slug
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", str(wt)], check=True, capture_output=True)
+    if dirty:
+        (wt / "note.txt").write_text("wip", encoding="utf-8")
+    return wt
+
+
+def test_reconcile_removes_clean_orphan_and_keeps_dirty(tmp_path, monkeypatch):
+    """First ensure() sweeps prior-run residue: clean removed, dirty kept."""
+    from openjiuwen.agent_teams import paths as team_paths
+    from openjiuwen.agent_teams.paths import team_session_worktrees_dir
+    from openjiuwen.agent_teams.workflow.worktree import SwarmflowWorkerWorktrees
+
+    team_paths.configure_openjiuwen_home(tmp_path)
+
+    repo = _make_repo(tmp_path, "proj")
+    root = team_session_worktrees_dir("wt-team", "sess-1")
+    root.mkdir(parents=True)
+    clean = _seed_orphan(root, repo, "agent-t-clean1234-deadbeef00", dirty=False)
+    dirty = _seed_orphan(root, repo, "agent-t-dirty1234-cafebabed0", dirty=True)
+    removed: list[str] = []
+
+    wts = SwarmflowWorkerWorktrees(
+        team_name="wt-team",
+        build_context=_build_context_with_worktree_manager(_stub_manager(removed)),
+        session_id="sess-1",
+    )
+    # Drive the reconcile directly for determinism; ensure() only calls it
+    # before the first worktree-creating agent().
+    asyncio.run(wts._reconcile_orphans_once())
+
+    assert str(clean) in removed
+    assert str(dirty) not in removed
+    # Idempotent within a run: second call is a no-op.
+    asyncio.run(wts._reconcile_orphans_once())
+    assert removed.count(str(clean)) == 1
+
+    team_paths.reset_openjiuwen_home()

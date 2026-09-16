@@ -668,7 +668,10 @@ class DeepAgent(BaseAgent):
         language = resolve_language(config.language)
         mode = resolve_mode(config.prompt_mode)
         self.prompt_attachment_manager.language = language
+        priority_registry = getattr(self.system_prompt_builder, "priority_registry", None)
         prompt_builder = SystemPromptBuilder(language=language, mode=mode)
+        if priority_registry is not None:
+            prompt_builder.set_priority_registry(priority_registry)
         if config.system_prompt:
             prompt_builder.add_section(PromptSection(
                 name=SectionName.IDENTITY,

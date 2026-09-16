@@ -68,7 +68,7 @@ def build_heartbeat_section(
     return PromptSection(
         name=SectionName.HEARTBEAT,
         content={language: prompt_content},
-        priority=80,
+        priority=78,
     )
 
 

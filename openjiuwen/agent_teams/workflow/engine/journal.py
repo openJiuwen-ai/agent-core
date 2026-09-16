@@ -71,14 +71,19 @@ def call_signature(
     before this parameter existed, so worker resume is unaffected. A stateful
     session turn folds its prior turns in, so a changed upstream turn cascades a
     re-run of every turn that depends on it.
+
+    ``isolation`` participates **only when set**: omitting it yields the exact
+    legacy byte sequence (existing caches stay valid), while flipping a call
+    to ``isolation='worktree'`` re-keys it. Without this, editing a script to
+    add isolation to an already-cached call would resume-hit the old record
+    and silently skip the worktree the caller now asked for.
     """
+    identity = {k: opts.get(k) for k in ("label", "phase", "model")}
+    if opts.get("isolation"):
+        identity["isolation"] = opts["isolation"]
     parts = [
         prompt,
-        json.dumps(
-            {k: opts.get(k) for k in ("label", "phase", "model")},
-            sort_keys=True,
-            ensure_ascii=False,
-        ),
+        json.dumps(identity, sort_keys=True, ensure_ascii=False),
         json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
     ]
     if history:
@@ -157,15 +162,79 @@ class Journal:
         crashed prior run — so if the journal is missing or incomplete, the WAL's
         records still seed ``prior`` (last record wins across both sources). Reads
         are async (``aiofiles``) so they never stall the shared event loop.
+
+        After the replay the WAL is **compacted**: call records belonging to
+        *sealed* (terminal) runs are dropped. A sealed run can never be resumed
+        (the seal guard forces any relaunch onto a fresh run_id) and ``get_cached``
+        requires a run_id match, so its call records can never be replayed again —
+        they are pure bloat for sessions that repeatedly relaunch a script without
+        ever finalizing (F_40 已知遗留 "WAL 只增不自清"). Records of unsealed runs
+        and all run-level records (pause/seal) are kept: pause records are what a
+        cold resume looks up, seal records are what the seal guard reads, and an
+        unsealed run may still be resumed. The crash-durability invariant is
+        untouched — finalize remains the only full-WAL removal, and compaction
+        only shrinks the WAL to records no future load can serve. A failure
+        mid-compaction degrades to "WAL kept whole" (os.replace is atomic; a torn
+        line is tolerated by replay), never to losing recoverable work.
         """
         prior: dict[str, dict] = {}
-        for src in (path, wal_path):
+        wal_text: str | None = None
+        if wal_path and Path(wal_path).exists():
+            async with aiofiles.open(wal_path, "r", encoding="utf-8") as f:
+                wal_text = await f.read()
+        for src, text in ((path, None), (wal_path, wal_text)):
             if src and Path(src).exists():
-                async with aiofiles.open(src, "r", encoding="utf-8") as f:
-                    text = await f.read()
+                if text is None:
+                    async with aiofiles.open(src, "r", encoding="utf-8") as f:
+                        text = await f.read()
                 for rec in cls._parse_records(text):
                     prior[rec["key"]] = rec  # last record wins (WAL overlays journal)
-        return cls(prior, wal_path=wal_path)
+        journal = cls(prior, wal_path=wal_path)
+        if wal_text is not None:
+            await journal._compact_wal(wal_text)
+        return journal
+
+    async def _compact_wal(self, wal_text: str) -> None:
+        """Rewrite the WAL without sealed runs' call records (see :meth:`load`).
+
+        Called from :meth:`load`, before this run appends anything, so the
+        rewrite never races the caller's own appends. A concurrent same-name
+        run's append landing between the read above and the ``os.replace`` would
+        be lost — that equals the already-tolerated torn-line severity (the call
+        simply recomputes on its next resume), never a correctness break.
+        """
+        sealed = {rec.get("run_id") for rec in self.prior.values() if rec.get("type") == "seal"}
+        sealed.discard(None)
+        if not sealed:
+            return
+        kept: list[str] = []
+        dropped = 0
+        for line in wal_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)  # torn line: keep bytes; replay skips it anyway
+                continue
+            if not isinstance(rec, dict) or "key" not in rec:
+                kept.append(line)
+                continue
+            if rec.get("type") in ("pause", "seal"):
+                kept.append(json.dumps(rec, ensure_ascii=False))
+                continue
+            if rec.get("run_id") in sealed:
+                dropped += 1
+                continue
+            kept.append(json.dumps(rec, ensure_ascii=False))
+        if not dropped:
+            return
+        tmp = f"{self._wal_path}.tmp"
+        async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
+            await f.write(("\n".join(kept) + "\n") if kept else "")
+            await f.flush()
+        os.replace(tmp, self._wal_path)
 
     def get_cached(self, ks: str, sig: str, run_id: str | None = None) -> dict | None:
         """Return the cached record if both ``sig`` and ``run_id`` match.

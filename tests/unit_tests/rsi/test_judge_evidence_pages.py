@@ -51,6 +51,7 @@ def test_long_response_pages_preserve_every_character_and_original_metadata(tmp_
     assert original["response"] == before == response
     assert text not in (workspace / "request.json").read_text(encoding="utf-8")
     assert request["judge_protocol"] == judge_evidence.judge_protocol_identity()
+    assert "read the listed response.pages files" in request["evidence_note"]
 
 
 @pytest.mark.parametrize("response", ["", "short answer", {"output": "42", "result_type": "answer"}])
@@ -63,6 +64,7 @@ def test_small_or_empty_response_stays_inline(tmp_path, response):
     request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
     assert request["response"] == response
     assert not (workspace / "response").exists()
+    assert "inline in response, with no response pages" in request["evidence_note"]
 
 
 def test_nonstandard_response_object_is_not_dropped(tmp_path):

@@ -195,7 +195,7 @@ def build_evolution_protocol_section(language: str = "cn") -> PromptSection:
     return PromptSection(
         name=SectionName.EVOLUTION_PROTOCOL,
         content={"cn": EVOLUTION_PROTOCOL_PROMPT_CN, "en": EVOLUTION_PROTOCOL_PROMPT_EN},
-        priority=86,
+        priority=98,
         category="skills",
     )
 
@@ -205,7 +205,7 @@ def build_team_evolution_protocol_section(language: str = "cn") -> PromptSection
     return PromptSection(
         name=SectionName.EVOLUTION_TEAM_PROTOCOL,
         content={"cn": TEAM_EVOLUTION_PROTOCOL_PROMPT_CN, "en": TEAM_EVOLUTION_PROTOCOL_PROMPT_EN},
-        priority=87,
+        priority=99,
         category="skills",
     )
 

@@ -40,7 +40,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_END_TIME,
     OJ_ERROR,
     OJ_INVOKE_ID,
-    OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -388,8 +387,6 @@ class TestOtelAgentHandler:
         assert OJ_START_TIME in s.attributes
         assert OJ_END_TIME in s.attributes
         assert OJ_ELAPSED_TIME in s.attributes
-        # meta_data set from instance_info when span.meta_data is None
-        assert OJ_META_DATA in s.attributes
 
     async def test_agent_chain_fields_set_when_span_empty(self):
         """Chain: invoke_type = "chain" when span.invoke_type is None."""
@@ -1140,8 +1137,13 @@ class TestMultiRoundConversationTraceContinuity:
         _EXPORTER.clear()
         self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
 
-    async def test_second_round_picks_up_first_round_context(self):
-        """Second round should use first round's component span as parent."""
+    async def test_second_round_continues_same_trace(self):
+        """Second round continues the same trace within the same session.
+
+        The handler caches the OTel context from the first root span and
+        reuses it for subsequent root spans, ensuring all spans within the
+        same execution share one OTel trace.
+        """
         # Round 1: root workflow with a component
         await self.handler.on_call_start(
             invoke_id="round1_root",
@@ -1157,17 +1159,15 @@ class TestMultiRoundConversationTraceContinuity:
             parent_node_id="",
         )
         await self.handler.on_call_done(invoke_id="round1_comp", outputs={})
-        # End round1_root so its span is exported (preserved in _layer_root_spans)
         await self.handler.on_call_done(invoke_id="round1_root", outputs={})
 
-        # Round 2: same workflow_id, new conversation round
+        # Round 2: same workflow_id, same session (continues trace)
         await self.handler.on_call_start(
             invoke_id="round2_root",
             metadata={"workflow_id": "wf1", "workflow_name": "Round 2"},
         )
 
-        # After round2 on_call_start, _layer_root_spans[""] is updated to round2_root
-        # Key assertion: _layer_root_spans was NOT cleared (multi-round preservation)
+        # _layer_root_spans should be updated to round2_root
         assert "" in self.handler._layer_root_spans
         assert self.handler._layer_root_spans[""].invoke_id == "round2_root"
 
@@ -1176,7 +1176,41 @@ class TestMultiRoundConversationTraceContinuity:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 3
 
-        # Verify round2_root has a parent from round1 (trace continuity)
+        # Verify round2_root continues the same trace as round1
+        round1_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round1_root"]
         round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
+        assert len(round1_spans) == 1
         assert len(round2_spans) == 1
         assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
+        # Both rounds share the same OTel trace
+        assert round1_spans[0].context.trace_id == round2_spans[0].context.trace_id, \
+            "round2_root should share the same OTel trace as round1_root"
+
+    async def test_new_session_clears_cached_context(self):
+        """A new session should clear cached context, starting a fresh trace."""
+        # Session 1: create root span
+        self.handler.set_session_id("session_1")
+        await self.handler.on_call_start(
+            invoke_id="s1_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Session 1"},
+        )
+        await self.handler.on_call_done(invoke_id="s1_root", outputs={})
+
+        # Session 2: new session clears cache
+        self.handler.set_session_id("session_2")
+        await self.handler.on_call_start(
+            invoke_id="s2_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Session 2"},
+        )
+        await self.handler.on_call_done(invoke_id="s2_root", outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        s1_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "s1_root"]
+        s2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "s2_root"]
+        assert len(s1_spans) == 1
+        assert len(s2_spans) == 1
+        # Different sessions get different traces
+        assert s1_spans[0].context.trace_id != s2_spans[0].context.trace_id, \
+            "Different sessions should have different OTel traces"
+
+

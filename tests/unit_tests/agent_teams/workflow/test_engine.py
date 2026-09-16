@@ -217,7 +217,9 @@ def test_resume_replays_from_journal_without_backend(tmp_path):
         def __init__(self) -> None:
             self.calls = 0
 
-        async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
+        async def run(
+            self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+        ) -> AgentResult:
             self.calls += 1
             if schema_json is not None:
                 return AgentResult(structured={"msg": f"r{self.calls}"})

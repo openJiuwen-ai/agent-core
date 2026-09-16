@@ -670,6 +670,8 @@ class TestSubagentRailRuntimeMode:
         mock_agent.system_prompt_builder.add_section.assert_called_once()
         section = mock_agent.system_prompt_builder.add_section.call_args[0][0]
         assert section.name == SectionName.SUBAGENT_TOOLS
+        prompt = section.content["cn"]
+        assert prompt.index("# 子智能体使用规则") < prompt.index("## 常驻子代理工具")
 
     @staticmethod
     @pytest.mark.asyncio
@@ -700,6 +702,7 @@ class TestSubagentRailRuntimeMode:
         section = system_prompt_builder.add_section.call_args.args[0]
         assert section.name == SectionName.SUBAGENT_TOOLS
         assert "subagent_spawn" in section.content["en"]
+        assert "# Subagent Usage Rules" in section.content["en"]
         assert "## Browser Agent" in section.content["en"]
         assert "Delegate browser work." in section.content["en"]
 
@@ -747,6 +750,11 @@ class TestSubagentRailRuntimeMode:
             call.args[0].name: call.args[0]
             for call in system_prompt_builder.add_section.call_args_list
         }
+        ordered_names = [
+            call.args[0].name
+            for call in system_prompt_builder.add_section.call_args_list
+        ]
+        assert ordered_names == [SectionName.TASK_TOOL, SectionName.SUBAGENT_TOOLS]
         assert SectionName.SUBAGENT_TOOLS in sections
         assert SectionName.TASK_TOOL in sections
         assert "## Browser Route" not in sections[SectionName.SUBAGENT_TOOLS].content["en"]

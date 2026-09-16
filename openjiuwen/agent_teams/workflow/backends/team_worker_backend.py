@@ -36,6 +36,7 @@ override it without standing up a real LLM.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Callable, Sequence
 
@@ -167,8 +168,10 @@ class TeamWorkerBackend(AgentBackend):
         # workflow that only uses single-shot agent() never pays for it.
         self._session_mgr: Any = None
 
-    async def run(self, prompt: str, opts: dict, schema_json: dict | None) -> AgentResult:
-        member_name = self._next_member_name(opts)
+    async def run(
+        self, prompt: str, opts: dict, schema_json: dict | None, *, call_key: str | None = None
+    ) -> AgentResult:
+        member_name = self._next_member_name(opts, call_key)
         model = self._resolve_model(opts.get("model"))
         # One rail per call: it bills this worker's model calls to the run's
         # shared ledger (and cuts the worker short once that ledger is dry),
@@ -587,23 +590,33 @@ class TeamWorkerBackend(AgentBackend):
     # Helpers
     # ------------------------------------------------------------------
 
-    def _next_member_name(self, opts: dict) -> str:
+    def _next_member_name(self, opts: dict, call_key: str | None = None) -> str:
         """Mint a unique worker member name from the call label and run prefix.
 
-        ``{run_prefix}-{label-slug}-{n}`` (or ``wf-{label-slug}-{n}`` when no
-        run id is set) — lowercase ASCII, the leading run/``wf-`` prefix
-        guarantees it starts with a letter (satisfies member-name routing/path
-        constraints). ``n`` is a per-backend counter; the synchronous
-        read-increment between awaits keeps it collision-free under the
-        engine's concurrent fan-out.
+        ``{run_prefix}-{label-slug}-{ident}`` (or ``wf-{label-slug}-{ident}``
+        when no run id is set) — lowercase ASCII, the leading run/``wf-``
+        prefix guarantees it starts with a letter (satisfies member-name
+        routing/path constraints).
+
+        ``ident`` is the hash of the engine's call-path key when available:
+        the key is deterministic across replays of the same script (cache
+        hits consume their key slot too), so a paused-and-resumed run mints
+        the same name for the same call site and the worker's worktree slug —
+        hence its kept-dirty worktree — is found again via the create
+        fast-recovery path. The per-backend counter remains only for callers
+        that invoke the backend without a call key (direct tests); it would
+        drift across a resume because hit calls never reach the backend.
         """
-        n = self._counter
-        self._counter += 1
         label = str(opts.get("label") or "worker")
         slug = _SLUG_RE.sub("-", label.lower()).strip("-") or "worker"
+        if call_key:
+            ident = hashlib.sha256(call_key.encode("utf-8")).hexdigest()[:12]
+        else:
+            ident = str(self._counter)
+            self._counter += 1
         if self._run_prefix:
-            return f"{self._run_prefix}-{slug}-{n}"
-        return f"wf-{slug}-{n}"
+            return f"{self._run_prefix}-{slug}-{ident}"
+        return f"wf-{slug}-{ident}"
 
     @staticmethod
     def _run_id_prefix(run_id: str | None) -> str | None:

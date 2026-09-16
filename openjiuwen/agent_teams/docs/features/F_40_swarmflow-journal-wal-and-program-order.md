@@ -78,7 +78,28 @@ journal 落地后(`F_38`)在使用中暴露三个问题,均由实跑 + 评审发
 
 - **fsync 未做**:append/save 只 `flush()`(到 OS 缓冲),防**进程崩溃**够用;防**断电/OS 崩溃**需
   `os.fsync`,代价是每次写的 fsync 延迟。首期不做(swarmflow 场景进程崩溃是主要威胁)。
-- **WAL 只增不自清**:仅 `finalize` 删;一直崩溃从不优雅完成的 session,其 WAL 会累积(随
-  `delete_team` 整树删除连带清掉)。需要时再加保留策略。
 - **`os.replace`/`unlink` 仍同步**:元数据 syscall 通常 µs 级;极端慢 FS 上仍可能微阻塞,但
   `aiofiles` 不封装 rename/unlink,且不可用 `to_thread`(owner 否决),暂保持同步。
+
+## 修订 2026-09-11:load 时 compaction(WAL 只增不自清的止血)
+
+原已知遗留"WAL 只增不自清"已落地保留策略:`Journal.load` 重放完 WAL 后做一次
+**compaction**——把 **sealed(终态)run 的 call 记录**从 WAL 里删掉。
+
+- **为什么 sealed run 的 call 记录是纯死数据**:seal guard(`tool_swarmflow._seal_guard`)
+  拦截 sealed run_id 强制 relaunch 换新 run_id(F_88);`get_cached(ks, sig, run_id)` 又要求
+  run_id 精确匹配(F_87)。两条合起来 = sealed run 的 call 记录**永远不可能再被命中**。反复
+  relaunch(每次强制新 run_id)+ 从不 finalize 的 session,WAL 里会按轮累积同 (key,sig) 不同
+  run_id 的重复记录——issue「wal 导致 journal 膨胀」的实证根因。
+- **保留什么**:pause/seal 两类 run 级记录原样保留(pause 记录是 cold resume 找恢复点的依据、
+  seal 记录是 seal guard 的读取对象);unsealed run 的 call 记录保留(该 run 可能还会 resume);
+  无法解析的 torn 行字节原样保留(replay 本来就跳过它)。
+- **不变量不破**:`finalize` 仍是唯一的整文件级 WAL 删除;compaction 只收缩"未来任何 load 都
+  不可能 serve 的记录",崩溃 durability 语义不变。`load` 内先读后写、run 开始前执行,不与本次
+  run 的 append 竞争;若同 session 并发了同名 run 的 append 恰好落在读与 replace 之间,最坏
+  等同于已容忍的 torn 行(该调用下次 resume 重算),无正确性影响。
+- **验证**:`test_journal.py` 新增 3 例——sealed call 记录被删而 pause/seal/unsealed 记录保留、
+  无 seal 时 WAL 字节不动、torn 行在全删场景下幸存且 seal 记录仍可查;原 18 例全过。
+  另有真实 LLM ST(`agent_team_swarmflow_cache_opt_st.py`,本地不提交)双场景复现:
+  relaunch 后 WAL 与 journal 存在同 (key,sig) 不同 run_id 的记录(compaction 目标),场景 A
+  11/11、场景 B 8/8 PASS。
