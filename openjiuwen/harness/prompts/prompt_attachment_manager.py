@@ -104,6 +104,38 @@ def hash_rendered(rendered: str) -> str:
     return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
 
 
+# Date and timestamp patterns stripped before hashing so that content whose
+# only drift is a clock value does not trigger a new delta UserMessage.
+# Matches pure dates (2026-09-16, 2026/09/16) and full ISO timestamps
+# (2026-09-16T10:00:00Z, 2026-09-16 10:00:00+08:00).
+_ISO_DATETIME_RE = re.compile(
+    r"\d{4}[-/]\d{2}[-/]\d{2}"
+    r"(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?"
+)
+# Parenthesized timestamp annotations like "(updated: 2026-09-16T10:00:00Z)".
+_PAREN_TIMESTAMP_RE = re.compile(
+    r"\s*\((?:updated|retrieved_at|created_at|fetched_at|modified)"
+    r"\s*:\s*[^)]*\)"
+)
+_WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _normalize_content_for_hash(content: str) -> str:
+    """Strip date/timestamp fragments so hash comparison reflects real content.
+
+    Both pure dates (``2026-09-16``) and full ISO timestamps
+    (``2026-09-16T10:00:00Z``) are stripped, along with parenthesized
+    timestamp annotations (``(updated: ...)``).  Only meaningful content
+    remains for change detection.  Rendered output is unaffected — the model
+    still sees the original timestamps.
+    """
+    if not content:
+        return ""
+    text = _ISO_DATETIME_RE.sub("", content)
+    text = _PAREN_TIMESTAMP_RE.sub("", text)
+    return _WHITESPACE_RE.sub(" ", text).strip()
+
+
 def hash_prompt_attachment(prompt_attachment: PromptAttachment) -> str:
     """Return a stable hash for the content visible to the model.
 
@@ -117,7 +149,7 @@ def hash_prompt_attachment(prompt_attachment: PromptAttachment) -> str:
     payload = {
         "section": prompt_attachment.section,
         "kind": _kind_value(prompt_attachment.kind),
-        "content": prompt_attachment.content or "",
+        "content": _normalize_content_for_hash(prompt_attachment.content or ""),
         "content_kind": prompt_attachment.content_kind,
     }
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
