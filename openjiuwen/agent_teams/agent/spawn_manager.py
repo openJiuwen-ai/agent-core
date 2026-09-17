@@ -319,6 +319,7 @@ class SpawnManager:
         team_name = self._configurator.team_name
         if team_backend and team_name:
             member = await team_backend.db.member.get_member(member_name, team_name)
+            status = MemberStatus.ERROR
             if member is not None:
                 try:
                     status = MemberStatus(member.status)
@@ -331,6 +332,18 @@ class SpawnManager:
                         status.value,
                     )
                     return
+            # READY/BUSY/UNSTARTED 等 active 状态不能直接迁移到 RESTARTING，需先经
+            # ERROR 归一化（与 recovery_manager 的 session-switch 路径一致），否则
+            # 会报 "Invalid state transition: ready -> restarting"（issue #4318）。
+            if status not in {
+                MemberStatus.PAUSED,
+                MemberStatus.STOPPED,
+                MemberStatus.ERROR,
+                MemberStatus.SHUTDOWN,
+            }:
+                await team_backend.db.member.update_member_status(
+                    member_name, team_name, MemberStatus.ERROR.value,
+                )
             await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,

@@ -160,6 +160,19 @@ class TeamMember:
                 f"Member {self.member_name} not registered yet; skipping execution status update to {new_status.value}"
             )
             return False
+        # 幂等：重复设置相同执行状态（如恢复后再次收到 started 事件导致的
+        # running->running）直接返回成功，避免 CAS 迁移校验报
+        # "Invalid state transition" 刷屏（issue #4318）。
+        if old_status == new_status:
+            return True
+        # 倒退容忍：恢复/断点续跑时上一轮异常退出使 execution_status 残留 RUNNING，
+        # 新一轮 started 事件又从 STARTING 走起（running->starting）。这是恢复
+        # 场景的重复启动，视为幂等成功，避免非法迁移刷屏（issue #4318）。
+        if (
+            old_status == ExecutionStatus.RUNNING
+            and new_status == ExecutionStatus.STARTING
+        ):
+            return True
         success = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,
