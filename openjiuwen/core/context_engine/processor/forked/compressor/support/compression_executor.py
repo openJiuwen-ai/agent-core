@@ -114,7 +114,7 @@ class CompressionResult:
 
 
 class CompressionExecutor:
-    """Shared model invocation wrapper for compaction calls using main-agent prefix context."""
+    """Shared model invocation wrapper for compaction calls."""
 
     def __init__(self, model: Any) -> None:
         self._model = model

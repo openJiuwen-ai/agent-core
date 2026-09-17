@@ -373,9 +373,12 @@ class PrefixCompactProcessor(ContextProcessor):
         overflow_retry_index = 0
         transient_retry_count = 0
         while True:
-            request = CompressionRequest.from_context_window(
+            # The agent's system prompt and callable tools are needed for the
+            # main model call, but not for summarizing conversation history.
+            request = CompressionRequest(
                 prompt=prompt,
-                context_window=context_window,
+                context_messages=list(context_window.context_messages or []),
+                tools=[],
                 exclude_recent_messages=len(span.protected_tail),
             )
             try:
