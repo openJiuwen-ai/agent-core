@@ -9,18 +9,20 @@ database, transport, child process, or additional runtime class here.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
+import functools
 import hashlib
 import json
 import os
 import re
 import stat
 import tempfile
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime, timezone
 from pathlib import Path
-from typing import Mapping, cast
+from typing import Mapping, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -54,6 +56,8 @@ from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFe
 from openjiuwen.harness.personal_context.models import FetchBatch, PersonalContextStatus
 from openjiuwen.harness.personal_context.source_metadata import read_source_detail
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_T = TypeVar("_T")
 
 _QUEUE_CAPACITY = 8
 _PIPELINE_CANCEL_GRACE_SECONDS = 5.0
@@ -142,7 +146,7 @@ def _fetch_run_status(
     elif run_state == "succeeded":
         percent = 100
     elif phase == "organizing":
-        percent = 80
+        percent = 45
     elif phase == "validating":
         percent = 90
     elif phase == "committing":
@@ -352,6 +356,7 @@ class PersonalContext:
         self._fetch_run_history: dict[str, list[dict[str, object]]] = {}
         self._fetch_run_identity: dict[str, dict[str, object]] = {}
         self._invalidated_fetch_runs: set[tuple[str, str]] = set()
+        self._query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-query")
 
     def _set_embedding_configuration(
         self,
@@ -385,7 +390,7 @@ class PersonalContext:
                     self._state = "CONFIGURED"
                 return
             history = {
-                service.service_id: await asyncio.to_thread(self._read_run_history, service.service_id)
+                service.service_id: await self._run_query(self._read_run_history, service.service_id)
                 for service in config.fetch_services
             }
             await self._cancel_authorization(clear_error=True)
@@ -624,33 +629,43 @@ class PersonalContext:
                     if update_error:
                         self._authorization_error = authorization_error
 
+    async def _run_query(self, function: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
+        """Run one small read in the dedicated query pool, away from pipeline I/O."""
+        loop = asyncio.get_running_loop()
+        call = functools.partial(function, *args, **kwargs)
+        return await loop.run_in_executor(self._query_executor, call)
+
+    def shutdown(self) -> None:
+        """Shut down the dedicated query pool when this instance is discarded."""
+        self._query_executor.shutdown(wait=False, cancel_futures=True)
+
     async def get_graph(self, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
         """Read one breadth-first slice of the last published Context graph."""
 
-        return await asyncio.to_thread(build_context_graph, self._home, root_id=root_id, depth=depth)
+        return await self._run_query(build_context_graph, self._home, root_id=root_id, depth=depth)
 
     async def get_tree(self, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
         """Read one breadth-first slice of the last published Context file tree."""
 
-        return await asyncio.to_thread(build_context_tree, self._home, root_id=root_id, depth=depth)
+        return await self._run_query(build_context_tree, self._home, root_id=root_id, depth=depth)
 
     async def search_graph(self, query: str) -> dict[str, object]:
         """Search the last published Context pages without starting the runtime."""
 
         if not isinstance(query, str) or not query.strip():
             raise _state_error("query must be a non-empty string")
-        return await asyncio.to_thread(search_context_graph, self._home, query.strip())
+        return await self._run_query(search_context_graph, self._home, query.strip())
 
     async def get_graph_page(self, node_id: str) -> dict[str, object]:
         """Read one published Context page without starting the runtime."""
 
-        return await asyncio.to_thread(read_context_graph_page, self._home, node_id)
+        return await self._run_query(read_context_graph_page, self._home, node_id)
 
     async def get_source(self, source_id: str) -> dict[str, object]:
         """Read one structured atomic-source detail without exposing internals."""
 
         source_root = self._home / "workspace" / "source-meta"
-        return await asyncio.to_thread(read_source_detail, source_root, source_id)
+        return await self._run_query(read_source_detail, source_root, source_id)
 
     async def activate_runtime(self) -> None:
         """Start the one Pipeline and all enabled provider scheduler tasks."""
@@ -665,7 +680,7 @@ class PersonalContext:
                 return
             if self._state == "STARTING" and self._activation_task is not None:
                 task = self._activation_task
-            elif self._state in {"CONFIGURED", "STOPPED"}:
+            elif self._state in {"CONFIGURED", "STOPPED", "FAILED"}:
                 self._state = "STARTING"
                 task = asyncio.create_task(self._activate_runtime_impl(), name="personal-context-activation")
                 self._activation_task = task
@@ -684,7 +699,7 @@ class PersonalContext:
             raise _state_error("PersonalContext has not been configured")
         pipeline: ContextPipelineService | None = None
 
-        def report_pipeline_phase(service_id: str, run_id: str, phase: str) -> None:
+        def report_pipeline_phase(service_id: str, run_id: str, phase: str, progress_percent: int) -> None:
             identity = self._fetch_run_identity.get(service_id)
             progress = self._fetch_run_progress.get(service_id)
             is_current_run = identity is not None and identity.get("run_id") == run_id
@@ -697,6 +712,7 @@ class PersonalContext:
                 total_items=cast(int, progress["total_items"]),
                 completed_items=cast(int, progress["completed_items"]),
                 phase=phase,
+                progress_percent=progress_percent,
             )
 
         try:
@@ -847,7 +863,7 @@ class PersonalContext:
         if not isinstance(service, PersonalContextFetchServiceConfig):
             raise _state_error("service must be PersonalContextFetchServiceConfig")
         safe_id = _safe_service_id(service.service_id)
-        history = await asyncio.to_thread(self._read_run_history, safe_id)
+        history = await self._run_query(self._read_run_history, safe_id)
         async with self._state_lock:
             config = self._config
             if config is None:
@@ -947,6 +963,14 @@ class PersonalContext:
         service_id: str | None = None,
     ) -> dict[str, object]:
         """Start managed manual fetch rounds and return after acceptance."""
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            if not config.collection_enabled:
+                raise _state_error("PersonalContext is disabled")
+        if self._state != "RUNNING":
+            await self.activate_runtime()
         async with self._state_lock:
             config = self._config
             pipeline = self._pipeline_service
