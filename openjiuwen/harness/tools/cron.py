@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol, Sequence
+from typing import Any, Protocol
 
-from openjiuwen.core.foundation.tool import LocalFunction, Tool, ToolCard
-from openjiuwen.harness.prompts.tools import build_tool_card, get_tool_input_params
+from openjiuwen.core.foundation.tool import LocalFunction, Tool
+from openjiuwen.harness.prompts.tools import build_tool_card
 
 
 @dataclass(frozen=True)
@@ -93,45 +93,6 @@ def _tool_scope(context: CronToolContext | None) -> str:
     return scope.replace(":", "_")
 
 
-def _make_tool(
-    *,
-    name: str,
-    scope: str,
-    language: str,
-    agent_id: str,
-    func: Any,
-    target_schema: dict[str, Any] | None = None,
-) -> Tool:
-    card = build_tool_card(name, f"{name}_{scope}", language, agent_id=agent_id)
-    if target_schema is not None:
-        input_params = get_tool_input_params(name, language)
-        if "properties" in input_params and "targets" in input_params["properties"]:
-            input_params["properties"]["targets"] = target_schema
-        card = ToolCard(
-            id=card.id,
-            name=card.name,
-            description=card.description,
-            input_params=input_params,
-        )
-    return LocalFunction(card=card, func=func)
-
-
-def _target_schema(
-    target_channels: Sequence[str] | None,
-    default_target_channel: str | None,
-) -> dict[str, Any]:
-    schema: dict[str, Any] = {
-        "type": "string",
-        "description": "Legacy compatibility target channel",
-    }
-    enum_values = [str(item).strip() for item in list(target_channels or []) if str(item).strip()]
-    if enum_values:
-        schema["enum"] = enum_values
-    if default_target_channel:
-        schema["default"] = str(default_target_channel).strip()
-    return schema
-
-
 async def _dispatch_cron_action(
     backend: CronToolBackend,
     *,
@@ -206,12 +167,18 @@ def create_cron_tools(
     *,
     context: CronToolContext | None = None,
     language: str = "cn",
-    target_channels: Sequence[str] | None = None,
-    default_target_channel: str | None = None,
-    include_legacy_compat: bool = True,
+    target_channels: list[str] | None = None,  # noqa: ARG001
+    default_target_channel: str | None = None,  # noqa: ARG001
+    include_legacy_compat: bool = False,  # noqa: ARG001
     agent_id: str | None = None,
 ) -> list[Tool]:
-    """Create the unified cron tool plus optional legacy compatibility tools."""
+    """Create the unified cron tool.
+
+    Exactly one model-facing tool named ``cron`` (action dispatcher) is
+    returned. Legacy ``cron_*`` tools were removed; the parameters are kept
+    in the signature for backward compatibility with existing callers and
+    are ignored.
+    """
 
     scope = _tool_scope(context)
     final_agent_id = agent_id or scope
@@ -219,93 +186,12 @@ def create_cron_tools(
     async def cron_tool_wrapper(**kwargs: Any) -> Any:
         return await _dispatch_cron_action(backend, context=context, **kwargs)
 
-    async def list_jobs_wrapper() -> list[dict[str, Any]]:
-        return await backend.list_jobs()
-
-    async def get_job_wrapper(job_id: str) -> dict[str, Any] | None:
-        return await backend.get_job(job_id)
-
-    async def create_job_wrapper(**kwargs: Any) -> dict[str, Any]:
-        return await backend.create_job(dict(kwargs), context=context)
-
-    async def update_job_wrapper(job_id: str, patch: dict[str, Any]) -> dict[str, Any]:
-        return await backend.update_job(job_id, patch, context=context)
-
-    async def delete_job_wrapper(job_id: str) -> bool:
-        return await backend.delete_job(job_id)
-
-    async def toggle_job_wrapper(job_id: str, enabled: bool) -> dict[str, Any]:
-        return await backend.toggle_job(job_id, enabled)
-
-    async def preview_job_wrapper(job_id: str, count: int = 5) -> list[dict[str, Any]]:
-        return await backend.preview_job(job_id, count)
-
-    tools: list[Tool] = [
+    return [
         LocalFunction(
             card=build_tool_card("cron", f"cron_{scope}", language, agent_id=final_agent_id),
             func=cron_tool_wrapper,
         )
     ]
-    if not include_legacy_compat:
-        return tools
-
-    target_schema = _target_schema(target_channels, default_target_channel)
-
-    tools.extend(
-        [
-            _make_tool(
-                name="cron_list_jobs",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=list_jobs_wrapper,
-            ),
-            _make_tool(
-                name="cron_get_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=get_job_wrapper,
-            ),
-            _make_tool(
-                name="cron_create_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=create_job_wrapper,
-                target_schema=target_schema,
-            ),
-            _make_tool(
-                name="cron_update_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=update_job_wrapper,
-            ),
-            _make_tool(
-                name="cron_delete_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=delete_job_wrapper,
-            ),
-            _make_tool(
-                name="cron_toggle_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=toggle_job_wrapper,
-            ),
-            _make_tool(
-                name="cron_preview_job",
-                scope=scope,
-                language=language,
-                agent_id=final_agent_id,
-                func=preview_job_wrapper,
-            ),
-        ]
-    )
-    return tools
 
 
 __all__ = [
