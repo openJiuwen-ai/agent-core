@@ -88,7 +88,7 @@ async def test_dump_writes_request_and_post_compression_context(tmp_path):
     assert request["prompt"]
     assert request["exclude_recent_messages"] >= 0
     # messages_sent_to_model is exactly what the executor builds for the model call:
-    # system_messages + to-be-compressed context + the compression prompt as a user turn.
+    # To-be-compressed context + the compression prompt as a user turn.
     sent = request["messages_sent_to_model"]
     assert isinstance(sent, list)
     assert sent[-1]["role"] == "user"
