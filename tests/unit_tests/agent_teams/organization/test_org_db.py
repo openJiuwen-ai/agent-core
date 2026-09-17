@@ -69,6 +69,40 @@ async def test_org_db_context_runs_static_ddl_once(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_org_db_context_adds_missing_summary_execution_updated_at():
+    from openjiuwen.agent_teams.organization import db as org_db
+
+    db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
+    await db.initialize()
+    assert db.engine is not None
+
+    async with db.engine.begin() as conn:
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE org_summary_execution (
+                execution_id TEXT PRIMARY KEY,
+                organization_id TEXT,
+                root_task_id TEXT,
+                summary_task_id TEXT,
+                summary_team_id TEXT,
+                status TEXT,
+                created_at BIGINT
+            )
+            """
+        )
+        await conn.run_sync(org_db.ensure_org_static_tables)
+
+    async with db.engine.connect() as conn:
+        columns = await conn.run_sync(
+            lambda sync_conn: {
+                column["name"] for column in inspect(sync_conn).get_columns("org_summary_execution")
+            }
+        )
+    assert "updated_at" in columns
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_team_organization_manager_shares_db_context():
     db = TeamDatabase(DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:"))
     manager = TeamOrganizationManager(organization_id="org-1", db=db)
