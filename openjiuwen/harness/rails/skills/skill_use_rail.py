@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -210,6 +211,88 @@ def _catalog_name_and_description(yaml_data: Optional[dict]) -> Optional[tuple[s
     return name, description
 
 
+# Fallback identity bounds: a directory whose SKILL.md frontmatter is incomplete
+# is still indexed when the body provides a usable description source. This keeps
+# user-imported skills visible to the model (and to ``skill_tool``) even when the
+# frontmatter is malformed — see the "skill confusion" incident where such a
+# skill silently vanished from the catalog and a semantically similar skill was
+# wrongly substituted.
+_FALLBACK_DESCRIPTION_MAX_CHARS = 120
+_FALLBACK_BODY_HEAD_LINES = 16
+_FALLBACK_BODY_READ_BUDGET = 8192
+_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*#*\s*$")
+_NON_CONTENT_LINES = frozenset({"---", "***", "___"})
+
+
+def _read_body_head(skill_md_path: Path, max_lines: int = _FALLBACK_BODY_HEAD_LINES) -> str:
+    """Bounded local read of the first body lines (frontmatter fence excluded)."""
+    try:
+        with skill_md_path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.read(1)
+            if first == "\ufeff":
+                # Mirror _extract_frontmatter_yaml_and_body: strip a UTF-8 BOM so
+                # the frontmatter fence and first body line are not corrupted.
+                first = handle.read(3)
+            elif first:
+                first += handle.read(2)
+            in_frontmatter = first == "---"
+            parts: List[str] = [] if in_frontmatter else [first]
+            total = len(first)
+            collected = 0 if in_frontmatter else 1
+            while total < _FALLBACK_BODY_READ_BUDGET and collected < max_lines:
+                line = handle.readline(_FALLBACK_BODY_READ_BUDGET)
+                if not line:
+                    break
+                total += len(line)
+                if in_frontmatter:
+                    if line.strip() == "---":
+                        in_frontmatter = False
+                    continue
+                parts.append(line)
+                collected += 1
+            return "".join(parts)
+    except OSError:
+        return ""
+
+
+def _fallback_description_from_body(body_head: str) -> str:
+    """First meaningful body line (heading preferred), single-lined and truncated."""
+    for raw_line in body_head.splitlines():
+        line = raw_line.strip()
+        if not line or line in _NON_CONTENT_LINES:
+            continue
+        match = _HEADING_RE.match(line)
+        text = match.group(1) if match else line
+        return " ".join(text.split())[:_FALLBACK_DESCRIPTION_MAX_CHARS]
+    return ""
+
+
+def _fallback_skill_identity(
+    skill_md_path: Path,
+    yaml_data: Optional[dict],
+) -> Optional[Tuple[str, str]]:
+    """Resolve ``(name, description)`` with per-field fallbacks.
+
+    ``name`` ← frontmatter ``name`` when non-empty, else the skill directory name.
+    ``description`` ← frontmatter ``description`` when non-empty, else the first
+    markdown heading (or first meaningful line) from the body head, single-lined
+    and truncated to ``_FALLBACK_DESCRIPTION_MAX_CHARS``.
+
+    Returns None when description has no usable source (blank body) or the
+    resolved name is empty — the directory stays unindexed in that case.
+    """
+    data = yaml_data if isinstance(yaml_data, dict) else {}
+    name = str(data.get("name") or "").strip() or skill_md_path.parent.name
+    description = str(data.get("description") or "").strip()
+    if not description:
+        description = _fallback_description_from_body(
+            _read_body_head(skill_md_path)
+        )
+    if not description or not name:
+        return None
+    return name, description
+
+
 def _skill_from_frontmatter_local(
     skill_dir: Path, update_at: float
 ) -> Optional[Skill]:
@@ -230,6 +313,8 @@ def _skill_from_frontmatter_local(
         )
         return None
     fields = _catalog_name_and_description(yaml_data)
+    if fields is None:
+        fields = _fallback_skill_identity(skill_md_path, yaml_data)
     if fields is None:
         return None
     name, description = fields
@@ -257,7 +342,8 @@ def warmup_process_skill_index(
     can hit ``cache=hit``. Safe to call repeatedly; mtime mismatch refreshes.
 
     Returns:
-        Stats dict: ``scanned``, ``kept``, ``filled``, ``hits``, ``cost_ms``.
+        Stats dict: ``scanned``, ``kept``, ``filled``, ``hits``, ``failed``,
+        ``entries``, ``cost_ms``.
     """
     t0 = time.perf_counter()
     enabled = SkillUseRail.normalize_name_set(enabled_skills)
@@ -267,6 +353,7 @@ def warmup_process_skill_index(
     kept = 0
     filled = 0
     hits = 0
+    failed = 0
 
     def _allowed(name: str) -> bool:
         if enabled and name not in enabled:
@@ -307,9 +394,11 @@ def warmup_process_skill_index(
                 )
                 continue
             if skill is None:
+                failed += 1
                 logger.debug(
                     "[SkillUseRail] skill_index_warmup skip path=%s: "
-                    "missing frontmatter name/description",
+                    "no usable name/description (frontmatter incomplete and "
+                    "body fallback failed)",
                     item,
                 )
                 continue
@@ -323,16 +412,18 @@ def warmup_process_skill_index(
         "kept": kept,
         "filled": filled,
         "hits": hits,
+        "failed": failed,
         "entries": len(_PROCESS_SKILL_INDEX),
         "cost_ms": round(cost_ms, 1),
     }
     logger.info(
         "[SkillUseRail] skill_index_warmup scanned=%s kept=%s filled=%s hits=%s "
-        "entries=%s cost_ms=%.1f",
+        "failed=%s entries=%s cost_ms=%.1f",
         scanned,
         kept,
         filled,
         hits,
+        failed,
         stats["entries"],
         cost_ms,
     )
@@ -498,6 +589,7 @@ class SkillUseRail(DeepAgentRail):
         scanned_dirs = 0
         skipped_by_filter = 0
         loaded_or_cached = 0
+        failed_loads = 0
         cache_hits = 0
         cache_misses = 0
 
@@ -552,6 +644,7 @@ class SkillUseRail(DeepAgentRail):
                         skill = await self._load_skill(item, update_at)
                         cache_misses += 1
                         if skill is None:
+                            failed_loads += 1
                             discovered_keys.discard(key)
                             if ordered_keys and ordered_keys[-1] == key:
                                 ordered_keys.pop()
@@ -579,10 +672,11 @@ class SkillUseRail(DeepAgentRail):
             cache_label = "mixed"
         cost_ms = (time.perf_counter() - t0) * 1000
         logger.info(
-            "[SkillUseRail] filter_before_load done scanned=%s skipped=%s kept=%s",
+            "[SkillUseRail] filter_before_load done scanned=%s skipped=%s kept=%s failed=%s",
             scanned_dirs,
             skipped_by_filter,
             loaded_or_cached,
+            failed_loads,
         )
         logger.info(
             "[SkillUseRail] skill_index cache=%s hits=%s misses=%s entries=%s cost_ms=%.1f",
@@ -596,7 +690,8 @@ class SkillUseRail(DeepAgentRail):
     async def _load_skill(self, skill_dir: Path, update_at: float) -> Optional[Skill]:
         """Load one skill from a skill directory.
 
-        Returns None when frontmatter lacks required ``name`` / ``description``.
+        Returns None only when neither the frontmatter nor the fallback identity
+        (directory name + body head) yields a usable ``name`` / ``description``.
         """
         skill_md_path = skill_dir / "SKILL.md"
 
@@ -609,8 +704,11 @@ class SkillUseRail(DeepAgentRail):
 
         fields = _catalog_name_and_description(yaml_data)
         if fields is None:
-            logger.debug(
-                "[SkillUseRail] skip skill path=%s: missing frontmatter name/description",
+            fields = _fallback_skill_identity(skill_md_path, yaml_data)
+        if fields is None:
+            logger.warning(
+                "[SkillUseRail] skip skill path=%s: no usable name/description "
+                "(frontmatter incomplete and body fallback failed)",
                 skill_dir,
             )
             return None
