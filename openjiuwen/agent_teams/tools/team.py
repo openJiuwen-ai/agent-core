@@ -2766,10 +2766,15 @@ class TeamBackend:
                 the native CLI reports an authentication failure.
 
         Returns:
-            ``MemberOpResult`` — failure if the backend name is unknown or the
-            underlying ``spawn_member`` rejects the registration.
+            ``MemberOpResult`` — failure if the backend name is unknown, its
+            optional SDK is not installed, or the underlying ``spawn_member``
+            rejects the registration.
         """
-        from openjiuwen.agent_teams.external.cli_agent.backends import available_backends, is_known_backend
+        from openjiuwen.agent_teams.external.cli_agent.backends import (
+            available_backends,
+            is_known_backend,
+            missing_sdk_requirement,
+        )
 
         if not prompt:
             return MemberOpResult.fail("spawn_external_cli_agent requires non-empty 'prompt'")
@@ -2784,6 +2789,16 @@ class TeamBackend:
             )
         if not is_known_backend(cli_agent):
             return MemberOpResult.fail(f"Unknown cli_agent '{cli_agent}'; known: {', '.join(available_backends())}")
+        # Fail at registration rather than at the lazy startup triggered by the
+        # first message: the SDK is only imported when the member process is
+        # spawned, which would otherwise surface as an opaque send failure.
+        missing_sdk = missing_sdk_requirement(cli_agent)
+        if missing_sdk is not None:
+            return MemberOpResult.fail(
+                f"cli_agent '{cli_agent}' is unavailable: Python package '{missing_sdk.distribution}' "
+                f"is not installed in this environment (install openjiuwen[{missing_sdk.extra}]); "
+                "do not retry this member kind until the dependency is installed"
+            )
 
         member_card = AgentCard(
             id=f"{self.team_name}_{member_name}",
