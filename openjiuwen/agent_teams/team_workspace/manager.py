@@ -6,11 +6,15 @@
 
 Handles locking, versioning, sync, and conflict detection for the team
 shared workspace directory. File I/O is delegated to SysOperation tools
-via the .team/ symlink mount — this module manages only metadata and
-version control.
+against absolute paths under the team workspace (its ``artifacts/<date>/
+chat-<n>/outputs/`` subtree for projectless members, the user project for
+members bound to one) — this module manages only metadata and version
+control. The legacy ``.team/`` symlink mount is no longer the access path;
+``mount_into_workspace`` / ``mount_worktree`` are retained only as opt-in
+symlink convenience for worktree-isolated code teams.
 
 Two operating modes:
-- LOCAL: single _team_workspace/ directory, symlink mount, in-memory locks.
+- LOCAL: single _team_workspace/ directory, in-memory locks.
 - DISTRIBUTED: per-node clone, git push/pull sync, leader-coordinated locks
   (Phase 3).
 """
@@ -63,7 +67,9 @@ _MOUNT_MERGE_SKIP_NAMES = frozenset(
 class TeamWorkspaceManager:
     """Manages team shared workspace metadata and version control.
 
-    File I/O is handled by standard SysOperation tools via .team/ mount.
+    File I/O is handled by standard SysOperation tools against absolute paths
+    under the team workspace (the shared outputs directory for projectless
+    members, the user project for members bound to one).
     This manager handles locking, versioning, sync, and conflict detection.
 
     Operates in two modes:

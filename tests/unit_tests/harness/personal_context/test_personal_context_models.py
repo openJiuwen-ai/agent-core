@@ -23,15 +23,12 @@ def _item(**overrides):
     return value
 
 
-def test_raw_change_item_requires_content_for_upsert_and_forbids_content_for_delete():
+def test_raw_change_item_requires_content_and_rejects_delete_for_first_release():
     with pytest.raises(ValidationError):
         RawChangeItem(**_item(content=None))
 
     with pytest.raises(ValidationError):
         RawChangeItem(**_item(operation="delete", content="body"))
-
-    item = RawChangeItem(**_item(operation="delete", content=None))
-    assert item.content is None
 
 
 def test_raw_change_item_enforces_content_snapshot_and_metadata_boundaries():
@@ -76,54 +73,156 @@ def test_fetch_batch_enforces_size_pairing_and_cursor_json_boundary():
 
 def test_personal_context_status_is_frozen_and_copies_nested_state():
     states = {"notes": "RUNNING"}
+    progress = {
+        "notes": {
+            "service_id": "notes",
+            "run_state": "running",
+            "progress_percent": 15,
+            "total_items": 20,
+            "completed_items": 3,
+            "last_error": None,
+        }
+    }
     status = PersonalContextStatus(
         configured=True,
-        enabled=True,
-        fetching_enabled=True,
+        collection_enabled=True,
+        agent_use_enabled=True,
         state="RUNNING",
         pipeline_running=True,
         pipeline_queue_size=0,
         fetch_service_states=states,
         fetch_service_errors={},
+        fetch_run_progress=progress,
         context_root="/tmp/context",
         context_ready=True,
         last_error=None,
     )
     states["notes"] = "FAILED"
+    progress["notes"]["completed_items"] = 20
 
     assert status.fetch_service_states["notes"] == "RUNNING"
+    assert status.fetch_run_progress["notes"]["completed_items"] == 3
     with pytest.raises(ValidationError):
         status.state = "FAILED"
 
 
-def test_status_reports_fetching_switch():
+def test_personal_context_status_accepts_stopping_fetch_run_progress():
     status = PersonalContextStatus(
         configured=True,
-        enabled=True,
-        fetching_enabled=False,
+        collection_enabled=True,
+        agent_use_enabled=False,
+        state="RUNNING",
+        pipeline_running=True,
+        pipeline_queue_size=0,
+        fetch_service_states={"notes": "STOPPING"},
+        fetch_service_errors={},
+        fetch_run_progress={
+            "notes": {
+                "service_id": "notes",
+                "run_state": "stopping",
+                "progress_percent": 50,
+                "total_items": 2,
+                "completed_items": 1,
+                "last_error": None,
+            }
+        },
+        context_root="C:/personal_context/workspace/context",
+        context_ready=False,
+        last_error=None,
+    )
+
+    assert status.fetch_run_progress["notes"]["run_state"] == "stopping"
+
+
+def test_personal_context_status_accepts_staged_progress_before_success():
+    status = PersonalContextStatus(
+        configured=True,
+        collection_enabled=True,
+        agent_use_enabled=False,
+        state="RUNNING",
+        pipeline_running=True,
+        pipeline_queue_size=0,
+        fetch_service_states={"notes": "RUNNING"},
+        fetch_service_errors={},
+        fetch_run_progress={
+            "notes": {
+                "service_id": "notes",
+                "run_state": "running",
+                "progress_percent": 80,
+                "total_items": 20,
+                "completed_items": 20,
+                "last_error": None,
+            }
+        },
+        context_root="C:/personal_context/workspace/context",
+        context_ready=False,
+        last_error=None,
+    )
+
+    assert status.fetch_run_progress["notes"]["progress_percent"] == 80
+
+
+def test_personal_context_status_rejects_100_percent_before_success():
+    with pytest.raises(ValidationError):
+        PersonalContextStatus(
+            configured=True,
+            collection_enabled=True,
+            agent_use_enabled=False,
+            state="RUNNING",
+            pipeline_running=True,
+            pipeline_queue_size=0,
+            fetch_service_states={"notes": "RUNNING"},
+            fetch_service_errors={},
+            fetch_run_progress={
+                "notes": {
+                    "service_id": "notes",
+                    "run_state": "running",
+                    "progress_percent": 100,
+                    "total_items": 20,
+                    "completed_items": 20,
+                    "last_error": None,
+                }
+            },
+            context_root="C:/personal_context/workspace/context",
+            context_ready=False,
+            last_error=None,
+        )
+
+
+def test_status_reports_independent_collection_and_agent_use_switches():
+    status = PersonalContextStatus(
+        configured=True,
+        collection_enabled=False,
+        agent_use_enabled=True,
         state="RUNNING",
         pipeline_running=True,
         pipeline_queue_size=0,
         fetch_service_states={"notes": "STOPPED"},
         fetch_service_errors={},
+        fetch_run_progress={},
         context_root="C:/personal_context/workspace/context",
         context_ready=True,
         last_error=None,
     )
-    assert status.fetching_enabled is False
+    dumped = status.model_dump(mode="json")
+    assert status.collection_enabled is False
+    assert status.agent_use_enabled is True
+    assert "enabled" not in dumped
+    assert "fetching_enabled" not in dumped
 
 
 def test_personal_context_status_last_error_has_a_bounded_public_shape():
     with pytest.raises(ValidationError):
         PersonalContextStatus(
             configured=True,
-            enabled=True,
-            fetching_enabled=True,
+            collection_enabled=True,
+            agent_use_enabled=True,
             state="RUNNING",
             pipeline_running=True,
             pipeline_queue_size=0,
             fetch_service_states={},
             fetch_service_errors={},
+            fetch_run_progress={},
             context_root="/tmp/context",
             context_ready=True,
             last_error={
@@ -140,13 +239,14 @@ def test_personal_context_status_rejects_unknown_fetch_service_state():
     with pytest.raises(ValidationError):
         PersonalContextStatus(
             configured=True,
-            enabled=True,
-            fetching_enabled=True,
+            collection_enabled=True,
+            agent_use_enabled=True,
             state="RUNNING",
             pipeline_running=True,
             pipeline_queue_size=0,
             fetch_service_states={"notes": "BROKEN"},
             fetch_service_errors={},
+            fetch_run_progress={},
             context_root="/tmp/context",
             context_ready=True,
             last_error=None,
@@ -157,13 +257,14 @@ def test_personal_context_status_rejects_nested_last_error_values():
     with pytest.raises(ValidationError):
         PersonalContextStatus(
             configured=True,
-            enabled=True,
-            fetching_enabled=True,
+            collection_enabled=True,
+            agent_use_enabled=True,
             state="RUNNING",
             pipeline_running=True,
             pipeline_queue_size=0,
             fetch_service_states={},
             fetch_service_errors={},
+            fetch_run_progress={},
             context_root="/tmp/context",
             context_ready=True,
             last_error={
@@ -179,13 +280,14 @@ def test_personal_context_status_rejects_non_string_last_error_message():
     with pytest.raises(ValidationError):
         PersonalContextStatus(
             configured=True,
-            enabled=True,
-            fetching_enabled=True,
+            collection_enabled=True,
+            agent_use_enabled=True,
             state="RUNNING",
             pipeline_running=True,
             pipeline_queue_size=0,
             fetch_service_states={},
             fetch_service_errors={},
+            fetch_run_progress={},
             context_root="/tmp/context",
             context_ready=True,
             last_error={

@@ -133,8 +133,8 @@ uv run python -m pytest tests/unit_tests/agent_teams -q      # 1796 passed, 16 s
 - `test_tool_variants.py::test_scheduled_member_swaps_claim_for_complete` —— 注册差分。
 - `test_tool_variants.py::test_variants_keep_card_identity` —— `card.id` / `name` 不随形态漂移。
 - `test_tool_variants.py::test_send_message_variant_narrows_to_enum` —— scheduled 成员 `to` 是
-  `enum ["leader", "user"]`（角色词，不含真实 leader 名）且无 `anyOf`；leader 仍是 `anyOf`；
-  `content` 描述逐字复用。
+  `enum ["leader", "user"]`（角色词，不含真实 leader 名）且无 `targets`；完整形态的 `to` 是
+  `string`、`targets` 是 `array<string>`，同样无 `anyOf`；`content` 描述逐字复用。
 - `test_tool_variants.py::test_report_to_leader_resolves_leader_from_db` —— backend 没被传 leader
   名，`resolve_leader_member_name()` 从 `team_info` 行查到，`to="leader"` 投递到真实名。
 - `test_tool_variants.py::test_report_to_leader_soft_fails_when_leader_unresolvable` —— team 行缺失时

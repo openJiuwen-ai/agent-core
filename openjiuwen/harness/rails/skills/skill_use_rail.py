@@ -11,6 +11,7 @@ import yaml
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
+from openjiuwen.core.foundation.llm.schema.message import UserMessage
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
@@ -23,7 +24,9 @@ from openjiuwen.harness.prompts.sections.skills import (
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentKind
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.rails._multimodal import should_enable_read_image_multimodal
+from openjiuwen.harness.rails._multimodal import (
+    build_read_image_multimodal_resolver,
+)
 from openjiuwen.harness.tools import BashTool, ReadFileTool, ListSkillTool, SkillTool
 from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 
@@ -31,6 +34,19 @@ from openjiuwen.agent_evolving.checkpointing import EvolutionStore
 # tens of KB while the front matter is a handful of lines; a file whose front
 # matter does not fit within this budget falls back to a full read.
 _FRONT_MATTER_PROBE_LINES = 64
+
+# Directory names the skill scan never descends into. This answers a different
+# question from ``skill_tool._TREE_SKIP_DIR_NAMES`` ("do not *show* this in the
+# directory tree") — here it is "do not go looking for skills in there" — so the
+# two sets are deliberately independent even though they currently agree.
+_SKILL_SCAN_SKIP_DIRS: frozenset[str] = frozenset(
+    {
+        "output",
+        "temp",
+        "assets",
+        "node_modules",
+    }
+)
 
 
 class SkillUseRail(DeepAgentRail):
@@ -63,6 +79,8 @@ class SkillUseRail(DeepAgentRail):
         disabled_skills: Optional[Union[str, List[str]]] = None,
         evolution_store: Optional[EvolutionStore] = None,
         multimodal_skill_mode: str = "hint",
+        max_skills: Optional[int] = None,
+        max_total_chars: Optional[int] = None,
     ):
         """Initialize SkillUseRail.
 
@@ -78,6 +96,12 @@ class SkillUseRail(DeepAgentRail):
             disabled_skills: Optional deny-list of skill names. Supports str or List[str].
             evolution_store: Optional EvolutionStore for progressive disclosure experience text.
             multimodal_skill_mode: ``hint`` (default), ``attach``, or ``branch``.
+            max_skills: Optional hard cap on the number of skills injected in ``all`` mode.
+            max_total_chars: Optional soft cap on total skill description chars in ``all`` mode.
+                When exceeded, skills are ranked by keyword overlap with the query and low-ranked
+                whole skills are dropped (gentle truncation — never mid-text). The cap is soft:
+                the single highest-ranked skill is always retained, even when it alone exceeds
+                the limit.
         """
         super().__init__()
 
@@ -96,6 +120,8 @@ class SkillUseRail(DeepAgentRail):
         self.disabled_skills = self._normalize_name_set(disabled_skills)
         self.evolution_store: Optional[EvolutionStore] = evolution_store
         self.multimodal_skill_mode = multimodal_skill_mode
+        self.max_skills = max_skills
+        self.max_total_chars = max_total_chars
 
         self.skills: List[Skill] = []
         self.system_prompt_builder = None
@@ -157,43 +183,19 @@ class SkillUseRail(DeepAgentRail):
         discovered_keys: Set[str] = set()
         ordered_keys: List[str] = []
 
-        for root in roots:
-            if not root.exists():
-                logger.debug(
-                    "[SkillUseRail] skills_dir does not exist, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
-            if not root.is_dir():
-                logger.debug(
-                    "[SkillUseRail] skills_dir is not a directory, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
+        for item, update_at in self._discover_skill_dirs(roots):
+            key = str(item.resolve())
 
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
+            discovered_keys.add(key)
+            ordered_keys.append(key)
 
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
+            cached_skill = self._skill_cache.get(key)
+            cached_update_at = self._skill_update_at.get(key)
 
-                key = str(item.resolve())
-                update_at = skill_md_path.stat().st_mtime
-
-                discovered_keys.add(key)
-                ordered_keys.append(key)
-
-                cached_skill = self._skill_cache.get(key)
-                cached_update_at = self._skill_update_at.get(key)
-
-                if cached_skill is None or cached_update_at != update_at:
-                    skill = await self._load_skill(item, update_at)
-                    self._skill_cache[key] = skill
-                    self._skill_update_at[key] = update_at
+            if cached_skill is None or cached_update_at != update_at:
+                skill = await self._load_skill(item, update_at)
+                self._skill_cache[key] = skill
+                self._skill_update_at[key] = update_at
 
         stale_keys = [key for key in self._skill_cache.keys() if key not in discovered_keys]
         for key in stale_keys:
@@ -277,7 +279,7 @@ class SkillUseRail(DeepAgentRail):
 
         lang = agent.system_prompt_builder.language
         agent_id = getattr(getattr(agent, "card", None), "id", None)
-        enable_read_image_multimodal = should_enable_read_image_multimodal(agent)
+        enable_read_image_multimodal = build_read_image_multimodal_resolver(agent)
 
         tools.append(
             SkillTool(
@@ -442,7 +444,8 @@ class SkillUseRail(DeepAgentRail):
             else list(self.skills)
         )
         await self._fetch_evolution_texts([*baseline_skills, *self.skills])
-        skills_section = self._build_skills_section(baseline_skills)
+        query = self._extract_query_from_messages(ctx)
+        skills_section = self._build_skills_section(baseline_skills, query=query)
         if skills_section is not None:
             self.system_prompt_builder.add_section(skills_section)
         else:
@@ -459,30 +462,22 @@ class SkillUseRail(DeepAgentRail):
 
     def _build_skills_snapshot_signature(self) -> Tuple[Tuple[str, float], ...]:
         """Build the same incremental-refresh signature used by _prepare_skills."""
-        entries: List[Tuple[str, float]] = []
+        roots = self._normalize_skill_dirs(self.skills_dir)
+        return tuple(
+            (str(item.resolve()), update_at)
+            for item, update_at in self._discover_skill_dirs(roots)
+        )
 
-        for root in self._normalize_skill_dirs(self.skills_dir):
-            if not root.exists():
-                continue
-            if not root.is_dir():
-                continue
+    def _build_skills_section(self, skills: Optional[List[Skill]] = None, query: Optional[str] = None):
+        """Build the stable system prompt section from session baseline skills.
 
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
-
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
-
-                entries.append((str(item.resolve()), skill_md_path.stat().st_mtime))
-
-        return tuple(entries)
-
-    def _build_skills_section(self, skills: Optional[List[Skill]] = None):
-        """Build the stable system prompt section from session baseline skills."""
+        Args:
+            skills: Optional skill list override. Defaults to self.skills.
+            query: Optional task query for budget-based ranking.
+        """
         skills = self.skills if skills is None else skills
         if self.skill_mode == self.SKILL_MODE_ALL:
+            skills = self._apply_skill_budget(skills, query)
             body_lines: List[str] = []
             for idx, skill in enumerate(skills):
                 body_lines.append(
@@ -505,6 +500,120 @@ class SkillUseRail(DeepAgentRail):
                 language=self.system_prompt_builder.language,
                 mode="auto_list",
             )
+
+    def _apply_skill_budget(
+        self,
+        skills: List[Skill],
+        query: Optional[str] = None,
+    ) -> List[Skill]:
+        """Rank skills by query relevance and drop low-ranked ones to stay under budget.
+
+        This implements *gentle truncation*: whole skills are dropped,
+        never mid-description. ``max_total_chars`` is a soft cap — the
+        highest-ranked skill is always retained, even when it alone exceeds
+        the limit, so callers never get an empty list back from a non-empty
+        input.
+
+        Args:
+            skills: Full list of skills to consider.
+            query: Optional task query for relevance scoring.
+
+        Returns:
+            Filtered skill list within budget constraints.
+        """
+        if not skills:
+            return skills
+        if self.max_skills is None and self.max_total_chars is None:
+            return skills
+
+        # Score skills by keyword overlap with query (or description length as fallback)
+        if query:
+            keywords = self._extract_keywords(query)
+            scored = []
+            for skill in skills:
+                text = f"{skill.name} {skill.description}".lower()
+                score = sum(1 for kw in keywords if kw in text)
+                scored.append((score, skill))
+            scored.sort(key=lambda x: (-x[0], x[1].name))
+            ranked = [s for _, s in scored]
+        else:
+            # Without a query, preserve original order (assumed pre-sorted by importance)
+            ranked = list(skills)
+
+        # Apply hard skill count cap
+        if self.max_skills is not None and len(ranked) > self.max_skills:
+            dropped = ranked[self.max_skills:]
+            ranked = ranked[:self.max_skills]
+            logger.info(
+                "[SkillUseRail] Dropped %d skills due to max_skills=%d: %s",
+                len(dropped),
+                self.max_skills,
+                ", ".join(s.name for s in dropped),
+            )
+
+        # Apply soft char cap by dropping lowest-ranked whole skills.
+        # The cap is soft: the highest-ranked skill is always retained, even if it
+        # alone exceeds max_total_chars, so the model never sees an empty skill list.
+        if self.max_total_chars is not None:
+            total_chars = sum(len(s.description or "") for s in ranked)
+            while len(ranked) > 1 and total_chars > self.max_total_chars:
+                dropped_skill = ranked.pop()
+                total_chars -= len(dropped_skill.description or "")
+                logger.info(
+                    "[SkillUseRail] Dropped skill '%s' to stay under max_total_chars=%d "
+                    "(remaining chars=%d)",
+                    dropped_skill.name,
+                    self.max_total_chars,
+                    total_chars,
+                )
+            if ranked and total_chars > self.max_total_chars:
+                logger.warning(
+                    "[SkillUseRail] Skill '%s' alone exceeds max_total_chars=%d "
+                    "(%d chars); keeping it so the skills section is never empty",
+                    ranked[0].name,
+                    self.max_total_chars,
+                    total_chars,
+                )
+
+        return ranked
+
+    _STOP_WORDS: Set[str] = frozenset({
+        "the", "a", "an", "is", "are", "was", "were", "be", "been", "being",
+        "to", "of", "and", "or", "in", "on", "at", "by", "for", "with", "as",
+        "this", "that", "these", "those", "it", "its", "from", "have", "has",
+        "had", "do", "does", "did", "will", "would", "could", "should", "may",
+        "might", "can", "shall", "you", "your", "we", "our", "i", "my", "he",
+        "she", "they", "them", "their", "what", "which", "who", "when", "where",
+        "why", "how", "all", "each", "every", "both", "few", "more", "most",
+        "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+    })
+
+    @classmethod
+    def _extract_keywords(cls, text: str) -> Set[str]:
+        """Extract lowercase alphanumeric keywords from text, removing stop words."""
+        words = set()
+        for token in text.lower().split():
+            token = "".join(c for c in token if c.isalnum())
+            if token and token not in cls._STOP_WORDS and len(token) > 2:
+                words.add(token)
+        return words
+
+    @staticmethod
+    def _extract_query_from_messages(ctx: AgentCallbackContext) -> Optional[str]:
+        """Extract the latest user query from context messages for skill ranking.
+
+        Looks at the last few messages and returns the content of the most
+        recent UserMessage, or None if no user messages are found.
+        """
+        messages = getattr(ctx.inputs, "messages", None)
+        if not messages:
+            return None
+        for message in reversed(messages):
+            if isinstance(message, UserMessage):
+                content = getattr(message, "content", None)
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        return None
 
     def get_skills_for_session(self, session: Any = None) -> List[Skill]:
         """Return the current skill view for a tool invocation.
@@ -888,6 +997,88 @@ class SkillUseRail(DeepAgentRail):
         return normalized
 
     @classmethod
+    def _discover_skill_dirs(cls, roots: List[Path]) -> List[Tuple[Path, float]]:
+        """Find every skill directory under ``roots``, with its SKILL.md mtime.
+
+        A skill library is not necessarily flat: skills are commonly filed
+        under grouping directories (``skills/lark/lark-doc/SKILL.md``), and a
+        scan that only looked one level down found the group instead of the
+        skills and reported nothing.
+
+        So the walk descends — but **stops at the first ``SKILL.md`` it finds
+        on a branch**. A directory holding a ``SKILL.md`` is a skill, and what
+        it keeps inside is its own business: sub-skills there are private
+        detail its author discloses through the parent's own content (see
+        ``skill_tool``'s nested-skill listing), not top-level entries the
+        model sees before it has read the parent. The rule needs no special
+        case for "is this a group or a skill" — finding a ``SKILL.md`` answers
+        it.
+
+        Args:
+            roots: Normalized library roots, as returned by
+                ``_normalize_skill_dirs``.
+
+        Returns:
+            ``(skill_dir, skill_md_mtime)`` pairs, ordered by root and then by
+            directory name at each level, so callers get a stable sequence.
+        """
+        found: List[Tuple[Path, float]] = []
+        # Resolved paths already walked. Symlinked libraries are a normal way
+        # to share one skill across teams, so a cycle is reachable and would
+        # otherwise recurse forever.
+        visited: Set[str] = set()
+
+        def _walk(directory: Path) -> None:
+            try:
+                dir_key = str(directory.resolve())
+            except OSError:
+                dir_key = str(directory)
+            if dir_key in visited:
+                return
+            visited.add(dir_key)
+
+            try:
+                children = sorted(directory.iterdir(), key=lambda p: p.name)
+            except OSError as exc:
+                logger.debug("[SkillUseRail] cannot list %s: %s", directory, exc)
+                return
+
+            for child in children:
+                if not child.is_dir():
+                    continue
+                if child.name.startswith(".") or child.name in _SKILL_SCAN_SKIP_DIRS:
+                    continue
+
+                skill_md_path = child / "SKILL.md"
+                if skill_md_path.is_file():
+                    try:
+                        found.append((child, skill_md_path.stat().st_mtime))
+                    except OSError as exc:
+                        logger.debug("[SkillUseRail] cannot stat %s: %s", skill_md_path, exc)
+                    continue
+
+                _walk(child)
+
+        for root in roots:
+            if not root.exists():
+                logger.debug(
+                    "[SkillUseRail] skills_dir does not exist, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
+            if not root.is_dir():
+                logger.debug(
+                    "[SkillUseRail] skills_dir is not a directory, "
+                    "skipping: %s",
+                    root,
+                )
+                continue
+            _walk(root)
+
+        return found
+
+    @classmethod
     async def load_skills_from_dir(
         cls,
         skills_dir: Union[str, List[str]],
@@ -905,42 +1096,18 @@ class SkillUseRail(DeepAgentRail):
             include_tools=False,
         )
 
-        for root in roots:
-            if not root.exists():
-                logger.debug(
-                    "[SkillUseRail] skills_dir does not exist, "
-                    "skipping: %s",
-                    root,
-                )
-                continue
-            if not root.is_dir():
-                logger.debug(
-                    "[SkillUseRail] skills_dir is not a directory, "
-                    "skipping: %s",
-                    root,
+        for item, update_at in cls._discover_skill_dirs(roots):
+            skill = await loader._load_skill(item, update_at)
+
+            if skill.name in skill_map:
+                prev_dir = skill_map[skill.name].directory
+                logger.warning(
+                    f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
+                    f"keep='{prev_dir}', skip='{item}'."
                 )
                 continue
 
-            for item in sorted(root.iterdir(), key=lambda p: p.name):
-                if not item.is_dir():
-                    continue
-
-                skill_md_path = item / "SKILL.md"
-                if not skill_md_path.exists():
-                    continue
-
-                update_at = skill_md_path.stat().st_mtime
-                skill = await loader._load_skill(item, update_at)
-
-                if skill.name in skill_map:
-                    prev_dir = skill_map[skill.name].directory
-                    logger.warning(
-                        f"[SkillUseRail] duplicate skill name detected: '{skill.name}'. "
-                        f"keep='{prev_dir}', skip='{item}'."
-                    )
-                    continue
-
-                skill_map[skill.name] = skill
+            skill_map[skill.name] = skill
 
         return list(skill_map.values())
 

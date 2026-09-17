@@ -2,6 +2,12 @@
 
 Canonical trajectory values, in-process span capture, synchronous archives, and stateless projections.
 
+Install the optional observability dependencies before importing the online processor or Rails:
+
+```bash
+uv sync --extra observability
+```
+
 ## Public package exports
 
 ```python
@@ -51,8 +57,9 @@ Use `from_historical_otlp()` only at a compatibility read boundary where histori
 ## class TrajectorySpanProcessor
 
 `TrajectorySpanProcessor` implements the OpenTelemetry `SpanProcessor` interface and fans out completed spans to
-in-process subscriptions. Register one shared instance with the active `TracerProvider`, then inject that same object
-into every consuming Rail.
+in-process subscriptions. Online Agent/Team hosts acquire observability and obtain the process-wide instance from
+`openjiuwen.extensions.observability.demand.get_trajectory_span_processor()`. The demand coordinator registers that
+same object with the shared provider; inject it into every consuming Rail instead of creating another processor.
 
 ```python
 subscription = processor.subscribe(
@@ -72,6 +79,9 @@ processor.unsubscribe(subscription)
   leaving normal exporters active.
 
 Do not read trajectories back from exporters or create one processor per Rail.
+
+To archive one canonical LLM/tool execution trajectory per Agent invoke, mount
+[`TrajectoryRail`](../openjiuwen.harness/rails/evolution/trajectory_rail.md) with a `TrajectoryStore`.
 
 ## class TrajectoryStore
 
@@ -131,6 +141,11 @@ from openjiuwen.agent_evolving.trajectory.spans import (
 
 The module also provides normalization, merge, crop, and trim helpers. These helpers return detached canonical values
 and do not mutate the input trajectory.
+
+`trim_trajectory()` and its alias `crop_trajectory()` apply time filtering and the span limit globally, retaining
+the newest selected spans in their original resource and instrumentation-scope groups. Group order, empty groups,
+and group metadata are preserved. Spans are sorted within each group; consumers needing a global chronological
+sequence must sort across groups. Cropping does not deduplicate spans.
 
 ## Conversation messages
 

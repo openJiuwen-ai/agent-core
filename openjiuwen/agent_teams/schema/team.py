@@ -107,11 +107,23 @@ class TeamRole(str, Enum):
     aliasing it onto the plain ``TEAMMATE`` label. Role-driven dispatch
     (CLI-vs-DeepAgent) is gated on the ``cli_agent`` registry, not on this
     role value.
+
+    ``PASSIVE_HUMAN`` is a human member with **no avatar at all** — no
+    harness, no LLM, no coordination loop. It exists as a roster identity
+    plus a message-bus address: team-side messages and task assignments
+    are relayed straight to the controlling human through the SDK's HITT
+    inbound callback, and the human acts back through the interact channel
+    — natural-language messages via the ``$name`` grammar, and structured
+    tool calls via the ``HumanAgentToolCall`` passthrough payload, which
+    the runtime executes under this member's identity. It may hold and
+    complete tasks; it is never a coordinated member (no startup /
+    restart / recovery path may spawn a runtime for it).
     """
 
     LEADER = "leader"
     TEAMMATE = "teammate"
     HUMAN_AGENT = "human_agent"
+    PASSIVE_HUMAN = "passive_human"
     BRIDGE_AGENT = "bridge_agent"
     WORKER = "worker"
     EXTERNAL_CLI = "external_cli"
@@ -204,6 +216,7 @@ class TeamMemberSpec(MemberSpecBase):
         TeamRole.LEADER,
         TeamRole.TEAMMATE,
         TeamRole.HUMAN_AGENT,
+        TeamRole.PASSIVE_HUMAN,
     ] = TeamRole.TEAMMATE
 
 
@@ -285,6 +298,14 @@ class ExternalCliAgentSpec(BaseModel):
     This is passed to ``spawn_member(cli_agent=...)``. See
     ``agent_teams/external/cli_agent``."""
 
+    skills: list[str | dict[str, Any]] = Field(default_factory=list)
+    """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
+    skill_conflict: Literal["skip", "replace"] = "skip"
+    """Keep or replace project skills with the same name."""
+
+    system_prompt_mode: Literal["append", "replace"] | None = None
+    """Prompt policy for Claude/Codex; None keeps each provider's default."""
+
     command: Optional[list[str]] = None
     """Full launch argv overriding an adapter backend's built-in command.
 
@@ -322,17 +343,19 @@ class ExternalCliAgentSpec(BaseModel):
     mcp_default_tools_approval_mode: Literal["auto", "prompt", "writes", "approve"] | None = None
     """Optional Codex approval policy for tools exposed by the injected MCP server.
 
-    ``None`` preserves the user's Codex configuration. Headless trusted-server
-    scenarios may opt into ``"approve"`` without changing approval behavior for
-    shell commands, other MCP servers, or non-Codex backends.
+    ``None`` uses ``"approve"`` for the injected team MCP server so its tools
+    remain available when Codex auto-review is unsupported by the active model
+    provider. Explicit values override that default without changing approval
+    behavior for shell commands, other MCP servers, or non-Codex backends.
     """
 
     codex_bypass_approvals_and_sandbox: bool = False
     """Run a Codex member with no approval prompts and no SDK sandbox.
 
-    This is an explicit high-risk opt-in for externally isolated, headless
-    environments. It is valid only for ``cli_agent="codex"`` and never becomes
-    the framework default.
+    Codex members enable this by default, matching the Claude member's
+    ``bypassPermissions`` behavior. Set it explicitly to ``False`` to restore
+    Codex approval prompts and its SDK sandbox. This option is valid only for
+    ``cli_agent="codex"``.
     """
 
     codex_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
@@ -348,6 +371,29 @@ class ExternalCliAgentSpec(BaseModel):
     Retries reuse the same thread and are attempted only after the stalled turn
     was interrupted successfully. Turns that emitted any notification are not
     replayed because they may already have produced external side effects.
+    """
+
+    claude_turn_idle_timeout_s: float | None = Field(default=None, gt=0)
+    """Optional Claude turn inactivity ceiling in seconds.
+
+    The runtime default is used when unset. Any SDK message (assistant /
+    user tool results / system) refreshes the timer; a turn whose message
+    stream stalls past the ceiling is interrupted and finalized as a
+    ``network_timeout`` failure so the member settles back to READY instead
+    of hanging forever.
+    """
+
+    claude_max_buffer_size: int | None = Field(default=None, ge=1)
+    """Optional per-line stdout buffer ceiling (bytes) for the Claude SDK
+    transport; ``None`` keeps the harness default (32 MiB).
+
+    The SDK reads NDJSON (one message per line) and rejects any single line
+    beyond this bound with a decode error, killing the turn. Tool results
+    that embed large payloads (a base64 image read via the CLI Read tool is
+    roughly 4/3 of the file size) blow past the SDK's 1 MiB default, which is
+    why the effective default is raised far above it. The buffer is a
+    transient per-line string, so the memory cost only appears while a large
+    message is in flight.
     """
 
     mcp_server_command: list[str] = Field(default_factory=lambda: ["openjiuwen-team-mcp"])
@@ -378,6 +424,11 @@ class ExternalCliAgentSpec(BaseModel):
     @model_validator(mode="after")
     def _validate_backend_launch_override(self) -> "ExternalCliAgentSpec":
         """Keep SDK binary selection separate from adapter argv overrides."""
+        if (
+            self.cli_agent == "codex"
+            and "codex_bypass_approvals_and_sandbox" not in self.model_fields_set
+        ):
+            self.codex_bypass_approvals_and_sandbox = True
         if self.cli_agent == "codex" and self.command is not None:
             raise ValueError(
                 "Codex SDK config does not support command; use cli_path to select a custom executable",
@@ -398,6 +449,10 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_timeout_s is only valid when cli_agent='codex'")
         if self.cli_agent != "codex" and self.codex_turn_idle_retries is not None:
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
+        if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
+            raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
+        if self.cli_agent != "claude" and "claude_max_buffer_size" in self.model_fields_set:
+            raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
         return self
@@ -519,6 +574,8 @@ class TeamRuntimeContext(BaseModel):
     db_config: DatabaseConfig = Field(default_factory=DatabaseConfig)
     member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig assigned to this member by the allocator."""
+    fallback_member_model: Optional[TeamModelConfig] = None
+    """TeamModelConfig reserved for native external-CLI authentication fallback."""
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     fork_source: Optional[str] = None

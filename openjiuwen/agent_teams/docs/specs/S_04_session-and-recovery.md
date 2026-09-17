@@ -254,7 +254,7 @@ class SessionManager:
 ```python
 class RecoveryManager:
     async def recover_team(self) -> list[str]:
-        """leader-only：从 DB 拉所有非自身成员，逐个置 RESTARTING 后重启。"""
+        """leader-only：按持久状态恢复仍在队成员，并保留显式退场。"""
 
     def persist_leader_config(self, session) -> None:
         """leader-only：把 spec / context / allocator state 写到 per-team namespace。"""
@@ -278,6 +278,9 @@ class RecoveryManager:
 
 关键语义：
 
+- **`recover_team` 不等于复活整份名册**：`SHUTDOWN_REQUESTED` / `SHUTDOWN` 都由关闭链路
+  拥有，冷恢复只跳过、不代写状态也不清 runtime handle。其余无 live handle 的成员延续
+  既有流程：尝试更新为 `RESTARTING`，再调用 `restart_teammate`。
 - **`collect_live_teammates_for_session_switch`** 只对 `role == LEADER` 且
   `team_backend` 存在的情况下返回非空。它的判定条件是
   "DB 里 status 不在 `{UNSTARTED, SHUTDOWN, STOPPED}`" **且** "spawn_manager 上仍持有

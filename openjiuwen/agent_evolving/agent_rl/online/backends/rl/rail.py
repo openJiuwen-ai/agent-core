@@ -22,7 +22,12 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     TRAJECTORY_SCHEMA_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, span_attributes, span_sort_key
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    span_attributes,
+    span_sort_key,
+    write_llm_exchange,
+)
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.extensions.observability import semconv
@@ -135,7 +140,7 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         *,
         step_index: int,
     ) -> Trajectory | None:
-        """Build a minimal ``llm.call`` trajectory when OTel spans are unavailable."""
+        """Build a minimal GenAI inference trajectory when OTel spans are unavailable."""
 
         inputs = getattr(ctx, "inputs", None)
         if not isinstance(inputs, ModelCallInputs) or inputs.response is None:
@@ -146,16 +151,15 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         trace_id = uuid.uuid4().hex
         span_id = uuid.uuid4().hex[:16]
         response = self._message_to_dict(inputs.response)
+        model_name = self._resolve_model_name(ctx)
         attrs: dict[str, Any] = {
-            semconv.GEN_AI_REQUEST_MODEL: self._resolve_model_name(ctx),
-            semconv.GEN_AI_REQUEST_MESSAGE_COUNT: len(inputs.messages or []),
+            semconv.GEN_AI_REQUEST_MODEL: model_name,
+            semconv.OJ_REQUEST_MESSAGE_COUNT: len(inputs.messages or []),
             semconv.GEN_AI_OPERATION_NAME: "chat",
-            semconv.GEN_AI_SYSTEM: "openjiuwen",
             "evolution.rl.fallback_capture": True,
             "evolution.rl.turn_id": step_index,
         }
-        self._write_indexed_messages(attrs, semconv.GEN_AI_PROMPT, inputs.messages or [])
-        self._write_indexed_messages(attrs, semconv.GEN_AI_COMPLETION, [response])
+        self._write_llm_messages(attrs, inputs.messages or [], [response])
         if inputs.tools:
             attrs[semconv.GEN_AI_TOOL_DEFINITIONS] = json.dumps(
                 self._json_safe(inputs.tools),
@@ -167,7 +171,7 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         self._write_usage_attrs(attrs, usage)
         finish_reason = getattr(inputs.response, "finish_reason", None)
         if finish_reason and finish_reason != "null":
-            attrs[semconv.GEN_AI_RESPONSE_FINISH_REASON] = str(finish_reason)
+            attrs[semconv.GEN_AI_RESPONSE_FINISH_REASONS] = [str(finish_reason)]
 
         prompt_ids = self._direct_prompt_ids(inputs.response)
         completion_ids = self._direct_completion_ids(inputs.response)
@@ -200,7 +204,7 @@ class RLOnlineRail(BaseOnlineTrainingRail):
                                     {
                                         "traceId": trace_id,
                                         "spanId": span_id,
-                                        "name": "llm.call",
+            "name": f"chat {model_name}" if model_name else "chat",
                                         "kind": "SPAN_KIND_CLIENT",
                                         "startTimeUnixNano": str(now_ns),
                                         "endTimeUnixNano": str(now_ns),
@@ -240,16 +244,20 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         return {"role": getattr(message, "role", "unknown"), "content": str(data or "")}
 
     @classmethod
-    def _write_indexed_messages(cls, attrs: dict[str, Any], base: str, messages: list[Any]) -> None:
-        for index, message in enumerate(messages):
-            data = cls._message_to_dict(message)
-            attrs[f"{base}.{index}.role"] = data.get("role", "unknown")
-            attrs[f"{base}.{index}.content"] = data.get("content", "")
-            tool_calls = data.get("tool_calls")
-            if tool_calls:
-                attrs[f"{base}.{index}.tool_calls"] = json.dumps(tool_calls, ensure_ascii=False, default=str)
-                if base == semconv.GEN_AI_COMPLETION:
-                    attrs[semconv.GEN_AI_TOOL_CALLS] = json.dumps(tool_calls, ensure_ascii=False, default=str)
+    def _write_llm_messages(
+        cls,
+        attrs: dict[str, Any],
+        prompts: list[Any],
+        completions: list[Any],
+    ) -> None:
+        """Record the exchange as the standard GenAI attributes.
+
+        Tool calls are encoded once as standard output-message parts.
+        """
+
+        prompt_dicts = [cls._message_to_dict(message) for message in prompts]
+        completion_dicts = [cls._message_to_dict(message) for message in completions]
+        attrs.update(write_llm_exchange(prompt_dicts, completion_dicts))
 
     @staticmethod
     def _resolve_callback_session_id(ctx: AgentCallbackContext) -> str:
@@ -283,9 +291,8 @@ class RLOnlineRail(BaseOnlineTrainingRail):
         if usage is None:
             return
         for source, target in (
-            ("input_tokens", semconv.GEN_AI_USAGE_PROMPT_TOKENS),
-            ("output_tokens", semconv.GEN_AI_USAGE_COMPLETION_TOKENS),
-            ("total_tokens", semconv.GEN_AI_USAGE_TOTAL_TOKENS),
+            ("input_tokens", semconv.GEN_AI_USAGE_INPUT_TOKENS),
+            ("output_tokens", semconv.GEN_AI_USAGE_OUTPUT_TOKENS),
         ):
             value = getattr(usage, source, None)
             if value:

@@ -633,4 +633,4 @@ JSON 输出解析器，继承自 `BaseOutputParser`。从 AssistantMessage 或�
 
 ---
 
-> **说明**：`model_client_config` 不可为 `None`；`client_provider` 当前支持 `"OpenAI"`、`"OpenAIAccount"`、`"SiliconFlow"`、`"DashScope"`、`"Anthropic"`、`"DeepSeek"`、`"AscendAffinity"`、`"InferenceAffinity"`、`"OpenRouter"`、`"intelli_router"`，其他值会抛出异常并提示支持的类型。未传的 `temperature`、`top_p`、`max_tokens`、`stop` 等将使用 `model_config` 中的默认值。
+> **说明**：`model_client_config` 不可为 `None`；`client_provider` 当前支持 `"OpenAI"`、`"OpenAIAccount"`、`"SiliconFlow"`、`"DashScope"`、`"Anthropic"`、`"DeepSeek"`、`"AscendAffinity"`、`"OpenRouter"`、`"intelli_router"`，其他值会抛出异常并提示支持的类型。未传的 `temperature`、`top_p`、`max_tokens`、`stop` 等将使用 `model_config` 中的默认值。

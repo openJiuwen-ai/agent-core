@@ -46,7 +46,7 @@ def _trajectory(skill_md: str | None, *, member_id: str = "worker-1"):
             "spanId": "member-1",
             "parentSpanId": "team-1",
             "name": "member.run",
-            "attributes": attributes_from_map({semconv.AT_MEMBER_ID: member_id}),
+            "attributes": attributes_from_map({semconv.AT_MEMBER_NAME: member_id}),
         },
     ]
     if skill_md is not None:
@@ -59,8 +59,8 @@ def _trajectory(skill_md: str | None, *, member_id: str = "worker-1"):
                 "attributes": attributes_from_map(
                     {
                         semconv.GEN_AI_TOOL_NAME: "read_file",
-                        semconv.GEN_AI_TOOL_INPUT: {"path": skill_md},
-                        semconv.GEN_AI_TOOL_OUTPUT: "# xlsx",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"path": skill_md},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: "# xlsx",
                     }
                 ),
             }

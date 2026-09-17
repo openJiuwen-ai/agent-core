@@ -276,6 +276,8 @@ class GraphMutationCoordinator:
                 snapshot=state.target_build_snapshot,
                 provider_snapshot=state.target_snapshot,
             )
+        except BaseError:
+            raise
         except Exception as exc:  # noqa: BLE001 -- matcher backends expose provider-specific errors.
             raise_mutation_error(
                 "matcher_failed",

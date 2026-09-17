@@ -955,7 +955,7 @@ class SessionMemoryManager:
     ) -> int:
         all_messages = list(context_window.system_messages or []) + list(context_window.context_messages or [])
         # 优先用末尾 AssistantMessage.usage_metadata.total_tokens 作为整窗口
-        # 基准（已含当时 system+tools），尾部新增消息用 len//4 补算；无
+        # 基准（已含当时 system+tools），尾部新增消息用 len//3 补算；无
         # usage 时 fallback 到 token_counter / char 估算。
         for idx in range(len(all_messages) - 1, -1, -1):
             message = all_messages[idx]

@@ -11,14 +11,13 @@ from pathlib import Path, PurePosixPath
 from typing import NoReturn
 from urllib.parse import unquote, urlsplit
 
-from openjiuwen.harness.personal_context.source_metadata import read_source_metadata
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _MARKDOWN_LINK = re.compile(r"(?<!!)\[[^\]\r\n]*\]\(([^)\r\n]+)\)")
-_SOURCE_ID = re.compile(r"^src_[0-9a-f]{32}$")
 _MAX_GRAPH_FILES = 10_000
 _MAX_GRAPH_FILE_BYTES = 2 * 1024 * 1024
 _MAX_GRAPH_PATH_CHARS = 1_024
+_MAX_SLICE_DEPTH = 10
 _SEARCH_TOKEN = re.compile(r"[a-z0-9_]+|[\u3400-\u4dbf\u4e00-\u9fff]+")
 _HEADING = re.compile(r"^(#{1,3})\s+(.+?)\s*$")
 _COLLAPSED_WHITESPACE = re.compile(r"\s+")
@@ -73,12 +72,11 @@ def _read_graph_text(root: Path, path: Path) -> str:
 
 def _graph_target(
     context_root: Path,
-    source_root: Path,
     page: Path,
     raw_target: str,
     *,
     page_ids: dict[str, str],
-) -> tuple[str, dict[str, object] | None] | None:
+) -> str | None:
     target = raw_target.strip()
     if target.startswith("<"):
         closing = target.find(">")
@@ -102,29 +100,11 @@ def _graph_target(
     try:
         relative = target_path.relative_to(Path(os.path.abspath(context_root))).as_posix()
     except ValueError:
-        try:
-            source_relative = target_path.relative_to(Path(os.path.abspath(source_root)))
-        except ValueError:
-            return None
-        if len(source_relative.parts) != 1 or _SOURCE_ID.fullmatch(source_relative.stem) is None:
-            _graph_error("PersonalContext atomic source metadata path is invalid")
-        metadata = read_source_metadata(target_path)
-        source_id = str(metadata["source_id"])
-        node_id = f"source:{source_id}"
-        return node_id, {
-            "id": node_id,
-            "kind": "source",
-            "subkind": "source.0",
-            "label": str(metadata["title"]),
-            "path": f"{source_id}.md",
-            "service_id": str(metadata["service"]),
-        }
-    page_id = page_ids.get(relative)
-    return (page_id, None) if page_id is not None else None
+        return None
+    return page_ids.get(relative)
 
 
-def _read_context_pages(home: Path) -> dict[str, tuple[Path, str]]:
-    context_root = home / "workspace" / "context"
+def _read_context_pages_from_root(context_root: Path) -> dict[str, tuple[Path, str]]:
     description = context_root / "description.md"
     if not context_root.is_dir() or context_root.is_symlink():
         return {}
@@ -147,31 +127,52 @@ def _read_context_pages(home: Path) -> dict[str, tuple[Path, str]]:
     return pages
 
 
-def build_context_graph(home: Path) -> dict[str, object]:
-    """Build the stable Context graph payload without starting PersonalContext."""
+def _read_context_pages(home: Path) -> dict[str, tuple[Path, str]]:
+    return _read_context_pages_from_root(home / "workspace" / "context")
 
-    context_root = home / "workspace" / "context"
-    source_root = home / "workspace" / "source-meta"
-    pages = _read_context_pages(home)
+
+def _validate_slice_request(root_id: str | None, depth: int) -> None:
+    if isinstance(depth, bool) or not isinstance(depth, int) or not 1 <= depth <= _MAX_SLICE_DEPTH:
+        _graph_error(f"PersonalContext graph depth must be between 1 and {_MAX_SLICE_DEPTH}")
+    if root_id is not None and not isinstance(root_id, str):
+        _graph_error("PersonalContext graph root node ID is invalid")
+
+
+def build_context_slice(
+    context_root: Path,
+    *,
+    root_id: str | None,
+    depth: int,
+    include_references: bool,
+) -> dict[str, object]:
+    """Build one stable breadth-first Context structure slice."""
+
+    _validate_slice_request(root_id, depth)
+    pages = _read_context_pages_from_root(context_root)
     if not pages:
         return {"context_ready": False, "nodes": [], "edges": []}
-    nodes: dict[str, dict[str, object]] = {}
+
     page_ids: dict[str, str] = {}
+    nodes: dict[str, dict[str, object]] = {}
     for relative in sorted(pages):
         relative_path = PurePosixPath(relative)
         node_id = f"page:{relative}"
         page_ids[relative] = node_id
         is_directory = relative_path.name == "description.md"
         directory_depth = len(relative_path.parent.parts)
+        title, _headings = _page_heading_fields(relative, pages[relative][1])
         nodes[node_id] = {
             "id": node_id,
             "kind": "directory" if is_directory else "document",
             "subkind": f"directory.{directory_depth}" if is_directory else "document.0",
-            "label": relative_path.name,
+            "label": title,
             "path": relative,
             "service_id": None,
+            "has_children": False,
         }
-    edges: set[tuple[str, str, str]] = set()
+
+    contains: set[tuple[str, str, str]] = set()
+    children: dict[str, list[str]] = {node_id: [] for node_id in nodes}
     for relative, node_id in page_ids.items():
         relative_path = PurePosixPath(relative)
         if relative == "description.md":
@@ -181,30 +182,74 @@ def build_context_graph(home: Path) -> dict[str, object]:
         parent_description = (parent_directory / "description.md").as_posix()
         parent_id = page_ids.get(parent_description)
         if parent_id is not None:
-            edges.add((parent_id, node_id, "contains"))
-    for relative, (page, text) in pages.items():
-        kind = "navigates_to" if page.name == "description.md" else "links_to"
-        for match in _MARKDOWN_LINK.finditer(text):
-            target = _graph_target(
-                context_root,
-                source_root,
-                page,
-                match.group(1),
-                page_ids=page_ids,
-            )
-            if target is not None:
-                target_id, source_node = target
-                if source_node is not None:
-                    nodes[target_id] = source_node
-                edges.add((page_ids[relative], target_id, kind))
+            contains.add((parent_id, node_id, "contains"))
+            children[parent_id].append(node_id)
+    for parent_id, child_ids in children.items():
+        child_ids.sort(key=lambda child_id: str(nodes[child_id]["path"]))
+        nodes[parent_id]["has_children"] = bool(child_ids)
+
+    root_node_id = root_id or page_ids["description.md"]
+    root_node = nodes.get(root_node_id)
+    if root_node is None:
+        _graph_error("PersonalContext graph root node does not exist")
+    if root_node["kind"] != "directory":
+        _graph_error("PersonalContext graph root node must be a directory")
+
+    current_level = [root_node_id] if root_id is None else list(children[root_node_id])
+    selected: list[str] = []
+    selected_set: set[str] = set()
+    for _level in range(depth):
+        next_level: list[str] = []
+        for node_id in current_level:
+            if node_id in selected_set:
+                continue
+            selected.append(node_id)
+            selected_set.add(node_id)
+            next_level.extend(children[node_id])
+        current_level = next_level
+
+    edges = set(contains)
+    if include_references:
+        contains_pairs = {(source, target) for source, target, _kind in contains}
+        for relative, (page, text) in pages.items():
+            source_id = page_ids[relative]
+            for match in _MARKDOWN_LINK.finditer(text):
+                target_id = _graph_target(context_root, page, match.group(1), page_ids=page_ids)
+                if target_id is not None and (source_id, target_id) not in contains_pairs:
+                    edges.add((source_id, target_id, "references"))
+
+    allowed_ids = selected_set | ({root_node_id} if root_id is not None else set())
     return {
         "context_ready": True,
-        "nodes": sorted(nodes.values(), key=lambda node: (str(node["kind"]), str(node["id"]))),
+        "nodes": [nodes[node_id] for node_id in selected],
         "edges": [
             {"source": source, "target": target, "kind": kind}
             for source, target, kind in sorted(edges, key=lambda item: (item[2], item[0], item[1]))
+            if source in allowed_ids and target in allowed_ids
         ],
     }
+
+
+def build_context_graph(home: Path, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
+    """Build a breadth-first Context graph slice."""
+
+    return build_context_slice(
+        home / "workspace" / "context",
+        root_id=root_id,
+        depth=depth,
+        include_references=True,
+    )
+
+
+def build_context_tree(home: Path, *, root_id: str | None = None, depth: int = 3) -> dict[str, object]:
+    """Build a breadth-first Context file-tree slice."""
+
+    return build_context_slice(
+        home / "workspace" / "context",
+        root_id=root_id,
+        depth=depth,
+        include_references=False,
+    )
 
 
 def _tokenize(text: str) -> tuple[str, ...]:
@@ -316,19 +361,7 @@ def read_context_graph_page(home: Path, node_id: str) -> dict[str, object]:
     if not isinstance(node_id, str):
         _graph_error("PersonalContext graph page node ID is invalid")
     if node_id.startswith("source:"):
-        source_id = node_id.removeprefix("source:")
-        if _SOURCE_ID.fullmatch(source_id) is None:
-            _graph_error("PersonalContext graph source node ID is invalid")
-        source_root = home / "workspace" / "source-meta"
-        source_path = source_root / f"{source_id}.md"
-        metadata = read_source_metadata(source_path)
-        markdown = _read_graph_text(source_root, source_path)
-        return {
-            "node_id": node_id,
-            "title": str(metadata["title"]),
-            "path": f"{source_id}.md",
-            "markdown": markdown,
-        }
+        _graph_error("PersonalContext source detail must be read with get_source")
     if not node_id.startswith("page:"):
         _graph_error("PersonalContext graph page node ID is invalid")
     relative = node_id.removeprefix("page:")
@@ -382,4 +415,10 @@ def search_context_graph(home: Path, query: str) -> dict[str, object]:
     }
 
 
-__all__ = ["build_context_graph", "read_context_graph_page", "search_context_graph"]
+__all__ = [
+    "build_context_graph",
+    "build_context_slice",
+    "build_context_tree",
+    "read_context_graph_page",
+    "search_context_graph",
+]

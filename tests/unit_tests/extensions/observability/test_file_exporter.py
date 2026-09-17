@@ -86,7 +86,7 @@ def test_export_writes_immediately(tmp_path: Path) -> None:
 
 
 def test_each_line_is_valid_otlp_json_with_hex_ids(tmp_path: Path) -> None:
-    """Each appended line is OTLP JSON with hex traceId/spanId (not base64)."""
+    """Each line uses OTLP JSON hex identifiers and integer enum values."""
     exporter = TraceFileExporter(root_dir=str(tmp_path), retention_days=7)
     span = _make_span("llm.call", session_id="abc")
     exporter.export([span])
@@ -101,6 +101,22 @@ def test_each_line_is_valid_otlp_json_with_hex_ids(tmp_path: Path) -> None:
     assert all(c in "0123456789abcdef" for c in sp["traceId"]), "traceId must be hex"
     assert len(sp["spanId"]) == 16
     assert all(c in "0123456789abcdef" for c in sp["spanId"]), "spanId must be hex"
+    assert sp["kind"] == 1
+    assert sp["status"]["code"] == 1
+
+
+def test_error_status_uses_the_otlp_integer_enum(tmp_path: Path) -> None:
+    """Error status follows OTLP JSON's integer-only enum encoding."""
+    tracer = TracerProvider().get_tracer("ut")
+    span = tracer.start_span("tool.failed", kind=SpanKind.INTERNAL)
+    span.set_status(Status(StatusCode.ERROR, "tool reported failure"))
+    span.end()
+
+    exporter = TraceFileExporter(root_dir=str(tmp_path), retention_days=7)
+    exporter.export([span])
+
+    encoded = _read_spans(_day_file(tmp_path))[0]
+    assert encoded["status"] == {"message": "tool reported failure", "code": 2}
 
 
 def test_spans_of_same_trace_interleaved_in_one_file(tmp_path: Path) -> None:
@@ -214,9 +230,16 @@ def file_config(tmp_path: Path) -> ObservabilityConfig:
 
 
 def test_build_exporter_returns_trace_file_exporter(file_config: ObservabilityConfig) -> None:
+    from openjiuwen.extensions.observability.exporters.transforming import (
+        TransformingSpanExporter,
+    )
     from openjiuwen.extensions.observability.runtime import build_span_exporter
 
     exporter = build_span_exporter(file_config)
-    assert isinstance(exporter, TraceFileExporter)
-    assert exporter.root_dir == file_config.traces_dir
-    assert exporter.retention_days == 7
+    # The file exporter is the Langfuse file WAL: it is wrapped behind the
+    # shared Langfuse projection so its OTLP JSON lines match the langfuse
+    # exporter's payload.
+    assert isinstance(exporter, TransformingSpanExporter)
+    assert isinstance(exporter.exporter, TraceFileExporter)
+    assert exporter.exporter.root_dir == file_config.traces_dir
+    assert exporter.exporter.retention_days == 7

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 
@@ -13,6 +14,14 @@ class TrajectorySampleStore(Protocol):
 
     async def save_sample(self, sample: dict[str, Any], *, user_id: str = "online") -> None:
         """Save a sample as pending for ``user_id``."""
+
+    async def save_samples_once(
+        self,
+        samples: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+    ) -> set[str]:
+        """Atomically publish samples not already present and return their IDs."""
 
     async def get_pending_count(self, user_id: str) -> int:
         """Return pending sample count for ``user_id``."""
@@ -34,6 +43,9 @@ class TrajectorySampleStore(Protocol):
 
     async def stats(self) -> dict[str, int]:
         """Return store counters."""
+
+    async def delete_sample(self, sample_id: str, *, force: bool = False) -> bool:
+        """Delete a sample and return whether it existed."""
 
 
 __all__ = ["TrajectorySampleStore"]

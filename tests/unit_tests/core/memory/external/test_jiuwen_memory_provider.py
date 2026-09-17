@@ -542,6 +542,7 @@ import sys
 import types
 
 from dataclasses import dataclass, field
+from typing import Any
 
 
 # ---- fake agent-memory type surface -------------------------------------- #
@@ -604,6 +605,28 @@ class _FakeConfig:
         return cls()
 
 
+@dataclass
+class _FakeAuthContext:
+    actor: Any = None
+    credential_type: str = "legacy"
+    auth_method: str = "legacy"
+
+
+@dataclass
+class _FakeRequestSecurityContext:
+    auth: _FakeAuthContext = field(default_factory=_FakeAuthContext)
+    surface: str = "internal"
+    peer: str = ""
+
+
+def _fake_legacy_request_context(actor, *, surface="internal", peer=""):
+    """Mirror of ``jiuwen_memory.api.legacy_request_context`` for the fake kernel:
+    wraps the identity ``Scope`` into a ``RequestSecurityContext``."""
+    return _FakeRequestSecurityContext(
+        auth=_FakeAuthContext(actor=actor), surface=surface, peer=peer
+    )
+
+
 def _build_fake_mem_modules(local_api):
     """Build fake jiuwen_memory.* modules for sys.modules injection.
 
@@ -616,6 +639,7 @@ def _build_fake_mem_modules(local_api):
     """
     api_mod = types.ModuleType("jiuwen_memory.api")
     api_mod.assemble = MagicMock(return_value=local_api)
+    api_mod.legacy_request_context = _fake_legacy_request_context
 
     ctd_pkg = types.ModuleType("jiuwen_memory.common.type_def")
     ctd_pkg.Scope = _FakeScope
@@ -749,8 +773,8 @@ async def test_sdk_add_passes_content_scope_tags_metadata(fake_kernel):
     scope = args[1]
     assert scope.org == "org1" and scope.user == "alice"
     assert kwargs["tags"] == ["x"]
-    assert kwargs["metadata"] == {"infer": "true"}   # infer flag → metadata
-    assert kwargs["identity"] is scope               # identity == target scope
+    assert kwargs["system_metadata"] == {"infer": "true"}   # infer flag → system_metadata
+    assert kwargs["security"].auth.actor is scope     # legacy ctx wraps the target scope
 
 
 @pytest.mark.asyncio
@@ -762,7 +786,7 @@ async def test_sdk_add_without_infer_omits_metadata(fake_kernel):
         fake_kernel,
     )
     await provider.handle_tool_call("mem2_add", {"content": "raw text"})
-    assert local_api.add.call_args.kwargs["metadata"] is None
+    assert local_api.add.call_args.kwargs["system_metadata"] is None
 
 
 @pytest.mark.asyncio
@@ -815,7 +839,7 @@ async def test_sdk_search_passes_query_scope_top_k_disclosure(fake_kernel):
     assert args[0] == "Python"                       # query
     ctx = args[1]
     assert ctx.scope.org == "org1" and ctx.scope.user == "alice"
-    assert kwargs["identity"] is ctx.scope
+    assert kwargs["security"].auth.actor is ctx.scope  # legacy ctx wraps the scope
     assert kwargs["top_k"] == 5
     assert kwargs["disclosure"] == _FakeDisclosureLevel.L2   # full content parity
 
@@ -914,7 +938,7 @@ async def test_sdk_sync_turn_infer_flag_respected(fake_kernel):
         fake_kernel,
     )
     await provider.sync_turn("user says", "assistant says", infer=True)
-    assert local_api.add.call_args.kwargs["metadata"] == {"infer": "true"}
+    assert local_api.add.call_args.kwargs["system_metadata"] == {"infer": "true"}
 
 
 # ---- tool dispatch edges ------------------------------------------------ #

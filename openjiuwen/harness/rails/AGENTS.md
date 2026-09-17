@@ -141,7 +141,7 @@ WARNING），只有 tool 事件才真中断。
 | 注入 prompt section | `heartbeat_rail.py`（64 行，可整读） | `init` 抓 builder 引用，`before_model_call` 里 add/remove，`uninit` 删干净 |
 | 注册工具 | `mcp_rail.py`（44 行）/ `sys_operation_rail.py` | 纯 init 型，不参与任何生命周期钩子 |
 | 改写模型输入 | `progressive_tool_rail.py` | `before_model_call` 里直接改写 `ctx.inputs.tools` |
-| 拦截执行 | `interrupt/ask_user_rail.py` | 首次 interrupt，resume 后**不执行工具**、把用户答复当 tool_result 返回 |
+| 拦截执行 | `interrupt/ask_user_rail.py` | 首次 interrupt 前写 `ask_user.requested` OTel event；resume 后写 `ask_user.resolved`，不跨中断持有 Span，且**不执行工具**、把用户答复当 tool_result 返回 |
 | 回灌指令 | `task_planning_rail.py` | 全包**唯一**一处 `ctx.push_steering(...)`，注释说明为何要延到 ToolMessage 写完之后 |
 
 另有 `ctx.request_retry(delay)`（`llm_retry_rail.py` / `tool_call_resilience_rail.py`）与
@@ -173,6 +173,35 @@ WARNING），只有 tool 事件才真中断。
 4. 有几个 rail 存在但**没从 `rails/__init__.py` 导出**（`ToolCallResilienceRail`、
    `ContextProcessorRail`、`ContextAssembleRail`、各决策类型），要走子模块路径 import。
    `__init__.py` 顶部的 `# fmt: off` / `# ruff: noqa: I001` 是刻意的，import 顺序手排过。
+
+## Skill 发现：谁负责找到哪一层
+
+`SkillUseRail` 与 `skill_tool` 各管 skill 树的一半，**边界是"这个目录有没有 SKILL.md"**：
+
+- **`SkillUseRail._discover_skill_dirs`（发现侧）**递归下降找 skill，但**遇到第一个
+  `SKILL.md` 就停止深入**。所以分组目录会被穿过（`skills/lark/lark-doc/SKILL.md` 里的
+  `lark-doc` 是一个 skill，`lark` 不是），而一个 skill 目录内部不再被翻。它的产出进 skills
+  列表、系统提示词、visibility 门控。
+- **`skill_tool._collect_nested_skill_names`（读取侧）**接手另一半：模型打开某个 skill 时，
+  递归列出**它内部**的嵌套 skill，附在结果末尾，用
+  `skill_tool(skill_name=<父>, relative_file_path="designer/SKILL.md")` 加载。
+
+两边不重叠，合起来覆盖整棵树。这条分工是刻意的——嵌套在一个 skill 里的子 skill 属于其作者
+的私有结构，由父 skill 的内容自己决定何时披露；把它提升成顶层条目会绕过那层控制，也会让
+模型在读父 skill 之前就看到本该渐进给出的细节。
+
+**因此 `skill_tool(skill_name="designer")` 对一个嵌套 skill 会报 `Skill not found`**——它
+没有被注册成顶层 skill，只能经父 skill 的 `relative_file_path` 到达。这恰好是模型读完父
+skill 后最直觉的下一步，所以 "## Nested skills" 那段文案**点名说这个调用不成立**，并用父
+skill 的真实名字拼出可用的那条调用。
+
+这段文案要能被读到，`skill_tool` 就必须**无条件**设 `data["content"]`：
+`AbilityManager._build_tool_message_content` 只在有 `content` 时按原文渲染，否则回落
+`str(result)`——把 skill 正文连同这段附录一起埋进整个 `ToolOutput` 的 pydantic repr。
+`data` 的其余键（`skill_directory` / `discovered_skill_names` …）仍留给程序消费者。
+
+发现侧跳过隐藏目录与 `_SKILL_SCAN_SKIP_DIRS`；后者与 `skill_tool._TREE_SKIP_DIR_NAMES` 取值
+恰好相同但**是两个独立常量**，回答的是不同问题（"别进去找" vs "别在目录树里展示"）。
 
 ## 与其它子系统的边界
 

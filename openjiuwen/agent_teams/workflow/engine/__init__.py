@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from .backends import SKIP, AgentBackend, AgentResult, MockBackend
 from .budget import BudgetLedger
-from .errors import BudgetExhausted, LintError, MetaError, SchemaError, WorkflowError
+from .errors import BudgetExhausted, EngineError, LintError, MetaError, SchemaError
 from .journal import Journal
 from .loader import LoadedWorkflow, load_workflow_source
 from .primitives import (
@@ -38,8 +38,10 @@ from .primitives import (
     phase,
     pipeline,
     pmap,
+    verify,
     workflow,
 )
+from .verify import Reviewer, VerifyResult, VerifyVote, settle_verify_tally
 from .progress import (
     PhasePlan,
     ProgressKind,
@@ -74,6 +76,12 @@ __all__ = [
     "budget",
     "compact",
     "flatten_filter",
+    # verify primitive
+    "verify",
+    "Reviewer",
+    "VerifyResult",
+    "VerifyVote",
+    "settle_verify_tally",
     # backends
     "AgentBackend",
     "AgentResult",
@@ -88,7 +96,7 @@ __all__ = [
     "WorkflowProgressEvent",
     "noop_progress_sink",
     # errors
-    "WorkflowError",
+    "EngineError",
     "MetaError",
     "LintError",
     "SchemaError",

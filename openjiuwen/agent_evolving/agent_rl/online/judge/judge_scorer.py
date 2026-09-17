@@ -9,7 +9,9 @@ or a raw vLLM endpoint) to score a single turn.
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Mapping
 from typing import Any, Optional
 
 import httpx
@@ -77,40 +79,45 @@ class JudgeScorer:
 
     async def score(
         self,
-        *,
-        response_text: str,
-        instruction_text: str,
-        followup_user_feedback: str,
-        session_id: str = "",
-        turn_num: int = 0,
-    ) -> dict[str, Any]:
-        """Score a turn and return normalized reward details.
+        request: Mapping[str, Any],
+        response: Mapping[str, Any],
+        followup_user_message: str,
+    ) -> float:
+        """Score one complete policy call and return reward in ``[0, 1]``.
 
         Args:
-            response_text: Assistant response content to score.
-            instruction_text: User instruction text for this turn.
-            followup_user_feedback: Next-turn user feedback for delayed scoring.
-            session_id: Optional session id used for logging context.
-            turn_num: Optional turn index used for logging context.
+            request: Complete standard OpenAI request.
+            response: Complete standard OpenAI response.
+            followup_user_message: Next-turn user message, or empty on Task stop.
 
         Returns:
-            Dict with normalized ``score`` and raw vote details.
+            Normalized reward in ``[0, 1]``.
         """
         result = await evaluate_judge_scores(
             client=self._http_client,
             config=self._config,
-            response_text=response_text,
-            instruction_text=instruction_text,
-            followup_user_feedback=followup_user_feedback,
-            session_id=session_id,
-            turn_num=turn_num,
+            response_text=self._prompt_json(response),
+            instruction_text=self._prompt_json(request),
+            followup_user_feedback=followup_user_message,
             logger=logger,
         )
-        result.pop("model", None)
-        result.pop("session_id", None)
-        result.pop("turn_num", None)
-        return result
+        return float(result["score"])
 
     @staticmethod
     def _parse_scores(content: str) -> dict[str, Any]:
         return parse_judge_scores(content)
+
+    @classmethod
+    def _prompt_json(cls, value: Any) -> str:
+        return json.dumps(cls._replace_images(value), ensure_ascii=False, sort_keys=True)
+
+    @classmethod
+    def _replace_images(cls, value: Any) -> Any:
+        if isinstance(value, Mapping):
+            item_type = str(value.get("type") or "")
+            if item_type in {"image", "image_url", "input_image"} or "image_url" in value:
+                return "[image]"
+            return {str(key): cls._replace_images(item) for key, item in value.items()}
+        if isinstance(value, list | tuple):
+            return [cls._replace_images(item) for item in value]
+        return value

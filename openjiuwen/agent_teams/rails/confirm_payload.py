@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload
-from openjiuwen.harness.security.models import PermissionConfirmResponse
+from openjiuwen.harness.security.permission_engine.models import PermissionConfirmResponse
 
 
 class TeamConfirmPayload(ConfirmPayload):

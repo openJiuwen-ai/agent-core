@@ -1,0 +1,128 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+"""Built-in pipeline and stage registration."""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+from typing import Any, Callable
+
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline import (
+    ExtendedEvolvePipeline,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.meta_evolve_pipeline import (
+    MetaEvolvePipeline,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.registry.base import (
+    PipelineRegistry,
+    StageRegistry,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
+    AutoHarnessConfig,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.assess import (
+    ExtendAssessStage,
+    MetaAssessStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.commit import (
+    CommitStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.implement import (
+    ExtendImplementStage,
+    MetaImplementStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.learnings import (
+    LearningsStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.plan import (
+    ExtendPlanStage,
+    MetaPlanStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr import (
+    PublishPRStage,
+)
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.verify import (
+    ExtendVerifyStage,
+    MetaVerifyStage,
+)
+
+
+def _load_registrar(path: str) -> Callable[..., Any]:
+    """Load a registrar callable from ``module:callable`` notation."""
+    module_name, sep, attr = path.partition(":")
+    if not sep or not module_name or not attr:
+        raise ValueError(f"Registrar must use 'module:callable' syntax: {path}")
+    module = importlib.import_module(module_name)
+    registrar = getattr(module, attr)
+    if not callable(registrar):
+        raise TypeError(f"Registrar '{path}' is not callable")
+    return registrar
+
+
+def _call_pipeline_registrar(
+    registrar: Callable[..., Any],
+    pipeline_registry: PipelineRegistry,
+    stage_registry: StageRegistry,
+) -> None:
+    """Invoke a pipeline registrar with a supported signature."""
+    params = list(inspect.signature(registrar).parameters.values())
+    positional_kinds = {
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    }
+    positional = [p for p in params if p.kind in positional_kinds]
+    if len(positional) >= 2:
+        registrar(pipeline_registry, stage_registry)
+        return
+    registrar(pipeline_registry)
+
+
+def register_builtin_stages(
+    registry: StageRegistry,
+) -> StageRegistry:
+    """Register built-in stage metadata."""
+    for stage_cls in [
+        MetaAssessStage,
+        ExtendAssessStage,
+        MetaPlanStage,
+        ExtendPlanStage,
+        MetaImplementStage,
+        ExtendImplementStage,
+        MetaVerifyStage,
+        ExtendVerifyStage,
+        CommitStage,
+        PublishPRStage,
+        LearningsStage,
+    ]:
+        registry.register(stage_cls.spec())
+    return registry
+
+
+def build_stage_registry(
+    config: AutoHarnessConfig,
+) -> StageRegistry:
+    """Build the stage registry from built-ins and extensions."""
+    registry = register_builtin_stages(StageRegistry())
+    for path in config.stage_registrars:
+        _load_registrar(path)(registry)
+    return registry
+
+
+def build_pipeline_registry(
+    config: AutoHarnessConfig,
+    *,
+    stage_registry: StageRegistry,
+) -> PipelineRegistry:
+    """Build the pipeline registry from built-ins and extensions."""
+    registry = PipelineRegistry()
+    registry.register(MetaEvolvePipeline.spec())
+    registry.register(ExtendedEvolvePipeline.spec())
+    for path in config.pipeline_registrars:
+        registrar = _load_registrar(path)
+        _call_pipeline_registrar(
+            registrar,
+            registry,
+            stage_registry,
+        )
+    return registry

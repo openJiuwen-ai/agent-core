@@ -23,17 +23,11 @@ from openjiuwen.harness.prompts.tools.base import (
 # ---------------------------------------------------------------------------
 GENERAL_PURPOSE_AGENT_DESC: Dict[str, str] = {
     "cn": "通用型子代理，继承主代理的工具与能力（文件读写、bash、MCP、skills 等），"
-          "适合执行独立的复杂子任务（调研、搜代码、多步实现等）。"
-          "子代理运行在独立上下文窗口中，中间工具调用结果不会污染主代理上下文。"
-          "当你在搜索关键词或文件时，如果不确定前几次尝试就能找到正确匹配，"
-          "就用这个子代理来帮你搜索。",
+          "在独立上下文中执行被委派的子任务；中间工具调用结果不进入主代理上下文。",
     "en": "General-purpose subagent that inherits the parent agent's tools and "
-          "capabilities (file I/O, bash, MCP, skills, etc.) for independent complex "
-          "subtasks such as research, code search, and multi-step implementation. "
-          "Runs in an isolated context window so intermediate tool results do not "
-          "pollute the parent agent's context. When you are searching for a keyword "
-          "or file and are not confident you will find the right match in the first "
-          "few tries, use this subagent to perform the search for you.",
+          "capabilities (file I/O, bash, MCP, skills, etc.) and runs delegated "
+          "subtasks in an isolated context; intermediate tool results do not "
+          "enter the parent agent's context.",
 }
 
 # ---------------------------------------------------------------------------
@@ -76,7 +70,13 @@ with no memory of this conversation
 The result returned by the subagent is not visible to the user. To show the \
 user the result, you should send a text message back to the user with a \
 concise summary of the result.
-- Each task_tool invocation starts fresh — provide a complete task description.
+- Each task_tool invocation starts fresh by default — provide a complete task description. Only pass the returned resume_task_id when explicitly continuing the same unfinished browser task.
+- For browser_agent, preserve browser_result.status together with its summary, evidence and source observations. \
+Even a partial result can contain useful answers. unverified_fields means fields were not mapped to typed slots, \
+not that the observed answer is false. Do not repeat a lookup merely to reformat or independently verify it.
+- retryable=true permits, but does not require, at most one focused continuation with the same resume_task_id. \
+Continue only for genuinely unanswered user requirements, using missing_slots and recommended_recovery; \
+do not restart the full task or expand requested_slots. If retryable=false, report the available result.
 - The subagent's outputs should generally be trusted.
 - Clearly tell the subagent whether you expect it to write code or just to do \
 research (search, file reads, web fetches, etc.), since it is not aware of \
@@ -142,7 +142,13 @@ task_tool 启动专门的子代理来自主处理复杂任务。每种子代理�
 - task_description 应包含完整的上下文信息——子代理没有本次对话的任何记忆
 - 子代理完成后会返回一条消息给你。该结果对用户不可见。\
 如需向用户展示结果，你应发送一条文字消息，简明总结子代理的结果。
-- 每次 task_tool 调用都是全新启动——请提供完整的任务描述。
+- 每次 task_tool 调用默认都是全新启动——请提供完整的任务描述。只有明确继续同一个未完成的浏览器任务时，才传入上次返回的 resume_task_id。
+- 对 browser_agent，保留 browser_result.status 以及 summary、evidence 和带来源的 observations。\
+partial 中也可能已有可用答案。unverified_fields 表示未映射到结构化字段，不代表已观察到的答案错误；\
+不要仅为改写字段名或交叉验证而重复查询。
+- retryable=true 只是允许续跑，不是要求续跑。只有用户要求确实尚未回答时，\
+才可使用同一 resume_task_id，针对 missing_slots 和 recommended_recovery 至多续跑一次；\
+不要重做整个任务或扩大 requested_slots。retryable=false 时直接报告已有结果。
 - 子代理的输出通常应当被信任。
 - 明确告知子代理你期望它写代码还是仅做调研\
 （搜索、读文件、抓取网页等），因为它不知道用户的意图。
@@ -197,6 +203,13 @@ TASK_TOOL_PARAMS: Dict[str, Dict[str, str]] = {
         "cn": "浏览器子代理所需的额外能力类别列表；仅使用核心能力时传入空列表",
         "en": "Additional capability categories required by browser_agent; use an empty list for core-only tasks",
     },
+    "resume_task_id": {
+        "cn": "仅在继续同一个未完成浏览器任务时，传入上一次 task_tool 返回的 resume_task_id；新任务不要传",
+        "en": (
+            "Only when continuing the same unfinished browser task, pass the resume_task_id "
+            "returned by the previous task_tool call; omit it for a new task"
+        ),
+    },
 }
 
 
@@ -225,6 +238,10 @@ def get_task_tool_input_params(language: str = "cn") -> Dict[str, Any]:
                 "type": "array",
                 "items": {"type": "string"},
                 "description": p["browser_capabilities"].get(language, p["browser_capabilities"]["cn"]),
+            },
+            "resume_task_id": {
+                "type": "string",
+                "description": p["resume_task_id"].get(language, p["resume_task_id"]["cn"]),
             },
         },
         "required": ["subagent_type", "task_description"],

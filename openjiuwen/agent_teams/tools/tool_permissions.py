@@ -13,7 +13,8 @@ LEADER_ONLY_TOOLS: set[str] = {
     "build_team",         # Create a new team
     "clean_team",         # Clean up a team
     "spawn_teammate",     # Spawn an ordinary LLM teammate
-    "spawn_human_agent",  # Spawn a human member (HITT)
+    "spawn_human_agent",  # Spawn a human member with an avatar (HITT)
+    "spawn_passive_human", # Spawn a passive human member, no avatar (HITT)
     "spawn_bridge_agent", # Spawn a bridge to a remote agent
     "spawn_external_cli", # Spawn a third-party CLI agent teammate
     "shutdown_member",    # Shutdown a team member
@@ -103,6 +104,23 @@ HUMAN_AGENT_TOOLS: set[str] = {
     "verify_task",  # A human member can be assigned as a reviewer (reviewer-guarded)
     "send_message",
 }
+
+# Tools a passive human member may drive through the tool-call passthrough
+# (``HumanAgentToolCall``). This is NOT a ``create_team_tools`` role set — a
+# passive member has no harness, so no tool list is ever built for an LLM;
+# the passthrough executor consults this constant directly when the runtime
+# executes an externally relayed tool call under the member's identity.
+#
+# The base surface matches ``HUMAN_AGENT_TOOLS``: the passive role is the
+# avatar-free flavor of the same human member, so it inherits the human tool
+# face verbatim. ``claim_task`` is the one deliberate delta — the avatar
+# refrains from autonomous claiming as an LLM-behavior guard, but a passive
+# human IS the operator: an explicit claim relayed through the external
+# protocol is as intentional as ``member_complete_task``. Under scheduled
+# dispatch the executor subtracts ``claim_task`` and swaps ``send_message``
+# for its report-to-leader form, aligning with the
+# ``MEMBER_ONLY_TOOLS_SCHEDULED`` convention that the leader assigns all work.
+PASSIVE_HUMAN_TOOLS: set[str] = HUMAN_AGENT_TOOLS | {"claim_task"}
 
 
 # ``member_name`` is used verbatim as a primary key, a message routing

@@ -93,8 +93,8 @@ def test_build_team_trajectory_summary_includes_tool_calls() -> None:
                                     "attributes": attributes_from_map(
                                         {
                                             semconv.GEN_AI_TOOL_NAME: "send_message",
-                                            semconv.GEN_AI_TOOL_INPUT: {"to": "reviewer"},
-                                            semconv.GEN_AI_TOOL_OUTPUT: "sent",
+                                            semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"to": "reviewer"},
+                                            semconv.GEN_AI_TOOL_CALL_RESULT: "sent",
                                         }
                                     ),
                                 }

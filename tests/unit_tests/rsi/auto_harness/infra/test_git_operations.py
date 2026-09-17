@@ -9,10 +9,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.git_auth import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.git_auth import (
     build_git_auth_env,
 )
-from openjiuwen.rsi.auto_harness.infra.git_operations import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.git_operations import (
     GitOperations,
 )
 
@@ -48,19 +48,19 @@ class TestGitOperations:
 
         proc = AsyncMock()
         proc.communicate.return_value = (
-            b" M openjiuwen/rsi/auto_harness/schema.py\n",
+            b" M openjiuwen/rsi/harness_rsi/auto_harness/schema.py\n",
             b"",
         )
         proc.returncode = 0
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.git_operations.asyncio.create_subprocess_exec",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.git_operations.asyncio.create_subprocess_exec",
             return_value=proc,
         ):
             code, out = await git._git("status", "--porcelain")
 
         assert code == 0
-        assert out == " M openjiuwen/rsi/auto_harness/schema.py"
+        assert out == " M openjiuwen/rsi/harness_rsi/auto_harness/schema.py"
 
     @pytest.mark.asyncio
     async def test_push_uses_task_scoped_auth_env(self):
@@ -76,7 +76,7 @@ class TestGitOperations:
         proc.returncode = 0
 
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.git_operations.asyncio.create_subprocess_exec",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.git_operations.asyncio.create_subprocess_exec",
             return_value=proc,
         ) as create_proc:
             result = await git.push("feature-branch")
@@ -95,7 +95,7 @@ class TestGitOperations:
             side_effect=[
                 (
                     0,
-                    " M openjiuwen/rsi/auto_harness/schema.py\n"
+                    " M openjiuwen/rsi/harness_rsi/auto_harness/schema.py\n"
                     "?? tests/unit_tests/rsi/auto_harness/test_schema.py\n"
                     "R  old.py -> new.py",
                 ),
@@ -105,12 +105,12 @@ class TestGitOperations:
         result = await git.collect_status()
 
         assert result["dirty_files"] == [
-            "openjiuwen/rsi/auto_harness/schema.py",
+            "openjiuwen/rsi/harness_rsi/auto_harness/schema.py",
             "tests/unit_tests/rsi/auto_harness/test_schema.py",
             "new.py",
         ]
         assert result["tracked_modified_files"] == [
-            "openjiuwen/rsi/auto_harness/schema.py",
+            "openjiuwen/rsi/harness_rsi/auto_harness/schema.py",
             "new.py",
         ]
         assert result["untracked_files"] == ["tests/unit_tests/rsi/auto_harness/test_schema.py"]
@@ -123,14 +123,14 @@ class TestGitOperations:
         git._git = AsyncMock(
             return_value=(
                 0,
-                " M openjiuwen/rsi/auto_harness/schema.py\n?? tests/unit_tests/rsi/auto_harness/test_schema.py",
+                " M openjiuwen/rsi/harness_rsi/auto_harness/schema.py\n?? tests/unit_tests/rsi/auto_harness/test_schema.py",
             )
         )
 
         result = await git.status_porcelain()
 
         assert result == (
-            " M openjiuwen/rsi/auto_harness/schema.py\n?? tests/unit_tests/rsi/auto_harness/test_schema.py"
+            " M openjiuwen/rsi/harness_rsi/auto_harness/schema.py\n?? tests/unit_tests/rsi/auto_harness/test_schema.py"
         )
         git._git.assert_awaited_once_with("status", "--porcelain", "--untracked-files=all")
 

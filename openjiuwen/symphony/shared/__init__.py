@@ -14,7 +14,6 @@ from .naming import (
     normalize_name_key,
     to_camel_case,
     to_camel_path,
-    to_kebab_case,
     to_pascal_case,
     to_pascal_path,
 )
@@ -64,7 +63,6 @@ __all__ = [
     "read_s3_text",
     "to_camel_case",
     "to_camel_path",
-    "to_kebab_case",
     "to_pascal_case",
     "to_pascal_path",
     "upload_local_dir_to_s3",

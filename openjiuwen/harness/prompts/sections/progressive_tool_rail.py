@@ -4,12 +4,32 @@
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Iterable, List, Optional
 
 from openjiuwen.harness.prompts.builder import PromptSection
 from openjiuwen.harness.prompts.sections import SectionName
 
 _MAX_DEFERRED_TOOL_SUMMARY_CHARS = 120
+
+
+PROGRESSIVE_TOOL_NAVIGATION_HEADER: Dict[str, str] = {
+    "cn": (
+        "## 工具导航\n"
+        "下面的内容用于说明当前 session 中的工具。延迟工具需要先通过 `tool_search` 找到；"
+        "搜索结果会包含完整参数 schema，下一轮可以直接调用。\n"
+    ),
+    "en": (
+        "## Tool Navigation\n"
+        "The entries below describe tools available in the current session. Deferred "
+        "tools become callable after `tool_search` returns them, with their complete "
+        "parameter schemas.\n"
+    ),
+}
+
+PROGRESSIVE_TOOL_NAVIGATION_EMPTY: Dict[str, str] = {
+    "cn": "- （当前没有可展示的导航条目）",
+    "en": "- (no navigation entries available)",
+}
 
 
 PROGRESSIVE_TOOL_RULES_HEADER: Dict[str, str] = {
@@ -87,6 +107,30 @@ PROGRESSIVE_TOOL_RULES_BODY: Dict[str, str] = {
         "that no suitable tool is available.\n"
     ),
 }
+
+
+def build_navigation_prompt(
+    entries: Iterable[str],
+    language: str = "cn",
+) -> str:
+    lang = language if language in PROGRESSIVE_TOOL_NAVIGATION_HEADER else "cn"
+    items: List[str] = [item for item in entries if item]
+    header = PROGRESSIVE_TOOL_NAVIGATION_HEADER[lang]
+    if not items:
+        return header + "\n" + PROGRESSIVE_TOOL_NAVIGATION_EMPTY[lang]
+    return header + "\n" + "\n".join(items)
+
+
+def build_navigation_section(
+    entries: Iterable[str],
+    language: str = "cn",
+) -> "PromptSection":
+    return PromptSection(
+        name=SectionName.TOOL_NAVIGATION,
+        content={language: build_navigation_prompt(entries, language)},
+        priority=72,
+        category="system_prompt",
+    )
 
 
 def _render_deferred_tool_descriptions(
@@ -261,6 +305,35 @@ def build_progressive_tool_rules_section(
             )
         },
         priority=75,
+        category="system_prompt",
+    )
+
+
+def build_navigation_entry(
+    *,
+    name: str,
+    group: str,
+    status: str,
+    summary: str,
+    language: str = "cn",
+) -> str:
+    if language == "en":
+        return f"- {name} [{group}, {status}]: {summary}"
+    return f"- {name} [{group}, {status}]：{summary}"
+
+
+def build_multilingual_navigation_section(
+    entries_cn: Iterable[str],
+    entries_en: Iterable[str],
+) -> "PromptSection":
+    return PromptSection(
+        name=SectionName.TOOL_NAVIGATION,
+        content={
+            "cn": build_navigation_prompt(entries_cn, "cn"),
+            "en": build_navigation_prompt(entries_en, "en"),
+        },
+        priority=72,
+        category="system_prompt",
     )
 
 
@@ -280,4 +353,5 @@ def build_multilingual_progressive_tool_rules_section(
             ),
         },
         priority=75,
+        category="tools",
     )

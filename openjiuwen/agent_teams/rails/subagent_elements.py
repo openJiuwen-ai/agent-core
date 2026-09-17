@@ -102,42 +102,49 @@ def _common_kwargs(inp: SubAgentInput, context: Any) -> dict[str, Any]:
 
 
 def _attach_observability_rail(spec: Any) -> Any:
-    """Append an ObservabilityRail to a sub-agent spec when observability is on.
+    """Append the agent-tier observability rail to a sub-agent spec when tracing is on.
 
     Sub-agents default to ``enable_task_loop=False`` and run via the
-    single-round invoke path, which never fires iteration events. Without
-    this rail their LLM/tool spans fall back to the team span (or are
-    skipped), leaving the trace without an agent layer. ObservabilityRail
+    single-round invoke path, which never fires iteration events. Without a
+    rail their LLM/tool spans fall back to the run root (or are skipped),
+    leaving the trace without an agent layer. ``AgentObservabilityRail``
     implements ``before_invoke``/``after_invoke`` precisely to cover this
     single-round path.
 
-    Both guards are shared with ``build_observability_rail``: the optional
+    Only that rail — **never the team one**, even though this factory lives in
+    the team package. A sub-agent is not a team member: it has no member id, no
+    role and no mailbox, so an ``agentteam.*`` block on its span would assert an
+    identity it does not have (its "member name" would be the sub-agent *type*).
+    Attribution stays structural instead — the sub-agent span nests under the
+    dispatching member's span, which does carry the team identity.
+
+    Both guards are shared with the element factories: the optional
     ``observability`` extra must be installed
     (``observability_dependency_installed``) and observability must be
-    initialized (``maybe_observability_rail``); only the idempotent-append
-    tail is specific to this sub-agent path. Returns the spec unchanged
-    when the extra is absent, observability is off, or a rail is already
-    attached. Confined to the team package — the harness sub-agent builders
-    are not modified.
+    initialized (``maybe_agent_observability_rail``); only the
+    idempotent-append tail is specific to this sub-agent path. Returns the spec
+    unchanged when the extra is absent, observability is off, or the rail is
+    already attached. Confined to the team package — the harness sub-agent
+    builders are not modified.
     """
     if not observability_dependency_installed():
         return spec
 
-    from openjiuwen.agent_teams.observability.rail import (
-        ObservabilityRail,
-        maybe_observability_rail,
+    from openjiuwen.harness.observability.rail import (
+        AgentObservabilityRail,
+        maybe_agent_observability_rail,
     )
 
-    rail = maybe_observability_rail()
+    rail = maybe_agent_observability_rail()
     if rail is None:
         return spec
 
-    existing = spec.rails or []
-    # Idempotent: never append a second ObservabilityRail even if a caller
-    # wraps the same spec twice.
-    if any(isinstance(r, ObservabilityRail) for r in existing):
+    existing = list(spec.rails or [])
+    # Idempotent: never append a second agent rail even if a caller wraps the
+    # same spec twice.
+    if any(isinstance(item, AgentObservabilityRail) for item in existing):
         return spec
-    spec.rails = list(existing) + [rail]
+    spec.rails = existing + [rail]
     return spec
 
 

@@ -20,6 +20,10 @@ from openjiuwen.core.common.exception.errors import (
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
+    NativeTokenizerCounter,
+    StringLengthCounter,
+    TiktokenCounter,
+    TokenizerSpec,
 )
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.processor.base import ContextEvent, ContextProcessor
@@ -146,24 +150,19 @@ class TestContextEngine:
         assert ctx1 is ctx2
 
     @pytest.mark.asyncio
-    async def test_create_context_does_not_create_default_tiktoken_counter(self, session):
+    async def test_create_context_uses_string_counter_when_tiktoken_is_disabled(self, session):
         engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=False))
 
-        with patch("openjiuwen.core.context_engine.context_engine.context_engine_logger") as logger:
-            context = await engine.create_context(context_id="ctx", session=session)
+        context = await engine.create_context(context_id="ctx", session=session)
 
-        assert context.token_counter() is None
-        logger.info.assert_called_once_with(
-            "tiktoken counter disabled; using character-based token estimation, session_id=%s context_id=%s",
-            session.get_session_id(),
-            "ctx",
-        )
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert context.token_counter().measurement_fallback_reason == "tiktoken_disabled"
 
     @pytest.mark.asyncio
     async def test_create_context_creates_default_tiktoken_counter_when_enabled(self, session):
         engine = ContextEngine(ContextEngineConfig(enable_tiktoken_counter=True))
 
-        with patch("openjiuwen.core.context_engine.token.tiktoken_counter.TiktokenCounter") as counter_cls:
+        with patch("openjiuwen.core.context_engine.token.tokenizer_selector.TiktokenCounter") as counter_cls:
             counter = MagicMock()
             counter_cls.return_value = counter
             context = await engine.create_context(context_id="ctx", session=session)
@@ -234,18 +233,33 @@ class TestContextEngine:
         )
 
     @pytest.mark.asyncio
-    async def test_recover_from_model_exception_does_not_retry_partial_stream(self, engine):
+    async def test_recover_from_model_exception_skips_partial_stream(self, engine, session):
+        context = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[STREAM_RECOVERED]"),
+            )],
+            history_messages=[UserMessage(content="large historical context")],
+        )
+        session.commit = AsyncMock()
         provider_error = RuntimeError(
             "This model's maximum context length is 1048576 tokens."
         )
 
         recovered = await engine.recover_from_model_exception(
+            context_id="ctx",
+            session=session,
+            context=context,
             exception=provider_error,
             streaming=True,
             stream_chunks_emitted=1,
         )
 
         assert recovered is False
+        assert context.get_messages()[0].content == "large historical context"
+        session.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_compress_context_preserves_explicit_empty_trigger(self, engine, session):
@@ -405,6 +419,203 @@ class TestContextEngine:
             context_id="ctx", session=session, token_counter=token_counter
         )
         assert context.token_counter() is token_counter
+
+    @pytest.mark.asyncio
+    async def test_rebind_context_model_preserves_history_and_refreshes_binding(
+        self, session, another_session
+    ):
+        old_counter = MagicMock()
+        new_counter = MagicMock()
+        engine = ContextEngine(
+            ContextEngineConfig(
+                model_name="old-model",
+                model_provider="old-provider",
+                context_window_tokens=100,
+            )
+        )
+        old_context = await engine.create_context(
+            context_id="ctx", session=session, token_counter=old_counter
+        )
+        untouched_context = await engine.create_context(
+            context_id="ctx", session=another_session, token_counter=old_counter
+        )
+        await old_context.add_messages(UserMessage(content="history"))
+        old_context._usage_measurement_cache["cached"] = object()
+        old_context._usage_report_cache["cached"] = object()
+
+        new_config = ContextEngineConfig(
+            model_name="new-model",
+            model_provider="new-provider",
+            context_window_tokens=200,
+        )
+        with patch.object(engine, "_select_token_counter", return_value=new_counter):
+            rebound = engine.rebind_context_model(
+                new_config,
+                session_id=session.get_session_id(),
+            )
+
+        assert rebound == 1
+        assert engine.get_context("ctx", session.get_session_id()) is old_context
+        assert old_context.get_messages()[-1].content == "history"
+        assert old_context.token_counter() is new_counter
+        assert old_context.context_window_tokens() == 200
+        assert old_context._model_name == "new-model"
+        assert old_context._usage_measurement_cache == {}
+        assert old_context._usage_report_cache == {}
+        assert untouched_context.token_counter() is old_counter
+        assert untouched_context._model_name == "old-model"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("enabled", "expected_counter"),
+        [
+            (True, TiktokenCounter),
+            (False, StringLengthCounter),
+        ],
+    )
+    async def test_create_context_without_model_respects_tiktoken_switch(
+        self, session, enabled, expected_counter
+    ):
+        engine = ContextEngine(
+            ContextEngineConfig(enable_tiktoken_counter=enabled)
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), expected_counter)
+        if not enabled:
+            assert (
+                context.token_counter().measurement_fallback_reason
+                == "tiktoken_disabled"
+            )
+
+    @pytest.mark.asyncio
+    async def test_create_context_without_local_tokenizer_uses_string_length(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=False,
+                model_name="deepseek-chat",
+                model_provider="DeepSeek",
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert context.token_counter().measurement_fallback_reason == "model_tokenizer_spec_missing"
+
+    @pytest.mark.asyncio
+    async def test_create_context_uses_local_native_tokenizer_without_download(
+        self, session, tmp_path
+    ):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+
+        artifact = tmp_path / "tokenizer.json"
+        tokenizer = Tokenizer(
+            WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]")
+        )
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.save(str(artifact))
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=True,
+                enable_tokenizer_download=True,
+                tokenizer_offline=False,
+                tokenizer_spec=TokenizerSpec(
+                    provider="deepseek",
+                    model="deepseek-chat",
+                    source="local",
+                    artifact_path=str(artifact),
+                ),
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), NativeTokenizerCounter)
+
+    @pytest.mark.asyncio
+    async def test_create_context_uses_cached_family_tokenizer_when_switch_is_false(
+        self, session, tmp_path
+    ):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+
+        artifact = tmp_path / "tokenizer.json"
+        tokenizer = Tokenizer(
+            WordLevel({"[UNK]": 0, "hello": 1}, unk_token="[UNK]")
+        )
+        tokenizer.pre_tokenizer = Whitespace()
+        tokenizer.save(str(artifact))
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=False,
+                model_provider="openai",
+                model_name="GLM-5.2_Thinking",
+                tokenizer_registry=[
+                    TokenizerSpec(
+                        provider="OpenAI",
+                        model="glm-5.2",
+                        source="LOCAL",
+                        artifact_path=str(artifact),
+                    )
+                ],
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), NativeTokenizerCounter)
+        assert context.token_counter().measurement_source == "family_tokenizer_fallback"
+
+    @pytest.mark.asyncio
+    async def test_create_context_missing_tokenizer_falls_back_without_download(
+        self, session, monkeypatch
+    ):
+        from openjiuwen.core.context_engine.token.tokenizer_manager import (
+            TokenizerArtifactManager,
+        )
+
+        manager_options = {}
+        original_init = TokenizerArtifactManager.__init__
+
+        def capture_init(manager, **kwargs):
+            manager_options.update(kwargs)
+            original_init(manager, **kwargs)
+
+        monkeypatch.setattr(TokenizerArtifactManager, "__init__", capture_init)
+        monkeypatch.setattr(
+            TokenizerArtifactManager,
+            "_resolve_huggingface",
+            lambda _manager, _spec: None,
+        )
+
+        engine = ContextEngine(
+            ContextEngineConfig(
+                enable_tiktoken_counter=True,
+                enable_tokenizer_download=True,
+                tokenizer_offline=False,
+                model_provider="DeepSeek",
+                model_name="deepseek-chat",
+                tokenizer_spec=TokenizerSpec(
+                    provider="DeepSeek",
+                    model="deepseek-chat",
+                    source="huggingface",
+                    id="missing/tokenizer",
+                ),
+            )
+        )
+
+        context = await engine.create_context(context_id="ctx", session=session)
+
+        assert isinstance(context.token_counter(), StringLengthCounter)
+        assert manager_options["enable_download"] is False
+        assert manager_options["offline"] is True
 
     @pytest.mark.asyncio
     @pytest.mark.usefixtures("refactored_context_processors")
@@ -973,3 +1184,32 @@ class TestContextEngine:
         context1.set_messages(messages=messages1, with_history=False)
         assert context1.get_messages(with_history=False) == messages1
         assert context1.get_messages() == history + messages[:-1] + messages1
+
+    @pytest.mark.asyncio
+    async def test_model_context_window_override_updates_cached_context(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 131072
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 262144
+
+    @pytest.mark.asyncio
+    async def test_global_context_window_stays_above_model_override(self, session):
+        engine = ContextEngine(
+            ContextEngineConfig(
+                context_window_tokens=65536,
+                model_name="model-a",
+                model_context_window_tokens_override=131072,
+            )
+        )
+        context = await engine.create_context(context_id="ctx", session=session)
+        assert context.context_window_tokens() == 65536
+
+        engine.update_model_context(model_name="model-b", context_window_tokens=262144)
+        assert context.context_window_tokens() == 65536

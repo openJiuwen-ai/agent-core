@@ -56,7 +56,7 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
 | `TOOL_APPROVAL_RESULT` | 目标是自己才 `resume_interrupt`，把审批结果包成 `InteractiveInput` 灌回被中断的工具调用 |
 | `TASK_PLAN_RESPONSE` | 同上，plan 闸的恢复路径。**与 `TaskBoardHandler` 在同一 event_key 上 fan-out**，分工见下文 |
 
-### `MemberHandler`（7 个事件，持 `_team_clean_requested`）
+### `MemberHandler`（7 个事件，无状态）
 
 `on_member_event` 先按角色分流：
 
@@ -67,10 +67,11 @@ event_key → handler 的路由归 `AsyncCallbackFramework`；**"收到这个事
   不带状态但含义各自固定（STARTING / RESTARTING），查 `_ACTIVITY_STATUS_BY_EVENT` 映射、
   **不回查 DB**；`MEMBER_SHUTDOWN` 不参与——它之前必有一条到 `SHUTDOWN_REQUESTED` 的状态变更。
   这条路只补"别人"的状态，leader 自己的跃迁走本地 `TeamAgent._update_status`（自发事件被
-  `_filter_self` 丢掉，事件流永远看不到自己）。唯一的副作用在 `MEMBER_STATUS_CHANGED` 上：
-  `_maybe_clean_team_after_shutdown` 在**每个非 leader 成员都到达终态 SHUTDOWN** 后自动
-  `clean_team`，`_team_clean_requested` 保证只做一次。存在理由——自然语言的"解散团队"常常
-  只做到 `shutdown_member` 就停了，而 persistent 团队根本不给 leader 暴露 `clean_team` 工具。
+  `_filter_self` 丢掉，事件流永远看不到自己）。**除此之外没有别的副作用**——本 handler 一度在
+  "每个非 leader 成员都到达终态 SHUTDOWN"时自动 `clean_team`，那是把状态当意图读：leader 关掉
+  最后一名成员准备换一批人时同样满足它，而 `clean_team` 会 cascade 删库并 `rmtree` 掉产物目录。
+  解散只认显式调用（temporary leader 的 `clean_team` 工具 / operator 的 `delete_agent_team`），
+  见 [[F_81]] 与 `S_03` 不变量 21。
 - **非 leader 分支**：只反应指向自己的事件。`MEMBER_CANCELED` → `cancel_agent()`；
   `MEMBER_SHUTDOWN` **只在 `force` 时** `shutdown_self()`。
   **graceful 退场不在这里 teardown** —— 它骑 `MessageHandler` 的邮箱 drain + harness-input

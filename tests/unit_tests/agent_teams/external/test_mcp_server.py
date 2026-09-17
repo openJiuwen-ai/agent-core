@@ -4,11 +4,12 @@
 """Tests for the team-member MCP server, scoped by descriptor.scope.
 
 ``member`` scope exposes the real teammate ``TeamTool`` set (view_task /
-claim_task / send_message) + the external-only read_inbox, with empty
-server-level instructions. ``operator`` scope exposes the broad external
-team-control set + workflow instructions. The server is the low-level
-:class:`mcp.server.lowlevel.Server`, so tools are driven through its
-registered request handlers.
+claim_task / send_message) only, with empty server-level instructions —
+inbound messages are pushed by the parent process's coordination layer, so
+the operator-only read_inbox pull tool is absent. ``operator`` scope exposes
+the broad external team-control set (read_inbox included) + workflow
+instructions. The server is the low-level :class:`mcp.server.lowlevel.Server`,
+so tools are driven through its registered request handlers.
 """
 
 import mcp.types as types
@@ -19,7 +20,7 @@ from openjiuwen.agent_teams.mcp.server import build_server
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 
-_MEMBER_TOOLS = {"read_inbox", "view_task", "claim_task", "verify_task", "send_message"}
+_MEMBER_TOOLS = {"view_task", "claim_task", "verify_task", "send_message"}
 _OPERATOR_TOOLS = {
     "read_inbox",
     "send_message",
@@ -155,11 +156,26 @@ async def test_member_send_message_delivers(team_db, make_descriptor):
 
 @pytest.mark.asyncio
 @pytest.mark.level1
-async def test_member_read_inbox_returns_text(team_db, make_descriptor):
+async def test_member_scope_drops_read_inbox(team_db, make_descriptor):
+    # Messages reach an external member via the parent process's coordination
+    # push (steer / follow-up), mirroring the Claude SDK in-process MCP tool
+    # set — so the member must not be offered the operator-only pull tool.
     async with ExternalTeamClient(make_descriptor(member="leader", role="leader")) as leader:
         await leader.send_message("dev-1", "ping from leader")
 
     server = build_server(_factory(make_descriptor, scope="member"), scope="member")
+    assert "read_inbox" not in await _list_names(server)
+    text = await _call_text(server, "read_inbox", {})
+    assert text == "Unknown tool: read_inbox"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_operator_read_inbox_returns_text(team_db, make_descriptor):
+    async with ExternalTeamClient(make_descriptor(member="leader", role="leader")) as leader:
+        await leader.send_message("dev-1", "ping from leader")
+
+    server = build_server(_factory(make_descriptor, scope="operator"), scope="operator")
     text = await _call_text(server, "read_inbox", {})
     assert "ping from leader" in text
 

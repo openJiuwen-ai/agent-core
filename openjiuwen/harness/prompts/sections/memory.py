@@ -167,6 +167,7 @@ def build_memory_section(
         name=SectionName.MEMORY,
         content={language: "\n".join(sections)},
         priority=50,
+        category="memory",
     )
 
 

@@ -3,18 +3,26 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import hashlib
 import os
 import stat as stat_module
 from collections.abc import AsyncIterator, Mapping
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, cast
 
 import pdfplumber
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    candidate_in_time_range,
+    select_latest_candidates,
+)
+from openjiuwen.harness.personal_context.fetch.retry import classify_file_error, retry_provider_read
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
@@ -32,59 +40,88 @@ _READ_CHUNK_SIZE = 64 * 1024
 class LocalFilesFetchService(ContextFetchService):
     """Scan one configured local directory and emit file changes."""
 
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id
+        try:
+            _validate_selection_cursor(cursor)
+            root = await asyncio.to_thread(_root_dir, self._config)
+            metadata = await retry_provider_read(
+                lambda: asyncio.to_thread(_scan_files, root),
+                provider="local_files",
+                operation_name="directory_scan",
+                classify=classify_file_error,
+            )
+            candidates: list[dict[str, object]] = []
+            for item in metadata:
+                mtime_ns = _integer(item.get("mtime_ns"), name="mtime_ns")
+                size = _integer(item.get("size"), name="size")
+                path = Path(str(item["path"])).resolve()
+                candidate_time = (
+                    datetime.fromtimestamp(mtime_ns / 1_000_000_000, tz=UTC).isoformat().replace("+00:00", "Z")
+                )
+                candidate = {
+                    **item,
+                    "stable_id": os.path.normcase(str(path)),
+                    "revision_id": hashlib.sha256(f"{mtime_ns}:{size}".encode()).hexdigest(),
+                    "candidate_time": candidate_time,
+                    "resource_lane": "file",
+                    "locator": str(path),
+                    "root_dir": str(root),
+                }
+                if candidate_in_time_range(candidate_time, self._config.time_range, run_started_at):
+                    candidates.append(candidate)
+            limit = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
+            return select_latest_candidates(tuple(candidates), cursor, limit)
+        except asyncio.CancelledError:
+            raise
+        except BaseError:
+            raise
+        except Exception as exc:
+            raise build_error(
+                StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR,
+                error_msg="local files preparation failed",
+                cause=exc,
+            ) from None
+
     async def fetch(
         self,
         *,
         run_id: str,
         cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
     ) -> AsyncIterator[FetchBatch]:
         del run_id
+        next_cursor = dict(cursor) if cursor is not None else {}
         try:
-            previous = _cursor_files(cursor)
             root = await asyncio.to_thread(_root_dir, self._config)
-            metadata_candidates = await asyncio.to_thread(_scan_files, root)
-            candidates: list[dict[str, Any]] = []
-            for candidate in metadata_candidates:
-                candidates.append(await asyncio.to_thread(_fingerprint_candidate, candidate))
-
-            current = {candidate["relative_path"]: candidate for candidate in candidates}
-            limit = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            changes = _changes(
-                root,
-                candidates,
-                current,
-                previous,
-                initial=cursor is None or cursor == {},
-                max_items=limit,
-            )
-            selected = changes[:limit]
-
-            if not selected:
-                yield FetchBatch(batch_id="batch-0", items=(), next_cursor={"files": previous})
+            if not candidates:
+                yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
-
-            temporary_cursor = dict(previous)
             batch_index = 0
-            for start in range(0, len(selected), _BATCH_SIZE):
+            for start in range(0, len(candidates), _BATCH_SIZE):
                 end = start + _BATCH_SIZE
-                chunk = selected[start:end]
+                chunk = candidates[start:end]
                 materialized: list[dict[str, Any]] = []
-                for change in chunk:
-                    if change["operation"] == "upsert":
-                        materialized.append(await asyncio.to_thread(_materialize_candidate, change))
-                    else:
-                        materialized.append(change)
+                for candidate in chunk:
+                    materialized.append(
+                        await retry_provider_read(
+                            partial(asyncio.to_thread, _materialize_candidate, candidate),
+                            provider="local_files",
+                            operation_name="file_read",
+                            classify=classify_file_error,
+                        )
+                    )
                 items = tuple(_change_item(root, change) for change in materialized)
-                for change in materialized:
-                    path = str(change["relative_path"])
-                    if change["operation"] == "delete":
-                        temporary_cursor.pop(path, None)
-                    else:
-                        temporary_cursor[path] = _summary(change)
                 yield FetchBatch(
                     batch_id=f"batch-{batch_index}",
                     items=items,
-                    next_cursor={"files": temporary_cursor},
+                    next_cursor=next_cursor,
                 )
                 batch_index += 1
         except asyncio.CancelledError:
@@ -113,49 +150,17 @@ def _root_dir(config: PersonalContextFetchServiceConfig) -> Path:
     return root
 
 
-def _cursor_files(cursor: dict[str, object] | None) -> dict[str, dict[str, object]]:
+def _validate_selection_cursor(cursor: dict[str, object] | None) -> None:
     if cursor is None:
-        return {}
-    if not isinstance(cursor, Mapping):
-        raise ValueError("cursor must be an object")
-    raw_files: object = cursor.get("files", {})
-    if not isinstance(raw_files, Mapping):
-        raise ValueError("cursor files must be an object")
-    result: dict[str, dict[str, object]] = {}
-    for raw_path, raw_summary in raw_files.items():
-        path = _validate_relative_path(raw_path)
-        if not isinstance(raw_summary, Mapping):
-            raise ValueError("cursor file summary must be an object")
-        summary = dict(raw_summary)
-        revision_id = summary.get("revision_id")
-        if not isinstance(revision_id, str) or not revision_id:
-            raise ValueError("cursor file summary revision_id is invalid")
-        result[path] = {
-            "mtime_ns": _integer(summary.get("mtime_ns"), name="mtime_ns"),
-            "size": _integer(summary.get("size"), name="size"),
-            "revision_id": revision_id,
-        }
-    return result
+        return
+    if not isinstance(cursor, Mapping) or set(cursor) - {"_selection"}:
+        raise ValueError("local files cursor contains unsupported fields")
 
 
 def _integer(value: object, *, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError(f"cursor {name} is invalid")
     return value
-
-
-def _validate_relative_path(value: object) -> str:
-    if not isinstance(value, str) or not value or "\\" in value:
-        raise ValueError("cursor path is invalid")
-    path = Path(value)
-    if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
-        raise ValueError("cursor path is invalid")
-    if any(":" in part for part in path.parts):
-        raise ValueError("cursor path is invalid")
-    normalized = path.as_posix()
-    if normalized != value:
-        raise ValueError("cursor path is invalid")
-    return normalized
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -234,8 +239,8 @@ def _max_size(extension: str) -> int:
     return _PDF_MAX_SIZE if extension.casefold() == ".pdf" else _TEXT_MAX_SIZE
 
 
-def _read_checked(path: Path, *, extension: str, collect: bool) -> bytes | str:
-    """Read or hash one bounded file while checking its metadata before/after."""
+def _read_checked(path: Path, *, extension: str) -> bytes:
+    """Read one bounded file while checking its metadata before/after."""
 
     try:
         before = path.stat()
@@ -243,8 +248,7 @@ def _read_checked(path: Path, *, extension: str, collect: bool) -> bytes | str:
         if before.st_size > maximum:
             raise ValueError("file exceeds the provider size limit")
 
-        digest = hashlib.sha256()
-        chunks: list[bytes] | None = [] if collect else None
+        chunks: list[bytes] = []
         total = 0
         with path.open("rb") as stream:
             while True:
@@ -255,14 +259,10 @@ def _read_checked(path: Path, *, extension: str, collect: bool) -> bytes | str:
                 total += len(chunk)
                 if total > maximum:
                     raise ValueError("file exceeds the provider size limit")
-                digest.update(chunk)
-                if chunks is not None:
-                    chunks.append(chunk)
+                chunks.append(chunk)
         after = path.stat()
         if after.st_mtime_ns != before.st_mtime_ns or after.st_size != before.st_size or total != before.st_size:
-            raise ValueError("file changed while it was being read")
-        if chunks is None:
-            return digest.hexdigest()
+            raise OSError(getattr(errno, "ESTALE", 116), "file changed while it was being read")
         return b"".join(chunks)
     except asyncio.CancelledError:
         raise
@@ -272,25 +272,12 @@ def _read_checked(path: Path, *, extension: str, collect: bool) -> bytes | str:
         raise _file_error("local file read failed", exc) from None
 
 
-def _fingerprint_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
-    revision_id = _read_checked(
-        Path(str(candidate["path"])),
-        extension=str(candidate["extension"]),
-        collect=False,
-    )
-    return {**candidate, "revision_id": str(revision_id)}
-
-
 def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
     path = Path(str(candidate["path"]))
     extension = str(candidate["extension"])
     try:
-        raw_bytes = _read_checked(path, extension=extension, collect=True)
-        if not isinstance(raw_bytes, bytes):
-            raise TypeError("local file materialization did not return bytes")
-        revision_id = _revision_id(raw_bytes)
-        if revision_id != candidate["revision_id"]:
-            raise ValueError("file changed between fingerprint and materialization")
+        raw_bytes = _read_checked(path, extension=extension)
+        content_revision_id = _revision_id(raw_bytes)
         if extension == ".pdf":
             content, content_truncated = _read_pdf(path)
         else:
@@ -303,6 +290,7 @@ def _materialize_candidate(candidate: Mapping[str, Any]) -> dict[str, Any]:
             raise ValueError("file changed between fingerprint and materialization")
         return {
             **candidate,
+            "content_revision_id": content_revision_id,
             "content": content,
             "raw_snapshot": raw_bytes if len(raw_bytes) <= _RAW_SNAPSHOT_MAX_SIZE else None,
             "content_truncated": content_truncated,
@@ -347,70 +335,6 @@ def _revision_id(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _summary(change: Mapping[str, object]) -> dict[str, object]:
-    return {
-        "mtime_ns": _integer(change["mtime_ns"], name="mtime_ns"),
-        "size": _integer(change["size"], name="size"),
-        "revision_id": str(change["revision_id"]),
-    }
-
-
-def _changes(
-    root: Path,
-    candidates: list[dict[str, Any]],
-    current: dict[str, dict[str, Any]],
-    previous: dict[str, dict[str, object]],
-    *,
-    initial: bool,
-    max_items: int,
-) -> list[dict[str, Any]]:
-    del max_items
-    new_or_changed: list[dict[str, Any]] = []
-    historical: list[dict[str, Any]] = []
-    latest_known_mtime = max(
-        (_integer(summary["mtime_ns"], name="mtime_ns") for summary in previous.values()),
-        default=None,
-    )
-    for candidate in candidates:
-        path = str(candidate["relative_path"])
-        previous_summary = previous.get(path)
-        change = {**candidate, "operation": "upsert"}
-        if previous_summary is not None and previous_summary.get("revision_id") != candidate["revision_id"]:
-            new_or_changed.append(change)
-        elif previous_summary is None:
-            candidate_mtime = _integer(candidate["mtime_ns"], name="mtime_ns")
-            if not initial and latest_known_mtime is not None and candidate_mtime > latest_known_mtime:
-                new_or_changed.append(change)
-            else:
-                historical.append(change)
-
-    for path, summary in previous.items():
-        if path not in current:
-            new_or_changed.append(
-                {
-                    "relative_path": path,
-                    "path": root / Path(path),
-                    "content": None,
-                    "mtime_ns": _integer(summary["mtime_ns"], name="mtime_ns"),
-                    "size": _integer(summary["size"], name="size"),
-                    "revision_id": str(summary["revision_id"]),
-                    "operation": "delete",
-                }
-            )
-
-    def _sort_key(change: Mapping[str, object]) -> tuple[int, str, str]:
-        relative_path = change.get("relative_path")
-        return (
-            -_integer(change.get("mtime_ns"), name="mtime_ns"),
-            str(relative_path).casefold(),
-            str(relative_path),
-        )
-
-    new_or_changed.sort(key=_sort_key)
-    historical.sort(key=_sort_key)
-    return [*new_or_changed, *historical]
-
-
 def _logical_id(root: Path, relative_path: str) -> str:
     root_digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()
     return f"local_files:{root_digest}:{relative_path}"
@@ -418,8 +342,7 @@ def _logical_id(root: Path, relative_path: str) -> str:
 
 def _change_item(root: Path, change: Mapping[str, object]) -> RawChangeItem:
     path = str(change["relative_path"])
-    operation = str(change["operation"])
-    absolute_path = root / Path(path) if operation == "delete" else Path(str(change["path"])).resolve()
+    absolute_path = Path(str(change["path"])).resolve()
     metadata = {
         "path": path,
         "root_dir": str(root),
@@ -429,17 +352,16 @@ def _change_item(root: Path, change: Mapping[str, object]) -> RawChangeItem:
         "content_truncated": bool(change.get("content_truncated", False)),
     }
     try:
-        operation = cast(Literal["upsert", "delete"], operation)
         raw_snapshot = cast(str | bytes | None, change.get("raw_snapshot"))
         return RawChangeItem(
             logical_id=_logical_id(root, path),
-            revision_id=str(change["revision_id"]),
-            operation=operation,
+            revision_id=str(change["content_revision_id"]),
+            operation="upsert",
             title=path,
-            content=None if operation == "delete" else str(change["content"]),
+            content=str(change["content"]),
             original_ref=str(absolute_path),
             metadata=metadata,
-            raw_snapshot=None if operation == "delete" else raw_snapshot,
+            raw_snapshot=raw_snapshot,
         )
     except asyncio.CancelledError:
         raise

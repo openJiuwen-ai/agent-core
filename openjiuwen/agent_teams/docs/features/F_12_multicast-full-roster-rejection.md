@@ -8,6 +8,8 @@
 | 测试基线 | `pytest tests/unit_tests/agent_teams/test_team_tools.py` → 88 passed, 14 skipped；其中 `-k SendMessage` 21 passed |
 | Refs | #751 |
 
+> 当前收件参数已由 F_109 分离为 `to: string` 与 `targets: string[]`；本文中的 `to` 数组是当时的历史接口。
+
 ## 背景
 
 `send_message` 工具有三种投递方式：点对点（`to` 为成员名）、组播（`to` 为成员名数组）、

@@ -2,7 +2,7 @@ Metadata tool for the team shared workspace: **file lock management** and **git 
 
 ## Scope
 
-This tool does **not** perform file I/O. The shared workspace is exposed as the `.team/` mount point — use the standard `read_file` / `write_file` / `glob` tools against `.team/...` paths for reads and writes.
+This tool does **not** perform file I/O. The shared workspace is exposed by absolute path (see the "Final deliverables directory" under "Team Shared Workspace" in the team info block) — use the standard `read_file` / `write_file` / `glob` tools against paths under that directory for reads and writes.
 
 ## action
 
@@ -21,7 +21,7 @@ This tool does **not** perform file I/O. The shared workspace is exposed as the 
 
 ## When to Use
 
-- Before writing to files under `.team/` in multi-member collaboration: `lock`, write, then `unlock`
+- Before writing to files under the shared team deliverables directory in multi-member collaboration: `lock`, write, then `unlock`
 - Use `history` to inspect revisions of a shared file
 - Use `locks` to see who is currently holding what (useful for coordination)
 

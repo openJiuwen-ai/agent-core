@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -150,6 +151,34 @@ def test_normal_affinity_request_keeps_explicit_max_tokens():
     assert params["max_tokens"] == 512
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["evict_kvc", "offload_kvc", "prefetch_kvc"])
+async def test_session_affinity_action_builds_one_messages_argument(action):
+    client = _affinity_client()
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(return_value=_Obj())
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await getattr(client, action)(
+            session_id="child",
+            parent_session_id="parent",
+            messages=None,
+            tools=None,
+        )
+
+    assert result is True
+    sent = sdk_client.chat.completions.create.call_args.kwargs
+    assert sent["messages"] == []
+    assert sent["extra_body"]["agent_hint"] == {
+        "session_id": "child",
+        "parent_session_id": "parent",
+        "context_management": {
+            "edits": [{"type": action.removesuffix("_kvc"), "target": "session"}],
+            "manage_request": True,
+        },
+    }
+
+
 def test_gateway_parser_accepts_token_text_and_reasoning():
     line = json.dumps({
         "choices": [{
@@ -173,6 +202,34 @@ def test_gateway_parser_accepts_data_without_space():
     chunk = _parse_gateway_stream_line(f"data:{payload}")
     assert chunk is not None
     assert chunk.finish_reason == "length"
+
+
+def test_gateway_parser_preserves_streamed_tool_calls():
+    payload = json.dumps({
+        "choices": [{
+            "delta": {
+                "tool_calls": [{
+                    "index": 0,
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {
+                        "name": "write_file",
+                        "arguments": '{"file_path":"test.py"}',
+                    },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }]
+    })
+
+    chunk = _parse_gateway_stream_line(f"data: {payload}")
+
+    assert chunk is not None
+    assert chunk.finish_reason == "tool_calls"
+    assert chunk.tool_calls is not None
+    assert chunk.tool_calls[0].id == "call-1"
+    assert chunk.tool_calls[0].name == "write_file"
+    assert chunk.tool_calls[0].arguments == '{"file_path":"test.py"}'
 
 
 def test_gateway_parser_surfaces_nested_upstream_error():

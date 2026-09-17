@@ -18,11 +18,11 @@
 - A/B/C 三类文本的写盘（`WorkspaceAssembler` / `WorkspaceStore`）与读侧演进覆盖（`WorkspaceCache` + 两个读侧工厂）。
 - `frontmatter.py` 原语（`body_sha256` / `read_frontmatter` / `write_frontmatter` / `atomic_write`）。
 - 路径单一真相：workspace 根（顶层 `paths.team_workspace_dir`）+ workspace 内子路径（`WorkspaceLayout`）。
-- 装配点 `_assemble_member_workspace` 的写盘 + attach + lazy get 生命周期与 S7 缓存共享。
+- 装配点 `_assemble_member_workspace` 的写盘 + attach + lazy get 生命周期与 S7 缓存共享。B-member 另在 `spawn_member` 写 db 前经 `write_member_identity` 取演进值写 db 快照 + prime cache（见不变量 10/11），`_assemble_member_workspace` 仍是 spawn 期装配（幂等重跑）。
 
 **这个规约不管：**
 
-- 成员—团队拓扑、拉平、junction、引用计数、迁移（binder / ref_store / migrator）。
+- 成员—团队拓扑、拉平、junction、引用计数（binder / ref_store）。
 - message/task 正文的 session 文件外置——归 `S_23_session-file-data-store`。
 - tool 的 `type`/`required`/`enum` 等 schema 结构——归 `S_12_schema-data-models`。
 - 共享 workspace 的锁/版本/同步（`TeamWorkspaceManager` / `WorkspaceFileLock` 等）——归 `S_13_team-workspace`。
@@ -38,11 +38,11 @@
 7. **Runner finally 失效**：cache 失效点在 `RuntimeManager.finalize` 的 pause 路径（`agent.invalidate_workspace_cache()`），每 run 边界执行一次，清空 dict（不读文件）；下次 run 的第一次 `get*` 重新 lazy miss 读演进值。stop 路径对象 GC，无需失效。teammate 经 `share_workspace_cache_with` 共享 leader 的 manager 引用（同一 cache 实例），不 build 自己的。
 8. **路径单一真相**：`"team-workspace"` 字面量只在顶层 `paths.py: team_workspace_dir` 一处；`prompts/system` / `prompts/tool` / `prompts/identity` / `tool.param.*` / `MEMBER_IDENTITY_REL` 只在 `WorkspaceLayout` 一处。全仓 `grep "prompts/system"` 命中收敛到 `layout.py`。
 9. **`evolution_enabled` 是演进机制总开关**：`on` 写全部最新文件 + 建 cache（读侧演进值覆盖框架默认 / DB）；`off` **不写文件、不建 cache**（`manager.workspace_cache` 为 `None`，读侧自然回退框架默认 / DB 裸值）、已落盘文件**保留但不生效**。**开关改变必须换 session 冷恢复**——同 session `RESUME_FROM_PAUSE` 复用 agent 忽略传入 spec，改开关必走 `activate` 拆旧 agent → 重新 configure → 重新按开关建 / 不建 cache。
-10. **B 类双写**：DB 列存裸值（fallback），文件存演进值；`display_name` 不演进。B 类 team 级仅在 ctx 带 DB 值（`team_info` 行存在）时写。
+10. **B 类双写**：DB 列存"入队演进快照"（fallback），文件存演进值；`display_name` 不演进。B-member 的 db 快照由 `spawn_member` 写 db 前经 `write_member_identity` 取演进值写入（复用成员=演进值，首次成员=基线值）；后续演进只更 md 不回写 db。读侧 overlay 永远读 md 最新演进值，md 没演进退 db（=入队演进快照，正确）。B 类 team 级仅在 ctx 带 DB 值（`team_info` 行存在）时写。
 11. **写盘三路拆分 + 幂等**：按值源与依赖分三个挂载点（`on` 时各写一次，全幂等）：
     - **A/C（系统模板 + tool 描述/参数，值源框架源）→ `coordination.start`** 团队级一次（kernel），teammate 的 `start` 重复调用幂等无害。
     - **B-team（team_card/team_prompt，值源 build_team 的 desc 参数）→ `build_team` 的 create_team 之后 + `_reattach_team`**；`team_prompt` 是只写不读到模型字段（build_team 无 prompt 参数）。
-    - **B-member（card/member_prompt，值源 ctx 演进值）→ 装配期 `_assemble_member_workspace`**（每成员只写自己 2 文件，放大可控；移 spawn_member 会降级为 spec 裸值丢演进值）。
+    - **B-member（card/member_prompt，值源演进 md 经 `write_member_identity` 返回）→ `spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root + 取演进值 prime cache + 写 db 快照）+ 装配期 `_assemble_member_workspace`（spawn 期幂等重跑）**。`write_member_identity` 只读/保护演进 md + prime cache + 返回演进值，**不建目录不碰 link**（root 由调用前的 `prepare_member_workspace` 保证：非 leader 在 spawn_member、leader 在 setup_agent）。db 存入队演进快照，后续演进只更 md 不回写 db；读侧 overlay 永远读 md 最新，md 没演进退 db（=演进快照）。统一覆盖所有成员（预定义/动态/HUMAN_AGENT/external_cli 全走 spawn_member）。binder reuse-first：恢复遇已有 in-team 真实目录原样复用、不补 link、不补 ref（补 link 是 legacy 迁移语义，历史会话状态不可控且收益不抵风险，详见 F_82 D8.1）。
     - **`off` 时三处都不写**（`TeamBackend._spec_evolution_enabled` 守卫）。cache 对象只在 `_attach_workspace_cache` 判断 `on` 时创建（`off` 不建，`manager.workspace_cache = None`）。in-process 队友经 `share_workspace_cache_with` 共享 leader 的 manager 引用（同一 cache 实例），复用分支（manager 已有 cache）命中即返回（S7 read-once）。
 
 ## 接口契约
@@ -146,8 +146,11 @@ class WorkspaceAssembler:
         # 挂载点：build_team（create_team 后）+ _reattach_team
 
     def write_member_identity(self, *, team_name: str, member_name: str,
-                              member_desc: str | None, member_prompt: str | None) -> None:
-        # B 类 member 级（card.md + member_prompt.md）；值源 ctx 演进值；挂载点：装配期
+                              member_desc: str | None, member_prompt: str | None
+                              ) -> tuple[str | None, str | None]:
+        # B 类 member 级（card.md + member_prompt.md）；值源演进 md；挂载点：spawn_member 写 db 前 + 装配期
+        # 只写/保护演进 md → prime cache → 返回演进值(供 db 写入)；不建 workspace 目录
+        # root(link/真实目录)由调用前的 prepare_member_workspace 保证(spawn_member 对非 leader、setup_agent 对 leader)
 ```
 
 ### `WorkspaceLayout`（路径单一真相，无状态静态方法）
@@ -227,7 +230,7 @@ spawn 后永不变，`_IDENTITY_EMITTED` 基线门控只投递一次。`member_p
 
 - **A/C**：`coordination.start` 的 `workspace_manager.initialize` 之后，`WorkspaceAssembler(cache).write_system_and_tool_prompts(team_name, language)`——团队级一次（值源框架源，不依赖 team row）；teammate 的 `start` 幂等重跑无害。**冷启动时序**：leader `start` 写 A/C 基线 → build_team（第一轮工具调用）→ teammate 装配读到已就绪基线。
 - **B-team**：`build_team` 的 `create_team` 成功之后 + `_reattach_team`，`WorkspaceAssembler(cache).write_team_identity(team_name, team_desc=..., team_prompt=...)`；`off` 时 `TeamBackend._spec_evolution_enabled` 守卫跳过。值来自 build_team 的 `desc` 参数（不查 `get_team_info`——避免冷启动 None 坑）。
-- **B-member**：`_assemble_member_workspace`（`TeamHarness.build` 之后），`WorkspaceAssembler(cache).write_member_identity(...)`——store 写方法返回最终 body → `cache.fill_member_field`。`off` 时跳过（不写不 fill）。
+- **B-member**：`spawn_member` 写 db 前（非 leader 先 `prepare_member_workspace` 建 root link/真实目录 + 取演进值 + prime cache + 写 db 演进快照）+ `_assemble_member_workspace`（spawn 期幂等重跑），`WorkspaceAssembler(cache).write_member_identity(...)`——只写/保护演进 md 返回最终 body → `cache.fill_member_field` → 返回 body 供 db 写入；root 由调用前的 `prepare_member_workspace` 保证（非 leader 在 spawn_member、leader 在 setup_agent），write_member_identity 不建目录不碰 link。`off` 时跳过（不写不 fill，db 用 spec 裸值）。
 
 > **时序约束**：cache attach 必须在 `TeamHarness.build`（rails mint）之前——rail 工厂构造期把 `backend.workspace_cache` 绑进 A 类 loader 闭包，若 mint 时 cache 未 attach（首次 build / COLD_RECOVER 新实例），loader 退化为 framework 只读，团队的演进提示词值永远不会到达模型。
 
@@ -235,7 +238,7 @@ spawn 后永不变，`_IDENTITY_EMITTED` 基线门控只投递一次。`member_p
 
 ## 生命周期 / 维护
 
-- **写**：三路挂载（`on` 时）——A/C 在 `coordination.start`、B-team 在 `build_team`/`_reattach_team`、B-member 在装配期；全部幂等。`off` 时三处都不写。
+- **写**：三路挂载（`on` 时）——A/C 在 `coordination.start`、B-team 在 `build_team`/`_reattach_team`、B-member 在 `spawn_member` 写 db 前 + 装配期；全部幂等。`off` 时三处都不写。
 - **读**：写侧 fill + 读侧 lazy miss，run 内每个文件最多读一次；演进方改文件 → 下次 run 生效（Runner finally 失效 → 下次 run 第一次 get 重读）。
 - **回退**：删文件 → 回代码默认 / DB 裸值；`off` → 全量回退（cache=None）。
 - **升级**：框架默认变化 → 未演进文件自动覆盖并更新基线；已演进文件保持演进值。

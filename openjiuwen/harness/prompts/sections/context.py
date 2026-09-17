@@ -29,6 +29,14 @@ CONTEXT_SECTION_BY_FILE = {
     "IDENTITY.md": "context.identity",
 }
 
+CONTEXT_SECTION_PRIORITIES = {
+    "context.agent": 101,
+    "context.soul": 102,
+    "context.identity": 103,
+    "context.user": 104,
+    "context.heartbeat": 105,
+}
+
 _IDENTITY_FILLED_NAME_RE = re.compile(
     r"^\s*[-*]?\s*(?:\*\*)?(?:名字|Name)[：:](?:\*\*)?\s*(?P<name>\S.*?)\s*$",
     re.MULTILINE,
@@ -282,7 +290,8 @@ async def build_context_section(
     return PromptSection(
         name=SectionName.CONTEXT,
         content={language: content},
-        priority=80,
+        priority=100,
+        category="memory",
     )
 
 
@@ -314,7 +323,8 @@ async def build_context_file_sections(
         sections[section_name] = PromptSection(
             name=section_name,
             content={language: f"{title}\n\n{content}\n"},
-            priority=80,
+            priority=CONTEXT_SECTION_PRIORITIES.get(section_name, 100),
+            category="memory",
         )
     return sections
 
@@ -380,4 +390,7 @@ def build_tools_section(
         name=SectionName.TOOLS,
         content={language: content},
         priority=30,
+        # This section contains tool-use rules.  The actual tool schemas are
+        # counted separately from ContextWindow.tools.
+        category="system_prompt",
     )

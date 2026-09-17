@@ -11,7 +11,7 @@ implementing the same Protocol. Capturing the contract here lets the runtime
 be swapped without business-code changes.
 
 The interaction surface mirrors :class:`~openjiuwen.agent_teams.harness.HarnessProtocol`
-(``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` /
+(``start`` / ``stop`` / ``outputs`` / ``send`` / ``abort`` / ``pause`` / ``resume`` /
 ``subscribe`` / ``state`` / ``session_id``): one cycle is
 started per ``coordination.start`` and torn down at ``finalize_round``. Inputs
 arrive through ``send`` (``immediate`` steers the active round); the producing
@@ -88,6 +88,10 @@ class MemberRuntime(Protocol):
 
     async def pause(self) -> None:
         """Pause the in-flight round; the next send restarts it."""
+        ...
+
+    async def resume(self, *, query: Any | None = None) -> None:
+        """Resume a preserved warm round or a cold checkpoint restoration."""
         ...
 
     async def subscribe(

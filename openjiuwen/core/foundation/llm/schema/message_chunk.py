@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 from typing import Any
 
@@ -220,11 +220,23 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
             tool_calls=merged_tool_calls if merged_tool_calls else None,
             usage_metadata=other.usage_metadata or self.usage_metadata,
             finish_reason=merged_finish_reason,
-            parser_content=other.parser_content or self.parser_content,
+            parser_content=(
+                other.parser_content
+                if other.parser_content is not None
+                else self.parser_content
+            ),
             reasoning_content=(self.reasoning_content or '') + (other.reasoning_content or ''),
             prompt_token_ids=merged_prompt_token_ids,
             completion_token_ids=merged_completion_token_ids,
             logprobs=merged_logprobs,
+            response_id=other.response_id or self.response_id,
+            response_model=other.response_model or self.response_model,
+            provider_metadata={**self.provider_metadata, **other.provider_metadata},
+            provider_content=(
+                other.provider_content
+                if other.provider_content is not None
+                else self.provider_content
+            ),
         )
 
 

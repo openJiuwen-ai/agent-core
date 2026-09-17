@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+import stat
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -20,11 +22,525 @@ from openjiuwen.harness.personal_context.source_metadata import (
 )
 
 
+@pytest.mark.asyncio
+async def test_rules_directory_selection_does_not_block_event_loop_and_cancels_promptly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = threading.Event()
+    stopped = threading.Event()
+
+    def slow_selection(*_args: object, **kwargs: object) -> Path:
+        cancel_requested = kwargs.get("cancel_requested")
+        started.set()
+        if not callable(cancel_requested):
+            time.sleep(0.2)
+            return tmp_path
+        while not cancel_requested():
+            time.sleep(0.005)
+        stopped.set()
+        return tmp_path
+
+    monkeypatch.setattr(context_pipeline, "_select_rules_directory", slow_selection)
+    selection = asyncio.create_task(
+        context_pipeline._select_rules_directory_hybrid(
+            tmp_path,
+            provider="local_files",
+            document={"logical_id": "one", "title": "One", "markdown": "Body"},
+            source_id="src_" + "a" * 32,
+            run_time=datetime.now(timezone.utc),
+            embed_texts=None,
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    assert loop.time() - heartbeat_started < 0.1
+    assert started.is_set()
+
+    selection.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(selection, timeout=0.2)
+    assert stopped.is_set()
+
+
+@pytest.mark.asyncio
+async def test_related_document_refresh_keeps_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    for index in range(5):
+        source_id = f"src_{index:032x}"
+        (context_root / f"page-{index}.md").write_text(
+            f"# Page {index}\n\n<!-- personal-context-managed-source: {source_id} -->\n\nshared topic\n",
+            encoding="utf-8",
+        )
+
+    original_scores = context_pipeline._sparse_semantic_scores
+
+    def slow_scores(*args: object, **kwargs: object) -> list[float]:
+        time.sleep(0.035)
+        return original_scores(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(context_pipeline, "_sparse_semantic_scores", slow_scores)
+    refresh = asyncio.create_task(
+        context_pipeline._refresh_related_documents_hybrid(
+            context_root,
+            embed_texts=None,
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = loop.time() - heartbeat_started
+    await refresh
+
+    assert heartbeat_elapsed < 0.09
+
+
+@pytest.mark.asyncio
+async def test_retain_related_documents_preserves_valid_managed_block(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    one = context_root / "one.md"
+    two = context_root / "two.md"
+    original = (
+        "# One\n\n"
+        f"<!-- personal-context-managed-source: src_{1:032x} -->\n\n"
+        "User-authored body.\n\n"
+        "<!-- personal-context-related:start -->\n"
+        "## 相关文档\n\n"
+        "- [Two](two.md)\n"
+        "<!-- personal-context-related:end -->\n"
+    )
+    one.write_text(original, encoding="utf-8")
+    two.write_text(
+        f"# Two\n\n<!-- personal-context-managed-source: src_{2:032x} -->\n",
+        encoding="utf-8",
+    )
+
+    changed = await context_pipeline._retain_valid_related_documents(context_root)
+
+    assert changed == set()
+    assert one.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_retain_related_documents_prunes_only_stale_managed_block(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    one = context_root / "one.md"
+    one.write_text(
+        "# One\n\n"
+        f"<!-- personal-context-managed-source: src_{1:032x} -->\n\n"
+        "Keep [user-authored missing link](missing-user.md).\n\n"
+        "<!-- personal-context-related:start -->\n"
+        "## 相关文档\n\n"
+        "- [Deleted](deleted.md)\n"
+        "<!-- personal-context-related:end -->\n",
+        encoding="utf-8",
+    )
+
+    changed = await context_pipeline._retain_valid_related_documents(context_root)
+
+    retained = one.read_text(encoding="utf-8")
+    assert changed == {"one.md"}
+    assert "[user-authored missing link](missing-user.md)" in retained
+    assert "personal-context-related" not in retained
+    assert "[Deleted](deleted.md)" not in retained
+
+
+@pytest.mark.asyncio
+async def test_semantic_finalization_refreshes_related_documents_by_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context"
+    context_root.mkdir()
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    refreshed = False
+
+    async def refresh(_context_root: Path, *, embed_texts: object) -> set[str]:
+        nonlocal refreshed
+        refreshed = True
+        assert embed_texts is None
+        return set()
+
+    monkeypatch.setattr(context_pipeline, "_refresh_related_documents_hybrid", refresh)
+
+    await context_pipeline._finalize_semantic_context_hybrid(context_root, embed_texts=None)
+
+    assert refreshed
+
+
+def test_page_source_distribution_propagates_cooperative_cancellation(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    source_root = tmp_path / "source-meta"
+    context_root.mkdir()
+    source_root.mkdir()
+    page = context_root / "one.md"
+    page.write_text("[Two](two.md)\n", encoding="utf-8")
+    (context_root / "two.md").write_text("# Two\n", encoding="utf-8")
+    checks = 0
+
+    def cancel_requested() -> bool:
+        nonlocal checks
+        checks += 1
+        return checks >= 2
+
+    with pytest.raises(asyncio.CancelledError):
+        context_pipeline._page_source_distribution(
+            page,
+            context_root=context_root,
+            source_root=source_root,
+            cancel_requested=cancel_requested,
+        )
+
+
+@pytest.mark.asyncio
+async def test_rules_increment_reuses_existing_page_source_distribution_across_documents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context"
+    source_root = tmp_path / "source-meta"
+    topic = context_root / "Python"
+    topic.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    (topic / "description.md").write_text("# Python\n", encoding="utf-8")
+
+    existing_item = RawChangeItem(
+        **_item(
+            "existing/python",
+            original_ref="https://example.test/existing/python",
+            title="Python async runtime",
+            content="Python async runtime event loop and task cancellation.",
+        )
+    )
+    existing_source_id = upsert_source_metadata(
+        source_root,
+        existing_item,
+        provider="local_files",
+        service_id="existing",
+        observed_at="2026-09-14T00:00:00+00:00",
+    )
+    existing_page = topic / "existing.md"
+    existing_page.write_text(
+        context_pipeline._rules_source_page(
+            {
+                "logical_id": existing_item.logical_id,
+                "title": existing_item.title,
+                "markdown": existing_item.content,
+            },
+            source_id=existing_source_id,
+        ),
+        encoding="utf-8",
+    )
+
+    documents: list[dict[str, object]] = []
+    source_ids: dict[str, str] = {}
+    for index in range(2):
+        item = RawChangeItem(
+            **_item(
+                f"new/python-{index}",
+                original_ref=f"https://example.test/new/python-{index}",
+                title=f"Python async task {index}",
+                content="Python async runtime event loop and task cancellation.",
+            )
+        )
+        source_ids[item.logical_id] = upsert_source_metadata(
+            source_root,
+            item,
+            provider="local_files",
+            service_id="new",
+            observed_at="2026-09-14T00:00:00+00:00",
+        )
+        documents.append(
+            {
+                "logical_id": item.logical_id,
+                "title": item.title,
+                "markdown": item.content,
+            }
+        )
+
+    real_distribution = context_pipeline._page_source_distribution
+    existing_reads = 0
+
+    def count_existing_page(*args: object, **kwargs: object) -> dict[tuple[str, str], float]:
+        nonlocal existing_reads
+        if args and args[0] == existing_page:
+            existing_reads += 1
+        return real_distribution(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def no_recluster(*_args: object, **_kwargs: object) -> set[str]:
+        return set()
+
+    async def no_finalize(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(context_pipeline, "_page_source_distribution", count_existing_page)
+    monkeypatch.setattr(context_pipeline, "_recluster_context_candidate", no_recluster)
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", no_finalize)
+
+    await context_pipeline._apply_rules_increment(
+        context_root,
+        source_root=source_root,
+        provider="local_files",
+        processed={"documents": documents},
+        source_ids_by_logical_id=source_ids,
+        deleted_source_ids=set(),
+        run_time=datetime.now(timezone.utc),
+    )
+
+    assert existing_reads == 1
+
+
+@pytest.mark.asyncio
+async def test_rules_increment_enumerates_placement_directories_once_per_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "context"
+    source_root = tmp_path / "source-meta"
+    topic = context_root / "Python"
+    topic.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    (topic / "description.md").write_text("# Python\n", encoding="utf-8")
+    (topic / "existing.md").write_text("# Python async runtime\n", encoding="utf-8")
+
+    documents: list[dict[str, object]] = []
+    source_ids: dict[str, str] = {}
+    for index in range(2):
+        item = RawChangeItem(
+            **_item(
+                f"new/directory-cache-{index}",
+                original_ref=f"https://example.test/new/directory-cache-{index}",
+                title=f"Python async task {index}",
+                content="Python async runtime event loop and task cancellation.",
+            )
+        )
+        source_ids[item.logical_id] = upsert_source_metadata(
+            source_root,
+            item,
+            provider="local_files",
+            service_id="new",
+            observed_at="2026-09-14T00:00:00+00:00",
+        )
+        documents.append(
+            {
+                "logical_id": item.logical_id,
+                "title": item.title,
+                "markdown": item.content,
+            }
+        )
+
+    real_directories = context_pipeline._semantic_context_directories
+    enumeration_count = 0
+
+    def count_directories(root: Path) -> list[Path]:
+        nonlocal enumeration_count
+        enumeration_count += 1
+        return real_directories(root)
+
+    async def no_recluster(*_args: object, **_kwargs: object) -> set[str]:
+        return set()
+
+    async def no_finalize(*_args: object, **_kwargs: object) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(context_pipeline, "_semantic_context_directories", count_directories)
+    monkeypatch.setattr(context_pipeline, "_recluster_context_candidate", no_recluster)
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", no_finalize)
+
+    await context_pipeline._apply_rules_increment(
+        context_root,
+        source_root=source_root,
+        provider="local_files",
+        processed={"documents": documents},
+        source_ids_by_logical_id=source_ids,
+        deleted_source_ids=set(),
+        run_time=datetime.now(timezone.utc),
+        preserve_existing_paths=True,
+        refresh_related_documents=False,
+        use_source_prior=False,
+    )
+
+    assert enumeration_count == 1
+
+
+def test_copy_and_publish_tree_skips_identical_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate"
+    target = tmp_path / "target"
+    candidate.mkdir()
+    target.mkdir()
+    (candidate / "one.md").write_text("# One\n", encoding="utf-8")
+    (target / "one.md").write_text("# One\n", encoding="utf-8")
+    writes: list[Path] = []
+    real_atomic_write = context_pipeline._atomic_write
+
+    def record_write(path: Path, data: bytes) -> None:
+        writes.append(path)
+        real_atomic_write(path, data)
+
+    monkeypatch.setattr(context_pipeline, "_atomic_write", record_write)
+
+    obsolete = context_pipeline._copy_and_publish_tree(candidate, target)
+
+    assert obsolete == set()
+    assert writes == []
+
+
+def test_changed_source_ids_capture_prewrite_version_and_accumulate(tmp_path: Path) -> None:
+    item = RawChangeItem(
+        logical_id="one",
+        revision_id="r1",
+        operation="upsert",
+        title="检索",
+        content="检索正文",
+        original_ref="https://example.test/one",
+    )
+    state: dict[str, object] = {"source_alias_by_id": {}, "source_id_by_logical_id": {}, "changed_source_ids": set()}
+
+    def register(value: RawChangeItem) -> None:
+        context_pipeline._register_batch_source_refs(
+            tmp_path,
+            FetchBatch(batch_id="batch", items=[value]),
+            provider="github",
+            service_id="github-main",
+            state=state,
+        )
+
+    source_id = source_id_for_locator(item.original_ref)
+    register(item)
+    assert state["changed_source_ids"] == {source_id}
+    state["changed_source_ids"] = set()
+    register(item)
+    assert state["changed_source_ids"] == set()
+    changed = item.model_copy(update={"content": "新的检索内容"})
+    register(changed)
+    register(changed)
+    assert state["changed_source_ids"] == {source_id}
+    state["changed_source_ids"] = set()
+    register(changed.model_copy(update={"revision_id": "r2"}))
+    assert state["changed_source_ids"] == {source_id}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows long-path atomic write regression")
+def test_atomic_write_supports_managed_windows_paths_over_max_path(tmp_path: Path) -> None:
+    target = tmp_path.joinpath(*(f"segment-{index}-" + "x" * 60 for index in range(4))) / "page.md"
+    assert len(str(target)) > 260
+
+    context_pipeline._atomic_write(target, b"published")
+
+    extended_target = Path("\\\\?\\" + str(target.absolute()))
+    assert extended_target.read_bytes() == b"published"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows long-path candidate regression")
+def test_candidate_navigation_and_reference_graph_support_windows_long_paths(tmp_path: Path) -> None:
+    context_root = tmp_path / "context"
+    source_root = tmp_path / "source-meta"
+    long_directory = context_root / ("中文长目录" * 16)
+    page = long_directory / (("长页面" * 25) + "回归.md")
+    item = RawChangeItem(
+        logical_id="local/long-path",
+        revision_id="rev-1",
+        operation="upsert",
+        title="完整长标题",
+        content="长路径回归正文。",
+        original_ref="https://example.test/long-path",
+        metadata={"kind": "document"},
+    )
+    source_id = upsert_source_metadata(
+        source_root,
+        item,
+        provider="local_files",
+        service_id="long-path-test",
+        observed_at="2026-09-03T00:00:00+00:00",
+    )
+    assert len(str(page)) > 260
+
+    context_pipeline._atomic_write(
+        context_root / "description.md",
+        f"# Context\n\n- [长目录](<{long_directory.name}/description.md>)\n".encode("utf-8"),
+    )
+    context_pipeline._atomic_write(
+        long_directory / "description.md",
+        f"# 长目录\n\n- [长页面](<{page.name}>)\n".encode("utf-8"),
+    )
+    context_pipeline._atomic_write(
+        page,
+        f"# 完整长标题\n\n[来源](../../source-meta/{source_id}.md)\n".encode("utf-8"),
+    )
+
+    context_pipeline._validate_candidate(
+        context_root,
+        final_context_root=context_root,
+        source_root=source_root,
+    )
+    context_pipeline._validate_reference_graph(
+        context_root,
+        final_context_root=context_root,
+        source_root=source_root,
+        repairable=False,
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows long-path sandbox cleanup regression")
+def test_delete_run_sandbox_supports_nested_windows_paths_over_max_path(tmp_path: Path) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=asyncio.Queue())
+    target = service._run_sandbox_path("gitcode-service", "run-id")
+    long_file = target / "context" / ("nested-" + "x" * 70) / "sources" / "gitcode-service" / ("a" * 32 + ".md")
+    assert len(str(long_file)) > 260
+    extended_file = Path("\\\\?\\" + str(long_file.absolute()))
+    extended_file.parent.mkdir(parents=True)
+    extended_file.write_bytes(b"published")
+
+    service._delete_run_sandbox(("gitcode-service", "run-id"))
+
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-not-empty cleanup regression")
+def test_remove_tree_retries_windows_directory_not_empty_with_extended_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "sandbox"
+    target.mkdir()
+    (target / "page.md").write_bytes(b"published")
+    real_rmtree = context_pipeline.shutil.rmtree
+    attempts: list[Path] = []
+
+    def directory_not_empty_once(path: str | os.PathLike[str], *args: object, **kwargs: object) -> None:
+        attempts.append(Path(path))
+        if len(attempts) == 1:
+            error = OSError(41, "directory is not empty")
+            error.winerror = 145
+            raise error
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(context_pipeline.shutil, "rmtree", directory_not_empty_once)
+
+    context_pipeline._remove_tree(target)
+
+    assert len(attempts) == 2
+    assert str(attempts[1]).startswith("\\\\?\\")
+    assert not target.exists()
+
+
 def _config() -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": True,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -45,19 +561,18 @@ def _item(
     *,
     revision_id: str = "rev-1",
     content: str = "First paragraph.\n\nSecond paragraph.",
-    operation: str = "upsert",
     original_ref: str | None = None,
     title: str = "One",
 ) -> dict[str, object]:
     return {
         "logical_id": logical_id,
         "revision_id": revision_id,
-        "operation": operation,
+        "operation": "upsert",
         "title": title,
-        "content": content if operation == "upsert" else None,
+        "content": content,
         "original_ref": original_ref or f"file:///{logical_id}",
         "metadata": {"kind": "note"},
-        "raw_snapshot": "raw source" if operation == "upsert" else None,
+        "raw_snapshot": "raw source",
     }
 
 
@@ -150,15 +665,19 @@ async def test_rules_pipeline_publishes_after_root_description(tmp_path: Path) -
     context_root = tmp_path / "workspace" / "context"
     description = context_root / "description.md"
     assert description.read_text(encoding="utf-8").strip()
-    assert (context_root / "sources" / "local" / "description.md").is_file()
+    assert [path.name for path in context_root.iterdir() if path.is_file()] == ["description.md"]
+    assert not (context_root / "sources").exists()
+    assert not (context_root / "topics").exists()
     pages = [path for path in context_root.rglob("*.md") if path.name != "description.md"]
     assert len(pages) == 1
+    assert pages[0].parent != context_root
     page_text = pages[0].read_text(encoding="utf-8")
+    assert page_text.count("<!-- personal-context-managed-source:") == 1
     assert "personal_context_logical_ids" not in page_text
     assert "Source / Evidence" not in page_text
     assert "First paragraph." in page_text
     assert "[[ref:" not in page_text
-    assert "../../../source-meta/src_" in page_text
+    assert "../../source-meta/src_" in page_text
     source_metadata = list((tmp_path / "workspace" / "source-meta").glob("src_*.md"))
     assert len(source_metadata) == 1
     context_pipeline._validate_reference_graph(
@@ -217,30 +736,6 @@ async def test_startup_removes_only_stale_personal_context_content_roots(tmp_pat
     assert not (tmp_path / "materialized-sources").exists()
     assert user_file.read_text(encoding="utf-8") == "user-owned"
     await service.stop(timeout_seconds=1)
-
-
-@pytest.mark.asyncio
-async def test_rules_pipeline_delete_removes_page_but_keeps_source_metadata(tmp_path: Path) -> None:
-    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
-    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
-    await service.start()
-
-    await _submit_run(queue, "local", "run-1", _batch(_item()))
-    source_metadata = list((tmp_path / "workspace" / "source-meta").glob("src_*.md"))
-    assert len(source_metadata) == 1
-
-    await _submit_run(queue, "local", "run-2", _batch(_item(operation="delete"), batch_id="batch-2"))
-    context_root = tmp_path / "workspace" / "context"
-    assert not [path for path in context_root.rglob("*.md") if path.name != "description.md"]
-    assert source_metadata[0].is_file()
-    assert not (tmp_path / "workspace" / "source-proofs").exists()
-    assert description_has_empty_summary(context_root / "description.md")
-
-    await service.stop(timeout_seconds=1)
-
-
-def description_has_empty_summary(path: Path) -> bool:
-    return "No context documents" in path.read_text(encoding="utf-8")
 
 
 @pytest.mark.asyncio
@@ -334,7 +829,7 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
     first_batch = _batch(_item(content=large_content), batch_id="batch-1")
     second_batch = _batch(
         _item("notes/two", revision_id="rev-2", content="Second source."),
-        _item("notes/deleted", revision_id="rev-3", operation="delete"),
+        _item("notes/three", revision_id="rev-3", content="Third source."),
         batch_id="batch-2",
     )
     try:
@@ -348,10 +843,7 @@ async def test_two_batches_share_run_inputs_and_finish_publishes_once(
             "batch-1",
             "batch-2",
         }
-        assert (run_root / "inputs" / "deleted" / "batch-1.json").is_file()
-        assert json.loads((run_root / "inputs" / "deleted" / "batch-2.json").read_text(encoding="utf-8")) == [
-            "notes/deleted"
-        ]
+        assert len(list((run_root / "inputs" / "records" / "batch-2").rglob("content.md"))) == 2
         assert len(list((run_root / "inputs" / "records" / "batch-1").rglob("content.md"))) == 1
         assert len(list((run_root / "inputs" / "records" / "batch-1").rglob("context.md"))) == 1
         assert len(list((run_root / "inputs" / "processed" / "batch-1").rglob("record.json"))) == 1
@@ -398,11 +890,7 @@ async def test_source_ref_alias_is_monotonic_per_run_and_restarts_for_another_ru
             _batch(
                 _item("notes/one-copy", original_ref=first_locator),
                 _item("notes/three", original_ref="https://example.test/source/three"),
-                _item(
-                    "notes/deleted",
-                    operation="delete",
-                    original_ref="https://example.test/source/deleted",
-                ),
+                _item("notes/one-again", original_ref=first_locator),
                 batch_id="batch-2",
             ),
         )
@@ -424,10 +912,10 @@ async def test_source_ref_alias_is_monotonic_per_run_and_restarts_for_another_ru
         state = service._run_states[("local", "run-alias")]
         aliases = state.get("source_alias_by_id")
         logical_sources = state.get("source_id_by_logical_id")
-        assert isinstance(aliases, dict) and len(aliases) == 4
+        assert isinstance(aliases, dict) and len(aliases) == 3
         assert isinstance(logical_sources, dict) and len(logical_sources) == 5
         source_files = sorted((tmp_path / "workspace" / "source-meta").glob("*.md"))
-        assert len(source_files) == 4
+        assert len(source_files) == 3
         assert all("raw source" not in path.read_text(encoding="utf-8") for path in source_files)
 
         await _put_event(queue, "abort", "local", "run-alias", None)
@@ -750,9 +1238,14 @@ async def test_cancelled_finish_waits_for_finish_io_before_run_cleanup(
         cleanup_started=cleanup_started,
     )
 
+    assert not cleanup_started.is_set()
+    assert run_root.exists()
+    state = service._run_states[("local", "run-cancel-finish")]
+    assert state["status"] == "processing"
+    assert state["batch_ids"] == ["batch-1"]
+    await service._cleanup_run_state(("local", "run-cancel-finish"))
     assert cleanup_started.is_set()
     assert not run_root.exists()
-    assert ("local", "run-cancel-finish") not in service._run_states
     await service.stop(timeout_seconds=1)
 
 
@@ -792,6 +1285,238 @@ async def test_invalid_tagged_events_fail_only_their_completion_and_consumer_con
 
 
 @pytest.mark.asyncio
+async def test_cancel_run_interrupts_matching_finish_and_keeps_consumer_alive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    original_filesystem = service._filesystem_with_fallback
+    finish_started = asyncio.Event()
+    finish_cancelled = asyncio.Event()
+    release_finish = asyncio.Event()
+    calls = 0
+
+    async def block_first_finish(**kwargs: object) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            finish_started.set()
+            try:
+                await release_finish.wait()
+            except asyncio.CancelledError:
+                finish_cancelled.set()
+                raise
+        return await original_filesystem(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_filesystem_with_fallback", block_first_finish)
+    await service.start()
+    completion = asyncio.get_running_loop().create_future()
+    try:
+        await _put_event(queue, "batch", "local", "run-blocked", _batch(_item()))
+        await queue.put(("finish", "local", "run-blocked", None, completion))
+        await asyncio.wait_for(finish_started.wait(), timeout=1)
+
+        await asyncio.wait_for(service.cancel_run("local", "run-blocked"), timeout=1)
+
+        with pytest.raises(BaseError):
+            await completion
+        assert finish_cancelled.is_set()
+        assert service.is_running()
+        state = service._run_states[("local", "run-blocked")]
+        assert state["status"] == "processing"
+        assert state["batch_ids"] == ["batch-1"]
+
+        await _put_event(queue, "retain", "local", "run-blocked", None)
+
+        await _submit_run(
+            queue,
+            "local",
+            "run-next",
+            _batch(_item("notes/two", original_ref="file:///notes/two")),
+        )
+        assert service.is_running()
+    finally:
+        release_finish.set()
+        if not completion.done():
+            completion.cancel()
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_signals_active_cooperative_worker_before_task_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    release = asyncio.Event()
+    active = asyncio.create_task(release.wait())
+    signalled: list[asyncio.Task[None]] = []
+    monkeypatch.setattr(
+        context_pipeline,
+        "_request_cooperative_thread_cancel",
+        signalled.append,
+    )
+    service._active_event_task = active
+    service._active_run_key = ("local", "run-cooperative")
+
+    await service.cancel_run("local", "run-cooperative")
+
+    assert signalled == [active]
+    assert active.cancelled()
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_discards_only_inflight_batch_and_retains_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    original_process = service._process_deterministic
+    second_started = asyncio.Event()
+
+    async def block_second(batch: FetchBatch) -> dict[str, object]:
+        if batch.batch_id == "batch-2":
+            second_started.set()
+            await asyncio.Event().wait()
+        return await original_process(batch)
+
+    monkeypatch.setattr(service, "_process_deterministic", block_second)
+    await service.start()
+    second_completion = asyncio.get_running_loop().create_future()
+    try:
+        first = _item()
+        second = _item("notes/two", original_ref="file:///notes/two", title="Two")
+        await _put_event(queue, "batch", "local", "run-checkpoint", _batch(first))
+        await queue.put(
+            (
+                "batch",
+                "local",
+                "run-checkpoint",
+                _batch(second, batch_id="batch-2"),
+                second_completion,
+            )
+        )
+        await asyncio.wait_for(second_started.wait(), timeout=1)
+
+        await asyncio.wait_for(service.cancel_run("local", "run-checkpoint"), timeout=1)
+
+        with pytest.raises(BaseError):
+            await second_completion
+        state = service._run_states[("local", "run-checkpoint")]
+        assert state["batch_ids"] == ["batch-1"]
+        assert not (state["sandbox"] / "inputs" / "records" / "batch-2").exists()
+        assert not (
+            tmp_path / "workspace" / "source-meta" / f"{source_id_for_locator('file:///notes/two')}.md"
+        ).exists()
+
+        await _put_event(queue, "retain", "local", "run-checkpoint", None)
+        published = "\n".join(
+            page.read_text(encoding="utf-8") for page in (tmp_path / "workspace" / "context").rglob("*.md")
+        )
+        assert "First paragraph." in published
+        assert "file:///notes/two" not in published
+    finally:
+        if not second_completion.done():
+            second_completion.cancel()
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_finish_reports_validation_and_commit_phases(tmp_path: Path) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    phases: list[tuple[str, str, str]] = []
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config(),
+        input_queue=queue,
+        progress_callback=lambda service_id, run_id, phase: phases.append((service_id, run_id, phase)),
+    )
+    await service.start()
+    try:
+        await _submit_run(queue, "local", "run-progress", _batch(_item()))
+    finally:
+        await service.stop(timeout_seconds=1)
+
+    assert phases == [
+        ("local", "run-progress", "validating"),
+        ("local", "run-progress", "committing"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancel_run_fences_finish_that_ignores_initial_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    original_filesystem = service._filesystem_with_fallback
+    finish_started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release_finish = asyncio.Event()
+
+    async def stubborn_finish(**kwargs: object) -> str:
+        finish_started.set()
+        try:
+            await release_finish.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release_finish.wait()
+        return await original_filesystem(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_filesystem_with_fallback", stubborn_finish)
+    monkeypatch.setattr(context_pipeline, "_PIPELINE_CANCEL_GRACE_SECONDS", 0.01, raising=False)
+    await service.start()
+    completion = asyncio.get_running_loop().create_future()
+    try:
+        await _put_event(queue, "batch", "local", "run-stubborn", _batch(_item()))
+        await queue.put(("finish", "local", "run-stubborn", None, completion))
+        await asyncio.wait_for(finish_started.wait(), timeout=1)
+
+        await asyncio.wait_for(service.cancel_run("local", "run-stubborn"), timeout=0.2)
+
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+        assert not completion.done()
+        release_finish.set()
+        with pytest.raises(BaseError):
+            await asyncio.wait_for(completion, timeout=1)
+        assert not (tmp_path / "workspace" / "context" / "description.md").exists()
+        state = service._run_states[("local", "run-stubborn")]
+        assert state["status"] == "processing"
+        assert state["batch_ids"] == ["batch-1"]
+
+        await _put_event(queue, "retain", "local", "run-stubborn", None)
+
+        assert (tmp_path / "workspace" / "context" / "description.md").is_file()
+    finally:
+        release_finish.set()
+        if not completion.done():
+            completion.cancel()
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_hard_invalidated_run_cannot_be_unfenced_by_retain(tmp_path: Path) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+    await service.start()
+    try:
+        await _put_event(queue, "batch", "local", "run-invalidated", _batch(_item()))
+        service.invalidate_run("local", "run-invalidated")
+
+        with pytest.raises(BaseError):
+            await _put_event(queue, "retain", "local", "run-invalidated", None)
+
+        assert not (tmp_path / "workspace" / "context" / "description.md").exists()
+        assert ("local", "run-invalidated") not in service._run_states
+    finally:
+        await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_workspace_symlink_is_rejected_before_publication(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
@@ -822,6 +1547,28 @@ async def test_start_removes_controlled_stale_run_before_starting_consumer(tmp_p
 
     assert service.is_running()
     assert not stale_run.exists()
+    await service.stop(timeout_seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_start_removes_legacy_agent_baseline_with_long_read_only_path(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / "workspace" / "sandboxes" / "local" / ".personal-context-agent-baseline-deadbeef"
+    payload = legacy / "materialized-source"
+    for index in range(4):
+        payload /= f"segment-{index}-" + ("x" * 52)
+    payload /= "payload.md"
+    context_pipeline._atomic_write(payload, b"stale")
+    extended_payload = context_pipeline._extended_path(payload)
+    extended_payload.chmod(extended_payload.stat().st_mode & ~stat.S_IWUSR & ~stat.S_IWGRP & ~stat.S_IWOTH)
+    queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
+    service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
+
+    await service.start()
+
+    assert not context_pipeline._path_exists(legacy)
+    assert service.is_running()
     await service.stop(timeout_seconds=1)
 
 
@@ -893,18 +1640,14 @@ async def test_stop_drains_queued_completions_with_exception(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_rules_preserves_existing_context_and_builds_layered_source_navigation(tmp_path: Path) -> None:
     context_root = tmp_path / "workspace" / "context"
-    topic_root = context_root / "topics" / "existing"
+    topic_root = context_root / "已有主题"
     topic_root.mkdir(parents=True)
     root_body = "这是 Agent 保留的根语义正文。"
     topic_body = "这是 Agent 保留的目录语义正文。"
     source_id = _seed_atomic_source(tmp_path)
-    ordinary_body = f"# 已有主题页\n\n不得被 Rules 改写。\n\n[既有来源](../../../source-meta/{source_id}.md)\n"
+    ordinary_body = f"# 已有主题页\n\n不得被 Rules 改写。\n\n[既有来源](../../source-meta/{source_id}.md)\n"
     (context_root / "description.md").write_text(
-        (f"# Agent 门户\n\n- [既有主题](topics/description.md)\n\n{root_body}\n"),
-        encoding="utf-8",
-    )
-    (context_root / "topics" / "description.md").write_text(
-        ("# Topics\n\n- [已有主题](existing/description.md)\n"),
+        (f"# Agent 门户\n\n- [既有主题](已有主题/description.md)\n\n{root_body}\n"),
         encoding="utf-8",
     )
     original_topic_description = f"# 已有主题\n\n- [已有主题页](existing.md)\n\n{topic_body}\n"
@@ -919,31 +1662,32 @@ async def test_rules_preserves_existing_context_and_builds_layered_source_naviga
     service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
     await service.start()
     try:
-        await _submit_run(queue, "local", "run-layered", _batch(_item(title="普通新增")))
+        await _submit_run(
+            queue,
+            "local",
+            "run-layered",
+            _batch(_item(title="已有主题新增", content="已有主题的新增内容。")),
+        )
 
         root_text = (context_root / "description.md").read_text(encoding="utf-8")
         assert root_text.count("<!-- personal-context:navigation:start -->") == 1
         assert root_text.count("<!-- personal-context:navigation:end -->") == 1
         assert root_text.index("<!-- personal-context:navigation:start -->") < root_text.index(root_body)
-        assert "sources/description.md" in root_text
-        assert "sources/local/description.md" not in root_text
+        assert "已有主题/description.md" in root_text
         assert root_body in root_text
 
-        sources_description = (context_root / "sources" / "description.md").read_text(encoding="utf-8")
-        assert "local/description.md" in sources_description
-        assert "sources/local/" not in sources_description
-
-        service_root = context_root / "sources" / "local"
-        source_pages = [path for path in service_root.glob("*.md") if path.name != "description.md"]
-        assert len(source_pages) == 1
-        service_description = (service_root / "description.md").read_text(encoding="utf-8")
-        assert source_pages[0].name in service_description
-        assert "existing.md" not in service_description
-        source_text = source_pages[0].read_text(encoding="utf-8")
-        assert "## 摘要" in source_text
-        assert "## 正文" in source_text
-
-        assert (topic_root / "description.md").read_text(encoding="utf-8") == original_topic_description
+        source_pages = [path for path in topic_root.glob("*.md") if path.name != "description.md"]
+        assert len(source_pages) == 2
+        managed_page = next(
+            page for page in source_pages if "personal-context-managed-source" in page.read_text(encoding="utf-8")
+        )
+        topic_text = (topic_root / "description.md").read_text(encoding="utf-8")
+        assert managed_page.name in topic_text
+        assert "## 摘要" in managed_page.read_text(encoding="utf-8")
+        assert "## 正文" in managed_page.read_text(encoding="utf-8")
+        assert not (context_root / "sources").exists()
+        assert not (context_root / "topics").exists()
+        assert topic_body in topic_text
         assert ordinary_page.read_text(encoding="utf-8") == ordinary_body
     finally:
         await service.stop(timeout_seconds=1)
@@ -952,18 +1696,19 @@ async def test_rules_preserves_existing_context_and_builds_layered_source_naviga
 @pytest.mark.asyncio
 async def test_rules_adds_managed_link_only_for_unique_high_confidence_topic(tmp_path: Path) -> None:
     context_root = tmp_path / "workspace" / "context"
-    topic_root = context_root / "topics" / "openjiuwen"
+    topic_root = context_root / "OpenJiuWen"
     topic_root.mkdir(parents=True)
+    source_id = _seed_atomic_source(tmp_path, suffix="openjiuwen")
     (context_root / "description.md").write_text(
-        "# Agent 门户\n\n- [主题](topics/description.md)\n\n根正文。\n",
-        encoding="utf-8",
-    )
-    (context_root / "topics" / "description.md").write_text(
-        "# Topics\n\n- [OpenJiuWen](openjiuwen/description.md)\n",
+        "# Agent 门户\n\n- [OpenJiuWen](OpenJiuWen/description.md)\n\n根正文。\n",
         encoding="utf-8",
     )
     topic_description = topic_root / "description.md"
     topic_description.write_text("# OpenJiuWen\n\nAgent 目录正文。\n", encoding="utf-8")
+    (topic_root / "既有页面.md").write_text(
+        f"# OpenJiuWen Rail 基础\n\n主动上下文 Rail 接入说明。\n\n[既有来源](../../source-meta/{source_id}.md)\n",
+        encoding="utf-8",
+    )
 
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
     service = ContextPipelineService(home=tmp_path, config=_config(), input_queue=queue)
@@ -973,17 +1718,17 @@ async def test_rules_adds_managed_link_only_for_unique_high_confidence_topic(tmp
             queue,
             "local",
             "run-topic",
-            _batch(_item(title="OpenJiuWen Rail 接入说明")),
+            _batch(_item(title="OpenJiuWen Rail 接入说明", content="主动上下文 Rail 接入与配置说明。")),
         )
 
         text = topic_description.read_text(encoding="utf-8")
-        source_page = next(
-            path for path in (context_root / "sources" / "local").glob("*.md") if path.name != "description.md"
-        )
+        source_page = next(path for path in topic_root.glob("*.md") if "Rail" in path.name)
         assert "Agent 目录正文。" in text
-        assert text.count("<!-- personal-context:source-links:start -->") == 1
-        assert text.count("<!-- personal-context:source-links:end -->") == 1
+        assert text.count("<!-- personal-context:navigation:start -->") == 1
+        assert text.count("<!-- personal-context:navigation:end -->") == 1
         assert source_page.name in text
+        assert "personal-context-managed-source" in source_page.read_text(encoding="utf-8")
+        assert not (context_root / "sources").exists()
     finally:
         await service.stop(timeout_seconds=1)
 
@@ -993,29 +1738,23 @@ async def test_rules_does_not_place_ambiguous_or_generic_topic(tmp_path: Path) -
     context_root = tmp_path / "workspace" / "context"
     (context_root / "description.md").parent.mkdir(parents=True)
     source_id = _seed_atomic_source(tmp_path, suffix="ambiguous")
-    (context_root / "description.md").write_text(
-        ("# Agent 门户\n\n- [主题](topics/description.md)\n根正文。\n"),
-        encoding="utf-8",
-    )
     descriptions: list[Path] = []
     original_descriptions: dict[Path, str] = {}
     for directory_name, heading in (("first", "OpenJiuWen"), ("second", "OpenJiuWen"), ("docs", "资料")):
-        description = context_root / "topics" / directory_name / "description.md"
+        description = context_root / directory_name / "description.md"
         description.parent.mkdir(parents=True)
         page = description.parent / "existing.md"
         page.write_text(
-            f"# {directory_name}\n\n既有页面。\n\n[既有来源](../../../source-meta/{source_id}.md)\n",
+            f"# {directory_name}\n\n既有页面。\n\n[既有来源](../../source-meta/{source_id}.md)\n",
             encoding="utf-8",
         )
         original = f"# {heading}\n\n- [既有页面](existing.md)\n\n{directory_name} 正文。\n"
         description.write_text(original, encoding="utf-8")
         descriptions.append(description)
         original_descriptions[description] = original
-    (context_root / "topics" / "description.md").write_text(
-        (
-            "# Topics\n\n"
-            + "".join(f"- [{path.parent.name}]({path.parent.name}/description.md)\n" for path in descriptions)
-        ),
+    (context_root / "description.md").write_text(
+        "# Agent 门户\n\n"
+        + "".join(f"- [{path.parent.name}]({path.parent.name}/description.md)\n" for path in descriptions),
         encoding="utf-8",
     )
 
@@ -1033,7 +1772,10 @@ async def test_rules_does_not_place_ambiguous_or_generic_topic(tmp_path: Path) -
         for description in descriptions:
             text = description.read_text(encoding="utf-8")
             assert "<!-- personal-context:source-links:start -->" not in text
-            assert text == original_descriptions[description]
+            assert original_descriptions[description].splitlines()[-1] in text
+        managed_pages = context_pipeline._managed_pages_by_source(context_root)
+        new_page = next(path for source, path in managed_pages.items() if source != source_id)
+        assert new_page.parent.name not in {"first", "second", "docs"}
     finally:
         await service.stop(timeout_seconds=1)
 

@@ -8,13 +8,13 @@ import tempfile
 import time
 from unittest import IsolatedAsyncioTestCase
 
-from openjiuwen.rsi.auto_harness.experience.experience_store import (
+from openjiuwen.rsi.harness_rsi.auto_harness.experience.experience_store import (
     ExperienceStore,
     _count_hits,
     _recency_score,
     _tokenize,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     Experience,
     ExperienceType,
 )

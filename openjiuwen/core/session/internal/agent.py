@@ -28,7 +28,9 @@ class AgentSession(BaseSession):
             config: Config = None,
             checkpointer: Checkpointer | None = None,
             card=None,
-            stream_writer_manager: StreamWriterManager | None = None):
+            stream_writer_manager: StreamWriterManager | None = None,
+            *,
+            trace_id: str = None):
         self._session_id = session_id
         self._config = config
         self._state = StateCollection()
@@ -37,7 +39,7 @@ class AgentSession(BaseSession):
             if stream_writer_manager is not None
             else StreamWriterManager(StreamEmitter())
         )
-        tracer = Tracer(session_id=session_id)
+        tracer = Tracer(session_id=session_id, trace_id=trace_id)
         tracer.init(self._stream_writer_manager)
         self._tracer = tracer
         self._checkpointer = CheckpointerFactory.get_checkpointer() if checkpointer is None else checkpointer

@@ -9,23 +9,23 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
     TaskRuntime,
 )
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines.extended_evolve_pipeline.extension_task_pipeline import (
     ExtensionTaskPipeline,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     ExtensionDesign,
     OptimizationTask,
     RuntimeExtensionArtifact,
 )
-from openjiuwen.rsi.auto_harness.stages.activate import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.activate import (
     ExtendActivateStage,
 )
 
@@ -192,33 +192,33 @@ async def test_extension_task_pipeline_runs_end_to_end(
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.pipelines."
+            "openjiuwen.rsi.harness_rsi.auto_harness.pipelines."
             "extended_evolve_pipeline."
             "extension_task_pipeline."
             "create_auto_harness_agent",
             return_value=mock_agent,
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.verify._check_ruff",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.verify._check_ruff",
             new_callable=AsyncMock,
             return_value=[],
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.stages.commit._collect_commit_facts",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.commit._collect_commit_facts",
             new_callable=AsyncMock,
         ) as mock_facts,
         patch(
-            "openjiuwen.rsi.auto_harness.stages.commit._run_commit_round_stream",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.commit._run_commit_round_stream",
         ) as mock_commit_round,
         patch(
-            "openjiuwen.rsi.auto_harness.stages.publish_pr.PublishPRStage.stream",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.PublishPRStage.stream",
         ) as mock_publish,
     ):
         # CommitStage: simulate successful commit
-        from openjiuwen.rsi.auto_harness.schema import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
             StageResult,
         )
-        from openjiuwen.rsi.auto_harness.stages.commit import (
+        from openjiuwen.rsi.harness_rsi.auto_harness.stages.commit import (
             CommitFacts,
             CommitRoundResult,
         )
@@ -250,7 +250,7 @@ async def test_extension_task_pipeline_runs_end_to_end(
         # PublishPRStage: simulate successful PR
         async def _fake_publish(self_or_ctx, *args):
             ctx_arg = self_or_ctx if hasattr(self_or_ctx, "put_artifact") else args[0]
-            from openjiuwen.rsi.auto_harness.schema import (
+            from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
                 PullRequestArtifact,
             )
 

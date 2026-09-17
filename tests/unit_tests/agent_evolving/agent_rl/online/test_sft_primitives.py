@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import shlex
 import signal
 import subprocess
 import sys
@@ -335,7 +336,10 @@ def test_local_program_rollout_uses_current_python_env(tmp_path, monkeypatch):
 
     command_text = spec.command[-1]
     assert "conda activate wrong-env" not in command_text
-    assert f"export PATH={Path(sys.executable).resolve().parent}:$PATH" in command_text
+    # The producer shlex-quotes the bin dir (uv-managed Pythons live under
+    # "Library/Application Support", which contains a space), so compare against
+    # the quoted form rather than a raw path interpolation.
+    assert f"export PATH={shlex.quote(str(Path(sys.executable).resolve().parent))}:$PATH" in command_text
     assert spec.env["SFT_TASK_LIGHT_CONFIG"] == "1"
 
 
@@ -362,7 +366,10 @@ def test_sft_converter_builds_session_batch():
     from openjiuwen.agent_evolving.agent_rl.online.backends.sft.converter import SFTRawTrajectoryConverter
     from openjiuwen.agent_evolving.trajectory.model import Trajectory
     from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID, TRAJECTORY_SOURCE
-    from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+    from openjiuwen.agent_evolving.trajectory.spans import (
+        attributes_from_map,
+        write_llm_exchange,
+    )
     from openjiuwen.extensions.observability import semconv
 
     trajectory = Trajectory.from_otlp(
@@ -389,10 +396,10 @@ def test_sft_converter_builds_session_batch():
                                     "attributes": attributes_from_map(
                                         {
                                             semconv.GEN_AI_REQUEST_MODEL: "m1",
-                                            f"{semconv.GEN_AI_PROMPT}.0.role": "user",
-                                            f"{semconv.GEN_AI_PROMPT}.0.content": "hello",
-                                            f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                                            f"{semconv.GEN_AI_COMPLETION}.0.content": "world",
+                                            **write_llm_exchange(
+                                                [{"role": "user", "content": "hello"}],
+                                                [{"role": "assistant", "content": "world"}],
+                                            ),
                                         }
                                     ),
                                 }
@@ -1234,6 +1241,30 @@ def test_sft_executor_clamps_train_batch_to_gpu_count(tmp_path, monkeypatch):
 
     assert payload["data"]["train_batch_size"] == 4
     assert payload["trainer"]["n_gpus_per_node"] == 4
+
+
+def test_sft_executor_enables_rebased_left_truncation_position_ids(tmp_path, monkeypatch):
+    from openjiuwen.agent_evolving.agent_rl.online.backends.sft.trainer import SFTTrainingExecutor
+
+    monkeypatch.setenv("SFT_VERL_REBASE_LEFT_TRUNCATED_POSITION_IDS", "true")
+    executor = SFTTrainingExecutor(
+        base_model_path="/models/Qwen3-4B-Instruct-2507",
+        lora_repo=None,
+        notifier=None,
+        training_gpu_ids="4,5,6,7",
+        target_model_id="teacher",
+        dry_run=True,
+    )
+
+    payload = executor._build_sft_config(
+        user_id="u1",
+        dataset_path=tmp_path / "train.parquet",
+        output_dir=tmp_path / "output",
+        custom_cls_path=tmp_path / "sft_verl_dataset.py",
+        training_count=1,
+    )
+
+    assert payload["data"]["rebase_left_truncated_position_ids"] is True
 
 
 def test_sft_executor_parses_numeric_save_freq(tmp_path, monkeypatch):

@@ -24,6 +24,7 @@ from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcess
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, merge_trajectories
 from openjiuwen.extensions.observability import semconv
+from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
@@ -67,10 +68,10 @@ def _llm_span(span_index: int, tool_calls: list[dict]) -> dict:
         "name": "llm.call",
         "attributes": attributes_from_map(
             {
-                f"{semconv.GEN_AI_COMPLETION}.0.role": "assistant",
-                f"{semconv.GEN_AI_COMPLETION}.0.content": "",
+                f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.role": "assistant",
+                f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.content": "",
                 semconv.GEN_AI_REQUEST_MODEL: "mock",
-                semconv.GEN_AI_TOOL_CALLS: tool_calls,
+                legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS: tool_calls,
             }
         ),
     }
@@ -85,11 +86,11 @@ def _tool_span(
 ) -> dict:
     attrs = {
         semconv.GEN_AI_TOOL_NAME: tool_name,
-        semconv.GEN_AI_TOOL_INPUT: "{}",
-        semconv.GEN_AI_TOOL_OUTPUT: call_result,
+        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: "{}",
+        semconv.GEN_AI_TOOL_CALL_RESULT: call_result,
     }
     if tool_call_id is not None:
-        attrs[semconv.GEN_AI_TOOL_ID] = tool_call_id
+        attrs[semconv.GEN_AI_TOOL_CALL_ID] = tool_call_id
     return {
         "traceId": "trace-test",
         "spanId": f"tool-{span_index}",

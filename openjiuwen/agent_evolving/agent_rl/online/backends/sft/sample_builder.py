@@ -7,11 +7,10 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel
-
-from openjiuwen.agent_evolving.agent_rl.online.gateway.common import utc_now_iso
 
 SFT_RAW_PROTOCOL_VERSION = "sft-raw-v1"
 SFT_SAMPLE_PROTOCOL_VERSION = "sft-sample-v1"
@@ -29,6 +28,10 @@ _CHAT_MESSAGE_FIELDS = (
     "audio",
     "function_call",
 )
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def json_safe(value: Any) -> Any:
@@ -271,7 +274,7 @@ def build_sft_sample(
     sample = {
         "protocol_version": SFT_SAMPLE_PROTOCOL_VERSION,
         "sample_id": sample_id or fallback_id or str(uuid.uuid4()),
-        "created_at": created_at or utc_now_iso(),
+        "created_at": created_at or _utc_now_iso(),
         "user_id": str(user_id or "").strip(),
         "session_id": str(session_id or "").strip(),
         "source_raw_id": str(source_raw_id or ""),

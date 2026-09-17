@@ -54,8 +54,9 @@ NativeHarness.prepare_config = spec.resolve_parts(ctx) + apply_deep_agent_parts(
 `swarm.*` 命名空间共存。
 
 **③ team live handle 经 `BuildContext.extras`**：`TeamHandleKey` 命名空间下的 `team_backend` /
-`workspace_manager` / `model_allocator` / `messager` / `on_teammate_created` / `swarmflow_launcher`
-+ `reliability_components`。`AgentConfigurator` 是唯一写入者（`inject_team_handles`），team rail
+`workspace_manager` / `model_allocator` / `messager` / `swarmflow_launcher`
++ `reliability_components`。（`on_teammate_created` 一度也是其中之一，F_84 把它收敛进
+`TeamBackend.on_member_started` 后这个 handle 已删除。）`AgentConfigurator` 是唯一写入者（`inject_team_handles`），team rail
 工厂经 accessor 直读（运行时句柄，不进 ConstructionInput schema——对齐 swarm 把
 `trajectory_registry` 塞 extras 的范式）。**rail 不缓存**：每次 native 重建都经工厂新建 rail
 （对齐 provider 注册范式）；需跨重建存活的状态作为复用对象注入、由 fresh rail 在构造时包装——

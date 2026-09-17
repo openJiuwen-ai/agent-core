@@ -15,15 +15,13 @@ fallbacks remain explicitly owned by the trajectory package.
 from __future__ import annotations
 
 import json
-import re
-from copy import deepcopy
 from collections.abc import Iterable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any, Iterator, TypeAlias
 
 from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.extensions.observability import semconv
-
 
 JSONValue: TypeAlias = Any
 Span: TypeAlias = dict[str, Any]
@@ -399,6 +397,31 @@ def merge_spans(base: Any, additions: Iterable[Mapping[str, Any]]) -> Any:
     return _trajectory_from_payload(merge_payloads(payload, extra))
 
 
+def _trim_span_indices(
+    spans: Sequence[Mapping[str, Any]],
+    max_spans: int | None,
+    *,
+    start_time: int | None,
+    end_time: int | None,
+) -> list[int]:
+    """Select positions so equal or repeated span identities remain distinct."""
+
+    selected: list[int] = []
+    for index, span in enumerate(spans):
+        if start_time is not None and _time_value(span, "endTimeUnixNano") < start_time:
+            continue
+        if end_time is not None and _time_value(span, "startTimeUnixNano") > end_time:
+            continue
+        selected.append(index)
+
+    selected.sort(key=lambda index: span_sort_key(spans[index]))
+    if max_spans is not None:
+        if max_spans <= 0:
+            return []
+        selected = selected[-max_spans:]
+    return selected
+
+
 def trim_spans(
     spans: Iterable[Mapping[str, Any]],
     max_spans: int | None = None,
@@ -412,17 +435,9 @@ def trim_spans(
     limit yields an empty list, which is useful for a bounded clean window.
     """
 
-    selected = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
-    if start_time is not None:
-        selected = [span for span in selected if _time_value(span, "endTimeUnixNano") >= start_time]
-    if end_time is not None:
-        selected = [span for span in selected if _time_value(span, "startTimeUnixNano") <= end_time]
-    selected.sort(key=span_sort_key)
-    if max_spans is not None:
-        if max_spans <= 0:
-            return []
-        selected = selected[-max_spans:]
-    return deepcopy(selected)
+    normalized = [normalize_span(span) for span in spans if isinstance(span, Mapping)]
+    selected = _trim_span_indices(normalized, max_spans, start_time=start_time, end_time=end_time)
+    return [normalized[index] for index in selected]
 
 
 def trim_trajectory(
@@ -432,35 +447,29 @@ def trim_trajectory(
     start_time: int | None = None,
     end_time: int | None = None,
 ) -> Any:
-    """Return a new trajectory retaining only the selected span window."""
+    """Return a globally trimmed trajectory preserving original resource/scope groups."""
 
     payload = normalize_otlp(_payload_for(value))
     if max_spans is None and start_time is None and end_time is None:
         return _trajectory_from_payload(payload)
-    selected = trim_spans(
-        list(iter_spans(payload)),
+
+    entries = list(_payload_spans(payload))
+    selected = _trim_span_indices(
+        [span for _, _, _, span in entries],
         max_spans,
         start_time=start_time,
         end_time=end_time,
     )
-    # Keep the first resource/scope metadata while replacing spans with the
-    # selected forest.  Empty spans are valid for a snapshot; resourceSpans is
-    # retained so Trajectory validation still sees a canonical envelope.
     result = deepcopy(payload)
-    locations: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for resource_span in result.get("resourceSpans") or []:
         for scope_span in resource_span.get("scopeSpans") or []:
             scope_span["spans"] = []
-            locations.append((resource_span, scope_span))
-    if not locations:
-        result.setdefault("resourceSpans", []).append({"resource": {}, "scopeSpans": [{"scope": {}, "spans": []}]})
-        locations.append((result["resourceSpans"][0], result["resourceSpans"][0]["scopeSpans"][0]))
-    # Preserve each selected span's original resource/scope when possible.
-    for span in selected:
-        # The detached span does not carry its source location; using the first
-        # scope is deterministic and preserves the canonical envelope.
-        locations[0][1].setdefault("spans", []).append(span)
-    _sort_payload_spans(result)
+
+    # Keep empty groups and their metadata; selected positions identify the original
+    # source even when different groups contain identical trace/span IDs.
+    for index in selected:
+        resource_index, scope_index, _, span = entries[index]
+        result["resourceSpans"][resource_index]["scopeSpans"][scope_index]["spans"].append(span)
     return _trajectory_from_payload(result)
 
 
@@ -497,22 +506,6 @@ def _decode_structured_attribute(value: Any) -> Any:
     return decode_json_attribute(value)
 
 
-_INDEXED_ATTRIBUTE_RE = re.compile(r"^(?P<base>.+)\.(?P<index>\d+)\.(?P<field>[^.]+)$")
-
-
-def _indexed_messages(attributes: Mapping[str, Any], base: str) -> list[dict[str, Any]]:
-    indexed: dict[int, dict[str, Any]] = {}
-    prefix = f"{base}."
-    for key, value in attributes.items():
-        if not key.startswith(prefix):
-            continue
-        match = _INDEXED_ATTRIBUTE_RE.match(key)
-        if not match or match.group("base") != base:
-            continue
-        index = int(match.group("index"))
-        indexed.setdefault(index, {})[match.group("field")] = deepcopy(value)
-    return [indexed[index] for index in sorted(indexed)]
-
 
 def _message_list(value: Any) -> list[dict[str, Any]]:
     decoded = _decode_structured_attribute(value)
@@ -529,21 +522,205 @@ def _message_list(value: Any) -> list[dict[str, Any]]:
     return messages
 
 
+def _structured_parts_text(parts: Any) -> str:
+    """Join the text carried by one message's structured parts."""
+
+    if not isinstance(parts, list):
+        return ""
+    texts: list[str] = []
+    for part in parts:
+        if isinstance(part, Mapping) and isinstance(part.get("content"), str):
+            texts.append(part["content"])
+    return "\n".join(texts)
+
+
+def _tool_calls_from_parts(parts: Any) -> list[dict[str, Any]]:
+    """Rebuild the flat tool-call list from a message's structured parts."""
+
+    if not isinstance(parts, list):
+        return []
+    tool_calls: list[dict[str, Any]] = []
+    for part in parts:
+        if not isinstance(part, Mapping) or part.get("type") != "tool_call":
+            continue
+        # A call carried whole keeps its own ``type``; one flattened by the
+        # instrumentation has its fields directly on the part.
+        nested = part.get("call")
+        if isinstance(nested, Mapping):
+            tool_calls.append(deepcopy(dict(nested)))
+            continue
+        tool_calls.append(
+            {key: deepcopy(value) for key, value in part.items() if key != "type"}
+        )
+    return tool_calls
+
+
+def _flatten_structured_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Collapse a structured message onto the flat role/content shape.
+
+    Standard GenAI messages carry their text and their tool calls as ``parts``;
+    every consumer here reads ``content`` and ``tool_calls``. Remaining fields
+    (``name``, ``finish_reason``) pass through untouched.
+    """
+
+    flat = {key: deepcopy(value) for key, value in message.items() if key != "parts"}
+    if not isinstance(flat.get("content"), str):
+        parts = message.get("parts")
+        contents = [
+            part["content"] for part in parts
+            if isinstance(part, Mapping) and "content" in part
+        ] if isinstance(parts, list) else []
+        if len(contents) == 1 and not isinstance(contents[0], str):
+            # Multimodal content rides in one part and comes back whole.
+            flat["content"] = deepcopy(contents[0])
+        elif contents:
+            flat["content"] = _structured_parts_text(parts)
+    if "tool_calls" not in flat:
+        tool_calls = _tool_calls_from_parts(message.get("parts"))
+        if tool_calls:
+            flat["tool_calls"] = tool_calls
+    if flat.get("role") == "tool":
+        parts = message.get("parts")
+        responses = [
+            part for part in parts
+            if isinstance(part, Mapping) and part.get("type") == "tool_call_response"
+        ] if isinstance(parts, list) else []
+        if responses:
+            response = responses[0]
+            flat.setdefault("content", deepcopy(response.get("response")))
+            if response.get("id") is not None:
+                flat.setdefault("tool_call_id", deepcopy(response["id"]))
+    flat.setdefault("role", "unknown")
+    return flat
+
+
+def _structure_message(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Render one flat role/content message as a structured GenAI message.
+
+    Text, tool calls, and tool responses become the exact part shapes defined
+    by the OpenTelemetry GenAI JSON schema.
+    """
+
+    parts: list[dict[str, Any]] = []
+    content = message.get("content")
+    role = str(message.get("role") or "unknown")
+    if role == "tool" and content is not None:
+        response: dict[str, Any] = {
+            "type": "tool_call_response",
+            "response": deepcopy(content),
+        }
+        if message.get("tool_call_id") is not None:
+            response["id"] = deepcopy(message["tool_call_id"])
+        parts.append(response)
+    elif content is not None:
+        # Recorded even when empty: a message that carried an empty content
+        # field is not the same as one that carried none.
+        parts.append({"type": "text", "content": deepcopy(content)})
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if isinstance(call, Mapping):
+                function = call.get("function")
+                function = function if isinstance(function, Mapping) else {}
+                part: dict[str, Any] = {"type": "tool_call"}
+                call_id = call.get("id", function.get("id"))
+                name = call.get("name", function.get("name"))
+                arguments = call.get("arguments", function.get("arguments"))
+                if call_id is not None:
+                    part["id"] = deepcopy(call_id)
+                if name is not None:
+                    part["name"] = deepcopy(name)
+                if arguments is not None:
+                    part["arguments"] = deepcopy(arguments)
+                parts.append(part)
+    structured: dict[str, Any] = {
+        "role": role,
+        "parts": parts,
+    }
+    if message.get("name") is not None:
+        structured["name"] = deepcopy(message["name"])
+    return structured
+
+
+def write_llm_exchange(
+    prompts: Iterable[Mapping[str, Any]] | None,
+    completions: Iterable[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    """Render an LLM exchange as the standard GenAI span attributes.
+
+    The inverse of :func:`read_llm_exchange`, for the trajectory producers that
+    build span attribute dictionaries by hand rather than through
+    instrumentation: offline extraction, the RL rail, and legacy conversion.
+
+    Args:
+        prompts: Flat request messages, system turns included.
+        completions: Flat reply messages.
+
+    Returns:
+        The standard attributes to merge into a span's attribute map; keys with
+        nothing to carry are omitted.
+    """
+
+    system_parts: list[dict[str, Any]] = []
+    input_messages: list[dict[str, Any]] = []
+    for message in prompts or []:
+        if not isinstance(message, Mapping):
+            continue
+        if str(message.get("role") or "") == "system":
+            content = message.get("content")
+            if content not in (None, ""):
+                system_parts.append({"type": "text", "content": deepcopy(content)})
+            continue
+        input_messages.append(_structure_message(message))
+    output_messages = [
+        _structure_message(message)
+        for message in completions or []
+        if isinstance(message, Mapping)
+    ]
+
+    def encode(value: Any) -> str:
+        return json.dumps(to_json_compatible(value), ensure_ascii=False, default=str)
+
+    attributes: dict[str, Any] = {}
+    if system_parts:
+        attributes[semconv.GEN_AI_SYSTEM_INSTRUCTIONS] = encode(system_parts)
+    if input_messages:
+        attributes[semconv.GEN_AI_INPUT_MESSAGES] = encode(input_messages)
+    if output_messages:
+        attributes[semconv.GEN_AI_OUTPUT_MESSAGES] = encode(output_messages)
+    return attributes
+
+
+def _standard_prompt_messages(attrs: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Read the standard input attributes back as one ordered message list.
+
+    ``gen_ai.system_instructions`` holds the instructions given outside the
+    chat history, so it leads; ``gen_ai.input.messages`` follows in order.
+    """
+
+    messages: list[dict[str, Any]] = []
+    system_text = _structured_parts_text(
+        _decode_structured_attribute(attrs.get(semconv.GEN_AI_SYSTEM_INSTRUCTIONS))
+    )
+    if system_text:
+        messages.append({"role": "system", "content": system_text})
+    messages.extend(
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_INPUT_MESSAGES))
+    )
+    return messages
+
+
 def read_llm_exchange(span: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Read detached LLM messages, preferring standard attributes over Langfuse mirrors."""
+    """Read detached LLM messages from the standard GenAI attributes."""
 
     attrs = span_attributes(span)
-    prompts = _indexed_messages(attrs, semconv.GEN_AI_PROMPT)
-    completions = _indexed_messages(attrs, semconv.GEN_AI_COMPLETION)
-    if not prompts:
-        prompts = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_PROMPT)
-    if not completions:
-        completions = _indexed_messages(attrs, semconv.LANGFUSE_GEN_AI_COMPLETION)
-    if not prompts:
-        prompts = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_INPUT_MESSAGES))
-    if not completions:
-        completions = _message_list(attrs.get(legacy_semconv.LEGACY_GEN_AI_OUTPUT_MESSAGES))
-    tool_calls = _decode_structured_attribute(attrs.get(semconv.GEN_AI_TOOL_CALLS))
+    prompts = _standard_prompt_messages(attrs)
+    completions = [
+        _flatten_structured_message(message)
+        for message in _message_list(attrs.get(semconv.GEN_AI_OUTPUT_MESSAGES))
+    ]
+    tool_calls = _decode_structured_attribute(attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS))
     if tool_calls not in (None, ""):
         if completions:
             completions[0].setdefault("tool_calls", tool_calls)
@@ -568,19 +745,19 @@ def read_tool_call(span: Mapping[str, Any]) -> dict[str, Any]:
     attrs = span_attributes(span)
     result: dict[str, Any] = {}
     name = attrs.get(semconv.GEN_AI_TOOL_NAME)
-    tool_id = attrs.get(semconv.GEN_AI_TOOL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ID)
+    tool_id = attrs.get(semconv.GEN_AI_TOOL_CALL_ID) or attrs.get(legacy_semconv.LEGACY_GEN_AI_TOOL_ID)
     if name is not None:
         result["name"] = deepcopy(name)
     if tool_id is not None:
         result["id"] = deepcopy(tool_id)
-    if semconv.GEN_AI_TOOL_INPUT in attrs:
-        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_INPUT])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
-        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS])
-    if semconv.GEN_AI_TOOL_OUTPUT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_OUTPUT])
-    elif legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT in attrs:
-        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALL_RESULT])
+    if semconv.GEN_AI_TOOL_CALL_ARGUMENTS in attrs:
+        result["input"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT in attrs:
+        result["input"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_INPUT])
+    if semconv.GEN_AI_TOOL_CALL_RESULT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[semconv.GEN_AI_TOOL_CALL_RESULT])
+    elif legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT in attrs:
+        result["output"] = _decode_structured_attribute(attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_OUTPUT])
     error = read_span_error(span)
     if error is not None:
         result["error"] = error
@@ -594,13 +771,13 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
     mapping = (
         (
             "prompt_tokens",
-            (semconv.GEN_AI_USAGE_PROMPT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_INPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_INPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_PROMPT_TOKENS),
         ),
         (
             "completion_tokens",
-            (semconv.GEN_AI_USAGE_COMPLETION_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS),
+            (semconv.GEN_AI_USAGE_OUTPUT_TOKENS, legacy_semconv.LEGACY_GEN_AI_USAGE_COMPLETION_TOKENS),
         ),
-        ("total_tokens", (semconv.GEN_AI_USAGE_TOTAL_TOKENS,)),
+        ("total_tokens", (legacy_semconv.LEGACY_GEN_AI_USAGE_TOTAL_TOKENS,)),
     )
     result: dict[str, int] = {}
     for output_key, input_keys in mapping:
@@ -611,6 +788,8 @@ def read_usage(span: Mapping[str, Any]) -> dict[str, int]:
             result[output_key] = int(value)
         except (TypeError, ValueError):
             continue
+    if "total_tokens" not in result and ("prompt_tokens" in result or "completion_tokens" in result):
+        result["total_tokens"] = result.get("prompt_tokens", 0) + result.get("completion_tokens", 0)
     return result
 
 
@@ -725,6 +904,7 @@ __all__ = [
     "normalize_otlp",
     "normalize_span",
     "read_llm_exchange",
+    "write_llm_exchange",
     "read_llm_messages",
     "read_rl_fields",
     "read_span_error",

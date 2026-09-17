@@ -484,9 +484,9 @@ class MessageSummaryOffloader(ContextProcessor):
         return self._character_budget(context, self._ttl_message_threshold_ratio())
 
     def _character_budget(self, context: ModelContext, ratio: float) -> int:
-        # token 阈值 (context_max * ratio) 反推为字符阈值；×4 与 fallback
-        # 估算 len//4 互逆，保证字符截断阈值与 token 触发阈值口径一致。
-        return max(int(self._context_max(context) * 4 * ratio), 1)
+        # token 阈值 (context_max * ratio) 反推为字符阈值；×3 与 fallback
+        # 估算 len//3 互逆，保证字符截断阈值与 token 触发阈值口径一致。
+        return max(int(self._context_max(context) * 3 * ratio), 1)
 
     def _context_max(self, context: ModelContext) -> int:
         return resolve_context_max(context)

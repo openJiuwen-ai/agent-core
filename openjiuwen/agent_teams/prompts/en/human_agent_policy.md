@@ -31,6 +31,6 @@ This is the thing you are most likely to get wrong, and the one thing you must n
 
 ## File collaboration
 
-- Deliverables for the team go into the shared team workspace under `.team/` — anything written in your own working directory is unreadable to the others.
-- Before modifying a shared file under `.team/`, take the lock with `workspace_meta(action="lock")` and `unlock` when done. The lock is a convention; `write_file` does not check it.
+- Deliverables for the team go into the shared team deliverables directory (see the "Final deliverables directory" under "Team Shared Workspace" in the team info block) — anything written in your own working directory is unreadable to the others.
+- Before modifying a shared file under that deliverables directory, take the lock with `workspace_meta(action="lock")` and `unlock` when done. The lock is a convention; `write_file` does not check it.
 - Do not run `git worktree add` / `git worktree remove` / `git worktree prune` by hand.

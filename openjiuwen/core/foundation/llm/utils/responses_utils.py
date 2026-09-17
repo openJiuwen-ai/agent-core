@@ -84,9 +84,29 @@ def build_request_body(
 
     if include_reasoning_encrypted_content:
         body["include"] = ["reasoning.encrypted_content"]
-    if extra_body:
-        body.update(extra_body)
+    expanded = expand_nested_extra_body(extra_body)
+    if expanded:
+        body.update(expanded)
     return body
+
+
+def expand_nested_extra_body(extra_body: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Flatten a one-level nested ``extra_body`` into root request fields.
+
+    Callers often pass ``model_config.model_dump()`` which may itself contain
+    an ``extra_body`` key (e.g. ``{"extra_body": {"thinking": ...}}``). The
+    Responses wire format needs those fields at the body root, not nested.
+    Outer keys win over nested keys on conflict.
+    """
+    if not extra_body:
+        return {}
+    pending = dict(extra_body)
+    nested = pending.pop("extra_body", None)
+    expanded: dict[str, Any] = {}
+    if isinstance(nested, dict):
+        expanded.update(nested)
+    expanded.update(pending)
+    return expanded
 
 
 def build_headers(
@@ -176,6 +196,9 @@ def parse_response(payload: dict[str, Any], *, model_name: str = "") -> Assistan
         usage_metadata=_usage_from_payload(payload.get("usage"), model_name=model_name),
         finish_reason=_finish_reason(payload, has_tool_calls=bool(tool_calls)),
         reasoning_content="\n".join(reasoning_parts) if reasoning_parts else None,
+        response_id=str(payload.get("id") or "") or None,
+        response_model=str(payload.get("model") or model_name or "") or None,
+        provider_metadata=_response_provider_metadata(payload),
     )
 
 
@@ -290,6 +313,9 @@ def message_from_stream_chunk(chunk: Optional[AssistantMessageChunk]) -> Assista
         prompt_token_ids=chunk.prompt_token_ids,
         completion_token_ids=chunk.completion_token_ids,
         logprobs=chunk.logprobs,
+        response_id=chunk.response_id,
+        response_model=chunk.response_model,
+        provider_metadata=chunk.provider_metadata,
     )
 
 
@@ -527,6 +553,21 @@ def _terminal_stream_chunk(
         content="",
         usage_metadata=_usage_from_payload(usage, model_name=model_name),
         finish_reason=finish_reason,
+        response_id=(
+            str(response_payload.get("id") or "") or None
+            if isinstance(response_payload, dict)
+            else None
+        ),
+        response_model=(
+            str(response_payload.get("model") or model_name or "") or None
+            if isinstance(response_payload, dict)
+            else (model_name or None)
+        ),
+        provider_metadata=(
+            _response_provider_metadata(response_payload)
+            if isinstance(response_payload, dict)
+            else {}
+        ),
     )
 
 
@@ -550,9 +591,13 @@ def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadat
         total_tokens = input_tokens + output_tokens
 
     cache_tokens = 0
+    cache_creation_tokens = None
     token_details = usage.get("input_tokens_details") or usage.get("prompt_tokens_details")
     if isinstance(token_details, dict):
         cache_tokens = _int_or_zero(token_details.get("cached_tokens"))
+        cache_creation_tokens = _optional_int(
+            _first_present(token_details, "cache_creation_tokens", "cache_write_tokens")
+        )
 
     return UsageMetadata(
         model_name=model_name,
@@ -560,7 +605,25 @@ def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadat
         output_tokens=output_tokens,
         total_tokens=total_tokens,
         cache_tokens=cache_tokens,
+        cache_read_tokens=cache_tokens if token_details is not None else None,
+        cache_status="observed" if token_details is not None else None,
+        cache_source="provider_usage" if token_details is not None else None,
+        cache_authoritative=token_details is not None,
+        cache_creation_input_tokens=cache_creation_tokens,
     )
+
+
+def _response_provider_metadata(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep only non-sensitive Responses API status metadata."""
+    metadata: dict[str, Any] = {}
+    for key in ("status", "service_tier"):
+        value = payload.get(key)
+        if isinstance(value, (str, int, float, bool)) and value != "":
+            metadata[key] = value
+    incomplete_details = payload.get("incomplete_details")
+    if isinstance(incomplete_details, dict):
+        metadata["incomplete_details"] = dict(incomplete_details)
+    return metadata
 
 
 def _finish_reason(payload: dict[str, Any], *, has_tool_calls: bool) -> str:

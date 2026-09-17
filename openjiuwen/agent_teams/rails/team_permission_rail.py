@@ -29,11 +29,11 @@ from openjiuwen.agent_teams.rails.confirm_payload import (
 )
 from openjiuwen.agent_teams.tools.message_manager import TeamMessageManager
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness.security.host import (
+from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
     PermissionConfirmationResult,
 )
-from openjiuwen.harness.security.models import (
+from openjiuwen.harness.security.permission_engine.models import (
     PermissionConfirmResponse,
 )
 from openjiuwen.harness.rails.interrupt.confirm_rail import ConfirmPayload

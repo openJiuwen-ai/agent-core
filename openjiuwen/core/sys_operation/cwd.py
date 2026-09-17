@@ -17,7 +17,8 @@ Reading priority: cwd -> original_cwd -> os.getcwd()
 Auxiliary workspace locations (not part of the cwd fallback chain):
 
   - workspace: agent workspace root (DeepAgent per-agent artifact dir)
-  - team_workspace: shared team workspace root (mounted via .team/)
+  - team_workspace: shared team workspace root (optionally symlinked into
+    agent workspaces as .team/{team_id}/ for navigation)
 
 Both are optional and return ``None`` when unset -- they record
 related paths used by tools, not where shell commands run.
@@ -149,10 +150,10 @@ def set_workspace(path: str) -> None:
 def get_team_workspace() -> str | None:
     """Get the team shared workspace root for the current agent context.
 
-    Returns the path owned by ``TeamWorkspaceManager`` and mounted
-    into agent workspaces as ``.team/{team_id}/``.  Returns ``None``
-    when the agent is not part of a team or the team has no
-    shared workspace.
+    Returns the path owned by ``TeamWorkspaceManager`` and optionally
+    symlinked into agent workspaces as ``.team/{team_id}/`` for
+    navigation.  Returns ``None`` when the agent is not part of a
+    team or the team has no shared workspace.
     """
     return _state().team_workspace
 

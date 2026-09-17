@@ -16,6 +16,10 @@ from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
+from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
+from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
+from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.runner.callback import trigger, lazy_callback_framework as _fw
 from openjiuwen.core.runner.callback.events import ContextEvents
@@ -95,6 +99,78 @@ class ContextEngine:
         """Clear instance-level final-window mutators."""
         self._window_mutators.clear()
 
+    @staticmethod
+    def _select_token_counter(config: ContextEngineConfig) -> TokenCounter:
+        """Select a local-only counter for a context-engine configuration."""
+        has_model_tokenizer_target = bool(
+            config.model_name
+            or config.model_provider
+            or config.tokenizer_spec
+            or config.tokenizer_registry
+        )
+        try:
+            return TokenizerSelector(
+                provider=config.model_provider or "",
+                model=config.model_name or "",
+                spec=config.tokenizer_spec,
+                registry=TokenizerRegistry(config.tokenizer_registry),
+                # Context creation and model rebinding are deliberately
+                # read-only.  The application warm-up service owns downloads.
+                manager=TokenizerArtifactManager(
+                    cache_dir=config.tokenizer_cache_dir,
+                    enable_download=False,
+                    offline=True,
+                ),
+                # This switch is only meaningful for a model-less historical
+                # context. Configured model contexts use native-or-string
+                # resolution and never initialize a remote/default tiktoken
+                # counter here.
+                allow_tiktoken_fallback=(
+                    config.enable_tiktoken_counter
+                    and not has_model_tokenizer_target
+                ),
+            ).select()
+        except Exception as exc:  # noqa: BLE001 - context must fail open
+            context_engine_logger.warning(
+                "local tokenizer selection failed; using string-length fallback: %s",
+                exc,
+            )
+            return StringLengthCounter(
+                model=config.model_name or "",
+                fallback_reason="local_tokenizer_selection_failed",
+            )
+
+    def update_model_context(
+        self,
+        *,
+        model_name: Optional[str] = None,
+        context_window_tokens: Optional[int] = None,
+    ) -> None:
+        """Update selected-model metadata for this engine and cached contexts.
+
+        ``ContextEngineConfig.context_window_tokens`` is deliberately not
+        changed here: it is the global override and remains the highest
+        priority source. Only the selected model name and model-level window
+        are refreshed, including on contexts already cached for a session.
+        """
+        self._config = self._config.model_copy(
+            update={
+                "model_name": model_name or None,
+                "model_context_window_tokens_override": (
+                    context_window_tokens
+                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                    else None
+                ),
+            }
+        )
+        for context in self._context_pool.values():
+            update_context = getattr(context, "update_model_context", None)
+            if callable(update_context):
+                update_context(
+                    model_name=model_name,
+                    context_window_tokens=context_window_tokens,
+                )
+
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
             self,
@@ -108,10 +184,11 @@ class ContextEngine:
         """
         Create or retrieve a ModelContext for the given session & context ID.
 
-        Token counting: an explicitly provided `token_counter` is always used.
-        When it is omitted, `TiktokenCounter` is created only if
-        `config.enable_tiktoken_counter` is enabled; otherwise the context uses
-        its built-in character-based estimation fallbacks.
+        Token counting: an explicitly provided ``token_counter`` is always used.
+        Otherwise a configured local tokenizer is used when available; an
+        unavailable local tokenizer falls back to ``StringLengthCounter``
+        without downloading anything. The application-level warm-up service is
+        responsible for remote downloads before context creation.
 
         Message seeding:
         - if `history_messages` is provided, it is used as-is;
@@ -124,11 +201,10 @@ class ContextEngine:
             session: Session object supplying session_id; if None, a default
                      session ID is used.
             history_messages: Initial message list.
-            token_counter: Strategy for counting tokens. If omitted,
-                           ``TiktokenCounter`` is used only when
-                           ``enable_tiktoken_counter`` is enabled in the engine
-                           config; otherwise token counting falls back to
-                           character-based estimates.
+            token_counter: Strategy for counting tokens. If omitted, the
+                           selector only reads local tokenizer artifacts and
+                           falls back to character-length counting for a
+                           configured model.
 
         Returns:
             ModelContext: The newly created or cached context instance.
@@ -148,23 +224,7 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            if self._config.enable_tiktoken_counter:
-                context_engine_logger.info(
-                    "tiktoken counter enabled; initializing default tokenizer, "
-                    "session_id=%s context_id=%s",
-                    session_id,
-                    context_id,
-                )
-                from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
-
-                token_counter = TiktokenCounter()
-            else:
-                context_engine_logger.info(
-                    "tiktoken counter disabled; using character-based token estimation, "
-                    "session_id=%s context_id=%s",
-                    session_id,
-                    context_id,
-                )
+            token_counter = self._select_token_counter(self._config)
 
         if self._config.enable_openrouter_model_context_window_tokens:
             # Scheduled, not awaited: this is the first-turn critical path and the
@@ -189,6 +249,50 @@ class ContextEngine:
         self._load_state_from_session(context, session, history_messages)
         self._context_pool[full_context_id] = context
         return context
+
+    def rebind_context_model(
+        self,
+        config: ContextEngineConfig,
+        *,
+        session_id: str | None = None,
+        context_id: str | None = None,
+    ) -> int:
+        """Apply a new model binding to cached contexts without losing history.
+
+        ``config`` becomes the configuration for contexts created after this
+        call.  Existing contexts can be narrowed by ``session_id`` and/or
+        ``context_id``; only contexts that implement the built-in rebinding
+        contract are updated.  The return value is the number of contexts
+        successfully rebound.
+        """
+        if not isinstance(config, ContextEngineConfig):
+            raise TypeError("config must be a ContextEngineConfig")
+
+        self._config = config
+        normalized_context_id = (
+            self._process_context_id(context_id) if context_id is not None else None
+        )
+        token_counter = self._select_token_counter(config)
+        rebound = 0
+        for context in self._context_pool.values():
+            if session_id is not None and context.session_id() != session_id:
+                continue
+            if normalized_context_id is not None and context.context_id() != normalized_context_id:
+                continue
+            rebind = getattr(context, "rebind_model", None)
+            if not callable(rebind):
+                continue
+            try:
+                if rebind(config, token_counter=token_counter):
+                    rebound += 1
+            except Exception:  # noqa: BLE001 - one custom context must not block switching
+                context_engine_logger.warning(
+                    "failed to rebind context model, session_id=%s context_id=%s",
+                    context.session_id(),
+                    context.context_id(),
+                    exc_info=True,
+                )
+        return rebound
 
     def get_context(
             self,
@@ -279,16 +383,22 @@ class ContextEngine:
         """Recover from a model context-window rejection by compressing once.
 
         ReAct agents call this hook after model-call rail retries are
-        exhausted. A retry is requested only when the provider error clearly
-        describes an input/context limit and no partial stream output has
-        already been emitted. ``compress_context`` returns ``"compressed"``
-        only when a registered processor changed the context, so a missing or
-        ineffective processor preserves the original model exception.
+        exhausted. A retry is requested when the provider error clearly
+        describes an input/context limit and ``compress_context`` returns
+        ``"compressed"``. A missing or ineffective processor preserves the
+        original model exception.
         """
         del context
-        if streaming and int(stream_chunks_emitted or 0) > 0:
-            context_engine_logger.info(
-                "skip model context recovery after partial stream output"
+
+        # A streaming response may already have been sent to the caller when
+        # the provider reports an overflow. Retrying after compression would
+        # emit the already-sent prefix again, so only recover before the first
+        # stream chunk is visible.
+        if streaming and stream_chunks_emitted > 0:
+            context_engine_logger.warning(
+                "skip model context recovery after streaming output was emitted, "
+                "stream_chunks_emitted=%s",
+                stream_chunks_emitted,
             )
             return False
 

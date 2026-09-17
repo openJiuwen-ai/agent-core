@@ -3,6 +3,7 @@
 
 """Member management tools: spawn, shutdown, approve, and list."""
 
+import json
 from abc import ABC
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -15,7 +16,27 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.schema.team import MemberOpResult
+
+
+def _is_anthropic_provider(provider: str) -> bool:
+    """Return whether a provider name is Anthropic-compatible."""
+    return "anthropic" in provider.lower()
+
+
+def _provider_filter_for_cli(cli_agent: str) -> Callable[[str], bool] | None:
+    """Return a provider filter for the CLI kind, or None for unknown kinds."""
+    if cli_agent == "claude":
+        return _is_anthropic_provider
+    if cli_agent == "codex":
+        return lambda p: not _is_anthropic_provider(p)
+    return None
+
+
+def _model_api_protocol(provider: str) -> str:
+    """Return the external CLI protocol label for a model provider."""
+    return "Anthropic" if _is_anthropic_provider(provider) else "OpenAI"
 
 
 # ========== Member Management ==========
@@ -462,6 +483,63 @@ class SpawnHumanAgentTool(_SpawnToolBase):
         )
 
 
+class SpawnPassiveHumanTool(_SpawnToolBase):
+    """Spawn a passive human member (``role_type='passive_human'``).
+
+    A passive human has no avatar — no harness, no LLM, no prompt — just
+    a READY roster identity plus a message-bus address. The controlling
+    human speaks through the interact channel (messages and tool-call
+    passthrough), so the member can be assigned tasks like any human
+    collaborator. Schema omits ``model_name`` / ``prompt`` for the same
+    reason as ``SpawnHumanAgentTool``; the HITT check below is a
+    defensive backstop (the tool is not wired when HITT is disabled).
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(team, t, "spawn_passive_human")
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "member_name"),
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": t("spawn_passive_human", "display_name"),
+                },
+                "desc": {"type": "string", "description": t("spawn_passive_human", "desc")},
+            },
+            "required": ["member_name", "display_name", "desc"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_member_name(inputs.get("member_name"))
+        if err:
+            return self._fail(err)
+
+        if not self.team.hitt_enabled():
+            return self._fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team). "
+                "Enable HITT in the team spec or use spawn_teammate instead."
+            )
+
+        member_name = inputs["member_name"]
+        display_name = inputs.get("display_name")
+        result = await self.team.spawn_passive_human(
+            member_name=member_name,
+            display_name=display_name,
+            desc=inputs.get("desc", ""),
+        )
+        return self._from_result(
+            result,
+            member_name=member_name,
+            display_name=display_name,
+            role_type="passive_human",
+        )
+
+
 class SpawnBridgeAgentTool(_SpawnToolBase):
     """Spawn a bridge agent to a remote independent agent (``role_type='bridge_agent'``).
 
@@ -579,8 +657,17 @@ class SpawnExternalCliTool(_SpawnToolBase):
     (see ``create_team_tools``).
     """
 
-    def __init__(self, team: TeamBackend, t: Translator):
+    def __init__(
+        self,
+        team: TeamBackend,
+        t: Translator,
+        *,
+        model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
+    ):
         super().__init__(team, t, "spawn_external_cli")
+        self._allocate_model_config = model_config_allocator
+        fallback_description = t("spawn_external_cli", "fallback_model_name")
+        fallback_description = f"{fallback_description}\n\n{self._model_catalog_context()}"
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -598,9 +685,64 @@ class SpawnExternalCliTool(_SpawnToolBase):
                     "type": "string",
                     "description": t("spawn_external_cli", "cli_agent"),
                 },
+                "model_name": {
+                    "type": "string",
+                    "description": t("spawn_external_cli", "model_name"),
+                },
+                "fallback_model_name": {
+                    "anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}],
+                    "description": fallback_description,
+                },
             },
-            "required": ["member_name", "display_name", "prompt", "cli_agent"],
+            "required": ["member_name", "display_name", "prompt", "cli_agent", "fallback_model_name"],
         }
+
+    def _compatible_pool_entries(self, cli_agent: str) -> list["ModelPoolEntry"]:
+        """Return protocol-compatible pool entries for one CLI kind."""
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        return [
+            entry
+            for entry in self.team.get_model_pool()
+            if provider_filter is None or provider_filter(entry.api_provider)
+        ]
+
+    def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
+        """Return the current model when the pool can allocate it compatibly."""
+        current_name = self.team.current_model_name
+        current_provider = self.team.current_model_provider
+        if current_name is None or current_provider is None:
+            return None
+        current_protocol = _model_api_protocol(current_provider)
+        for entry in entries:
+            if entry.model_name != current_name:
+                continue
+            if _model_api_protocol(entry.api_provider) == current_protocol:
+                return current_name
+        return None
+
+    def _model_catalog_context(self) -> str:
+        """Render safe current-model and pool protocol data for the model."""
+        current_model = None
+        if self.team.current_model_name is not None and self.team.current_model_provider is not None:
+            current_model = {
+                "model_name": self.team.current_model_name,
+                "protocol": _model_api_protocol(self.team.current_model_provider),
+            }
+        compatible_by_cli: dict[str, list[dict[str, str]]] = {}
+        for cli_agent in sorted(self.team.external_cli_kinds()):
+            options = {
+                (entry.model_name, _model_api_protocol(entry.api_provider))
+                for entry in self._compatible_pool_entries(cli_agent)
+            }
+            compatible_by_cli[cli_agent] = [
+                {"model_name": model_name, "protocol": protocol}
+                for model_name, protocol in sorted(options)
+            ]
+        catalog = {
+            "current_model": current_model,
+            "compatible_fallback_models": compatible_by_cli,
+        }
+        return f"<fallback_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</fallback_model_catalog>"
 
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
         err = self._validate_member_name(inputs.get("member_name"))
@@ -613,6 +755,12 @@ class SpawnExternalCliTool(_SpawnToolBase):
                 "spawn_external_cli requires 'cli_agent' naming a CLI kind "
                 "declared in TeamAgentSpec.external_cli_agents (e.g. 'claude' or 'codex')"
             )
+        if self.team.external_cli_config(cli_agent) is None:
+            declared = ", ".join(sorted(self.team.external_cli_kinds())) or "<none>"
+            return self._fail(
+                f"cli_agent '{cli_agent}' is not declared in TeamAgentSpec.external_cli_agents "
+                f"(declared: {declared})"
+            )
 
         desc = inputs.get("desc") or ""
         prompt = inputs.get("prompt") or ""
@@ -621,12 +769,78 @@ class SpawnExternalCliTool(_SpawnToolBase):
 
         member_name = inputs["member_name"]
         display_name = inputs.get("display_name")
+        model_name = inputs.get("model_name")
+        if "fallback_model_name" not in inputs:
+            return self._fail("spawn_external_cli requires 'fallback_model_name' to be a model name or null")
+        raw_fallback_model_name = inputs["fallback_model_name"]
+        if raw_fallback_model_name is not None and not isinstance(raw_fallback_model_name, str):
+            return self._fail("spawn_external_cli requires 'fallback_model_name' to be a model name or null")
+        fallback_model_name = (
+            raw_fallback_model_name.strip()
+            if isinstance(raw_fallback_model_name, str)
+            else None
+        )
+        if fallback_model_name == "":
+            return self._fail("spawn_external_cli requires 'fallback_model_name' to be a non-empty model name or null")
+        allocation = None
+        fallback_allocation = None
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        compatible_entries = self._compatible_pool_entries(cli_agent)
+        compatible_model_names = sorted(
+            {
+                entry.model_name
+                for entry in compatible_entries
+            }
+        )
+        preferred_current_model = self._preferred_current_model(cli_agent, compatible_entries)
+        if model_name:
+            if self._allocate_model_config is None:
+                return self._fail("spawn_external_cli requires a team model pool when 'model_name' is specified")
+            if provider_filter is not None:
+                allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
+            else:
+                allocation = self._allocate_model_config(model_name)
+            if allocation is None:
+                return self._fail(
+                    f"model_name '{model_name}' is unavailable or incompatible with cli_agent '{cli_agent}'"
+                )
+        if fallback_model_name is None:
+            if compatible_model_names:
+                return self._fail(
+                    "fallback_model_name cannot be null while compatible models are available for "
+                    f"cli_agent '{cli_agent}': {', '.join(compatible_model_names)}"
+                )
+        elif preferred_current_model is not None and fallback_model_name != preferred_current_model:
+            return self._fail(
+                f"fallback_model_name must use current model '{preferred_current_model}' because it is present "
+                f"in the team model pool and compatible with cli_agent '{cli_agent}'"
+            )
+        elif self._allocate_model_config is None:
+            return self._fail("spawn_external_cli requires a team model pool when 'fallback_model_name' is specified")
+        else:
+            if provider_filter is not None:
+                fallback_allocation = self._allocate_model_config(
+                    fallback_model_name,
+                    provider_filter=provider_filter,
+                )
+            else:
+                fallback_allocation = self._allocate_model_config(fallback_model_name)
+            if fallback_allocation is None:
+                compatible_hint = ", ".join(compatible_model_names) if compatible_model_names else "none"
+                return self._fail(
+                    f"fallback_model_name '{fallback_model_name}' is unavailable or incompatible with "
+                    f"cli_agent '{cli_agent}' (compatible models: {compatible_hint}); use null only when no "
+                    "compatible model is available"
+                )
         result = await self.team.spawn_external_cli_agent(
             member_name=member_name,
             display_name=display_name,
             cli_agent=cli_agent,
             desc=desc,
             prompt=prompt,
+            model_name=model_name,
+            allocation=allocation,
+            fallback_allocation=fallback_allocation,
         )
         return self._from_result(
             result,

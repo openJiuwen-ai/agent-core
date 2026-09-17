@@ -236,8 +236,10 @@ async def test_skill_tool_non_hint_mode_skips_media_hints(sys_op, temp_dir):
     skill_res = await skill_tool.invoke({"skill_name": "media_skill"})
 
     assert skill_res.success is True
-    assert "content" not in skill_res.data
+    # ``content`` is always present now; what "attach" mode must not do is put
+    # the markdown-images hint into the text the model reads.
     assert SKILL_TOOL_MARKDOWN_IMAGES_HINT not in skill_res.data["skill_content"]
+    assert SKILL_TOOL_MARKDOWN_IMAGES_HINT not in skill_res.data["content"]
 
 
 @pytest.mark.asyncio
@@ -273,6 +275,30 @@ async def test_skill_tool_includes_directory_tree_and_nested_skills(sys_op, temp
         "outline-planner",
     ]
     assert skill_res.data["discovered_skill_names_truncated"] is False
+
+
+@pytest.mark.asyncio
+async def test_skill_tool_nested_skill_hint_spells_a_call_that_works(sys_op, temp_dir):
+    """The nested-skill note must steer away from the call that fails.
+
+    A nested directory is not registered as a top-level skill, so
+    ``skill_tool(skill_name="designer")`` is both the obvious next step and an
+    error. The note names the parent explicitly and shows the working call.
+    """
+    skills_root = Path(temp_dir) / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    parent = _write_skill(skills_root, "pptx-craft", "parent skill", "parent body")
+    _write_skill(parent.directory, "designer", "designer skill", "designer body")
+
+    skill_tool = SkillTool(sys_op, lambda: [parent])
+    skill_res = await skill_tool.invoke({"skill_name": "pptx-craft"})
+
+    content = skill_res.data["content"]
+    # The skill body itself still leads.
+    assert "parent body" in content
+    assert 'skill_tool(skill_name="pptx-craft", relative_file_path="designer/SKILL.md")' in content
+    assert 'skill_tool(skill_name="designer")' in content
+    assert "not** top-level skills" in content
 
 
 @pytest.mark.asyncio

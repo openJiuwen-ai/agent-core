@@ -19,6 +19,13 @@ class ProviderType(str, Enum):
     SiliconFlow = "SiliconFlow"
     DashScope = "DashScope"
     DeepSeek = "DeepSeek"
+    Moonshot = "Moonshot"
+    MiniMax = "MiniMax"
+    ModelArts = "ModelArts"
+    VolcEngine = "VolcEngine"
+    Qianfan = "Qianfan"
+    Zhipu = "Zhipu"
+    MiMo = "MiMo"
     InferenceAffinity = "InferenceAffinity"
     AscendAffinity = "AscendAffinity"
     IntelliRouter = "intelli_router"
@@ -38,10 +45,7 @@ class LLMAuthMode(str, Enum):
 
 
 class KVCacheExtensionConfig(BaseModel):
-    mode: Literal["none", "release", "affinity"] = "none"
-    release_endpoint: str = "/release_kv_cache"
-    session_field: str = "cache_salt"
-    enable_cache_sharing_field: str = "cache_sharing"
+    mode: Literal["none", "affinity"] = "none"
     affinity_field: str = "agent_hint"
 
 
@@ -52,6 +56,15 @@ class LLMExtensionsConfig(BaseModel):
     request_extra_body: dict[str, Any] = Field(default_factory=dict)
 
 
+class ReasoningConfig(BaseModel):
+    """Provider-neutral reasoning/thinking request intent."""
+
+    mode: Literal["auto", "enabled", "disabled"] = Field(default="auto")
+    effort: Optional[str] = Field(default=None)
+    budget_tokens: Optional[int] = Field(default=None, ge=0)
+    model_config = {"extra": "forbid"}
+
+
 _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.OpenAI.value,
     ProviderType.OpenRouter.value,
@@ -59,6 +72,13 @@ _TOP_LEVEL_API_KEY_PROVIDERS = {
     ProviderType.SiliconFlow.value,
     ProviderType.DashScope.value,
     ProviderType.DeepSeek.value,
+    ProviderType.Moonshot.value,
+    ProviderType.MiniMax.value,
+    ProviderType.ModelArts.value,
+    ProviderType.VolcEngine.value,
+    ProviderType.Qianfan.value,
+    ProviderType.Zhipu.value,
+    ProviderType.MiMo.value,
     ProviderType.InferenceAffinity.value,
 }
 _TOP_LEVEL_API_BASE_PROVIDERS = _TOP_LEVEL_API_KEY_PROVIDERS | {ProviderType.OpenAIAccount.value}
@@ -75,7 +95,7 @@ class ModelClientConfig(BaseModel):
     client_provider: Union[ProviderType, str] = Field(
         ...,
         description="Service provider identification, Enumeration value: OpenAI, OpenRouter, "
-                    "OpenAIAccount, SiliconFlow, DashScope, InferenceAffinity or ICBC"
+                    "OpenAIAccount, SiliconFlow, DashScope, AscendAffinity or ICBC"
     )
     api_key: str = Field(default="", description="API key")
     api_base: str = Field(default="", description="API base URL")
@@ -187,8 +207,18 @@ class ModelClientConfig(BaseModel):
 class ModelRequestConfig(BaseModel):
     """Model config"""
     model_name: str = Field(default="", alias="model", description="Model name, e.g. gpt-4")
-    temperature: float = Field(default=0.95, description="Temperature parameter, controlling the randomness of outputs")
-    top_p: float = Field(default=0.95, description="Top-p sampling parameter")
+    temperature: Optional[float] = Field(
+        default=None, description="Temperature parameter, controlling the randomness of outputs"
+    )
+    top_p: Optional[float] = Field(default=None, description="Top-p sampling parameter")
     max_tokens: Optional[int] = Field(default=None, description="Maximum number of tokens to generate")
     stop: Union[Optional[str], None] = Field(default=None, description="Stop sequence")
+    context_window: Optional[int] = Field(
+        default=None,
+        description="Maximum context window supported by the model, in tokens; internal context metadata",
+    )
+    reasoning: Optional[Union[ReasoningConfig, dict[str, Any]]] = Field(
+        default=None,
+        description="Provider-neutral reasoning/thinking request intent. Legacy raw reasoning dicts remain accepted.",
+    )
     model_config = {"extra": "allow", "populate_by_name": True}

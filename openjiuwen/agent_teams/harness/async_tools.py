@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable
 from openjiuwen.agent_teams.i18n import t
 from openjiuwen.agent_teams.id_generator import generate_id
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.agent_teams.workflow.engine.errors import BudgetExhausted
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -234,11 +235,22 @@ class AsyncToolRuntime:
         try:
             result = await coro_factory()
         except asyncio.CancelledError:
-            if record is not None:
-                record.status = "error"
-                record.error = "cancelled"
-            self._signal(task_id)
+            self._mark_error(task_id, record, "cancelled")
             raise
+        except BudgetExhausted as exc:
+            # A budget ceiling is a BaseException (not Exception): without this
+            # branch it would escape the tool's ``except Exception`` and kill the
+            # task silently — the leader would see ``launched`` and then nothing.
+            # Catch it here so the run reports a terminal failure the leader can
+            # act on. Pass the exception itself to ``_report_failure`` so
+            # ``format_failed`` can render its structured fields.
+            team_logger.warning(
+                "[AsyncToolRuntime] task %s (%s) hit budget ceiling: %s",
+                task_id,
+                tool_name,
+                exc,
+            )
+            await self._report_failure(task_id, record, tool_name, exc)
         except Exception as exc:  # noqa: BLE001 - report any tool failure back
             team_logger.error(
                 "[AsyncToolRuntime] task %s (%s) failed: %s",
@@ -247,17 +259,47 @@ class AsyncToolRuntime:
                 exc,
                 exc_info=True,
             )
-            if record is not None:
-                record.status = "error"
-                record.error = str(exc)
-            self._signal(task_id)
-            failure_text = None
-            if record is not None and record.format_failed is not None:
-                failure_text = record.format_failed(str(exc))
-            if failure_text is None:
-                failure_text = t("async_tool.failed", tool=tool_name, error=str(exc))
-            await self._inject(failure_text)
-            return
+            await self._report_failure(task_id, record, tool_name, str(exc))
+        else:
+            await self._report_completed(task_id, record, tool_name, result)
+
+    def _mark_error(self, task_id: str, record: AsyncToolRecord | None, error: str) -> None:
+        """Mark a task's record terminal-error and wake any ``wait`` on it."""
+        if record is not None:
+            record.status = "error"
+            record.error = error
+        self._signal(task_id)
+
+    async def _report_failure(
+        self,
+        task_id: str,
+        record: AsyncToolRecord | None,
+        tool_name: str,
+        error: BaseException | str,
+    ) -> None:
+        """Report a failed background run: mark, wake waiters, inject failure text.
+
+        ``error`` is handed to ``format_failed`` as-is: the BudgetExhausted path
+        relies on the callback receiving the exception object so it can render
+        the structured fields (scope / spent / total / top_phases /
+        workflow_spent / workflow_total); the generic path passes a plain
+        ``str``. The record and the ``async_tool.failed`` fallback always use
+        ``str(error)``.
+        """
+        self._mark_error(task_id, record, str(error))
+        failure_text = (
+            record.format_failed(error) if record is not None and record.format_failed else None
+        ) or t("async_tool.failed", tool=tool_name, error=str(error))
+        await self._inject(failure_text)
+
+    async def _report_completed(
+        self,
+        task_id: str,
+        record: AsyncToolRecord | None,
+        tool_name: str,
+        result: Any,
+    ) -> None:
+        """Report a completed background run: mark, spill, wake waiters, inject."""
         if record is not None:
             record.status = "completed"
             record.result = result
@@ -265,11 +307,9 @@ class AsyncToolRuntime:
         if record is not None:
             result_text = await self._maybe_spill(task_id, record, result_text)
         self._signal(task_id)
-        completion_text = None
-        if record is not None and record.format_completed is not None:
-            completion_text = record.format_completed(result)
-        if completion_text is None:
-            completion_text = t("async_tool.completed", tool=tool_name, result=result_text)
+        completion_text = (
+            record.format_completed(result) if record is not None and record.format_completed else None
+        ) or t("async_tool.completed", tool=tool_name, result=result_text)
         await self._inject(completion_text)
 
     def _signal(self, task_id: str) -> None:

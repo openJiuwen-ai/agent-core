@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import json
 import logging
 import os
 from pathlib import Path
+import re
 from threading import Lock
 from typing import Any
 
 from openjiuwen.core.common.logging import logger as common_logger
+from openjiuwen.core.common.logging.browser_context import is_browser_agent_log_context
 
 
 _BROWSER_LOGGER_NAME = "openjiuwen.browser_agent"
@@ -18,6 +23,7 @@ _BROWSER_LOG_ANNOUNCED_MARKER = "_openjiuwen_browser_agent_file_announced"
 _FALSE_VALUES = {"0", "false", "no", "off", ""}
 _DISABLE_VALUES = {"0", "false", "no", "off", "none", "null", "-"}
 _LOCK = Lock()
+_AUDIT_LOCK = Lock()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -131,3 +137,58 @@ def browser_agent_log_error(message: str, *args: Any) -> None:
 
     if get_browser_agent_log_path() is None:
         common_logger.error(message, *args)
+
+
+def write_browser_agent_audit_artifact(kind: str, raw: Any) -> dict[str, Any]:
+    """Persist an opted-in, content-addressed raw browser observation."""
+    if isinstance(raw, str):
+        raw_text = raw
+    else:
+        raw_text = json.dumps(raw, ensure_ascii=False, default=str)
+    raw_bytes = raw_text.encode("utf-8", "ignore")
+    digest = hashlib.sha256(raw_bytes).hexdigest()
+    audit = {
+        "raw_size_bytes": len(raw_bytes),
+        "raw_sha256": digest[:16],
+        "stored": False,
+    }
+    if not is_browser_agent_log_context() or not _env_bool(
+        "OPENJIUWEN_BROWSER_AGENT_AUDIT_RAW",
+        default=False,
+    ):
+        return audit
+
+    log_path = get_browser_agent_log_path()
+    if log_path is None:
+        return audit
+    safe_kind = re.sub(r"[^a-z0-9_-]+", "_", str(kind or "observation").lower()).strip("_")
+    safe_kind = safe_kind or "observation"
+    artifact_name = f"{safe_kind}_{digest[:16]}.json.gz"
+    artifact_path = log_path.parent / "browser_agent_audit" / artifact_name
+    try:
+        with _AUDIT_LOCK:
+            artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            if not artifact_path.exists():
+                with gzip.open(artifact_path, mode="wt", encoding="utf-8") as stream:
+                    json.dump(
+                        {"kind": safe_kind, "sha256": digest, "raw": raw_text},
+                        stream,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    )
+        audit["stored"] = True
+        get_browser_agent_logger().info(
+            "[BROWSER_AUDIT] kind=%s sha256=%s size=%s artifact=%s",
+            safe_kind,
+            digest[:16],
+            len(raw_bytes),
+            artifact_name,
+        )
+    except OSError as exc:
+        get_browser_agent_logger().warning(
+            "[BROWSER_AUDIT_ERROR] kind=%s sha256=%s error=%s",
+            safe_kind,
+            digest[:16],
+            exc,
+        )
+    return audit

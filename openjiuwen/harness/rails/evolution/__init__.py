@@ -22,6 +22,7 @@ from openjiuwen.harness.rails.evolution.context_evolution_rail import (
     ContextEvolutionRail,
     SummarizeTrajectoriesInput,
 )
+from openjiuwen.harness.rails.evolution.context_evolve_rail import ContextEvolveRail
 from openjiuwen.harness.rails.evolution.contracts import (
     EvolutionHostEventMeta,
     EvolutionRequestResult,
@@ -33,6 +34,10 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionTriggerPoint,
     PreparedEvolutionInput,
 )
+from openjiuwen.harness.rails.evolution.member_skill_evolution_rail import (
+    MemberSkillEvolutionRail,
+)
+from openjiuwen.harness.rails.evolution.metis_context_evolve_rail import MetisContextEvolveRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.review.subagent import (
     EVOLUTION_REVIEW_AGENT_NAME,
@@ -41,10 +46,34 @@ from openjiuwen.harness.rails.evolution.review.subagent import (
     remove_evolution_review_agent_config,
 )
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
-from openjiuwen.harness.rails.evolution.member_skill_evolution_rail import (
-    MemberSkillEvolutionRail,
-)
 from openjiuwen.harness.rails.evolution.skill_evolution_sharing import SkillEvolutionSharingMixin
+from openjiuwen.harness.rails.evolution.symphony_edge_evaluator import (
+    SymphonyEdgeEndpointSummary,
+    SymphonyEdgeEvaluationSummary,
+    evaluate_symphony_edge_candidates,
+)
+from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
+    SymphonyEdgeCandidate,
+    SymphonyEdgeDecision,
+    build_model_edge_decisions,
+    build_symphony_edge_candidates,
+)
+from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
+    SymphonyExecutionFragment,
+    project_symphony_execution_fragments,
+)
+from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
+    CapabilityIdentity,
+    CapabilitySnapshotProvider,
+    build_symphony_execution_graph,
+)
+from openjiuwen.harness.rails.evolution.symphony_graph_evolution_rail import (
+    GraphSnapshotProvider,
+    SymphonyEvolutionSubmitCallback,
+    SymphonyGraphEvolutionInput,
+    SymphonyGraphEvolutionRail,
+    TeamSymphonyGraphEvolutionRail,
+)
 from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
     MergedMemoryItem,
     MergedRetrieveResult,
@@ -72,6 +101,18 @@ __all__ = [
     "SkillEvolutionRail",
     "MemberSkillEvolutionRail",
     "SkillEvolutionSharingMixin",
+    "CapabilityIdentity",
+    "CapabilitySnapshotProvider",
+    "GraphSnapshotProvider",
+    "SymphonyEdgeCandidate",
+    "SymphonyEdgeDecision",
+    "SymphonyEdgeEndpointSummary",
+    "SymphonyEdgeEvaluationSummary",
+    "SymphonyExecutionFragment",
+    "SymphonyEvolutionSubmitCallback",
+    "SymphonyGraphEvolutionInput",
+    "SymphonyGraphEvolutionRail",
+    "TeamSymphonyGraphEvolutionRail",
     "TeamSkillCreateRail",
     "TeamSkillEvolutionRail",
     "TrajectoryRail",
@@ -79,15 +120,22 @@ __all__ = [
     "build_evolution_progress_event",
     "build_evolve_review_command_prompt",
     "ContextEvolutionRail",
+    "ContextEvolveRail",
     "MergedMemoryItem",
     "MergedRetrieveResult",
     "SummarizeTrajectoriesInput",
+    "MetisContextEvolveRail",
     "TeamContextEvolutionRail",
     "TeamInsightBuffer",
     "TeamInsightEntry",
     "build_rebuild_command_prompt",
     "build_simplify_command_prompt",
     "build_skill_approval_event",
+    "build_model_edge_decisions",
+    "build_symphony_edge_candidates",
+    "build_symphony_execution_graph",
+    "evaluate_symphony_edge_candidates",
+    "project_symphony_execution_fragments",
     "build_evolution_review_agent_config",
     "configure_skill_evolution",
     "configure_skill_evolution_runtime",

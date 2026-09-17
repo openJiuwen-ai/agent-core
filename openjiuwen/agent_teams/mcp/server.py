@@ -11,13 +11,16 @@ first connect) — see :class:`TeamJoinDescriptor`:
   ``send_message``) built by ``create_team_tools(role="teammate")``, so the
   external member calls the exact same ``TeamTool`` instances — same input
   schema, same behaviour, same ``map_result()`` text — as a native in-process
-  teammate. Plus the external-only ``read_inbox`` (natives get messages pushed
-  by coordination; an external member must pull). Server-level instructions are
-  **empty**: the team system prompt is injected directly into the CLI at spawn
-  time, so the protocol is not repeated here.
+  teammate. Inbound messages reach the member the native way too: the parent
+  process's coordination layer pushes them into the CLI, so no pull tool is
+  exposed. Server-level instructions are **empty**: the team system prompt is
+  injected directly into the CLI at spawn time, so the protocol is not
+  repeated here.
 * ``operator`` (default) — an external, non-member interface that operates and
   controls the team via tools (task board + messaging + roster + member
-  control). Server-level instructions carry the control workflow.
+  control). Server-level instructions carry the control workflow. The
+  operator has no coordination layer of its own, so it also gets the
+  operator-only ``read_inbox`` pull tool.
 
 Built on the low-level :class:`mcp.server.lowlevel.Server` (not FastMCP) so the
 member tools can advertise their own raw ``card.input_params`` JSON schema and
@@ -53,7 +56,7 @@ cancel, send_message to direct members (use "*" to broadcast), list_members to
 see the roster, and the task-board tools. Refer to members by name.
 """
 
-# Stable tool name (external-only pull op, both scopes).
+# Stable tool name (operator-only pull op; members get messages pushed).
 READ_INBOX = "read_inbox"
 
 # Async callable that produces a connected ExternalTeamClient.
@@ -68,7 +71,7 @@ async def connect_from_env() -> ExternalTeamClient:
 
 
 def _read_inbox_tool() -> types.Tool:
-    """The external-only inbox tool definition (no native counterpart)."""
+    """The operator-only inbox tool definition (no native counterpart)."""
     return types.Tool(
         name=READ_INBOX,
         description=(
@@ -248,7 +251,10 @@ def build_server(
     async def list_tools() -> list[types.Tool]:
         client = await holder.get()
         if client.scope == "member":
-            tools = [
+            # Real teammate tools only — inbound messages are pushed to the
+            # member by the parent process's coordination layer, so the
+            # operator-only read_inbox pull tool is deliberately absent.
+            return [
                 types.Tool(
                     name=tool.card.name,
                     description=tool.card.description,
@@ -256,16 +262,16 @@ def build_server(
                 )
                 for tool in client.tools.values()
             ]
-            tools.append(_read_inbox_tool())
-            return tools
         return _operator_tool_defs()
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
         client = await holder.get()
-        if name == READ_INBOX:
-            return [types.TextContent(type="text", text=await client.read_inbox())]
         try:
+            if name == READ_INBOX:
+                if client.scope != "operator":
+                    return [types.TextContent(type="text", text=f"Unknown tool: {name}")]
+                return [types.TextContent(type="text", text=await client.read_inbox())]
             if client.scope == "member":
                 tool = client.tools.get(name)
                 if tool is None:

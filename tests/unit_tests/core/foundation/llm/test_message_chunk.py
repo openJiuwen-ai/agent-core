@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import pytest
 
@@ -321,6 +321,21 @@ def test_assistant_add_keeps_latest_non_empty_metadata():
     result = chunk1 + chunk2 + chunk3
 
     assert result.metadata == chunk2.metadata
+
+
+@pytest.mark.parametrize(
+    "parser_content",
+    [False, 0, "", [], {}],
+    ids=["false", "zero", "empty-string", "empty-list", "empty-dict"],
+)
+def test_assistant_add_preserves_falsy_parser_content(parser_content: object) -> None:
+    first = AssistantMessageChunk(content="first", parser_content=None)
+    second = AssistantMessageChunk(content="second", parser_content=parser_content)
+
+    result = first + second
+
+    assert type(result.parser_content) is type(parser_content)
+    assert result.parser_content == parser_content
 
 
 def test_assistant_add_merges_finish_reason():

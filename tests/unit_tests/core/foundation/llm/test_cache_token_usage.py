@@ -72,3 +72,46 @@ def test_extract_cache_tokens_ignores_mock_missing_attributes():
     usage.prompt_tokens_details = None
 
     assert BaseModelClient._extract_cache_tokens(usage) == 0
+
+
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        (
+            {"prompt_cache_hit_tokens": 40, "prompt_cache_miss_tokens": 60},
+            {"cache_read_tokens": 40, "cache_miss_tokens": 60},
+        ),
+        (
+            {"prompt_tokens_details": {"cached_tokens": 25}},
+            {"cache_read_tokens": 25, "cache_miss_tokens": None},
+        ),
+        ({}, {"cache_read_tokens": None, "cache_miss_tokens": None}),
+    ],
+)
+def test_cache_usage_metadata_preserves_provider_read_and_miss(usage, expected):
+    metadata = BaseModelClient._cache_usage_metadata(usage)
+
+    assert metadata["cache_read_tokens"] == expected["cache_read_tokens"]
+    assert metadata["cache_miss_tokens"] == expected["cache_miss_tokens"]
+    assert metadata["cache_authoritative"] is (bool(expected["cache_read_tokens"] is not None))
+
+
+def test_cache_usage_metadata_does_not_clamp_negative_provider_values():
+    metadata = BaseModelClient._cache_usage_metadata({"cache_read_tokens": -1})
+
+    assert metadata["cache_read_tokens"] == -1
+
+
+def test_cache_usage_metadata_downgrades_legacy_cache_tokens_authority():
+    metadata = BaseModelClient._cache_usage_metadata({"cache_tokens": 40})
+
+    assert metadata["cache_read_tokens"] == 40
+    assert metadata["cache_status"] == "observed"
+    assert metadata["cache_authoritative"] is False
+
+
+def test_cache_usage_metadata_prefers_explicit_read_tokens_over_legacy_field():
+    metadata = BaseModelClient._cache_usage_metadata({"cache_read_tokens": 10, "cache_tokens": 40})
+
+    assert metadata["cache_read_tokens"] == 10
+    assert metadata["cache_authoritative"] is True

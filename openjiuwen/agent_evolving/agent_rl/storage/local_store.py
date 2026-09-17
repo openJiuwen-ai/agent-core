@@ -10,7 +10,7 @@ import json
 import logging
 import os
 import time
-import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, TypeVar
@@ -146,6 +146,35 @@ class LocalTrajectoryStore:
 
         await self._state.transact(_save)
 
+    async def save_samples_once(
+        self,
+        samples: Sequence[dict[str, Any]],
+        *,
+        user_id: str = "online",
+    ) -> set[str]:
+        prepared: list[dict[str, Any]] = []
+        for sample in samples:
+            sample_id = str(sample.get("sample_id") or "").strip()
+            if not sample_id:
+                raise ValueError("sample_id is required")
+            normalized = copy.deepcopy(sample)
+            normalized["user_id"] = str(normalized.get("user_id") or user_id or "online")
+            normalized["_store_status"] = "pending"
+            normalized.setdefault("created_at", _now_iso())
+            prepared.append(normalized)
+
+        def _save(state: dict[str, Any]) -> set[str]:
+            saved_ids: set[str] = set()
+            for normalized in prepared:
+                sample_id = str(normalized["sample_id"])
+                if sample_id in state["samples"]:
+                    continue
+                state["samples"][sample_id] = normalized
+                saved_ids.add(sample_id)
+            return saved_ids
+
+        return await self._state.transact(_save)
+
     async def get_pending_count(self, user_id: str) -> int:
         def _count(state: dict[str, Any]) -> int:
             count = 0
@@ -276,8 +305,8 @@ class LocalTrajectoryStore:
                 return None
             old_status = str(sample.get("_store_status") or "pending")
             new_status = str(updates.get("status") or old_status)
-            if old_status in {"processing", "training"} and new_status == "deleted" and not bool(updates.get("force")):
-                raise RuntimeError("cannot delete active trajectory without force=true")
+            if old_status == "training" and new_status == "deleted" and not bool(updates.get("force")):
+                raise RuntimeError("cannot delete training trajectory without force=true")
             for key in ("reward", "judge", "metadata", "policy_version", "source"):
                 if key in updates:
                     sample[key] = copy.deepcopy(updates[key])
@@ -292,8 +321,8 @@ class LocalTrajectoryStore:
             sample = state["samples"].get(sample_id)
             if sample is None:
                 return False
-            if str(sample.get("_store_status") or "pending") in {"processing", "training"} and not force:
-                raise RuntimeError("cannot delete active trajectory without force=true")
+            if str(sample.get("_store_status") or "pending") == "training" and not force:
+                raise RuntimeError("cannot delete training trajectory without force=true")
             del state["samples"][sample_id]
             return True
 
@@ -423,137 +452,14 @@ class LocalSFTStore:
         sample_stats = await self._sample_store.stats()
         return {
             "pending_raw": raw_stats["pending_samples"],
-            "processing_raw": raw_stats.get("processing_samples", 0),
-            "processed_raw": raw_stats.get("processed_samples", 0),
+            "processing_raw": raw_stats["processing_samples"],
+            "processed_raw": raw_stats["processed_samples"],
             "failed_raw": raw_stats["failed_samples"],
             "pending_samples": sample_stats["pending_samples"],
             "training_samples": sample_stats["training_samples"],
             "trained_samples": sample_stats["trained_samples"],
             "failed_samples": sample_stats["failed_samples"],
         }
-
-
-class LocalTrainingTaskStore:
-    """Local file-backed training task store with single-active-task semantics."""
-
-    def __init__(self, root_dir: str | os.PathLike[str]) -> None:
-        self._state = _JsonStateStore(root_dir)
-
-    async def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-        def _create(state: dict[str, Any]) -> dict[str, Any]:
-            active_task_id = str(state.get("active_task_id") or "")
-            active = state["tasks"].get(active_task_id) if active_task_id else None
-            if active and active.get("status") in {"pending", "running", "stopping"}:
-                raise RuntimeError("an active training task already exists")
-
-            task_id = str(payload.get("task_id") or "").strip() or f"task-{uuid.uuid4().hex[:12]}"
-            now = _now_iso()
-            task = {
-                "task_id": task_id,
-                "status": "pending",
-                "user_id": str(payload.get("user_id") or "").strip(),
-                "created_at": now,
-                "updated_at": now,
-                "started_at": "",
-                "finished_at": "",
-                "error": "",
-                "sample_count": int(payload.get("sample_count") or 0),
-                "training_count": int(payload.get("training_count") or 0),
-                "drain_pending_on_train": bool(payload.get("drain_pending_on_train", True)),
-                "max_samples_per_run": int(payload.get("max_samples_per_run") or 0),
-                "ppo_samples_per_step": int(payload.get("ppo_samples_per_step") or 0),
-                "allow_partial_last_step": bool(payload.get("allow_partial_last_step", True)),
-                "metadata": copy.deepcopy(payload.get("metadata") or {}),
-            }
-            state["tasks"][task_id] = task
-            order = [item for item in state.get("task_order", []) if item != task_id]
-            order.append(task_id)
-            state["task_order"] = order
-            state["active_task_id"] = task_id
-            return copy.deepcopy(task)
-
-        return await self._state.transact(_create)
-
-    async def list_tasks(self, *, limit: int = 100) -> list[dict[str, Any]]:
-        normalized_limit = max(1, int(limit))
-
-        def _list(state: dict[str, Any]) -> list[dict[str, Any]]:
-            out = []
-            for task_id in reversed(state.get("task_order", [])):
-                task = state["tasks"].get(task_id)
-                if task is not None:
-                    out.append(copy.deepcopy(task))
-                if len(out) >= normalized_limit:
-                    break
-            return out
-
-        return await self._state.transact(_list)
-
-    async def get_active_task(self) -> Optional[dict[str, Any]]:
-        def _get(state: dict[str, Any]) -> Optional[dict[str, Any]]:
-            task_id = str(state.get("active_task_id") or "")
-            task = state["tasks"].get(task_id) if task_id else None
-            return copy.deepcopy(task) if task is not None else None
-
-        return await self._state.transact(_get)
-
-    async def get_task(self, task_id: str) -> Optional[dict[str, Any]]:
-        def _get(state: dict[str, Any]) -> Optional[dict[str, Any]]:
-            task = state["tasks"].get(task_id)
-            return copy.deepcopy(task) if task is not None else None
-
-        return await self._state.transact(_get)
-
-    async def claim_pending_task(self, *, user_id: str | None, sample_count: int) -> Optional[dict[str, Any]]:
-        def _claim(state: dict[str, Any]) -> Optional[dict[str, Any]]:
-            task_id = str(state.get("active_task_id") or "")
-            task = state["tasks"].get(task_id) if task_id else None
-            if task is None or task.get("status") != "pending":
-                return None
-            if user_id and task.get("user_id") and str(task["user_id"]) not in {"", user_id}:
-                return None
-            now = _now_iso()
-            task["status"] = "running"
-            task["started_at"] = now
-            task["updated_at"] = now
-            task["sample_count"] = int(sample_count)
-            task["user_id"] = str(user_id or task.get("user_id") or "")
-            return copy.deepcopy(task)
-
-        return await self._state.transact(_claim)
-
-    async def update_task_status(
-        self,
-        task_id: str,
-        *,
-        status: str,
-        error: str = "",
-    ) -> Optional[dict[str, Any]]:
-        def _update(state: dict[str, Any]) -> Optional[dict[str, Any]]:
-            task = state["tasks"].get(task_id)
-            if task is None:
-                return None
-            task["status"] = status
-            task["updated_at"] = _now_iso()
-            task["error"] = error
-            if status in {"succeeded", "failed", "canceled"}:
-                task["finished_at"] = _now_iso()
-                if str(state.get("active_task_id") or "") == task_id:
-                    state["active_task_id"] = ""
-            return copy.deepcopy(task)
-
-        return await self._state.transact(_update)
-
-    async def request_stop(self, task_id: str) -> Optional[dict[str, Any]]:
-        task = await self.get_task(task_id)
-        if task is None:
-            return None
-        status = str(task.get("status") or "pending")
-        if status == "pending":
-            return await self.update_task_status(task_id, status="canceled")
-        if status == "running":
-            return await self.update_task_status(task_id, status="stopping")
-        return task
 
 
 class LocalPendingJudgeStore:

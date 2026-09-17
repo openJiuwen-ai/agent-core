@@ -14,9 +14,9 @@ DeepAgent 工具权限与安全提示示例（仅依赖 openjiuwen）。
    :class:`openjiuwen.harness.rails.security.tool_security_rail.PermissionInterruptRail`，
    在 ``before_tool_call`` 上判定 **allow / ask / deny**；``ask`` 走 Confirm 中断（需会话侧继续交互）。
 
-宿主注入：:class:`openjiuwen.harness.security.host.ToolPermissionHost`
+宿主注入：:class:`openjiuwen.harness.security.permission_engine.host.ToolPermissionHost`
 （``get_permissions_snapshot``、``request_permission_confirmation``、``persist_allow_rule``、
-``resolve_workspace_dir``、``permission_yaml_path`` 等）。YAML 落盘路径以
+``persist_session_allow_rule``、``resolve_workspace_dir``、``permission_yaml_path`` 等）。YAML 落盘路径以
 ``permission_yaml_path`` 为准；未设置则内置 YAML 持久化无法解析路径。不依赖环境变量。
 
 运行（在仓库根目录）::
@@ -48,8 +48,10 @@ from openjiuwen.core.single_agent.interrupt.response import ToolCallInterruptReq
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness.factory import create_deep_agent
 from openjiuwen.harness.security.core import PermissionEngine
+from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths import merge_package_sensitive_paths
+from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import inline_package_command_rules
 from openjiuwen.harness.security.factory import build_permission_interrupt_rail
-from openjiuwen.harness.security.host import ToolPermissionHost
+from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.security import SecurityRail
 from openjiuwen.harness.rails.security import PermissionInterruptRail
@@ -70,6 +72,10 @@ def example_permissions_dict() -> dict:
     }
 
 
+def example_effective_permissions() -> dict:
+    return merge_package_sensitive_paths(inline_package_command_rules(example_permissions_dict()))
+
+
 def example_permission_host(workspace: Path, config_yaml: Path | None) -> ToolPermissionHost:
     root = workspace.resolve()
 
@@ -83,7 +89,7 @@ def example_permission_host(workspace: Path, config_yaml: Path | None) -> ToolPe
 
 
 def demo_sync_permission_engine(workspace: Path) -> None:
-    perms = example_permissions_dict()
+    perms = example_effective_permissions()
     engine = PermissionEngine(perms, workspace_root=workspace.resolve())
     level, rule = engine.evaluate_global_policy_directly(
         "read_file",
@@ -93,7 +99,7 @@ def demo_sync_permission_engine(workspace: Path) -> None:
 
 
 async def demo_async_check_permission(workspace: Path) -> None:
-    perms = example_permissions_dict()
+    perms = example_effective_permissions()
     engine = PermissionEngine(perms, workspace_root=workspace.resolve())
     result = await engine.check_permission(
         "read_file",
@@ -142,7 +148,7 @@ async def demo_deep_agent_mounts_rails(workspace: Path) -> None:
             workspace=str(workspace),
             max_iterations=3,
             language="cn",
-            permissions=example_permissions_dict(),
+            permissions=example_effective_permissions(),
             permission_host=host,
         )
 
@@ -158,7 +164,7 @@ async def demo_deep_agent_mounts_rails(workspace: Path) -> None:
 
 def demo_standalone_rail_factory(workspace: Path) -> None:
     rail = build_permission_interrupt_rail(
-        permissions=example_permissions_dict(),
+        permissions=example_effective_permissions(),
         host=example_permission_host(workspace, None),
         workspace_root=workspace.resolve(),
     )
@@ -226,7 +232,7 @@ async def demo_natural_language_triggers_permission_rail(workspace: Path) -> Non
             workspace=str(workspace),
             max_iterations=8,
             language="cn",
-            permissions=example_permissions_dict(),
+            permissions=example_effective_permissions(),
             permission_host=host,
             rails=[SysOperationRail()],
             system_prompt=(

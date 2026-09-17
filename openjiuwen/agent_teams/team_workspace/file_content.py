@@ -110,14 +110,15 @@ def parse_file_content(path: Path) -> FileContent | None:
             updated_at_present = True
         else:
             # Blank / absent / non-int ``updated_at``: return 0 faithfully
-            # rather than backfilling a wall-clock value. The member-prompt
-            # re-announce probe treats ``(0, present=False)`` as an explicit
-            # "must update" signal and stamps a single timestamp back into the
-            # file + baseline in one move (so the next read sees a stable
-            # non-zero value and does not re-fire). The aggregated roster /
-            # team-info probes floor on the DB ``updated_at`` (``max(db, 0)``
-            # → ``db``), so a blank field does not advance them either —
-            # consistent with "blank does not mutate roster".
+            # rather than backfilling a wall-clock value. The member-prompt and
+            # team-card re-announce probes treat ``(0, present=False)`` as an
+            # explicit "must update" signal and stamp a single timestamp back
+            # into the file + baseline in one move (so the next read sees a
+            # stable non-zero value and does not re-fire). The aggregated
+            # roster probe floors on the DB ``updated_at`` (``max(db, 0)`` →
+            # ``db``) — it has no per-file stamp path, so a blank field does
+            # not advance it directly; it moves only when a member_prompt /
+            # team_card stamp (or a member DB write) pushes the aggregate.
             updated_at = 0
     else:
         updated_at = 0

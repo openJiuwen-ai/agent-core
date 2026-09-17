@@ -6,6 +6,7 @@ Unit tests for IntelliRouterModelClient — wraps intelli_router.ReliableRouter.
 import importlib.util
 import os
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -483,6 +484,8 @@ class TestIntelliRouterModelClientInvoke:
         result = await client.invoke(messages, output_parser=parser)
 
         assert result.content == "parsed_result"
+        assert result.parser_content == "parsed_result"
+        assert result.provider_content == '{"output": "parsed"}'
 
     @pytest.mark.asyncio
     async def test_invoke_model_override(self, client):
@@ -579,6 +582,47 @@ class TestIntelliRouterModelClientStream:
             contents.append(chunk.content)
 
         assert contents == ["Hello ", "world", "!"]
+
+    @pytest.mark.asyncio
+    async def test_stream_parser_keeps_raw_deltas_and_exposes_parser_result(self, client):
+        async def fake_stream():
+            yield SimpleNamespace(
+                content='{"value":',
+                finish_reason="null",
+                tool_calls=None,
+                reasoning_content=None,
+                metadata={"source": "router"},
+            )
+            yield SimpleNamespace(
+                content="1}",
+                finish_reason="stop",
+                tool_calls=None,
+                reasoning_content=None,
+                metadata={"source": "router"},
+            )
+
+        async def fake_parse(content):
+            if content == '{"value":1}':
+                return {"value": 1}
+            raise ValueError("incomplete")
+
+        parser = MagicMock(spec=BaseOutputParser)
+        parser.parse = fake_parse
+        client._router.stream = MagicMock(return_value=fake_stream())
+
+        chunks = [
+            chunk
+            async for chunk in client.stream(
+                [UserMessage(content="Hi")],
+                output_parser=parser,
+            )
+        ]
+
+        assert [chunk.content for chunk in chunks] == ['{"value":', "1}"]
+        assert chunks[0].parser_content is None
+        assert chunks[1].parser_content == {"value": 1}
+        assert chunks[1].metadata == {"source": "router"}
+        assert "output_parser" not in client._router.stream.call_args.kwargs
 
     @pytest.mark.asyncio
     async def test_stream_empty_content(self, client):
@@ -893,6 +937,53 @@ class TestIntelliRouterConvertResponse:
         assert result.usage_metadata.output_tokens == 20
         assert result.usage_metadata.total_tokens == 30
         assert result.usage_metadata.cache_tokens == 5
+
+    @pytest.mark.asyncio
+    async def test_to_ow_assistant_message_preserves_additive_response_facts(
+        self, model_request_config, intelli_router_client_config,
+    ):
+        with (
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.ReliableRouter", FakeReliableRouter),
+            patch("openjiuwen.core.foundation.llm.model_clients.intelli_router_model_client.Deployment", FakeDeployment),
+        ):
+            client = IntelliRouterModelClient(model_request_config, intelli_router_client_config)
+
+        source = SimpleNamespace(
+            content="answer",
+            tool_calls=None,
+            usage_metadata=SimpleNamespace(
+                input_tokens=3,
+                output_tokens=2,
+                total_tokens=5,
+                cache_tokens=1,
+                cache_creation_input_tokens=1,
+                reasoning_tokens=0,
+                input_cost=0.1,
+                output_cost=0.2,
+                total_cost=0.3,
+                model_name="returned-model",
+            ),
+            finish_reason="stop",
+            reasoning_content=None,
+            parser_content={"ok": True},
+            prompt_token_ids=[1],
+            completion_token_ids=[2],
+            logprobs={"content": []},
+            response_id="resp-1",
+            response_model="returned-model",
+            provider_metadata={"status": "completed", "secret": "drop"},
+        )
+
+        result = await client._to_ow_assistant_message(source)
+
+        assert result.usage_metadata.cache_creation_input_tokens == 1
+        assert result.usage_metadata.total_cost == pytest.approx(0.3)
+        assert result.parser_content == {"ok": True}
+        assert result.prompt_token_ids == [1]
+        assert result.completion_token_ids == [2]
+        assert result.response_id == "resp-1"
+        assert result.response_model == "returned-model"
+        assert result.provider_metadata == {"status": "completed"}
 
     @pytest.mark.asyncio
     async def test_to_ow_assistant_message_usage_no_reasoning_tokens_field(

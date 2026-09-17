@@ -50,7 +50,7 @@ class _CapturingRouter:
         )
 
 
-def test_rule_compression_pipeline_uses_four_characters_per_token():
+def test_rule_compression_pipeline_uses_three_characters_per_token():
     context = _Context(None)
     router = _CapturingRouter()
     pipeline = RuleCompressionPipeline(router=router)
@@ -64,12 +64,12 @@ def test_rule_compression_pipeline_uses_four_characters_per_token():
         context_messages=[],
     )
 
-    assert pipeline.context_character_capacity(context) == 400
+    assert pipeline.context_character_capacity(context) == 300
     assert router.context is not None
-    assert router.context.max_tokens == 20
-    assert router.context.head_tokens == 10
-    assert router.context.tail_tokens == 10
-    assert router.context.count_tokens("x" * 40) == 10
+    assert router.context.max_tokens == 26
+    assert router.context.head_tokens == 13
+    assert router.context.tail_tokens == 13
+    assert router.context.count_tokens("x" * 40) == 13
 
 
 def test_rule_compression_dump_is_written_when_enabled(tmp_path):

@@ -143,6 +143,15 @@ class ContextProcessorRail(DeepAgentRail):
         if not overrides:
             return base_config
         base_dict = base_config.model_dump(exclude_none=True)
+        # Pass nested model instances through as objects instead of their dumps.
+        # Dumping them would materialize defaults (e.g. auth_mode=api_key) into
+        # the rebuilt copy's model_fields_set and break OpenAIAccount oauth
+        # normalization. Pydantic keeps instances as-is (revalidate_instances
+        # defaults to "never"), so identity and fields_set survive the rebuild.
+        for name in type(base_config).model_fields:
+            value = getattr(base_config, name, None)
+            if isinstance(value, BaseModel):
+                base_dict[name] = value
         merged = {**base_dict, **overrides}
         return type(base_config)(**merged)
 

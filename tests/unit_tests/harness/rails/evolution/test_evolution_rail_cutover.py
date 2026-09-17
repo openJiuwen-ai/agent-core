@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.sdk.util.instrumentation import InstrumentationScope
 from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags, TraceState
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
@@ -26,7 +27,7 @@ from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, Evo
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 
 
-def _span(name: str, span_id: int, *, end_time: int | None = None) -> ReadableSpan:
+def _span(name: str, span_id: int, *, end_time: int | None = None, scope_name: str = "test") -> ReadableSpan:
     end = span_id if end_time is None else end_time
     context = SpanContext(
         trace_id=1,
@@ -37,6 +38,7 @@ def _span(name: str, span_id: int, *, end_time: int | None = None) -> ReadableSp
     )
     return ReadableSpan(
         name=name,
+        instrumentation_scope=InstrumentationScope(scope_name),
         context=context,
         resource=Resource.create({"openjiuwen.session_id": "producer"}),
         kind=SpanKind.INTERNAL,
@@ -262,3 +264,29 @@ async def test_agent_callbacks_resolve_invoke_capture_across_task_contexts() -> 
         )
         is None
     )
+
+
+@pytest.mark.asyncio
+async def test_clean_window_preserves_scopes_across_increments() -> None:
+    processor = TrajectorySpanProcessor()
+    rail = _HookRail(processor)
+    ctx = _ctx(AgentCallbackEvent.BEFORE_INVOKE, InvokeInputs(query="q", conversation_id="s"))
+    await rail.before_invoke(ctx)
+    try:
+        for span_id, scope in ((1, "native"), (2, "bridge"), (3, "native")):
+            processor.on_end(_span("tool.read", span_id, scope_name=scope))
+            await rail.after_tool_call(
+                _ctx(
+                    AgentCallbackEvent.AFTER_TOOL_CALL,
+                    ToolCallInputs(tool_name="read", tool_args={}, tool_result="ok"),
+                )
+            )
+        trajectory = rail.get_trajectory(session_id="s", member_id="card-id")
+        assert trajectory is not None
+        scopes = trajectory.to_otlp()["resourceSpans"][0]["scopeSpans"]
+        assert [(group["scope"]["name"], [span["spanId"] for span in group["spans"]]) for group in scopes] == [
+            ("native", [f"{1:016x}", f"{3:016x}"]),
+            ("bridge", [f"{2:016x}"]),
+        ]
+    finally:
+        await rail.after_invoke(ctx)

@@ -18,7 +18,7 @@ import time
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Dict, Any, AsyncIterator, List, Optional, Tuple
+from typing import Callable, Dict, Any, AsyncIterator, List, Optional, Tuple
 
 import pdfplumber
 
@@ -30,10 +30,16 @@ from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.rg_binary import resolve_rg_binary
 
 
 _FILE_EDIT_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
 _FILE_EDIT_LOCKS_GUARD = threading.Lock()
+
+# POSIX NAME_MAX / PATH_MAX. Overlong values must not reach Path.resolve()
+# (ENAMETOOLONG aborts the turn instead of returning a tool error).
+_NAME_MAX = 255
+_PATH_MAX = 4096
 
 
 def _get_file_edit_lock(file_path: str) -> asyncio.Lock:
@@ -347,18 +353,167 @@ class _TokenBudget:
         return self.spent >= self.max_tokens
 
 
+def _extract_json_object(text: str) -> Optional[Dict[str, Any]]:
+    """Parse a JSON object, ignoring trailing XML/tool junk after the closing brace."""
+    if not isinstance(text, str):
+        return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    stack = 0
+    in_string = False
+    escape = False
+    end = None
+    for index, char in enumerate(text[start:], start):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            stack += 1
+        elif char == "}":
+            stack -= 1
+            if stack == 0:
+                end = index + 1
+                break
+    if end is None:
+        return None
+    try:
+        parsed = json.loads(text[start:end])
+    except (TypeError, ValueError):
+        # JSONDecodeError is a ValueError subclass; do not list both (G.ERR.09).
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _overlong_path_error(file_path: str) -> Optional[str]:
+    """Return an error if *file_path* cannot be a real filesystem path."""
+    if not isinstance(file_path, str) or not file_path:
+        return None
+    if len(file_path) > _PATH_MAX:
+        return (
+            f"file_path is too long ({len(file_path)} chars; max {_PATH_MAX}). "
+            "Pass a plain path in `file_path` and the file body in `content`."
+        )
+    normalized = file_path.replace("\\", "/")
+    for part in pathlib.PurePosixPath(normalized).parts:
+        if part in (".", "..", "/"):
+            continue
+        if len(part) > _NAME_MAX:
+            return (
+                f"file_path has a component longer than {_NAME_MAX} characters. "
+                "Pass a plain path in `file_path` and the file body in `content` "
+                "— do not serialize the whole tool-call JSON into `file_path`."
+            )
+    return None
+
+
+def _looks_like_plain_file_path(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    stripped = value.strip()
+    if not stripped or stripped.startswith("{"):
+        return False
+    return _overlong_path_error(stripped) is None
+
+
+def _should_prefer_nested_content(nested_content: Any, current_content: Any) -> bool:
+    """Whether nested JSON ``content`` should replace the outer field."""
+    if not isinstance(nested_content, str):
+        return False
+    if not isinstance(current_content, str) or not current_content.strip():
+        return True
+    return len(nested_content) > len(current_content)
+
+
+def _coerce_file_tool_inputs(inputs: Any) -> Dict[str, Any]:
+    """Unwrap nested / stringified write_file payloads into a normal args dict.
+
+    Some models (observed with DeepSeek tool XML) put the entire
+    ``{"file_path": "...", "content": "..."}`` object into ``file_path``.
+    Resolving that blob as a relative path raises ENAMETOOLONG and used to
+    kill the headless turn. Unwrap one level when the nested object has a
+    plain ``file_path``.
+    """
+    if inputs is None:
+        return {}
+    if isinstance(inputs, str):
+        parsed = _extract_json_object(inputs)
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                "tool arguments must be an object with file_path "
+                "(and content for write_file)"
+            )
+        inputs = parsed
+    if not isinstance(inputs, dict):
+        raise ValueError("tool arguments must be an object")
+
+    out = dict(inputs)
+    raw_path = out.get("file_path")
+    nested: Optional[Dict[str, Any]] = None
+    if isinstance(raw_path, dict):
+        nested = raw_path
+    elif isinstance(raw_path, str) and raw_path.lstrip().startswith("{"):
+        nested = _extract_json_object(raw_path)
+
+    if isinstance(nested, dict) and _looks_like_plain_file_path(nested.get("file_path")):
+        out["file_path"] = nested["file_path"]
+        if _should_prefer_nested_content(nested.get("content"), out.get("content")):
+            out["content"] = nested["content"]
+        for key in ("old_string", "new_string", "replace_all"):
+            if key in nested and key not in out:
+                out[key] = nested[key]
+        logger.info(
+            "Unwrapped nested JSON payload from file_path into %s",
+            out.get("file_path"),
+        )
+    return out
+
+
 def _resolve_tool_file_path(operation: SysOperation, file_path: str) -> str:
     """Resolve relative tool paths against the configured sys_operation work_dir.
 
     Keeps UNC paths unchanged. Relative paths are only accepted when the operation
     exposes a work_dir; otherwise the caller must still provide an absolute path.
+
+    Overlong or un-statable paths raise ``ValueError`` (not ``OSError``) so
+    callers can return ``ToolOutput(success=False)`` instead of failing the turn.
     """
+    _ = operation
+    if not isinstance(file_path, str) or not file_path:
+        raise ValueError("file_path is required")
+    err = _overlong_path_error(file_path)
+    if err:
+        raise ValueError(err)
+
     expanded = os.path.expanduser(file_path)
     if expanded.startswith("\\\\") or expanded.startswith("//") or os.path.isabs(expanded):
+        err = _overlong_path_error(expanded)
+        if err:
+            raise ValueError(err)
         return expanded
 
     work_dir = get_cwd()
-    return str((pathlib.Path(work_dir).expanduser().resolve() / expanded).resolve())
+    try:
+        resolved = str(
+            (pathlib.Path(work_dir).expanduser().resolve() / expanded).resolve()
+        )
+    except OSError as exc:
+        raise ValueError(
+            f"Invalid file_path ({exc}). Pass a plain path in `file_path` "
+            "and the file body in `content`."
+        ) from exc
+    err = _overlong_path_error(resolved)
+    if err:
+        raise ValueError(err)
+    return resolved
 
 
 def _is_unc_path(path_value: str) -> bool:
@@ -378,7 +533,7 @@ class ReadFileTool(Tool):
         operation: SysOperation,
         language: str = "cn",
         agent_id: Optional[str] = None,
-        enable_image_multimodal: bool = True,
+        enable_image_multimodal: bool | Callable[[], bool] = True,
     ):
         super().__init__(
             build_tool_card(
@@ -390,7 +545,26 @@ class ReadFileTool(Tool):
             )
         )
         self.operation = operation
-        self.enable_image_multimodal = enable_image_multimodal
+        self._enable_image_multimodal = enable_image_multimodal
+
+    @property
+    def enable_image_multimodal(self) -> bool:
+        """Return the current native-image policy.
+
+        Auto mode is represented by a callable so a long-lived tool can pick
+        up a completed capability probe or a main-model change without being
+        rebuilt.
+        """
+        if callable(self._enable_image_multimodal):
+            return bool(self._enable_image_multimodal())
+        return self._enable_image_multimodal
+
+    @enable_image_multimodal.setter
+    def enable_image_multimodal(
+        self,
+        value: bool | Callable[[], bool],
+    ) -> None:
+        self._enable_image_multimodal = value
 
     # ------------------------------------------------------------------
     # File-type predicates
@@ -1076,11 +1250,25 @@ class WriteFileTool(Tool):
         return raw.decode(encoding, errors="replace"), encoding
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
+        try:
+            inputs = _coerce_file_tool_inputs(inputs)
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
+
         path: Optional[str] = inputs.get("file_path")
         content = inputs.get("content")
 
         if not path:
             return ToolOutput(success=False, error="file_path is required")
+        if isinstance(path, str) and path.lstrip().startswith("{"):
+            return ToolOutput(
+                success=False,
+                error=(
+                    "file_path looks like a JSON object, not a filesystem path. "
+                    "Call write_file with `file_path` as a plain path string and "
+                    "`content` as a separate string field."
+                ),
+            )
         if content is None:
             return ToolOutput(success=False, error="content is required")
         if not isinstance(content, str):
@@ -1433,6 +1621,10 @@ class EditFileTool(Tool):
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         """Serialize the complete read-modify-write transaction per file."""
+        try:
+            inputs = _coerce_file_tool_inputs(inputs)
+        except ValueError as exc:
+            return ToolOutput(success=False, error=str(exc))
         file_path = inputs.get("file_path")
         if not isinstance(file_path, str) or not file_path.strip():
             return await self._invoke_unlocked(inputs, **kwargs)
@@ -1881,6 +2073,71 @@ class GrepTool(Tool):
         was_truncated = len(items) - offset > effective_limit
         return sliced, effective_limit if was_truncated else None
 
+    # Models often pass language extensions (``rs``, ``py``) as ``type``.
+    # ripgrep expects type *names* (``rust``, ``py``). Map common aliases.
+    # ``tsx``/``jsx`` are not built-in rg types; ``ts``/``js`` already cover
+    # ``*.tsx`` / ``*.jsx``.
+    _RG_TYPE_ALIASES: Dict[str, str] = {
+        "rs": "rust",
+        "rust": "rust",
+        "py": "py",
+        "python": "py",
+        "js": "js",
+        "javascript": "js",
+        "jsx": "js",
+        "ts": "ts",
+        "typescript": "ts",
+        "tsx": "ts",
+        "go": "go",
+        "golang": "go",
+        "c": "c",
+        "h": "c",
+        "cpp": "cpp",
+        "cc": "cpp",
+        "cxx": "cpp",
+        "java": "java",
+        "kt": "kotlin",
+        "kotlin": "kotlin",
+        "rb": "ruby",
+        "ruby": "ruby",
+        "php": "php",
+        "swift": "swift",
+        "scala": "scala",
+        "sh": "sh",
+        "bash": "sh",
+        "zsh": "sh",
+        "md": "markdown",
+        "markdown": "markdown",
+        "toml": "toml",
+        "yaml": "yaml",
+        "yml": "yaml",
+        "json": "json",
+        "html": "html",
+        "css": "css",
+        "sql": "sql",
+    }
+
+    @classmethod
+    def _normalize_rg_file_type(cls, file_type: Optional[str]) -> Optional[str]:
+        """Map extension-style type filters to ripgrep ``--type`` names.
+
+        Known aliases are matched case-insensitively (and with an optional
+        leading ``.``). Unknown values are returned unchanged so custom
+        case-sensitive ripgrep types keep working.
+        """
+        if file_type is None:
+            return None
+        raw = str(file_type).strip()
+        if not raw:
+            return None
+        lookup = raw.lower()
+        if lookup.startswith("."):
+            lookup = lookup[1:]
+        mapped = cls._RG_TYPE_ALIASES.get(lookup)
+        if mapped is not None:
+            return mapped
+        return raw
+
     @staticmethod
     def _split_glob_patterns(glob_value: Optional[str]) -> List[str]:
         if not glob_value:
@@ -1914,9 +2171,10 @@ class GrepTool(Tool):
             case_insensitive: bool,
             file_type: Optional[str],
             multiline: bool,
+            rg_path: str = "rg",
     ) -> str:
         parts: List[str] = [
-            "rg",
+            self._shell_quote(rg_path),
             "--hidden",
             "--color=never",
             "--max-columns",
@@ -2059,7 +2317,10 @@ class GrepTool(Tool):
         if multiline:
             return None
 
-        parts: List[str] = ["grep", "-R", "--binary-files=without-match"]
+        # Use POSIX ERE (-E) so patterns with (, |, etc. match rg semantics
+        # better than basic regex. Always pass the pattern via -e and end
+        # options with -- so values like "--config" are never treated as flags.
+        parts: List[str] = ["grep", "-R", "-E", "--binary-files=without-match"]
 
         for directory in self.VCS_DIRECTORIES_TO_EXCLUDE:
             parts.append(f"--exclude-dir={self._shell_quote(directory)}")
@@ -2088,7 +2349,12 @@ class GrepTool(Tool):
         for glob_pattern in self._split_glob_patterns(glob):
             parts.append(f"--include={self._shell_quote(glob_pattern)}")
 
-        parts.extend([self._shell_quote(pattern), self._shell_quote(path)])
+        parts.extend([
+            "-e",
+            self._shell_quote(pattern),
+            "--",
+            self._shell_quote(path),
+        ])
         return " ".join(parts)
 
     @staticmethod
@@ -2213,7 +2479,7 @@ class GrepTool(Tool):
         offset = self._as_int(inputs.get("offset"), 0) or 0
         multiline = self._as_bool(inputs.get("multiline", False))
         glob = inputs.get("glob")
-        file_type = inputs.get("type")
+        file_type = self._normalize_rg_file_type(inputs.get("type"))
 
         has_context_controls = any(
             value is not None for value in [context_before, context_after, context_c, context]
@@ -2224,7 +2490,8 @@ class GrepTool(Tool):
             context_c = None
             context = None
 
-        if shutil.which("rg"):
+        rg_bin = resolve_rg_binary()
+        if rg_bin:
             cmd = self._build_rg_command(
                 pattern=str(pattern),
                 path=path,
@@ -2238,6 +2505,7 @@ class GrepTool(Tool):
                 case_insensitive=ignore_case,
                 file_type=file_type,
                 multiline=multiline,
+                rg_path=rg_bin,
             )
         elif os.name == "nt":
             if file_type:

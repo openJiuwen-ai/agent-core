@@ -6,10 +6,10 @@ scope-local clean window，以及演进任务期间的 suppression。
 ## 构造
 
 ```python
-from openjiuwen.agent_evolving.trajectory import TrajectorySpanProcessor
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
 from openjiuwen.harness.rails import EvolutionRail, EvolutionTriggerPoint
 
-processor = TrajectorySpanProcessor()
+processor = get_trajectory_span_processor()
 
 rail = EvolutionRail(
     evolution_trigger=EvolutionTriggerPoint.AFTER_INVOKE,
@@ -20,8 +20,9 @@ rail = EvolutionRail(
 )
 ```
 
-Processor 必须已经注册到当前 OpenTelemetry provider；同一 runtime 的所有 Rails 应共享同一 processor
-对象。
+构造前必须先 acquire Agent 或 Team observability。demand coordinator 会把该进程级 processor 注册到
+当前 OpenTelemetry provider；同一 runtime 的所有 Rails 必须复用该对象，不要另建
+`TrajectorySpanProcessor`。
 
 ## 采集生命周期
 

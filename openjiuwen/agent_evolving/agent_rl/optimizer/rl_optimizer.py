@@ -127,7 +127,6 @@ class OfflineRLOptimizer(BaseRLOptimizer):
         return None
 
     def _build_persistence(self, config: RLConfig):
-        from openjiuwen.agent_evolving.agent_rl.offline.store.base import RolloutPersistence
         from openjiuwen.agent_evolving.agent_rl.offline.store.file_store import FileRolloutStore
         from openjiuwen.agent_evolving.agent_rl.offline.store.null_store import NullRolloutStore
 
@@ -295,57 +294,10 @@ class OfflineRLOptimizer(BaseRLOptimizer):
 class OnlineRLOptimizer(BaseRLOptimizer):
     def __init__(self, config: RLConfig) -> None:
         super().__init__(config)
-        self._redis_url: str = ""
-        self._lora_repo_root: str = ""
-        self._vllm_url: str = ""
-        self._poll_interval: float = 30.0
-        self._min_samples: int = 4
         self._ppo_config_path: Optional[str] = None
         self._training_gpu_ids: str = ""
         self._nproc_per_node: int = 1
-        self._scheduler = None
         self._ppo_runner = None
-
-    def setup_redis(
-        self,
-        redis_url: str,
-        poll_interval: float = 30.0,
-        min_samples: int = 4,
-    ) -> "OnlineRLOptimizer":
-        self._redis_url = redis_url.rstrip("/")
-        self._poll_interval = poll_interval
-        self._min_samples = min_samples
-        return self
-
-    def setup_gateway(
-        self,
-        gateway_url: str,
-        poll_interval: float = 30.0,
-        min_samples: int = 4,
-    ) -> "OnlineRLOptimizer":
-        logger.warning(
-            "setup_gateway() is deprecated for OnlineRLOptimizer; use setup_redis() instead"
-        )
-        normalized = gateway_url.strip()
-        if not normalized.startswith(("redis://", "rediss://")):
-            raise ValueError(
-                "setup_gateway() no longer accepts HTTP Gateway URLs. "
-                "OnlineRLOptimizer now polls Redis directly; call setup_redis() "
-                "with a redis:// or rediss:// URL instead."
-            )
-        return self.setup_redis(
-            normalized,
-            poll_interval=poll_interval,
-            min_samples=min_samples,
-        )
-
-    def setup_lora_repo(self, lora_repo_root: str) -> "OnlineRLOptimizer":
-        self._lora_repo_root = lora_repo_root
-        return self
-
-    def setup_inference(self, vllm_url: str) -> "OnlineRLOptimizer":
-        self._vllm_url = vllm_url
-        return self
 
     def setup_training_gpu(
         self,
@@ -380,48 +332,9 @@ class OnlineRLOptimizer(BaseRLOptimizer):
             "Online RL environment initialized (GPUs: %s)", self._training_gpu_ids
         )
 
-    def start_training(self) -> None:
-        if not self._redis_url:
-            raise ValueError(
-                "Redis URL not configured. Call setup_redis() first."
-            )
-
-        from openjiuwen.agent_evolving.agent_rl.online.core.scheduler import (
-            OnlineTrainingScheduler,
-        )
-        from openjiuwen.agent_evolving.agent_rl.storage.lora_repo import LoRARepository
-        from openjiuwen.agent_evolving.agent_rl.online.inference.notifier import InferenceNotifier
-
-        lora_repo = (
-            LoRARepository(self._lora_repo_root) if self._lora_repo_root else None
-        )
-        notifier = InferenceNotifier(self._vllm_url) if self._vllm_url else None
-
-        self._scheduler = OnlineTrainingScheduler(
-            redis_url=self._redis_url,
-            poll_interval=self._poll_interval,
-            min_samples_for_training=self._min_samples,
-            base_model_path=self.config.training.model_path,
-            lora_repo=lora_repo,
-            notifier=notifier,
-            nproc_per_node=self._nproc_per_node,
-            training_gpu_ids=self._training_gpu_ids,
-            ppo_config_path=self._ppo_config_path,
-        )
-        self._scheduler.start()
-        logger.info(
-            "OnlineTrainingScheduler started: redis=%s min_samples=%d poll=%.0fs",
-            self._redis_url,
-            self._min_samples,
-            self._poll_interval,
-        )
-
     def stop(self) -> None:
         import ray_adapter as ray
 
-        if self._scheduler:
-            self._scheduler.stop()
-            self._scheduler = None
         if ray.is_initialized():
             ray.shutdown()
         logger.info("Online RL stopped")

@@ -22,28 +22,24 @@ from openjiuwen.core.foundation.llm.schema.message import (
 from openjiuwen.core.graph.pregel import GraphInterrupt, Interrupt
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
-from openjiuwen.core.session.tracer.span import TraceAgentSpan, SpanManager
+from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_COMPLETION,
+    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_PROMPT,
+    GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_SYSTEM,
-    GEN_AI_SYSTEM_VALUE,
+    GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_NAME,
     OJ_AGENT_ERROR_MESSAGE,
-    OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
-    OJ_CHILD_INVOKE_IDS,
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
     OJ_INVOKE_ID,
-    OJ_META_DATA,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -99,9 +95,8 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         s = finished[0]
-        assert s.name == "llm.TestModel"
+        assert s.name == "chat TestModel"
         assert s.kind == trace.SpanKind.CLIENT
-        assert s.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
         assert s.attributes[GEN_AI_REQUEST_MODEL] == "TestModel"
         assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
         # Span base attributes (field-completion)
@@ -150,7 +145,8 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_COMPLETION] == "world"
+        output = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert output[0]["parts"][0]["content"] == "world"
 
         # End-time base attributes should be present
         s = finished[0]
@@ -207,7 +203,7 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 2
 
-        child = next(s for s in finished if s.name == "tool.ChildTool")
+        child = next(s for s in finished if s.name == "execute_tool ChildTool")
         parent = next(s for s in finished if s.name == "chain.ParentChain")
 
         # Child's parent should point to parent's span_id
@@ -251,8 +247,10 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        request = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        response = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert request[0]["parts"][0]["content"].startswith("sha256:")
+        assert response[0]["parts"][0]["content"].startswith("sha256:")
 
     async def test_agent_llm_prompt_completion_split_redaction(self):
         """redact_prompts=False, redact_completions=True: prompt not hashed, completion hashed."""
@@ -268,14 +266,16 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         # Prompt not hashed (redact_prompts=False overrides redaction_enabled=True)
-        assert not finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
+        request = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        assert request[0]["parts"][0]["content"] == "visible prompt"
         # Completion hashed (redact_completions=True)
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        response = json.loads(finished[0].attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert response[0]["parts"][0]["content"].startswith("sha256:")
 
     async def test_agent_llm_inputs_normalized_to_dict(self):
         """Message objects are converted to plain dicts via model_dump().
 
-        Without normalization, GEN_AI_PROMPT would contain class repr like
+        Without normalization, the structured request would contain class repr like
         ``SystemMessage(role='system', ...)``.  After normalization it should
         be standard JSON with ``{"role": "...", "content": "..."}`` entries.
         """
@@ -296,24 +296,48 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        prompt_attr = finished[0].attributes[GEN_AI_PROMPT]
+        instructions_attr = finished[0].attributes[GEN_AI_SYSTEM_INSTRUCTIONS]
+        prompt_attr = finished[0].attributes[GEN_AI_INPUT_MESSAGES]
 
         # Should be valid JSON, not a Python repr
+        instructions = json.loads(instructions_attr)
         parsed = json.loads(prompt_attr)
-        assert "inputs" in parsed
-        assert isinstance(parsed["inputs"], list)
-        assert len(parsed["inputs"]) == 2
-
-        # Each message is a plain dict — no class names in the output
-        sys_msg = parsed["inputs"][0]
-        assert sys_msg["role"] == "system"
-        assert sys_msg["content"] == "you are helpful"
-        user_msg = parsed["inputs"][1]
+        assert instructions == [{"type": "text", "content": "you are helpful"}]
+        assert len(parsed) == 1
+        user_msg = parsed[0]
         assert user_msg["role"] == "user"
-        assert user_msg["content"] == "hello"
+        assert user_msg["parts"][0]["content"] == "hello"
         # No Pydantic class repr leaked into the serialized form
         assert "SystemMessage" not in prompt_attr
         assert "UserMessage" not in prompt_attr
+
+    async def test_agent_llm_system_instructions_bypass_attribute_length_cap(self):
+        config = OtelTracerConfig(redaction_enabled=False, max_attr_length=8)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+        system_prompt = "stable-system-prompt-" * 20
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={
+                "inputs": [
+                    SystemMessage(role="system", content=system_prompt),
+                    UserMessage(role="user", content="long-user-message"),
+                ]
+            },
+            instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs="done")
+
+        finished = _EXPORTER.get_finished_spans()
+        instructions = json.loads(
+            finished[0].attributes[GEN_AI_SYSTEM_INSTRUCTIONS]
+        )
+        messages = json.loads(finished[0].attributes[GEN_AI_INPUT_MESSAGES])
+        assert instructions[0]["content"] == system_prompt
+        assert "OTel attribute truncated" not in instructions[0]["content"]
+        assert "OTel attribute truncated" in messages[0]["parts"][0]["content"]
 
     async def test_agent_llm_outputs_normalized_to_dict(self):
         """AssistantMessage outputs are converted to plain dicts via model_dump()."""
@@ -329,11 +353,11 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        completion_attr = finished[0].attributes[GEN_AI_COMPLETION]
+        completion_attr = finished[0].attributes[GEN_AI_OUTPUT_MESSAGES]
 
         parsed = json.loads(completion_attr)
-        assert parsed["role"] == "assistant"
-        assert parsed["content"] == "world"
+        assert parsed[0]["role"] == "assistant"
+        assert parsed[0]["parts"][0]["content"] == "world"
         assert "AssistantMessage" not in completion_attr
 
     async def test_agent_llm_fields_set_when_span_empty(self):
@@ -363,8 +387,6 @@ class TestOtelAgentHandler:
         assert OJ_START_TIME in s.attributes
         assert OJ_END_TIME in s.attributes
         assert OJ_ELAPSED_TIME in s.attributes
-        # meta_data set from instance_info when span.meta_data is None
-        assert OJ_META_DATA in s.attributes
 
     async def test_agent_chain_fields_set_when_span_empty(self):
         """Chain: invoke_type = "chain" when span.invoke_type is None."""
@@ -496,7 +518,6 @@ class TestOtelWorkflowHandler:
         assert len(finished) == 1
         s = finished[0]
         assert s.name == "wf_root"
-        assert s.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
         assert s.attributes[OJ_WORKFLOW_ID] == "wf1"
         # Base attributes (field-completion)
         assert OJ_TRACE_ID in s.attributes
@@ -587,7 +608,7 @@ class TestOtelWorkflowHandler:
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
-        llm_span = next(s for s in finished if s.name == "component.llm_node")
+        llm_span = next(s for s in finished if s.name == "chat")
         assert llm_span.kind == trace.SpanKind.CLIENT
         # LLM components get gen_ai.operation.name="chat"
         assert llm_span.attributes[GEN_AI_OPERATION_NAME] == "chat"
@@ -626,7 +647,7 @@ class TestOtelWorkflowHandler:
             assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
 
     async def test_workflow_tool_component_tagged_as_execute_tool(self):
-        """ToolExecutable → gen_ai.operation.name="execute_tool" (no gen_ai.tool.name).
+        """ToolExecutable uses the standard execute-tool name and attributes.
 
         Tool 真名未通过 TracerWorkflowUtils._get_component_metadata 传递下来
         (metadata 中 component_name 实为 node_id)，故不设置 gen_ai.tool.name。
@@ -653,8 +674,8 @@ class TestOtelWorkflowHandler:
         # Tool components are not LLM → INTERNAL span kind
         assert s.kind == trace.SpanKind.INTERNAL
         assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
-        # gen_ai.tool.name intentionally not set (real tool name not in metadata)
-        assert GEN_AI_TOOL_NAME not in s.attributes
+        assert s.name == "execute_tool tool_node"
+        assert s.attributes[GEN_AI_TOOL_NAME] == "tool_node"
 
     async def test_workflow_non_llm_internal_span(self):
         """Non-LLM component → INTERNAL span kind."""
@@ -707,7 +728,7 @@ class TestOtelWorkflowHandler:
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
-        comp_span = next(s for s in finished if s.name == "component.comp1")
+        comp_span = next(s for s in finished if s.name == "execute_tool tool1")
         assert comp_span.attributes[OJ_WORKFLOW_COMPONENT_ID] == "comp1"
         assert comp_span.attributes[OJ_WORKFLOW_COMPONENT_TYPE] == "Tool"
 
@@ -839,7 +860,7 @@ class TestOtelWorkflowHandler:
 
         # 2. Host component (llm_node) under root workflow
         await handler.on_call_start(
-            invoke_id="llm_node_exec",
+            invoke_id="llm_node",
             metadata={
                 "component_id": "llm_node",
                 "component_type": "LLM",
@@ -858,14 +879,14 @@ class TestOtelWorkflowHandler:
 
         # 4. End all spans
         await handler.on_call_done(invoke_id="sub_wf_root")
-        await handler.on_call_done(invoke_id="llm_node_exec")
+        await handler.on_call_done(invoke_id="llm_node")
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 3
 
         root_wf = next(s for s in finished if s.name == "wf_root")
-        host_comp = next(s for s in finished if s.name == "component.llm_node_exec")
+        host_comp = next(s for s in finished if s.name == "chat")
         sub_wf = next(s for s in finished if s.name == "sub_wf_root")
 
         # root_wf has no parent (or zero span_id parent)
@@ -892,7 +913,7 @@ class TestOtelWorkflowHandler:
 
         # 2. Host component (sub_wf_node) under root workflow
         await handler.on_call_start(
-            invoke_id="sub_wf_node_exec",
+            invoke_id="sub_wf_node",
             metadata={
                 "component_id": "sub_wf_node",
                 "component_type": "sub_workflow",
@@ -933,16 +954,16 @@ class TestOtelWorkflowHandler:
         # 5. End all spans in reverse order
         await handler.on_call_done(invoke_id="sub_wf_node.llm")
         await handler.on_call_done(invoke_id="sub_wf_node.start")
-        await handler.on_call_done(invoke_id="sub_wf_node_exec")
+        await handler.on_call_done(invoke_id="sub_wf_node")
         await handler.on_call_done(invoke_id="wf_root")
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 4
 
         root_wf = next(s for s in finished if s.name == "wf_root")
-        host_comp = next(s for s in finished if s.name == "component.sub_wf_node_exec")
+        host_comp = next(s for s in finished if s.name == "component.sub_wf_node")
         start_node = next(s for s in finished if s.name == "component.sub_wf_node.start")
-        llm_node = next(s for s in finished if s.name == "component.sub_wf_node.llm")
+        llm_node = next(s for s in finished if s.name == "chat")
 
         # root_wf — top level
         assert root_wf.parent is None or root_wf.parent.span_id == 0
@@ -954,3 +975,242 @@ class TestOtelWorkflowHandler:
         # (via _component_spans fallback, not _layer_root_spans)
         assert start_node.parent.span_id == host_comp.context.span_id
         assert llm_node.parent.span_id == host_comp.context.span_id
+# ===========================================================================
+# Supplementary tests for issues B/C/D
+# ===========================================================================
+
+
+class TestRefreshInputsAttribute:
+    """Test _refresh_inputs_attribute (Problem C: memory variable inputs showing None).
+
+    When transform callbacks (e.g. resolve_global_vars_transform) mutate the
+    inputs dict in place after on_pre_invoke, the OTel attribute should reflect
+    the post-transform values.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig(redaction_enabled=False))
+
+    async def test_refresh_inputs_after_mutation(self):
+        """Inputs mutated after on_pre_invoke should appear in span attributes."""
+        invoke_id = "node_1"
+        await self.handler.on_call_start(
+            invoke_id=invoke_id,
+            metadata={
+                "component_id": "node_1",
+                "component_type": "LLM",
+                "workflow_id": "wf1",
+            },
+        )
+        # Simulate on_pre_invoke with initial inputs (memory vars as None)
+        initial_inputs = {"query": "hello", "CHAT_HISTORY": None, "selfname": None}
+        await self.handler.on_pre_invoke(invoke_id=invoke_id, inputs=initial_inputs, component_metadata={})
+
+        # Transform callback mutates inputs in place (resolves memory vars)
+        initial_inputs["CHAT_HISTORY"] = [{"role": "user", "content": "hi"}]
+        initial_inputs["selfname"] = "test_user"
+
+        # on_call_done should re-serialize inputs with resolved values
+        await self.handler.on_call_done(invoke_id=invoke_id, outputs={"result": "ok"})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        span = finished[0]
+        inputs_attr = span.attributes.get("openjiuwen.workflow.inputs")
+        assert "CHAT_HISTORY" in inputs_attr
+        assert "test_user" in inputs_attr
+        assert "None" not in inputs_attr or inputs_attr.count("None") == 0
+
+    async def test_refresh_inputs_with_no_inputs(self):
+        """When inputs is None, refresh should be a no-op."""
+        invoke_id = "node_2"
+        await self.handler.on_call_start(
+            invoke_id=invoke_id,
+            metadata={
+                "component_id": "node_2",
+                "component_type": "Start",
+                "workflow_id": "wf1",
+            },
+        )
+        # on_call_done without on_pre_invoke (no inputs stored)
+        await self.handler.on_call_done(invoke_id=invoke_id, outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 1
+        # Should not crash, span should exist without inputs attribute
+        span = finished[0]
+        assert span is not None
+
+
+class TestComponentSpansInvokeIdKey:
+    """Test _component_spans using invoke_id as key (Problem B part 2).
+
+    Previously _component_spans used component_id as key, causing collisions
+    when the same component was invoked multiple times (e.g. in loops).
+    Now uses invoke_id to ensure uniqueness.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+
+    async def test_multiple_invocations_same_component_id(self):
+        """Same component_id with different invoke_ids should not collide."""
+        # First invocation
+        await self.handler.on_call_start(
+            invoke_id="node_1_inv_1",
+            metadata={
+                "component_id": "node_1",
+                "component_type": "LLM",
+                "workflow_id": "wf1",
+            },
+        )
+        await self.handler.on_call_done(invoke_id="node_1_inv_1", outputs={})
+
+        # Second invocation with same component_id but different invoke_id
+        await self.handler.on_call_start(
+            invoke_id="node_1_inv_2",
+            metadata={
+                "component_id": "node_1",
+                "component_type": "LLM",
+                "workflow_id": "wf1",
+            },
+        )
+        await self.handler.on_call_done(invoke_id="node_1_inv_2", outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 2
+        # Both spans should exist independently
+        invoke_ids = {s.attributes.get(OJ_INVOKE_ID) for s in finished}
+        assert invoke_ids == {"node_1_inv_1", "node_1_inv_2"}
+
+
+class TestWorkflowIsolation:
+    """Test workflow isolation via workflow_id field (Problem B part 3).
+
+    When a new workflow starts with a different workflow_id, stale context
+    from the previous workflow should be cleaned.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+
+    async def test_different_workflow_id_cleans_stale_context(self):
+        """New workflow_id should clean old _layer_root_spans and _component_spans."""
+        # First workflow
+        await self.handler.on_call_start(
+            invoke_id="wf1_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Workflow 1"},
+        )
+        await self.handler.on_call_done(invoke_id="wf1_root", outputs={})
+
+        # Second workflow with different workflow_id
+        await self.handler.on_call_start(
+            invoke_id="wf2_root",
+            metadata={"workflow_id": "wf2", "workflow_name": "Workflow 2"},
+        )
+
+        # Internal state should be cleaned
+        assert "wf1_root" not in self.handler._layer_root_spans
+        assert self.handler._component_spans == {}
+
+        await self.handler.on_call_done(invoke_id="wf2_root", outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 2
+
+
+class TestMultiRoundConversationTraceContinuity:
+    """Test multi-round conversation trace continuity (Problem B core fix).
+
+    When a conversation has multiple rounds, the second round should pick up
+    the first round's context so sub-workflows can find their parent.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _setup(self):
+        _EXPORTER.clear()
+        self.handler = OtelWorkflowHandler(_OTEL_TRACER, OtelTracerConfig())
+
+    async def test_second_round_continues_same_trace(self):
+        """Second round continues the same trace within the same session.
+
+        The handler caches the OTel context from the first root span and
+        reuses it for subsequent root spans, ensuring all spans within the
+        same execution share one OTel trace.
+        """
+        # Round 1: root workflow with a component
+        await self.handler.on_call_start(
+            invoke_id="round1_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Round 1"},
+        )
+        await self.handler.on_call_start(
+            invoke_id="round1_comp",
+            metadata={
+                "component_id": "comp1",
+                "component_type": "LLM",
+                "workflow_id": "wf1",
+            },
+            parent_node_id="",
+        )
+        await self.handler.on_call_done(invoke_id="round1_comp", outputs={})
+        await self.handler.on_call_done(invoke_id="round1_root", outputs={})
+
+        # Round 2: same workflow_id, same session (continues trace)
+        await self.handler.on_call_start(
+            invoke_id="round2_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Round 2"},
+        )
+
+        # _layer_root_spans should be updated to round2_root
+        assert "" in self.handler._layer_root_spans
+        assert self.handler._layer_root_spans[""].invoke_id == "round2_root"
+
+        await self.handler.on_call_done(invoke_id="round2_root", outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        assert len(finished) == 3
+
+        # Verify round2_root continues the same trace as round1
+        round1_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round1_root"]
+        round2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "round2_root"]
+        assert len(round1_spans) == 1
+        assert len(round2_spans) == 1
+        assert round2_spans[0].parent is not None, "round2_root should have a parent span from round1"
+        # Both rounds share the same OTel trace
+        assert round1_spans[0].context.trace_id == round2_spans[0].context.trace_id, \
+            "round2_root should share the same OTel trace as round1_root"
+
+    async def test_new_session_clears_cached_context(self):
+        """A new session should clear cached context, starting a fresh trace."""
+        # Session 1: create root span
+        self.handler.set_session_id("session_1")
+        await self.handler.on_call_start(
+            invoke_id="s1_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Session 1"},
+        )
+        await self.handler.on_call_done(invoke_id="s1_root", outputs={})
+
+        # Session 2: new session clears cache
+        self.handler.set_session_id("session_2")
+        await self.handler.on_call_start(
+            invoke_id="s2_root",
+            metadata={"workflow_id": "wf1", "workflow_name": "Session 2"},
+        )
+        await self.handler.on_call_done(invoke_id="s2_root", outputs={})
+
+        finished = _EXPORTER.get_finished_spans()
+        s1_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "s1_root"]
+        s2_spans = [s for s in finished if s.attributes.get("openjiuwen.invoke_id") == "s2_root"]
+        assert len(s1_spans) == 1
+        assert len(s2_spans) == 1
+        # Different sessions get different traces
+        assert s1_spans[0].context.trace_id != s2_spans[0].context.trace_id, \
+            "Different sessions should have different OTel traces"
+
+

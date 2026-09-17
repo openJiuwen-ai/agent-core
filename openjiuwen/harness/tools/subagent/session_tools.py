@@ -16,7 +16,12 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.session.agent import Session
+from openjiuwen.core.single_agent.rail.base import (
+    current_usage_attribution,
+    current_usage_invocation_id,
+)
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.kv_cache import kv_cache_subagent_lifecycle
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -306,21 +311,34 @@ class SessionsSpawnTool(Tool):
                 StatusCode.TOOL_SESSION_TOOL_INVOKED,
                 reason="SessionSpawnTool requires a valid session in kwargs",
             )
-        parent_session_id = parent_session.get_session_id()
-        sub_session_id = f"{parent_session_id}_sub_{secrets.token_hex(4)}"
+        runtime_parent_session_id = parent_session.get_session_id()
+        affinity_enabled = kv_cache_subagent_lifecycle.affinity_enabled(self._parent_agent)
+        parent_cache_id = runtime_parent_session_id
+        if affinity_enabled:
+            parent_cache_id = kv_cache_subagent_lifecycle.resolve_subagent_parent_cache_id(
+                parent_session
+            )
+        sub_session_id = f"{runtime_parent_session_id}_sub_{secrets.token_hex(4)}"
 
         task_metadata = {
             "subagent_type": subagent_type,
             "task_description": task_description,
             "sub_session_id": sub_session_id,
-            "parent_session_id": parent_session_id,
+            "parent_session_id": parent_cache_id,
+            "delegation_id": task_id,
         }
+        parent_invocation_id = current_usage_invocation_id()
+        if parent_invocation_id:
+            task_metadata["parent_invocation_id"] = parent_invocation_id
+        parent_usage_attribution = current_usage_attribution()
+        if parent_usage_attribution:
+            task_metadata["parent_usage_attribution"] = parent_usage_attribution
         if browser_capabilities is not None:
             task_metadata["browser_capabilities"] = browser_capabilities
 
         await tm.add_task(
             CoreTask(
-                session_id=parent_session_id,
+                session_id=runtime_parent_session_id,
                 task_id=task_id,
                 task_type=SESSION_SPAWN_TASK_TYPE,
                 description=task_description,

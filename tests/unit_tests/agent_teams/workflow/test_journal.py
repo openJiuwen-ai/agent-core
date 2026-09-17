@@ -12,25 +12,26 @@ of ``workflow/engine/journal.py``. The journal's I/O methods (``load`` / ``use``
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
-from openjiuwen.agent_teams.workflow.engine.journal import Journal, key_str
+from openjiuwen.agent_teams.workflow.engine.journal import Journal, call_signature, key_str
 
 
-def _rec(path: list, sig: str = "s", result=None) -> dict:
+def _rec(path: list, sig: str = "s", result=None, run_id: str | None = None) -> dict:
     """Build a journal record whose ``key`` is the serialised structural path."""
     ks = key_str(path)
-    return {"key": ks, "sig": sig, "kind": "dict", "result": result or {"v": ks}}
+    return {"key": ks, "sig": sig, "run_id": run_id, "kind": "dict", "result": result or {"v": ks}}
 
 
 def _keys_in_file(path: Path) -> list[str]:
     return [json.loads(line)["key"] for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-async def _use_all(j: Journal, paths: list) -> None:
+async def _use_all(j: Journal, paths: list, run_id: str | None = None) -> None:
     for p in paths:
-        r = _rec(p)
+        r = _rec(p, run_id=run_id)
         await j.use(r["key"], r)
 
 
@@ -231,3 +232,211 @@ def test_finalize_keeps_wal_if_saved_journal_missing_a_used_record(tmp_path):
 
     asyncio.run(_run())
     assert wal.exists()
+
+
+# ---------------------------------------------------------------------------
+# run_id isolation — cache hit requires sig AND run_id match
+# ---------------------------------------------------------------------------
+
+def _rec_with_run_id(path: list, sig: str, run_id: str, result=None) -> dict:
+    """Record carrying an explicit ``run_id`` field (the new isolation key)."""
+    ks = key_str(path)
+    return {"key": ks, "sig": sig, "run_id": run_id, "kind": "dict", "result": result or {"v": ks}}
+
+
+def test_get_cached_requires_run_id_match():
+    """Same key + sig but different run_id → cache miss (no cross-run bleed)."""
+    j = Journal()
+    rec_a = _rec_with_run_id([["call", 0]], "s", "run-A")
+    j.prior[rec_a["key"]] = rec_a
+    # Run B reuses the same key + sig — must NOT hit A's record.
+    assert j.get_cached(rec_a["key"], "s", "run-B") is None
+    # Same run_id hits.
+    assert j.get_cached(rec_a["key"], "s", "run-A") is rec_a
+
+
+def test_get_cached_old_record_without_run_id_naturally_misses():
+    """A legacy record (no run_id field) does not match a run with a run_id set."""
+    j = Journal()
+    legacy = _rec([["call", 0]])  # no run_id field
+    j.prior[legacy["key"]] = legacy
+    # New run carries run_id → legacy (run_id=None) must not hit.
+    assert j.get_cached(legacy["key"], "s", "run-new") is None
+
+
+def test_get_cached_run_id_optional_backcompat():
+    """When run_id is None (caller omits it), the old sig-only behaviour holds."""
+    j = Journal()
+    rec = _rec([["call", 0]])  # no run_id field
+    j.prior[rec["key"]] = rec
+    # Caller passes no run_id (or None) → sig-only match, back-compat path.
+    assert j.get_cached(rec["key"], "s") is rec
+    assert j.get_cached(rec["key"], "s", None) is rec
+
+
+# ---------------------------------------------------------------------------
+# call_signature isolation folding
+# ---------------------------------------------------------------------------
+
+def test_call_signature_byte_stable_without_isolation():
+    """No isolation → the exact legacy byte sequence (existing caches stay valid).
+
+    The reference is the pre-change formula spelled out inline — a three-key
+    identity dict (phase/model default to None) over the same parts — so any
+    accidental re-key of the legacy path fails loudly here.
+    """
+    legacy = hashlib.sha256(
+        "\x00".join(
+            [
+                "task A",
+                json.dumps(
+                    {"label": "A", "model": None, "phase": None},
+                    sort_keys=True,
+                    ensure_ascii=False,
+                ),
+                json.dumps(None, sort_keys=True, ensure_ascii=False),
+            ]
+        ).encode("utf-8")
+    ).hexdigest()
+    assert call_signature("task A", {"label": "A"}, None) == legacy
+
+
+def test_call_signature_folds_isolation_when_set():
+    """isolation='worktree' re-keys the call; different isolation values differ too."""
+    plain = call_signature("task A", {"label": "A"}, None)
+    iso = call_signature("task A", {"label": "A", "isolation": "worktree"}, None)
+    assert iso != plain
+    # Explicit None is the same as absent (option bag strips None before opts).
+    assert call_signature("task A", {"label": "A", "isolation": None}, None) == plain
+
+
+# ---------------------------------------------------------------------------
+# run-level pause/seal records — written to journal, recovered by run_id
+# ---------------------------------------------------------------------------
+
+async def _write_pause(j: Journal, run_id: str, spent: int, phase_tokens: dict) -> None:
+    await j.write_run_record(run_id, "pause", {
+        "spent": spent, "phase_tokens": phase_tokens,
+        "budget_snapshot": None, "pause_reason": "paused",
+    })
+
+
+def test_write_run_record_persists_pause_and_finds_by_run_id():
+    """A pause record is written to the journal and found by run_id + type."""
+    j = Journal()
+    asyncio.run(_write_pause(j, "run-A", spent=1000, phase_tokens={"p1": 1000}))
+    rec = j.find_run_record("run-A", "pause")
+    assert rec is not None
+    assert rec["spent"] == 1000
+    assert rec["phase_tokens"] == {"p1": 1000}
+    assert rec["pause_reason"] == "paused"
+
+
+def test_find_run_record_misses_other_run_id():
+    """find_run_record returns None for a run_id with no such record."""
+    j = Journal()
+    asyncio.run(_write_pause(j, "run-A", spent=1000, phase_tokens={}))
+    assert j.find_run_record("run-B", "pause") is None
+    # seal not written for A either
+    assert j.find_run_record("run-A", "seal") is None
+
+
+def test_pause_record_survives_save_and_reload(tmp_path):
+    """A pause record round-trips through save → load (find_run_record recovers)."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _write():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]])  # a call record
+        await _write_pause(j, "run-A", spent=500, phase_tokens={"p": 500})
+        await j.save(str(journal))
+
+    asyncio.run(_write())
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    rec = loaded.find_run_record("run-A", "pause")
+    assert rec is not None
+    assert rec["spent"] == 500
+    # call record also recovered
+    assert loaded.get_cached(key_str([["call", 0]]), "s") is not None
+
+
+def test_seal_record_written_on_terminal():
+    """A seal record is written and findable — relaunch detects terminal via this."""
+    j = Journal()
+    asyncio.run(j.write_run_record("run-A", "seal", {"terminal_status": "completed", "final_spent": 2000}))
+    rec = j.find_run_record("run-A", "seal")
+    assert rec is not None
+    assert rec["terminal_status"] == "completed"
+    assert rec["final_spent"] == 2000
+
+
+def test_load_compacts_sealed_run_records_from_wal(tmp_path):
+    """Load drops WAL call records of sealed runs; unsealed ones survive."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]], run_id="run-A")  # run-A computes one call
+        await j.write_run_record("run-A", "seal", {"terminal_status": "completed"})
+        # run-B paused mid-run: its records must survive compaction
+        await _use_all(j, [[["call", 1]]], run_id="run-B")
+        await j.write_run_record("run-B", "pause", {"pause_reason": "paused"})
+        # No save/finalize — everything lives in the WAL only.
+
+    asyncio.run(_build())
+    lines_before = len(wal.read_text(encoding="utf-8").splitlines())
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    lines_after = len(wal.read_text(encoding="utf-8").splitlines())
+    # run-A's call record dropped; everything else (seal, pause, run-B call) kept.
+    assert lines_after == lines_before - 1
+    assert loaded.find_run_record("run-A", "seal") is not None
+    assert loaded.find_run_record("run-B", "pause") is not None
+    # Sealed call records are already unusable as hits (run_id mismatch), so
+    # dropping them from prior changes nothing observable for a fresh run.
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-new") is None
+    # Unsealed call record still recovers for run-B's cold resume.
+    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-B") is not None
+
+
+def test_load_compaction_keeps_wal_without_seals(tmp_path):
+    """No seal records in prior → WAL is left byte-identical (no rewrite)."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]])
+        await j.write_run_record("run-A", "pause", {"pause_reason": "paused"})
+
+    asyncio.run(_build())
+    before = wal.read_text(encoding="utf-8")
+    asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    assert wal.read_text(encoding="utf-8") == before
+
+
+def test_load_compaction_tolerates_torn_line_and_empty_result(tmp_path):
+    """A torn line survives compaction; dropping every call record empties the WAL cleanly."""
+    journal = tmp_path / "journal.jsonl"
+    wal = tmp_path / "journal.jsonl.wal"
+
+    async def _build():
+        j = await Journal.load(str(journal), wal_path=str(wal))
+        await _use_all(j, [[["call", 0]]], run_id="run-A")
+        await j.write_run_record("run-A", "seal", {"terminal_status": "stopped"})
+
+    asyncio.run(_build())
+    with open(wal, "a", encoding="utf-8") as f:
+        f.write('{"key": "torn')  # simulate crash mid-append
+    before_lines = [l for l in wal.read_text(encoding="utf-8").splitlines() if l]
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    text = wal.read_text(encoding="utf-8")
+    # The call record is dropped; the seal record and the torn line remain.
+    assert [l for l in text.splitlines() if l] == [before_lines[1], before_lines[-1]]
+    # Seal record still findable after the rewrite.
+    assert loaded.find_run_record("run-A", "seal") is not None
+

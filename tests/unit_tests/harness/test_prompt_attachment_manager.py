@@ -7,7 +7,15 @@ import pytest
 
 from openjiuwen.core.context_engine.context.context import SessionModelContext
 from openjiuwen.core.context_engine.schema.config import ContextEngineConfig
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import (
+    AssistantMessage,
+    LLMApiMode,
+    ModelClientConfig,
+    ProviderType,
+    SystemMessage,
+    ToolMessage,
+    UserMessage,
+)
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PROMPT_ATTACHMENT_HISTORY_METADATA_KEY,
@@ -48,7 +56,9 @@ async def test_prompt_attachment_manager_collect_render_and_update():
     assert [item.id for item in collected] == ["session.sess1.runtime", "session.sess1.memory"]
 
     rendered = manager.render(collected)
-    assert rendered.startswith("The following dynamic context is currently active.")
+    assert rendered.startswith("<system-reminder>\n")
+    assert "The following content does not represent the user's intent" in rendered
+    assert rendered.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in rendered
     assert "runtime rules" in rendered
     assert "memory content" in rendered
@@ -89,9 +99,12 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
 
     snapshot = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(snapshot, SystemMessage)
+    assert isinstance(snapshot, UserMessage)
     assert snapshot.metadata[PROMPT_ATTACHMENT_HISTORY_METADATA_KEY] is True
-    assert snapshot.content.startswith("The following dynamic context is currently active.")
+    assert snapshot.content.startswith("<system-reminder>\n")
+    assert "The following dynamic context is currently active." in snapshot.content
+    assert "The following content does not represent the user's intent" in snapshot.content
+    assert snapshot.content.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in snapshot.content
     assert "runtime v1" in snapshot.content
     assert "unchanged payload" in snapshot.content
@@ -121,11 +134,12 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
     await manager.update_content_by_id(runtime.id, content="runtime v2", session_id="sess1")
     delta = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(delta, SystemMessage)
-    assert delta.content.startswith("The following dynamic context has changed.")
+    assert isinstance(delta, UserMessage)
+    assert delta.content.startswith("<system-reminder>\n")
+    assert "The following dynamic context has changed." in delta.content
+    assert delta.content.endswith("\n</system-reminder>")
     assert "<prompt-attachment" not in delta.content
     assert "runtime v2" in delta.content
-    assert "<system-reminder>" not in delta.content
     assert "unchanged payload" not in delta.content
     assert len(context.get_messages()) == 3
     assert context.get_messages()[0].content == "query"
@@ -135,10 +149,11 @@ async def test_prompt_attachment_manager_persists_snapshot_then_only_deltas():
     await manager.clear_section(session_id="sess1", section="stable")
     removal = await manager.sync_to_context(context, "sess1")
 
-    assert isinstance(removal, SystemMessage)
+    assert isinstance(removal, UserMessage)
     assert "no longer active" in removal.content
     assert "- `stable`" in removal.content
     assert "<prompt-attachment" not in removal.content
+    assert removal.content.endswith("\n</system-reminder>")
     assert len(context.get_messages()) == 4
     assert context.get_messages()[-1].content == removal.content
 
@@ -166,7 +181,7 @@ async def test_prompt_attachment_snapshot_precedes_the_first_user_message():
     await context.add_messages(user_message)
 
     assert context.get_messages() == [snapshot, user_message]
-    assert isinstance(context.get_messages()[0], SystemMessage)
+    assert isinstance(context.get_messages()[0], UserMessage)
 
 
 @pytest.mark.asyncio
@@ -275,7 +290,7 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
 
     await manager.update_content_by_id(runtime.id, content="updated runtime", session_id="sess1")
     delta = await manager.sync_to_context(context, "sess1")
-    assert isinstance(delta, SystemMessage)
+    assert isinstance(delta, UserMessage)
 
     window = await context.get_context_window(
         system_messages=[SystemMessage(content="base system")],
@@ -286,6 +301,82 @@ async def test_prompt_attachment_manager_keeps_history_attachment_order_in_windo
     assert window.context_messages[-1].content == delta.content
     assert window.get_messages()[1].content == snapshot.content
     assert window.get_messages()[-1].content == delta.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "endpoint_profile", "api_mode", "use_system_role"),
+    [
+        (ProviderType.DeepSeek, None, LLMApiMode.ChatCompletions, False),
+        (ProviderType.DeepSeek, None, LLMApiMode.AnthropicMessages, False),
+        (ProviderType.DashScope, None, LLMApiMode.ChatCompletions, True),
+        (ProviderType.DashScope, None, LLMApiMode.AnthropicMessages, False),
+        (ProviderType.OpenAI, "dashscope", LLMApiMode.ChatCompletions, True),
+        (ProviderType.OpenAI, "dashscope", LLMApiMode.AnthropicMessages, False),
+        (ProviderType.OpenAI, "bailian", LLMApiMode.ChatCompletions, True),
+        (ProviderType.OpenAI, "openai", LLMApiMode.ChatCompletions, False),
+        (ProviderType.Anthropic, None, None, False),
+    ],
+)
+async def test_prompt_attachment_model_window_role_is_route_specific(
+    provider: ProviderType,
+    endpoint_profile: str | None,
+    api_mode: LLMApiMode | None,
+    use_system_role: bool,
+) -> None:
+    manager = PromptAttachmentManager(language="en")
+    await manager.add_section(
+        session_id="sess1",
+        section="runtime",
+        kind=PromptAttachmentKind.RUNTIME,
+        source="rail.runtime",
+        content="runtime context",
+    )
+    context = SessionModelContext(
+        "ctx1",
+        "sess1",
+        ContextEngineConfig(),
+        history_messages=[],
+        processors=[],
+    )
+    snapshot = await manager.sync_to_context(context, "sess1")
+    query = UserMessage(content="<system-reminder>user-authored text</system-reminder>")
+    assistant = AssistantMessage(content="previous answer")
+    await context.add_messages([query, assistant])
+
+    config = ModelClientConfig(
+        client_provider=provider,
+        api_key="test-key",
+        api_base="https://example.test/v1",
+        endpoint_profile=endpoint_profile,
+        api_mode=api_mode,
+    )
+    mutator = manager.build_model_window_mutator(
+        session_id="sess1",
+        model_client_config=config,
+    )
+    window = await context.get_context_window(
+        system_messages=[SystemMessage(content="base system")],
+        window_mutators=[mutator],
+    )
+
+    assert snapshot is not None
+    assert isinstance(snapshot, UserMessage)
+    assert isinstance(context.get_messages()[0], UserMessage)
+    assert context.get_messages()[0] is snapshot
+
+    if use_system_role:
+        assert window.system_messages == [SystemMessage(content="base system")]
+        assert isinstance(window.context_messages[0], SystemMessage)
+        assert window.context_messages[0].content == snapshot.content
+        assert window.context_messages[1:] == [query, assistant]
+    else:
+        assert window.system_messages == [SystemMessage(content="base system")]
+        assert window.context_messages == [snapshot, query, assistant]
+
+    assert window.get_messages()[0] == SystemMessage(content="base system")
+    assert query in window.context_messages
+    assert query not in window.system_messages
 
 
 def test_prompt_attachment_manager_render_truncates_large_content():
@@ -508,6 +599,8 @@ def test_prompt_attachment_plain_text_intro_is_rendered_only_with_attachments():
         ]
     )
 
+    assert rendered.startswith("<system-reminder>\n")
+    assert rendered.endswith("\n</system-reminder>")
     intro_index = rendered.index("The following dynamic context")
     content_index = rendered.index("runtime context")
     assert intro_index < content_index

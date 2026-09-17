@@ -23,7 +23,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Sequence
 
 import aiofiles
 
@@ -47,7 +47,11 @@ def _program_order(ks: str) -> list[int]:
     execution order.
     """
     coords: list[int] = []
-    for seg in json.loads(ks):
+    try:
+        segs = json.loads(ks)
+    except (json.JSONDecodeError, TypeError):
+        return coords  # unparseable key → stable-ish at front; should not happen
+    for seg in segs:
         for item in seg[1:]:  # drop kind (seg[0]); keep ordinal + integer sub-indices
             if isinstance(item, int):
                 coords.append(item)
@@ -67,14 +71,19 @@ def call_signature(
     before this parameter existed, so worker resume is unaffected. A stateful
     session turn folds its prior turns in, so a changed upstream turn cascades a
     re-run of every turn that depends on it.
+
+    ``isolation`` participates **only when set**: omitting it yields the exact
+    legacy byte sequence (existing caches stay valid), while flipping a call
+    to ``isolation='worktree'`` re-keys it. Without this, editing a script to
+    add isolation to an already-cached call would resume-hit the old record
+    and silently skip the worktree the caller now asked for.
     """
+    identity = {k: opts.get(k) for k in ("label", "phase", "model")}
+    if opts.get("isolation"):
+        identity["isolation"] = opts["isolation"]
     parts = [
         prompt,
-        json.dumps(
-            {k: opts.get(k) for k in ("label", "phase", "model")},
-            sort_keys=True,
-            ensure_ascii=False,
-        ),
+        json.dumps(identity, sort_keys=True, ensure_ascii=False),
         json.dumps(json_schema, sort_keys=True, ensure_ascii=False),
     ]
     if history:
@@ -117,12 +126,20 @@ class Journal:
         # loop stays free while one append runs.
         self._wal_lock = asyncio.Lock()
 
+    @property
+    def wal_path(self) -> str | None:
+        """WAL path this journal persists to; ``None`` means durability is off."""
+        return self._wal_path
+
     @staticmethod
     def _parse_records(text: str) -> "list[dict]":
         """Parse JSONL into records, tolerating a torn trailing line.
 
         A crash mid WAL-append can leave a partial final record; that line fails to
         parse and is skipped — its call simply re-executes on the next run.
+        Accepts both call records (keyed by structural path) and run-level
+        records (``pause`` / ``seal``), which carry a synthetic key of the form
+        ``__run__:{type}:{run_id}`` so they round-trip through ``load``.
         """
         records: list[dict] = []
         for line in text.splitlines():
@@ -145,19 +162,116 @@ class Journal:
         crashed prior run — so if the journal is missing or incomplete, the WAL's
         records still seed ``prior`` (last record wins across both sources). Reads
         are async (``aiofiles``) so they never stall the shared event loop.
+
+        After the replay the WAL is **compacted**: call records belonging to
+        *sealed* (terminal) runs are dropped. A sealed run can never be resumed
+        (the seal guard forces any relaunch onto a fresh run_id) and ``get_cached``
+        requires a run_id match, so its call records can never be replayed again —
+        they are pure bloat for sessions that repeatedly relaunch a script without
+        ever finalizing (F_40 已知遗留 "WAL 只增不自清"). Records of unsealed runs
+        and all run-level records (pause/seal) are kept: pause records are what a
+        cold resume looks up, seal records are what the seal guard reads, and an
+        unsealed run may still be resumed. The crash-durability invariant is
+        untouched — finalize remains the only full-WAL removal, and compaction
+        only shrinks the WAL to records no future load can serve. A failure
+        mid-compaction degrades to "WAL kept whole" (os.replace is atomic; a torn
+        line is tolerated by replay), never to losing recoverable work.
         """
         prior: dict[str, dict] = {}
-        for src in (path, wal_path):
+        wal_text: str | None = None
+        if wal_path and Path(wal_path).exists():
+            async with aiofiles.open(wal_path, "r", encoding="utf-8") as f:
+                wal_text = await f.read()
+        for src, text in ((path, None), (wal_path, wal_text)):
             if src and Path(src).exists():
-                async with aiofiles.open(src, "r", encoding="utf-8") as f:
-                    text = await f.read()
+                if text is None:
+                    async with aiofiles.open(src, "r", encoding="utf-8") as f:
+                        text = await f.read()
                 for rec in cls._parse_records(text):
                     prior[rec["key"]] = rec  # last record wins (WAL overlays journal)
-        return cls(prior, wal_path=wal_path)
+        journal = cls(prior, wal_path=wal_path)
+        if wal_text is not None:
+            await journal._compact_wal(wal_text)
+        return journal
 
-    def get_cached(self, ks: str, sig: str) -> dict | None:
+    async def _compact_wal(self, wal_text: str) -> None:
+        """Rewrite the WAL without sealed runs' call records (see :meth:`load`).
+
+        Called from :meth:`load`, before this run appends anything, so the
+        rewrite never races the caller's own appends. A concurrent same-name
+        run's append landing between the read above and the ``os.replace`` would
+        be lost — that equals the already-tolerated torn-line severity (the call
+        simply recomputes on its next resume), never a correctness break.
+        """
+        sealed = {rec.get("run_id") for rec in self.prior.values() if rec.get("type") == "seal"}
+        sealed.discard(None)
+        if not sealed:
+            return
+        kept: list[str] = []
+        dropped = 0
+        for line in wal_text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                kept.append(line)  # torn line: keep bytes; replay skips it anyway
+                continue
+            if not isinstance(rec, dict) or "key" not in rec:
+                kept.append(line)
+                continue
+            if rec.get("type") in ("pause", "seal"):
+                kept.append(json.dumps(rec, ensure_ascii=False))
+                continue
+            if rec.get("run_id") in sealed:
+                dropped += 1
+                continue
+            kept.append(json.dumps(rec, ensure_ascii=False))
+        if not dropped:
+            return
+        tmp = f"{self._wal_path}.tmp"
+        async with aiofiles.open(tmp, "w", encoding="utf-8") as f:
+            await f.write(("\n".join(kept) + "\n") if kept else "")
+            await f.flush()
+        os.replace(tmp, self._wal_path)
+
+    def get_cached(self, ks: str, sig: str, run_id: str | None = None) -> dict | None:
+        """Return the cached record if both ``sig`` and ``run_id`` match.
+
+        ``run_id`` is an independent isolation key (NOT folded into the sig hash):
+        two runs of the same script with the same prompt produce the same ``sig``,
+        but a record written under ``run_id="A"`` must not be served to
+        ``run_id="B"``. A legacy record with no ``run_id`` field (``None``) never
+        matches a run that carries a non-``None`` ``run_id`` — it naturally misses
+        without error.
+
+        When ``run_id`` is ``None`` (the caller omits it), the old sig-only
+        behaviour holds for back-compat (e.g. callers not yet threaded through).
+        """
         rec = self.prior.get(ks)
-        return rec if rec is not None and rec.get("sig") == sig else None
+        if rec is None or rec.get("sig") != sig:
+            return None
+        # run_id isolation: a non-None query run_id must equal the record's
+        # run_id. A record missing run_id (None) and a non-None query miss.
+        if run_id is not None and rec.get("run_id") != run_id:
+            return None
+        return rec
+
+    def find_run_record(self, run_id: str, record_type: str) -> dict | None:
+        """Find the latest record of ``record_type`` (``"pause"`` / ``"seal"``) for ``run_id``.
+
+        Used to recover budget state on resume (pause record) or detect a
+        terminal prior run (seal record → force a fresh run_id on relaunch).
+        Returns the last match in insertion order (WAL overlay semantics: a
+        later record of the same type supersedes an earlier one). ``None`` when
+        no such record exists (first run, or a different run_id).
+        """
+        found = None
+        for rec in self.prior.values():
+            if rec.get("run_id") == run_id and rec.get("type") == record_type:
+                found = rec  # last one wins (dict iteration = insertion order)
+        return found
 
     async def use(self, ks: str, record: dict) -> None:
         """Record a used result, durably appending FRESH ones to the WAL first.
@@ -170,6 +284,25 @@ class Journal:
         if self.prior.get(ks) is not record:
             await self._append_wal(record)
         self.used[ks] = record
+
+    async def write_run_record(self, run_id: str, record_type: str, payload: dict) -> None:
+        """Write a run-level record (``pause`` / ``seal``) to the journal + WAL.
+
+        Unlike call records, these carry no structural call path — they are a
+        run-wide snapshot keyed by a synthetic path ``[["__run__", ord,
+        record_type, run_id]]``. A high ordinal (``sys.maxsize``) sorts them after every call
+        in program order, so they land at the tail of a saved journal exactly
+        where a terminal/mid-run snapshot belongs. ``payload`` is merged onto the
+        ``type`` / ``run_id`` envelope before persistence.
+        """
+        import sys
+        ks = key_str([["__run__", sys.maxsize, record_type, run_id]])
+        rec = {"key": ks, "type": record_type, "run_id": run_id, **payload}
+        await self._append_wal(rec)
+        self.used[ks] = rec
+        # Also surface in ``prior`` so same-run lookups (find_run_record) see it
+        # without a reload — matching how cache-hit call records live in both.
+        self.prior[ks] = rec
 
     async def _append_wal(self, record: dict) -> None:
         """Durably append one fresh record to the WAL (crash-safe checkpoint).

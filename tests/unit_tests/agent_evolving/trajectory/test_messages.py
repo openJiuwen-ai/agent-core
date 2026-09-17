@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +14,10 @@ from openjiuwen.agent_evolving.trajectory.messages import (
     trajectory_to_messages,
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
 
 
@@ -47,18 +49,10 @@ def _llm_span(
     prompt: list[dict],
     completion: dict | None = None,
 ) -> dict:
-    attributes: dict = {}
-    for index, message in enumerate(prompt):
-        for field, value in message.items():
-            attributes[f"{semconv.GEN_AI_PROMPT}.{index}.{field}"] = (
-                json.dumps(value, ensure_ascii=False) if field == "tool_calls" else value
-            )
-    if completion is not None:
-        for field, value in completion.items():
-            if field == "tool_calls":
-                attributes[semconv.GEN_AI_TOOL_CALLS] = json.dumps(value, ensure_ascii=False)
-            else:
-                attributes[f"{semconv.GEN_AI_COMPLETION}.0.{field}"] = value
+    attributes: dict = write_llm_exchange(
+        prompt,
+        [] if completion is None else [completion],
+    )
     return _span(span_id, start=start, attributes=attributes)
 
 
@@ -71,7 +65,7 @@ def _trajectory(spans: list[dict]) -> Trajectory:
                         "attributes": attributes_from_map(
                             {
                                 "openjiuwen.trajectory_id": "trajectory-1",
-                                semconv.AT_SESSION_ID: "session-1",
+                                semconv.GEN_AI_CONVERSATION_ID: "session-1",
                             }
                         )
                     },
@@ -186,15 +180,15 @@ def test_normalizes_tool_calls_and_links_results_only_by_id() -> None:
         start=20,
         name="tool.search",
         attributes={
-            semconv.GEN_AI_TOOL_ID: "call-1",
-            semconv.GEN_AI_TOOL_OUTPUT: {"ok": True},
+            semconv.GEN_AI_TOOL_CALL_ID: "call-1",
+            semconv.GEN_AI_TOOL_CALL_RESULT: {"ok": True},
         },
     )
     unlinked_tool = _span(
         "tool-2",
         start=30,
         name="tool.search",
-        attributes={semconv.GEN_AI_TOOL_OUTPUT: "same-name output"},
+        attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "same-name output"},
     )
 
     messages = trajectory_to_messages(_trajectory([unlinked_tool, linked_tool, llm]))

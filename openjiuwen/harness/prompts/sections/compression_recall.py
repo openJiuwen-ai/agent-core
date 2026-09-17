@@ -37,5 +37,5 @@ def build_compression_recall_section(language: str = "cn") -> PromptSection:
     return PromptSection(
         name="compression_recall",
         content={selected_language: _HINTS[selected_language]},
-        priority=90,
+        priority=93,
     )

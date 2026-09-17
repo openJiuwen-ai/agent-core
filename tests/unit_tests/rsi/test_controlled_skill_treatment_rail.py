@@ -14,7 +14,7 @@ from openjiuwen.core.single_agent.rail.base import (
     ModelCallInputs,
     ToolCallInputs,
 )
-from openjiuwen.rsi.evaluator.controlled_skill_treatment_rail import (
+from openjiuwen.rsi.harness_rsi.evaluator.controlled_skill_treatment_rail import (
     ControlledSkillTreatmentRail,
 )
 

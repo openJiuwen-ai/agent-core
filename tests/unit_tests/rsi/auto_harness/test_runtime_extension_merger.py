@@ -9,11 +9,11 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.infra.runtime_extension_merger import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.runtime_extension_merger import (
     MergedExtensionError,
     merge_runtime_extensions,
 )
-from openjiuwen.rsi.auto_harness.schema import RuntimeExtensionArtifact
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import RuntimeExtensionArtifact
 
 
 def _write_minimal_ext(

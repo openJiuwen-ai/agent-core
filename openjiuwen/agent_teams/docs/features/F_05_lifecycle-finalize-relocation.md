@@ -167,7 +167,7 @@ manager 未懒构造、session 不匹配都退化成 no-op + warning，不影响
 让 kernel 在 stop 路径里把所有 teammate 直接标 SHUTDOWN，与 `shutdown_self` 对齐。
 
 否决理由：
-1. teammate 持久态从此一并被 kernel 写——但 `recover_team` 会被 kernel.start 的"全员 SHUTDOWN → clean_team"自保撤销整个团队。外部 `stop_team` 应当"team 仍 live、可以再 recover"，写 SHUTDOWN 等于把团队解散。
+1. teammate 持久态从此一并被 kernel 写——但 `recover_team` 会被 kernel.start 的"全员 SHUTDOWN → clean_team"自保撤销整个团队。外部 `stop_team` 应当"team 仍 live、可以再 recover"，写 SHUTDOWN 等于把团队解散。（**历史注**：那条自保分支已在 [[F_81]] 中删除，本条的具体机制不再存在；否决结论不受影响——`SHUTDOWN` 谎报永久退场这一点由下面的理由 2 独立支撑。）
 2. 与 `stop_team` 真实语义不符。`SHUTDOWN` 是逻辑退场，不是"runtime 暂停"。这就是 `STOPPED` 状态存在的全部理由。
 
 ### C. 给 dispatch 加 `pool_entry.current_session_id == target_session_id` 的早 reject

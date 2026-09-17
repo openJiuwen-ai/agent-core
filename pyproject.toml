@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openjiuwen"
-version = "0.1.17"
+version = "0.1.18"
 description = "openJiuwen agent-core is a feature-rich AI agent SDK for developing, running, tuning, and improving your AI agents."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
@@ -32,6 +32,14 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.41",
     "sqlmodel>=0.0.37",
     # AI/LLM
+    # Pinned exactly, not floored: `openjiuwen.rsi.artifact_rsi.program_opt`
+    # vendors the PUCT port out of agentdescent's `examples/` (which the wheel
+    # does not package) and imports internals around it (`FlatPuct`,
+    # `Candidate.prior`, `AggregatorConfig`, `vv_staleness`, `Ledger`,
+    # `get_policy`). None of those promise stability across releases, so a
+    # floor would let a minor bump move the algorithm the vendored code is
+    # written against.
+    "agentdescent==0.4.6",
     "anthropic>=0.120.2",
     "openai>=1.108.0",
     "transformers>=4.52.4",
@@ -40,7 +48,7 @@ dependencies = [
     # Vector database (2.6.10 changed interface)
     "pymilvus>=2.6.2,<2.6.10",
     # MCP server
-    "fastmcp>=2.14.2,<3.0",
+    "fastmcp>=2.14.2,<4.0",
     "mcp>=1.26.0",
     # Document processing
     "beautifulsoup4>=4.12.0",
@@ -66,6 +74,11 @@ dependencies = [
     "loguru>=0.7.3",
     "gitcode-api>=1.2.20",
     "pyoxigraph>=0.5.8",
+    "matplotlib>=3.11.1",
+    # OpenTelemetry SDK is imported unconditionally by openjiuwen.agent_evolving;
+    # under fastmcp 2.x it was provided transitively, but fastmcp 3.x (fastmcp-slim)
+    # no longer pulls it, so declare it explicitly to keep imports working.
+    "opentelemetry-sdk>=1.25.0",
 ]
 
 # A2A: required for `openjiuwen.remote_clients` / `openjiuwen.server_adapters` A2A entry
@@ -91,6 +104,9 @@ jiuwen-memory = ["JiuwenMemory>=0.1.0", "httpx>=0.24"]
 agentarts = ["agentarts-sdk>=0.1.2,<0.2"]
 claude = ["claude-agent-sdk>=0.2.115"]
 codex = ["openai-codex>=0.144.4"]
+# The SDK has only ever published pre-releases; the lower bound names one so
+# PEP 440 lets a resolver pick it up at all. Import name stays `deepseek_harness`.
+dsh = ["deepseek-harness-sdk>=0.1.5rc1"]
 ssh = ["asyncssh>=2.24.0"]
 tracer-otel = [
     "opentelemetry-api>=1.25.0",
@@ -106,6 +122,7 @@ mobile-gui = [
 ]
 
 online-rl = [
+    "openjiuwen[redis]",
     "fastapi>=0.100",
     "uvicorn[standard]",
     "httpx>=0.24",
@@ -172,6 +189,7 @@ A2A = "openjiuwen.extensions.a2a.a2a_server_adapter:A2AServerAdapter"
 openjiuwen = "openjiuwen.harness.cli.cli:cli"
 team-member = "openjiuwen.agent_teams.skill.cli:run"
 openjiuwen-team-mcp = "openjiuwen.agent_teams.mcp.server:main"
+openjiuwen-rl-service = "openjiuwen.agent_evolving.agent_rl.online.service:main"
 
 [project.urls]
 Homepage = "https://openjiuwen.com"
@@ -194,6 +212,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/harness/resources/*.yaml",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "symphony/README.md",
@@ -225,6 +244,7 @@ line-length = 120
 target-version = "py311"
 
 [tool.ruff.lint]
+select = ["E", "F", "I", "ASYNC"]
 # E203 (whitespace before ':') intentionally allowed everywhere: ``ruff
 # format`` (Black style) inserts a space before ``:`` in slices that contain
 # non-trivial expressions (e.g. ``s[len(prefix) :]``), and Black's official

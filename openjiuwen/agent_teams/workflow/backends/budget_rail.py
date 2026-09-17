@@ -25,7 +25,13 @@ from openjiuwen.core.single_agent.rail.base import (
 
 
 class SwarmflowBudgetRail(AgentRail):
-    """Bill one agent's model calls to the run's ledger; stop it when dry.
+    """Bill one agent's model calls to both ledgers; stop it when either runs dry.
+
+    The session-wide ``budget`` never resets; the per-run ``workflow_budget``
+    resets on each ``swarmflow`` invocation. The same tokens go to each —
+    independent counters, not a sum. The engine's entry gates tell the two
+    apart by ``BudgetExhausted.scope`` (``"workflow"`` retryable, ``"session"``
+    not).
 
     Attributes:
         call_tokens: Tokens this agent has reported so far — the backend reads
@@ -36,9 +42,10 @@ class SwarmflowBudgetRail(AgentRail):
     #: cannot pay for should be refused before anything else prepares for it.
     priority: int = 950
 
-    def __init__(self, budget: BudgetLedger) -> None:
+    def __init__(self, budget: BudgetLedger, workflow_budget: BudgetLedger | None = None) -> None:
         super().__init__()
         self._budget = budget
+        self._wf_budget = workflow_budget
         self.call_tokens: int = 0
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
@@ -50,7 +57,7 @@ class SwarmflowBudgetRail(AgentRail):
         self._stop_if_exhausted(ctx, "before")
 
     async def after_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Bill the call that just returned, then stop if that emptied the pot."""
+        """Bill the call that just returned, then stop if that emptied a pot."""
         inputs = ctx.inputs
         if not isinstance(inputs, ModelCallInputs):
             return
@@ -58,32 +65,52 @@ class SwarmflowBudgetRail(AgentRail):
         tokens = _usage_tokens(inputs.response)
         if tokens > 0:
             self.call_tokens += tokens
-            self._budget.add(tokens)
+            self._budget.add(tokens)            # session-wide (nested double-count)
+            if self._wf_budget is not None:
+                self._wf_budget.add(tokens)     # per-run (same tokens, second ledger)
         self._stop_if_exhausted(ctx, "after")
 
     def _stop_if_exhausted(self, ctx: AgentCallbackContext, when: str) -> None:
-        """End this agent's round when the ledger has nothing left.
+        """End this agent's round when either ledger has nothing left.
 
         A force-finish rather than an exception: the run is over budget, not
         broken, so the work done so far is kept and returned normally. The
         engine's own gate then stops the *next* ``agent()`` from starting.
+        Session wins over workflow when both are dry (terminal, not retryable).
         """
-        if not self._budget.exhausted:
+        if self._budget.exhausted:
+            team_logger.warning(
+                "[swarmflow] session token budget exhausted ({}/{}); finishing agent round ({} model call)",
+                self._budget.spent,
+                self._budget.total,
+                when,
+            )
+            ctx.request_force_finish(
+                {
+                    "reason": (
+                        f"swarmflow session token budget exhausted "
+                        f"({self._budget.spent}/{self._budget.total})"
+                    ),
+                    "exhausted_ledger": "session",
+                }
+            )
             return
-        team_logger.warning(
-            "[swarmflow] token budget exhausted ({}/{}); finishing agent round ({} model call)",
-            self._budget.spent,
-            self._budget.total,
-            when,
-        )
-        ctx.request_force_finish(
-            {
-                "reason": (
-                    f"swarmflow token budget exhausted "
-                    f"({self._budget.spent}/{self._budget.total})"
-                )
-            }
-        )
+        if self._wf_budget is not None and self._wf_budget.exhausted:
+            team_logger.warning(
+                "[swarmflow] workflow token budget exhausted ({}/{}); finishing agent round ({} model call)",
+                self._wf_budget.spent,
+                self._wf_budget.total,
+                when,
+            )
+            ctx.request_force_finish(
+                {
+                    "reason": (
+                        f"swarmflow workflow token budget exhausted "
+                        f"({self._wf_budget.spent}/{self._wf_budget.total})"
+                    ),
+                    "exhausted_ledger": "workflow",
+                }
+            )
 
 
 def _usage_tokens(response: object | None) -> int:

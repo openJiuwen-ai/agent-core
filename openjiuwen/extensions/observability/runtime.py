@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 import threading
+import warnings
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
@@ -14,6 +15,7 @@ from typing import Any
 from opentelemetry import trace
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import SpanLimits, SpanProcessor, TracerProvider
+
 from opentelemetry.sdk.trace.export import (
     BatchSpanProcessor,
     ConsoleSpanExporter,
@@ -25,9 +27,20 @@ from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
 from openjiuwen.core.common.exception.codes import StatusCode as ErrStatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.runner.callback.events import AgentEvents, LLMCallEvents, ToolCallEvents
+from openjiuwen.core.runner.callback.events import AgentEvents, ContextEvents, LLMCallEvents, ToolCallEvents
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
+from openjiuwen.extensions.observability.context_compression_handler import (
+    ContextCompressionObservabilityBridge,
+)
+from openjiuwen.extensions.observability.exporters.langfuse import (
+    LangfuseExporterConfig,
+    build_langfuse_span_exporter,
+    project_langfuse_span,
+)
+from openjiuwen.extensions.observability.exporters.transforming import (
+    TransformingSpanExporter,
+)
 from openjiuwen.extensions.observability.file_exporter import TraceFileExporter
 from openjiuwen.extensions.observability.span_context import (
     ActiveSpanTracker,
@@ -97,6 +110,7 @@ class ObservabilityRuntime:
         self._additional_processors: list[SpanProcessor] = []
         self._tracker: ActiveSpanTracker | None = None
         self._callback_handler: OtelCallbackHandler | None = None
+        self._context_compression_handler: ContextCompressionObservabilityBridge | None = None
         self._registered_callbacks: list[tuple[str, Any]] = []
         self._callback_framework: Any | None = None
         self._callback_namespace = "extensions.observability"
@@ -160,8 +174,14 @@ class ObservabilityRuntime:
                     config,
                     tracer=provider.get_tracer("openjiuwen.extensions.observability"),
                 )
+                context_compression_handler = ContextCompressionObservabilityBridge(
+                    tracer=provider.get_tracer("openjiuwen.extensions.observability.context"),
+                )
                 self._callback_handler = callback_handler
-                self._register_callbacks(self._callback_pairs(callback_handler))
+                self._context_compression_handler = context_compression_handler
+                self._register_callbacks(
+                    self._callback_pairs(callback_handler, context_compression_handler)
+                )
                 try:
                     trace.set_tracer_provider(provider)
                 except Exception as exc:
@@ -177,6 +197,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 set_active_span_tracker(None)
                 self._additional_processors.clear()
                 raise
@@ -243,6 +264,7 @@ class ObservabilityRuntime:
                 self._config = None
                 self._tracker = None
                 self._callback_handler = None
+                self._context_compression_handler = None
                 if get_active_span_tracker() is tracker:
                     set_active_span_tracker(None)
                 self._additional_processors.clear()
@@ -253,12 +275,25 @@ class ObservabilityRuntime:
             return self._tracker
 
     @staticmethod
-    def _callback_pairs(handler: OtelCallbackHandler) -> list[tuple[str, Any]]:
+    def _callback_pairs(
+        handler: OtelCallbackHandler,
+        context_compression_handler: ContextCompressionObservabilityBridge,
+    ) -> list[tuple[str, Any]]:
         """Return the framework events handled by the common callback rail."""
         return [
             (LLMCallEvents.LLM_INVOKE_INPUT, handler.on_llm_invoke_input),
+            (
+                LLMCallEvents.LLM_INVOKE_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
             (LLMCallEvents.LLM_STREAM_INPUT, handler.on_llm_stream_input),
+            (
+                LLMCallEvents.LLM_STREAM_INPUT,
+                context_compression_handler.on_llm_request_input,
+            ),
+            (LLMCallEvents.LLM_INPUT, handler.on_llm_input),
             (LLMCallEvents.LLM_STREAM_OUTPUT, handler.on_llm_stream_output),
+            (LLMCallEvents.LLM_STREAM_COMPLETED, handler.on_llm_stream_completed),
             (LLMCallEvents.LLM_INVOKE_OUTPUT, handler.on_llm_invoke_output),
             (LLMCallEvents.LLM_OUTPUT, handler.on_llm_output),
             (LLMCallEvents.LLM_CALL_ERROR, handler.on_llm_call_error),
@@ -269,6 +304,10 @@ class ObservabilityRuntime:
             (AgentEvents.AGENT_INVOKE_OUTPUT, handler.on_agent_invoke_output),
             (AgentEvents.AGENT_STREAM_INPUT, handler.on_agent_stream_input),
             (AgentEvents.AGENT_STREAM_OUTPUT, handler.on_agent_stream_output),
+            (
+                ContextEvents.CONTEXT_COMPRESSION_STATE,
+                context_compression_handler.on_context_compression_state,
+            ),
         ]
 
     def _register_callbacks(
@@ -357,14 +396,23 @@ class ObservabilityRuntime:
 
 def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
     """Construct the exporter selected by the configuration."""
-    if config.exporter == "console":
+    resolved = resolve_exporter_selection(config)
+    if resolved == "console":
         return ConsoleSpanExporter()
-    if config.exporter == "file":
-        return TraceFileExporter(
-            root_dir=config.traces_dir,
-            retention_days=config.file_retention_days,
+    if resolved == "file":
+        # The file exporter is the file WAL for Langfuse ingestion: it is
+        # wrapped in the same projection the ``langfuse`` exporter sends, so
+        # its OTLP JSON lines match what Langfuse would receive.
+        return wrap_langfuse_projection(
+            TraceFileExporter(
+                root_dir=config.traces_dir,
+                retention_days=config.file_retention_days,
+            ),
+            LangfuseExporterConfig.from_observability_config(config),
         )
-    if config.exporter == "otlp_grpc":
+    if resolved == "langfuse":
+        return build_langfuse_span_exporter(config)
+    if resolved == "otlp_grpc":
         from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 
         return OTLPSpanExporter(
@@ -372,7 +420,7 @@ def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
             insecure=True,
             headers=build_auth_headers(config),
         )
-    if config.exporter == "otlp_http":
+    if resolved == "otlp_http":
         from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
             OTLPSpanExporter as HttpExporter,
         )
@@ -380,8 +428,37 @@ def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
         return HttpExporter(endpoint=config.endpoint, headers=build_auth_headers(config))
     raise build_error(
         ErrStatusCode.PARAM_INVALID_ERROR,
-        msg=f"unsupported observability exporter: {config.exporter}",
+        msg=f"unsupported observability exporter: {resolved}",
     )
+
+
+def wrap_langfuse_projection(
+    exporter: SpanExporter,
+    langfuse_config: LangfuseExporterConfig,
+) -> SpanExporter:
+    """Wrap one exporter behind the shared Langfuse span projection."""
+    return TransformingSpanExporter(
+        exporter,
+        transform=lambda span: project_langfuse_span(span, langfuse_config),
+    )
+
+
+def resolve_exporter_selection(config: ObservabilityConfig) -> str:
+    """Resolve the effective exporter, translating the deprecated ``backend``.
+
+    ``backend`` is translated to ``exporter`` exactly once, here in the
+    initialization stage, and emits a deprecation warning. The translated
+    value is never handed to the collection layer (callback/bridge/rail)
+    and never influences telemetry shape.
+    """
+    if config.backend == "langfuse":
+        warnings.warn(
+            "ObservabilityConfig.backend is deprecated; use exporter='langfuse' instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return "langfuse"
+    return config.exporter
 
 
 def build_auth_headers(config: ObservabilityConfig) -> dict[str, str]:
@@ -397,4 +474,5 @@ __all__ = [
     "SafeSpanProcessor",
     "build_auth_headers",
     "build_span_exporter",
+    "resolve_exporter_selection",
 ]

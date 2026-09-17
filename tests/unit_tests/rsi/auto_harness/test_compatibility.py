@@ -3,7 +3,7 @@
 """Compatibility tests for the relocated AutoHarness package."""
 
 import openjiuwen.auto_harness as legacy_auto_harness
-import openjiuwen.rsi.auto_harness as rsi_auto_harness
+import openjiuwen.rsi.harness_rsi.auto_harness as rsi_auto_harness
 
 
 def test_legacy_package_reexports_rsi_public_api():

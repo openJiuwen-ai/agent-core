@@ -90,7 +90,7 @@ def test_build_runtime_settings_respects_env_overrides() -> None:
             "OPENROUTER_API_KEY": "test-key",
             "MODEL_NAME": "google/gemini-3.1-pro-preview",
             "BROWSER_TIMEOUT_S": "45",
-            "PLAYWRIGHT_MCP_ARGS": '["-y", "@playwright/mcp@latest", "--headless"]',
+            "PLAYWRIGHT_MCP_ARGS": '["-y", "@playwright/mcp@0.0.78", "--headless"]',
         },
         clear=True,
     ):
@@ -102,7 +102,7 @@ def test_build_runtime_settings_respects_env_overrides() -> None:
         assert settings.guardrails.timeout_s == 45
         assert settings.mcp_cfg.params["args"] == [
             "-y",
-            "@playwright/mcp@latest",
+            "@playwright/mcp@0.0.78",
             "--headless",
             "--caps=pdf,vision,devtools,config,network,storage,testing",
         ]
@@ -128,14 +128,14 @@ def test_model_policy_capabilities_are_not_forwarded_as_playwright_caps() -> Non
 def test_build_playwright_mcp_config_preserves_other_capabilities() -> None:
     with patch.dict(
         os.environ,
-        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest --caps=vision,devtools"},
+        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@0.0.78 --caps=vision,devtools"},
         clear=True,
     ):
         cfg = build_playwright_mcp_config()
 
     assert cfg.params["args"] == [
         "-y",
-        "@playwright/mcp@latest",
+        "@playwright/mcp@0.0.78",
         "--caps=vision,devtools,pdf,config,network,storage,testing",
     ]
 
@@ -143,20 +143,20 @@ def test_build_playwright_mcp_config_preserves_other_capabilities() -> None:
 def test_build_playwright_mcp_config_deduplicates_capabilities() -> None:
     with patch.dict(
         os.environ,
-        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@latest --caps pdf,vision,pdf"},
+        {"PLAYWRIGHT_MCP_ARGS": "-y @playwright/mcp@0.0.78 --caps pdf,vision,pdf"},
         clear=True,
     ):
         cfg = build_playwright_mcp_config()
 
     assert cfg.params["args"] == [
         "-y",
-        "@playwright/mcp@latest",
+        "@playwright/mcp@0.0.78",
         "--caps=pdf,vision,devtools,config,network,storage,testing",
     ]
 
 
 def test_parse_command_args_accepts_json_list() -> None:
-    assert parse_command_args('["-y", "@playwright/mcp@latest"]') == ["-y", "@playwright/mcp@latest"]
+    assert parse_command_args('["-y", "@playwright/mcp@0.0.78"]') == ["-y", "@playwright/mcp@0.0.78"]
 
 
 def test_extract_json_object_handles_fenced_json() -> None:

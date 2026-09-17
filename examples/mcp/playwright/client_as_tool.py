@@ -33,7 +33,7 @@ SERVER_NAME = "browser-playwright-server"
 # from mcp import StdioServerParameters
 # STDIO_PARAMS = StdioServerParameters(
 #     command="npx",
-#     args=["@playwright/mcp@latest", "--headless"],
+#     args=["@playwright/mcp@0.0.78", "--headless"],
 # )
 
 

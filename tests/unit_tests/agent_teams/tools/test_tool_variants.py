@@ -185,7 +185,10 @@ async def test_send_message_variant_narrows_to_enum(db):
     )
     leader_send = _by_name(leader_tools, "send_message")
     assert isinstance(leader_send, SendMessageTool)
-    assert "anyOf" in leader_send.card.input_params["properties"]["to"]
+    leader_properties = leader_send.card.input_params["properties"]
+    assert leader_properties["to"]["type"] == "string"
+    assert leader_properties["targets"]["type"] == "array"
+    assert "anyOf" not in leader_properties["to"]
 
     member_tools = create_team_tools(
         role="teammate", agent_team=_backend(db, DEV_1, False), dispatch_mode="scheduled"
@@ -194,6 +197,7 @@ async def test_send_message_variant_narrows_to_enum(db):
     assert isinstance(member_send, ReportToLeaderTool)
     to_schema = member_send.card.input_params["properties"]["to"]
     assert "anyOf" not in to_schema
+    assert "targets" not in member_send.card.input_params["properties"]
     # The enum is role words, not the concrete leader member_name.
     assert to_schema["enum"] == ["leader", "user"]
     assert LEADER_NAME not in to_schema["enum"]
@@ -273,9 +277,9 @@ async def test_report_to_leader_rejects_peers_at_invoke(db):
     broadcast = await send.invoke({"to": "*", "content": "hi all"})
     assert not broadcast.success
 
-    multicast = await send.invoke({"to": [DEV_2], "content": "hi"})
+    multicast = await send.invoke({"targets": [DEV_2], "content": "hi"})
     assert not multicast.success
-    assert "must be a string" in multicast.error
+    assert "not supported" in multicast.error
 
     # The role word resolves to the real leader and delivers.
     to_leader = await send.invoke({"to": "leader", "content": "done"})

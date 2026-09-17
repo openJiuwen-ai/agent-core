@@ -6,7 +6,8 @@ When ``ContextEngineConfig.enable_context_debug`` (or a processor-local
 ``enable_compression_dump`` / ``enable_debug_dump``) is on, the forked
 processors call :func:`write_debug_record` to persist a single JSONL record
 describing one stage of the compression/offload pipeline — a threshold
-check, a span split, a compression retry, a before/after diff, etc.
+check, a span split, a compression retry, a before/after diff, etc.  The
+ReAct agent uses the same writer for the final outbound model payload.
 
 All filesystem errors are swallowed so tracing never breaks the context
 pipeline.
@@ -65,6 +66,89 @@ def write_debug_record(
         logger.warning("[%s] failed to write context debug record: %s", processor_type, exc, exc_info=True)
         return None
     return log_path
+
+
+def write_llm_request_record(
+    context: ModelContext,
+    *,
+    enabled: bool,
+    dump_dir: str | None,
+    model: str | None,
+    provider: str | None,
+    request_id: str | None,
+    sequence: int | None,
+    messages: Any,
+    tools: Any,
+    context_window_tokens: int | None,
+    system_message_count: int | None = None,
+    context_message_count: int | None = None,
+    statistic: Any = None,
+    usage_report: Any = None,
+) -> str | None:
+    """Persist the exact message/tool payload about to be sent to an LLM.
+
+    This is intentionally opt-in because the payload can contain user data,
+    tool results, and system instructions.  The record is kept in the same
+    context-debug directory as the processor traces, but uses a stable
+    ``llm_request.jsonl`` filename so it is easy to inspect independently.
+    """
+    message_items = _as_debug_sequence(messages)
+    tool_items = _as_debug_sequence(tools)
+    return write_debug_record(
+        context,
+        processor_type="llm_request",
+        event="pre_call",
+        enabled=enabled,
+        dump_dir=dump_dir,
+        request_id=request_id,
+        sequence=sequence,
+        model=model,
+        provider=provider,
+        context_window_tokens=context_window_tokens,
+        message_count=len(message_items),
+        system_message_count=system_message_count,
+        context_message_count=context_message_count,
+        tool_count=len(tool_items),
+        messages=_json_safe_debug_value(message_items),
+        tools=_json_safe_debug_value(tool_items),
+        statistic=_json_safe_debug_value(statistic),
+        usage_report=_json_safe_debug_value(usage_report),
+    )
+
+
+def _as_debug_sequence(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _json_safe_debug_value(value: Any) -> Any:
+    """Convert pydantic/custom objects while preserving structured payloads."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _json_safe_debug_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe_debug_value(item) for item in value]
+
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _json_safe_debug_value(model_dump(mode="json"))
+        except Exception:
+            try:
+                return _json_safe_debug_value(model_dump())
+            except Exception as exc:
+                logger.debug(
+                    "context debug model_dump() failed for %s: %s",
+                    type(value).__name__,
+                    exc,
+                )
+    return str(value)
 
 
 def _resolve_debug_dir(context: ModelContext, dump_dir: str | None) -> str:

@@ -1446,6 +1446,60 @@ async def test_reassign_transfers_task_and_revokes_old_assignee(task_manager, me
 
 
 @pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reassign_assigned_but_not_started_task_keeps_it_pending(task_manager, member2, message_bus):
+    """An assigned-but-not-yet-started task can be handed over, and stays put.
+
+    This is the scheduled mode's resting state (``PENDING`` with an assignee,
+    waiting for the scheduler to start it) and the cheapest possible handover
+    — nobody is working, so nothing is discarded. The swap must not start the
+    task, and must not drop it back into the claimable pool.
+    """
+    result = await task_manager.add_graph(
+        [TaskGraphSpec(title="T", content="c", task_id="t1", assignee="member1")]
+    )
+    assert result.ok
+    assert result.tasks[0].status == TaskStatus.PENDING.value
+    message_bus.publish.reset_mock()
+
+    assert (await task_manager.reassign("t1", "member2")).ok
+
+    refreshed = await task_manager.get("t1")
+    assert refreshed.assignee == "member2"
+    assert refreshed.status == TaskStatus.PENDING.value
+
+    revoked = _published_events(message_bus, TeamEvent.TASK_REVOKED)
+    assert [e.payload["member_name"] for e in revoked] == ["member1"]
+    claimed = _published_events(message_bus, TeamEvent.TASK_CLAIMED)
+    assert any(c.payload["member_name"] == "member2" for c in claimed)
+    # Still owned throughout — it never re-entered the claimable pool.
+    assert _published_events(message_bus, TeamEvent.TASK_RELEASED) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_reassign_task_in_review_is_refused(task_manager, member2, message_bus):
+    """A task inside the verify gate is not reassignable.
+
+    ``IN_REVIEW`` has an artifact bound to the current owner (the submitted
+    work a reviewer is judging); swapping the owner underneath would attribute
+    it to someone who never produced it.
+    """
+    task = await task_manager.add(title="T", content="c")
+    assert (await task_manager.assign(task.task_id, "member1")).ok
+    assert await task_manager.db.task.update_task_status(task.task_id, TaskStatus.IN_REVIEW.value)
+    message_bus.publish.reset_mock()
+
+    result = await task_manager.reassign(task.task_id, "member2")
+    assert not result.ok
+
+    refreshed = await task_manager.get(task.task_id)
+    assert refreshed.assignee == "member1"
+    assert refreshed.status == TaskStatus.IN_REVIEW.value
+    assert _published_events(message_bus, TeamEvent.TASK_REVOKED) == []
+
+
+@pytest.mark.asyncio
 @pytest.mark.level1
 async def test_reassign_missing_new_member_leaves_task_intact(task_manager, message_bus):
     """A reassign to an unknown member must not strand the task as an

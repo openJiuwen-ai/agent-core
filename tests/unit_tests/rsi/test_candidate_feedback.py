@@ -7,12 +7,12 @@ from copy import deepcopy
 
 import pytest
 
-from openjiuwen.rsi.single_harness.candidate_feedback import (
+from openjiuwen.rsi.harness_rsi.single_harness.candidate_feedback import (
     build_candidate_feedback_cohort,
     canonical_candidate_fingerprint,
     rank_candidate_proposals,
 )
-from openjiuwen.rsi.improver_evolution.policy import VersionedImproverPolicy
+from openjiuwen.rsi.harness_rsi.improver_evolution.policy import VersionedImproverPolicy
 
 
 def _capability(**overrides):

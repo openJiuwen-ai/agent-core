@@ -9,11 +9,13 @@ import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.harness.execution_subject import current_execution_subject
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.subagent_runtime.ids import new_task_id
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
@@ -54,6 +56,7 @@ class MockAgent:
     prepare_calls: int = 0
     cleanup_calls: int = 0
     received_generator_exit: bool = False
+    observed_subjects: list[object] = field(default_factory=list)
     card: SimpleNamespace = field(default_factory=lambda: SimpleNamespace(id="sub-card"))
 
     def prepare_task_resources(self) -> None:
@@ -73,6 +76,7 @@ class MockAgent:
         _ = session
         _ = inputs
         self.stream_calls += 1
+        self.observed_subjects.append(current_execution_subject())
         self.active_streams += 1
         self.max_active_streams = max(self.max_active_streams, self.active_streams)
         try:
@@ -118,6 +122,7 @@ def _make_instance(
     agent: MockAgent | None = None,
     session: MockSession | None = None,
     semaphore: asyncio.Semaphore | None = None,
+    parent_subject_id: str = "main",
 ) -> tuple[SubagentInstance, MockAgent, list[MockSession]]:
     mock_agent = agent or MockAgent()
     sessions: list[MockSession] = []
@@ -139,6 +144,7 @@ def _make_instance(
         display_name="Explorer",
         role="researcher",
         parent_session_id="parent",
+        parent_subject_id=parent_subject_id,
         agent=mock_agent,
         session_factory=session_factory,
         running_semaphore=semaphore or asyncio.Semaphore(5),
@@ -350,6 +356,65 @@ async def test_shared_semaphore_serializes_streams_across_instances() -> None:
 
 
 @pytest.mark.asyncio
+async def test_concurrent_instances_bind_isolated_execution_subjects() -> None:
+    agent_a = MockAgent(delay_s=0.02)
+    agent_b = MockAgent(delay_s=0.02)
+    instance_a, _, _ = _make_instance(
+        subagent_id="parent_sub_a",
+        agent=agent_a,
+        parent_subject_id="main",
+    )
+    instance_b, _, _ = _make_instance(
+        subagent_id="parent_sub_b",
+        agent=agent_b,
+        parent_subject_id="main",
+    )
+    await instance_a.start_worker()
+    await instance_b.start_worker()
+
+    await instance_a.enqueue(UserInputOp(query="a", task_id="a1"))
+    await instance_b.enqueue(UserInputOp(query="b", task_id="b1"))
+    await asyncio.sleep(0.08)
+
+    subject_a = agent_a.observed_subjects[0]
+    subject_b = agent_b.observed_subjects[0]
+    assert subject_a.subject_id == "subagent:parent_sub_a"
+    assert subject_a.session_id == "parent_sub_a"
+    assert subject_a.parent_subject_id == "main"
+    assert subject_b.subject_id == "subagent:parent_sub_b"
+    assert subject_b.session_id == "parent_sub_b"
+    assert subject_b.parent_subject_id == "main"
+    assert subject_a != subject_b
+    assert current_execution_subject() is None
+
+
+@pytest.mark.asyncio
+async def test_turn_aliases_parent_root_to_subagent_session_until_cleanup() -> None:
+    instance, agent, _ = _make_instance(subagent_id="parent_sub_trace")
+    owner_root = SimpleNamespace(is_recording=lambda: True)
+    registrations: list[tuple[object, str]] = []
+    unregistrations: list[tuple[object, str]] = []
+
+    with patch(
+        "openjiuwen.extensions.observability.span_context.get_root_span",
+        return_value=owner_root,
+    ), patch(
+        "openjiuwen.harness.observability.span_context.register_run_root_span",
+        side_effect=lambda span, *, session_id: registrations.append((span, session_id)),
+    ), patch(
+        "openjiuwen.harness.observability.span_context.unregister_run_root_span",
+        side_effect=lambda span, *, session_id: unregistrations.append((span, session_id)),
+    ):
+        await instance.start_worker()
+        await instance.enqueue(UserInputOp(query="trace", task_id="t1"))
+        await asyncio.sleep(0.05)
+
+    assert agent.stream_calls == 1
+    assert registrations == [(owner_root, "parent_sub_trace")]
+    assert unregistrations == [(owner_root, "parent_sub_trace")]
+
+
+@pytest.mark.asyncio
 async def test_running_only_after_semaphore_acquired() -> None:
     semaphore = asyncio.Semaphore(1)
     blocker = MockAgent(delay_s=0.2)
@@ -399,6 +464,28 @@ async def test_is_evictable() -> None:
 
     await asyncio.sleep(0.3)
     assert instance.is_evictable() is True
+
+
+@pytest.mark.asyncio
+async def test_claimed_turn_is_active_while_waiting_for_concurrency_slot() -> None:
+    semaphore = asyncio.Semaphore(0)
+    instance, _, _ = _make_instance(semaphore=semaphore)
+    await instance.start_worker()
+    await instance.enqueue(UserInputOp(query="waiting", task_id="t1"))
+
+    async def wait_until_worker_claims_turn() -> None:
+        while instance.current_task_id is None:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_until_worker_claims_turn(), timeout=1.0)
+
+    assert instance._ops.empty()
+    assert instance._current_run is None
+    assert instance.has_active_turn() is True
+
+    semaphore.release()
+    await asyncio.wait_for(instance._ops.join(), timeout=1.0)
+    await instance.shutdown("test_cleanup")
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ import pytest
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError, ExecutionError, build_error
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
+from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
 from openjiuwen.harness.subagent_runtime.models import SubagentStatusKind, UserInputOp
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
@@ -106,6 +107,30 @@ async def test_create_main_path() -> None:
     assert instance.role == "researcher"
     assert instance.agent_status().kind is SubagentStatusKind.PENDING_INIT
     assert manager.find("parent_sub_explore") is instance
+
+
+@pytest.mark.asyncio
+async def test_create_captures_nested_parent_execution_subject() -> None:
+    manager = _manager()
+    parent_subject = ExecutionSubject(
+        subject_id="subagent:parent",
+        display_name="Parent",
+        kind="subagent",
+        parent_subject_id="main",
+        session_id="parent-subsession",
+    )
+
+    with execution_subject_scope(parent_subject), _patch_create_session():
+        instance = await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_nested",
+            parent_session_id="parent",
+            display_name="Nested",
+            role="researcher",
+        )
+
+    assert instance.execution_subject.parent_subject_id == "subagent:parent"
+    assert instance.execution_subject.subject_id == "subagent:parent_sub_nested"
 
 
 @pytest.mark.asyncio
@@ -324,8 +349,8 @@ async def test_session_factory_creates_new_session_per_turn() -> None:
 
 
 @pytest.mark.asyncio
-async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
-    from openjiuwen.core.foundation.kv_cache import KVCacheAffinityConfig
+async def test_kv_cache_lifecycle_called_when_affinity_enabled() -> None:
+    from openjiuwen.core.kv_cache import KVCacheAffinityConfig
 
     parent = MockParentAgent()
     parent.deep_config = SimpleNamespace(
@@ -334,9 +359,10 @@ async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
     manager = _manager(parent=parent)
 
     with _patch_create_session(), patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.prefetch_sticky_subagent",
-    ) as prefetch_mock, patch(
-        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_hooks.finish_subagent",
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.prepare_subagent",
+        new=AsyncMock(),
+    ) as prepare_mock, patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.kv_cache_subagent_lifecycle.finish_subagent",
         new=AsyncMock(),
     ) as finish_mock:
         instance = await manager.create(
@@ -350,7 +376,7 @@ async def test_kv_cache_hooks_called_when_affinity_enabled() -> None:
         await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
         await asyncio.sleep(0.05)
 
-    prefetch_mock.assert_called_once()
+    prepare_mock.assert_awaited_once()
     finish_mock.assert_awaited_once()
     assert finish_mock.await_args.kwargs["succeeded"] is True
     assert instance._include_parent_session_id is True

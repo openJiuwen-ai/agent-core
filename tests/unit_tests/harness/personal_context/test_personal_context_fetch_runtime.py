@@ -1,26 +1,38 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context import context_pipeline
 from openjiuwen.harness.personal_context import personal_context as personal_context_module
 from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import local_files
+from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
+from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
+from openjiuwen.harness.personal_context.fetch.gitcode import GitCodeFetchService
+from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetchService
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.personal_context import PersonalContext
-from openjiuwen.harness.personal_context.source_metadata import read_source_metadata, source_id_for_locator
+from openjiuwen.harness.personal_context.source_metadata import (
+    read_source_metadata,
+    source_id_for_locator,
+    upsert_source_metadata,
+)
 
 
 def _config(tmp_path: Path, *, interval: float = 0.01) -> PersonalContextConfig:
     return PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -30,6 +42,7 @@ def _config(tmp_path: Path, *, interval: float = 0.01) -> PersonalContextConfig:
                     "provider": "local_files",
                     "enabled": True,
                     "interval_seconds": interval,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(tmp_path)},
                     "credentials": {},
                 }
@@ -41,15 +54,14 @@ def _config(tmp_path: Path, *, interval: float = 0.01) -> PersonalContextConfig:
 def _manual_config(
     tmp_path: Path,
     *,
-    enabled: bool = True,
-    fetching_enabled: bool = True,
+    collection_enabled: bool = True,
     services: dict[str, bool] | None = None,
 ) -> PersonalContextConfig:
     service_states = services or {"notes": True}
     return PersonalContextConfig.from_dict(
         {
-            "enabled": enabled,
-            "fetching_enabled": fetching_enabled,
+            "collection_enabled": collection_enabled,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -59,6 +71,7 @@ def _manual_config(
                     "provider": "local_files",
                     "enabled": service_enabled,
                     "interval_seconds": 3600.0,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(tmp_path / service_id)},
                     "credentials": {},
                 }
@@ -68,9 +81,39 @@ def _manual_config(
     )
 
 
+def _repository_runtime_config(
+    *,
+    token: str,
+    interval: float = 3600.0,
+) -> PersonalContextConfig:
+    return PersonalContextConfig.from_dict(
+        {
+            "collection_enabled": True,
+            "agent_use_enabled": False,
+            "strategy_profile": "rules",
+            "fetch_services": [
+                {
+                    "service_id": "github-main",
+                    "provider": "github",
+                    "enabled": True,
+                    "interval_seconds": interval,
+                    "time_range": {"mode": "all"},
+                    "source": {
+                        "owner": "openJiuwen",
+                        "repo": "agent-core",
+                        "resources": ["issues"],
+                    },
+                    "credentials": {"token": token},
+                }
+            ],
+        }
+    )
+
+
 class _RunningPipeline:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
+        self.configurations: list[PersonalContextConfig] = []
 
     def is_running(self) -> bool:
         return self.running
@@ -79,8 +122,29 @@ class _RunningPipeline:
         del timeout_seconds
         self.running = False
 
+    async def cancel_run(self, service_id: str, run_id: str) -> None:
+        del service_id, run_id
 
-class _BlockingManualProvider(ContextFetchService):
+    def invalidate_run(self, service_id: str, run_id: str) -> None:
+        del service_id, run_id
+
+    def replace_configuration(self, config: PersonalContextConfig) -> None:
+        self.configurations.append(config)
+
+
+class _EmptyPreparedProvider(ContextFetchService):
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id, run_started_at, cursor
+        return ()
+
+
+class _BlockingManualProvider(_EmptyPreparedProvider):
     instances: dict[str, "_BlockingManualProvider"] = {}
 
     def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
@@ -92,8 +156,14 @@ class _BlockingManualProvider(ContextFetchService):
         self.abort_calls: list[str] = []
         type(self).instances[config.service_id] = self
 
-    async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-        del run_id, cursor
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del run_id, cursor, candidates
         self.started.set()
         await self.release.wait()
         if self.fail:
@@ -128,13 +198,303 @@ async def _finish_manual_tasks(personal_context: PersonalContext, service_ids: t
     await asyncio.gather(*tasks)
 
 
-class _Provider(ContextFetchService):
+@pytest.mark.asyncio
+async def test_credential_replacement_keeps_active_manual_run_and_updates_next_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(
+        personal_context_module._PROVIDER_TYPES,
+        "github",
+        _BlockingManualProvider,
+    )
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+
+    await personal_context.run_fetch(service_id="github-main")
+    first_task = personal_context._manual_fetch_tasks["github-main"]
+    await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+    try:
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+
+        assert isinstance(new_provider, _BlockingManualProvider)
+        assert new_provider is not old_provider
+        assert not new_provider.started.is_set()
+        assert not first_task.done()
+
+        old_provider.release.set()
+        await asyncio.wait_for(first_task, timeout=1.0)
+        await personal_context.run_fetch(service_id="github-main")
+        second_task = personal_context._manual_fetch_tasks["github-main"]
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        new_provider.release.set()
+        await asyncio.wait_for(second_task, timeout=1.0)
+    finally:
+        old_provider.release.set()
+        if not first_task.done():
+            await asyncio.wait_for(first_task, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_reads_current_provider_cache_each_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "github", _BlockingManualProvider)
+    original = _repository_runtime_config(token="old-token", interval=0.01)
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    old_provider = _BlockingManualProvider(original.fetch_services[0], home=tmp_path)
+    personal_context._fetch_providers["github-main"] = old_provider
+    stop_event = asyncio.Event()
+    scheduler = asyncio.create_task(personal_context._run_fetch_service("github-main", stop_event))
+
+    try:
+        await asyncio.wait_for(old_provider.started.wait(), timeout=1.0)
+        replacement = _repository_runtime_config(token="new-token", interval=0.01).fetch_services[0]
+        await personal_context._replace_fetch_service_credentials((replacement,))
+        new_provider = personal_context._fetch_providers["github-main"]
+        assert isinstance(new_provider, _BlockingManualProvider)
+        old_provider.release.set()
+        await asyncio.wait_for(new_provider.started.wait(), timeout=1.0)
+        stop_event.set()
+        new_provider.release.set()
+        await asyncio.wait_for(scheduler, timeout=1.0)
+    finally:
+        stop_event.set()
+        old_provider.release.set()
+        cached = personal_context._fetch_providers.get("github-main")
+        if isinstance(cached, _BlockingManualProvider):
+            cached.release.set()
+        if not scheduler.done():
+            await asyncio.wait_for(scheduler, timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_credential_replacement_provider_build_failure_changes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = _repository_runtime_config(token="old-token")
+    personal_context = await _ready_manual_personal_context(tmp_path, original)
+    pipeline = personal_context._pipeline_service
+
+    def fail_provider(_config: PersonalContextFetchServiceConfig) -> ContextFetchService:
+        raise RuntimeError("provider build failed")
+
+    monkeypatch.setattr(personal_context, "_create_fetch_provider", fail_provider)
+    replacement = _repository_runtime_config(token="new-token").fetch_services[0]
+
+    with pytest.raises(RuntimeError, match="provider build failed"):
+        await personal_context._replace_fetch_service_credentials((replacement,))
+
+    assert personal_context._config is original
+    assert isinstance(pipeline, _RunningPipeline)
+    assert pipeline.configurations == []
+
+
+@pytest.mark.asyncio
+async def test_append_fetch_service_updates_live_config_without_restarting_existing_runtime(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path),
+    )
+    pipeline = personal_context._pipeline_service
+    assert isinstance(pipeline, _RunningPipeline)
+    new_service = _manual_config(
+        tmp_path,
+        services={"bookmarks": True},
+    ).fetch_services[0]
+    started: list[str] = []
+
+    async def start_fetch_service(service_id: str) -> None:
+        started.append(service_id)
+
+    personal_context.start_fetch_service = start_fetch_service  # type: ignore[method-assign]
+
+    await personal_context._append_fetch_service_config(new_service)
+
+    assert personal_context._config is not None
+    assert [service.service_id for service in personal_context._config.fetch_services] == [
+        "notes",
+        "bookmarks",
+    ]
+    assert started == ["bookmarks"]
+    assert pipeline.configurations[-1] is personal_context._config
+    assert personal_context._fetch_run_progress["bookmarks"]["run_state"] == "idle"
+
+    await personal_context._remove_fetch_service_config("bookmarks")
+
+    assert [service.service_id for service in personal_context._config.fetch_services] == ["notes"]
+    assert pipeline.configurations[-1] is personal_context._config
+    assert "bookmarks" not in personal_context._fetch_run_progress
+
+
+def _gitcode_runtime_service() -> PersonalContextFetchServiceConfig:
+    return PersonalContextFetchServiceConfig.model_validate(
+        {
+            "service_id": "gitcode-demo",
+            "provider": "gitcode",
+            "enabled": True,
+            "interval_seconds": 3600,
+            "time_range": {"mode": "all"},
+            "source": {"owner": "acme", "repo": "demo", "resources": ["issues"]},
+            "credentials": {"pat": "snapshot-pat"},
+        }
+    )
+
+
+def test_gitcode_provider_is_registered_in_the_exact_eight_provider_factory(tmp_path: Path) -> None:
+    assert set(personal_context_module._PROVIDER_TYPES) == {
+        "local_files",
+        "github",
+        "gitcode",
+        "feishu",
+        "browser_bookmarks",
+        "zhihu_reader",
+        "toutiao_reader",
+        "rss_feed",
+    }
+
+    provider = PersonalContext(home=tmp_path)._create_fetch_provider(_gitcode_runtime_service())
+
+    assert isinstance(provider, GitCodeFetchService)
+
+
+@pytest.mark.asyncio
+async def test_gitcode_prepare_failure_isolated_from_other_manual_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SuccessfulProvider(ContextFetchService):
+        instances: dict[str, "SuccessfulProvider"] = {}
+
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.commit_calls: list[str] = []
+            self.abort_calls: list[str] = []
+            type(self).instances[config.service_id] = self
+
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return (_run_candidate(1),)
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="success", items=(_run_item(1),), next_cursor={"done": True})
+
+        async def commit_run(self, *, run_id: str) -> None:
+            self.commit_calls.append(run_id)
+
+        async def abort_run(self, *, run_id: str) -> None:
+            self.abort_calls.append(run_id)
+
+    class FailingGitCodeProvider(SuccessfulProvider):
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            raise RuntimeError("injected GitCode prepare failure")
+
+    config = PersonalContextConfig.from_dict(
+        {
+            "collection_enabled": True,
+            "agent_use_enabled": False,
+            "strategy_profile": "rules",
+            "model_client": None,
+            "model_request": None,
+            "fetch_services": [
+                {
+                    "service_id": "local-good",
+                    "provider": "local_files",
+                    "enabled": True,
+                    "interval_seconds": 3600,
+                    "time_range": {"mode": "all"},
+                    "source": {"root_dir": str(tmp_path / "source")},
+                    "credentials": {},
+                },
+                _gitcode_runtime_service().model_dump(mode="python"),
+            ],
+        }
+    )
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", SuccessfulProvider)
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "gitcode", FailingGitCodeProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, config)
+    pipeline_events: list[tuple[str, str]] = []
+
+    async def submit(
+        service_id: str,
+        run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        del run_id, batch
+        if enqueued is not None:
+            enqueued.set()
+        pipeline_events.append(("batch", service_id))
+
+    async def finish(service_id: str, run_id: str) -> None:
+        del run_id
+        pipeline_events.append(("finish", service_id))
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish  # type: ignore[method-assign]
+
+    result = await personal_context.run_fetch()
+    tasks = list(personal_context._manual_fetch_tasks.values())
+    await asyncio.gather(*tasks)
+
+    assert result["state"] == "accepted"
+    assert result["service_ids"] == ["gitcode-demo", "local-good"]
+    assert personal_context._fetch_states["gitcode-demo"] == "FAILED"
+    assert personal_context._fetch_states["local-good"] == "STOPPED"
+    assert pipeline_events == [("batch", "local-good"), ("finish", "local-good")]
+    assert personal_context._read_cursor("gitcode-demo") is None
+    successful_cursor = personal_context._read_cursor("local-good")
+    assert successful_cursor is not None
+    assert len(successful_cursor["_selection"]["completed"]) == 1
+    assert SuccessfulProvider.instances["local-good"].commit_calls
+    assert not SuccessfulProvider.instances["local-good"].abort_calls
+    assert FailingGitCodeProvider.instances["gitcode-demo"].abort_calls
+    assert not FailingGitCodeProvider.instances["gitcode-demo"].commit_calls
+
+
+class _Provider(_EmptyPreparedProvider):
     fetch_calls = 0
     commit_calls: list[str] = []
     abort_calls: list[str] = []
 
-    async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-        del cursor
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del cursor, candidates
         type(self).fetch_calls += 1
         yield FetchBatch(
             batch_id=f"batch-{type(self).fetch_calls}", items=(), next_cursor={"n": type(self).fetch_calls}
@@ -145,6 +505,380 @@ class _Provider(ContextFetchService):
 
     async def abort_run(self, *, run_id: str) -> None:
         type(self).abort_calls.append(run_id)
+
+
+def _run_candidate(index: int) -> dict[str, object]:
+    return {
+        "stable_id": f"item-{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-08-25T00:00:00Z",
+        "resource_lane": "document",
+        "locator": f"file:///notes/item-{index}",
+    }
+
+
+def _run_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"notes/item-{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Item {index}",
+        content=f"Body {index}",
+        original_ref=f"file:///notes/item-{index}",
+    )
+
+
+def _item_candidate(item: RawChangeItem) -> dict[str, object]:
+    return {
+        "stable_id": item.logical_id,
+        "revision_id": item.revision_id,
+        "candidate_time": "2026-08-25T00:00:00Z",
+        "resource_lane": "test",
+        "locator": item.original_ref,
+    }
+
+
+class _ProgressProvider(ContextFetchService):
+    def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+        super().__init__(config, home=home)
+        self.prepare_started = asyncio.Event()
+        self.release_prepare = asyncio.Event()
+        self.events: list[str] = []
+        self.received_candidates: tuple[dict[str, object], ...] | None = None
+
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id, run_started_at, cursor
+        self.events.append("prepare_started")
+        self.prepare_started.set()
+        await self.release_prepare.wait()
+        self.events.append("prepare_returned")
+        return tuple(_run_candidate(index) for index in range(20))
+
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del run_id, cursor
+        self.events.append("fetch_started")
+        self.received_candidates = candidates
+        for batch_index, indexes in enumerate((range(0, 2), range(2, 3), range(3, 20)), start=1):
+            yield FetchBatch(
+                batch_id=f"progress-{batch_index}",
+                items=tuple(_run_item(index) for index in indexes),
+                next_cursor={"batch": batch_index},
+            )
+
+
+@pytest.mark.asyncio
+async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    provider = _ProgressProvider(personal_context._config.fetch_services[0], home=tmp_path)
+    submit_entered = [asyncio.Event() for _ in range(3)]
+    submit_release = [asyncio.Event() for _ in range(3)]
+    finish_entered = asyncio.Event()
+    finish_release = asyncio.Event()
+    submit_index = 0
+
+    async def submit_batch(
+        service_id: str,
+        run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        nonlocal submit_index
+        del service_id, run_id, batch
+        if enqueued is not None:
+            enqueued.set()
+        current = submit_index
+        submit_index += 1
+        submit_entered[current].set()
+        await submit_release[current].wait()
+
+    async def finish_run(service_id: str, run_id: str) -> None:
+        del service_id, run_id
+        finish_entered.set()
+        await finish_release.wait()
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish_run  # type: ignore[method-assign]
+    task = asyncio.create_task(personal_context._run_fetch_once("notes", provider))
+
+    await asyncio.wait_for(provider.prepare_started.wait(), timeout=1)
+    assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "service_id": "notes",
+        "run_state": "running",
+        "progress_percent": 0,
+        "total_items": 0,
+        "completed_items": 0,
+        "last_error": None,
+    }
+    provider.release_prepare.set()
+    await asyncio.wait_for(submit_entered[0].wait(), timeout=1)
+    assert provider.events == ["prepare_started", "prepare_returned", "fetch_started"]
+    assert isinstance(provider.received_candidates, tuple)
+    assert len(provider.received_candidates) == 20
+    discovered = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (discovered["total_items"], discovered["progress_percent"]) == (20, 5)
+
+    submit_release[0].set()
+    await asyncio.wait_for(submit_entered[1].wait(), timeout=1)
+    first = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (first["completed_items"], first["progress_percent"]) == (2, 12)
+
+    submit_release[1].set()
+    await asyncio.wait_for(submit_entered[2].wait(), timeout=1)
+    second = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (second["completed_items"], second["progress_percent"]) == (3, 15)
+
+    submit_release[2].set()
+    await asyncio.wait_for(finish_entered.wait(), timeout=1)
+    publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 80)
+
+    finish_release.set()
+    await asyncio.wait_for(task, timeout=1)
+    assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "service_id": "notes",
+        "run_state": "succeeded",
+        "progress_percent": 100,
+        "total_items": 20,
+        "completed_items": 20,
+        "last_error": None,
+    }
+    committed_cursor = personal_context._read_cursor("notes")
+    assert committed_cursor is not None
+    assert committed_cursor["batch"] == 3
+    selection = committed_cursor["_selection"]
+    assert isinstance(selection, dict)
+    assert len(selection["completed"]) == 20
+
+
+@pytest.mark.asyncio
+async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_path: Path) -> None:
+    class FailingProvider(_ProgressProvider):
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="completed", items=tuple(_run_item(index) for index in range(2)))
+            raise RuntimeError("injected provider failure")
+
+    class CancelledProvider(_ProgressProvider):
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.blocked = asyncio.Event()
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="completed", items=tuple(_run_item(index) for index in range(2)))
+            self.blocked.set()
+            await asyncio.Event().wait()
+            if False:
+                yield FetchBatch(batch_id="unreachable")
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    service_config = personal_context._config.fetch_services[0]
+
+    async def submit_batch(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+
+    failed = FailingProvider(service_config, home=tmp_path)
+    failed.release_prepare.set()
+    with pytest.raises(Exception):
+        await personal_context._run_fetch_once("notes", failed)
+    failed_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert failed_status["run_state"] == "failed"
+    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 12)
+    assert isinstance(failed_status["last_error"], str)
+
+    cancelled = CancelledProvider(service_config, home=tmp_path)
+    cancelled.release_prepare.set()
+    task = asyncio.create_task(personal_context._run_fetch_once("notes", cancelled))
+    await asyncio.wait_for(cancelled.blocked.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    cancelled_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert cancelled_status["run_state"] == "cancelled"
+    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 12)
+    assert cancelled_status["last_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_progress_names_message_less_failure(tmp_path: Path) -> None:
+    class MessageLessProvider(_ProgressProvider):
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="completed", items=tuple(_run_item(index) for index in range(2)))
+            raise TimeoutError
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    assert personal_context._config is not None
+    service_config = personal_context._config.fetch_services[0]
+
+    async def submit_batch(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    personal_context._submit_batch = submit_batch  # type: ignore[method-assign]
+
+    provider = MessageLessProvider(service_config, home=tmp_path)
+    provider.release_prepare.set()
+    with pytest.raises(Exception):
+        await personal_context._run_fetch_once("notes", provider)
+    status = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert status["run_state"] == "failed"
+    assert status["last_error"] == "TimeoutError (no message)"
+
+
+@pytest.mark.asyncio
+async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_path: Path) -> None:
+    class EmptyProvider(ContextFetchService):
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return ()
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(batch_id="empty", next_cursor={"checked": True})
+
+    class BlockingPrepareProvider(EmptyProvider):
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.started = asyncio.Event()
+
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            self.started.set()
+            await asyncio.Event().wait()
+            return ()
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path))
+    initial = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert initial["run_state"] == "idle"
+    assert initial["progress_percent"] == 0
+    assert personal_context._config is not None
+    service_config = personal_context._config.fetch_services[0]
+
+    await personal_context._run_fetch_once("notes", EmptyProvider(service_config, home=tmp_path))
+    assert (await personal_context.snapshot()).fetch_run_progress["notes"] == {
+        "service_id": "notes",
+        "run_state": "succeeded",
+        "progress_percent": 100,
+        "total_items": 0,
+        "completed_items": 0,
+        "last_error": None,
+    }
+
+    blocking = BlockingPrepareProvider(service_config, home=tmp_path)
+    task = asyncio.create_task(personal_context._run_fetch_once("notes", blocking))
+    await asyncio.wait_for(blocking.started.wait(), timeout=1)
+    replacement = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert replacement["run_state"] == "running"
+    assert replacement["progress_percent"] == 0
+    assert replacement["total_items"] == 0
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+
+def test_write_cursor_compacts_selection_and_atomically_preserves_old_bytes_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    asyncio.run(personal_context.set_configuration(_config(tmp_path)))
+    base_time = datetime(2026, 8, 1, tzinfo=UTC)
+    candidates = tuple(
+        {
+            **_run_candidate(index),
+            "candidate_time": (base_time + timedelta(minutes=index // 20)).isoformat().replace("+00:00", "Z"),
+        }
+        for index in range(6000)
+    )
+    cursor = record_completed_candidates(None, candidates)
+    replace_calls: list[tuple[Path, Path]] = []
+    real_replace = personal_context_module.os.replace
+
+    def recording_replace(source: str | Path, target: str | Path) -> None:
+        replace_calls.append((Path(source), Path(target)))
+        real_replace(source, target)
+
+    monkeypatch.setattr(personal_context_module.os, "replace", recording_replace)
+
+    personal_context._write_cursor("notes", cursor)
+
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    payload = cursor_path.read_bytes()
+    stored = json.loads(payload)
+    compacted_cursor = stored["cursor"]
+    compacted_bytes = json.dumps(
+        compacted_cursor,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    assert len(payload) <= 512 * 1024
+    assert len(compacted_bytes) <= 384 * 1024
+    assert len(replace_calls) == 1
+    assert replace_calls[0][1] == cursor_path
+
+    before = cursor_path.read_bytes()
+    with pytest.raises(Exception):
+        personal_context._write_cursor("notes", {"provider_state": "x" * (512 * 1024)})
+    assert cursor_path.read_bytes() == before
+    assert len(replace_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -168,7 +902,8 @@ async def test_run_fetch_all_accepts_only_enabled_services_and_returns_before_co
 
     result = await personal_context.run_fetch()
 
-    assert result == {"state": "accepted", "service_ids": ["a", "b"]}
+    assert result == {"state": "accepted", "service_ids": ["a", "b"], "runs": result["runs"]}
+    assert [item["service_id"] for item in result["runs"]] == ["a", "b"]
     assert set(personal_context._manual_fetch_tasks) == {"a", "b"}
     assert all(not task.done() for task in personal_context._manual_fetch_tasks.values())
     assert "disabled" not in _BlockingManualProvider.instances
@@ -176,7 +911,7 @@ async def test_run_fetch_all_accepts_only_enabled_services_and_returns_before_co
 
 
 @pytest.mark.asyncio
-async def test_run_fetch_one_ignores_service_and_global_fetch_switches(
+async def test_run_fetch_one_ignores_service_switch_when_collection_is_enabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -190,7 +925,6 @@ async def test_run_fetch_one_ignores_service_and_global_fetch_switches(
         tmp_path,
         _manual_config(
             tmp_path,
-            fetching_enabled=False,
             services={"disabled": False},
         ),
     )
@@ -200,6 +934,7 @@ async def test_run_fetch_one_ignores_service_and_global_fetch_switches(
     assert result == {
         "state": "accepted",
         "service_ids": ["disabled"],
+        "runs": result["runs"],
     }
     await _finish_manual_tasks(personal_context, ("disabled",))
 
@@ -214,7 +949,7 @@ async def test_run_fetch_rejects_disabled_core_stopped_runtime_or_dead_pipeline(
 
     disabled = PersonalContext(home=tmp_path / "disabled")
     await disabled.set_configuration(
-        _manual_config(tmp_path, enabled=False),
+        _manual_config(tmp_path, collection_enabled=False),
     )
     with pytest.raises(PersonalContext.Error):
         await disabled.run_fetch()
@@ -353,7 +1088,7 @@ async def test_stop_fetch_service_waits_for_manual_round_before_returning(
         tmp_path,
         _manual_config(
             tmp_path,
-            fetching_enabled=False,
+            collection_enabled=True,
             services={"notes": False},
         ),
     )
@@ -377,6 +1112,75 @@ async def test_stop_fetch_service_waits_for_manual_round_before_returning(
 
 
 @pytest.mark.asyncio
+async def test_stop_collection_cancels_active_round_without_cursor_or_context_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(
+        personal_context_module._PROVIDER_TYPES,
+        "local_files",
+        _BlockingManualProvider,
+    )
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"notes": False}),
+    )
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    description_path = tmp_path / "workspace" / "context" / "description.md"
+    description_path.parent.mkdir(parents=True)
+    description_path.write_text("last complete context", encoding="utf-8")
+
+    await personal_context.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    manual_task = personal_context._manual_fetch_tasks["notes"]
+    await asyncio.wait_for(provider.started.wait(), timeout=1.0)
+
+    await personal_context.stop_collection(timeout_seconds=1.0)
+
+    assert manual_task.done()
+    assert provider.commit_calls == []
+    assert len(provider.abort_calls) == 1
+    assert not cursor_path.exists()
+    assert description_path.read_text(encoding="utf-8") == "last complete context"
+    status = await personal_context.snapshot()
+    assert status.collection_enabled is False
+    assert status.pipeline_running is False
+    assert status.state == "STOPPED"
+
+
+@pytest.mark.asyncio
+async def test_disabling_scheduled_service_lets_active_round_finish_and_stops_next_timer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(
+        personal_context_module._PROVIDER_TYPES,
+        "local_files",
+        _BlockingManualProvider,
+    )
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _config(tmp_path, interval=0.01),
+    )
+    await personal_context.start_fetch_service("notes")
+    scheduler = personal_context._fetch_tasks["notes"]
+    provider = _BlockingManualProvider.instances["notes"]
+    await asyncio.wait_for(provider.started.wait(), timeout=1.0)
+
+    await personal_context.set_fetch_service_enabled("notes", False)
+
+    assert not scheduler.done()
+    assert provider.abort_calls == []
+    provider.release.set()
+    await asyncio.wait_for(scheduler, timeout=1.0)
+    assert len(provider.commit_calls) == 1
+    assert personal_context._fetch_states["notes"] == "STOPPED"
+    assert "notes" not in personal_context._fetch_tasks
+
+
+@pytest.mark.asyncio
 async def test_manual_fetch_stop_timeout_cancels_and_aborts_without_cursor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -391,7 +1195,7 @@ async def test_manual_fetch_stop_timeout_cancels_and_aborts_without_cursor(
         tmp_path,
         _manual_config(
             tmp_path,
-            fetching_enabled=False,
+            collection_enabled=True,
             services={"notes": False},
         ),
     )
@@ -429,7 +1233,7 @@ async def test_deactivate_runtime_waits_for_manual_round_and_stops_pipeline_afte
         tmp_path,
         _manual_config(
             tmp_path,
-            fetching_enabled=False,
+            collection_enabled=True,
             services={"notes": False},
         ),
     )
@@ -485,7 +1289,7 @@ async def test_manual_fetch_failure_is_reported_without_task_residue(
         tmp_path,
         _manual_config(
             tmp_path,
-            fetching_enabled=False,
+            collection_enabled=True,
             services={"notes": False},
         ),
     )
@@ -527,8 +1331,24 @@ class _TwoBatchProvider(ContextFetchService):
             for number in (1, 2)
         )
 
-    async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-        del run_id, cursor
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id, run_started_at, cursor
+        return tuple(_item_candidate(item) for batch in self.batches for item in batch.items)
+
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del run_id, cursor, candidates
         for batch in self.batches:
             yield batch
 
@@ -546,6 +1366,146 @@ async def _two_batch_run(tmp_path: Path) -> tuple[PersonalContext, _TwoBatchProv
     provider = _TwoBatchProvider(personal_context._config.fetch_services[0], home=tmp_path)
     personal_context._write_cursor("notes", {"n": 0})
     return personal_context, provider
+
+
+async def _local_retry_run(tmp_path: Path) -> tuple[PersonalContext, LocalFilesFetchService, Path]:
+    source = tmp_path / "source"
+    source.mkdir()
+    note = source / "note.md"
+    note.write_text("# Note\n\nBody", encoding="utf-8")
+    home = tmp_path / "home"
+    personal_context = PersonalContext(home=home)
+    await personal_context.set_configuration(_config(source))
+    assert personal_context._config is not None
+    provider = LocalFilesFetchService(personal_context._config.fetch_services[0], home=home)
+    return personal_context, provider, home / "state" / "cursors" / "notes.json"
+
+
+@pytest.mark.asyncio
+async def test_transient_provider_read_recovery_submits_once_and_commits_cursor_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context, provider, cursor_path = await _local_retry_run(tmp_path)
+    original_materialize = local_files._materialize_candidate
+    attempts = 0
+    pipeline_events: list[tuple[str, str]] = []
+
+    def flaky_materialize(candidate: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError(errno.EBUSY, "temporarily busy")
+        return original_materialize(candidate)
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def submit(
+        _service_id: str,
+        run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        assert len(batch.items) == 1
+        if enqueued is not None:
+            enqueued.set()
+        pipeline_events.append(("batch", run_id))
+
+    async def finish(_service_id: str, run_id: str) -> None:
+        pipeline_events.append(("finish", run_id))
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", flaky_materialize)
+    monkeypatch.setattr(retry_module, "_sleep", no_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish  # type: ignore[method-assign]
+
+    await personal_context._run_fetch_once("notes", provider)
+
+    assert attempts == 2
+    assert [event[0] for event in pipeline_events] == ["batch", "finish"]
+    assert pipeline_events[0][1] == pipeline_events[1][1]
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["service_id"] == "notes"
+    committed_cursor = personal_context._read_cursor("notes")
+    assert committed_cursor is not None
+    assert len(committed_cursor["_selection"]["completed"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_exhausted_provider_read_does_not_submit_or_commit_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context, provider, cursor_path = await _local_retry_run(tmp_path)
+    attempts = 0
+    pipeline_events: list[str] = []
+
+    def always_busy(_candidate: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise OSError(errno.EBUSY, "still busy")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    async def unexpected(*_args: object, **_kwargs: object) -> None:
+        pipeline_events.append("called")
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", always_busy)
+    monkeypatch.setattr(retry_module, "_sleep", no_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+    personal_context._submit_batch = unexpected  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = unexpected  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = unexpected  # type: ignore[method-assign]
+
+    with pytest.raises(Exception):
+        await personal_context._run_fetch_once("notes", provider)
+
+    assert attempts == 3
+    assert pipeline_events == []
+    assert not cursor_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_provider_retry_wait_stops_without_submit_or_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context, provider, cursor_path = await _local_retry_run(tmp_path)
+    attempts = 0
+    sleep_started = asyncio.Event()
+    pipeline_events: list[str] = []
+
+    def always_busy(_candidate: dict[str, object]) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise OSError(errno.EBUSY, "still busy")
+
+    async def blocking_sleep(_delay: float) -> None:
+        sleep_started.set()
+        await asyncio.Event().wait()
+
+    async def unexpected(*_args: object, **_kwargs: object) -> None:
+        pipeline_events.append("called")
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", always_busy)
+    monkeypatch.setattr(retry_module, "_sleep", blocking_sleep)
+    monkeypatch.setattr(retry_module, "_jitter_seconds", lambda: 0.0)
+    personal_context._submit_batch = unexpected  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = unexpected  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = unexpected  # type: ignore[method-assign]
+
+    task = asyncio.create_task(personal_context._run_fetch_once("notes", provider))
+    await asyncio.wait_for(sleep_started.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert attempts == 1
+    assert pipeline_events == []
+    assert not cursor_path.exists()
 
 
 async def _next_pipeline_event(personal_context: PersonalContext) -> tuple[tuple[object, ...], asyncio.Future[None]]:
@@ -639,9 +1599,15 @@ async def test_scheduler_remains_alive_after_fetch_state_becomes_failed(
 ) -> None:
     attempted = asyncio.Event()
 
-    class FailingProvider(ContextFetchService):
-        async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-            del run_id, cursor
+    class FailingProvider(_EmptyPreparedProvider):
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
             attempted.set()
             if False:
                 yield FetchBatch(batch_id="unreachable")
@@ -662,7 +1628,9 @@ async def test_scheduler_remains_alive_after_fetch_state_becomes_failed(
     try:
         await asyncio.wait_for(attempted.wait(), timeout=1.0)
         async with asyncio.timeout(1.0):
-            while (await personal_context.snapshot()).fetch_service_states["notes"] != "FAILED":
+            while (  # noqa: ASYNC110 - the public snapshot transition is the behavior under test.
+                await personal_context.snapshot()
+            ).fetch_service_states["notes"] != "FAILED":
                 await asyncio.sleep(0)
 
         assert not scheduler.done()
@@ -673,9 +1641,15 @@ async def test_scheduler_remains_alive_after_fetch_state_becomes_failed(
 
 @pytest.mark.asyncio
 async def test_cancelled_round_aborts_without_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    class BlockingProvider(ContextFetchService):
-        async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-            del cursor
+    class BlockingProvider(_EmptyPreparedProvider):
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del cursor, candidates
             yield FetchBatch(batch_id="batch-1", items=(), next_cursor={"n": 1})
             await asyncio.Event().wait()
 
@@ -709,7 +1683,10 @@ async def test_multi_batch_run_finishes_pipeline_before_provider_commit_and_curs
         ("finish", "notes", run_id),
     ]
     assert provider.abort_calls == []
-    assert personal_context._read_cursor("notes") == {"n": 2}
+    committed_cursor = personal_context._read_cursor("notes")
+    assert committed_cursor is not None
+    assert committed_cursor["n"] == 2
+    assert len(committed_cursor["_selection"]["completed"]) == 2
 
 
 @pytest.mark.asyncio
@@ -720,6 +1697,8 @@ async def test_multi_batch_failure_aborts_pipeline_and_preserves_old_cursor(
 ) -> None:
     personal_context, provider = await _two_batch_run(tmp_path)
     events = _record_pipeline_calls(personal_context, provider, failure_stage=failure_stage)
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    before = cursor_path.read_bytes()
 
     with pytest.raises(Exception):
         await personal_context._run_fetch_once("notes", provider)
@@ -736,17 +1715,24 @@ async def test_multi_batch_failure_aborts_pipeline_and_preserves_old_cursor(
     assert provider.commit_calls == []
     assert provider.abort_calls == [run_id]
     assert personal_context._read_cursor("notes") == {"n": 0}
+    assert cursor_path.read_bytes() == before
 
 
 @pytest.mark.asyncio
 async def test_empty_only_run_commits_cursor_without_pipeline_or_sandbox(tmp_path: Path) -> None:
-    class EmptyProvider(ContextFetchService):
+    class EmptyProvider(_EmptyPreparedProvider):
         def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
             super().__init__(config, home=home)
             self.commit_calls: list[str] = []
 
-        async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-            del run_id, cursor
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
             yield FetchBatch(batch_id="empty", items=(), next_cursor={"n": 1})
 
         async def commit_run(self, *, run_id: str) -> None:
@@ -769,7 +1755,10 @@ async def test_empty_only_run_commits_cursor_without_pipeline_or_sandbox(tmp_pat
 
     assert len(provider.commit_calls) == 1
     assert pipeline_calls == []
-    assert personal_context._read_cursor("notes") == {"n": 1}
+    committed_cursor = personal_context._read_cursor("notes")
+    assert committed_cursor is not None
+    assert committed_cursor["n"] == 1
+    assert committed_cursor["_selection"]["completed"] == []
     assert not (tmp_path / "workspace" / "sandboxes").exists()
 
 
@@ -781,6 +1770,7 @@ async def test_private_pipeline_helpers_submit_one_tagged_queue_contract(tmp_pat
         (lambda: personal_context._submit_batch("notes", "run-1", provider.batches[0]), "batch", provider.batches[0]),
         (lambda: personal_context._finish_pipeline_run("notes", "run-1"), "finish", None),
         (lambda: personal_context._abort_pipeline_run("notes", "run-1"), "abort", None),
+        (lambda: personal_context._rollback_pipeline_run("notes", "run-1"), "rollback", None),
     ):
         task = asyncio.create_task(submit())
         event, completion = await _next_pipeline_event(personal_context)
@@ -818,27 +1808,16 @@ async def test_cancelled_before_first_batch_is_enqueued_does_not_submit_pipeline
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("waiting_for", ["batch", "finish"])
-async def test_cancelled_after_pipeline_enqueue_aborts_in_order(tmp_path: Path, waiting_for: str) -> None:
+async def test_cancelled_during_pipeline_batch_aborts_in_order(tmp_path: Path) -> None:
     personal_context, provider = await _two_batch_run(tmp_path)
     abort_order = _record_abort_order(personal_context, provider)
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    before = cursor_path.read_bytes()
     task = asyncio.create_task(personal_context._run_fetch_once("notes", provider))
-    run_id: str | None = None
-    completed_batches = provider.batches if waiting_for == "finish" else ()
-    for batch in completed_batches:
-        event, completion = await _next_pipeline_event(personal_context)
-        if run_id is None:
-            assert isinstance(event[2], str)
-            run_id = event[2]
-        assert event[:4] == ("batch", "notes", run_id, batch)
-        completion.set_result(None)
-
     pending_event, pending_completion = await _next_pipeline_event(personal_context)
-    if run_id is None:
-        assert isinstance(pending_event[2], str)
-        run_id = pending_event[2]
-    expected_payload = provider.batches[0] if waiting_for == "batch" else None
-    assert pending_event[:4] == (waiting_for, "notes", run_id, expected_payload)
+    assert isinstance(pending_event[2], str)
+    run_id = pending_event[2]
+    assert pending_event[:4] == ("batch", "notes", run_id, provider.batches[0])
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -847,6 +1826,33 @@ async def test_cancelled_after_pipeline_enqueue_aborts_in_order(tmp_path: Path, 
     assert abort_order == ["pipeline", "provider"]
     assert pending_completion.cancelled()
     assert not pending_completion.cancel()
+    assert provider.commit_calls == []
+    assert personal_context._read_cursor("notes") == {"n": 0}
+    assert cursor_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_cancelled_during_pipeline_finish_aborts_before_commit(tmp_path: Path) -> None:
+    personal_context, provider = await _two_batch_run(tmp_path)
+    abort_order = _record_abort_order(personal_context, provider)
+    task = asyncio.create_task(personal_context._run_fetch_once("notes", provider))
+    run_id: str | None = None
+    for batch in provider.batches:
+        event, completion = await _next_pipeline_event(personal_context)
+        if run_id is None:
+            assert isinstance(event[2], str)
+            run_id = event[2]
+        assert event[:4] == ("batch", "notes", run_id, batch)
+        completion.set_result(None)
+
+    finish_event, finish_completion = await _next_pipeline_event(personal_context)
+    assert finish_event[:4] == ("finish", "notes", run_id, None)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finish_completion.cancelled()
+    assert abort_order == ["pipeline", "provider"]
     assert provider.commit_calls == []
     assert personal_context._read_cursor("notes") == {"n": 0}
 
@@ -932,8 +1938,24 @@ async def test_failed_finish_keeps_old_context_cursor_and_source_metadata(
             self.commit_calls: list[str] = []
             self.abort_calls: list[str] = []
 
-        async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-            del run_id, cursor
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return tuple(_item_candidate(item) for item in self.batch.items)
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
             yield self.batch
 
         async def commit_run(self, *, run_id: str) -> None:
@@ -972,7 +1994,10 @@ async def test_failed_finish_keeps_old_context_cursor_and_source_metadata(
         old_page = next(
             path for path in (tmp_path / "workspace" / "context").rglob("*.md") if path.name != "description.md"
         )
-        assert personal_context._read_cursor("notes") == {"n": 1}
+        committed_cursor = personal_context._read_cursor("notes")
+        assert committed_cursor is not None
+        assert committed_cursor["n"] == 1
+        assert len(committed_cursor["_selection"]["completed"]) == 1
 
         original_publish = context_pipeline._copy_and_publish_tree
 
@@ -982,18 +2007,18 @@ async def test_failed_finish_keeps_old_context_cursor_and_source_metadata(
             return original_publish(candidate, target, skip_relative=skip_relative)
 
         monkeypatch.setattr(context_pipeline, "_copy_and_publish_tree", fail_context_publish)
-        delete = SingleBatchProvider(
+        update = SingleBatchProvider(
             service_config,
             home=tmp_path,
             batch=FetchBatch(
-                batch_id="delete",
+                batch_id="update",
                 items=(
                     RawChangeItem(
                         logical_id="notes/one",
                         revision_id="rev-2",
-                        operation="delete",
-                        title=None,
-                        content=None,
+                        operation="upsert",
+                        title="One updated",
+                        content="Updated body.",
                         original_ref="file:///notes/one",
                     ),
                 ),
@@ -1002,11 +2027,11 @@ async def test_failed_finish_keeps_old_context_cursor_and_source_metadata(
         )
 
         with pytest.raises(Exception):
-            await personal_context._run_fetch_once("notes", delete)
+            await personal_context._run_fetch_once("notes", update)
 
-        assert personal_context._read_cursor("notes") == {"n": 1}
-        assert delete.commit_calls == []
-        assert len(delete.abort_calls) == 1
+        assert personal_context._read_cursor("notes") == committed_cursor
+        assert update.commit_calls == []
+        assert len(update.abort_calls) == 1
         assert old_page.is_file()
         assert source_metadata.is_file()
         assert not (tmp_path / "workspace" / "source-proofs").exists()
@@ -1034,8 +2059,32 @@ async def test_retry_replaces_failed_same_revision_context_without_persistent_so
             self.commit_calls: list[str] = []
             self.abort_calls: list[str] = []
 
-        async def fetch(self, *, run_id: str, cursor: dict[str, object] | None):
-            del run_id, cursor
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return (
+                {
+                    "stable_id": "notes/one",
+                    "revision_id": "rev-1",
+                    "candidate_time": "2026-08-25T00:00:00Z",
+                    "resource_lane": "test",
+                    "locator": "file:///notes/one",
+                },
+            )
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
             yield FetchBatch(
                 batch_id=f"batch-{self.next_cursor}",
                 items=(
@@ -1090,8 +2139,8 @@ async def test_retry_replaces_failed_same_revision_context_without_persistent_so
 
     config = PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": True,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": "agent",
             "model_client": {
                 "client_provider": "OpenAI",
@@ -1105,6 +2154,7 @@ async def test_retry_replaces_failed_same_revision_context_without_persistent_so
                     "provider": "local_files",
                     "enabled": True,
                     "interval_seconds": 3600,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(tmp_path)},
                     "credentials": {},
                 }
@@ -1164,7 +2214,10 @@ async def test_retry_replaces_failed_same_revision_context_without_persistent_so
         assert not (workspace / "context" / "topics" / "page-1.md").exists()
         assert not (workspace / "source-proofs").exists()
         assert not list((workspace / "sandboxes").rglob("content.md"))
-        assert personal_context._read_cursor("notes") == {"n": 2}
+        committed_cursor = personal_context._read_cursor("notes")
+        assert committed_cursor is not None
+        assert committed_cursor["n"] == 2
+        assert len(committed_cursor["_selection"]["completed"]) == 1
         assert second.commit_calls
         assert second.abort_calls == []
     finally:
@@ -1185,8 +2238,8 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
     home = tmp_path / "personal-context-home"
     config = PersonalContextConfig.from_dict(
         {
-            "enabled": True,
-            "fetching_enabled": False,
+            "collection_enabled": True,
+            "agent_use_enabled": False,
             "strategy_profile": "rules",
             "model_client": None,
             "model_request": None,
@@ -1196,6 +2249,7 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
                     "provider": "local_files",
                     "enabled": True,
                     "interval_seconds": 3600.0,
+                    "time_range": {"mode": "all"},
                     "source": {"root_dir": str(source_root)},
                     "credentials": {},
                 }
@@ -1207,23 +2261,25 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
     await personal_context.set_configuration(config)
     await personal_context.activate_runtime()
     try:
-        assert await personal_context.run_fetch() == {
-            "state": "accepted",
-            "service_ids": ["notes-a", "notes-b"],
-        }
+        accepted = await personal_context.run_fetch()
+        assert accepted["state"] == "accepted"
+        assert accepted["service_ids"] == ["notes-a", "notes-b"]
+        assert [item["service_id"] for item in accepted["runs"]] == ["notes-a", "notes-b"]
         for _attempt in range(500):
             status = await personal_context.snapshot()
             cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
             if (
                 status.context_ready
                 and len(cursor_files) == 2
-                and status.fetch_service_states == {"notes-a": "STOPPED", "notes-b": "STOPPED"}
+                and status.fetch_service_states == {"notes-a": "RUNNING", "notes-b": "RUNNING"}
             ):
                 break
             assert status.fetch_service_errors == {}
             await asyncio.sleep(0.01)
         else:
-            pytest.fail("public PersonalContext fetch lifecycle did not finish")
+            pytest.fail(
+                f"public PersonalContext fetch lifecycle did not finish: status={status!r}, cursors={cursor_files!r}"
+            )
 
         expected_source_ids = {
             source_id_for_locator(str(shared.resolve())),
@@ -1240,7 +2296,7 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
             assert "DISTINCT_SOURCE_BODY_SENTINEL" not in source_markdown
 
         context_root = home / "workspace" / "context"
-        context_files = sorted(context_root.rglob("*.md"))
+        context_files = sorted(path for path in context_root.rglob("*.md") if path.is_file())
         assert context_files
         for context_file in context_files:
             text = context_file.read_text(encoding="utf-8")
@@ -1253,41 +2309,28 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         nodes = {str(node["id"]): node for node in graph["nodes"]}
         edges = [(str(edge["source"]), str(edge["target"]), str(edge["kind"])) for edge in graph["edges"]]
         assert graph["context_ready"] is True
-        assert {node_id for node_id in nodes if node_id.startswith("source:")} == {
-            f"source:{source_id}" for source_id in expected_source_ids
-        }
-        assert all(nodes[f"source:{source_id}"]["kind"] == "source" for source_id in expected_source_ids)
-        assert all(nodes[f"source:{source_id}"]["subkind"] == "source.0" for source_id in expected_source_ids)
-        assert all("source-meta" not in node_id for node_id in nodes)
+        assert all(node["kind"] in {"directory", "document"} for node in nodes.values())
+        assert all(not node_id.startswith("source:") for node_id in nodes)
+        assert all(kind in {"contains", "references"} for _source, _target, kind in edges)
+        assert all(not source.startswith("source:") and not target.startswith("source:") for source, target, _ in edges)
 
-        adjacency: dict[str, set[str]] = {}
-        for source, target, _kind in edges:
-            adjacency.setdefault(source, set()).add(target)
-        for page_id in (node_id for node_id in nodes if node_id.startswith("page:")):
-            pending = [page_id]
-            visited: set[str] = set()
-            while pending:
-                current = pending.pop()
-                if current in visited:
-                    continue
-                visited.add(current)
-                pending.extend(adjacency.get(current, set()) - visited)
-            assert any(node_id.startswith("source:") for node_id in visited), page_id
+        context_markdown = "\n".join(path.read_text(encoding="utf-8") for path in context_files)
+        assert all(source_id in context_markdown for source_id in expected_source_ids)
 
         for source_id in expected_source_ids:
-            detail = await personal_context.get_graph_page(f"source:{source_id}")
-            assert detail["node_id"] == f"source:{source_id}"
-            assert detail["path"] == f"{source_id}.md"
-            assert detail["markdown"] == (home / "workspace" / "source-meta" / f"{source_id}.md").read_text(
-                encoding="utf-8"
-            )
+            detail = await personal_context.get_source(source_id)
+            assert detail["source_id"] == source_id
+            assert detail["locator"] in {str(shared.resolve()), str(distinct.resolve())}
+            assert "markdown" not in detail
 
         cursor_files = sorted((home / "state" / "cursors").glob("*.json"))
         assert {path.stem for path in cursor_files} == {"notes-a", "notes-b"}
-        assert all(json.loads(path.read_text(encoding="utf-8"))["cursor"]["files"] for path in cursor_files)
+        assert all(
+            json.loads(path.read_text(encoding="utf-8"))["cursor"]["_selection"]["completed"] for path in cursor_files
+        )
         persistent_files = {path.relative_to(home).as_posix() for path in home.rglob("*") if path.is_file()}
         assert all(
-            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/"))
+            path.startswith(("workspace/context/", "workspace/source-meta/", "state/cursors/", "state/run-history/"))
             for path in persistent_files
         )
         assert not list((home / "workspace" / "sandboxes").rglob("*"))
@@ -1300,3 +2343,822 @@ async def test_public_lifecycle_publishes_deduplicated_atomic_sources_without_so
         assert {path.name: path.read_bytes() for path in source_root.iterdir()} == input_snapshot
     finally:
         await personal_context.deactivate_runtime(timeout_seconds=5)
+
+
+class _PartialStopProvider(ContextFetchService):
+    instances: dict[str, "_PartialStopProvider"] = {}
+
+    def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+        super().__init__(config, home=home)
+        self.commit_calls: list[str] = []
+        self.abort_calls: list[str] = []
+        self.batches = (
+            FetchBatch(batch_id="partial-1", items=(_run_item(1),), next_cursor={"n": 1}),
+            FetchBatch(batch_id="partial-2", items=(_run_item(2),), next_cursor={"n": 2}),
+        )
+        type(self).instances[config.service_id] = self
+
+    async def prepare_run(
+        self,
+        *,
+        run_id: str,
+        run_started_at: datetime,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object], ...]:
+        del run_id, run_started_at, cursor
+        return (_run_candidate(1), _run_candidate(2))
+
+    async def fetch(
+        self,
+        *,
+        run_id: str,
+        cursor: dict[str, object] | None,
+        candidates: tuple[dict[str, object], ...],
+    ):
+        del run_id, cursor, candidates
+        for batch in self.batches:
+            yield batch
+
+    async def commit_run(self, *, run_id: str) -> None:
+        self.commit_calls.append(run_id)
+
+    async def abort_run(self, *, run_id: str) -> None:
+        self.abort_calls.append(run_id)
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _PartialStopProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _PartialStopProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    personal_context._write_cursor("notes", {"n": 0})
+    second_entered = asyncio.Event()
+    calls: list[tuple[str, str]] = []
+    batch_calls: dict[str, int] = {}
+
+    async def submit(
+        _service_id: str,
+        _run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        if enqueued is not None:
+            enqueued.set()
+        batch_calls[batch.batch_id] = batch_calls.get(batch.batch_id, 0) + 1
+        calls.append(("batch", batch.batch_id))
+        if batch.batch_id == "partial-2":
+            second_entered.set()
+            await asyncio.Event().wait()
+
+    async def retain(_service_id: str, _run_id: str) -> None:
+        calls.append(("retain", "run"))
+
+    async def rollback(_service_id: str, _run_id: str) -> None:
+        calls.append(("rollback", "run"))
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[attr-defined,method-assign]
+    personal_context._rollback_pipeline_run = rollback  # type: ignore[method-assign]
+
+    await personal_context.run_fetch(service_id="notes")
+    await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+    await personal_context.stop_fetch_run("notes")
+
+    provider = _PartialStopProvider.instances["notes"]
+    assert calls == [
+        ("batch", "partial-1"),
+        ("batch", "partial-2"),
+        ("retain", "run"),
+    ]
+    assert batch_calls == {"partial-1": 1, "partial-2": 1}
+    assert len(provider.commit_calls) == 1
+    assert provider.abort_calls == []
+    cursor = personal_context._read_cursor("notes")
+    assert cursor is not None
+    assert cursor["n"] == 1
+    assert [item["stable_id"] for item in cursor["_selection"]["completed"]] == ["item-1"]
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
+        "cancelled",
+        1,
+        40,
+    )
+    assert personal_context._config is not None
+    assert personal_context._config.fetch_services[0].enabled is True
+    assert "notes" not in personal_context._fetch_running
+
+    await personal_context.stop_fetch_run("notes")
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_before_first_completed_batch_preserves_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    personal_context._write_cursor("notes", {"n": 0})
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    before = cursor_path.read_bytes()
+
+    await personal_context.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    await asyncio.wait_for(provider.started.wait(), timeout=1.0)
+    await personal_context.stop_fetch_run("notes")
+
+    assert len(provider.abort_calls) == 1
+    assert provider.commit_calls == []
+    assert cursor_path.read_bytes() == before
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "cancelled"
+    assert progress["completed_items"] == 0
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_immediately_after_acceptance_reports_cancelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+
+    await personal_context.run_fetch(service_id="notes")
+    await personal_context.stop_fetch_run("notes")
+
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "cancelled"
+    assert progress["completed_items"] == 0
+    assert "notes" not in personal_context._active_fetch_run_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    release = asyncio.Event()
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+
+    async def stubborn_run() -> None:
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+
+    task = asyncio.create_task(stubborn_run())
+    await started.wait()
+    run_id = "a" * 32
+    personal_context._active_fetch_run_tasks["notes"] = task
+    personal_context._active_fetch_run_stop_events["notes"] = asyncio.Event()
+    personal_context._fetch_run_identity["notes"] = {
+        "run_id": run_id,
+        "started_at": "2026-09-14T00:00:00Z",
+        "finished_at": None,
+    }
+    personal_context._fetch_run_progress["notes"] = personal_context_module._fetch_run_status(
+        "notes",
+        run_state="running",
+        total_items=20,
+        completed_items=20,
+        phase="organizing",
+    )
+    personal_context._fetch_states["notes"] = "RUNNING"
+    monkeypatch.setattr(personal_context_module, "_PIPELINE_CANCEL_GRACE_SECONDS", 0.01, raising=False)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05, raising=False)
+
+    async def ignore_pipeline_cancel(_service_id: str, _run_id: str) -> None:
+        await asyncio.Event().wait()
+
+    personal_context._cancel_pipeline_run = ignore_pipeline_cancel  # type: ignore[method-assign]
+    try:
+        with pytest.raises(BaseError):
+            await asyncio.wait_for(personal_context.stop_fetch_run("notes"), timeout=0.5)
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["run_state"] == "failed"
+        assert progress["progress_percent"] == 80
+        assert personal_context._fetch_states["notes"] == "FAILED"
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_does_not_block_accepting_another_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"a": True, "b": True}),
+    )
+    release = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    pipeline_cancel_started = asyncio.Event()
+    pipeline_cancel_release = asyncio.Event()
+
+    async def stubborn_run() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+
+    async def stalled_pipeline_cancel(_service_id: str, _run_id: str) -> None:
+        pipeline_cancel_started.set()
+        await pipeline_cancel_release.wait()
+
+    task = asyncio.create_task(stubborn_run())
+    run_id = "a" * 32
+    personal_context._active_fetch_run_tasks["a"] = task
+    personal_context._active_fetch_run_stop_events["a"] = asyncio.Event()
+    personal_context._fetch_run_identity["a"] = {
+        "run_id": run_id,
+        "started_at": "2026-09-14T00:00:00Z",
+        "finished_at": None,
+    }
+    personal_context._fetch_run_progress["a"] = personal_context_module._fetch_run_status(
+        "a",
+        run_state="running",
+        total_items=10,
+        completed_items=5,
+        phase="processing",
+    )
+    personal_context._fetch_states["a"] = "RUNNING"
+    personal_context._cancel_pipeline_run = stalled_pipeline_cancel  # type: ignore[method-assign]
+    stop_task = asyncio.create_task(personal_context.stop_fetch_run("a"))
+
+    try:
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        await asyncio.wait_for(pipeline_cancel_started.wait(), timeout=1)
+        accepted = await asyncio.wait_for(personal_context.run_fetch(service_id="b"), timeout=0.2)
+        assert accepted["state"] == "accepted"
+        assert accepted["service_ids"] == ["b"]
+        assert not stop_task.done()
+        await asyncio.wait_for(_BlockingManualProvider.instances["b"].started.wait(), timeout=1)
+    finally:
+        release.set()
+        pipeline_cancel_release.set()
+        provider = _BlockingManualProvider.instances.get("b")
+        if provider is not None:
+            provider.release.set()
+        await asyncio.gather(
+            stop_task,
+            *personal_context._manual_fetch_tasks.values(),
+            return_exceptions=True,
+        )
+
+
+@pytest.mark.asyncio
+async def test_timed_out_run_cannot_commit_after_provider_ignores_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StubbornProvider(ContextFetchService):
+        instance: "StubbornProvider | None" = None
+
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.started = asyncio.Event()
+            self.cancelled = asyncio.Event()
+            self.release = asyncio.Event()
+            self.commit_calls: list[str] = []
+            self.abort_calls: list[str] = []
+            type(self).instance = self
+
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            return (_run_candidate(1),)
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            self.started.set()
+            try:
+                await self.release.wait()
+            except asyncio.CancelledError:
+                self.cancelled.set()
+                await self.release.wait()
+            yield FetchBatch(batch_id="late", items=(_run_item(1),), next_cursor={"n": 1})
+
+        async def commit_run(self, *, run_id: str) -> None:
+            self.commit_calls.append(run_id)
+
+        async def abort_run(self, *, run_id: str) -> None:
+            self.abort_calls.append(run_id)
+
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", StubbornProvider)
+    monkeypatch.setattr(personal_context_module, "_PIPELINE_CANCEL_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+
+    async def no_op(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    personal_context._submit_batch = no_op  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = no_op  # type: ignore[method-assign]
+    await personal_context.run_fetch(service_id="notes")
+    provider = StubbornProvider.instance
+    assert provider is not None
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+
+    with pytest.raises(BaseError):
+        await personal_context.stop_fetch_run("notes")
+    await asyncio.wait_for(provider.cancelled.wait(), timeout=0.1)
+    provider.release.set()
+    await asyncio.wait_for(personal_context._manual_fetch_tasks["notes"], timeout=1)
+
+    assert provider.commit_calls == []
+    assert len(provider.abort_calls) == 1
+    assert personal_context._read_cursor("notes") is None
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_keeps_scheduler_and_allows_its_next_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ScheduledProvider(_EmptyPreparedProvider):
+        instance: "ScheduledProvider | None" = None
+
+        def __init__(self, config: PersonalContextFetchServiceConfig, *, home: Path) -> None:
+            super().__init__(config, home=home)
+            self.prepare_calls = 0
+            self.first_started = asyncio.Event()
+            self.second_started = asyncio.Event()
+            self.abort_calls: list[str] = []
+            type(self).instance = self
+
+        async def prepare_run(
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+        ) -> tuple[dict[str, object], ...]:
+            del run_id, run_started_at, cursor
+            self.prepare_calls += 1
+            if self.prepare_calls == 1:
+                self.first_started.set()
+                await asyncio.Event().wait()
+            self.second_started.set()
+            return ()
+
+        async def fetch(
+            self,
+            *,
+            run_id: str,
+            cursor: dict[str, object] | None,
+            candidates: tuple[dict[str, object], ...],
+        ):
+            del run_id, cursor, candidates
+            yield FetchBatch(
+                batch_id=f"scheduled-{self.prepare_calls}",
+                items=(),
+                next_cursor={"round": self.prepare_calls},
+            )
+
+        async def abort_run(self, *, run_id: str) -> None:
+            self.abort_calls.append(run_id)
+
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", ScheduledProvider)
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path, interval=0.01))
+    personal_context._state = "RUNNING"
+    personal_context._pipeline_service = _RunningPipeline()  # type: ignore[assignment]
+
+    await personal_context.start_fetch_service("notes")
+    scheduler = personal_context._fetch_tasks["notes"]
+    provider = ScheduledProvider.instance
+    assert provider is not None
+    try:
+        await asyncio.wait_for(provider.first_started.wait(), timeout=1.0)
+        await personal_context.stop_fetch_run("notes")
+        assert not scheduler.done()
+        assert personal_context._fetch_tasks["notes"] is scheduler
+        assert personal_context._config is not None
+        assert personal_context._config.fetch_services[0].enabled is True
+        await asyncio.wait_for(provider.second_started.wait(), timeout=1.0)
+        assert provider.prepare_calls >= 2
+    finally:
+        personal_context._fetch_stop_events["notes"].set()
+        scheduler.cancel()
+        await asyncio.gather(scheduler, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_isolated_to_one_run_all_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"a": True, "b": True}),
+    )
+
+    await personal_context.run_fetch()
+    first = _BlockingManualProvider.instances["a"]
+    second = _BlockingManualProvider.instances["b"]
+    await asyncio.wait_for(first.started.wait(), timeout=1.0)
+    await asyncio.wait_for(second.started.wait(), timeout=1.0)
+
+    await personal_context.stop_fetch_run("a")
+    assert "a" not in personal_context._fetch_running
+    assert "b" in personal_context._fetch_running
+    assert not personal_context._active_fetch_run_tasks["b"].done()
+
+    second.release.set()
+    await asyncio.wait_for(personal_context._manual_fetch_tasks["b"], timeout=1.0)
+    assert len(second.commit_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _PartialStopProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _PartialStopProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    finish_entered = asyncio.Event()
+    finish_release = asyncio.Event()
+    finish_cancelled = asyncio.Event()
+    finish_calls = 0
+    cancel_calls = 0
+    retain_calls = 0
+
+    async def submit(
+        _service_id: str,
+        _run_id: str,
+        _batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        if enqueued is not None:
+            enqueued.set()
+
+    async def finish(_service_id: str, _run_id: str) -> None:
+        nonlocal finish_calls
+        finish_calls += 1
+        finish_entered.set()
+        try:
+            await finish_release.wait()
+        except asyncio.CancelledError:
+            finish_cancelled.set()
+            raise
+
+    async def cancel(_service_id: str, _run_id: str) -> None:
+        nonlocal cancel_calls
+        cancel_calls += 1
+
+    async def retain(_service_id: str, _run_id: str) -> None:
+        nonlocal retain_calls
+        retain_calls += 1
+
+    async def rollback(_service_id: str, _run_id: str) -> None:
+        return None
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = finish  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = cancel  # type: ignore[attr-defined,method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[attr-defined,method-assign]
+    personal_context._rollback_pipeline_run = rollback  # type: ignore[method-assign]
+
+    await personal_context.run_fetch(service_id="notes")
+    await asyncio.wait_for(finish_entered.wait(), timeout=1.0)
+    stop_task = asyncio.create_task(personal_context.stop_fetch_run("notes"))
+    try:
+        await asyncio.wait_for(asyncio.shield(stop_task), timeout=0.5)
+    finally:
+        finish_release.set()
+        if not stop_task.done():
+            await asyncio.wait_for(stop_task, timeout=1.0)
+
+    provider = _PartialStopProvider.instances["notes"]
+    assert finish_calls == 1
+    assert cancel_calls == 1
+    assert retain_calls == 1
+    assert finish_cancelled.is_set()
+    assert len(provider.commit_calls) == 1
+    assert provider.abort_calls == []
+    cursor = personal_context._read_cursor("notes")
+    assert cursor is not None
+    assert cursor["n"] == 2
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
+        "cancelled",
+        2,
+        80,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_fetch_run_partial_publish_failure_keeps_old_cursor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _PartialStopProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _PartialStopProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    personal_context._write_cursor("notes", {"n": 0})
+    cursor_path = tmp_path / "state" / "cursors" / "notes.json"
+    before = cursor_path.read_bytes()
+    second_entered = asyncio.Event()
+
+    async def submit(
+        _service_id: str,
+        _run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        if enqueued is not None:
+            enqueued.set()
+        if batch.batch_id == "partial-2":
+            second_entered.set()
+            await asyncio.Event().wait()
+
+    async def no_op(*_args: object) -> None:
+        return None
+
+    async def fail_retain(*_args: object) -> None:
+        raise RuntimeError("retain failed")
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._finish_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._abort_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._rollback_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = fail_retain  # type: ignore[method-assign]
+
+    await personal_context.run_fetch(service_id="notes")
+    await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+    with pytest.raises(Exception):
+        await personal_context.stop_fetch_run("notes")
+
+    provider = _PartialStopProvider.instances["notes"]
+    assert provider.commit_calls == []
+    assert len(provider.abort_calls) == 1
+    assert cursor_path.read_bytes() == before
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "failed"
+
+
+def test_strict_rollback_removes_source_metadata_created_by_unpublished_run(tmp_path: Path) -> None:
+    pipeline = context_pipeline.ContextPipelineService(
+        home=tmp_path,
+        config=_config(tmp_path),
+        input_queue=asyncio.Queue(),
+    )
+    item = RawChangeItem(
+        logical_id="notes/inflight",
+        revision_id="rev-1",
+        operation="upsert",
+        title="Inflight",
+        content="new unpublished metadata",
+        original_ref="file:///notes/inflight",
+    )
+    source_id = upsert_source_metadata(
+        pipeline._source_meta_root,
+        item,
+        provider="local_files",
+        service_id="notes",
+        observed_at="2026-09-08T00:00:00Z",
+    )
+    metadata_path = pipeline._source_meta_root / f"{source_id}.md"
+    written = metadata_path.read_bytes()
+
+    pipeline._restore_unpublished_source_metadata(
+        {
+            "status": "processing",
+            "source_metadata_before": {},
+            "source_metadata_written": {source_id: written},
+        },
+        discard_new_source_metadata=True,
+    )
+
+    assert not metadata_path.exists()
+
+
+def test_strict_rollback_restores_preexisting_source_metadata(tmp_path: Path) -> None:
+    pipeline = context_pipeline.ContextPipelineService(
+        home=tmp_path,
+        config=_config(tmp_path),
+        input_queue=asyncio.Queue(),
+    )
+    old_item = RawChangeItem(
+        logical_id="notes/existing",
+        revision_id="rev-1",
+        operation="upsert",
+        title="Existing",
+        content="published metadata",
+        original_ref="file:///notes/existing",
+    )
+    source_id = upsert_source_metadata(
+        pipeline._source_meta_root,
+        old_item,
+        provider="local_files",
+        service_id="notes",
+        observed_at="2026-09-08T00:00:00Z",
+    )
+    metadata_path = pipeline._source_meta_root / f"{source_id}.md"
+    before = metadata_path.read_bytes()
+    new_item = RawChangeItem(
+        logical_id="notes/existing",
+        revision_id="rev-2",
+        operation="upsert",
+        title="Existing updated",
+        content="unpublished metadata",
+        original_ref="file:///notes/existing",
+    )
+    upsert_source_metadata(
+        pipeline._source_meta_root,
+        new_item,
+        provider="local_files",
+        service_id="notes",
+        observed_at="2026-09-08T01:00:00Z",
+    )
+    written = metadata_path.read_bytes()
+
+    pipeline._restore_unpublished_source_metadata(
+        {
+            "status": "processing",
+            "source_metadata_before": {source_id: before},
+            "source_metadata_written": {source_id: written},
+        },
+        discard_new_source_metadata=True,
+    )
+
+    assert metadata_path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_acceptance_retention_restart_and_active_slot(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    config = _manual_config(tmp_path)
+    core = await _ready_manual_personal_context(tmp_path, config)
+    run_ids = []
+    for _ in range(7):
+        accepted = await core.run_fetch(service_id="notes")
+        run_id = accepted["runs"][0]["run_id"]
+        run_ids.append(run_id)
+        active = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert active["run_state"] == "running"
+        assert active["finished_at"] is None
+        await _finish_manual_tasks(core, ("notes",))
+        finished = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert finished["run_state"] == "succeeded"
+        assert finished["progress_percent"] == 100
+        assert finished["completed_items"] == finished["total_items"] == 0
+        assert finished["finished_at"] >= finished["started_at"]
+        assert _BlockingManualProvider.instances["notes"].commit_calls == [run_id]
+    assert len(set(run_ids)) == 7
+    retained = await core.get_fetch_run_status("notes")
+    assert [run["run_id"] for run in retained["runs"]] == run_ids[-5:][::-1]
+    with pytest.raises(Exception, match="not found|expired"):
+        await core.get_fetch_run_status("notes", run_id=run_ids[0])
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(config)
+    assert await restored.get_fetch_run_status("notes") == retained
+    accepted = await core.run_fetch(service_id="notes")
+    assert len((await core.get_fetch_run_status("notes"))["runs"]) == 6
+    await _finish_manual_tasks(core, ("notes",))
+    assert len((await core.get_fetch_run_status("notes"))["runs"]) == 5
+    assert accepted["runs"][0]["run_id"] != run_ids[-1]
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_failure_cancel_and_query_validation(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    for fail in (True, False):
+        accepted = await core.run_fetch(service_id="notes")
+        run_id = accepted["runs"][0]["run_id"]
+        provider = _BlockingManualProvider.instances["notes"]
+        await provider.started.wait()
+        if fail:
+            provider.fail = True
+            await _finish_manual_tasks(core, ("notes",))
+        else:
+            await core.stop_fetch_run("notes")
+            await asyncio.gather(*core._manual_fetch_tasks.values())
+        result = await core.get_fetch_run_status("notes", run_id=run_id)
+        assert result["run_state"] == ("failed" if fail else "cancelled")
+        assert result["finished_at"] is not None
+    for kwargs in ({"run_id": "abc"}, {"service_id": "notes", "run_id": ""}, {"service_id": "unknown"}):
+        with pytest.raises(Exception):
+            await core.get_fetch_run_status(**kwargs)
+    group = await core.get_fetch_run_status()
+    assert group["services"][0]["service_id"] == "notes"
+    assert len(group["services"][0]["runs"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_stop_before_worker_starts(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    accepted = await core.run_fetch(service_id="notes")
+    await core.stop_fetch_run("notes")
+    record = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    assert record["run_state"] == "cancelled"
+    assert record["finished_at"] is not None
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(_manual_config(tmp_path))
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_reconfigure_remove_restore_and_atomic_failure(tmp_path, monkeypatch):
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    accepted = await core.run_fetch(service_id="notes")
+    await _finish_manual_tasks(core, ("notes",))
+    record = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    restored = PersonalContext(home=tmp_path)
+    await restored.set_configuration(_manual_config(tmp_path, collection_enabled=False))
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    backup = restored.remove_fetch_run_history("notes")
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == []
+    restored.restore_fetch_run_history("notes", backup)
+    assert (await restored.get_fetch_run_status("notes"))["runs"] == [record]
+    history_path = tmp_path / "state" / "run-history" / "notes.json"
+    original = history_path.read_bytes()
+
+    def fail_replace(*args):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr(personal_context_module.os, "replace", fail_replace)
+    with pytest.raises(Exception, match="history write failed"):
+        restored._write_run_history("notes", [])
+    assert history_path.read_bytes() == original
+    assert list(history_path.parent.glob(".notes.json.*")) == []
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_rejects_corrupt_file(tmp_path):
+    history_path = tmp_path / "state" / "run-history" / "notes.json"
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text('{"schema_version":1,"runs":[{"credentials":"must-not-return"}]}')
+    core = PersonalContext(home=tmp_path)
+    with pytest.raises(Exception, match="history is invalid"):
+        await core.set_configuration(_manual_config(tmp_path))
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_stop_during_result_write_keeps_success(tmp_path, monkeypatch):
+    import threading
+
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    writing = threading.Event()
+    release = threading.Event()
+    original_write = core._write_run_history
+
+    def blocked_write(service_id, records):
+        writing.set()
+        assert release.wait(3)
+        original_write(service_id, records)
+
+    monkeypatch.setattr(core, "_write_run_history", blocked_write)
+    accepted = await core.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    await provider.started.wait()
+    provider.release.set()
+    assert await asyncio.to_thread(writing.wait, 3)
+    stop_task = asyncio.create_task(core.stop_fetch_run("notes"))
+    await asyncio.sleep(0)
+    progress = (await core.snapshot()).fetch_run_progress["notes"]
+    release.set()
+    await stop_task
+    await asyncio.gather(*core._manual_fetch_tasks.values())
+    assert progress["run_state"] == "succeeded"
+    result = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
+    assert result["run_state"] == "succeeded"

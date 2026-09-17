@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.interaction import (
     HumanAgentInbox,
     HumanAgentMessage,
     HumanAgentNotEnabledError,
+    HumanAgentToolCall,
     InteractPayload,
     OperatorMessage,
     UnknownHumanAgentError,
@@ -41,7 +42,6 @@ from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     resolve_targets,
 )
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -250,6 +250,7 @@ class TeamRuntimeManager:
             MemberStatus.STOPPED,
             MemberStatus.PAUSED,
             MemberStatus.SHUTDOWN,
+            MemberStatus.ERROR,
         }
     )
 
@@ -268,7 +269,8 @@ class TeamRuntimeManager:
 
         When ``team_member`` is already in
         :data:`_MEMBER_FINALIZED_STATUSES` someone else has written the
-        outcome (leader's ``_mark_live_teammates`` or ``shutdown_self``),
+        outcome (leader's ``_mark_live_teammates``, ``shutdown_self``, or a
+        runtime failure reporter),
         so we only tear down the kernel and skip the status write entirely.
         """
         member = agent.team_member
@@ -287,22 +289,24 @@ class TeamRuntimeManager:
                 current_status is not None and current_status in TeamRuntimeManager._MEMBER_FINALIZED_STATUSES
             )
 
-            async def _evict_member() -> None:
-                await kv_cache_hooks.evict_member(agent, reason="member-shutdown")
+            async def _release_member_kvc() -> None:
+                harness = getattr(getattr(agent, "resources", None), "harness", None)
+                current_session = getattr(harness, "current_session", None)
+                session = current_session() if callable(current_session) else None
+                release_kvc = getattr(session, "release_kvc", None)
+                if callable(release_kvc):
+                    await release_kvc()
 
             if already_finalized:
-                # External party (leader stop/pause, shutdown_self) already
-                # wrote a terminal/quiescent status. Just close the kernel.
+                # Another lifecycle owner already wrote the persisted outcome.
+                # Just close the kernel without erasing STOPPED/PAUSED/ERROR.
                 team_logger.info(
                     "finalize_member: team member {} already finalized (status={}); closing kernel only",
                     member_name,
                     current_status.value if current_status is not None else None,
                 )
-                if (
-                    current_status is MemberStatus.SHUTDOWN
-                    and await kv_cache_hooks.has_manageable_member_binding(agent)
-                ):
-                    await agent.stop_coordination(on_quiesced=_evict_member)
+                if current_status is MemberStatus.SHUTDOWN:
+                    await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 else:
                     await agent.stop_coordination()
                 return
@@ -311,10 +315,7 @@ class TeamRuntimeManager:
                     "finalize_member: shutting down team member {} on request",
                     member_name,
                 )
-                if await kv_cache_hooks.has_manageable_member_binding(agent):
-                    await agent.stop_coordination(on_quiesced=_evict_member)
-                else:
-                    await agent.stop_coordination()
+                await agent.stop_coordination(on_quiesced=_release_member_kvc)
                 if member is not None:
                     await member.update_status(MemberStatus.SHUTDOWN)
                 return
@@ -323,7 +324,6 @@ class TeamRuntimeManager:
                 member_name,
             )
             await agent.pause_coordination()
-            await kv_cache_hooks.mark_ready_resident(agent)
             if member is not None:
                 await member.update_status(MemberStatus.READY)
         except Exception as exc:
@@ -448,7 +448,7 @@ class TeamRuntimeManager:
             # routing directives — they fold back into a no-mention
             # message for the leader / avatar instead of silently
             # writing a bus message to a non-existent member.
-            return await self.dispatch_payloads(entry.agent, payloads)
+            return await self.dispatch_payloads(entry.agent, payloads, entry=entry)
         finally:
             await entry.interact_gate.consume_done(ticket)
 
@@ -534,13 +534,15 @@ class TeamRuntimeManager:
     async def dispatch_payloads(
         agent: "TeamAgent",
         payloads: list[InteractPayload],
+        *,
+        entry: Optional["ActiveTeam"] = None,
     ) -> DeliverResult:
         """Resolve and dispatch interact payloads through the runtime router."""
         payloads = await TeamRuntimeManager._resolve_recipients(agent, payloads)
 
         last_result: DeliverResult = DeliverResult.success(None)
         for entry_payload in payloads:
-            last_result = await TeamRuntimeManager._dispatch_payload(agent, entry_payload)
+            last_result = await TeamRuntimeManager._dispatch_payload(agent, entry_payload, entry=entry)
             if not last_result.ok:
                 return last_result
         return last_result
@@ -568,7 +570,12 @@ class TeamRuntimeManager:
         return await resolve_targets(payloads, member_exists=_member_exists)
 
     @staticmethod
-    async def _dispatch_payload(agent: "TeamAgent", payload: InteractPayload) -> DeliverResult:
+    async def _dispatch_payload(
+        agent: "TeamAgent",
+        payload: InteractPayload,
+        *,
+        entry: Optional["ActiveTeam"] = None,
+    ) -> DeliverResult:
         backend = agent.team_backend
         if backend is None and not isinstance(payload, GodViewMessage):
             return DeliverResult.failure("no_team_backend")
@@ -597,6 +604,13 @@ class TeamRuntimeManager:
             result = await inbox.direct(payload.target, payload.body)
             return result
         if isinstance(payload, HumanAgentMessage):
+            # Bare `$passive` input (no @target) would fall through to the
+            # avatar-driving branch below — but a passive member HAS no
+            # avatar to drive. Fail with a stable token instead; the
+            # routing semantics of bare passive input belong to the
+            # upcoming communication redesign (r1 decision, kept in r2).
+            if payload.target is None and await backend.is_passive_human(payload.sender):
+                return DeliverResult.failure("passive_member_no_avatar")
             try:
                 if payload.target is not None:
                     if payload.target in {"all", "*"}:
@@ -619,7 +633,56 @@ class TeamRuntimeManager:
                 return DeliverResult.failure("human_agent_not_enabled")
             except UnknownHumanAgentError:
                 return DeliverResult.failure("unknown_human_agent")
+        if isinstance(payload, HumanAgentToolCall):
+            return await TeamRuntimeManager._dispatch_tool_call(agent, payload, entry=entry)
         return DeliverResult.failure(f"unknown_payload:{type(payload).__name__}")
+
+    @staticmethod
+    async def _dispatch_tool_call(
+        agent: "TeamAgent",
+        payload: HumanAgentToolCall,
+        *,
+        entry: Optional["ActiveTeam"] = None,
+    ) -> DeliverResult:
+        """Execute one relayed tool call under a passive member's identity.
+
+        The passthrough channel: the external protocol relays a tool call
+        for a passive human member, and the runtime executes it verbatim
+        with the same identity invariants an avatar's LLM-driven call
+        enjoys. Avatars are refused — their LLM tool loop (plus the
+        plan-mode approval chain) is the governed path, and an external
+        relay would bypass it. Synchronous RPC semantics: the tool's
+        result comes back on this ``DeliverResult`` (``output`` /
+        ``data``), so the caller never needs a second round-trip.
+        """
+        from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
+
+        backend = agent.team_backend
+        if backend is None:
+            return DeliverResult.failure("no_team_backend")
+        if not backend.hitt_enabled():
+            return DeliverResult.failure("human_agent_not_enabled")
+
+        human_names = await backend.human_agent_names()
+        if payload.sender not in human_names:
+            return DeliverResult.failure("unknown_human_agent")
+        if not await backend.is_passive_human(payload.sender):
+            return DeliverResult.failure("tool_passthrough_avatar_not_supported")
+        if entry is None:
+            return DeliverResult.failure("tool_passthrough_no_runtime")
+
+        if entry.passive_tool_executor is None:
+            language = getattr(agent.blueprint, "language", None) if getattr(agent, "blueprint", None) else None
+            entry.passive_tool_executor = PassiveToolExecutor(backend, language=language or "cn")
+        executor = entry.passive_tool_executor
+
+        output = await executor.execute(payload.sender, payload.tool_name, payload.tool_args)
+        if not output.success:
+            return DeliverResult.failure(output.error or "tool_failed")
+        return DeliverResult.tool_success(
+            output=executor.map_output(payload.tool_name, output),
+            data=output.data,
+        )
 
     async def register_human_agent_inbound(
         self,

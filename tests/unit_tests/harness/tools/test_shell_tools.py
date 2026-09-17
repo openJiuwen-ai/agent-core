@@ -122,25 +122,34 @@ async def test_bash_tool_allowlist(sys_op):
 
 # ────────────────────────────────────────────────────────────
 # Dangerous command interception
+# Overlapping items (rm -rf / shutdown / disk / registry) are Engine policy.
+# Local no longer hard-blocks them; see test_shell_operation.py.
+# Local only honors explicit run_config.dangerous_patterns.
 # ────────────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("command,label", [
-    ("rm -rf /tmp/foo", "rm -rf"),
-    ("shutdown -h now", "shutdown"),
-    ("reboot", "reboot"),
-    ("diskpart", "diskpart"),
-    ("mkfs.ext4 /dev/sda", "mkfs"),
-    ("reg delete HKLM\\Software\\Test", "reg delete"),
-    ("Remove-Item C:\\foo -Recurse -Force", "Remove-Item -Recurse -Force"),
-])
-async def test_dangerous_command_blocked(sys_op, command, label):
-    bash_tool = BashTool(sys_op)
-    res = await bash_tool.invoke({"command": command})
-    assert res.success is False
-    assert res.data is None
-    assert "safety" in res.error
-    assert label in res.error
+async def test_custom_dangerous_patterns_still_block():
+    await Runner.start()
+    card_id = "test_shell_custom_danger"
+    card = SysOperationCard(
+        id=card_id,
+        mode=OperationMode.LOCAL,
+        work_config=LocalWorkConfig(
+            shell_allowlist=[],
+            dangerous_patterns=[r"custom-block-marker"],
+        ),
+    )
+    Runner.resource_mgr.add_sys_operation(card)
+    try:
+        bash_tool = BashTool(Runner.resource_mgr.get_sys_operation(card_id))
+        res = await bash_tool.invoke({"command": "echo custom-block-marker"})
+        assert res.success is False
+        assert res.data is None
+        assert "safety" in (res.error or "")
+        assert "custom-block-marker" in (res.error or "")
+    finally:
+        Runner.resource_mgr.remove_sys_operation(sys_operation_id=card_id)
+        await Runner.stop()
 
 
 # ────────────────────────────────────────────────────────────

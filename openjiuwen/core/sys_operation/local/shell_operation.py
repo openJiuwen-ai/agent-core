@@ -255,34 +255,9 @@ class ShellOperation(BaseShellOperation):
          "Interactive TUI program will hang without TTY", None),
     ]
 
-    _DANGEROUS_PATTERNS: List[Tuple[re.Pattern, str]] = [
-        (re.compile(r"\brm\s+-rf\b", re.IGNORECASE), "rm -rf"),
-        (re.compile(r"\bdel\s+/[a-z]*[fsq][a-z]*\b", re.IGNORECASE), "del /f /s /q"),
-        (re.compile(r"\brd\s+/s\s+/q\b", re.IGNORECASE), "rd /s /q"),
-        (re.compile(r"\bformat\s+[a-z]:", re.IGNORECASE), "format drive"),
-        (re.compile(r"\bshutdown\b", re.IGNORECASE), "shutdown"),
-        (re.compile(r"\breboot\b", re.IGNORECASE), "reboot"),
-        (re.compile(r"\bdiskpart\b", re.IGNORECASE), "diskpart"),
-        (re.compile(r"\bmkfs\b", re.IGNORECASE), "mkfs"),
-        (re.compile(r"\breg\s+delete\b", re.IGNORECASE), "reg delete"),
-        (re.compile(r"\bremove-item\b[^\n\r]*-recurse[^\n\r]*-force", re.IGNORECASE), "Remove-Item -Recurse -Force"),
-        (
-            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
-            "pkill targeting jiuwenswarm backend",
-        ),
-        (
-            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenswarm(?!-tui)", re.IGNORECASE),
-            "killall targeting jiuwenswarm backend",
-        ),
-        (
-            re.compile(r"\bpkill\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
-            "pkill targeting jiuwenclaw backend",
-        ),
-        (
-            re.compile(r"\bkillall\b[^\n\r;|&]*jiuwenclaw", re.IGNORECASE),
-            "killall targeting jiuwenclaw backend",
-        ),
-    ]
+    # Overlapping shell danger checks live in PermissionEngine builtin rules.
+    # Keep this table empty; only honor host-supplied run_config.dangerous_patterns.
+    _DANGEROUS_PATTERNS: List[Tuple[re.Pattern, str]] = []
 
     _BUFFERING_WRAPPERS: Dict[str, Callable[[str], str]] = {
         "windows": lambda cmd: cmd,

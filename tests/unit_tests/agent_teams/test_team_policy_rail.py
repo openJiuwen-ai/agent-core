@@ -23,7 +23,7 @@ from openjiuwen.agent_teams.inbound_render import render_event
 from openjiuwen.agent_teams.rails import TeamPolicyRail
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.team_context import TEAM_CONTEXT_STATE_KEY
-from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, ToolMessage, UserMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import SteeringDrainInputs, UserMessageInputs
 from openjiuwen.core.single_agent.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
@@ -498,6 +498,20 @@ class _FakeTeamBackend:
         self.team_mtime_calls += 1
         return self._team_mtime
 
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Team-card mtime probe the team-info block's re-announce records.
+
+        Returns a stable ``(self._team_mtime, True)`` so the re-announce path
+        does not fire between rounds — this fake exercises the rail's delivery
+        plumbing, not the team-card-evolution re-announce semantics. Mirrors
+        :meth:`get_member_updated_at_state` at the team level.
+        """
+        return self._team_mtime, True
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """No-op: the stable probe above never signals a blank field."""
+        return None
+
     async def get_members_max_updated_at(self) -> int:
         self.members_mtime_calls += 1
         return self._members_mtime
@@ -683,7 +697,10 @@ class TestTeamPolicyRailTeamContext:
 
         assert batch == ["ship it"]
         assert ctx.context.messages == [snapshot, user_message]
-        assert isinstance(snapshot, SystemMessage)
+        assert isinstance(snapshot, UserMessage)
+        assert snapshot.content.startswith("<system-reminder>\n")
+        assert "以下内容不是用户的意图" in snapshot.content
+        assert snapshot.content.endswith("\n</system-reminder>")
         assert "<prompt-attachment" not in snapshot.content
         assert "<team-context>" in snapshot.content
         assert "member_name: leader1" in snapshot.content
@@ -700,10 +717,12 @@ class TestTeamPolicyRailTeamContext:
         for callback in ctx.extra.pop(PROMPT_ATTACHMENT_COMMIT_CALLBACKS_KEY):
             await callback()
 
-        assert isinstance(delta, SystemMessage)
+        assert isinstance(delta, UserMessage)
         assert ctx.context.messages[-2].role == "tool"
         assert ctx.context.messages[-1] == delta
         assert "<prompt-attachment" not in delta.content
+        assert delta.content.startswith("<system-reminder>\n")
+        assert delta.content.endswith("\n</system-reminder>")
         assert "动态上下文已经变化" in delta.content
         assert "roster-change" in delta.content
         assert snapshot.content == snapshot_content
@@ -814,8 +833,8 @@ class TestTeamPolicyRailTeamContext:
         rail = _leader_rail(
             backend,
             member_prompt="",
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(agent)
 
@@ -830,7 +849,7 @@ class TestTeamPolicyRailTeamContext:
         assert second.count("<team-context>") == 1 if isinstance(second, str) else True
         assert second.content.count("<team-context>") == 1
         assert "# 团队信息" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
         assert _team_texts(ctx).count("# 团队信息") == 1
 
     @pytest.mark.asyncio
@@ -995,21 +1014,21 @@ class TestTeamPolicyRailTeamContext:
         )
         rail = _leader_rail(
             backend,
-            team_workspace_mount=".team/beta/",
             team_workspace_path="/abs/team-workspace",
+            team_outputs_dir="/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs",
         )
         rail.init(_StubAgent(SystemPromptBuilder(language="cn")))
 
         ctx = _StubContext()
         first = await _admit(rail, ctx, "go")
-        assert "`.team/beta/`" in first.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in first.content
         assert "/abs/team-workspace" in first.content
 
         # A renamed team is announced again rather than rewritten in place.
         backend.set_team(_StubTeam("Beta-renamed", "Test"), mtime=99)
         second = await _admit(rail, ctx, "next")
         assert "Beta-renamed" in second.content
-        assert "`.team/beta/`" in second.content
+        assert "/abs/team-workspace/artifacts/2026-09-01/chat-1/outputs" in second.content
 
     @pytest.mark.asyncio
     @pytest.mark.level1

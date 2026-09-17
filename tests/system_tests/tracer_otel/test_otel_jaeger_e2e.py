@@ -23,9 +23,8 @@ import requests
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER, jaeger_is_available
 from tests.unit_tests.core.workflow.mock_nodes import MockStartNode, MockEndNode, Node1
 from openjiuwen.core.session.tracer.handler import TracerHandlerName
-from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
-from openjiuwen.core.session.workflow import Session, create_workflow_session
+from openjiuwen.core.session.workflow import create_workflow_session
 from openjiuwen.core.workflow import Workflow
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
@@ -131,8 +130,8 @@ class TestJaegerAgentIntegration:
         await asyncio.sleep(6)
 
         span_names = _query_jaeger_traces("openjiuwen")
-        assert "tool.JaegerSearchTool" in span_names, (
-            f"tool.JaegerSearchTool not in Jaeger. Found: {span_names}"
+        assert "execute_tool JaegerSearchTool" in span_names, (
+            f"execute_tool JaegerSearchTool not in Jaeger. Found: {span_names}"
         )
 
 

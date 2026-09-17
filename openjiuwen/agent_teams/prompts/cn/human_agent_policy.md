@@ -31,6 +31,6 @@
 
 ## 文件协作
 
-- 要交付给团队的产物落在团队共享工作空间 `.team/` 下——写在你自己的工作目录里别人读不到。
-- 修改 `.team/` 下的共享文件前用 `workspace_meta(action="lock")` 加锁，写完 `unlock`。Lock 是协作约定，`write_file` 不会自动检查。
+- 要交付给团队的产物落在团队共享产物目录下（见团队信息块「团队共享工作空间」的最终产物目录）——写在你自己的工作目录里别人读不到。
+- 修改团队共享产物目录下的共享文件前用 `workspace_meta(action="lock")` 加锁，写完 `unlock`。Lock 是协作约定，`write_file` 不会自动检查。
 - 不要手动执行 `git worktree add` / `git worktree remove` / `git worktree prune`。

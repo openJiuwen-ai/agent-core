@@ -17,6 +17,9 @@ from openjiuwen.harness.image_modality_probe import (
     reset_image_support_cache,
     schedule_image_support_probe,
 )
+from openjiuwen.core.foundation.llm.call_scope import (
+    is_llm_observation_suppressed,
+)
 
 
 class _FakeClientConfig:
@@ -30,9 +33,15 @@ class _FakeModelConfig:
 
 
 class _FakeResponse:
-    def __init__(self, content: Any, finish_reason: str = "stop") -> None:
+    def __init__(
+        self,
+        content: Any,
+        finish_reason: str = "stop",
+        reasoning_content: str | None = None,
+    ) -> None:
         self.content = content
         self.finish_reason = finish_reason
+        self.reasoning_content = reasoning_content
 
 
 def _make_llm(
@@ -92,12 +101,22 @@ async def test_probe_result_is_cached_per_endpoint_and_model() -> None:
 
 @pytest.mark.asyncio
 async def test_probe_retries_without_vendor_switches() -> None:
-    invoke = AsyncMock(side_effect=[TypeError("unknown field: thinking"), _FakeResponse("red")])
+    observation_states: list[bool] = []
+
+    async def invoke_probe(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        observation_states.append(is_llm_observation_suppressed())
+        if len(observation_states) == 1:
+            raise TypeError("unknown field: thinking")
+        return _FakeResponse("red")
+
+    invoke = AsyncMock(side_effect=invoke_probe)
     llm = _make_llm(invoke=invoke)
 
     assert await probe_image_support(llm) is True
     assert invoke.await_count == 2
     assert "extra_body" not in invoke.await_args.kwargs
+    assert observation_states == [True, True]
+    assert not is_llm_observation_suppressed()
 
 
 @pytest.mark.asyncio
@@ -126,6 +145,34 @@ async def test_probe_naming_the_color_wins_over_truncation() -> None:
 
     assert await probe_image_support(llm) is True
     assert get_cached_image_support(llm) is True
+
+
+@pytest.mark.asyncio
+async def test_probe_accepts_color_from_reasoning_when_answer_is_truncated() -> None:
+    """Mandatory reasoning may consume the budget after already inspecting the image."""
+    answered = _FakeResponse(
+        "",
+        finish_reason="length",
+        reasoning_content="The image is a solid red square. The answer should be Red.",
+    )
+    llm = _make_llm(invoke=AsyncMock(return_value=answered))
+
+    assert await probe_image_support(llm) is True
+    assert get_cached_image_support(llm) is True
+
+
+@pytest.mark.asyncio
+async def test_probe_timeout_is_inconclusive_and_not_cached(monkeypatch) -> None:
+    """A transiently slow image endpoint must not be cached as image-blind."""
+
+    async def _timeout(*_args: Any, **_kwargs: Any) -> _FakeResponse:
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(image_modality_probe, "_invoke_probe", _timeout)
+    llm = _make_llm()
+
+    assert await probe_image_support(llm) is None
+    assert get_cached_image_support(llm) is None
 
 
 @pytest.mark.asyncio

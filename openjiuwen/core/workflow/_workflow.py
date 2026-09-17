@@ -175,6 +175,7 @@ class BaseWorkflow:
             max_retries: int = 0,
             timeout: float = -1.0,
             exception_config: "ExceptionConfig" = None,
+            name: str = None,
     ) -> Self:
         self._validate_comp_id(comp_id)
         self._validate_schemas(comp_id, inputs_schema, outputs_schema, stream_inputs_schema, stream_outputs_schema)
@@ -185,7 +186,8 @@ class BaseWorkflow:
             abilities=comp_ability if comp_ability is not None else [],
             max_retries=max_retries,
             timeout=timeout,
-            exception_config=exception_config)
+            exception_config=exception_config,
+            name=name)
         self._workflow_spec.comp_configs[comp_id] = node_spec
         if wait_for_all is None:
             wait_for_all = False

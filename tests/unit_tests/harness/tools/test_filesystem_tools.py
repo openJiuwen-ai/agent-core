@@ -30,9 +30,13 @@ from openjiuwen.harness.tools import filesystem as filesystem_module
 from openjiuwen.harness.tools.filesystem import (
     _FILE_READ_REGISTRY,
     _TokenBudget,
-    _merge_range,
-    _ranges_cover,
+    _coerce_file_tool_inputs,
+    _extract_json_object,
     _first_unread_offset,
+    _merge_range,
+    _overlong_path_error,
+    _ranges_cover,
+    _resolve_tool_file_path,
 )
 
 
@@ -120,6 +124,28 @@ async def test_read_file_image_can_disable_multimodal_payload(sys_op, temp_dir):
     assert "base64," not in read_res.data["content"]
     assert read_res.data["multimodal"] == []
     assert "native image multimodal input is disabled" in read_res.data["content"]
+
+
+@pytest.mark.asyncio
+async def test_read_file_image_resolves_multimodal_policy_per_call(sys_op, temp_dir):
+    policy = {"enabled": False}
+    read_tool = ReadFileTool(
+        sys_op,
+        enable_image_multimodal=lambda: policy["enabled"],
+    )
+    file_path = os.path.join(temp_dir, "dynamic_one_pixel.png")
+    raw = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+    )
+    with open(file_path, "wb") as fh:
+        fh.write(raw)
+
+    disabled_result = await read_tool.invoke({"file_path": file_path})
+    assert disabled_result.data["multimodal"] == []
+
+    policy["enabled"] = True
+    enabled_result = await read_tool.invoke({"file_path": file_path})
+    assert enabled_result.data["multimodal"][0]["type"] == "image"
 
 
 def test_estimate_base64_tokens_matches_actual_encoding():
@@ -1322,3 +1348,75 @@ async def test_write_file_small_file_single_full_read_allows_overwrite(sys_op, t
 
     res = await write_tool.invoke({"file_path": file_path, "content": "x\ny\nz"})
     assert res.success is True
+
+
+def test_extract_json_object_strips_trailing_tool_xml() -> None:
+    blob = (
+        '{"file_path": "/app/src/rules/auto-toc.ts", "content": "export const x = 1;"}'
+        '\nStderr: (empty)\nExit Code: 0</tool'
+    )
+    parsed = _extract_json_object(blob)
+    assert parsed["file_path"] == "/app/src/rules/auto-toc.ts"
+    assert parsed["content"] == "export const x = 1;"
+
+
+def test_coerce_file_tool_inputs_unwraps_json_file_path() -> None:
+    nested = {
+        "file_path": "/app/src/rules/auto-toc.ts",
+        "content": "export default class AutoToc {}\n",
+    }
+    coerced = _coerce_file_tool_inputs(
+        {"file_path": json.dumps(nested), "content": ""}
+    )
+    assert coerced["file_path"] == "/app/src/rules/auto-toc.ts"
+    assert "export default class AutoToc" in coerced["content"]
+
+
+def test_overlong_path_error_rejects_json_blob_components() -> None:
+    blob = '{"file_path": "/app/src/x.ts", "content": "' + ("a" * 400) + '"}'
+    err = _overlong_path_error("/app/" + blob)
+    assert err is not None
+    assert "longer than" in err or "too long" in err
+
+
+def test_resolve_tool_file_path_oserror_becomes_valueerror(temp_dir) -> None:
+    original = get_cwd()
+    set_cwd(temp_dir)
+    try:
+        with pytest.raises(ValueError, match="plain path"):
+            _resolve_tool_file_path(
+                MagicMock(),
+                '{"file_path": "/app/src/auto-toc.ts", "content": "' + ("x" * 300) + '"}',
+            )
+    finally:
+        set_cwd(original)
+
+
+@pytest.mark.asyncio
+async def test_write_file_unwraps_nested_json_file_path(sys_op, temp_dir) -> None:
+    write_tool = WriteFileTool(sys_op)
+    target = os.path.join(temp_dir, "auto-toc.ts")
+    body = "export default class AutoToc {}\n"
+    nested = {"file_path": target, "content": body}
+    res = await write_tool.invoke(
+        {
+            "file_path": json.dumps(nested) + "\nStderr: (empty)\nExit Code: 0</tool",
+            "content": "",
+        }
+    )
+    assert res.success is True, res.error
+    with open(target, encoding="utf-8") as fh:
+        assert fh.read() == body
+
+
+@pytest.mark.asyncio
+async def test_write_file_overlong_path_returns_tool_error(sys_op) -> None:
+    write_tool = WriteFileTool(sys_op)
+    res = await write_tool.invoke(
+        {
+            "file_path": "/app/" + ("a" * 300) + ".ts",
+            "content": "x",
+        }
+    )
+    assert res.success is False
+    assert "file_path" in (res.error or "").lower()

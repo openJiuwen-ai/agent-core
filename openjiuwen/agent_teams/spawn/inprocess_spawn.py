@@ -14,7 +14,6 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
 from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
@@ -69,7 +68,6 @@ async def inprocess_spawn(
     # Injected at TeamAgent construction time so it cannot race configure.
     team_agent.share_workspace_cache_with(teammate)
     teammate.configure(spec, ctx)
-    kv_cache_hooks.share_registry_with_teammate(team_agent, teammate)
 
     # Share the leader's checkpoint dict so this teammate's
     # ``checkpoint()`` tool writes into the leader-visible namespace.

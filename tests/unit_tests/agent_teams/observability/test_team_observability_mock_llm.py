@@ -193,11 +193,24 @@ async def test_leader_single_iteration_trace_via_runner(
     agent_spans = [s for s in all_spans if s.name.startswith("agent.")]
     assert len(agent_spans) >= 1, f"want >=1 agent spans, got {len(agent_spans)}"
 
+    # The agent tier is itself nested — a react_iteration Step hangs under the
+    # task_iteration Turn — so an agent span's parent is either the team span
+    # or an outer agent span. What must hold is that every chain ends at a
+    # team span, with no agent tier escaping to another root.
     team_ids = {s.context.span_id for s in team_spans}
+    spans_by_id = {s.context.span_id: s for s in all_spans}
     for a in agent_spans:
         assert a.parent is not None, f"agent span {a.name} needs a parent"
-        assert a.parent.span_id in team_ids, \
-            f"agent span {a.name} parent not in team spans"
+        ancestor = a
+        while ancestor.parent is not None and ancestor.parent.span_id not in team_ids:
+            parent = spans_by_id.get(ancestor.parent.span_id)
+            assert parent is not None, \
+                f"agent span {a.name} has an orphaned ancestor {ancestor.name}"
+            assert parent.name.startswith("agent."), \
+                f"agent span {a.name} nests under non-agent span {parent.name}"
+            ancestor = parent
+        assert ancestor.parent is not None and ancestor.parent.span_id in team_ids, \
+            f"agent span {a.name} does not descend from a team span"
 
     # --- 3. LLM spans (if any) are children of agent spans ---
     # NOTE: LLM spans may be absent when mock_llm_context is used
@@ -216,16 +229,20 @@ async def test_leader_single_iteration_trace_via_runner(
     orphans = [s.name for s in all_spans if s.parent is not None and s.parent.span_id not in span_ids]
     assert len(orphans) == 0, f"orphan spans: {orphans}"
 
-    # --- 5. Agent spans have type AGENT ---
+    # --- 5. Agent spans carry a trajectory record kind ---
+    # The agent tier includes iteration/invoke spans (kind=agent) and their
+    # nested ReAct step spans (kind=step) — both are valid record kinds.
     for a in agent_spans:
-        assert _attr(a, "langfuse.observation.type") == "agent", \
-            f"{a.name} must have type=agent"
+        kind = _attr(a, "openjiuwen.trajectory.record.kind")
+        expected_kinds = ("agent", "step") if "react_iteration" in a.name else ("agent",)
+        assert kind in expected_kinds, \
+            f"{a.name} must have record kind in {expected_kinds}, got {kind}"
 
     # --- 6. LLM spans have input/output (if present) ---
     for llm in llm_spans:
         has_io = (_attr(llm, "gen_ai.prompt.0.content")
                   or _attr(llm, "gen_ai.completion.0.content")
-                  or _attr(llm, "langfuse.observation.output"))
+                  or _attr(llm, "gen_ai.output.messages"))
         assert has_io, f"LLM span {llm.name} needs prompt or completion"
 
     # --- 7. Reasoning spans (if present) have content ---
@@ -233,7 +250,7 @@ async def test_leader_single_iteration_trace_via_runner(
     for rs in reasoning_spans:
         assert rs.parent is not None, "reasoning span needs parent"
         has_io = (_attr(rs, "gen_ai.completion.0.content")
-                  or _attr(rs, "langfuse.observation.output"))
+                  or _attr(rs, "gen_ai.output.messages"))
         assert has_io, "reasoning span needs completion or output"
 
 

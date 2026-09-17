@@ -12,23 +12,23 @@ import pytest
 from openjiuwen.core.session.stream.base import (
     OutputSchema,
 )
-from openjiuwen.rsi.auto_harness.artifacts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.artifacts import (
     ArtifactStore,
 )
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
 )
-from openjiuwen.rsi.auto_harness.infra.gitcode_pr_template import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.gitcode_pr_template import (
     load_pr_template_fallback,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     CommitArtifact,
     CommitFacts,
     OptimizationTask,
     VerifyReportArtifact,
 )
-from openjiuwen.rsi.auto_harness.stages.publish_pr import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr import (
     PublishPRStage,
 )
 
@@ -252,7 +252,7 @@ async def test_publish_pr_stage_generates_draft_then_creates_pr():
     )
 
     with patch(
-        "openjiuwen.rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
         return_value=_FakeDraftAgent(),
     ) as create_agent:
         stage = PublishPRStage()
@@ -298,11 +298,11 @@ async def test_publish_pr_stage_injects_fetched_template_into_pr_draft_prompt():
 
     with (
         patch(
-            "openjiuwen.rsi.auto_harness.stages.publish_pr.fetch_pr_template",
+            "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.fetch_pr_template",
             AsyncMock(return_value=mocked_template),
         ),
         patch(
-            "openjiuwen.rsi.auto_harness.agents.factory.create_deep_agent",
+            "openjiuwen.rsi.harness_rsi.auto_harness.agents.factory.create_deep_agent",
             side_effect=_fake_create_deep_agent,
         ),
     ):
@@ -325,7 +325,7 @@ async def test_publish_pr_stage_fails_when_draft_is_invalid():
     )
 
     with patch(
-        "openjiuwen.rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
         return_value=_BrokenDraftAgent(),
     ):
         stage = PublishPRStage()
@@ -353,7 +353,7 @@ async def test_publish_pr_stage_accepts_simplified_pr_body():
     )
 
     with patch(
-        "openjiuwen.rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
         return_value=_SimplifiedDraftAgent(),
     ):
         stage = PublishPRStage()
@@ -390,7 +390,7 @@ async def test_publish_pr_stage_does_not_retry_after_simplified_draft():
     agent = _RepairingDraftAgent()
 
     with patch(
-        "openjiuwen.rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
+        "openjiuwen.rsi.harness_rsi.auto_harness.stages.publish_pr.create_pr_draft_agent",
         return_value=agent,
     ):
         stage = PublishPRStage()

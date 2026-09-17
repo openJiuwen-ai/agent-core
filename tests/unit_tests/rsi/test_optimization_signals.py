@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from openjiuwen.rsi.evaluator.optimization_signals import (
+from openjiuwen.rsi.harness_rsi.evaluator.optimization_signals import (
     evaluation_optimization_signals,
     optimization_signals_contract,
 )

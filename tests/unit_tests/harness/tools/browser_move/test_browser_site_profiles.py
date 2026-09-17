@@ -4,11 +4,21 @@ import json
 import logging
 from pathlib import Path
 
+from openjiuwen.harness.tools.browser_move.playwright_runtime.probe_semantics import (
+    normalize_card_probe_payload,
+)
 from openjiuwen.harness.tools.browser_move.playwright_runtime.site_profiles import (
     BrowserSelectorCache,
+    apply_site_card_semantics,
     builtin_site_profiles,
+    deduplicate_site_cards,
     domain_from_url,
+    infer_profile_evidence_entity,
+    normalize_site_card_fields,
     normalize_route_signature,
+    profile_detail_link_key,
+    site_profile_for_host,
+    site_profiles_for_url,
 )
 
 
@@ -23,6 +33,64 @@ def test_builtin_site_profiles_include_books_to_scrape() -> None:
     assert "article.product_pod" in profile["card_container_selectors"]
     assert "h3 a[title]" in profile["title_selectors"]
     assert ".price_color" in profile["price_selectors"]
+
+
+def test_site_profiles_own_marketplace_and_hotel_semantics() -> None:
+    taobao = site_profile_for_host("list.taobao.com")
+    ctrip = site_profile_for_host("hotels.ctrip.com")
+
+    assert taobao is not None and taobao["id"] == "taobao_marketplace"
+    assert ctrip is not None and ctrip["id"] == "ctrip_hotels"
+    assert profile_detail_link_key(
+        taobao,
+        "https://item.taobao.com/item.htm?id=42",
+    ) == "product:42"
+    assert profile_detail_link_key(
+        ctrip,
+        "https://hotels.ctrip.com/hotels/detail/?hotelId=99",
+    ) == "hotel:99"
+    assert [
+        profile["id"]
+        for profile in site_profiles_for_url("https://hotels.ctrip.com/list")
+    ] == ["ctrip_hotels"]
+
+
+def test_site_profiles_normalize_semantics_and_fields() -> None:
+    region, kind, is_ad = apply_site_card_semantics(
+        {
+            "title": "付费内容",
+            "primary_link": "https://www.zhihu.com/market/paid_column/123",
+        },
+        host="www.zhihu.com",
+        region="main_result",
+        kind="result",
+        is_ad=False,
+    )
+    assert (region, kind, is_ad) == ("sponsored_result", "paid_column", True)
+
+    card = {
+        "rating": "4.9",
+        "rating_raw_text": "店铺评分 4.9",
+        "rating_kind": "rating",
+    }
+    normalize_site_card_fields(card, host="item.taobao.com")
+    assert card["rating"] is None
+    assert card["shop_rating"] == "4.9"
+    assert card["rating_kind"] == "shop_rating"
+
+
+def test_site_profiles_deduplicate_detail_entities_and_infer_task_entity() -> None:
+    cards = [
+        {"title": "Hotel A", "primary_link": "https://hotels.ctrip.com/hotels/123.html"},
+        {"title": "Hotel A duplicate", "primary_link": "https://hotels.ctrip.com/hotels/123.html"},
+        {"title": "Hotel B", "primary_link": "https://hotels.ctrip.com/hotels/456.html"},
+    ]
+
+    deduplicated = deduplicate_site_cards(cards, host="hotels.ctrip.com")
+
+    assert [card["title"] for card in deduplicated] == ["Hotel A", "Hotel B"]
+    assert infer_profile_evidence_entity("比较携程的两家酒店") == "hotel"
+    assert infer_profile_evidence_entity("查看 B站 最新视频") == "bilibili_search_result"
 
 
 def test_normalize_route_signature_generalizes_numeric_paths() -> None:
@@ -454,3 +522,116 @@ def test_selector_cache_demotes_csdn_author_links_from_title_and_primary_link(
     assert "a.block-title.so-item-report" in selectors["title_selectors"]
     assert "a.user" in serialized
     assert "author_selectors" in selectors
+
+
+def test_google_probe_counts_only_natural_external_results() -> None:
+    payload = {
+        "url": "https://www.google.com/search?q=openjiuwen",
+        "generation_id": "g4",
+        "cards": [
+            {
+                "title": "OpenJiuwen documentation",
+                "primary_link": "https://openjiuwen.example/docs",
+                "selector_hint": "div.g:nth-of-type(1)",
+            },
+            {
+                "title": "AI Overview",
+                "text_preview": "AI Overview generated answer",
+                "selector_hint": "div.ai-overview",
+            },
+            {
+                "title": "People also ask",
+                "text_preview": "People also ask",
+                "selector_hint": "div.related-question-pair",
+            },
+            {
+                "title": "OpenJiuwen app",
+                "primary_link": "https://play.google.com/store/apps/details?id=test",
+                "text_preview": "Google Play",
+            },
+            {
+                "title": "Search settings",
+                "primary_link": "https://www.google.com/preferences",
+            },
+            {
+                "title": "Sponsored OpenJiuwen hosting",
+                "primary_link": "https://sponsor.example/openjiuwen",
+                "semantic_badges": ["Sponsored"],
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["observed_count"] == 1
+    assert payload["cards"][0]["result_index"] == 1
+    assert all(card["result_index"] is None for card in payload["cards"][1:])
+    assert {card["kind"] for card in payload["cards"][1:]} >= {
+        "ai_overview",
+        "people_also_ask",
+        "commercial_module",
+        "navigation_link",
+        "promotion",
+    }
+
+
+def test_csdn_probe_excludes_download_commercial_and_profile_links() -> None:
+    payload = {
+        "url": "https://so.csdn.net/so/search?q=fastapi&t=blog",
+        "generation_id": "g2",
+        "cards": [
+            {
+                "title": "FastAPI tutorial",
+                "primary_link": "https://blog.csdn.net/alice/article/details/123",
+            },
+            {
+                "title": "FastAPI source download",
+                "primary_link": "https://download.csdn.net/download/alice/456",
+            },
+            {
+                "title": "FastAPI paid course",
+                "primary_link": "https://edu.csdn.net/course/detail/789",
+            },
+            {
+                "title": "Alice profile",
+                "primary_link": "https://blog.csdn.net/alice",
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["observed_count"] == 1
+    assert payload["cards"][0]["result_index"] == 1
+    assert [card["kind"] for card in payload["cards"][1:]] == [
+        "download_resource",
+        "commercial_module",
+        "navigation_link",
+    ]
+    assert all(card["result_index"] is None for card in payload["cards"][1:])
+
+
+def test_probe_reports_classification_conflict_in_one_observation() -> None:
+    payload = {
+        "url": "https://search.example/results?q=test",
+        "generation_id": "g1",
+        "cards": [
+            {
+                "title": "Example result",
+                "primary_link": "https://example.test/item/1",
+                "selector_hint": "div.result:nth-of-type(1)",
+            },
+            {
+                "title": "Example result",
+                "primary_link": "https://example.test/item/1",
+                "selector_hint": "div.sponsored-ad",
+                "semantic_badges": ["sponsored"],
+            },
+        ],
+    }
+
+    normalize_card_probe_payload(payload)
+
+    assert payload["diagnostics"]["classification_conflict"] is True
+    assert payload["diagnostics"]["recommended_fallback"] == "one_precise_probe"
+    assert payload["observed_count"] == 1

@@ -8,19 +8,19 @@ from pathlib import Path
 
 import pytest
 
-from openjiuwen.rsi.auto_harness.contexts import (
+from openjiuwen.rsi.harness_rsi.auto_harness.contexts import (
     TaskContext,
     TaskRuntime,
 )
-from openjiuwen.rsi.auto_harness.orchestrator import (
+from openjiuwen.rsi.harness_rsi.auto_harness.orchestrator import (
     AutoHarnessOrchestrator,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     AutoHarnessConfig,
     ExtensionBuildArtifact,
     OptimizationTask,
 )
-from openjiuwen.rsi.auto_harness.stages.implement import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.implement import (
     promote_runtime,
 )
 

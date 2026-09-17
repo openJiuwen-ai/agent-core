@@ -30,6 +30,10 @@ class EndpointProfile(BaseModel):
     extensions: dict[str, Any] = Field(default_factory=dict)
 
 
+def model_requires_reasoning_content(model: Any) -> bool:
+    return "deepseek" in str(model or "").strip().lower()
+
+
 def _deepseek_reasoning_content(messages: list[dict]) -> list[dict]:
     for message in messages:
         if message.get("role") == "assistant":
@@ -45,13 +49,21 @@ MESSAGE_TRANSFORMS: dict[str, Callable[[list[dict]], list[dict]]] = {
 ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
     "openai": EndpointProfile(name="openai"),
     "openai_compatible": EndpointProfile(name="openai_compatible"),
-    "deepseek": EndpointProfile(
-        name="deepseek",
-        message_transforms=["deepseek_reasoning_content"],
-    ),
+    "deepseek": EndpointProfile(name="deepseek"),
     "openrouter": EndpointProfile(name="openrouter"),
     "siliconflow": EndpointProfile(name="siliconflow"),
     "dashscope": EndpointProfile(name="dashscope"),
+    "moonshot": EndpointProfile(name="moonshot"),
+    "minimax": EndpointProfile(name="minimax"),
+    "modelarts": EndpointProfile(name="modelarts"),
+    "qianfan": EndpointProfile(name="qianfan"),
+    "volcengine": EndpointProfile(name="volcengine"),
+    "zhipu": EndpointProfile(name="zhipu"),
+    "mimo": EndpointProfile(name="mimo"),
+    # Self-hosted vLLM/SGLang-style OpenAI-compatible gateways. These honor
+    # enable_thinking / chat_template_kwargs instead of the official vendor
+    # thinking controls, regardless of which model family they serve.
+    "vllm": EndpointProfile(name="vllm"),
     "ollama": EndpointProfile(
         name="ollama",
         default_api_base="http://localhost:11434/v1",
@@ -60,7 +72,6 @@ ENDPOINT_PROFILES: dict[str, EndpointProfile] = {
         name="lmstudio",
         default_api_base="http://localhost:1234/v1",
     ),
-    "vllm": EndpointProfile(name="vllm"),
     "sglang": EndpointProfile(name="sglang"),
 }
 
@@ -81,6 +92,34 @@ LEGACY_PROVIDER_ALIASES: dict[str, dict[str, Any]] = {
     ProviderType.DashScope.value: {
         "client_provider": ProviderType.OpenAI.value,
         "endpoint_profile": "dashscope",
+    },
+    ProviderType.Moonshot.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "moonshot",
+    },
+    ProviderType.MiniMax.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "minimax",
+    },
+    ProviderType.ModelArts.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "modelarts",
+    },
+    ProviderType.VolcEngine.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "volcengine",
+    },
+    ProviderType.Qianfan.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "qianfan",
+    },
+    ProviderType.Zhipu.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "zhipu",
+    },
+    ProviderType.MiMo.value: {
+        "client_provider": ProviderType.OpenAI.value,
+        "endpoint_profile": "mimo",
     },
     ProviderType.InferenceAffinity.value: {
         "client_provider": ProviderType.OpenAI.value,
@@ -103,6 +142,18 @@ LEGACY_PROVIDER_ALIASES: dict[str, dict[str, Any]] = {
         "auth_mode": LLMAuthMode.OpenAIAccountOAuth.value,
     },
 }
+_ANTHROPIC_COMPATIBLE_PROVIDER_ALIASES = {
+    ProviderType.DeepSeek.value,
+    ProviderType.OpenRouter.value,
+    ProviderType.DashScope.value,
+    ProviderType.Moonshot.value,
+    ProviderType.MiniMax.value,
+    ProviderType.ModelArts.value,
+    ProviderType.VolcEngine.value,
+    ProviderType.Qianfan.value,
+    ProviderType.Zhipu.value,
+    ProviderType.MiMo.value,
+}
 
 
 def deep_merge_defaults(target: dict[str, Any], defaults: dict[str, Any]) -> dict[str, Any]:
@@ -116,6 +167,28 @@ def deep_merge_defaults(target: dict[str, Any], defaults: dict[str, Any]) -> dic
     return merged
 
 
+def _alias_field_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+# After dump()+rebuild, ModelClientConfig defaults land in model_fields_set and
+# look like user intent. For OpenAIAccount those printed defaults are never a
+# real choice: keep applying oauth / responses unless the user set something else.
+_IMPLICIT_OPENAI_ACCOUNT_DEFAULTS: dict[str, frozenset[Any]] = {
+    "auth_mode": frozenset({LLMAuthMode.ApiKey, LLMAuthMode.ApiKey.value}),
+    "api_mode": frozenset({None}),
+}
+
+
+def _is_implicit_openai_account_default(provider: str, key: str, current: Any) -> bool:
+    if provider != ProviderType.OpenAIAccount.value:
+        return False
+    allowed = _IMPLICIT_OPENAI_ACCOUNT_DEFAULTS.get(key)
+    if allowed is None:
+        return False
+    return current in allowed or _alias_field_value(current) in allowed
+
+
 def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfig:
     """Return a normalized config carrying protocol/profile/auth/api-mode metadata."""
     provider = (
@@ -127,6 +200,10 @@ def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfi
     alias = LEGACY_PROVIDER_ALIASES.get(provider)
     if not alias:
         return config
+    alias = dict(alias)
+    api_mode = config.api_mode.value if hasattr(config.api_mode, "value") else config.api_mode
+    if api_mode == LLMApiMode.AnthropicMessages.value and provider in _ANTHROPIC_COMPATIBLE_PROVIDER_ALIASES:
+        alias["client_provider"] = ProviderType.Anthropic.value
 
     data = config.model_dump()
     explicit_data = config.model_dump(exclude_unset=True)
@@ -135,7 +212,11 @@ def normalize_model_client_config(config: ModelClientConfig) -> ModelClientConfi
     for key, value in alias.items():
         if key == "extensions":
             continue
-        if key == "client_provider" or key not in explicit_fields:
+        if (
+            key == "client_provider"
+            or key not in explicit_fields
+            or _is_implicit_openai_account_default(provider, key, data.get(key))
+        ):
             data[key] = value
 
     if alias.get("extensions"):

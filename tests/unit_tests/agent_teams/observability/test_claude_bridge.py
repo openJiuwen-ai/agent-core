@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+import json
 from typing import Any
 
 import pytest
@@ -19,17 +20,17 @@ from openjiuwen.agent_teams.observability import (
 from openjiuwen.agent_teams.observability.claude import ClaudeSpanBridge, NoopClaudeSpanBridge
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.semconv import (
-    AT_AGENT_INPUT,
-    AT_AGENT_OUTPUT,
+    OJ_SPAN_INPUT,
+    OJ_SPAN_OUTPUT,
     AT_MEMBER_NAME,
-    AT_SESSION_ID,
+    GEN_AI_CONVERSATION_ID,
     AT_TEAM_NAME,
-    GEN_AI_COMPLETION,
-    GEN_AI_TOOL_INPUT,
+    GEN_AI_OPERATION_NAME,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_TOOL_CALL_ARGUMENTS,
+    GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
-    GEN_AI_TOOL_OUTPUT,
-    LANGFUSE_OBSERVATION_INPUT,
-    LANGFUSE_OBSERVATION_OUTPUT,
+    OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.agent_teams.observability.setup import get_tracer
 from openjiuwen.agent_teams.observability.span_context import (
@@ -69,6 +70,13 @@ def _chunk(chunk_type: str, payload: dict[str, Any], index: int = 0) -> OutputSc
 
 def _spans_by_name(exporter: InMemorySpanExporter, name: str) -> list[Any]:
     """Return finished spans with the given name."""
+    if name.startswith("tool."):
+        tool_name = name.removeprefix("tool.")
+        return [
+            span for span in exporter.get_finished_spans()
+            if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+            and span.attributes.get(GEN_AI_TOOL_NAME) == tool_name
+        ]
     return [span for span in exporter.get_finished_spans() if span.name == name]
 
 
@@ -93,25 +101,27 @@ def test_claude_bridge_records_turn_output_and_reasoning(in_memory_exporter: InM
     turn_spans = _spans_by_name(in_memory_exporter, "agent.ppt-designer.claude_turn.1")
     assert len(turn_spans) == 1
     span = turn_spans[0]
-    assert _attr(span, AT_AGENT_INPUT) == "make a deck"
-    assert _attr(span, AT_AGENT_OUTPUT) == "done"
-    assert _attr(span, LANGFUSE_OBSERVATION_OUTPUT) == "done"
+    assert _attr(span, OJ_SPAN_INPUT) == "make a deck"
+    assert _attr(span, OJ_SPAN_OUTPUT) == "done"
+    assert _attr(span, OJ_SPAN_INPUT) == "make a deck"
+    assert _attr(span, OJ_SPAN_OUTPUT) == "done"
     assert _attr(span, "claude.reasoning") is None
     assert _attr(span, "claude.turn.status") == "ok"
     assert _attr(span, "agentteam.backend") == "claude"
     assert _attr(span, AT_MEMBER_NAME) == "ppt-designer"
     assert _attr(span, AT_TEAM_NAME) == "alpha"
-    assert _attr(span, AT_SESSION_ID) == "sess-1"
+    assert _attr(span, GEN_AI_CONVERSATION_ID) == "sess-1"
 
     reasoning_spans = _spans_by_name(in_memory_exporter, "llm.reasoning")
     assert len(reasoning_spans) == 1
     reasoning_span = reasoning_spans[0]
     assert reasoning_span.parent.span_id == span.context.span_id
-    assert _attr(reasoning_span, LANGFUSE_OBSERVATION_INPUT) == "llm reasoning"
-    assert _attr(reasoning_span, LANGFUSE_OBSERVATION_OUTPUT) == "thinking"
-    assert _attr(reasoning_span, f"{GEN_AI_COMPLETION}.0.role") == "reasoning"
-    assert _attr(reasoning_span, f"{GEN_AI_COMPLETION}.0.is_reasoning") is True
-    assert _attr(reasoning_span, f"{GEN_AI_COMPLETION}.0.content") == "thinking"
+    assert _attr(reasoning_span, OJ_TRAJECTORY_RECORD_KIND) == "reasoning"
+    output_messages = json.loads(_attr(reasoning_span, GEN_AI_OUTPUT_MESSAGES))
+    assert output_messages == [{
+        "role": "assistant",
+        "parts": [{"type": "reasoning", "content": "thinking"}],
+    }]
     assert _attr(reasoning_span, "agentteam.backend") == "claude"
 
 
@@ -141,12 +151,12 @@ def test_claude_bridge_records_tool_input_and_output(in_memory_exporter: InMemor
     )
     bridge.finish_turn(status="ok")
 
-    tool_spans = _spans_by_name(in_memory_exporter, "tool.Bash")
+    tool_spans = _spans_by_name(in_memory_exporter, "execute_tool Bash")
     assert len(tool_spans) == 1
     span = tool_spans[0]
     assert _attr(span, GEN_AI_TOOL_NAME) == "Bash"
-    assert _attr(span, GEN_AI_TOOL_INPUT) == '{"command":"pwd"}'
-    assert _attr(span, GEN_AI_TOOL_OUTPUT) == "ok"
+    assert _attr(span, GEN_AI_TOOL_CALL_ARGUMENTS) == '{"command":"pwd"}'
+    assert _attr(span, GEN_AI_TOOL_CALL_RESULT) == "ok"
     assert _attr(span, "claude.tool.call_id") == "tool-1"
     assert _attr(span, "agentteam.backend") == "claude"
 
@@ -270,8 +280,8 @@ def test_claude_bridge_redacts_tool_content() -> None:
         shutdown_observability()
 
     tool_span = _spans_by_name(exporter, "tool.secret_tool")[0]
-    assert str(_attr(tool_span, GEN_AI_TOOL_INPUT)).startswith("sha256:")
-    assert str(_attr(tool_span, GEN_AI_TOOL_OUTPUT)).startswith("sha256:")
+    assert str(_attr(tool_span, GEN_AI_TOOL_CALL_ARGUMENTS)).startswith("sha256:")
+    assert str(_attr(tool_span, GEN_AI_TOOL_CALL_RESULT)).startswith("sha256:")
 
 
 def test_claude_bridge_marks_failed_turn(in_memory_exporter: InMemorySpanExporter) -> None:

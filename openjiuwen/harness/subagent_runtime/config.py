@@ -7,9 +7,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # One turn of web research / coding routinely exceeds 10 minutes when several
-# subagents fetch in parallel. 30 minutes is the default safety net; wait max
-# remains 1 hour.
-TURN_TIMEOUT_S_DEFAULT = 1800.0
+# subagents fetch in parallel. Bumped from 1800.0: a real reporting-module run
+# (write 7 sections + ts-review's 3-round/3-lens adversarial pass, each round
+# spawning 3 isolated paper-reviewer subagent turns) measured ~1694s of
+# inherent model/tool work before ever reaching ts-latex, leaving under two
+# minutes of slack against the old 1800s default — the session was killed
+# mid-review on a live run. 40 minutes leaves real margin for a review round
+# plus the ts-latex compile/repair loop that follows it. Wait max remains 1
+# hour.
+TURN_TIMEOUT_S_DEFAULT = 2400.0
 
 
 @dataclass(frozen=True)

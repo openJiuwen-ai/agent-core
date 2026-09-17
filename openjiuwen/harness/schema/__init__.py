@@ -7,6 +7,7 @@ from openjiuwen.harness.schema.config import (
     AudioModelConfig,
     DeepAgentConfig,
     SubAgentConfig,
+    TaskLoopNoProgressGuardConfig,
     VisionModelConfig,
     is_vision_model_config_complete,
 )
@@ -31,6 +32,7 @@ from openjiuwen.harness.schema.task import (
 __all__ = [
     "AgentMode",
     "DeepAgentConfig",
+    "TaskLoopNoProgressGuardConfig",
     "AudioModelConfig",
     "VisionModelConfig",
     "is_vision_model_config_complete",

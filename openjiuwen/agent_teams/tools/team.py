@@ -22,6 +22,7 @@ from typing import (
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
+    from openjiuwen.agent_teams.schema.team import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
@@ -111,14 +112,21 @@ class TeamBackend:
         enable_hitt: bool = False,
         enable_bridge: bool = False,
         *,
+        model_pool_provider: Callable[[], list["ModelPoolEntry"]] | None = None,
+        current_model_name: str | None = None,
+        current_model_provider: str | None = None,
         dispatch_mode: str = "autonomous",
         enable_task_verification: bool = False,
         enable_fork: bool = False,
         evolution_enabled: bool = True,
+        member_workspace_prefix: bool = True,
         external_cli_agents: list[ExternalCliAgentSpec] | None = None,
         on_before_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_cleaned: Callable[[], Awaitable[None]] | None = None,
         on_team_built: Callable[[], Awaitable[None]] | None = None,
+        on_member_started: Callable[[str], Awaitable[None]] | None = None,
+        on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
+        on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -146,6 +154,14 @@ class TeamBackend:
                 ``build_team`` as ``{model_name, model_index}`` so the
                 assignment is auditable and survives full-restart
                 recovery via positional lookup against the live pool.
+            model_pool_provider: Returns the current team model pool for
+                validating external CLI fallback choices. The callback keeps
+                runtime pool updates visible without copying credentials into
+                the backend.
+            current_model_name: Name of the model currently driving this
+                member, used to prioritize an allocatable fallback.
+            current_model_provider: Provider of the current member model,
+                used to derive its model API protocol.
             enable_hitt: Spec-level HITT capability ceiling. When
                 False, every human-agent spawn path returns failure;
                 when True, the runtime instance flag (mutated by
@@ -191,6 +207,16 @@ class TeamBackend:
                 is deleted, before best-effort cleanup and event publishing.
             on_team_built: Optional async callback fired exactly once after
                 ``build_team`` creates the team row and initial members.
+            on_member_started: Optional async callback that launches the agent
+                process for one member name. Supplied by the hosting
+                ``TeamAgent`` (leader side only) and consumed by
+                ``autostart_unstarted``; leaving it None turns every
+                auto-start into a no-op, which is what an external
+                (out-of-process) backend wants — it has no process to spawn.
+            on_member_restarted: Optional async callback that replaces a dead
+                member runtime. Used after an atomic ERROR→RESTARTING claim.
+            on_member_stopped: Optional async callback that removes a dead
+                member's stale runtime handle after ERROR→SHUTDOWN settles.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -215,6 +241,9 @@ class TeamBackend:
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
         self._allocate_model_config = model_config_allocator
+        self._model_pool_provider = model_pool_provider
+        self.current_model_name = str(current_model_name or "").strip() or None
+        self.current_model_provider = str(current_model_provider or "").strip() or None
         self.leader_allocation = leader_allocation
         # Leader's private prompt (LeaderSpec.prompt via ctx.prompt). Persisted
         # on the leader's DB row at build_team so cold-recovery, which rebuilds
@@ -247,6 +276,12 @@ class TeamBackend:
         # framework / DB). No runtime override — unlike enable_hitt, build_team
         # cannot flip it.
         self._spec_evolution_enabled: bool = evolution_enabled
+        # Dynamic-member workspace isolation switch (mirrors
+        # ``TeamAgentSpec.member_workspace_prefix``). Spawn-time workspace
+        # setup reads it so dynamic members get the same real-directory
+        # shape (``team#member`` vs plain ``member``) as the in-process
+        # ``prepare_member_workspace`` path.
+        self._member_workspace_prefix: bool = member_workspace_prefix
         # True once build_team took over a team that already existed rather
         # than creating one, so the tool result can say which it was.
         self._team_taken_over: bool = False
@@ -260,6 +295,11 @@ class TeamBackend:
         self._on_before_team_cleaned = on_before_team_cleaned
         self._on_team_cleaned = on_team_cleaned
         self._on_team_built = on_team_built
+        # Spawns one member's agent process. The single injection point for
+        # every auto-start path that goes through ``autostart_unstarted``.
+        self._on_member_started = on_member_started
+        self._on_member_restarted = on_member_restarted
+        self._on_member_stopped = on_member_stopped
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -333,6 +373,12 @@ class TeamBackend:
         self._checkpoint_list_fn: Callable[[], dict] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
+
+    def get_model_pool(self) -> list["ModelPoolEntry"]:
+        """Return a snapshot of the current team model pool."""
+        if self._model_pool_provider is None:
+            return []
+        return list(self._model_pool_provider())
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
         """Register a filesystem path to remove on ``clean_team``.
@@ -576,6 +622,7 @@ class TeamBackend:
         execution_status: ExecutionStatus = ExecutionStatus.IDLE,
         mode: MemberMode = MemberMode.BUILD_MODE,
         allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
         cli_agent: Optional[str] = None,
@@ -600,6 +647,8 @@ class TeamBackend:
                 can refresh in-place via the live session pool. ``None``
                 when the team is not configured with a pool, in which
                 case the member uses its per-agent default model.
+            fallback_allocation: Pool allocation reserved for an external CLI
+                member when its native authentication is unavailable.
             role: ``TeamRole`` enum value persisted on the member row.
                 Defaults to ``TEAMMATE`` for the ordinary teammate
                 spawn paths; ``spawn_human_agent`` overrides with
@@ -632,10 +681,54 @@ class TeamBackend:
 
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
+            fallback_model_ref=(fallback_allocation.to_db_ref() if fallback_allocation is not None else None),
             cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
         )
+
+        # Resolve the latest identity from the evolvable md before writing the
+        # db row. ``prepare_member_workspace`` builds the in-team root first
+        # (link for dynamic/predefined, in-team real dir for external_cli/leader)
+        # so the md write below lands through that path — ``write_member_identity``
+        # only writes/protects the B-class md and primes the shared cache, never
+        # creating the workspace directory. Idempotent: a leader whose root was
+        # already built by its own ``setup_agent`` re-runs ``prepare_member_workspace``
+        # harmlessly (binder reuse). With the evolution switch off (or no cache),
+        # the spec baseline value stands and the db row is written unchanged.
+        # This closes the first-roster race: by the time the leader renders the
+        # roster, the cache already carries the evolved value and the db row is an
+        # evolved-value snapshot, not the spec baseline.
+        desc_to_write, prompt_to_write = desc, prompt
+        if self._spec_evolution_enabled and self.workspace_cache is not None:
+            from openjiuwen.agent_teams.team_workspace.binder import (
+                prepare_member_workspace,
+            )
+
+            prepare_member_workspace(
+                team_name=self.team_name,
+                member_name=member_name,
+                role=role,
+                leader_member_name=self.leader_member_name,
+                predefined_members={
+                    m.member_name for m in self.predefined_members
+                },
+                member_workspace_prefix=self._member_workspace_prefix,
+            )
+            from openjiuwen.agent_teams.team_workspace.assembler import WorkspaceAssembler
+
+            resolved_desc, resolved_prompt = WorkspaceAssembler(
+                cache=self.workspace_cache
+            ).write_member_identity(
+                team_name=self.team_name,
+                member_name=member_name,
+                member_desc=desc,
+                member_prompt=prompt,
+            )
+            if resolved_desc is not None:
+                desc_to_write = resolved_desc
+            if resolved_prompt is not None:
+                prompt_to_write = resolved_prompt
 
         success = await self.db.member.create_member(
             member_name=member_name,
@@ -644,10 +737,10 @@ class TeamBackend:
             agent_card=agent_card.model_dump_json(),
             status=status,
             role=role.value,
-            desc=desc,
+            desc=desc_to_write,
             execution_status=execution_status,
             mode=mode.value,
-            prompt=prompt,
+            prompt=prompt_to_write,
             options=options,
         )
         if not success:
@@ -709,6 +802,30 @@ class TeamBackend:
             started.append(member.member_name)
         return started
 
+    async def autostart_unstarted(self) -> list[str]:
+        """Start every UNSTARTED member using the injected spawn callback.
+
+        The shared entry point for the auto-start funnel: work that is about
+        to be handed to a member — a message, a freshly created task — must
+        not land on a member whose agent process was never launched. Callers
+        state the intent ("make sure the roster is up") without each carrying
+        its own spawn callback.
+
+        Leader-only and callback-gated, so a teammate backend or an external
+        out-of-process backend answers with an empty list instead of trying to
+        spawn something it cannot own. Concurrency is still settled one level
+        down by ``startup_member``'s UNSTARTED→STARTING CAS, which makes
+        repeated calls idempotent: whoever gets there second finds nothing in
+        UNSTARTED and does nothing.
+
+        Returns:
+            The member names started by this call; empty when there was
+            nothing to start or this backend does not own spawning.
+        """
+        if not self.is_leader or self._on_member_started is None:
+            return []
+        return await self.startup(on_created=self._on_member_started)
+
     async def startup_member(
         self,
         member_name: str,
@@ -745,6 +862,47 @@ class TeamBackend:
             raise
 
         return True
+
+    async def recover_member(self, member_name: str) -> bool:
+        """Restart one failed member after atomically claiming recovery.
+
+        Only ERROR members are eligible. The ERROR→RESTARTING CAS prevents a
+        direct message, scheduler handoff, and cold recovery from launching
+        duplicate runtimes. A failed restart returns the member to ERROR so a
+        later explicit nudge can try again.
+
+        Args:
+            member_name: The failed member to restart.
+
+        Returns:
+            True when this call restarted the member, otherwise False.
+        """
+        if not self.is_leader or self._on_member_restarted is None:
+            return False
+
+        transitioned = await self.db.member.try_transition_member_status(
+            member_name,
+            self.team_name,
+            MemberStatus.ERROR,
+            MemberStatus.RESTARTING,
+        )
+        if not transitioned:
+            return False
+
+        try:
+            restarted = await self._on_member_restarted(member_name)
+        except Exception as exc:
+            team_logger.error("Failed to recover member {}: {}", member_name, exc)
+            restarted = False
+
+        if not restarted:
+            await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.RESTARTING,
+                MemberStatus.ERROR,
+            )
+        return restarted
 
     async def approve_plan(
         self,
@@ -936,6 +1094,67 @@ class TeamBackend:
                     t("team.shutdown_human_active_tasks",
                       member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
                 )
+
+        # ERROR means the member runtime has already failed and cannot consume
+        # a mailbox request or shutdown event. Settle it directly; the CAS also
+        # arbitrates against a concurrent ERROR→RESTARTING recovery claim.
+        if current_status == MemberStatus.ERROR:
+            transitioned = await self.db.member.try_transition_member_status(
+                member_name,
+                self.team_name,
+                MemberStatus.ERROR,
+                MemberStatus.SHUTDOWN,
+            )
+            if not transitioned:
+                return MemberOpResult.fail(f"Member {member_name} lifecycle changed while shutting down")
+            if self._on_member_stopped is not None:
+                try:
+                    await self._on_member_stopped(member_name)
+                except Exception as exc:
+                    team_logger.warning("Failed to clean stale runtime for member {}: {}", member_name, exc)
+            team_logger.info("Shutdown failed member {} directly", member_name)
+            return MemberOpResult.success()
+
+        # Passive humans have no process to consume a MEMBER_SHUTDOWN event,
+        # so the two-phase REQUESTED→SHUTDOWN dance would strand the row in
+        # SHUTDOWN_REQUESTED (a non-settled status) forever. Land the
+        # terminal state directly — READY→SHUTDOWN is a legal edge — and
+        # still publish the shutdown event so rosters and observers refresh.
+        # No shutdown notice message: the member is removed from the
+        # reachable set the moment the status flips.
+        if await self.is_passive_human(member_name):
+            from openjiuwen.agent_teams.schema.status import (
+                MEMBER_TRANSITIONS,
+                is_valid_transition,
+            )
+
+            if not is_valid_transition(current_status, MemberStatus.SHUTDOWN, MEMBER_TRANSITIONS):
+                return MemberOpResult.fail(
+                    f"Member {member_name} cannot shut down from status '{current_status.value}'"
+                )
+            success = await self.db.member.update_member_status(
+                member_name, self.team_name, MemberStatus.SHUTDOWN.value
+            )
+            if not success:
+                return MemberOpResult.fail(f"Database rejected status update for member {member_name}")
+
+            try:
+                await self.messager.publish(
+                    topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                    message=EventMessage.from_event(
+                        MemberShutdownEvent(
+                            team_name=self.team_name,
+                            member_name=member_name,
+                            force=force,
+                        )
+                    ),
+                )
+                team_logger.debug(f"Member shutdown event published: {member_name}")
+            except Exception as e:
+                team_logger.error(f"Failed to publish member shutdown event for member {member_name}: {e}")
+
+            team_logger.info(f"Passive human member {member_name} shut down directly (no runtime to notify)")
+            return MemberOpResult.success()
 
         # Validate state transition
         from openjiuwen.agent_teams.schema.status import (
@@ -1384,6 +1603,52 @@ class TeamBackend:
         )
         return max(db_ts, md_max)
 
+    async def get_team_updated_at_state(self) -> tuple[int, bool]:
+        """Probe the team_card ``updated_at`` plus its presence flag.
+
+        Counterpart of :meth:`get_team_updated_at` narrowed to the team_card
+        md file (the only team B-class file whose body enters the team-info
+        block; ``team_prompt`` is a write-only placeholder whose body never
+        renders). Also surfaces whether the frontmatter carried an explicit
+        ``updated_at`` integer so the team-info re-announce path can treat
+        ``present=False`` (a blank field — the evolution party edited the
+        ``team_card.md`` body without stamping it) as an explicit "must
+        update" signal, symmetric with :meth:`get_member_updated_at_state`.
+
+        When the cache is absent (evolution off / single-agent) the md probe
+        has nothing to read, so the DB column is probed instead and surfaced
+        with ``present=True``: the team-info re-announce path then compares
+        the DB timestamp wall-clock (a ``build_team`` / team mutation moves
+        it and re-delivers), preserving the pre-evolution behaviour. Evolution
+        on stays md-only (the DB column is shadowed by ``get_team_info``'s md
+        overlay, so a DB-only change shows nothing new to announce).
+
+        Returns:
+            ``(updated_at_ms, present)`` — ``(db_ts, True)`` when the cache is
+            absent (evolution off; DB column drives the probe), the md pair
+            otherwise.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            db_ts = await self.db.team.get_team_updated_at(self.team_name)
+            return (db_ts, True)
+        return cache.get_team_updated_at_state("desc")
+
+    async def stamp_team_card_updated_at(self, ts: int) -> None:
+        """Stamp ``ts`` into ``team_card.md``'s ``updated_at`` (meta only).
+
+        Thin forward to the workspace cache, which owns all md-file IO. Called
+        by the team-info re-announce path right after a "must update" decision
+        so the comparison baseline and the file's ``updated_at`` share one
+        timestamp (next probe is stable, no re-fire). No-op when the cache is
+        absent (evolution off / single-agent). Symmetric with
+        :meth:`stamp_member_prompt_updated_at`.
+        """
+        cache = self.workspace_cache
+        if cache is None:
+            return
+        cache.stamp_team_updated_at("desc", ts)
+
     async def get_member_updated_at(self, member_name: str, field: str) -> int:
         """Probe one member's md ``updated_at`` for change detection.
 
@@ -1753,6 +2018,11 @@ class TeamBackend:
         for member_spec in self.predefined_members:
             if member_spec.role_type == TeamRole.HUMAN_AGENT:
                 continue
+            # Passive humans register as READY below (no runtime to start);
+            # the generic UNSTARTED path would feed them to the startup
+            # sweep, which must never spawn a runtime for them.
+            if member_spec.role_type == TeamRole.PASSIVE_HUMAN:
+                continue
             if isinstance(member_spec, BridgeMemberSpec) and not effective_enable_bridge:
                 skipped_bridge_specs.append(member_spec)
                 # Drop the index entry as well so downstream code does
@@ -1788,7 +2058,7 @@ class TeamBackend:
 
         # HITT: register every declared human member when the effective
         # capability is on. When the leader passed enable_hitt=False at
-        # build_team time, all predefined HUMAN_AGENT specs are skipped
+        # build_team time, all predefined human specs are skipped
         # (the ceiling itself stays open per the spec, but this run
         # declined to engage HITT).
         human_specs = [m for m in self.predefined_members if m.role_type == TeamRole.HUMAN_AGENT]
@@ -1805,6 +2075,24 @@ class TeamBackend:
                 "Skipped %d predefined HUMAN_AGENT(s) for team %s because "
                 "build_team(enable_hitt=False) overrode the spec capability",
                 len(human_specs),
+                team_name,
+            )
+
+        # Passive humans ride the same gate: predefined PASSIVE_HUMAN specs
+        # register (as READY roster identities) only when HITT is engaged.
+        passive_specs = [m for m in self.predefined_members if m.role_type == TeamRole.PASSIVE_HUMAN]
+        if effective_enable_hitt:
+            for passive_spec in passive_specs:
+                await self.spawn_passive_human(
+                    member_name=passive_spec.member_name,
+                    display_name=passive_spec.display_name,
+                    desc=passive_spec.desc,
+                )
+        elif passive_specs:
+            team_logger.warning(
+                "Skipped %d predefined PASSIVE_HUMAN(s) for team %s because "
+                "build_team(enable_hitt=False) overrode the spec capability",
+                len(passive_specs),
                 team_name,
             )
 
@@ -1905,8 +2193,95 @@ class TeamBackend:
             )
         return result
 
+    async def spawn_passive_human(
+        self,
+        *,
+        member_name: str,
+        display_name: Optional[str] = None,
+        desc: Optional[str] = None,
+    ) -> MemberOpResult:
+        """Register a passive human member that is READY from birth.
+
+        Public method called by ``build_team`` (for predefined
+        PASSIVE_HUMAN specs) and ``SpawnPassiveHumanTool`` (dynamic
+        spawn). A passive member has **no avatar**: no harness, no LLM,
+        no prompt, no coordination loop — just a roster row and a
+        message-bus address. Team-side traffic reaches the controlling
+        human through the HITT inbound callback, and the human acts back
+        via ``HumanAgentMessage`` (bus messages) or the
+        ``HumanAgentToolCall`` passthrough (tools executed by the runtime
+        under this member's identity).
+
+        Status starts at READY — a legal settled state — so the startup
+        sweep (which only looks for UNSTARTED rows) never picks the
+        member up and no recovery path may spawn a runtime for it.
+        Events: ``MemberSpawnedEvent`` is published here (best-effort)
+        because the shared ``_spawn_and_publish`` helper is owned by the
+        startup path this role deliberately skips.
+
+        Args:
+            member_name: Unique member identifier for the human.
+            display_name: Optional display label; falls back to the
+                framework-managed default when omitted.
+            desc: Optional member description; falls back to the
+                framework default.
+
+        Returns:
+            ``MemberOpResult``. Returns failure when HITT is disabled
+            (``MemberOpResult.fail``) or the underlying member create
+            fails.
+        """
+        if not self._enable_hitt:
+            return MemberOpResult.fail(
+                "Cannot spawn passive human: HITT capability is disabled "
+                "(enable_hitt=False on TeamAgentSpec or build_team)"
+            )
+
+        resolved_display_name = display_name or t("hitt.passive_human_display_name")
+        resolved_desc = desc or t("hitt.passive_human_default_desc")
+        member_card = AgentCard(
+            id=f"{self.team_name}_{member_name}",
+            name=resolved_display_name,
+            description=resolved_desc,
+        )
+        result = await self.spawn_member(
+            member_name=member_name,
+            display_name=resolved_display_name,
+            agent_card=member_card,
+            desc=resolved_desc,
+            status=MemberStatus.READY,
+            execution_status=ExecutionStatus.IDLE,
+            mode=MemberMode.BUILD_MODE,
+            role=TeamRole.PASSIVE_HUMAN,
+        )
+        if not result.ok:
+            team_logger.warning(
+                "Failed to register passive human '%s' for team %s: %s",
+                member_name,
+                self.team_name,
+                result.reason,
+            )
+            return result
+
+        try:
+            await self.messager.publish(
+                topic_id=TeamTopic.TEAM.build(get_session_id(), self.team_name),
+                message=EventMessage.from_event(
+                    MemberSpawnedEvent(
+                        team_name=self.team_name,
+                        member_name=member_name,
+                    ),
+                ),
+            )
+            team_logger.debug("Member spawned event published: {}", member_name)
+        except Exception as e:
+            team_logger.error("Failed to publish member spawned event for {}: {}", member_name, e)
+
+        team_logger.info("Passive human member {} registered as READY", member_name)
+        return result
+
     async def is_human_agent(self, member_name: Optional[str]) -> bool:
-        """Whether ``member_name`` is a registered human-agent member.
+        """Whether ``member_name`` is a registered human member (avatar or passive).
 
         Queries ``team_member.role`` from DB on every call — no in-memory
         cache, so the answer is always current regardless of when the
@@ -1919,10 +2294,26 @@ class TeamBackend:
             return False
         return await member_dao.is_human_agent(self.team_name, member_name)
 
-    async def is_live_human_agent(self, member_name: str | None) -> bool:
-        """Whether ``member_name`` is a human-agent member still on the team.
+    async def is_passive_human(self, member_name: Optional[str]) -> bool:
+        """Whether ``member_name`` is a registered passive human member.
 
-        Narrower than :meth:`is_human_agent`: a member whose status is in
+        The flavor probe that splits the human family: passive members
+        have no avatar, so they may drive the tool-call passthrough and
+        must never be routed through avatar-driving paths. Same DB-probe
+        discipline as :meth:`is_human_agent` (no in-memory cache).
+        """
+        if not member_name:
+            return False
+        member_dao = self.db.member
+        if member_dao is None:
+            return False
+        return await member_dao.is_passive_human(self.team_name, member_name)
+
+    async def is_live_human_agent(self, member_name: str | None) -> bool:
+        """Whether ``member_name`` is a human member still on the team.
+
+        Covers both flavors (avatar and passive). Narrower than
+        :meth:`is_human_agent`: a member whose status is in
         ``MEMBER_DEPARTED_STATUSES`` (shutdown requested / shut down) answers
         False. The HITT task lock in ``UpdateTaskTool`` keys on this, so
         shutting a human down releases the tasks it still holds back to the
@@ -2059,10 +2450,10 @@ class TeamBackend:
         confused about whether its team exists, which the refusal corrects.
 
         Both conditions are required. ``_history_restored`` alone is not
-        enough: a recovered leader whose team was disbanded mid-run (the
-        all-teammates-SHUTDOWN path in ``CoordinationKernel.start`` calls
-        ``clean_team``) has no team row left and genuinely does need to build
-        one. The team row is what says a team is there to be rejoined.
+        enough: a recovered leader whose team was disbanded (its own
+        ``clean_team``, or the operator's ``delete_agent_team``) has no team
+        row left and genuinely does need to build one. The team row is what
+        says a team is there to be rejoined.
 
         Returns:
             True when the leader is already attached, with history, to a team
@@ -2312,6 +2703,8 @@ class TeamBackend:
         desc: str = "",
         prompt: str,
         model_name: Optional[str] = None,
+        allocation: Optional["Allocation"] = None,
+        fallback_allocation: Optional["Allocation"] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -2331,8 +2724,13 @@ class TeamBackend:
                 Optional; defaults to empty.
             prompt: Private system prompt the CLI adopts to act as this
                 member. Required.
-            model_name: Ignored for external-CLI members (the model lives in
-                the external CLI); accepted for signature symmetry.
+            model_name: Optional model-name hint; passed to the pool allocator
+                to select a matching model endpoint.
+            allocation: Optional pool allocation for this member; persisted as a
+                ``{model_name, model_index}`` reference so credentials
+                refreshes propagate without re-spawning.
+            fallback_allocation: Required fallback allocation used only when
+                the native CLI reports an authentication failure.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown or the
@@ -2373,6 +2771,8 @@ class TeamBackend:
             mode=self.teammate_mode,
             role=TeamRole.EXTERNAL_CLI,
             cli_agent=cli_agent,
+            allocation=allocation,
+            fallback_allocation=fallback_allocation,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

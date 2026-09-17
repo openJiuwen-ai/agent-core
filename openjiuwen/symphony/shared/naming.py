@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 _CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
 _NON_ALNUM_RE = re.compile(r"[^A-Za-z0-9]+")
@@ -15,10 +16,6 @@ def _split_name_parts(value: str) -> list[str]:
     text = _NON_ALNUM_RE.sub("-", text)
     text = re.sub(r"-{2,}", "-", text)
     return [part.lower() for part in text.strip("-").split("-") if part]
-
-
-def to_kebab_case(value: str) -> str:
-    return "-".join(_split_name_parts(value))
 
 
 def to_camel_case(value: str) -> str:
@@ -53,7 +50,8 @@ def to_pascal_path(value: str) -> str:
 
 
 def normalize_name_key(value: str) -> str:
-    return to_kebab_case(value).replace("-", "")
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return "".join(character for character in text if unicodedata.category(character)[0] in {"L", "M", "N"})
 
 
 def bounded_edit_distance(left: str, right: str, *, max_distance: int) -> int | None:

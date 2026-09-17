@@ -1,18 +1,22 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""System-style tests for TeamSkillCreateRail and TeamSkillRail."""
+"""System-style tests for TeamSkillCreateRail and TeamSkillEvolutionRail."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import ReadableSpan
+from opentelemetry.trace import SpanContext, SpanKind, Status, StatusCode, TraceFlags, TraceState
 
-from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.agent_evolving.trajectory import TrajectorySpanProcessor
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     InvokeInputs,
@@ -20,9 +24,11 @@ from openjiuwen.core.single_agent.rail.base import (
     TaskIterationInputs,
     ToolCallInputs,
 )
+from openjiuwen.core.single_agent.skills.skill_manager import Skill
+from openjiuwen.extensions.observability import semconv
+from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 from openjiuwen.harness.rails.skills.skill_use_rail import SkillUseRail
-from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillRail
-from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
 
@@ -78,14 +84,67 @@ def _ctx(agent: _Agent, inputs: Any) -> AgentCallbackContext:
     return AgentCallbackContext(agent=agent, inputs=inputs)
 
 
-def _write_team_skill(skills_dir: Path, skill_name: str = "research-team") -> Path:
+def _record_tool_span(
+    processor: TrajectorySpanProcessor,
+    *,
+    tool_name: str,
+    span_id: int,
+    session_id: str,
+    tool_input: Any,
+    tool_output: Any,
+) -> None:
+    context = SpanContext(
+        trace_id=1,
+        span_id=span_id,
+        is_remote=False,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+    processor.on_end(
+        ReadableSpan(
+            name=f"tool.{tool_name}",
+            context=context,
+            resource=Resource.create({"openjiuwen.session_id": session_id}),
+            kind=SpanKind.INTERNAL,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: tool_name,
+                semconv.GEN_AI_TOOL_INPUT: json.dumps(tool_input),
+                semconv.GEN_AI_TOOL_OUTPUT: json.dumps(tool_output),
+            },
+            status=Status(StatusCode.OK),
+            start_time=span_id * 2,
+            end_time=span_id * 2 + 1,
+        )
+    )
+
+
+@pytest.fixture
+def trajectory_span_processor() -> TrajectorySpanProcessor:
+    return TrajectorySpanProcessor()
+
+
+@pytest.fixture(autouse=True)
+def active_team_root_span():
+    root_span = SimpleNamespace(
+        context=SimpleNamespace(trace_id=1),
+        attributes={semconv.AT_TEAM_NAME: "test-team"},
+        is_recording=lambda: True,
+    )
+    with patch(
+        "openjiuwen.harness.rails.evolution.evolution_rail.get_root_span",
+        return_value=root_span,
+    ):
+        yield root_span
+
+
+def _write_swarm_skill(skills_dir: Path, skill_name: str = "research-swarm") -> Path:
     skill_dir = skills_dir / skill_name
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
         "---\n"
         f"name: {skill_name}\n"
-        "description: simple research team\n"
-        "kind: team-skill\n"
+        "description: simple research swarm\n"
+        "kind: swarm-skill\n"
         "---\n"
         "# Workflow\n"
         "1. leader assigns tasks\n"
@@ -111,27 +170,55 @@ def _attach_team_creator_capability(agent: _Agent, skills_dir: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_skill_create_rail_schedules_nudge_after_spawn_threshold(tmp_path: Path):
+async def test_team_skill_create_rail_schedules_nudge_after_spawn_threshold(
+    tmp_path: Path,
+    trajectory_span_processor: TrajectorySpanProcessor,
+):
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
 
-    rail = TeamSkillCreateRail(skills_dir=str(skills_dir), min_team_members_for_create=2)
+    rail = TeamSkillCreateRail(
+        skills_dir=str(skills_dir),
+        trajectory_span_processor=trajectory_span_processor,
+        min_team_members_for_create=2,
+    )
     controller = _LoopController()
     agent = _Agent(_loop_controller=controller)
     _attach_team_creator_capability(agent, skills_dir)
 
     await rail.before_invoke(_ctx(agent, InvokeInputs(query="build a team", conversation_id="team-create")))
     for idx in range(2):
+        tool_args = {"name": f"worker-{idx}"}
+        tool_result = {"status": "spawned"}
+        _record_tool_span(
+            trajectory_span_processor,
+            tool_name="spawn_member",
+            span_id=idx + 1,
+            session_id="team-create",
+            tool_input=tool_args,
+            tool_output=tool_result,
+        )
         await rail.after_tool_call(
             _ctx(
                 agent,
                 ToolCallInputs(
                     tool_name="spawn_member",
-                    tool_args={"name": f"worker-{idx}"},
-                    tool_result={"status": "spawned"},
+                    tool_args=tool_args,
+                    tool_result=tool_result,
                 ),
             )
         )
+    await rail.after_task_iteration(
+        _ctx(
+            agent,
+            TaskIterationInputs(
+                iteration=0,
+                loop_event=None,
+                conversation_id="team-create",
+                query="build a team",
+            ),
+        )
+    )
     assert await rail.notify_team_completed() is True
     await rail.after_task_iteration(
         _ctx(
@@ -172,15 +259,19 @@ async def test_team_skill_create_rail_schedules_nudge_after_spawn_threshold(tmp_
 
 
 @pytest.mark.asyncio
-async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp_path: Path):
+async def test_team_skill_evolution_rail_generates_and_persists_patch_after_completion(
+    tmp_path: Path,
+    trajectory_span_processor: TrajectorySpanProcessor,
+):
     skills_dir = tmp_path / "skills"
     skills_dir.mkdir(parents=True, exist_ok=True)
-    skill_dir = _write_team_skill(skills_dir)
+    skill_dir = _write_swarm_skill(skills_dir)
 
-    rail = TeamSkillRail(
+    rail = TeamSkillEvolutionRail(
         skills_dir=str(skills_dir),
         llm=_MockLLM(),
         model="mock-model",
+        trajectory_span_processor=trajectory_span_processor,
         signal_trigger=True,
         auto_save=False,
         async_evolution=False,
@@ -189,6 +280,14 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
     agent = _Agent()
 
     await rail.before_invoke(_ctx(agent, InvokeInputs(query="run team skill", conversation_id="team-evolve")))
+    _record_tool_span(
+        trajectory_span_processor,
+        tool_name="read_file",
+        span_id=1,
+        session_id="team-evolve",
+        tool_input=str(skill_dir / "SKILL.md"),
+        tool_output="loaded",
+    )
     await rail.after_tool_call(
         _ctx(
             agent,
@@ -198,6 +297,14 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
                 tool_result="loaded",
             ),
         )
+    )
+    _record_tool_span(
+        trajectory_span_processor,
+        tool_name="spawn_member",
+        span_id=2,
+        session_id="team-evolve",
+        tool_input={"name": "researcher"},
+        tool_output={"status": "spawned"},
     )
     await rail.after_tool_call(
         _ctx(
@@ -209,6 +316,14 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
             ),
         )
     )
+    _record_tool_span(
+        trajectory_span_processor,
+        tool_name="send_message",
+        span_id=3,
+        session_id="team-evolve",
+        tool_input={"to_member_name": "researcher"},
+        tool_output="Error: researcher handoff failed because output format was missing",
+    )
     await rail.after_tool_call(
         _ctx(
             agent,
@@ -218,6 +333,14 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
                 tool_result="Error: researcher handoff failed because output format was missing",
             ),
         )
+    )
+    _record_tool_span(
+        trajectory_span_processor,
+        tool_name="view_task",
+        span_id=4,
+        session_id="team-evolve",
+        tool_input={},
+        tool_output="task-a completed\ntask-b completed",
     )
     await rail.after_tool_call(
         _ctx(
@@ -239,7 +362,7 @@ async def test_team_skill_rail_generates_and_persists_patch_after_completion(tmp
 
     await rail.on_approve_record(request_id)
 
-    evo_log = await rail.store.load_full_evolution_log("research-team")
+    evo_log = await rail.store.load_full_evolution_log("research-swarm")
     assert len(evo_log.entries) == 1
     assert evo_log.entries[0].change.section == "Workflow"
     assert "tighten handoff" in evo_log.entries[0].change.content

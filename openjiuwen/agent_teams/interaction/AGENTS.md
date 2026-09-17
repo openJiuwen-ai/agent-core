@@ -6,10 +6,11 @@
 
 | 文件 | 作用 |
 |---|---|
-| `payload.py` | `GodViewMessage` / `OperatorMessage` / `HumanAgentMessage` 三种交互视角的 dataclass + `InteractPayload` Union + `DeliverResult(ok, message_id, reason)` 统一返回类型 |
+| `payload.py` | `GodViewMessage` / `OperatorMessage` / `HumanAgentMessage` / `HumanAgentToolCall` 四种交互视角的 dataclass + `InteractPayload` Union + `DeliverResult(ok, message_id, reason, output, data)` 统一返回类型（`output`/`data` 为 F_111 透传工具执行结果） |
 | `router.py` | `parse_interact_str(body)` 纯语法解析(`# / $ / @member` 前缀 → typed payloads，不查 roster)；`parse_mention(raw) -> (target, body) \| None` 纯函数；`resolve_targets(payloads, *, member_exists)` async 后处理：严格匹配 `@member` recipient，未知 mention 折回为"无 @ 消息"投给 leader/avatar(保留原文，见 F_23)；`is_reserved_name(name)` 校验保留名 |
 | `user_inbox.py` | `UserInbox`：user 侧显式 API。`broadcast` / `direct` / `deliver_to_leader`，全部返回 `DeliverResult` |
-| `human_agent_inbox.py` | `HumanAgentInbox`：human_agent 对外发声，仅在 HITT 启用时可用。`send` 成功返 `DeliverResult`；HITT 关闭抛 `HumanAgentNotEnabledError`，未知 sender 抛 `UnknownHumanAgentError`（manager 层捕获转 `DeliverResult.failure(reason)`） |
+| `human_agent_inbox.py` | `HumanAgentInbox`：人类成员（avatar 或 passive）对外发声，仅在 HITT 启用时可用。`send` 成功返 `DeliverResult`；HITT 关闭抛 `HumanAgentNotEnabledError`，未知 sender 抛 `UnknownHumanAgentError`（manager 层捕获转 `DeliverResult.failure(reason)`）。`to=None` 驱动 avatar 仅对 avatar 型有意义——passive 的裸输入在 `_dispatch_payload` 被拒（`passive_member_no_avatar`） |
+| `passive_tool_executor.py` | `PassiveToolExecutor`（F_111）：被动人类成员的 tool call 透传执行器。按 sender 名构造绑定身份的 `TeamTaskManager` / `TeamMessageManager` + `PASSIVE_HUMAN_TOOLS` 工具实例（per-sender 缓存），挂在 `ActiveTeam.passive_tool_executor` 上随 leader runtime 生灭。`execute` never-raises，失败一律 `ToolOutput(success=False)` |
 | `bridge_protocol.py` | `BridgeProtocolAdapter` Protocol（纯文本 connect / relay / close）+ `REMOTE_UNAVAILABLE_SENTINEL` + `BridgeAgentNotEnabledError` / `UnknownBridgeAgentError`。本期只定义协议骨架，不实现任何 adapter——bridge agent 模块的协议适配扩展点统一在这里 |
 
 ## 调用链
@@ -41,6 +42,23 @@
 
 - **静态**：在 `TeamAgentSpec.predefined_members` 显式声明 `role_type=HUMAN_AGENT` 成员（自定 `member_name`，可多人）。框架不再隐式注入默认 `human_agent`。
 - **动态**：leader 在已建团后通过 `spawn_member(role_type='human_agent', member_name=..., display_name=..., desc=...)` 拉新人类成员加入。`role_type='human_agent'` 时禁止传 `model_name` / `prompt`（由框架内置模板托管）。
+
+### 被动人类成员（F_111，`role_type='passive_human'`）
+
+无 avatar 的人类成员：纯名册身份 + 消息地址 + 透传工具执行器，出生即 READY，
+零运行时。与 avatar 的分工：需要 LLM 代行人操作时用 `HUMAN_AGENT`，需要纯真人
+直连时用 `PASSIVE_HUMAN`。
+
+- **可被指派任务**：真人经 `HumanAgentToolCall` 透传
+  `member_complete_task` 完成（许可面 `PASSIVE_HUMAN_TOOLS`，avatar 的
+  `HUMAN_AGENT_TOOLS` + `claim_task`；scheduled 下减 claim_task）。
+- **出站**：消息与任务指派通知（autonomous 模式 leader 侧转写为 F_63 模板
+  消息 `passive_task_assigned`）都走 `_notify_human_agent_inbound` 回调，
+  `HumanAgentInboundEvent.meta` 透传模板的结构化载荷；leader 代标已读
+  （avatar 绝不代标，F_20）。
+- **透传仅 passive**：avatar 型 sender 传入 tool call 被拒
+  （`tool_passthrough_avatar_not_supported`，治理链完整性）。
+- 详见 `agent_teams/docs/features/F_111_passive-human-member.md`。
 
 ### 一致性约束（`TeamAgentSpec.build()` 时 fail-fast）
 

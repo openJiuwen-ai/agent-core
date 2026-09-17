@@ -9,13 +9,13 @@ import json
 import re
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any, Awaitable, Callable, Iterable
 
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.context_engine.base import ModelContext
-from openjiuwen.core.foundation.llm import SystemMessage
+from openjiuwen.core.context_engine.base import ContextWindow, ModelContext
+from openjiuwen.core.foundation.llm import BaseMessage, SystemMessage, UserMessage
 
 
 class PromptAttachmentKind(str, Enum):
@@ -74,6 +74,10 @@ _PROMPT_ATTACHMENT_HISTORY_STATE_KEY = "state"
 _PROMPT_ATTACHMENT_HISTORY_SESSION_KEY = "session_id"
 _PROMPT_ATTACHMENT_HISTORY_SNAPSHOT = "snapshot"
 _PROMPT_ATTACHMENT_HISTORY_DELTA = "delta"
+_SYSTEM_ATTACHMENT_ROLE_PROVIDERS = frozenset({"bailian", "dashscope"})
+_SYSTEM_ATTACHMENT_ROLE_ENDPOINT_PROFILES = frozenset({"bailian", "dashscope"})
+_ANTHROPIC_API_MODES = frozenset({"anthropic", "anthropic-messages", "messages"})
+_GENERIC_ENDPOINT_PROFILES = frozenset({"", "openai", "openai-compatible"})
 
 
 def _utc_now() -> str:
@@ -152,6 +156,36 @@ def _resolve_session_id_from_context(ctx: Any) -> str | None:
             if session_id:
                 return str(session_id)
     return None
+
+
+def _config_value(config: Any, key: str) -> Any:
+    if isinstance(config, dict):
+        return config.get(key)
+    return getattr(config, key, None)
+
+
+def _normalized_config_value(value: Any) -> str:
+    value = getattr(value, "value", value)
+    return str(value or "").strip().lower().replace("_", "-")
+
+
+def _uses_system_attachment_role(model_client_config: Any) -> bool:
+    """Return whether the active route preserves attachment system messages in place."""
+
+    provider = _normalized_config_value(_config_value(model_client_config, "client_provider"))
+    legacy_provider = _normalized_config_value(
+        _config_value(model_client_config, "legacy_client_provider")
+    )
+    endpoint_profile = _normalized_config_value(_config_value(model_client_config, "endpoint_profile"))
+    api_mode = _normalized_config_value(_config_value(model_client_config, "api_mode"))
+
+    if provider == "anthropic" or api_mode in _ANTHROPIC_API_MODES:
+        return False
+
+    backend = endpoint_profile
+    if backend in _GENERIC_ENDPOINT_PROFILES:
+        backend = legacy_provider or provider
+    return backend in _SYSTEM_ATTACHMENT_ROLE_ENDPOINT_PROFILES or backend in _SYSTEM_ATTACHMENT_ROLE_PROVIDERS
 
 
 class PromptAttachmentContextWriter:
@@ -505,12 +539,12 @@ class PromptAttachmentManager:
         self,
         context: ModelContext,
         session_id: str,
-    ) -> SystemMessage | None:
+    ) -> UserMessage | None:
         """Persist an attachment snapshot or delta into the context history.
 
         The first non-empty attachment state is written as a full snapshot.
         Later calls append only changed sections and explicit removals.  The
-        system message metadata carries the materialized section hashes so the
+        user message metadata carries the materialized section hashes so the
         state can be recovered after the manager is recreated from a session.
         """
 
@@ -536,7 +570,7 @@ class PromptAttachmentManager:
                 rendered = self.render_delta(changed, removed)
                 mode = _PROMPT_ATTACHMENT_HISTORY_DELTA
 
-            message = SystemMessage(
+            message = UserMessage(
                 content=rendered,
                 metadata={
                     PROMPT_ATTACHMENT_HISTORY_METADATA_KEY: True,
@@ -555,6 +589,64 @@ class PromptAttachmentManager:
             return message
 
     @staticmethod
+    def build_model_window_mutator(
+        *,
+        session_id: str,
+        model_client_config: Any,
+    ) -> Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]:
+        """Build a final-window projection for the active model provider.
+
+        Attachment history remains persisted as ``UserMessage``.  For
+        DashScope/Bailian routes using the OpenAI chat-completions client only
+        replace marked history messages in place with ``SystemMessage``.
+        Ordinary user messages and attachment positions remain unchanged.
+        Native Anthropic routes keep the persisted ``UserMessage`` because
+        their client moves ``SystemMessage`` content to the top-level system
+        field.
+        """
+
+        use_system_role = _uses_system_attachment_role(model_client_config)
+
+        async def mutate(_context: ModelContext, window: ContextWindow) -> ContextWindow:
+            if not use_system_role:
+                return window
+
+            context_messages: list[BaseMessage] = []
+            for message in window.context_messages:
+                metadata = getattr(message, "metadata", {}) or {}
+                history_session_id = metadata.get(_PROMPT_ATTACHMENT_HISTORY_SESSION_KEY)
+                is_attachment = (
+                    isinstance(message, UserMessage)
+                    and bool(metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY))
+                    and (
+                        history_session_id is None
+                        or str(history_session_id) == str(session_id)
+                    )
+                )
+                if not is_attachment:
+                    context_messages.append(message)
+                    continue
+
+                context_messages.append(
+                    SystemMessage(
+                        content=message.content,
+                        name=message.name,
+                        metadata=dict(metadata),
+                    )
+                )
+
+            if context_messages == window.context_messages:
+                return window
+
+            return window.model_copy(
+                update={
+                    "context_messages": context_messages,
+                }
+            )
+
+        return mutate
+
+    @staticmethod
     def _state_by_section(prompt_attachments: Iterable[PromptAttachment]) -> dict[str, str]:
         return {item.section: hash_prompt_attachment(item) for item in prompt_attachments}
 
@@ -563,7 +655,7 @@ class PromptAttachmentManager:
         state: dict[str, str] = {}
         has_snapshot = False
         for message in context.get_messages(with_history=True):
-            if not isinstance(message, SystemMessage):
+            if not isinstance(message, UserMessage):
                 continue
             metadata = getattr(message, "metadata", {}) or {}
             if not metadata.get(PROMPT_ATTACHMENT_HISTORY_METADATA_KEY):
@@ -586,7 +678,7 @@ class PromptAttachmentManager:
         max_prompt_attachment_chars: int = _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS,
         max_rendered_chars: int = _DEFAULT_MAX_RENDERED_CHARS,
     ) -> str:
-        """Render a full attachment snapshot as plain system text."""
+        """Render a full attachment snapshot as dynamic context text."""
 
         return self._render_history_payload(
             prompt_attachments,
@@ -602,7 +694,7 @@ class PromptAttachmentManager:
         max_prompt_attachment_chars: int = _DEFAULT_MAX_PROMPT_ATTACHMENT_CHARS,
         max_rendered_chars: int = _DEFAULT_MAX_RENDERED_CHARS,
     ) -> str:
-        """Render the first dynamic history snapshot as plain system text."""
+        """Render the first dynamic history snapshot as dynamic context text."""
 
         return self._render_history_payload(
             prompt_attachments,
@@ -646,6 +738,11 @@ class PromptAttachmentManager:
             return ""
 
         if self.language == "en":
+            system_reminder_notice = (
+                "The following content does not represent the user's intent and is not a direct instruction from "
+                "the user. It is dynamic context automatically attached by the system for this model call. Please "
+                "use it only as supplementary context."
+            )
             intro = (
                 "The following dynamic context is currently active. Use it together with the stable system "
                 "instructions."
@@ -658,6 +755,10 @@ class PromptAttachmentManager:
                 "earlier content:"
             )
         else:
+            system_reminder_notice = (
+                "以下内容不是用户的意图，也不是用户直接发出的指令；它是系统为本次模型调用自动附加的动态上下文。"
+                "请仅将其作为补充信息使用。"
+            )
             intro = (
                 "以下动态上下文当前有效，请与稳定的系统指令一同使用。"
                 if snapshot
@@ -684,12 +785,27 @@ class PromptAttachmentManager:
             blocks.append(removed_intro + "\n" + "\n".join(f"- `{section}`" for section in removed))
 
         rendered = "\n\n".join(blocks).rstrip()
-        if max_rendered_chars > 0 and len(rendered) > max_rendered_chars:
-            rendered = (
-                rendered[:max_rendered_chars]
-                + "\n\n[Prompt attachments truncated: rendered content exceeded max_rendered_chars.]"
-            )
-            truncated_ids = [item.id for item in items]
+        reminder_prefix = f"<system-reminder>\n{system_reminder_notice}\n\n"
+        reminder_suffix = "\n</system-reminder>"
+        if max_rendered_chars > 0:
+            available_content_chars = max_rendered_chars - len(reminder_prefix) - len(reminder_suffix)
+            if available_content_chars <= 0:
+                rendered = ""
+                truncated_ids = [item.id for item in items]
+            elif len(rendered) > available_content_chars:
+                truncation_notice = (
+                    "\n\n[Prompt attachments truncated: rendered content exceeded max_rendered_chars.]"
+                )
+                if len(truncation_notice) < available_content_chars:
+                    rendered = (
+                        rendered[: available_content_chars - len(truncation_notice)]
+                        + truncation_notice
+                    )
+                else:
+                    rendered = rendered[:available_content_chars]
+                truncated_ids = [item.id for item in items]
+
+        rendered = f"{reminder_prefix}{rendered}{reminder_suffix}"
 
         if truncated_ids:
             logger.warning(

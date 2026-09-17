@@ -33,7 +33,10 @@ from openjiuwen.agent_evolving.signal import (
 )
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    write_llm_exchange,
+)
 from openjiuwen.agent_evolving.types import ApplyResult
 from openjiuwen.core.foundation.llm import SystemMessage
 from openjiuwen.core.single_agent.rail.base import (
@@ -234,6 +237,7 @@ def _trajectory_from_steps(
         TRAJECTORY_SOURCE,
     )
     from openjiuwen.extensions.observability import semconv
+    from openjiuwen.agent_evolving.trajectory import legacy_semconv
 
     resource_attrs: dict[str, Any] = {TRAJECTORY_ID: execution_id, TRAJECTORY_SOURCE: source}
     if session_id is not None:
@@ -245,28 +249,26 @@ def _trajectory_from_steps(
         attrs: dict[str, Any] = {}
         if step.kind == "llm":
             all_tool_calls: list[Any] = []
-            prompt_index = 0
-            completion_index = 0
+            prompts: list[dict[str, Any]] = []
+            completions: list[dict[str, Any]] = []
             for message in step.detail.messages:
                 role = getattr(message, "role", None) if not isinstance(message, dict) else message.get("role")
                 content = getattr(message, "content", None) if not isinstance(message, dict) else message.get("content")
+                flat = {"role": role or "", "content": content or ""}
                 if role == "assistant":
-                    message_prefix = f"{semconv.GEN_AI_COMPLETION}.{completion_index}"
-                    completion_index += 1
+                    completions.append(flat)
                 else:
-                    message_prefix = f"{semconv.GEN_AI_PROMPT}.{prompt_index}"
-                    prompt_index += 1
-                attrs[f"{message_prefix}.role"] = role or ""
-                attrs[f"{message_prefix}.content"] = content or ""
+                    prompts.append(flat)
                 tool_calls = getattr(message, "tool_calls", None) if not isinstance(message, dict) else message.get("tool_calls")
                 if tool_calls:
                     all_tool_calls.extend(tool_calls)
+            attrs.update(write_llm_exchange(prompts, completions))
             if all_tool_calls:
                 normalized_tool_calls = []
                 for call in all_tool_calls:
                     item = dict(call) if isinstance(call, dict) else {"arguments": str(call)}
                     normalized_tool_calls.append(item)
-                attrs[semconv.GEN_AI_TOOL_CALLS] = json.dumps(
+                attrs[legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS] = json.dumps(
                     normalized_tool_calls, ensure_ascii=False, default=str
                 )
             name = "llm.call"
@@ -274,11 +276,11 @@ def _trajectory_from_steps(
             detail = step.detail
             attrs[semconv.GEN_AI_TOOL_NAME] = detail.tool_name
             if detail.call_args is not None:
-                attrs[semconv.GEN_AI_TOOL_INPUT] = json.dumps(detail.call_args, ensure_ascii=False, default=str)
+                attrs[semconv.GEN_AI_TOOL_CALL_ARGUMENTS] = json.dumps(detail.call_args, ensure_ascii=False, default=str)
             if detail.call_result is not None:
-                attrs[semconv.GEN_AI_TOOL_OUTPUT] = json.dumps(detail.call_result, ensure_ascii=False, default=str)
+                attrs[semconv.GEN_AI_TOOL_CALL_RESULT] = json.dumps(detail.call_result, ensure_ascii=False, default=str)
             if detail.tool_call_id is not None:
-                attrs[semconv.GEN_AI_TOOL_ID] = detail.tool_call_id
+                attrs[semconv.GEN_AI_TOOL_CALL_ID] = detail.tool_call_id
             name = f"tool.{detail.tool_name}"
         span: dict[str, Any] = {
             "name": name,

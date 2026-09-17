@@ -8,6 +8,8 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from openjiuwen.symphony.evaluation import EvaluationContext, EvaluationSuite, EvaluationWindow, Evaluator
+from openjiuwen.symphony.flow import LLMPackageReviewAgent
+from openjiuwen.symphony.flow.models import CombinationCandidate
 from openjiuwen.symphony.graph_engine import SymphonyGraphEngine
 from openjiuwen.symphony.interfaces import (
     AtomicCapabilityProvider,
@@ -34,6 +36,23 @@ from openjiuwen.symphony.models import (
     SourceSnapshot,
     SuggestionPriority,
 )
+from openjiuwen.symphony.observation import (
+    GRAPH_EVOLUTION_INPUT_SCHEMA,
+    EvidenceStrength,
+    EvolutionEdgeMetadata,
+    EvolutionGraph,
+    EvolutionGraphEdge,
+    EvolutionGraphNode,
+    FailureDomain,
+    GraphEvolutionInput,
+    GraphSnapshot,
+    GraphSnapshotRef,
+    ObservationReceipt,
+    TaskEvidence,
+    TaskOutcome,
+    TaskOutcomeLabel,
+    TraceEvidence,
+)
 from openjiuwen.symphony.orchestration import (
     CapabilityGraph,
     GraphArtifactStatus,
@@ -46,8 +65,9 @@ from openjiuwen.symphony.orchestration import (
     OrchestrationService,
     PrepareArtifactHook,
 )
-from openjiuwen.symphony.runtime import SymphonyRuntime
-from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec
+from openjiuwen.symphony.orchestration.artifacts import GraphArtifactStore
+from openjiuwen.symphony.runtime import EvolutionSubmitResult, SymphonyRuntime
+from openjiuwen.symphony.shared import ArtifactSpec, Fingerprint, ParameterSpec, normalize_name_key
 from openjiuwen.symphony.shared.fingerprint import (
     FINGERPRINT_ARTIFACT_FILENAME,
     FINGERPRINT_SCHEMA_VERSION,
@@ -63,19 +83,22 @@ from openjiuwen.symphony.shared.fingerprint import (
 if TYPE_CHECKING:
     from openjiuwen.symphony import agent as agent
     from openjiuwen.symphony import discovery as discovery
+    from openjiuwen.symphony import flow as flow
     from openjiuwen.symphony import retrieval as retrieval
     from openjiuwen.symphony import shared as shared
 
 CapabilityInput = ParameterSpec
 CapabilityOutput = ArtifactSpec
-_LAZY_MODULES = frozenset({"agent", "discovery", "retrieval", "shared"})
+_LAZY_MODULES = frozenset({"agent", "discovery", "flow", "retrieval", "shared"})
 
 __all__ = [
     "FINGERPRINT_ARTIFACT_FILENAME",
     "FINGERPRINT_SCHEMA_VERSION",
+    "GRAPH_EVOLUTION_INPUT_SCHEMA",
     "ArtifactSpec",
     "AtomicCapabilityProvider",
     "CapabilityCall",
+    "CombinationCandidate",
     "CapabilityDescriptor",
     "CapabilityFingerprint",
     "CapabilityGraph",
@@ -83,22 +106,34 @@ __all__ = [
     "CapabilityInput",
     "CapabilityOutput",
     "CapabilityProvider",
+    "EvidenceStrength",
     "EvaluationCase",
     "EvaluationContext",
     "EvaluationSuite",
     "EvaluationWindow",
+    "EvolutionGraph",
+    "EvolutionGraphEdge",
+    "EvolutionGraphNode",
+    "EvolutionSubmitResult",
+    "EvolutionEdgeMetadata",
     "Evaluator",
     "EvidenceRef",
     "FailureReason",
     "FailureSeverity",
+    "FailureDomain",
     "Fingerprint",
     "FingerprintArtifact",
     "FingerprintService",
     "FingerprintSettings",
     "GraphArtifactStatus",
+    "GraphArtifactStore",
     "GraphBuildResult",
+    "GraphEvolutionInput",
     "GraphMutationDelta",
     "GraphMutationResult",
+    "GraphSnapshot",
+    "GraphSnapshotRef",
+    "LLMPackageReviewAgent",
     "IONameVocabulary",
     "ImprovementSuggestion",
     "MetricResult",
@@ -107,6 +142,7 @@ __all__ = [
     "OrchestrationPlan",
     "OrchestrationProgress",
     "OrchestrationService",
+    "ObservationReceipt",
     "ParameterSpec",
     "PrepareArtifactHook",
     "QualityConfidence",
@@ -122,8 +158,14 @@ __all__ = [
     "SymphonyLLM",
     "SymphonyGraphEngine",
     "SymphonyRuntime",
+    "TaskEvidence",
+    "TaskOutcome",
+    "TaskOutcomeLabel",
+    "TraceEvidence",
     "agent",
     "discovery",
+    "flow",
+    "normalize_name_key",
     "retrieval",
     "shared",
 ]

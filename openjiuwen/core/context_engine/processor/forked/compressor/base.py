@@ -39,11 +39,11 @@ from openjiuwen.core.foundation.llm import (
     ToolMessage,
     UserMessage,
 )
-from openjiuwen.core.foundation.kv_cache import (
-    KVCacheIdentity,
+from openjiuwen.core.kv_cache.kv_cache_metadata import (
     context_compressor_cache_identity,
     resolve_session_lineage,
 )
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheIdentity
 from openjiuwen.core.foundation.tool import ToolInfo
 
 _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS = (0.85, 0.65, 0.5)
@@ -833,7 +833,7 @@ class PrefixCompactProcessor(ContextProcessor):
 
     @staticmethod
     def _estimate_text_tokens(text: str) -> int:
-        return max(len(text) // 4, 1) if text else 0
+        return max(len(text) // 3, 1) if text else 0
 
     def _context_debug_enabled(self) -> bool:
         return bool(getattr(self.config, "enable_compression_dump", False))
@@ -857,7 +857,7 @@ class PrefixCompactProcessor(ContextProcessor):
             {
                 "idx": idx,
                 "role": getattr(message, "role", None),
-                "tokens": max(len(str(getattr(message, "content", "") or "")) // 4, 1),
+                "tokens": max(len(str(getattr(message, "content", "") or "")) // 3, 1),
                 "preview": (str(getattr(message, "content", "") or ""))[:200],
             }
             for idx, message in enumerate(messages)

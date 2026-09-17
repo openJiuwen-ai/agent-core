@@ -158,3 +158,95 @@ class TestIdempotentReassembly:
         meta, body = read_frontmatter(target.read_text(encoding="utf-8"))
         assert body != "body"  # rebuilt from the framework default, not kept
         assert meta["baseline_sha256"] is not None
+
+
+class TestSharedCacheWriteGuard:
+    """A teammate sharing the leader's cache must not re-read evolved md.
+
+    The cache-hit guard (:meth:`WorkspaceCache.has_template` /
+    ``has_tool_md`` / ``is_tools_loaded``) makes a teammate sharing the
+    leader's ``WorkspaceCache`` instance skip the whole read-write-judge
+    pass on its ``coordination.start``. This keeps the cache stable for
+    the whole session: an evolution-party edit made mid-session must not
+    reach a teammate that re-enters the write path (which would pollute
+    the leader's primed baseline with the evolved value).
+    """
+
+    @pytest.fixture
+    def cached_assembler(self, tmp_path):
+        """Isolated home + a shared WorkspaceCache bound to team ``T``."""
+        from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+        from openjiuwen.agent_teams.team_workspace.workspace_store import WorkspaceStore
+
+        home = tmp_path / "home"
+        home.mkdir()
+        configure_openjiuwen_home(str(home))
+        cache = WorkspaceCache(WorkspaceStore(), "T", language="cn")
+        try:
+            yield WorkspaceAssembler(WorkspaceStore(), cache=cache), cache
+        finally:
+            reset_openjiuwen_home()
+
+    def test_teammate_write_skips_when_leader_primed(self, cached_assembler):
+        """Leader primes the cache; a teammate sharing it skips re-reading."""
+        assembler, cache = cached_assembler
+        # Leader's first write primes the cache dict (every A-class file).
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
+        sample = sorted((_team_root() / "prompts" / "system").glob("*.cn.md"))[0]
+        # The cache key is the framework stem (no language suffix).
+        name = sample.name.removesuffix(".cn.md")
+        leader_text = sample.read_text(encoding="utf-8")
+        assert cache.has_template(name)  # leader primed it
+
+        # Evolve the file on disk *after* the leader primed the cache — this
+        # is the mid-session evolution-party edit a teammate must not pick up.
+        meta, _ = read_frontmatter(leader_text)
+        sample.write_text(write_frontmatter(meta, "evolved body"), encoding="utf-8")
+
+        # A teammate sharing the cache re-runs the write pass: the guard sees
+        # the resident value and skips, so the cache keeps the leader's prime.
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
+        # The cache still serves the leader's primed baseline, not the evolved
+        # body written to disk mid-session (the dict was never re-read).
+        cached = cache.get_template(name)
+        _, cached_body = read_frontmatter(cached.content)
+        assert cached_body != "evolved body"
+
+    def test_resident_none_does_not_block_baseline_seed(self, cached_assembler):
+        """A read-side miss stores None; the write side still seeds the baseline.
+
+        ``get_template`` stores ``None`` on a miss (marks "no file value") so
+        the miss path is not retried. That sentinel is not a write-side prime:
+        the write guard (:meth:`has_template`) must report False for it, and
+        ``_write_baseline`` must still seed the missing file's baseline.
+        """
+        assembler, cache = cached_assembler
+        # A read-side lookup for a not-yet-written file caches None.
+        assert cache.get_template("leader_bootstrap") is None
+        assert not cache.has_template("leader_bootstrap")  # None is not a prime
+
+        # The write pass now seeds the baseline despite the resident None.
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
+        seeded = _team_root() / "prompts" / "system" / "leader_bootstrap.cn.md"
+        assert seeded.is_file()  # baseline seeded, not skipped
+        assert cache.has_template("leader_bootstrap")  # now a real prime
+
+    def test_read_side_scan_does_not_skip_leader_c_class_write(self, cached_assembler):
+        """A read-side C-class scan (``_load_tools``) must not block the write pass.
+
+        ``_load_tools`` sets the read-side ``_tools_loaded`` flag; the write
+        guard reads the separate write-side ``_tools_primed`` flag, so a
+        read-side scan that fires before the leader's write pass does not
+        make the leader skip seeding the C-class files.
+        """
+        assembler, cache = cached_assembler
+        # A read-side tool lookup triggers the lazy C-class scan.
+        cache.get_tool_md("create_task")
+        assert cache.is_tools_loaded() is False  # read-side scan, not a write prime
+
+        # The leader's write pass still seeds every C-class tool md.
+        assembler.write_system_and_tool_prompts(team_name="T", language="cn")
+        tool_dir = _team_root() / "prompts" / "tool"
+        tool_files = sorted(p.name for p in tool_dir.rglob("*.cn.md"))
+        assert tool_files  # C-class files seeded, not skipped
+        assert cache.is_tools_loaded() is True  # write pass marked _tools_primed

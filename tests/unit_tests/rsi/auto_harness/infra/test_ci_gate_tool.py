@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import yaml
 
-from openjiuwen.rsi.auto_harness.infra.ci_gate_runner import CIGateRunner
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.ci_gate_runner import CIGateRunner
 
 
 class _FakeProc:
@@ -223,7 +223,7 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
             {"name": "lint", "command": "make check COMMITS=1"},
         ]
         with patch(
-            "openjiuwen.rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
+            "openjiuwen.rsi.harness_rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
             new_callable=AsyncMock,
             return_value={
                 "name": "lint",
@@ -357,12 +357,12 @@ class TestCIGateRunnerInvoke(IsolatedAsyncioTestCase):
                 return_value=True,
             ),
             patch(
-                "openjiuwen.rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
+                "openjiuwen.rsi.harness_rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._run_check_gate",
                 new_callable=AsyncMock,
                 return_value={"name": "lint", "passed": True, "output": ""},
             ),
             patch(
-                "openjiuwen.rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._ensure_uv_available",
+                "openjiuwen.rsi.harness_rsi.auto_harness.infra.ci_gate_runner.CIGateRunner._ensure_uv_available",
                 new_callable=AsyncMock,
                 return_value=(True, ""),
             ),

@@ -2,10 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
-from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass
-import inspect
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
 
 import httpx
@@ -32,14 +30,28 @@ from openjiuwen.core.foundation.llm.headers_helper import (
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.reasoning import (
+    UNSET_REASONING,
+    apply_reasoning_plan,
+    is_reasoning_config_intent,
+    reasoning_request_controls,
+    resolve_reasoning_plan,
+)
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMApiMode,
     LLMAuthMode,
     ModelClientConfig,
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.utils.endpoint_profiles import apply_message_transforms
+from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
+    _deepseek_reasoning_content,
+    apply_message_transforms,
+    model_requires_reasoning_content,
+)
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -92,27 +104,12 @@ _OPENAI_EXTRA_BODY_EXTENSION_FIELDS = {
     "cache_salt",
     "cache_sharing",
     "return_token_ids",
+    # Vendor thinking flags must ride in extra_body; OpenAI SDK rejects them
+    # as top-level chat.completions.create kwargs.
+    "enable_thinking",
+    "thinking",
+    "chat_template_kwargs",
 }
-_DISABLED_THINKING_TYPES = {"disabled"}
-_DISABLED_REASONING_EFFORTS = {"off", "none"}
-_DISABLED_THINKING_NON_RETRY_STATUSES = {401, 403, 408, 429}
-_UNSUPPORTED_DISABLED_THINKING_MARKERS = (
-    "unsupported",
-    "not support",
-    "does not support",
-    "doesn't support",
-    "cannot disable",
-    "can't disable",
-    "不支持",
-    "不能关闭",
-    "不允许关闭",
-)
-_DISABLED_THINKING_VALUE_MARKERS = (
-    "disabled",
-    "disable",
-    "off",
-    "关闭",
-)
 
 
 def _openrouter_model_provider(model: Optional[str]) -> Optional[str]:
@@ -353,10 +350,26 @@ def _parse_gateway_stream_line(line: str) -> Optional[AssistantMessageChunk]:
         or message.get("reasoning_token_text")
         or delta.get("reasoning_token_text")
     )
+    raw_tool_calls = delta.get("tool_calls") or message.get("tool_calls") or []
+    tool_calls = []
+    for fallback_index, raw_tool_call in enumerate(raw_tool_calls):
+        if not isinstance(raw_tool_call, dict):
+            continue
+        function = raw_tool_call.get("function")
+        if not isinstance(function, dict):
+            continue
+        tool_calls.append(ToolCall(
+            id=str(raw_tool_call.get("id") or ""),
+            type=str(raw_tool_call.get("type") or "function"),
+            name=str(function.get("name") or ""),
+            arguments=str(function.get("arguments") or ""),
+            index=raw_tool_call.get("index", fallback_index),
+        ))
     finish_reason = choice.get("finish_reason") or "null"
     return AssistantMessageChunk(
         content=content or "",
         reasoning_content=reasoning_content,
+        tool_calls=tool_calls or None,
         finish_reason=finish_reason,
     )
 
@@ -402,7 +415,6 @@ class OpenAIModelClient(BaseModelClient):
             OPENROUTER_1H_PROMPT_CACHE_TTL_PROVIDERS,
         )
         self._previous_openrouter_prompt_cache_messages: Optional[list] = None
-        self._models_rejecting_disabled_thinking: set[str] = set()
 
     def _use_shared_client(self) -> bool:
         """Whether to reuse the process-wide cached client (default True).
@@ -587,9 +599,6 @@ class OpenAIModelClient(BaseModelClient):
                 f"raw_samples={raw_samples!r}"
             )
 
-    def supports_kv_cache_release(self) -> bool:
-        return self._kv_cache_mode() == "release"
-
     def supports_kv_cache_affinity(self) -> bool:
         return self._kv_cache_mode() == "affinity"
 
@@ -772,76 +781,6 @@ class OpenAIModelClient(BaseModelClient):
             "parent_session_id": parent_session_id or cache_id,
         }
 
-    def build_kv_cache_invoke_kwargs(
-            self,
-            *,
-            session: object = None,
-            enable_kv_cache_release: bool = False,
-            **_: Any,
-    ) -> dict:
-        if not enable_kv_cache_release or not self.supports_kv_cache_release():
-            return {}
-        extra: dict = {}
-        if session is not None and hasattr(session, "get_session_id"):
-            extra["session_id"] = session.get_session_id()
-        extra["enable_cache_sharing"] = True
-        return extra
-
-    async def release(
-            self,
-            session_id: str,
-            messages: List,
-            messages_released_index: int,
-            *,
-            model: Optional[str] = None,
-            tools: Optional[List] = None,
-            tools_released_index: Optional[int] = None,
-    ) -> bool:
-        if not self.supports_kv_cache_release():
-            return False
-
-        kv_cache = self._kv_cache_config()
-        messages_dict = self._convert_messages_to_dict(messages)
-        tools_dict = self._convert_tools_to_dict(tools)
-        sanitized_messages = self._sanitize_tool_calls(messages_dict)
-        release_params = {
-            "model": model if model else self.model_config.model_name,
-            getattr(kv_cache, "session_field", "cache_salt"): session_id,
-            getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing"): True,
-            "messages": sanitized_messages,
-            "messages_released_index": messages_released_index,
-        }
-        if tools_dict:
-            release_params["tools"] = tools_dict
-        if tools_released_index is not None:
-            release_params["tools_released_index"] = tools_released_index
-
-        url = (
-            f"{self.model_client_config.api_base.rstrip('/')}"
-            f"{getattr(kv_cache, 'release_endpoint', '/release_kv_cache')}"
-        )
-        verify = (
-            SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
-            if self.model_client_config.verify_ssl
-            else False
-        )
-        headers = {"Content-Type": "application/json"}
-        async with httpx.AsyncClient(
-                proxy=UrlUtils.get_global_proxy_url(url),
-                verify=verify,
-                timeout=self.model_client_config.timeout,
-        ) as http_client:
-            response = await http_client.post(url, headers=headers, json=release_params)
-        if 200 <= response.status_code < 300:
-            return True
-        raise build_error(
-            StatusCode.MODEL_CALL_FAILED,
-            error_msg=(
-                f"OpenAI-compatible KV cache release failed: "
-                f"{response.status_code} {response.text}"
-            ),
-        )
-
     async def evict_kvc(self, **kwargs) -> bool:
         return await self._invoke_kv_cache_affinity_action("evict", **kwargs)
 
@@ -858,6 +797,8 @@ class OpenAIModelClient(BaseModelClient):
             session_id: str,
             parent_session_id: Optional[str] = None,
             target: str = "session",
+            messages: Union[str, List[BaseMessage], List[dict], None] = None,
+            tools: Union[List[ToolInfo], List[dict], None] = None,
             model: Optional[str] = None,
             msg_start: Optional[int] = None,
             msg_end: Optional[int] = None,
@@ -872,8 +813,12 @@ class OpenAIModelClient(BaseModelClient):
             return False
 
         params = self._build_request_params(
-            messages=[{"role": "user", "content": ""}],
-            tools=None,
+            messages=(
+                messages
+                if messages is not None
+                else [{"role": "user", "content": ""}]
+            ),
+            tools=tools,
             temperature=None,
             top_p=None,
             model=model,
@@ -940,7 +885,6 @@ class OpenAIModelClient(BaseModelClient):
             - if temperature is not present but top_p is, keep top_p
         """
         session_id = kwargs.pop("session_id", None)
-        enable_cache_sharing = bool(kwargs.pop("enable_cache_sharing", False))
         parent_session_id = kwargs.pop("parent_session_id", None)
         kv_action = kwargs.pop("kv_action", None)
         kv_target = kwargs.pop("target", "session")
@@ -950,6 +894,10 @@ class OpenAIModelClient(BaseModelClient):
         tools_start = kwargs.pop("tools_start", None)
         tools_end = kwargs.pop("tools_end", None)
         include_tools = bool(kwargs.pop("include_tools", False))
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
 
         is_session_manage_request = bool(
             kv_action and manage_request is True and kv_target == "session"
@@ -973,6 +921,26 @@ class OpenAIModelClient(BaseModelClient):
             **kwargs
         )
 
+        apply_reasoning_plan(
+            params,
+            resolve_reasoning_plan(
+                self.model_client_config,
+                self.model_config,
+                request_model=model,
+                explicit_kwargs=reasoning_kwargs,
+            ),
+            override=is_reasoning_config_intent(explicit_reasoning),
+        )
+        reasoning_controls = reasoning_request_controls(params)
+        if reasoning_controls:
+            logger.info(
+                "Resolved OpenAI-compatible reasoning request controls: "
+                "model=%s provider=%s controls=%s",
+                params.get("model"),
+                self.model_client_config.client_provider,
+                reasoning_controls,
+            )
+
         api_base = (self.model_client_config.api_base or "").lower()
         if "openai.com" in api_base:
             has_temperature = "temperature" in params and params["temperature"] is not None
@@ -987,10 +955,12 @@ class OpenAIModelClient(BaseModelClient):
             self.model_client_config,
             params["messages"],
         )
+        if model_requires_reasoning_content(params.get("model")):
+            params["messages"] = _deepseek_reasoning_content(params["messages"])
 
         profile_name = self._endpoint_profile_name()
         kv_mode = self._kv_cache_mode()
-        if profile_name == "siliconflow" or kv_mode in {"release", "affinity"}:
+        if profile_name == "siliconflow" or kv_mode == "affinity":
             params["messages"] = self._sanitize_tool_calls(params["messages"])
 
         if is_session_manage_request:
@@ -998,11 +968,6 @@ class OpenAIModelClient(BaseModelClient):
             params.pop("tools", None)
             params.pop("tool_choice", None)
             params.pop("max_tokens", None)
-
-        if kv_mode == "release" and enable_cache_sharing and session_id:
-            kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "enable_cache_sharing_field", "cache_sharing")] = True
-            params[getattr(kv_cache, "session_field", "cache_salt")] = session_id
 
         if kv_mode == "affinity" and session_id:
             kv_cache = self._kv_cache_config()
@@ -1092,264 +1057,6 @@ class OpenAIModelClient(BaseModelClient):
                 extra_body[key] = params.pop(key)
         if extra_body:
             params["extra_body"] = extra_body
-
-    @staticmethod
-    def _is_disabled_thinking_type(value: Any) -> bool:
-        return isinstance(value, str) and value.strip().lower() in _DISABLED_THINKING_TYPES
-
-    @staticmethod
-    def _is_false_flag(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value is False
-        if isinstance(value, str):
-            return value.strip().lower() in {"false", "0", "no"}
-        return False
-
-    @staticmethod
-    def _is_disabled_reasoning_effort(value: Any) -> bool:
-        return isinstance(value, str) and value.strip().lower() in _DISABLED_REASONING_EFFORTS
-
-    @classmethod
-    def _mapping_has_disabled_thinking_params(cls, value: Any) -> bool:
-        if not isinstance(value, MappingABC):
-            return False
-
-        thinking = value.get("thinking")
-        if isinstance(thinking, MappingABC) and cls._is_disabled_thinking_type(thinking.get("type")):
-            return True
-
-        if cls._is_false_flag(value.get("enable_thinking")):
-            return True
-
-        chat_template_kwargs = value.get("chat_template_kwargs")
-        if (
-                isinstance(chat_template_kwargs, MappingABC)
-                and cls._is_false_flag(chat_template_kwargs.get("enable_thinking"))
-        ):
-            return True
-
-        reasoning = value.get("reasoning")
-        if isinstance(reasoning, MappingABC) and cls._is_false_flag(reasoning.get("enabled")):
-            return True
-
-        return cls._is_disabled_reasoning_effort(value.get("reasoning_effort"))
-
-    @classmethod
-    def _has_disabled_thinking_params(cls, params: Mapping[str, Any]) -> bool:
-        if cls._mapping_has_disabled_thinking_params(params):
-            return True
-        return cls._mapping_has_disabled_thinking_params(params.get("extra_body"))
-
-    @classmethod
-    def _strip_disabled_thinking_fields(cls, params: dict[str, Any]) -> None:
-        thinking = params.get("thinking")
-        if isinstance(thinking, MappingABC) and cls._is_disabled_thinking_type(thinking.get("type")):
-            thinking_params = dict(thinking)
-            thinking_params.pop("type", None)
-            if thinking_params:
-                params["thinking"] = thinking_params
-            else:
-                params.pop("thinking", None)
-
-        if cls._is_false_flag(params.get("enable_thinking")):
-            params.pop("enable_thinking", None)
-
-        chat_template_kwargs = params.get("chat_template_kwargs")
-        if (
-                isinstance(chat_template_kwargs, MappingABC)
-                and cls._is_false_flag(chat_template_kwargs.get("enable_thinking"))
-        ):
-            chat_template_params = dict(chat_template_kwargs)
-            chat_template_params.pop("enable_thinking", None)
-            if chat_template_params:
-                params["chat_template_kwargs"] = chat_template_params
-            else:
-                params.pop("chat_template_kwargs", None)
-
-        reasoning = params.get("reasoning")
-        if isinstance(reasoning, MappingABC) and cls._is_false_flag(reasoning.get("enabled")):
-            reasoning_params = dict(reasoning)
-            reasoning_params.pop("enabled", None)
-            if reasoning_params:
-                params["reasoning"] = reasoning_params
-            else:
-                params.pop("reasoning", None)
-
-        if cls._is_disabled_reasoning_effort(params.get("reasoning_effort")):
-            params.pop("reasoning_effort", None)
-
-    @classmethod
-    def _without_disabled_thinking_params(cls, params: Mapping[str, Any]) -> dict[str, Any]:
-        cleaned = deepcopy(dict(params))
-        cls._strip_disabled_thinking_fields(cleaned)
-
-        extra_body = cleaned.get("extra_body")
-        if isinstance(extra_body, MappingABC):
-            cleaned_extra_body = dict(extra_body)
-            cls._strip_disabled_thinking_fields(cleaned_extra_body)
-            if cleaned_extra_body:
-                cleaned["extra_body"] = cleaned_extra_body
-            else:
-                cleaned.pop("extra_body", None)
-        return cleaned
-
-    @staticmethod
-    def _disabled_thinking_model_key(params: Mapping[str, Any]) -> Optional[str]:
-        model_name = params.get("model")
-        if model_name is None:
-            return None
-        model_key = str(model_name).strip()
-        return model_key or None
-
-    def _apply_disabled_thinking_cache(self, params: dict[str, Any]) -> dict[str, Any]:
-        model_key = self._disabled_thinking_model_key(params)
-        if model_key not in self._models_rejecting_disabled_thinking:
-            return params
-        if not self._has_disabled_thinking_params(params):
-            return params
-        return self._without_disabled_thinking_params(params)
-
-    @classmethod
-    def _iter_exception_chain(cls, exc: BaseException) -> Iterable[BaseException]:
-        seen: set[int] = set()
-        current: Optional[BaseException] = exc
-        while current is not None and id(current) not in seen:
-            seen.add(id(current))
-            yield current
-            current = current.__cause__ or current.__context__
-
-    @staticmethod
-    def _optional_int(value: Any) -> Optional[int]:
-        if isinstance(value, bool) or value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
-
-    @staticmethod
-    def _exception_attr(value: Any, attr: str) -> Any:
-        instance_dict = getattr(value, "__dict__", None)
-        if isinstance(instance_dict, MappingABC) and attr in instance_dict:
-            return instance_dict[attr]
-        try:
-            return inspect.getattr_static(value, attr)
-        except AttributeError:
-            return None
-
-    @classmethod
-    def _exception_status_code(cls, exc: BaseException) -> Optional[int]:
-        for item in cls._iter_exception_chain(exc):
-            candidates = (item, cls._exception_attr(item, "response"))
-            for candidate in candidates:
-                if candidate is None:
-                    continue
-                for attr in ("status_code", "status"):
-                    status_code = cls._optional_int(cls._exception_attr(candidate, attr))
-                    if status_code is not None:
-                        return status_code
-        return None
-
-    @classmethod
-    def _collect_exception_text_parts(cls, value: Any, seen: set[int]) -> list[str]:
-        if value is None:
-            return []
-        if id(value) in seen:
-            return []
-        seen.add(id(value))
-
-        if isinstance(value, (str, int, float, bool)):
-            return [str(value)]
-        if isinstance(value, MappingABC):
-            parts: list[str] = []
-            for key, item in value.items():
-                parts.extend(cls._collect_exception_text_parts(key, seen))
-                parts.extend(cls._collect_exception_text_parts(item, seen))
-            return parts
-        if isinstance(value, (list, tuple, set, frozenset)):
-            parts = []
-            for item in value:
-                parts.extend(cls._collect_exception_text_parts(item, seen))
-            return parts
-
-        parts = [str(value)]
-        for attr in ("message", "body", "code", "type", "param", "status_code", "response"):
-            attr_value = cls._exception_attr(value, attr)
-            if attr_value is value:
-                continue
-            parts.extend(cls._collect_exception_text_parts(attr_value, seen))
-        return parts
-
-    @classmethod
-    def _exception_text(cls, exc: BaseException) -> str:
-        parts: list[str] = []
-        seen: set[int] = set()
-        for item in cls._iter_exception_chain(exc):
-            parts.extend(cls._collect_exception_text_parts(item, seen))
-        return "\n".join(part for part in parts if part)
-
-    @classmethod
-    def _is_disabled_thinking_rejection(cls, exc: BaseException) -> bool:
-        status_code = cls._exception_status_code(exc)
-        if (
-                status_code in _DISABLED_THINKING_NON_RETRY_STATUSES
-                or (status_code is not None and status_code >= 500)
-        ):
-            return False
-
-        error_text = cls._exception_text(exc).lower()
-        if "1210" in error_text:
-            return True
-
-        mentions_thinking = "thinking" in error_text or "reasoning" in error_text or "思考" in error_text
-        if not mentions_thinking:
-            return False
-
-        mentions_unsupported = any(marker in error_text for marker in _UNSUPPORTED_DISABLED_THINKING_MARKERS)
-        if not mentions_unsupported:
-            return False
-
-        mentions_disable = any(marker in error_text for marker in _DISABLED_THINKING_VALUE_MARKERS)
-        return mentions_disable or "parameter" in error_text or "参数" in error_text
-
-    def _retry_params_without_disabled_thinking(
-            self,
-            params: dict[str, Any],
-            exc: BaseException,
-    ) -> Optional[dict[str, Any]]:
-        if not self._has_disabled_thinking_params(params):
-            return None
-        if not self._is_disabled_thinking_rejection(exc):
-            return None
-        return self._without_disabled_thinking_params(params)
-
-    async def _create_chat_completion_with_disabled_thinking_fallback(
-            self,
-            async_client: "openai.AsyncOpenAI",
-            params: dict[str, Any],
-            *,
-            is_stream: bool,
-    ) -> Any:
-        request_params = self._apply_disabled_thinking_cache(params)
-        try:
-            return await async_client.chat.completions.create(**request_params)
-        except Exception as exc:
-            retry_params = self._retry_params_without_disabled_thinking(request_params, exc)
-            if retry_params is None:
-                raise
-
-            model_key = self._disabled_thinking_model_key(request_params)
-            if model_key:
-                self._models_rejecting_disabled_thinking.add(model_key)
-
-            llm_logger.warning(
-                "OpenAI-compatible model rejected disabled thinking; retrying with model defaults.",
-                event_type=LogEventType.LLM_CALL_ERROR,
-                model_name=model_key,
-                model_provider=self.model_client_config.client_provider,
-                is_stream=is_stream,
-            )
-            return await async_client.chat.completions.create(**retry_params)
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """Acquire an ``AsyncOpenAI`` client for a request.
@@ -1479,6 +1186,308 @@ class OpenAIModelClient(BaseModelClient):
         if closed:
             logger.info(f"Closed {closed} AsyncOpenAI client(s) for removed/updated model config")
 
+    def _uses_responses_api(self) -> bool:
+        """Whether this client talks to the OpenAI Responses endpoint (``/responses``)."""
+        api_mode = getattr(self.model_client_config, "api_mode", None)
+        value = api_mode.value if hasattr(api_mode, "value") else api_mode
+        return value == LLMApiMode.Responses.value
+
+    def _build_responses_request_body(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            **kwargs
+    ) -> dict[str, Any]:
+        """Build a Responses API request body from OpenAI client parameters."""
+        final_model = model or self.model_config.model_name
+        if not final_model:
+            raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
+
+        send_sampling_params = bool(kwargs.pop("send_sampling_params", False))
+        send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", False))
+
+        final_temperature = (
+            (temperature if temperature is not None else self.model_config.temperature)
+            if send_sampling_params
+            else None
+        )
+        final_top_p = (
+            (top_p if top_p is not None else self.model_config.top_p)
+            if send_sampling_params
+            else None
+        )
+        configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
+        final_stop = stop if stop is not None else self.model_config.stop
+
+        reasoning = kwargs.pop("reasoning", None)
+        extra_body = kwargs.pop("extra_body", None)
+        tool_choice = kwargs.pop("tool_choice", "auto")
+        parallel_tool_calls = kwargs.pop("parallel_tool_calls", True)
+        include_reasoning = kwargs.pop("include_reasoning_encrypted_content", False)
+
+        request_extra = self.model_config.model_dump(
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude_none=True,
+        )
+        request_extra.update(kwargs)
+
+        return build_request_body(
+            model=final_model,
+            messages=messages,
+            tools=tools,
+            temperature=final_temperature,
+            top_p=final_top_p,
+            max_tokens=configured_max_tokens if send_max_output_tokens else None,
+            stop=final_stop,
+            reasoning=reasoning,
+            include_reasoning_encrypted_content=include_reasoning,
+            tool_choice=tool_choice,
+            parallel_tool_calls=parallel_tool_calls,
+            extra_body={**request_extra, **(extra_body or {})} or None,
+        )
+
+    def _make_responses_transport(self, *, timeout: Optional[float]) -> OpenAIAccountResponsesTransport:
+        verify = (
+            SslUtils.create_strict_ssl_context(self.model_client_config.ssl_cert)
+            if self.model_client_config.verify_ssl
+            else False
+        )
+        return OpenAIAccountResponsesTransport(
+            base_url=self.model_client_config.api_base,
+            timeout_seconds=timeout if timeout is not None else self.model_client_config.timeout,
+            verify=verify,
+            proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
+            max_retries=self.model_client_config.max_retries,
+        )
+
+    async def _parse_responses_content(self, content: str, output_parser: BaseOutputParser) -> Any:
+        try:
+            return await output_parser.parse(content)
+        except Exception as exc:
+            llm_logger.warning(
+                "OpenAI Responses output parser error.",
+                event_type=LogEventType.LLM_CALL_ERROR,
+                model_name=self.model_config.model_name,
+                model_provider=self.model_client_config.client_provider,
+                is_stream=False,
+                exception=str(exc),
+            )
+            return None
+
+    async def _try_parse_responses_stream_content(self, content: str, output_parser: BaseOutputParser) -> Any:
+        try:
+            return await output_parser.parse(content)
+        except Exception:
+            return None
+
+    async def _invoke_responses_api(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            output_parser: Optional[BaseOutputParser],
+            timeout: Optional[float],
+            tracer_record_data,
+            request_custom_headers,
+            **kwargs,
+    ) -> AssistantMessage:
+        """Invoke the OpenAI Responses endpoint with an api_key bearer token."""
+        session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
+
+        body = self._build_responses_request_body(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            **kwargs,
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=body)
+
+        request_headers = self._build_request_headers(self._base_headers, request_custom_headers)
+        await trigger(
+            LLMCallEvents.LLM_INPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=False,
+        )
+
+        try:
+            response = await self._make_responses_transport(timeout=timeout).create_response(
+                body=body,
+                access_token=self._resolved_api_key(),
+                model_name=str(body.get("model") or ""),
+                session_id=session_id,
+                extra_headers=request_headers,
+            )
+        except Exception as exc:
+            await self._emit_responses_error(body, messages, tools, exc, is_stream=False)
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"Responses API invoke error: {_format_exception_detail(exc)}",
+            ) from exc
+
+        if output_parser and response.content:
+            response.parser_content = await self._parse_responses_content(response.content, output_parser)
+
+        if tracer_record_data:
+            await tracer_record_data(llm_response=response)
+
+        await trigger(
+            LLMCallEvents.LLM_OUTPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            response=response.content,
+            reasoning_content=response.reasoning_content,
+            usage=response.usage_metadata,
+            tool_calls=response.tool_calls,
+        )
+        return response
+
+    async def _stream_responses_api(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            output_parser: Optional[BaseOutputParser],
+            timeout: Optional[float],
+            tracer_record_data,
+            request_custom_headers,
+            **kwargs,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        """Stream from the OpenAI Responses endpoint with an api_key bearer token."""
+        session_id = kwargs.pop("session_id", None)
+        kwargs.pop("request_purpose", None)
+        kwargs.pop("context_operation_id", None)
+
+        body = self._build_responses_request_body(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            **kwargs,
+        )
+        if tracer_record_data:
+            await tracer_record_data(llm_params=body)
+
+        request_headers = self._build_request_headers(self._base_headers, request_custom_headers)
+        await trigger(
+            LLMCallEvents.LLM_INPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            temperature=body.get("temperature"),
+            top_p=body.get("top_p"),
+            max_tokens=body.get("max_output_tokens"),
+            is_stream=True,
+        )
+
+        final_message = None
+        accumulated_for_parser = ""
+        try:
+            async for chunk in self._make_responses_transport(timeout=timeout).stream_response(
+                body=body,
+                access_token=self._resolved_api_key(),
+                model_name=str(body.get("model") or ""),
+                session_id=session_id,
+                extra_headers=request_headers,
+            ):
+                await trigger(
+                    LLMCallEvents.LLM_RESPONSE_RECEIVED,
+                    model_name=body.get("model"),
+                    model_provider=self.model_client_config.client_provider,
+                )
+                if output_parser and chunk.content:
+                    accumulated_for_parser += str(chunk.content)
+                    parser_content = await self._try_parse_responses_stream_content(
+                        accumulated_for_parser, output_parser
+                    )
+                    if parser_content is not None:
+                        chunk.parser_content = parser_content
+                        accumulated_for_parser = ""
+                final_message = final_message + chunk if final_message else chunk
+                yield chunk
+        except Exception as exc:
+            await self._emit_responses_error(body, messages, tools, exc, is_stream=True)
+            raise build_error(
+                StatusCode.MODEL_CALL_FAILED,
+                error_msg=f"Responses API stream error: {_format_exception_detail(exc)}",
+            ) from exc
+
+        if tracer_record_data:
+            await tracer_record_data(llm_response=final_message)
+
+        await trigger(
+            LLMCallEvents.LLM_OUTPUT,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            is_stream=True,
+            response=final_message.content if final_message else None,
+            reasoning_content=final_message.reasoning_content if final_message else None,
+            usage=final_message.usage_metadata if final_message else None,
+            tool_calls=final_message.tool_calls if final_message else None,
+        )
+
+    async def _emit_responses_error(
+            self,
+            body: dict[str, Any],
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            error: Exception,
+            *,
+            is_stream: bool,
+    ) -> None:
+        await trigger(
+            LLMCallEvents.LLM_CALL_ERROR,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            is_stream=is_stream,
+            error=error,
+            error_message=(
+                _format_exception_detail(error) if not str(error).strip() else None
+            ),
+        )
+        llm_logger.error(
+            "Responses API call error.",
+            event_type=LogEventType.LLM_CALL_ERROR,
+            model_name=body.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            messages=messages,
+            tools=tools,
+            is_stream=is_stream,
+            exception=f"{type(error).__name__}: {error}",
+        )
+
     async def invoke(
             self,
             messages: Union[str, List[BaseMessage], List[dict]],
@@ -1513,6 +1522,24 @@ class OpenAIModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
+        # Responses API mode: go through the dedicated /responses transport
+        # instead of the chat-completions SDK path.
+        if self._uses_responses_api():
+            return await self._invoke_responses_api(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                tracer_record_data=tracer_record_data,
+                request_custom_headers=request_custom_headers,
+                **kwargs,
+            )
+
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -1535,7 +1562,6 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        params = self._apply_disabled_thinking_cache(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1562,11 +1588,7 @@ class OpenAIModelClient(BaseModelClient):
                 params["timeout"] = timeout
 
             # Call API
-            response = await self._create_chat_completion_with_disabled_thinking_fallback(
-                async_client,
-                params,
-                is_stream=False,
-            )
+            response = await async_client.chat.completions.create(**params)
             llm_logger.info(
                 "OpenAI API response received.",
                 event_type=LogEventType.LLM_CALL_END,
@@ -1612,7 +1634,10 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=False,
-                error=e)
+                error=e,
+                error_message=(
+                    _format_exception_detail(e) if not str(e).strip() else None
+                ))
             llm_logger.error(
                 "OpenAI API async invoke error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -1671,6 +1696,26 @@ class OpenAIModelClient(BaseModelClient):
         tracer_record_data = kwargs.pop("tracer_record_data", None)
         request_custom_headers = kwargs.pop("custom_headers", None)
 
+        # Responses API mode: go through the dedicated /responses transport
+        # instead of the chat-completions SDK path.
+        if self._uses_responses_api():
+            async for chunk in self._stream_responses_api(
+                messages=messages,
+                tools=tools,
+                temperature=temperature,
+                top_p=top_p,
+                model=model,
+                max_tokens=max_tokens,
+                stop=stop,
+                output_parser=output_parser,
+                timeout=timeout,
+                tracer_record_data=tracer_record_data,
+                request_custom_headers=request_custom_headers,
+                **kwargs,
+            ):
+                yield chunk
+            return
+
         # Build request parameters
         params = self._build_request_params(
             messages=messages,
@@ -1701,8 +1746,6 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        params = self._apply_disabled_thinking_cache(params)
-
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1745,11 +1788,7 @@ class OpenAIModelClient(BaseModelClient):
                         final_message = parsed_chunk
                     yield parsed_chunk
             else:
-                response_stream = await self._create_chat_completion_with_disabled_thinking_fallback(
-                    async_client,
-                    params,
-                    is_stream=True,
-                )
+                response_stream = await async_client.chat.completions.create(**params)
                 if output_parser:
                     async for parsed_result in self._astream_with_parser(response_stream, output_parser):
                         await trigger(
@@ -1799,7 +1838,8 @@ class OpenAIModelClient(BaseModelClient):
                 model_name=params.get("model"),
                 model_provider=self.model_client_config.client_provider,
                 is_stream=True,
-                error=e)
+                error=e,
+                error_message=error_detail if not str(e).strip() else None)
             llm_logger.error(
                 "OpenAI API async stream error.",
                 event_type=LogEventType.LLM_CALL_ERROR,
@@ -2314,6 +2354,7 @@ class OpenAIModelClient(BaseModelClient):
 
                 chunk_with_parser = AssistantMessageChunk(
                     content=parsed_chunk.content,  # Keep original content increment unchanged
+                    metadata=parsed_chunk.metadata,
                     reasoning_content=parsed_chunk.reasoning_content,
                     tool_calls=parsed_chunk.tool_calls,
                     usage_metadata=parsed_chunk.usage_metadata,
@@ -2322,6 +2363,9 @@ class OpenAIModelClient(BaseModelClient):
                     prompt_token_ids=parsed_chunk.prompt_token_ids,
                     completion_token_ids=parsed_chunk.completion_token_ids,
                     logprobs=parsed_chunk.logprobs,
+                    response_id=parsed_chunk.response_id,
+                    response_model=parsed_chunk.response_model,
+                    provider_metadata=parsed_chunk.provider_metadata,
                 )
 
                 yield chunk_with_parser
@@ -2399,6 +2443,8 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
                 cache_tokens=self._extract_cache_tokens(response.usage),
+                **self._cache_usage_metadata(response.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(response.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(response.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2464,6 +2510,9 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(response, "id", "") or "") or None,
+            response_model=str(getattr(response, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(response),
         )
 
     @staticmethod
@@ -2479,6 +2528,16 @@ class OpenAIModelClient(BaseModelClient):
         if hasattr(logprobs_obj, '__dict__'):
             return vars(logprobs_obj)
         return logprobs_obj
+
+    @staticmethod
+    def _response_provider_metadata(response: Any) -> dict[str, Any]:
+        """Return a small non-sensitive whitelist from an OpenAI response."""
+        metadata: dict[str, Any] = {}
+        for key in ("system_fingerprint", "service_tier"):
+            value = getattr(response, key, None)
+            if isinstance(value, (str, int, float, bool)) and value != "":
+                metadata[key] = value
+        return metadata
 
     def _parse_stream_chunk(self, chunk: Any) -> Optional[AssistantMessageChunk]:
         """Parse OpenAI streaming response chunk
@@ -2501,6 +2560,8 @@ class OpenAIModelClient(BaseModelClient):
                 output_tokens=getattr(chunk.usage, 'completion_tokens', 0) or 0,
                 total_tokens=getattr(chunk.usage, 'total_tokens', 0) or 0,
                 cache_tokens=self._extract_cache_tokens(chunk.usage),
+                **self._cache_usage_metadata(chunk.usage),
+                cache_creation_input_tokens=self._extract_cache_creation_tokens(chunk.usage),
                 reasoning_tokens=self._extract_reasoning_tokens(chunk.usage),
                 input_cost=input_cost,
                 output_cost=output_cost,
@@ -2520,6 +2581,9 @@ class OpenAIModelClient(BaseModelClient):
                     usage_metadata=usage_metadata,
                     finish_reason="null",
                     prompt_token_ids=prompt_token_ids,
+                    response_id=str(getattr(chunk, "id", "") or "") or None,
+                    response_model=str(getattr(chunk, "model", "") or "") or None,
+                    provider_metadata=self._response_provider_metadata(chunk),
                 )
             return None
 
@@ -2540,10 +2604,18 @@ class OpenAIModelClient(BaseModelClient):
             or self._extract_reasoning_content(message)
         )
 
-        # Parse tool_calls delta
+        # Parse tool calls from either the standard streaming ``delta`` or a
+        # full ``message`` carried by OpenAI-compatible gateways in the final
+        # SSE frame.  The former AscendAffinity client accepted both shapes;
+        # keep that compatibility in the consolidated OpenAI client.
         tool_calls = []
-        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-            for tc_delta in delta.tool_calls:
+        raw_tool_calls = (
+            getattr(delta, 'tool_calls', None)
+            or getattr(message, 'tool_calls', None)
+            or []
+        )
+        if raw_tool_calls:
+            for tc_delta in raw_tool_calls:
                 if hasattr(tc_delta, 'function') and tc_delta.function:
                     index = getattr(tc_delta, 'index', None)
                     function_name = getattr(tc_delta.function, 'name', None) or ""
@@ -2575,4 +2647,7 @@ class OpenAIModelClient(BaseModelClient):
             prompt_token_ids=prompt_token_ids,
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
+            response_id=str(getattr(chunk, "id", "") or "") or None,
+            response_model=str(getattr(chunk, "model", "") or "") or None,
+            provider_metadata=self._response_provider_metadata(chunk),
         )

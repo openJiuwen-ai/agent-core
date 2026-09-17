@@ -48,17 +48,16 @@ _REVIEW_LLM_MESSAGE_TEXT_CHARS = 500
 _REVIEW_LLM_MESSAGE_LIMIT = 3
 
 _CONTEXT_ATTRIBUTE_KEYS = (
-    semconv.AT_SESSION_ID,
+    semconv.GEN_AI_CONVERSATION_ID,
     semconv.AT_TEAM_ID,
     semconv.AT_TEAM_NAME,
     semconv.AT_TEAM_DISPLAY_NAME,
     semconv.AT_TEAM_LEADER,
     semconv.AT_AGENT_ID,
-    semconv.AT_AGENT_NAME,
+    semconv.GEN_AI_AGENT_NAME,
     semconv.AT_AGENT_ROLE,
-    semconv.AT_AGENT_INPUT,
-    semconv.AT_AGENT_OUTPUT,
-    semconv.AT_MEMBER_ID,
+    semconv.OJ_SPAN_INPUT,
+    semconv.OJ_SPAN_OUTPUT,
     semconv.AT_MEMBER_NAME,
     semconv.AT_MEMBER_STATUS_OLD,
     semconv.AT_MEMBER_STATUS_NEW,
@@ -633,7 +632,7 @@ def _context_attributes(span: Mapping[str, Any]) -> dict[str, Any]:
         if key not in attrs:
             continue
         value = attrs[key]
-        if key in {semconv.AT_AGENT_INPUT, semconv.AT_AGENT_OUTPUT}:
+        if key in {semconv.OJ_SPAN_INPUT, semconv.OJ_SPAN_OUTPUT}:
             result[key] = _bounded_value(value, limit=_REVIEW_DETAIL_TEXT_CHARS)
         elif isinstance(value, str) and len(value) > _REVIEW_TEXT_PREVIEW_CHARS:
             result[key] = _bounded_value(value, limit=_REVIEW_TEXT_PREVIEW_CHARS)

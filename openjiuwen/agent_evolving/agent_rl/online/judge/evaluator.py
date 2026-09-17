@@ -144,12 +144,11 @@ async def _query_vote(
             content = retry_content
 
         if scores is None:
-            logger.warning("[Judge] vote %d unparseable: %s", vote_id, content[:200])
-            return {"overall": 5.0, "error": "unparseable", "content": content}
+            raise ValueError(f"Judge vote {vote_id} is unparsable: {content[:200]}")
         return scores
     except Exception as exc:
         logger.warning("[Judge] vote %d failed: %s", vote_id, exc)
-        return {"overall": 5.0, "error": str(exc)}
+        raise
 
 
 async def _post_chat_completion(

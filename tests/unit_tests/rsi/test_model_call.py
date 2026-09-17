@@ -8,7 +8,7 @@ import asyncio
 
 import pytest
 
-from openjiuwen.rsi.model_call import (
+from openjiuwen.rsi.harness_rsi.model_call import (
     DEFAULT_MODEL_CALL_MAX_RETRIES,
     RetryableModelOutputError,
     model_output_has_mojibake,

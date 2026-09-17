@@ -4,14 +4,14 @@
 
 from __future__ import annotations
 
-from openjiuwen.rsi.auto_harness.infra.parsers import (
+from openjiuwen.rsi.harness_rsi.auto_harness.infra.parsers import (
     parse_extension_designs,
 )
-from openjiuwen.rsi.auto_harness.schema import (
+from openjiuwen.rsi.harness_rsi.auto_harness.schema import (
     Gap,
     GapAnalysisArtifact,
 )
-from openjiuwen.rsi.auto_harness.stages.plan import (
+from openjiuwen.rsi.harness_rsi.auto_harness.stages.plan import (
     _build_design,
     _build_design_query,
     _build_fallback_designs,

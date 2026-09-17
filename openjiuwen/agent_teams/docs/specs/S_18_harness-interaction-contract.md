@@ -176,3 +176,42 @@ PAUSED 收到 `send` 等价于「resume + 把新内容 steer 进去」——**�
 IDLE 不续 task_plan。StreamController 仅校验 `is_pending_interrupt_resume_valid` 后转发，不再
 client 侧排队。此路径与 warm resume 正交：一个 InteractiveInput round 被 pause 时不缓存其 query
 （不可 replay），PAUSED 收到 InteractiveInput 则直接起它自己的单轮 round。
+
+## 公共 HarnessProtocol 适配入口
+
+`agent_teams.harness.create_native_harness_protocol` 从 AgentTemplate manifest 构造
+`NativeHarnessProtocolAdapter`，复用 NativeHarness 的 spec snapshot/_prepare 装配链。
+其实现的是根级 `openjiuwen.harness_protocol.HarnessProtocol`，旧 `harness.protocol` 接口保留。
+
+```python
+from openjiuwen.agent_teams.harness import create_native_harness_protocol
+from openjiuwen.harness_providers import build_harness_context
+from openjiuwen.harness_protocol import HarnessInput
+
+harness = create_native_harness_protocol("/path/to/expert/manifest.json")
+context = build_harness_context(
+    "/path/to/expert/manifest.json", provider="native", host_session_id="session-1",
+)
+await harness.start(context)
+try:
+    receipt = await harness.send(HarnessInput(content="Inspect the project"))
+    cursor = harness.turn_events(receipt.turn_id)
+    try:
+        async for event in cursor:
+            print(event)
+    finally:
+        await cursor.aclose()
+finally:
+    await harness.stop()
+```
+
+外部 Turn 包含原生内部 round/续跑；protocol follow-up 保留独立 Turn，暂停不终结 Turn，
+恢复不添加用户消息。能力为 STEER、GRACEFUL_ABORT、FORCE_ABORT、PAUSE_RESUME、CHECKPOINT、
+PERSISTENT_SESSION。checkpoint schema=1 保存父上下文/DeepAgent 状态、暂停 query、Turn/message ID
+及 queued receipt；仅在暂停/IDLE 安全边界导出。恢复时校验 scope/card/cwd，start 保持 IDLE，
+resume() 调用原生 cold resume；不能直接 send 覆盖尚未恢复的暂停 Turn。详见 F_98。
+BLOCK 背压遵循公共协议：stop 时消费者需继续排空事件。
+
+统一工厂也支持 `create_harness(manifest, provider="native_v2", config={"deep_agent": {...}})`，
+相应 context 使用 `build_harness_context(manifest, provider="native_v2", ...)`。该路径通过
+`NativeV2HarnessProvider` 转发到本构造入口，manifest 的 persona/MCP/rails 仍由原生装配处理。

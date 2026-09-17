@@ -104,8 +104,14 @@ class WorkspaceCache:
         self._tool_md_values: dict[str, str | None] = {}
         # C-class param-level: (desc_key, param) → text.
         self._tool_params: dict[tuple[str, str], str | None] = {}
-        # C-class tree scanned once per run (gates ``_load_tools``).
+        # C-class tree scanned once per run (gates ``_load_tools`` — read side).
         self._tools_loaded: bool = False
+        # C-class write-side prime flag — set by ``mark_tools_loaded`` only,
+        # never by the read-side ``_load_tools`` scan. The write-side guard
+        # (:meth:`is_tools_loaded`) reads this, not the read-side scan flag,
+        # so a read-side scan that fires before the leader's write pass does
+        # not make the leader skip seeding the C-class files.
+        self._tools_primed: bool = False
 
     # ── A-class ────────────────────────────────────────────────────────────
 
@@ -125,6 +131,25 @@ class WorkspaceCache:
         value = PromptTemplate(name=name, content=body) if body is not None else None
         self._template_values[name] = value
         return value
+
+    def has_template(self, name: str) -> bool:
+        """True when a resident A-class value is already cached (write-side guard).
+
+        The leader primes the cache at first write, so a teammate sharing the
+        same cache instance skips re-writing (and re-reading the md file) when
+        the value is already resident. Unlike :meth:`get_template`, this never
+        triggers a lazy read — it only reports whether the write side already
+        filled this name. Keeps the cache stable for the whole session: an
+        evolution-party edit made mid-session must not reach a teammate that
+        re-enters the write path.
+
+        A resident ``None`` does **not** count: the read side stores ``None``
+        on a miss to avoid re-reading a missing file, but that sentinel marks
+        "no file value", not a write-side prime. The write side must still
+        seed the baseline for a name the read side only probed.
+        """
+        value = self._template_values.get(name)
+        return value is not None
 
     # ── B-class ────────────────────────────────────────────────────────────
 
@@ -290,6 +315,83 @@ class WorkspaceCache:
         content = self._team_values[field]
         return content.updated_at if content is not None else 0
 
+    def get_team_updated_at_state(
+        self,
+        field: Literal["desc", "prompt"],
+    ) -> tuple[int, bool]:
+        """Return ``(updated_at, present)`` for a team B-class file.
+
+        Counterpart of :meth:`get_team_updated_at` that also surfaces whether
+        the frontmatter carried an explicit ``updated_at`` integer. The
+        team-info re-announce probe uses ``present=False`` (a blank field —
+        the evolution party edited the ``team_card.md`` body without stamping
+        it) as an explicit "must update" signal distinct from the ``0`` a
+        *missing* file produces (``content is None`` → ``(0, True)``, no
+        update). Shares the single file read with :meth:`get_team_updated_at`
+        / :meth:`get_team_field` via the resident ``_team_values`` entry.
+        """
+        if field not in self._team_values:
+            root = self._store.team_workspace_root(self._team_name)
+            if field == "desc":
+                path = WorkspaceLayout.team_card_file(root)
+            else:
+                path = WorkspaceLayout.team_prompt_file(root)
+            self._team_values[field] = self._read_file_content(path)
+        content = self._team_values[field]
+        if content is None:
+            # Missing file → (0, True): no "must update" signal. Distinct
+            # from a present file whose blank ``updated_at`` yields
+            # ``(0, False)``.
+            return (0, True)
+        return (content.updated_at, content.updated_at_present)
+
+    def stamp_team_updated_at(
+        self,
+        field: Literal["desc", "prompt"],
+        ts: int,
+    ) -> None:
+        """Stamp ``ts`` into the team B-class file's ``updated_at`` (meta only).
+
+        Called by the team-info re-announce path right after it decides a
+        blank ``updated_at`` means "must update": one timestamp is used both
+        for the comparison baseline and the file's ``updated_at``, so the next
+        probe reads a stable non-zero value and does not re-fire. Only the
+        frontmatter changes — the body, baseline hash and ``evolved`` flag
+        are preserved (the evolution party's edit wins). Updates the resident
+        ``_team_values`` entry so a later ``get_team_updated_at_state`` in the
+        same run is a dict hit, not a re-read.
+        """
+        root = self._store.team_workspace_root(self._team_name)
+        if field == "desc":
+            path = WorkspaceLayout.team_card_file(root)
+        else:
+            path = WorkspaceLayout.team_prompt_file(root)
+        try:
+            text = path.read_text(encoding="utf-8")
+            meta, body = read_frontmatter(text)
+            meta["updated_at"] = ts
+            atomic_write(path, write_frontmatter(meta, body))
+        except (OSError, ValueError) as exc:
+            team_logger.warning(
+                "[workspace] %s updated_at stamp failed: %s", path, exc
+            )
+            return
+        # Refresh the resident entry so the stamped value is visible to a
+        # same-run probe without a disk re-read. Reuse the already-read body
+        # and baseline; only ``updated_at`` / ``updated_at_present`` move.
+        old = self._team_values.get(field)
+        if old is not None:
+            self._team_values[field] = FileContent(
+                kind=old.kind,
+                name=old.name,
+                language=old.language,
+                baseline_sha256=old.baseline_sha256,
+                updated_at=ts,
+                body=old.body,
+                evolved=old.evolved,
+                updated_at_present=True,
+            )
+
     # ── C-class ────────────────────────────────────────────────────────────
 
     def get_tool_md(self, desc_key: str) -> str | None:
@@ -303,6 +405,31 @@ class WorkspaceCache:
         if not self._tools_loaded:
             self._load_tools()
         return self._tool_md_values.get(desc_key)
+
+    def has_tool_md(self, desc_key: str) -> bool:
+        """True when a resident C-class tool-level value is cached (write-side guard).
+
+        Same write-side guard role as :meth:`has_template`: a teammate sharing
+        the leader's cache skips re-writing a tool md whose value is already
+        resident. Never triggers the lazy ``_load_tools`` scan. Like
+        :meth:`has_template`, a resident ``None`` does not count.
+        """
+        value = self._tool_md_values.get(desc_key)
+        return value is not None
+
+    def is_tools_loaded(self) -> bool:
+        """True when the leader already primed every C-class entry (write-side guard).
+
+        Reads the **write-side** prime flag (``_tools_primed``), set only by
+        :meth:`mark_tools_loaded` at the end of the leader's C-class write
+        pass. This is deliberately distinct from the read-side ``_tools_loaded``
+        scan flag set by ``_load_tools``: a read-side scan that fires before
+        the leader's write pass (e.g. a tool lookup during configure, before
+        ``coordination.start``) sets the scan flag but not this one, so the
+        leader still seeds the C-class files. A teammate sharing the cache
+        sees this flag set (the leader already wrote) and skips the pass.
+        """
+        return self._tools_primed
 
     def get_tool_param(self, desc_key: str, param: str) -> str | None:
         """Return the latest param-level description, or ``None``. Lazy (same scan as ``get_tool_md``)."""
@@ -351,8 +478,14 @@ class WorkspaceCache:
         self._tool_params[(desc_key, param)] = text
 
     def mark_tools_loaded(self) -> None:
-        """Mark the C-class scan done — the write side primed every tool entry."""
-        self._tools_loaded = True
+        """Mark the C-class write pass done — every tool entry is primed.
+
+        Sets the **write-side** prime flag (``_tools_primed``), the one the
+        write-side guard (:meth:`is_tools_loaded`) reads. Distinct from the
+        read-side ``_tools_loaded`` scan flag set by ``_load_tools`` so the
+        two passes do not trip each other's guards.
+        """
+        self._tools_primed = True
 
     def _load_tools(self) -> None:
         """Scan ``prompts/tool/`` once and populate both C-class dicts.
@@ -450,6 +583,7 @@ class WorkspaceCache:
         self._tool_md_values.clear()
         self._tool_params.clear()
         self._tools_loaded = False
+        self._tools_primed = False
 
 
 __all__ = ["WorkspaceCache"]

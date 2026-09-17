@@ -238,8 +238,10 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     from openjiuwen.agent_teams.observability import setup
     from openjiuwen.extensions.observability.semconv import (
-        LANGFUSE_OBSERVATION_INPUT,
-        LANGFUSE_OBSERVATION_OUTPUT,
+        GEN_AI_INPUT_MESSAGES,
+        GEN_AI_OPERATION_NAME,
+        GEN_AI_OUTPUT_MESSAGES,
+        GEN_AI_TOOL_NAME,
     )
 
     exporter = exporter_module.InMemorySpanExporter()
@@ -385,7 +387,11 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     team_span.end()
 
     spans = list(exporter.get_finished_spans())
-    llm_spans = [span for span in spans if span.name == "llm.call"]
+    llm_spans = [
+        span
+        for span in spans
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+    ]
     assert len(llm_spans) == 1
     llm_span = llm_spans[0]
     assert llm_span.start_time == 1_750_000_000_100_000_000
@@ -393,15 +399,24 @@ def test_rollout_inference_emits_exact_content_reasoning_and_tool_parent(
     assert llm_span.attributes["codex.inference.call_id"] == "inference-1"
     assert llm_span.attributes["codex.model.call.paired"] is True
     assert llm_span.attributes["gen_ai.request.model"] == "gpt-rollout"
-    assert "inspect task" in llm_span.attributes[LANGFUSE_OBSERVATION_INPUT]
-    assert "I will inspect it." in llm_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "inspect task" in llm_span.attributes[GEN_AI_INPUT_MESSAGES]
+    assert "I will inspect it." in llm_span.attributes[GEN_AI_OUTPUT_MESSAGES]
 
     reasoning_span = next(span for span in spans if span.name == "llm.reasoning")
     assert reasoning_span.parent.span_id == llm_span.context.span_id
-    assert "raw reasoning" in reasoning_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "raw reasoning" in reasoning_span.attributes[GEN_AI_OUTPUT_MESSAGES]
     turn_span = next(span for span in spans if span.name == "agent.codex-test.codex_turn.1")
-    tool_span = next(span for span in spans if span.name == "tool.view_task")
-    assert len([span for span in spans if span.name.startswith("tool.")]) == 1
+    tool_span = next(
+        span
+        for span in spans
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+        and span.attributes.get(GEN_AI_TOOL_NAME) == "openjiuwen_team.view_task"
+    )
+    assert len([
+        span
+        for span in spans
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+    ]) == 1
     assert tool_span.parent.span_id == turn_span.context.span_id
     assert tool_span.attributes["codex.tool.parent_inference_call_id"] == "inference-1"
     assert tool_span.attributes["codex.tool.parent_exact"] is True
@@ -424,7 +439,8 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     from openjiuwen.agent_teams.observability.codex import CodexSpanBridge
     from openjiuwen.agent_teams.observability import setup
     from openjiuwen.extensions.observability.semconv import (
-        LANGFUSE_OBSERVATION_OUTPUT,
+        GEN_AI_OPERATION_NAME,
+        GEN_AI_TOOL_NAME,
     )
 
     exporter = exporter_module.InMemorySpanExporter()
@@ -567,11 +583,17 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     team_span.end()
 
     spans = list(exporter.get_finished_spans())
-    tool_span = next(span for span in spans if span.name == "tool.codex.exec")
+    tool_span = next(
+        span
+        for span in spans
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
+        and span.attributes.get(GEN_AI_TOOL_NAME) == "codex.exec"
+    )
     first_llm = next(
         span
         for span in spans
-        if span.name == "llm.call" and span.attributes["codex.inference.call_id"] == "inference-1"
+        if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
+        and span.attributes["codex.inference.call_id"] == "inference-1"
     )
     turn_span = next(span for span in spans if span.name == "agent.codex-test.codex_turn.1")
     assert tool_span.parent.span_id == turn_span.context.span_id
@@ -581,7 +603,7 @@ def test_rollout_exec_wrapper_keeps_distinct_display_and_logical_names(
     assert tool_span.end_time == 1_750_000_000_500_000_000
     assert tool_span.attributes["codex.tool.source"] == "rollout"
     assert tool_span.attributes["codex.tool.boundary_exact"] is False
-    assert "pending" in tool_span.attributes[LANGFUSE_OBSERVATION_OUTPUT]
+    assert "pending" in tool_span.attributes["gen_ai.tool.call.result"]
     assert tool_span.attributes["gen_ai.tool.name"] == "codex.exec"
     assert tool_span.attributes["codex.tool.logical_name"] == (
         "openjiuwen_team.view_task"

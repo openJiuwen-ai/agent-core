@@ -160,13 +160,13 @@ def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None
     from openjiuwen.extensions.observability import semconv as observability_semconv
 
     migration_keys = (
-        "LEGACY_GEN_AI_INPUT_MESSAGES",
-        "LEGACY_GEN_AI_OUTPUT_MESSAGES",
-        "LEGACY_GEN_AI_TOOL_CALL_ID",
-        "LEGACY_GEN_AI_TOOL_CALL_ARGUMENTS",
-        "LEGACY_GEN_AI_TOOL_CALL_RESULT",
-        "LEGACY_GEN_AI_USAGE_INPUT_TOKENS",
-        "LEGACY_GEN_AI_USAGE_OUTPUT_TOKENS",
+        "LEGACY_GEN_AI_TOOL_CALLS",
+        "LEGACY_GEN_AI_TOOL_ID",
+        "LEGACY_GEN_AI_TOOL_INPUT",
+        "LEGACY_GEN_AI_TOOL_OUTPUT",
+        "LEGACY_GEN_AI_USAGE_PROMPT_TOKENS",
+        "LEGACY_GEN_AI_USAGE_COMPLETION_TOKENS",
+        "LEGACY_GEN_AI_USAGE_TOTAL_TOKENS",
         "LEGACY_TRAJECTORY_STEP_KIND",
         "LEGACY_STEP_META",
     )
@@ -177,8 +177,8 @@ def test_migration_semantic_keys_are_isolated_from_current_conventions() -> None
 def test_schema_team_identity_values_match_observability_without_runtime_dependency() -> None:
     from openjiuwen.extensions.observability import semconv
 
-    assert MEMBER_ID == semconv.AT_MEMBER_ID
-    assert SESSION_ID == semconv.AT_SESSION_ID
+    assert MEMBER_ID == semconv.AT_MEMBER_NAME
+    assert SESSION_ID == semconv.GEN_AI_CONVERSATION_ID
     assert TEAM_ID == semconv.AT_TEAM_ID
 
 

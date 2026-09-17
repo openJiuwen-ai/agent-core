@@ -135,7 +135,7 @@ def test_member_system_prompt_uses_native_workspace_policy_by_default():
         member_name="dev-1",
         language="en",
     )
-    assert "under `.team/`" in prompt
+    assert "shared team deliverables directory" in prompt
     assert "workspace_meta" in prompt
 
 
@@ -148,6 +148,6 @@ def test_member_system_prompt_uses_external_workspace_policy():
         language="en",
         workspace_prompt_variant="external",
     )
-    assert "under `.team/`" not in prompt
+    assert "shared team deliverables directory" not in prompt
     assert "given in the team info (`<team-context>`)" in prompt
     assert "workspace_meta" in prompt

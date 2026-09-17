@@ -2,6 +2,8 @@
 
 团队技能创建与在线演进文档。
 
+先安装运行时依赖：`uv sync --extra observability`。
+
 ---
 
 ## class TeamSkillCreateRail
@@ -49,7 +51,7 @@ class TeamSkillCreateRail(
 **参数**：
 
 * **skills_dir** (str): 技能目录路径。
-* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
+* **trajectory_span_processor** (TrajectorySpanProcessor): `get_trajectory_span_processor()` 返回、由 observability demand coordinator 注册的进程级共享 processor。
 * **language** (str): 语言设置，支持 `"cn"` 或 `"en"`。
 * **auto_trigger** (bool): 是否自动触发，默认 `True`。
 * **min_team_members_for_create** (int): 触发阈值，`spawn_member` 调用次数达到此值时触发，默认 2。
@@ -60,26 +62,28 @@ class TeamSkillCreateRail(
 
 ---
 
-## class TeamSkillRail
+## class TeamSkillEvolutionRail
 
 团队技能演进 public Rail，类似 `SkillEvolutionRail` 但专门处理团队技能。
-`TeamSkillRail` 是 `TeamSkillEvolutionRail` 的兼容 public alias。
-新建 team skill 仍由 `TeamSkillCreateRail` 负责；本 Rail 只演进已有的 `kind: team-skill`。
+`TeamSkillRail` 仍作为兼容 public alias 保留；新代码应使用 `TeamSkillEvolutionRail`。
+新建 Swarm Skill 仍由 `TeamSkillCreateRail` 负责。Team 自动演进同时识别 legacy
+`kind: team-skill` 与当前 `kind: swarm-skill`；Agent-facing subject 会把 legacy kind 归一化为
+`swarm-skill`。显式 `/evolve` review 使用从磁盘解析出的 canonical subject kind，而不是强制采用 Rail mode。
 
 ### 导入
 
 ```python
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
-    EvolutionReviewRuntime,
-    TeamSkillRail,
+    TeamSkillEvolutionRail,
     configure_skill_evolution,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime, build_evolve_review_command_prompt
 ```
 
 `TeamSkillEvolutionRail` 会注册稳定的 `evolution_reviewer`，并通过 Rail 自有的 `evolve_review_task` 暴露。主动审核链路不需要全局 `task_tool` 或 `SubagentRail`；相关工具共享 `EvolutionReviewRuntime`。
 
-`TeamSkillRail.init()` / `SkillEvolutionRail.init()` 都不再配置 `EvolutionInterruptRail`，如不走工厂函数，需要手动注入共享的 interrupt。
+`TeamSkillEvolutionRail.init()` / `SkillEvolutionRail.init()` 都不再配置 `EvolutionInterruptRail`，如不走工厂函数，需要手动注入共享的 interrupt。
 
 稳定 `evolution_reviewer` 按名称去重；若已有绑定过期，会替换为当前 runtime/query/store。
 
@@ -100,13 +104,16 @@ configure_skill_evolution(
 )
 ```
 
-配置 API 会将 `EvolutionInterruptRail` 与 `TeamSkillRail` 正确绑定。
+配置 API 会将 `EvolutionInterruptRail` 与 `TeamSkillEvolutionRail` 正确绑定。
+
+Agent 已初始化时使用 `configure_skill_evolution_runtime(..., team=True)`，使新增 Rails 立即注册。使用
+`unconfigure_skill_evolution(agent, team=True)` 移除 Team 演进 stack。
 
 手工组装时需要显式共享：
 
 ```python
 runtime = EvolutionReviewRuntime()
-team_rail = TeamSkillRail(
+team_rail = TeamSkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
@@ -117,7 +124,7 @@ team_rail = TeamSkillRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=team_rail.experience_manager.experience_submission_service,
+    submission_service=team_rail.approval_submission_service,
 )
 agent = create_deep_agent(
     model=model_client,
@@ -135,10 +142,10 @@ agent = create_deep_agent(
 ```python
 from openjiuwen.harness.rails import (
     EvolutionInterruptRail,
-    EvolutionReviewRuntime,
     SkillEvolutionRail,
-    TeamSkillRail,
+    TeamSkillEvolutionRail,
 )
+from openjiuwen.harness.rails.evolution import EvolutionReviewRuntime
 
 runtime = EvolutionReviewRuntime()
 skill_rail = SkillEvolutionRail(
@@ -148,7 +155,7 @@ skill_rail = SkillEvolutionRail(
     trajectory_span_processor=runtime_processor,
     review_runtime=runtime,
 )
-team_rail = TeamSkillRail(
+team_rail = TeamSkillEvolutionRail(
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
@@ -158,7 +165,7 @@ team_rail = TeamSkillRail(
 )
 interrupt_rail = EvolutionInterruptRail(
     review_runtime=runtime,
-    submission_service=skill_rail.experience_manager.experience_submission_service,
+    submission_service=skill_rail.approval_submission_service,
 )
 rails = [interrupt_rail, skill_rail, team_rail]
 ```
@@ -179,9 +186,12 @@ rails = [interrupt_rail, skill_rail, team_rail]
 - `review_trigger=True` 时，团队完成后的主动审核优先于被动信号生成。主 Agent 判断是否需要演进，并调用 Rail 自有的 `evolve_review_task` 运行 `evolution_reviewer`。
 - `signal_trigger=False` 会关闭被动完成态扫描，也会关闭 `notify_team_completed()` 的被动触发；当 `review_trigger=True` 时，`notify_team_completed()` 仍可安排主动审核。
 - 被动链路使用聚合后的协作轨迹证据，并调用 `SkillExperienceOptimizer(profile="team")`。Team completion、team skill attribution 和 runtime role attribution 是启发式 host bridge 信号，不是强 contract。
+- 用户 `/evolve` command 是独立于两个开关的显式 host path。Host 解析 Team/Swarm Skill subject，调用
+  `build_evolve_review_command_prompt()` 构造 prompt，并在同一 Agent Session 和 Team root trace 中作为下一条
+  query 运行。
 
 ```text
-class TeamSkillRail(
+class TeamSkillEvolutionRail(
     skills_dir: Union[str, list[str]],
     *,
     llm: Model,
@@ -213,14 +223,14 @@ class TeamSkillRail(
 * **llm** (Model): LLM 客户端实例。
 * **model** (str): 模型名称。
 * **language** (str): 语言设置。
-* **trajectory_span_processor** (TrajectorySpanProcessor): 已注册到运行时 OpenTelemetry provider 的共享 processor。
+* **trajectory_span_processor** (TrajectorySpanProcessor): `get_trajectory_span_processor()` 返回、由 observability demand coordinator 注册的进程级共享 processor。
 * **member_role** (str, 可选): 写入轨迹 resource metadata 的成员角色。团队技能演进默认是 `"leader"`。
 * **signal_trigger** (bool, 可选): 是否检测被动 team completion 并触发被动演进，默认 `False`。
 * **auto_save** (bool): 是否自动保存生成的经验记录，默认 `False`（需用户审批）。
 * **review_runtime** (EvolutionReviewRuntime): 主动审核与中断复用的共享运行时（必填）。
 * **async_evolution** (bool): 是否异步执行演进，默认 `True`。
 * **max_concurrent_evolution** (int): 后台演进最大并发数，默认 1。
-* **team_id** (str, 可选): 团队 ID。
+* **team_id** (str, 可选): 兼容配置值。运行时采集和主动 review 以当前 Team root span 中的 team name 作为权威 Team identity。
 * **record_llm_policy** (LLMInvokePolicy): 经验记录生成 LLM 调用策略。
 * **evaluate_llm_policy** (LLMInvokePolicy): 经验评估 LLM 调用策略。
 * **simplify_llm_policy** (LLMInvokePolicy): 经验简化 LLM 调用策略。
@@ -233,9 +243,13 @@ class TeamSkillRail(
 
 ### 运行时轨迹采集
 
-`TeamSkillRail` 消费 `EvolutionRail` 维护的 canonical clean window。Subscription 使用当前 Team root
+`TeamSkillEvolutionRail` 消费 `EvolutionRail` 维护的 canonical clean window。Subscription 使用当前 Team root
 trace ID，因此 leader Rail 可以选择同进程协作 span，不再需要运行时 source/sink registry。宿主必须注入
-与该 runtime 其他 Rails 共用的、已经注册的 `TrajectorySpanProcessor`。
+与该 runtime 其他 Rails 共用的、由 `get_trajectory_span_processor()` 返回的进程级
+`TrajectorySpanProcessor`。Team host 应 acquire/release Team observability demand，并挂载
+`maybe_observability_rails()` 返回的 Agent/Team Rail 组合。
+执行 invoke 与后续 `/evolve` review invoke 使用同一 Agent Session 时，Team root span 必须在两次调用期间
+保持 recording，并在完成后 finalize。
 
 Team clean window 是在线演进证据，不是完整 Team runtime archive。当前实现不提供
 `TeamTrajectoryRail`、`MemberTrajectorySnapshot` 或 `InMemoryTrajectoryRegistry`。
@@ -344,7 +358,7 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 ## 方法
 
-### async notify_team_completed(ctx) -> bool
+### async notify_team_completed(ctx=None) -> bool
 
 标记团队完成，交给已启用的被动信号和/或主动审核 trigger 处理。
 
@@ -358,9 +372,15 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 ---
 
-### async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+### build_evolve_review_command_prompt(*, subject, user_intent=None, review_agent_name="evolution_reviewer", language="cn") -> str
 
-为团队技能构造由 host 投递的主动审核 prompt。当前 Rail 轨迹或聚合后的团队轨迹作为默认审核证据；`user_intent` 只补充方向。
+构造推荐的主动 `/evolve` follow-up prompt，从 `openjiuwen.harness.rails.evolution` 导入。调用前使用
+`EvolutionStore.resolve_subject_payload(skill_name)` 解析真实 subject kind。
+
+### 兼容方法：async request_user_evolution(skill_name, user_intent="", *, auto_approve=None, max_index_records=None) -> EvolutionRequestResult
+
+为具名且已存在的 Skill subject 构造主动审核 prompt 的兼容 wrapper。新的 host command handler 应直接使用
+`build_evolve_review_command_prompt()`。
 
 **参数**：
 
@@ -371,11 +391,11 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 **返回**：
 
-* `EvolutionRequestResult`: `mode="agent_prompt"`，包含由 host 投递给主 Agent 的 `followup_prompt`；技能不存在或不是团队技能时返回空结果。
+* `EvolutionRequestResult`: `mode="agent_prompt"`，包含由 host 投递给主 Agent 的 `followup_prompt`；技能不存在时返回空结果，subject 由磁盘中的实际 kind 决定。
 
 ---
 
-### async request_simplify(skill_name, user_intent=None) -> SimplifyRequestResult
+### async request_simplify(skill_name, user_intent=None, *, mode="agent_prompt") -> SimplifyRequestResult
 
 暂存 scorer 驱动的 Team Skill simplify governance，并返回审批事件。
 
@@ -383,6 +403,7 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 * **skill_name** (str): 目标技能名称。
 * **user_intent** (str, 可选): 用户简化意图。
+* **mode** (str): Team Rail 接受但当前忽略的兼容参数。
 
 **返回**：
 
@@ -392,15 +413,18 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 ---
 
-### async request_rebuild(skill_name, user_intent=None, min_score=0.5) -> Optional[str]
+### async request_rebuild(skill_name, user_intent=None, min_score=0.5, *, max_context_records=40, max_context_chars=20000) -> Optional[str]
 
-请求技能重建（归档旧版本并生成新版本）。
+归档当前 Team Skill 资产并返回有界、确定性的 rebuild prompt。Host 必须把 prompt 交给 Agent；该方法不会
+生成或写入重建后的 Skill body。
 
 **参数**：
 
 * **skill_name** (str): 目标技能名称。
 * **user_intent** (str, 可选): 用户重建意图。
 * **min_score** (float): 演进经验筛选阈值，默认 0.5。
+* **max_context_records** (int): rebuild context 最多内联的记录数，默认 40。
+* **max_context_chars** (int): 内联 rebuild context 的最大字符数，默认 20000。
 
 **返回**：
 
@@ -408,13 +432,14 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 ---
 
-### async approve_record(request_id) -> None
+### async approve_record(request_id, *, approved_record_ids=None) -> None
 
 审批暂存的经验记录，并写入 `evolutions.json`。
 
 **参数**：
 
 * **request_id** (str): 请求 ID。
+* **approved_record_ids** (Sequence[str], 可选): 要审批的暂存记录 ID；省略时审批全部暂存记录。
 
 ---
 
@@ -485,13 +510,19 @@ Team signal 语义一部分在 `EvolutionSignal` 字段中结构化，一部分�
 
 ## 示例
 
-```python
-from openjiuwen.harness.rails import EvolutionReviewRuntime, TeamSkillCreateRail, TeamSkillRail
-from openjiuwen.harness import create_deep_agent
+可运行模块 `examples.agent_evolving.swarmskill_evolution_example` 合并了 Swarm Skill 创建与演进案例；实现使用
+当前公开 API `TeamSkillCreateRail` 和 `TeamSkillEvolutionRail`。
 
-# 由应用持有、已经注册到 OpenTelemetry 的 processor。
-processor = runtime_processor
-review_runtime = EvolutionReviewRuntime()
+```python
+from openjiuwen.harness.rails import TeamSkillCreateRail, TeamSkillEvolutionRail, configure_skill_evolution
+from openjiuwen.harness.rails.evolution import build_evolve_review_command_prompt
+from openjiuwen.harness import create_deep_agent
+from openjiuwen.core.runner import Runner
+from openjiuwen.extensions.observability.demand import get_trajectory_span_processor
+from openjiuwen.agent_teams.observability import maybe_observability_rails
+
+# 由 observability demand coordinator 注册的进程级共享 processor。
+processor = get_trajectory_span_processor()
 
 # 创建团队技能创建 Rail
 create_rail = TeamSkillCreateRail(
@@ -500,35 +531,36 @@ create_rail = TeamSkillCreateRail(
     min_team_members_for_create=2,
 )
 
-# 创建团队技能演进 Rail
-team_rail = TeamSkillRail(
+# 将创建 Rail 配置到 DeepAgent。
+agent = create_deep_agent(
+    model=model_client,
+    tools=team_tools,
+    rails=[create_rail, *maybe_observability_rails()],
+    enable_task_loop=True,
+)
+configure_skill_evolution(
+    agent,
     skills_dir="/path/to/skills",
     llm=model_client,
     model="gpt-4",
     trajectory_span_processor=processor,
-    review_runtime=review_runtime,
-    team_id="research-team",
+    team=True,
     auto_save=False,
     async_evolution=True,
 )
-
-# 配置到 DeepAgent
-agent = create_deep_agent(
-    model=model_client,
-    tools=team_tools,
-    rails=[create_rail, team_rail],
-    enable_task_loop=True,
+team_rail = next(
+    rail
+    for rail in agent.find_rails_by_type((TeamSkillEvolutionRail,))
+    if rail.__class__ is TeamSkillEvolutionRail
 )
 
-# 用户请求演进
-result = await team_rail.request_user_evolution(
-    skill_name="research-team",
+# Host 处理 /evolve，并在同一 Agent Session 中运行该 prompt。
+subject = team_rail.store.resolve_subject_payload("research-team")
+followup_prompt = build_evolve_review_command_prompt(
+    subject=subject,
     user_intent="增加 reviewer 角色，限制 research 时间不超过 10 分钟",
 )
-
-# 用户审批
-if result.approval_event is not None:
-    await team_rail.approve_record(result.request_id)
+result = await Runner.run_agent(agent, {"query": followup_prompt}, session=session)
 
 # 请求简化
 simplify_result = await team_rail.request_simplify("research-team")

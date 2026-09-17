@@ -392,11 +392,11 @@ def test_interaction_phase_has_only_initial_and_transition_writers() -> None:
 async def test_stop_retires_unstarted_agent_before_default_session_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from openjiuwen.core.session import agent as agent_session_module
+    import openjiuwen.harness.deep_agent as deep_agent_module
 
     agent = DeepAgent(AgentCard(name="deep", description="test"))
     create_session = MagicMock()
-    monkeypatch.setattr(agent_session_module, "create_agent_session", create_session)
+    monkeypatch.setattr(deep_agent_module, "create_agent_session", create_session)
 
     await agent.stop()
 
@@ -411,7 +411,7 @@ async def test_stop_waits_for_in_progress_start_setup(
     monkeypatch: pytest.MonkeyPatch,
     blocked_stage: str,
 ) -> None:
-    from openjiuwen.core.session import agent as agent_session_module
+    import openjiuwen.harness.deep_agent as deep_agent_module
 
     agent = DeepAgent(AgentCard(name="deep", description="test"))
     session = MagicMock()
@@ -434,7 +434,7 @@ async def test_stop_waits_for_in_progress_start_setup(
         if blocked_stage == "register":
             await block()
 
-    monkeypatch.setattr(agent_session_module, "create_agent_session", MagicMock(return_value=session))
+    monkeypatch.setattr(deep_agent_module, "create_agent_session", MagicMock(return_value=session))
     monkeypatch.setattr(agent, "prepare_interaction_task_loop", prepare)
     monkeypatch.setattr(agent, "register_rail", register)
     monkeypatch.setattr(agent, "_forward_session_stream", AsyncMock())
@@ -867,6 +867,7 @@ async def test_run_one_round_uses_single_round_path_for_interrupt_resume(
     effective_inputs = react_agent.invoke.await_args.args[0]
     assert isinstance(effective_inputs["query"], InteractiveInput)
     assert effective_inputs["query"].user_inputs == interactive_input.user_inputs
+    assert react_agent.invoke.await_args.kwargs == {"_streaming": True}
     coordinator.reset.assert_not_called()
     controller.submit_round.assert_not_awaited()
     build_next_work.assert_not_called()

@@ -42,8 +42,8 @@ def _warn(operation: str, exc: BaseException | None = None) -> None:
         logger.warning("[PersonalContextRail] %s failed (%s)", operation, type(exc).__name__)
 
 
-def _runtime_enabled(config_path: Path) -> bool:
-    """Read the fixed runtime switch without following unsafe config paths."""
+def _agent_use_enabled(config_path: Path) -> bool:
+    """Read the fixed Agent-use switch without following unsafe config paths."""
 
     try:
         current = config_path
@@ -65,7 +65,7 @@ def _runtime_enabled(config_path: Path) -> bool:
         loaded = yaml.safe_load(payload.decode("utf-8"))
         if not isinstance(loaded, dict):
             return False
-        enabled = loaded.get("enabled")
+        enabled = loaded.get("agent_use_enabled")
         return isinstance(enabled, bool) and enabled
     except Exception:
         return False
@@ -138,7 +138,6 @@ def _render_content(
 
     truncated = len(description) > _MAX_DESCRIPTION_CHARS
     body = description[:_MAX_DESCRIPTION_CHARS] if truncated else description
-    sources_description_path = context_root / "sources" / "description.md"
     if truncated:
         body = f"{body}\n\n[{_TRUNCATION_NOTICE}]"
     return (
@@ -147,7 +146,6 @@ def _render_content(
         f"- context_root: `{context_root}`\n"
         f"- description_path: `{description_path}`\n"
         f"- description_size_bytes: `{description_size_bytes}`\n"
-        f"- sources_description_path: `{sources_description_path}`\n"
         "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。\n\n"
         "## 当前上下文说明\n\n"
         f"{body}"
@@ -214,11 +212,11 @@ class PersonalContextRail(DeepAgentRail):
             return
 
         try:
-            runtime_enabled = await asyncio.to_thread(_runtime_enabled, self._config_path)
+            agent_use_enabled = await asyncio.to_thread(_agent_use_enabled, self._config_path)
         except Exception as exc:
             _warn("read runtime switch", exc)
             return
-        if not runtime_enabled:
+        if not agent_use_enabled:
             return
 
         inputs = ctx.inputs

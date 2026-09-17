@@ -14,7 +14,6 @@ bare ``swarmflow`` the loader always maps), so a script may import either.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Callable
 
 import aiofiles
@@ -30,6 +29,7 @@ from openjiuwen.agent_teams.workflow.engine import (
 )
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
 from openjiuwen.agent_teams.workflow.engine.loader import extract_workflow_meta, load_workflow_meta
+from openjiuwen.agent_teams.workflow.engine.runtime import AbortSignal
 from openjiuwen.agent_teams.workflow.observer import WorkflowObserver
 from openjiuwen.agent_teams.workflow.schema import WorkflowRun
 from openjiuwen.core.common.exception.codes import StatusCode
@@ -153,7 +153,7 @@ async def run_swarmflow(
     build_context: Any = None,
     messager: Any = None,
     session_id: str | None = None,
-    abort_event: asyncio.Event | None = None,
+    abort_event: AbortSignal | None = None,
     on_backend_ready: Callable[[Any], None] | None = None,
     run_id: str | None = None,
     agent_gate: Any = None,
@@ -187,9 +187,11 @@ async def run_swarmflow(
         messager: The team messager, used by human sessions to receive a real
             person's reply on the dedicated reply topic.
         session_id: The current session id, used to build the human-reply topic.
-        abort_event: Optional engine pause signal; when set mid-run, ``agent()``
-            abort checkpoints raise so the run unwinds without journaling the
-            in-flight call (resume reruns it). ``None`` disables pausing.
+        abort_event: Optional engine pause/stop signal; when set mid-run,
+            ``agent()`` abort checkpoints raise ``WorkflowAborted`` carrying the
+            signal's ``reason`` (pause → resume relaunches it; stop → terminal),
+            so the run unwinds without journaling the in-flight call. ``None``
+            disables the checkpoints.
         on_backend_ready: Optional callback invoked with the constructed
             ``TeamWorkerBackend`` before the run starts — the launcher uses it to
             register a control handle (so pause can reach ``abort_sessions``).
@@ -257,6 +259,7 @@ async def run_swarmflow(
         abort_event=abort_event,
         agent_gate=agent_gate,
         budget=budget,
+        run_id=run_id,
     )
 
 

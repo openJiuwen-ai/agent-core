@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.runtime.gate import InteractGate
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
+    from openjiuwen.agent_teams.interaction.passive_tool_executor import PassiveToolExecutor
 
 
 class RuntimeState(str, Enum):
@@ -50,6 +51,13 @@ class ActiveTeam:
     current_session_id: str
     state: RuntimeState = RuntimeState.RUNNING
     interact_gate: InteractGate = field(default_factory=InteractGate)
+    passive_tool_executor: "PassiveToolExecutor | None" = None
+    """Lazily-built executor for ``HumanAgentToolCall`` passthrough.
+
+    Holds tool surfaces bound to each passive human member's identity
+    (per-sender ``TeamTaskManager`` / ``TeamMessageManager`` caches). Born
+    on the first relayed tool call, dies with this pool entry — the same
+    lifecycle as the leader runtime whose ``TeamBackend`` it reads."""
 
 
 @dataclass(frozen=True, slots=True)

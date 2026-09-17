@@ -12,16 +12,20 @@ explicit ``to`` argument:
   coordination as user input (``interact`` → ``USER_INPUT`` event), tagged
   ``<team-inbound from="controller">`` so the avatar can tell its
   controller apart from the team; the avatar consumes it after its harness
-  has started. No bus message.
+  has started. No bus message. Avatar-flavored members only — a passive
+  human member has no avatar to drive, and ``_dispatch_payload`` refuses
+  bare passive input with ``passive_member_no_avatar`` before it gets here.
 * ``to in BROADCAST_TARGETS`` (``"all"`` / ``"*"``) → broadcast as the
-  human-agent ``sender``.
+  human ``sender`` (avatar or passive — both post bus rows).
 * ``to=<member>`` → validate the target and post a point-to-point bus
-  message from ``sender``.
+  message from ``sender`` (both flavors).
 
-Sender resolution stays here: a team with a single human-agent member
-can omit ``sender``, and we still want unknown senders to raise
-``UnknownHumanAgentError`` rather than silently injecting a rogue
-identity into the message log.
+Sender resolution stays here: a team with a single human member
+(avatar or passive) can omit ``sender``, and we still want unknown senders
+to raise ``UnknownHumanAgentError`` rather than silently injecting a rogue
+identity into the message log. A passive member's structured actions do
+NOT flow through this inbox — tool-call relays arrive as
+``HumanAgentToolCall`` payloads and go to the passthrough executor.
 """
 
 from __future__ import annotations

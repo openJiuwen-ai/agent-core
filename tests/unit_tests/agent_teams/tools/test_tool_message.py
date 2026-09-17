@@ -17,7 +17,7 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.status import MemberMode
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus
 from openjiuwen.agent_teams.tools.database import (
     DatabaseConfig,
     DatabaseType,
@@ -101,7 +101,7 @@ async def test_oversize_content_rejected_on_every_route(db):
     unicast = await send.invoke({"to": DEV_1, "content": OVERSIZE})
     assert not unicast.success
 
-    multicast = await send.invoke({"to": [DEV_1], "content": OVERSIZE})
+    multicast = await send.invoke({"targets": [DEV_1], "content": OVERSIZE})
     assert not multicast.success
 
     broadcast = await send.invoke({"to": "*", "content": OVERSIZE})
@@ -118,7 +118,7 @@ async def test_rejection_tells_the_caller_how_to_fix_it(db):
 
     assert not result.success
     assert "write_file" in result.error
-    assert ".team/" in result.error
+    assert "产物目录" in result.error
     assert str(MAX_CONTENT_CHARS) in result.error
     assert str(len(OVERSIZE)) in result.error
     # map_result is what actually reaches the model.
@@ -176,6 +176,38 @@ async def test_member_can_send_message_to_user(db):
     messages = await db.message.get_team_messages(team_name=TEAM_NAME)
     assert len(messages) == 1
     assert messages[0].to_member_name == "user"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_direct_message_recovers_error_recipient_before_delivery(db):
+    """A targeted message is an explicit nudge that may recover its ERROR recipient."""
+    failed_member = "failed-dev"
+    await db.member.create_member(
+        member_name=failed_member,
+        team_name=TEAM_NAME,
+        display_name=failed_member,
+        agent_card=AgentCard().model_dump_json(),
+        status=MemberStatus.ERROR.value,
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    on_restarted = AsyncMock(return_value=True)
+    backend = TeamBackend(
+        team_name=TEAM_NAME,
+        member_name=LEADER_NAME,
+        is_leader=True,
+        db=db,
+        messager=AsyncMock(spec=Messager),
+        on_member_restarted=on_restarted,
+    )
+    send = _send_tool(create_team_tools(role="leader", agent_team=backend, lang="cn"))
+
+    result = await send.invoke({"to": failed_member, "content": "retry this task"})
+
+    assert result.success
+    on_restarted.assert_awaited_once_with(failed_member)
+    member = await db.member.get_member(failed_member, TEAM_NAME)
+    assert member.status == MemberStatus.RESTARTING.value
 
 
 @pytest.mark.asyncio

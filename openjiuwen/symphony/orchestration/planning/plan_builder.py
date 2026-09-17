@@ -127,7 +127,7 @@ def edge_plan_item(edge: dict[str, Any]) -> dict[str, Any]:
     if isinstance(runtime_evidence, dict):
         item.update(
             {
-                "effective_score": edge.get("effective_score"),
+                "planner_weight": edge.get("effective_weight"),
                 "runtime_weight": edge.get("runtime_weight"),
                 "runtime_evidence": runtime_evidence,
             }

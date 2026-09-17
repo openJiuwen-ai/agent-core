@@ -117,6 +117,7 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
                 "Model may drift far from initial policy during training."
             )
         self.pad_size = None
+        self.preserve_provided_old_log_probs = False
         self._diagnostics = TrainingDiagnostics(tokenizer) if config.trainer.get("develop_mode", False) else None
         self._tensordict_worker_api = self._detect_tensordict_worker_api()
 
@@ -222,6 +223,10 @@ class BaseVerlTrainingExecutor(RayPPOTrainer):
             batch, self.actor_rollout_wg.world_size
         )
         self.pad_size = unpad_at
+
+        if getattr(self, "preserve_provided_old_log_probs", False) and "old_log_probs" in batch.batch:
+            metrics["actor/using_captured_old_log_probs"] = 1
+            return batch
 
         if self._tensordict_worker_api:
             tu, left_right_2_no_padding, no_padding_2_padding = self._padding_helpers()

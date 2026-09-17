@@ -238,6 +238,24 @@ def _render_prompt_section_text(spec: PromptSectionSpec, ctx: BuildContext, lang
     return _render_template(content, _render_params(spec.render_params, ctx))
 
 
+def render_agent_template_system_prompt(
+    spec: AgentTemplateSpec,
+    *,
+    language: str,
+    ctx: BuildContext | None = None,
+) -> str:
+    """Render the template's persona prompt sections into one system prompt.
+
+    Sections are ordered by priority and joined with blank lines. Used by
+    harness providers that cannot mount ``PromptSection`` objects and need
+    the persona as plain text (Claude Code, Codex, DSH).
+    """
+    build_ctx = ctx if ctx is not None else BuildContext(language=language)
+    ordered_sections = sorted(spec.prompt_sections, key=lambda item: item.priority)
+    rendered = [_render_prompt_section_text(section, build_ctx, language) for section in ordered_sections]
+    return "\n\n".join(text for text in rendered if text)
+
+
 def _resolve_skill(spec: SkillSpec) -> ResolvedSkill:
     return ResolvedSkill(directory=spec.dir, mode=spec.mode, enabled_skills=spec.enabled_skills)
 
@@ -280,6 +298,7 @@ __all__ = [
     "ResolvedSkill",
     "ResourceKind",
     "ResourceRef",
+    "render_agent_template_system_prompt",
     "resolve_agent_template_parts",
     "resolve_plugin_parts",
 ]

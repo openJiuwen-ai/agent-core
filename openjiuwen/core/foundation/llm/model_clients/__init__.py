@@ -5,6 +5,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
+    LLMApiMode,
     LLMAuthMode,
     ModelRequestConfig,
     ModelClientConfig,
@@ -19,6 +20,10 @@ def _value(value):
 
 def _implementation_provider(client_config: ModelClientConfig) -> str:
     provider = _value(client_config.client_provider)
+    api_mode = _value(getattr(client_config, "api_mode", None))
+    if api_mode == LLMApiMode.AnthropicMessages.value:
+        return ProviderType.Anthropic.value
+
     if provider != ProviderType.OpenAI.value:
         return provider
 

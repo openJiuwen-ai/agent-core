@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.team_workspace.session_file_store import SessionFileStore
 
 from openjiuwen.agent_teams.schema.status import (
+    TASK_REASSIGNABLE_STATUSES,
     TASK_TRANSITIONS,
     TaskStatus,
     is_valid_transition,
@@ -693,28 +694,32 @@ class TaskDao:
             return claimed
 
     async def reassign_task(self, task_id: str, from_assignee: str, to_assignee: str) -> bool:
-        """Atomically hand an IN_PROGRESS task from one member to another.
+        """Atomically hand an owned task from one member to another.
 
         Single conditional ``UPDATE`` — ``WHERE assignee = from_assignee AND
-        status = in_progress`` — so the task never bounces through PENDING (no
-        spurious TASK_RELEASED, no claimable-pool window an idle teammate
-        could race into). Mirrors ``claim_task``'s CAS discipline: existence /
-        member validation is the caller's job outside the write lock; this
-        method is only the concurrency arbiter.
+        status IN TASK_REASSIGNABLE_STATUSES`` — and the ``SET`` touches only
+        the assignee, so **the status is preserved**: an executing task never
+        bounces through PENDING (no spurious TASK_RELEASED, no claimable-pool
+        window an idle teammate could race into), and an assigned-but-not-yet-
+        started one stays exactly that. Mirrors ``claim_task``'s CAS
+        discipline: existence / member validation is the caller's job outside
+        the write lock; this method is only the concurrency arbiter.
 
         Returns:
             True iff the row was swapped (``rowcount == 1``); False when the
-            task is missing, not IN_PROGRESS, or not held by ``from_assignee``.
+            task is missing, sits in a non-reassignable status, or is not
+            held by ``from_assignee``.
         """
         team_task_model = _get_task_model()
         now = get_current_time()
+        reassignable = [status.value for status in TASK_REASSIGNABLE_STATUSES]
         async with self._sessions.write() as session:
             result = await session.execute(
                 update(team_task_model)
                 .where(
                     team_task_model.task_id == task_id,
                     team_task_model.assignee == from_assignee,
-                    team_task_model.status == TaskStatus.IN_PROGRESS.value,
+                    team_task_model.status.in_(reassignable),
                 )
                 .values(assignee=to_assignee, updated_at=now)
             )

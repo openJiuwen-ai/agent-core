@@ -5,8 +5,29 @@ from openjiuwen.core.context_engine.schema.config import CompressionRecallConfig
 from openjiuwen.core.context_engine.base import ContextWindowChange, ModelContext, ContextStats, ContextWindow
 from openjiuwen.core.context_engine.context_engine import ContextEngine
 
-from openjiuwen.core.context_engine.token.base import TokenCounter
+from openjiuwen.core.context_engine.token.base import TokenCounter, TokenMeasurement
 from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
+from openjiuwen.core.context_engine.token.tiktoken_model_counter import TiktokenModelCounter
+from openjiuwen.core.context_engine.token.native_tokenizer_counter import NativeTokenizerCounter
+from openjiuwen.core.context_engine.token.string_length_counter import StringLengthCounter
+from openjiuwen.core.context_engine.token.tokenizer_manager import TokenizerArtifactManager
+from openjiuwen.core.context_engine.token.tokenizer_registry import TokenizerRegistry
+from openjiuwen.core.context_engine.token.tokenizer_selector import TokenizerSelector
+from openjiuwen.core.context_engine.token.tokenizer_spec import CompatibleTokenizerSpec, TokenizerSpec
+from openjiuwen.core.context_engine.usage import (
+    CacheAggregationKey,
+    ContextCategory,
+    ContextPartUsage,
+    ContextUsageAnalyzer,
+    ContextUsageMeasurement,
+    ContextUsageSnapshot,
+    ContextWindowUsage,
+    ContextWindowTokenReport,
+    RequestKVCacheUsage,
+    SessionKVCacheAggregator,
+    SessionKVCacheUsage,
+    request_usage_from_metadata,
+)
 
 from openjiuwen.core.context_engine.processor.base import ContextProcessor
 from openjiuwen.core.context_engine.processor.offloader.message_offloader import (
@@ -60,7 +81,16 @@ _CORE_CLASSES = [
 
 _TOKEN_COUNTER = [
     "TokenCounter",
-    "TiktokenCounter"
+    "TokenMeasurement",
+    "TiktokenCounter",
+    "TiktokenModelCounter",
+    "NativeTokenizerCounter",
+    "StringLengthCounter",
+    "TokenizerArtifactManager",
+    "TokenizerRegistry",
+    "TokenizerSelector",
+    "CompatibleTokenizerSpec",
+    "TokenizerSpec",
 ]
 
 
@@ -96,9 +126,26 @@ _PROCESSORS_CLASSES = [
 ]
 
 
+_USAGE_CLASSES = [
+    "CacheAggregationKey",
+    "ContextCategory",
+    "ContextPartUsage",
+    "ContextUsageAnalyzer",
+    "ContextUsageMeasurement",
+    "ContextUsageSnapshot",
+    "ContextWindowUsage",
+    "ContextWindowTokenReport",
+    "RequestKVCacheUsage",
+    "SessionKVCacheAggregator",
+    "SessionKVCacheUsage",
+    "request_usage_from_metadata",
+]
+
+
 # Combine all public APIs
 __all__ = (
     _CORE_CLASSES
     + _TOKEN_COUNTER
     + _PROCESSORS_CLASSES
+    + _USAGE_CLASSES
 )

@@ -19,7 +19,7 @@ from openjiuwen.harness.cli.cli import (
     AutoHarnessRunRequest,
     _run_auto_harness,
 )
-from openjiuwen.rsi.auto_harness.pipelines import (
+from openjiuwen.rsi.harness_rsi.auto_harness.pipelines import (
     EXTENDED_EVOLVE_PIPELINE,
     META_EVOLVE_PIPELINE,
 )
@@ -40,7 +40,7 @@ def _make_fake_repo(parent: Path, name: str) -> Path:
     """Create a directory that passes ``_looks_like_repo_root``.
 
     Mirrors the four conditions in
-    ``openjiuwen.rsi.auto_harness.schema._looks_like_repo_root``: a directory
+    ``openjiuwen.rsi.harness_rsi.auto_harness.schema._looks_like_repo_root``: a directory
     containing ``.git/``, ``pyproject.toml``, and ``openjiuwen/``. Used
     to make tests deterministic regardless of the invoking cwd.
     """
@@ -112,7 +112,7 @@ class TestAutoHarnessCli:
 
         with (
             patch(
-                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
                 side_effect=_capture_create,
             ),
             patch(
@@ -186,7 +186,7 @@ class TestAutoHarnessCli:
 
         with (
             patch(
-                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
                 side_effect=_capture_create,
             ),
             patch(
@@ -262,7 +262,7 @@ class TestAutoHarnessCli:
 
         with (
             patch(
-                "openjiuwen.rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
+                "openjiuwen.rsi.harness_rsi.auto_harness.orchestrator.create_auto_harness_orchestrator",
                 side_effect=_capture_create,
             ),
             patch(
@@ -333,11 +333,11 @@ class TestAutoHarnessCli:
 
         with (
             patch(
-                "openjiuwen.rsi.auto_harness.infra.github_cli.ensure_github_cli_ready",
+                "openjiuwen.rsi.harness_rsi.auto_harness.infra.github_cli.ensure_github_cli_ready",
                 side_effect=_fake_preflight,
             ),
             patch(
-                "openjiuwen.rsi.auto_harness.stages.assess.run_assess_stream",
+                "openjiuwen.rsi.harness_rsi.auto_harness.stages.assess.run_assess_stream",
                 side_effect=_fake_assess_stream,
             ),
             patch(

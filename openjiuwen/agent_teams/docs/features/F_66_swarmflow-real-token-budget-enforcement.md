@@ -65,10 +65,12 @@ BudgetLedger (engine/budget.py)   ← 每个 leader 一个，所有 run 共享
 |---|---|---|---|
 | **rail**（主力） | `SwarmflowBudgetRail`，挂在每个 worker / avatar harness 上 | `after_model_call`：读 `usage_metadata` 记账，超了就停；`before_model_call`：付不起就不发起 | `ctx.request_force_finish` —— **就地终止 harness 的当前 round** |
 | **引擎**（兜底） | `_check_budget`，紧挨 `_check_abort` | `agent()` / `AgentSession.send()` **入口** | `raise BudgetExhausted` |
+| **引擎**（重试短路） | `_attempt_calls` except 分支 | 调用失败后、重试之前 | 查账本：干涸则 **fail-fast 不重试**，`AGENT_FAILED` 文案写与 gate 同格式的 `... token budget exhausted: X/Y` |
 
 - rail 用 **force-finish 而非抛异常**：超预算是「钱花完了」不是「坏了」，已做的工作照常返回。
 - `before_model_call` 那一路专治**并发**：账本是共享的，兄弟 worker 把预算烧干时，本 worker 下一次调用直接被挡。
 - 引擎的 gate **只在入口**，不做 pre-journal 检查（与 `_check_abort` 不同）：钱已经花了的调用必须落 journal，否则 resume 会重跑并**再付一次**。
+- 重试短路的理由：账本不退款，重试必败；human turn 的重试还会**重新弹一次 `HUMAN_PROMPT`**——修复前用户会被同一问题反复问最多 3 次、每次回答都被烧掉。
 
 ### `BudgetExhausted` 为什么是 `BaseException`
 
@@ -134,6 +136,7 @@ budget spent after 9 rounds (remaining=0 < worst_round=1032) — stopping ← �
 ## Progress 可观测（详 `S_18`）
 
 - `AgentResult.tokens` 经 progress 回路对外：`backend` → `_emit_agent_completed` / `_emit_agent_failed`
+- 失败帧 `message` 带**真实 attempt 数**（`_BackendCallResult.attempts`）：撞顶/skip 短路为 `... failed: workflow token budget exhausted: X/Y`（不再静态写 `failed after 3 attempts`），只有真试满 `retries` 才带 `after N attempts`
 - 同帧附带 `_budget_snapshot(rt.budget)` 的 `budget` 字段
 - `BudgetExhausted` 终态：`_exec_loaded` 补发 `WORKFLOW_FAILED`（`budget.exhausted=true`）
 - `SwarmflowTool._publish` 透传至 `WORKFLOW_PROGRESS`，供 Monitor/TUI 展示

@@ -28,8 +28,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Sequence
 
-from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import cancellation_safe_evict_then_dispose
-from openjiuwen.agent_teams.kv_cache import kv_cache_hooks
+from openjiuwen.agent_teams.kv_cache.kv_cache_cleanup import (
+    cancellation_safe_release_then_dispose,
+)
+from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_hook
+from openjiuwen.core.kv_cache.kv_cache_types import KVCacheRuntimeProtocol
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.agent_teams.harness.state import HarnessState
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
@@ -47,7 +50,7 @@ from openjiuwen.agent_teams.tools.structured_output_tool import (
 from openjiuwen.agent_teams.workflow.backends.budget_rail import SwarmflowBudgetRail
 from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
 from openjiuwen.agent_teams.workflow.engine.budget import BudgetLedger
-from openjiuwen.agent_teams.workflow.engine.errors import BackendError
+from openjiuwen.agent_teams.workflow.engine.errors import BackendError, WorkflowAborted
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UserMessage
 from openjiuwen.core.session.vcs.codec import encode_message
@@ -77,6 +80,25 @@ _SCHEMA_TURN_NUDGE = (
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
 _DEFAULT_HUMAN_TIMEOUT = 600.0
+
+# One-shot intent classification (see ``_classify_intent``): is the person's raw
+# reply a request to edit the script/flow and rerun, or a plain continue? Kept
+# as module constants (like the tiny-agent title/summary presets) — minimal.
+_INTENT_CLASSIFY_PROMPT = (
+    "Decide whether the user's reply asks to edit the script and re-run. "
+    "If they want to change the script/prompt/workflow and re-run, set "
+    "intent=edit_rerun and note the edit points; otherwise intent=continue. "
+    "Output structured results only."
+)
+
+_INTENT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "intent": {"type": "string", "enum": ["continue", "edit_rerun"]},
+        "edit_instructions": {"type": ["string", "null"]},
+    },
+    "required": ["intent"],
+}
 
 
 @dataclass
@@ -145,8 +167,11 @@ class AvatarSessionManager:
         on_human_replied: Callable[[str, str, str | None], None] | None = None,
         human_timeout: float | None = None,
         budget: BudgetLedger | None = None,
+        workflow_budget: BudgetLedger | None = None,
+        kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
+        self._workflow_budget = workflow_budget
         self._worker_base_spec = worker_base_spec
         self._human_base_spec = human_base_spec
         self._team_name = team_name
@@ -162,6 +187,10 @@ class AvatarSessionManager:
         # inbound reply arrives on the dedicated messager topic (subscribed lazily
         # on the first human session) and is routed by ``_on_reply_event``.
         self._pending_human: dict[str, asyncio.Future] = {}
+        # Human replies that arrive during a pause window (no live future, so the
+        # usual path would drop them) are parked here and consumed by
+        # ``_await_human_reply`` before it registers a new future.
+        self._pending_reply_buffer: dict[str, str] = {}
         self._on_human_prompt = on_human_prompt
         self._on_human_replied = on_human_replied
         self._human_timeout = human_timeout if human_timeout is not None else _DEFAULT_HUMAN_TIMEOUT
@@ -171,6 +200,7 @@ class AvatarSessionManager:
         # None falls back to the legacy session+team scope.
         self._run_id = run_id
         self._workflow_name = workflow_name
+        self._kv_cache_runtime = kv_cache_runtime
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -213,7 +243,7 @@ class AvatarSessionManager:
             spec_base=base,
             instructions=instructions,
             member_name=member_name,
-            budget_rail=SwarmflowBudgetRail(self._budget),
+            budget_rail=SwarmflowBudgetRail(self._budget, workflow_budget=self._workflow_budget),
             session_id=self._derive_avatar_session_id(member_name),
         )
         self._sessions[member_name] = state
@@ -486,16 +516,16 @@ class AvatarSessionManager:
         state = self._sessions.pop(session_id, None)
         if state is None or state.harness is None:
             return
-        binding = kv_cache_hooks.build_current_harness_binding(state.harness)
+        session = state.harness.current_session()
+        release_kvc = getattr(session, "release_kvc", None)
         try:
-            await cancellation_safe_evict_then_dispose(
-                binding=binding,
+            await cancellation_safe_release_then_dispose(
+                release_kvc=release_kvc if callable(release_kvc) else None,
                 dispose=state.harness.dispose,
-                reason="swarmflow-stateful-session-close",
                 owner_id=session_id,
             )
         finally:
-            kv_cache_hooks.clear_harness_session_hooks(state.harness)
+            kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(state.harness)
 
     async def aclose(self) -> None:
         """Cancel pending human waits, unsubscribe, and dispose every session."""
@@ -503,6 +533,7 @@ class AvatarSessionManager:
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
+        self._pending_reply_buffer.clear()
         if self._reply_topic_subscribed and self._messager is not None and self._session_id is not None:
             from openjiuwen.agent_teams.schema.events import swarmflow_human_reply_topic
 
@@ -528,35 +559,44 @@ class AvatarSessionManager:
         resume, so a person's reply still matches). Avatars are disposed by
         ``aclose`` on the run's unwind; an aborted-but-not-disposed harness is
         harmless — resume rebuilds fresh avatars, and journal-hit turns build none.
+
+        Harnesses abort in parallel: each avatar owns an independent control
+        queue / supervisor / TaskScheduler, and the shared KVCacheRuntime guards
+        its state with an internal condition lock, so concurrent aborts only
+        shorten the pause's wall time (serial: sum of every avatar's abort +
+        rollback; parallel: the slowest one).
         """
         for fut in list(self._pending_human.values()):
             if not fut.done():
                 fut.cancel()
         self._pending_human.clear()
-        for state in list(self._sessions.values()):
-            if state.harness is not None:
-                try:
-                    await state.harness.abort(immediate=True)
-                except Exception:  # noqa: BLE001 - best effort during pause
-                    team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
+        self._pending_reply_buffer.clear()
+        live = [state for state in list(self._sessions.values()) if state.harness is not None]
+        results = await asyncio.gather(
+            *(state.harness.abort(immediate=True) for state in live),
+            return_exceptions=True,
+        )
+        for state, exc in zip(live, results):
+            if isinstance(exc, Exception):  # noqa: BLE001 - best effort during pause
+                team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
 
     def submit_human_reply(self, correlation_id: str, answer: str) -> bool:
         """Resolve a pending human turn with the person's raw reply.
 
         The inbound seam: whatever transport carries a real person's answer
         (messager round-trip from ``interact_agent_team``) calls this with the
-        ``correlation_id`` from the outbound prompt. An unknown / already-resolved
-        correlation is rejected (returns ``False``) — an illegal id from an
-        external caller is dropped, not applied to some other turn.
+        ``correlation_id`` from the outbound prompt. A live pending future is
+        resolved directly; a reply for an unknown / paused correlation (no live
+        future) is buffered instead of dropped, so a resume that re-awaits the
+        turn still sees the person's answer.
         """
         fut = self._pending_human.get(correlation_id)
-        if fut is None or fut.done():
-            team_logger.warning(
-                "[swarmflow] rejected human reply for unknown/closed correlation_id %r",
-                correlation_id,
-            )
-            return False
-        fut.set_result(answer)
+        if fut is not None and not fut.done():
+            fut.set_result(answer)
+            return True
+        # No live future: buffer instead of drop (pause window or late reply).
+        self._pending_reply_buffer[correlation_id] = answer
+        team_logger.info("[swarmflow] buffered reply for pending correlation_id %r", correlation_id)
         return True
 
     # ------------------------------------------------------------------
@@ -610,7 +650,7 @@ class AvatarSessionManager:
             # turns *and* across a same-process resume (pre_run recovery needs a
             # deterministic session_id to locate the prior run's state).
             team_session = self._team_session_for(state)
-            kv_cache_hooks.configure_harness_session_hooks(
+            kv_cache_harness_session_lifecycle_hook.configure_harness_session_hooks(
                 harness,
                 product_session_id=self._session_id,
                 evict_on_finish=False,
@@ -624,7 +664,7 @@ class AvatarSessionManager:
             )
         except Exception as e:
             if harness is not None:
-                kv_cache_hooks.clear_harness_session_hooks(harness)
+                kv_cache_harness_session_lifecycle_hook.clear_harness_session_hooks(harness)
             team_logger.exception("[swarmflow] session avatar build/start failed for %s", state.member_name)
             raise BackendError(f"session avatar build/start failed for {state.member_name}: {e}") from e
         state.harness = harness
@@ -633,7 +673,11 @@ class AvatarSessionManager:
         """Build the team session carrying the avatar's stable child session id."""
         from openjiuwen.core.session.agent_team import Session as TeamSession
 
-        return TeamSession(session_id=state.session_id, team_id=self._team_name)
+        return TeamSession(
+            session_id=state.session_id,
+            team_id=self._team_name,
+            kv_cache_runtime=self._kv_cache_runtime,
+        )
 
     async def _seed_fork_context(self, harness: Any, state: _SessionState, fork_data: dict) -> None:
         """Inject the fork snapshot into the child avatar's context engine.
@@ -808,6 +852,19 @@ class AvatarSessionManager:
         raw = await self._await_human_reply(state, prompt, opts, correlation_id)
         if raw is None:  # timed out / no answer
             return AgentResult(skipped=True)
+        # NEW: classify intent before formatting (best-effort; any failure
+        # degrades to the existing formatting path rather than failing the turn).
+        try:
+            intent = await self._classify_intent(raw, prompt)
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify raised; degrade to continue")
+            intent = None
+        if intent and intent.get("intent") == "edit_rerun":
+            raise WorkflowAborted(
+                reason="early_return",
+                reply=raw,
+                edit_hints=intent.get("edit_instructions"),
+            )
         format_prompt = (
             f"You put this question to the person:\n{prompt}\n\n"
             f"The person replied:\n{raw}\n\n"
@@ -817,6 +874,49 @@ class AvatarSessionManager:
         # The avatar (human stand-in) formats the raw reply; reuse the agent turn
         # path so schema capture / round settling work identically.
         return await self._agent_turn(state, format_prompt, schema_json)
+
+    async def _classify_intent(self, raw: str, prompt: str) -> dict | None:
+        """One-shot TinyAgent classification: is this reply 'edit & rerun' or 'continue'?
+
+        Reuses the ``worker_base_spec.model`` already resolved on the base spec (the
+        path ``TeamWorkerBackend._sessions()`` takes). Ephemeral: async with
+        auto-dispose. Returns None when there is no base model or on any failure
+        (degrades to existing formatting path).
+        """
+        from openjiuwen.agent_teams.tiny_agent import TinyAgent
+        from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
+        from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+        from openjiuwen.harness.prompts import PromptMode
+
+        base_model = self._worker_base_spec.model if self._worker_base_spec else None
+        if base_model is None:
+            return None
+        user_prompt = f"Question:\n{prompt}\n\nReply:\n{raw}"
+        try:
+            # Build a TinyAgent straight from the already-resolved TeamModelConfig,
+            # skipping the name → resolver hop entirely.
+            spec = DeepAgentSpec(
+                card=AgentCard(id="intent-classifier", name="intent-classifier", description="tiny agent"),
+                system_prompt=_INTENT_CLASSIFY_PROMPT,
+                model=base_model,
+                tools=None,
+                auto_create_workspace=False,
+                max_iterations=3,
+                enable_security_rail=False,
+                language=self._language,
+                enable_read_image_multimodal=False,
+                prompt_mode=PromptMode.NONE.value,
+                enable_sys_operation=False,
+            )
+            classifier = TinyAgent(spec, default_schema=_INTENT_SCHEMA, language=self._language, budget=self._budget)
+            async with classifier:
+                return await classifier.run(
+                    user_prompt,
+                    schema=_INTENT_SCHEMA,
+                )
+        except Exception:
+            team_logger.debug("[swarmflow] intent classify failed; degrade to continue")
+            return None
 
     async def _await_human_reply(
         self,
@@ -836,6 +936,15 @@ class AvatarSessionManager:
         issued for an interrupted-then-resumed turn still matches.
         """
         corr = correlation_id or f"{state.member_name}:{state.turns_executed}"
+        # Consume a buffered reply first (don't re-push the prompt).
+        buffered = self._pending_reply_buffer.pop(corr, None)
+        if buffered is not None:
+            if self._on_human_replied is not None:
+                try:
+                    self._on_human_replied(state.member_name, corr, buffered)
+                except Exception:
+                    team_logger.debug("[swarmflow] human-replied notify failed for %s", state.member_name)
+            return buffered
         loop = asyncio.get_running_loop()
         fut: asyncio.Future = loop.create_future()
         self._pending_human[corr] = fut

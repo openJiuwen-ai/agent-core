@@ -154,6 +154,7 @@ class MemoryRail(DeepAgentRail):
                 name="daily_memory_context",
                 content={lang: header + daily_content},
                 priority=52,
+                category="memory",
             )
             self.system_prompt_builder.add_section(dm_section)
 

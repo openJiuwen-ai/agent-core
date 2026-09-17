@@ -190,11 +190,20 @@ async def test_graph_engine_build_and_plan_fast_or_beam(tmp_path: Path, mode: st
     )
 
     assert built.version
-    assert graph_engine.status().version == built.version
-    assert graph_engine.read()["schema_version"].startswith("1.")
-    assert result["language"] == "en"
-    assert result["execution_graph"]["nodes"]
-    assert result["capability_retrieval"]["candidate_ids"] == ["extract"]
+    assert set(result) == {"planned_graph"}
+    graph = result["planned_graph"]["graph"]
+    assert graph["id"]
+    assert graph["type"] == "planned_graph"
+    assert graph["directed"] is True
+    assert graph["metadata"]["status"] == "ready"
+    assert set(graph["metadata"]).issubset({"status", "reason", "missing_inputs"})
+    assert graph["nodes"] == {
+        "extract": {"label": "extract", "metadata": {"type": "skill"}},
+        "summarize": {"label": "summarize", "metadata": {"type": "skill"}},
+    }
+    assert graph["edges"] == [
+        {"source": "extract", "target": "summarize", "relation": "can_feed"},
+    ]
     assert events
 
 

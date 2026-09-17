@@ -600,9 +600,54 @@ def test_merge_config_with_overrides_none():
     assert result.messages_threshold == 10
 
 
-# =============================================================================
-# ContextProcessorRail - _merge_processors Tests
-# =============================================================================
+def test_merge_keeps_openai_account_model_client_unset_auth_mode():
+    """Dict overrides must not dump nested ModelClientConfig defaults into fields_set."""
+    from openjiuwen.core.foundation.llm.model_clients.openai_account_model_client import (
+        DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+    )
+    from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, ModelClientConfig, ProviderType
+    from openjiuwen.core.foundation.llm.utils.endpoint_profiles import normalize_model_client_config
+
+    client = ModelClientConfig(
+        client_provider=ProviderType.OpenAIAccount,
+        api_base=DEFAULT_OPENAI_ACCOUNT_BASE_URL,
+    )
+    assert "auth_mode" not in client.model_fields_set
+
+    base = ForkedDialogueCompressorConfig(model_client=client)
+    merged = ContextProcessorRail._merge_config_with_overrides(
+        base,
+        {"trigger_context_ratio": 0.7},
+    )
+
+    assert merged.trigger_context_ratio == 0.7
+    assert merged.model_client is client
+    assert "auth_mode" not in merged.model_client.model_fields_set
+
+    normalized = normalize_model_client_config(merged.model_client)
+    assert normalized.auth_mode == LLMAuthMode.OpenAIAccountOAuth.value
+
+
+def test_merge_nested_dict_keeps_nested_model_type():
+    """Nested dict overrides must validate back into the nested Pydantic model.
+
+    Matches the original merge semantics: a nested dict override replaces the
+    nested model wholesale (unspecified nested fields fall back to defaults).
+    """
+    base = SessionMemoryCompressorConfig(
+        enabled=False,
+        memory=SessionMemoryConfig(enable_debug_dump=True, debug_dump_dir="/tmp/x"),
+    )
+    merged = ContextProcessorRail._merge_config_with_overrides(
+        base,
+        {"enabled": True, "memory": {"update_trigger_context_ratio": 0.1}},
+    )
+
+    assert merged.enabled is True
+    assert isinstance(merged.memory, SessionMemoryConfig)
+    assert merged.memory.update_trigger_context_ratio == 0.1
+    # Wholesale replacement: fields absent from the override dict are defaults.
+    assert merged.memory.enable_debug_dump is False
 
 
 def test_merge_processors_replace_existing():
@@ -1077,6 +1122,31 @@ async def test_init_with_session_memory_compressor_dict_override(tmp_path: Path)
     assert merged.enabled is True
     assert merged.trigger_context_ratio == 0.7
     assert isinstance(merged.memory, SessionMemoryConfig)
+    assert rail._session_memory_mgr is not None
+
+
+@pytest.mark.asyncio
+async def test_init_with_session_memory_nested_memory_dict(tmp_path: Path):
+    """Yaml-style nested memory dict must stay a SessionMemoryConfig after merge."""
+    sys_operation = _make_sys_operation(tmp_path)
+    workspace = Workspace(root_path=str(tmp_path))
+    agent = _make_agent(sys_operation, workspace)
+
+    rail = ContextProcessorRail(
+        preset=True,
+        processors=[
+            (
+                "SessionMemoryCompressor",
+                {"enabled": True, "memory": {"update_trigger_context_ratio": 0.1}},
+            )
+        ],
+    )
+    rail.init(agent)
+
+    merged = dict(rail._all_processors)["SessionMemoryCompressor"]
+    assert merged.enabled is True
+    assert isinstance(merged.memory, SessionMemoryConfig)
+    assert merged.memory.update_trigger_context_ratio == 0.1
     assert rail._session_memory_mgr is not None
 
 

@@ -28,12 +28,18 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, attributes_to_map
+from openjiuwen.extensions.observability import semconv
 
 __all__ = ["TrajectorySpanProcessor"]
 
 _LOGGER = logging.getLogger(__name__)
 
 _CATEGORIES = frozenset({"llm", "tool", "agent", "task", "message", "member", "team"})
+
+# LLM and tool spans are named after the GenAI operation they carry ("chat
+# gpt-4o", "execute_tool search"), so their names embed a model or tool name and
+# cannot be matched by prefix.  The operation attribute is the stable fact.
+_CATEGORY_BY_OPERATION = MappingProxyType({"chat": "llm", "execute_tool": "tool"})
 _MAX_ISSUES = 128
 
 _ACTIVE_SUBSCRIPTIONS: ContextVar[tuple["_SubscriptionHandle", ...]] = ContextVar(
@@ -403,7 +409,7 @@ class TrajectorySpanProcessor(SpanProcessor):
         if _SUPPRESSION_DEPTH.get() > 0:
             return
         span_name = str(getattr(span, "name", ""))
-        category = self._category_for_name(span_name)
+        category = self._category_for_span(span)
         if category is None:
             return
         try:
@@ -474,6 +480,24 @@ class TrajectorySpanProcessor(SpanProcessor):
             _ACTIVE_SUBSCRIPTIONS.set(tuple())
 
     @staticmethod
+    def _category_for_span(span: Any) -> str | None:
+        """Classify a span by its GenAI operation, falling back to its name.
+
+        Args:
+            span: The ended span to classify.
+
+        Returns:
+            The trajectory category, or ``None`` when the span is not captured.
+        """
+        attributes = getattr(span, "attributes", None) or {}
+        operation = attributes.get(semconv.GEN_AI_OPERATION_NAME)
+        if operation is not None:
+            category = _CATEGORY_BY_OPERATION.get(str(operation))
+            if category is not None:
+                return category
+        return TrajectorySpanProcessor._category_for_name(str(getattr(span, "name", "")))
+
+    @staticmethod
     def _category_for_name(name: str) -> str | None:
         if name == "llm.call":
             return "llm"
@@ -503,7 +527,7 @@ class TrajectorySpanProcessor(SpanProcessor):
         """Best-effort route of an unexpected ``on_end`` failure."""
         try:
             span_name = self._safe_span_name(span)
-            category = self._category_for_name(span_name)
+            category = self._category_for_span(span)
             if category is None:
                 return
             self._record_capture_issue(

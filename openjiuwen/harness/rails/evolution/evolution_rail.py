@@ -751,7 +751,10 @@ class EvolutionRail(DeepAgentRail):
                     issues.append(MappingProxyType({"code": "indexed_attribute_gap", "attribute": base}))
             if span_category(span) != "tool":
                 continue
-            for key in (observability_semconv.GEN_AI_TOOL_INPUT, observability_semconv.GEN_AI_TOOL_OUTPUT):
+            for key in (
+                observability_semconv.GEN_AI_TOOL_CALL_ARGUMENTS,
+                observability_semconv.GEN_AI_TOOL_CALL_RESULT,
+            ):
                 value = attrs.get(key)
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
                     continue

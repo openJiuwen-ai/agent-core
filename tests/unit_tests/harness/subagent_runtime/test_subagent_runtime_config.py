@@ -18,8 +18,8 @@ from openjiuwen.harness.subagent_runtime.config import (
 
 
 def test_wait_timeout_constants() -> None:
-    assert TURN_TIMEOUT_S_DEFAULT == 1800.0
-    assert WAIT_TIMEOUT_MS_DEFAULT == 1_800_000
+    assert TURN_TIMEOUT_S_DEFAULT == 2400.0
+    assert WAIT_TIMEOUT_MS_DEFAULT == 2_400_000
     assert WAIT_TIMEOUT_MS_DEFAULT == int(TURN_TIMEOUT_S_DEFAULT * 1000)
     assert WAIT_TIMEOUT_MS_MIN == 10_000
     assert WAIT_TIMEOUT_MS_MAX == 3_600_000
