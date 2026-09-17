@@ -97,7 +97,7 @@ async def test_reporting_agent_continues_after_preflight_failure(tmp_path, monke
         "discover_latex_runtime",
         lambda *args, **kwargs: latex_runtime.LatexRuntime(None, None, ()),
     )
-    monkeypatch.setattr(reporting_agent.figures, "build_results_figure", lambda *args: None)
+    monkeypatch.setattr(reporting_agent.figures, "build_results_figure", lambda *args, **kwargs: None)
     monkeypatch.setattr(reporting_agent.ReportingAgent, "_build_evidence_blocks", lambda *args: {})
 
     async def fake_run_paper_agent(self, *, run_id, query):
@@ -121,7 +121,7 @@ async def test_reporting_agent_continues_after_preflight_failure(tmp_path, monke
             return "{}"
 
     inputs = SimpleNamespace(
-        plan=SimpleNamespace(run_id="latex-preflight", design_path=""),
+        plan=SimpleNamespace(run_id="latex-preflight", design_path="", metrics=[]),
         survey=SimpleNamespace(resource_paths=["missing-summary.md"]),
         result=_Result(),
         attempt=1,
