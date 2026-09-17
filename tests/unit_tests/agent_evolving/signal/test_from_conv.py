@@ -552,7 +552,9 @@ class TestConversationSignalDetector:
 
         signals = await detector.detect_user_intent(messages)
 
-        assert signals == []
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert not signals[0].skill_name
 
 
 class TestConversationSignalDetectorCollaborationBoundary:
@@ -585,3 +587,123 @@ class TestConversationSignalDetectorCollaborationBoundary:
 
         assert [signal.signal_type for signal in signals] == ["execution_failure"]
         assert signals[0].context.get("tool_name") == "send_message"
+
+
+class TestTtseFromConvHelpers:
+    """TTSE-facing helpers ported onto develop's ConversationSignalDetector."""
+
+    def test_is_tool_execution_failure_skips_ttse_consult(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import is_tool_execution_failure
+
+        bash_hit = is_tool_execution_failure("Error: command failed", "bash")
+        assert bash_hit is not None
+        assert "failed" in bash_hit.lower()
+        assert is_tool_execution_failure("FACT: 上次失败要改用 cl /utf-8", "ttse_consult") is None
+        assert is_tool_execution_failure("file content", "read_file") is None
+
+    def test_detect_tool_error_signals_resolves_tool_name_from_call_id(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import detect_tool_error_signals
+
+        signals = detect_tool_error_signals(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc_1", "name": "bash", "arguments": "{}"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "content": "Error: command failed",
+                },
+            ]
+        )
+        assert [s.signal_type for s in signals] == ["execution_failure"]
+        assert signals[0].context.get("tool_name") == "bash"
+        assert signals[0].skill_name is None
+
+    def test_detect_skips_ttse_consult_failure_keywords(self) -> None:
+        detector = ConversationSignalDetector()
+        signals = detector.detect(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc_1", "name": "ttse_consult", "arguments": "{}"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "name": "ttse_consult",
+                    "content": "[FACT] 上次编译失败要改用 cl /utf-8",
+                },
+            ]
+        )
+        assert signals == []
+
+    def test_convert_trajectory_to_messages_wraps_canonical_converter(self) -> None:
+        messages = [
+            {"role": "user", "content": "Run the code"},
+            {
+                "role": "assistant",
+                "content": "I'll run it",
+                "tool_calls": [{"id": "tc_1", "name": "bash", "type": "function", "arguments": "{}"}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "name": "bash",
+                "content": "Error: command failed",
+            },
+        ]
+        trajectory = _build_trajectory_from_messages(messages)
+        converted = ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
+        assert isinstance(converted, list)
+        assert converted
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_rule_fallback() -> None:
+        messages = [
+            {"role": "user", "content": "build the project"},
+            {"role": "assistant", "content": "running compile"},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        detector = ConversationSignalDetector()
+        signals = await detector.detect_user_intent(messages)
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert not signals[0].skill_name
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_true() -> None:
+        messages = [
+            {"role": "user", "content": "build the project"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "the output encoding is wrong, use utf-8"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={"content": '{"is_feedback": true, "excerpt": "use utf-8"}'}
+        )
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+        signals = await detector.detect_user_intent(messages)
+        assert len(signals) == 1
+        assert signals[0].excerpt == "use utf-8"
+        llm.invoke.assert_awaited()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_false() -> None:
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "thanks"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+        signals = await detector.detect_user_intent(messages)
+        assert signals == []
+
