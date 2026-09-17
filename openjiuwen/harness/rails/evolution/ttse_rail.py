@@ -59,7 +59,11 @@ from openjiuwen.agent_evolving.ttse.catalog import project_catalog, render_catal
 from openjiuwen.agent_evolving.ttse.classify import classify_rules
 from openjiuwen.agent_evolving.ttse.config import TTSEConfig
 from openjiuwen.agent_evolving.ttse.consult import TTSE_CONSULT_TOOL_NAME, create_ttse_consult_tools
-from openjiuwen.agent_evolving.ttse.dream import load_dream_state, run_dream_pass
+from openjiuwen.agent_evolving.ttse.dream import (
+    bump_dream_session_count,
+    load_dream_state,
+    run_dream_pass,
+)
 from openjiuwen.agent_evolving.ttse.induction import blame, induce, induce_batch, synthesize
 from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_CN,
@@ -619,17 +623,20 @@ class TTSERail(EvolutionRail):
             return
         if self._dream_iteration_blocked(ctx):
             return
-        self._dream_non_followup_count += 1
         interval = max(1, int(self._ttse_config.dream_interval))
+        count, reached = bump_dream_session_count(
+            self._ttse_config.resolved_dream_state_path(),
+            interval,
+        )
+        self._dream_non_followup_count = 0 if reached else count
         logger.info(
             "[TTSERail] dream session count=%s/%s session_id=%s",
-            self._dream_non_followup_count,
+            count,
             interval,
             self._catalog_session_id(ctx),
         )
-        if self._dream_non_followup_count < interval:
+        if not reached:
             return
-        self._dream_non_followup_count = 0
         logger.info("[TTSERail] dream interval reached; scheduling offline dream")
         self._schedule_dream(ctx)
 
