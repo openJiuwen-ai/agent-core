@@ -223,7 +223,8 @@ def classify_numeric_status(old: Evidence, new: Evidence) -> ClaimStatus:
 def normalize_prior_paper_evidence(context: ResearchContext) -> list[Evidence]:
     """Flatten typed prior-paper claims into ``Evidence`` rows with
     ``source="prior_paper"``. Qualitative claims keep their text as
-    ``value``; unmatched claims stay prior-only until a later metric match."""
+    ``value``; unmatched claims stay prior-only until a later metric match.
+    """
     evidence: list[Evidence] = []
     for claim in context.claims:
         numeric = claim.value if isinstance(claim.value, (int, float)) and not isinstance(claim.value, bool) else None

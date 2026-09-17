@@ -25,16 +25,12 @@ def numeric_metric_names(
 ) -> list[str]:
     declared = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
     if declared:
-        names = [
-            name
-            for name in declared
-            if any(
-                resolve_metric(dict(variant.metrics), name).status == "resolved"
-                for variant in result.variants
-            )
-        ]
-        if names:
-            return names
+        declared_names: list[str] = []
+        for name in declared:
+            if any(resolve_metric(dict(variant.metrics), name).status == "resolved" for variant in result.variants):
+                declared_names.append(name)
+        if declared_names:
+            return declared_names
     names: list[str] = []
     for variant in result.variants:
         for name, value in variant.metrics.items():

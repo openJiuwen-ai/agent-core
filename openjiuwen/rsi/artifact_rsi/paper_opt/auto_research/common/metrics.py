@@ -968,12 +968,8 @@ def overlay_paired_metrics(
         names, metric_names=metric_names, baselines=baselines
     )
     seed = next((item for item in variants if item.name == proposed_name), None)
-    peer_names = {
-        peer.name
-        for peer in (
-            _peer_variants(seed, variants, baseline_names) if seed is not None else []
-        )
-    }
+    seed_peers = _peer_variants(seed, variants, baseline_names) if seed is not None else []
+    peer_names = {peer.name for peer in seed_peers}
     overlaid: list[VariantResult] = []
     for item in variants:
         if (
@@ -996,11 +992,11 @@ def overlay_paired_metrics(
             overlaid.append(item)
             continue
         proposed_score = score_number(item.metrics)
-        peer_scores = [
-            score
-            for peer in _peer_variants(item, variants, baseline_names)
-            if (score := score_number(peer.metrics)) is not None
-        ]
+        peer_scores: list[float] = []
+        for peer in _peer_variants(item, variants, baseline_names):
+            peer_score = score_number(peer.metrics)
+            if peer_score is not None:
+                peer_scores.append(peer_score)
         if proposed_score is None or not peer_scores:
             overlaid.append(item)
             continue

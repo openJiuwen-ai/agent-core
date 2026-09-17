@@ -1354,7 +1354,7 @@ class CodeImplementationAdapter:
         output_dir = agent_workspace_dir(run_id).resolve() / "output"
         smoke_dir = module_attempt_dir(run_id, "code_implementation", round_index, attempt)
         try:
-            CodeImplementationAgent._promote_output(
+            CodeImplementationAgent.promote_output(
                 output_dir,
                 code_dir,
                 log_path=smoke_dir / _PROMOTION_LOG,

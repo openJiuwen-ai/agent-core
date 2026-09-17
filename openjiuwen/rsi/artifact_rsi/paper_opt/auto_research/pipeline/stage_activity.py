@@ -48,21 +48,21 @@ def _extract_bash_command(arguments: Any) -> str | None:
         if command is None and isinstance(payload.get("text"), str):
             try:
                 inner = json.loads(payload["text"])
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 inner = None
             command = inner.get("command") if isinstance(inner, dict) else payload.get("text")
         if not isinstance(command, str):
             return None
         command = " ".join(command.split()).strip()
         return command or None
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
 
 
 def _extract_path(arguments: Any) -> str | None:
     try:
         payload = arguments if isinstance(arguments, dict) else json.loads(arguments)
-    except (TypeError, ValueError, json.JSONDecodeError):
+    except (TypeError, ValueError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -154,7 +154,7 @@ async def tail_activity(
                 continue
             try:
                 event = json.loads(line)
-            except (json.JSONDecodeError, ValueError):
+            except ValueError:
                 continue
             if event.get("event") == "model_call_start":
                 # "Waiting on the model" is not a "what just happened" fact --
