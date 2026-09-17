@@ -98,6 +98,22 @@ def _normalize_message(message: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _trim_prompt_to_last_user(prompt: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Keep the current-invoke entry: last ``user`` message through the end.
+
+    LLM spans may store the full request prompt (prior session rounds included).
+    Callers such as TTSE pass ``invoke_local=True`` so a missing-window fallback
+    does not re-import that history. This is a slice, not text-overlap merge.
+    """
+    last_user: int | None = None
+    for index, message in enumerate(prompt):
+        if message.get("role") == "user":
+            last_user = index
+    if last_user is None:
+        return []
+    return list(prompt[last_user:])
+
+
 def _tool_message(
     tool_call: Mapping[str, Any],
     tool_call_names: Mapping[str, object],
@@ -229,6 +245,7 @@ def project_trajectory_messages(
     trajectory: Trajectory,
     *,
     fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    invoke_local: bool = False,
 ) -> tuple[list[dict[str, Any]], tuple[Mapping[str, object], ...]]:
     """Project a trajectory into detached chat messages, with its defects.
 
@@ -246,9 +263,15 @@ def project_trajectory_messages(
     Compaction requests contribute nothing: their prompt is about the
     conversation, not part of it.
 
+    ``invoke_local=True`` (TTSE detect/induce) slices a missing-window prompt
+    or a committed window to the last ``user`` message. Later spans in the same
+    projection do not re-append that prompt; they only add completions/tools.
+    This does not compare prompt text to merge overlap.
+
     Args:
         trajectory: Canonical trajectory including its v2 event spans.
         fields: Semantic message fields to keep besides ``role``.
+        invoke_local: If True, keep only the current-invoke user turn.
 
     Returns:
         The messages, and the issues found while projecting them.
@@ -283,8 +306,15 @@ def project_trajectory_messages(
                         }
                     )
                 )
-                projection.add_prompt([_normalize_message(message) for message in raw_prompt])
+                prompt = [_normalize_message(message) for message in raw_prompt]
+                if invoke_local:
+                    if not projection.messages:
+                        projection.add_prompt(_trim_prompt_to_last_user(prompt))
+                else:
+                    projection.add_prompt(prompt)
             else:
+                if invoke_local:
+                    window = _trim_prompt_to_last_user(window)
                 projection.add_window(window)
             projection.add_completions([_normalize_message(message) for message in raw_completions])
             continue
@@ -299,13 +329,16 @@ def trajectory_to_messages(
     trajectory: Trajectory,
     *,
     fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    invoke_local: bool = False,
 ) -> list[dict[str, Any]]:
     """Project canonical spans into detached OpenAI-compatible messages.
 
     See :func:`project_trajectory_messages`, which also returns the issues.
     """
 
-    messages, _ = project_trajectory_messages(trajectory, fields=fields)
+    messages, _ = project_trajectory_messages(
+        trajectory, fields=fields, invoke_local=invoke_local
+    )
     return messages
 
 
