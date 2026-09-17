@@ -5,18 +5,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-from openjiuwen.agent_evolving.ttse.config import TTSEConfig
-from openjiuwen.agent_evolving.ttse.success import SuccessDetector
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
 from openjiuwen.harness.rails.evolution.evolution_interrupt_rail import EvolutionInterruptRail
 from openjiuwen.harness.rails.evolution.review.runtime import EvolutionReviewRuntime
 from openjiuwen.harness.rails.evolution.skill_evolution_rail import SkillEvolutionRail
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
-from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_evolving.ttse.config import TTSEConfig
+    from openjiuwen.agent_evolving.ttse.success import SuccessDetector
+    from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 
 
 @dataclass(frozen=True)
@@ -397,11 +399,19 @@ def unconfigure_skill_evolution(agent, *, team: bool | None = None) -> int:
     return agent.strip_rails_by_type(types_to_remove)
 
 
+def _load_ttse_rail_cls():
+    """Import TTSERail only when a TTSE configure/unconfigure call runs."""
+    from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
+
+    return TTSERail
+
+
 def _find_existing_ttse_rail(agent) -> Optional[TTSERail]:
     """Return an existing TTSERail on ``agent`` (exact class), if any."""
-    rails = agent.find_rails_by_type((TTSERail,))
+    ttse_rail_cls = _load_ttse_rail_cls()
+    rails = agent.find_rails_by_type((ttse_rail_cls,))
     for rail in rails:
-        if rail.__class__ is TTSERail:
+        if rail.__class__ is ttse_rail_cls:
             return rail
     return None
 
@@ -437,12 +447,15 @@ def configure_ttse_evolution(
     Returns:
         The agent, for chaining.
     """
+    from openjiuwen.agent_evolving.ttse.config import TTSEConfig as _TTSEConfig
+
+    ttse_rail_cls = _load_ttse_rail_cls()
     existing = _find_existing_ttse_rail(agent)
     if existing is not None:
         logger.info("[TTSERail] already mounted; skipping duplicate configure")
         return agent
-    cfg = ttse_config or TTSEConfig()
-    rail = TTSERail(
+    cfg = ttse_config or _TTSEConfig()
+    rail = ttse_rail_cls(
         llm=llm,
         model=model,
         ttse_config=cfg,
@@ -494,7 +507,7 @@ def unconfigure_ttse_evolution(agent) -> int:
 
     Returns the number of rails removed.
     """
-    removed = agent.strip_rails_by_type((TTSERail,))
+    removed = agent.strip_rails_by_type((_load_ttse_rail_cls(),))
     if removed:
         logger.info("[TTSERail] unmounted (%s rail(s) removed)", removed)
     return removed

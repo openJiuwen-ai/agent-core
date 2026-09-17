@@ -2,14 +2,8 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Evolution rail implementations and their historical harness exports."""
 
-from openjiuwen.agent_evolving.ttse import (
-    SignalBasedSuccessDetector,
-    SuccessDetector,
-    SuccessOutcome,
-    TrajectoryErrorSuccessDetector,
-    TTSEConfig,
-    TTSERecordStore,
-)
+from importlib import import_module
+
 from openjiuwen.harness.rails.evolution.approval_events import (
     attach_evolution_meta,
     build_evolution_progress_event,
@@ -94,7 +88,6 @@ from openjiuwen.harness.rails.evolution.team_context_evolution_rail import (
 )
 from openjiuwen.harness.rails.evolution.team_skill_evolution_rail import TeamSkillEvolutionRail
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
-from openjiuwen.harness.rails.evolution.ttse_rail import TTSERail
 from openjiuwen.harness.rails.skills.skill_create_rail import SkillCreateRail
 from openjiuwen.harness.rails.skills.team_skill_create_rail import TeamSkillCreateRail
 
@@ -165,3 +158,28 @@ __all__ = [
     "TrajectoryErrorSuccessDetector",
     "SignalBasedSuccessDetector",
 ]
+
+_TTSE_LAZY_ATTRS = {
+    "TTSERail": ("openjiuwen.harness.rails.evolution.ttse_rail", "TTSERail"),
+    "TTSEConfig": ("openjiuwen.agent_evolving.ttse", "TTSEConfig"),
+    "TTSERecordStore": ("openjiuwen.agent_evolving.ttse", "TTSERecordStore"),
+    "SuccessDetector": ("openjiuwen.agent_evolving.ttse", "SuccessDetector"),
+    "SuccessOutcome": ("openjiuwen.agent_evolving.ttse", "SuccessOutcome"),
+    "TrajectoryErrorSuccessDetector": ("openjiuwen.agent_evolving.ttse", "TrajectoryErrorSuccessDetector"),
+    "SignalBasedSuccessDetector": ("openjiuwen.agent_evolving.ttse", "SignalBasedSuccessDetector"),
+}
+
+
+def __getattr__(name: str):
+    """Load TTSE types only when an explicit TTSE export is requested."""
+    target = _TTSE_LAZY_ATTRS.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attr_name = target
+    value = getattr(import_module(module_name), attr_name)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted({*globals().keys(), *_TTSE_LAZY_ATTRS})

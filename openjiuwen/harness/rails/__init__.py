@@ -34,7 +34,6 @@ from openjiuwen.harness.rails.evolution import (
     TeamInsightBuffer,
     TeamInsightEntry,
     TrajectoryRail,
-    TTSERail,
 )
 from openjiuwen.harness.rails.heartbeat_rail import HeartbeatRail
 from openjiuwen.harness.rails.model_anomaly_detection_rail import (
@@ -145,3 +144,17 @@ __all__ = [
     "VerificationContractRail",
     "VerificationRail",
 ]
+
+
+def __getattr__(name: str):
+    """Load TTSERail only when the TTSE export is requested."""
+    if name != "TTSERail":
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from openjiuwen.harness.rails.evolution import TTSERail
+
+    globals()["TTSERail"] = TTSERail
+    return TTSERail
+
+
+def __dir__():
+    return sorted({*globals().keys(), "TTSERail"})

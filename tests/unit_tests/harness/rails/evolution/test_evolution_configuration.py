@@ -187,6 +187,24 @@ def test_new_functions_can_be_imported_from_both_packages():
     assert unconfigure_skill_evolution is exported_unconfigure
 
 
+def test_importing_skill_configure_does_not_load_ttse():
+    """Skill evolution imports must not pull the TTSE package into the main path."""
+    import subprocess
+    import sys
+
+    script = """
+import sys
+from openjiuwen.harness.rails import SkillEvolutionRail, configure_skill_evolution, configure_ttse_evolution
+assert callable(configure_skill_evolution)
+assert callable(configure_ttse_evolution)
+assert SkillEvolutionRail is not None
+loaded = [name for name in sys.modules if name == "openjiuwen.agent_evolving.ttse" or name.startswith("openjiuwen.agent_evolving.ttse.") or name == "openjiuwen.harness.rails.evolution.ttse_rail"]
+assert not loaded, loaded
+"""
+    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+
+
 def test_old_build_factory_names_no_longer_exported():
     for name in (
         "build_skill_evolution_rails",
