@@ -130,6 +130,7 @@ async def tail_activity(
     offset = 0
     last_size = -1
     seen_patterns: dict[str, int] = {}
+    has_shown_action = False
     while True:
         await asyncio.sleep(poll_seconds)
         try:
@@ -155,8 +156,17 @@ async def tail_activity(
                 event = json.loads(line)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if event.get("event") == "model_call_start":
+                # "Waiting on the model" is not a "what just happened" fact --
+                # only worth a bootstrap note before any real action exists,
+                # never worth clobbering one already shown (e.g. "编写
+                # `sections/method.tex`") for however long the call takes.
+                if not has_shown_action and note is None:
+                    note = _describe_event(event, seen_patterns)
+                continue
             described = _describe_event(event, seen_patterns)
             if described:
                 note = described
+                has_shown_action = True
         if note:
             await on_note(note)
