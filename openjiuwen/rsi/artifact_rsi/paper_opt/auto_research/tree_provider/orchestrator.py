@@ -938,15 +938,22 @@ class PaperTreeOrchestrator:
         try:
             set_usage_node(seed.run_id)
 
-            async def on_stage(module: str) -> None:
+            async def on_stage(module: str, note: str | None = None) -> None:
+                # No "正在" prefix: the frontend's own isStageDescription()
+                # filter (jiuwenswarm's rsiPresentation.ts) treats any
+                # description containing "正在" as stage boilerplate and
+                # hides it from the node summary line, which is the only
+                # place the live `note` this label gets concatenated with
+                # (see PaperTreeOrchestrator._emit's NodeStageEvent handling
+                # below) can actually surface without frontend changes.
                 labels = {
-                    "manager": "正在规划下一阶段",
-                    "topic_survey": "正在调研文献",
-                    "experiment_design": "正在设计实验",
-                    "code_implementation": "正在实现代码",
-                    "experiment_execution": "正在执行实验",
-                    "reflection": "正在分析与反思",
-                    "reporting": "正在撰写论文",
+                    "manager": "规划下一阶段中",
+                    "topic_survey": "调研文献中",
+                    "experiment_design": "设计实验中",
+                    "code_implementation": "实现代码中",
+                    "experiment_execution": "执行实验中",
+                    "reflection": "分析与反思中",
+                    "reporting": "撰写论文中",
                 }
                 node = next(
                     (n for n in self.storage.load_tree() if _node_run_id(n) == seed.run_id),
@@ -957,6 +964,7 @@ class PaperTreeOrchestrator:
                         NodeStageEvent(
                             node_ref=node.node_id,
                             stage={"id": module, "name": labels.get(module, module)},
+                            note=note,
                         )
                     )
 
@@ -1251,11 +1259,17 @@ class PaperTreeOrchestrator:
         if isinstance(event, NodeStageEvent):
             for node in self.storage.load_tree():
                 if node.node_id == event.node_ref:
+                    label = event.stage.get("name")
+                    # `note` is a live "what just happened" hint (see
+                    # pipeline/stage_activity.py) folded straight into the
+                    # same summary string the frontend already renders, so
+                    # showing it needs no new field on the frontend side.
+                    summary = f"{label} · {event.note}" if event.note else label
                     self.storage.append_node(
                         node.model_copy(
                             update={
-                                "summary": event.stage.get("name"),
-                                "extra": {**node.extra, "stage": dict(event.stage)},
+                                "summary": summary,
+                                "extra": {**node.extra, "stage": {**dict(event.stage), "note": event.note}},
                             }
                         )
                     )

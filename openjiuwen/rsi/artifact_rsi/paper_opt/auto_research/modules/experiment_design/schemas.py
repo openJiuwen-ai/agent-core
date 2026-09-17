@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -314,6 +315,20 @@ class ExperimentDesignDraft(BaseModel):
     closed_claims: list[ClosedClaim] = Field(default_factory=list)
     new_claims: list[NewClaim] = Field(default_factory=list)
     section_updates: SectionUpdates | None = None
+
+    @field_validator("code_agent_instruction", mode="before")
+    @classmethod
+    def _decode_code_agent_instruction(cls, value: Any) -> Any:
+        # Some tool-calling backends don't dereference the `$ref` this nested
+        # model gets in the JSON schema (see `model_json_schema()`) and emit
+        # the argument as a JSON string instead of an object -- decode it
+        # here rather than failing validation outright.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                return value
+        return value
 
     @model_validator(mode="after")
     def _reject_empty_lists(self) -> ExperimentDesignDraft:
