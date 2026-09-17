@@ -1296,6 +1296,7 @@ async def test_direct_profiles_promote_readable_page_out_of_pending(
     monkeypatch.setattr(context_pipeline, "Model", _KeepRulesBalancedModel)
 
     actual_profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=batch,
@@ -1375,6 +1376,7 @@ async def test_forty_two_readable_pages_have_zero_fallback_through_direct_profil
     monkeypatch.setattr(context_pipeline, "Model", _KeepRulesBalancedModel)
 
     actual_profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=batch,
@@ -4152,6 +4154,7 @@ async def test_embedding_failure_keeps_balanced_profile_and_one_model_attempt(
 
     with caplog.at_level(logging.WARNING):
         result = await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=FetchBatch(batch_id="batch-1", items=[]),

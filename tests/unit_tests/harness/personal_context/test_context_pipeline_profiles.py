@@ -213,6 +213,7 @@ async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_processing_batch(0),
@@ -296,6 +297,7 @@ async def test_agent_context_normalization_keeps_event_loop_responsive(
     monkeypatch.setattr(context_pipeline, "run_personal_context_agent", fail_after_preparation)
     attempt = asyncio.create_task(
         service._filesystem_with_fallback(
+            run_id="run-progress",
             processed={"documents": [], "blocks": [], "deleted_ids": []},
             sandbox=sandbox,
             batch=_processing_batch(0),
@@ -406,6 +408,7 @@ async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
     monkeypatch.setattr(context_pipeline, "run_personal_context_agent", unexpected_agent)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_processing_batch(0),
@@ -495,6 +498,7 @@ async def test_agent_fallback_does_not_migrate_invalid_legacy_root_page(
 
     with pytest.raises(ExecutionError, match="root may only contain"):
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed={"documents": [], "blocks": [], "deleted_ids": []},
             sandbox=sandbox,
             batch=_processing_batch(0),
@@ -1018,6 +1022,7 @@ async def test_balanced_groups_at_most_five_upserts_without_retry(
         sandbox=sandbox,
         batch=_processing_batch(item_count),
         service_id="local",
+        run_id="run-progress",
     )
 
     calls = _page_model_calls()
@@ -1096,6 +1101,7 @@ async def test_balanced_uses_shared_configured_capacity_in_prompt_and_publish(
         sandbox=sandbox,
         batch=_processing_batch(3),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -1180,6 +1186,7 @@ async def test_balanced_enriches_pages_without_rewriting_existing_directory_body
         sandbox=sandbox,
         batch=_processing_batch(2),
         service_id="local",
+        run_id="run-progress",
     )
 
     candidate = sandbox / "context"
@@ -1239,6 +1246,7 @@ async def test_balanced_long_display_titles_keep_full_h1_with_one_model_call(
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     candidate = sandbox / "context"
@@ -1309,6 +1317,7 @@ async def test_balanced_preexisting_managed_source_updates_title_and_summary_wit
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -1367,6 +1376,7 @@ async def test_balanced_invalid_items_fall_back_individually_and_later_groups_co
         sandbox=sandbox,
         batch=_processing_batch(7),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -1410,6 +1420,7 @@ async def test_balanced_zero_accepted_items_returns_publishable_rules_candidate(
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "rules"
@@ -1598,6 +1609,7 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={
             "documents": [
                 {
@@ -2262,6 +2274,7 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
     if profile == "agent":
         with pytest.raises(Exception) as raised:
             await service._filesystem_with_fallback(
+                run_id="run-progress",
                 processed=processed,
                 sandbox=sandbox,
                 batch=FetchBatch(batch_id="finish-run", items=[]),
@@ -2270,6 +2283,7 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
     else:
         assert (
             await service._filesystem_with_fallback(
+                run_id="run-progress",
                 processed=processed,
                 sandbox=sandbox,
                 batch=FetchBatch(batch_id="finish-run", items=[]),
@@ -4148,6 +4162,7 @@ async def test_agent_to_balanced_cannot_move_new_readable_page_back_into_full_le
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -4240,6 +4255,7 @@ async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empt
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_batch(),
@@ -4313,6 +4329,7 @@ async def test_agent_authored_pending_path_does_not_trigger_profile_fallback(
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={
             "documents": [
                 {
@@ -4872,6 +4889,7 @@ async def test_direct_agent_prompt_and_inputs_do_not_expose_prescribed_fallback_
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=batch,
@@ -5025,6 +5043,7 @@ async def test_filesystem_agent_undeclared_root_is_a_non_fallback_security_error
     )
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -5099,6 +5118,7 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", capture_balanced_attempt)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5205,6 +5225,7 @@ async def test_agent_originated_fallback_preserves_over_capacity_existing_paths(
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5331,6 +5352,7 @@ async def test_agent_fallback_preserves_every_baseline_path_and_uses_page_metada
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5421,6 +5443,7 @@ async def test_direct_balanced_cannot_launder_new_deterministic_fallback_with_mo
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5488,6 +5511,7 @@ async def test_direct_balanced_fallback_to_rules_reclusters_over_capacity_contex
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5558,6 +5582,7 @@ async def test_filesystem_agent_root_layout_failure_falls_back_from_clean_baseli
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5609,6 +5634,7 @@ async def test_filesystem_rules_fallback_discards_failed_candidate(
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", failed_balanced)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5674,6 +5700,7 @@ async def test_filesystem_agent_missing_markdown_link_does_not_force_fallback(
     monkeypatch.setattr("openjiuwen.harness.personal_context.context_pipeline.Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5719,6 +5746,7 @@ async def test_balanced_invalid_output_does_not_retry(tmp_path: Path, monkeypatc
         "actual_profile": "balanced",
     }
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5783,6 +5811,7 @@ async def test_balanced_delete_only_skips_page_model_and_does_not_restore_page(
             alias_targets=aliases,
             deleted_source_ids={source_id},
             service_id="local",
+            run_id="run-progress",
         )
         == "rules"
     )
@@ -5869,6 +5898,7 @@ async def test_balanced_model_error_publishes_rules_candidate(tmp_path: Path, mo
     }
     assert (
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -5908,6 +5938,7 @@ async def test_filesystem_candidate_prepare_disk_error_is_non_fallback(
     }
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -6120,6 +6151,7 @@ async def test_filesystem_agent_can_update_an_existing_page_without_repair(
 
     assert (
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=second_sandbox,
             batch=new_batch,
@@ -6573,6 +6605,7 @@ async def test_materialized_source_is_copied_once_and_not_exposed_to_balanced_fa
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", balanced_success)
 
     profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=batch,
@@ -6648,6 +6681,7 @@ async def test_filesystem_non_model_agent_statuses_do_not_fallback(
 
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed={
                 "documents": [],
                 "blocks": [],
