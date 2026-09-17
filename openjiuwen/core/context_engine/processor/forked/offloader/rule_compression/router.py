@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import json
@@ -7,6 +10,7 @@ from typing import Protocol
 from json_repair import loads as repair_json_loads
 
 from openjiuwen.core.context_engine.processor.forked.offloader.rule_compression.common import (
+    is_source_file_path,
     strip_display_line_prefixes,
     strip_display_line_prefixes_preserving_body_whitespace,
 )
@@ -22,6 +26,7 @@ from .compressors.json_array_compressor import JsonArrayCompressor
 from .compressors.log_compressor import LogCompressor
 from .compressors.plain_text_compressor import PlainTextCompressor
 from .compressors.search_results_compressor import SearchResultsCompressor
+from .compressors.source_file_compressor import SourceFileCompressor
 
 
 class RuleCompressor(Protocol):
@@ -74,9 +79,15 @@ class RuleContentRouter:
             ContentType.SEARCH_RESULTS: SearchResultsCompressor(),
             ContentType.LOG: LogCompressor(),
             ContentType.PLAIN_TEXT: PlainTextCompressor(),
+            ContentType.SOURCE_FILE: SourceFileCompressor(),
         }
 
     def detect(self, content: str, ctx: RuleContext | None = None) -> ContentType:
+        # A file read by path is typed by its file name before any content
+        # sniffing: the sniffing heuristics below cannot tell JSX from HTML or a
+        # Markdown line starting with "Running" from a build log.
+        if ctx is not None and ctx.file_path and is_source_file_path(ctx.file_path):
+            return ContentType.SOURCE_FILE
         text = (content or "").strip()
         if not text:
             return ContentType.PLAIN_TEXT

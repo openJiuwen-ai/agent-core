@@ -1,3 +1,6 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -13,6 +16,8 @@ class ContentType(str, Enum):
     LOG = "LOG"
     BUILD_OUTPUT = "LOG"
     PLAIN_TEXT = "PLAIN_TEXT"
+    SOURCE_FILE = "SOURCE_FILE"
+    """Verbatim source, markup, config or document file read by path; never rule-compressed."""
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,8 @@ class RuleContext:
     json_csv_min_density: float = 0.8
     query_terms: frozenset[str] = frozenset()
     tool_name: str | None = None
+    file_path: str | None = None
+    """File path named by the tool call arguments, used to route file reads by file type."""
     search_max_matches_per_file: int = 5
     search_max_total_matches: int = 30
     search_max_files: int = 15
