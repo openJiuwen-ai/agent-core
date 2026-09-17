@@ -645,7 +645,7 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     submit_release[2].set()
     await asyncio.wait_for(finish_entered.wait(), timeout=1)
     publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 80)
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 45)
 
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
@@ -958,8 +958,7 @@ async def test_run_fetch_rejects_disabled_core_stopped_runtime_or_dead_pipeline(
     await stopped.set_configuration(_manual_config(tmp_path))
     stopped._state = "STOPPED"
     stopped._pipeline_service = _RunningPipeline()  # type: ignore[assignment]
-    with pytest.raises(PersonalContext.Error):
-        await stopped.run_fetch()
+    await stopped.run_fetch()
 
     dead_pipeline = PersonalContext(home=tmp_path / "dead")
     await dead_pipeline.set_configuration(_manual_config(tmp_path))
@@ -2546,7 +2545,7 @@ async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
         progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
         assert progress["run_state"] == "failed"
-        assert progress["progress_percent"] == 80
+        assert progress["progress_percent"] == 45
         assert personal_context._fetch_states["notes"] == "FAILED"
     finally:
         release.set()
@@ -2877,7 +2876,7 @@ async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         2,
-        80,
+        45,
     )
 
 

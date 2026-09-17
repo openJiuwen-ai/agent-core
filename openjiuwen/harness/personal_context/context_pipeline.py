@@ -23,7 +23,7 @@ import threading
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
+from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -1198,27 +1198,45 @@ def _remove_tree_entry(path: Path) -> None:
         _remove_tree(path)
 
 
+def _retry_readonly_removal(
+    function: Any,
+    path: str,
+    exc_info: tuple[type[BaseException], BaseException, Any],
+) -> None:
+    error = exc_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise error
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+    except OSError:
+        raise error from None
+
+
 def _remove_tree(path: Path) -> None:
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_retry_readonly_removal)
     except OSError as exc:
-        if not isinstance(exc, FileNotFoundError) and getattr(exc, "winerror", None) != 145:
+        if (
+            not isinstance(exc, FileNotFoundError)
+            and getattr(exc, "winerror", None) not in (3, 145, 206)
+        ):
             raise
         if not _path_exists(path) and not _path_is_link_or_reparse(path):
             return
-        shutil.rmtree(_extended_path(path))
+        shutil.rmtree(_extended_path(path), onerror=_retry_readonly_removal)
 
 
 def _make_tree_writable(path: Path) -> None:
     """Make a temporary candidate removable after read-only source copies."""
 
-    target = _extended_path(path)
-    if target.is_symlink() or not target.exists():
+    if not _path_exists(path) or _path_is_link_or_reparse(path):
         return
-    if target.is_dir():
-        for child in target.iterdir():
-            _make_tree_writable(child)
-    target.chmod(target.stat().st_mode | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    for entry in [path, *_walk_tree_paths(path)]:
+        extended = _extended_path(entry)
+        extended.chmod(extended.stat().st_mode | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
 
 
 def _remove_empty_directories(root: Path) -> None:
@@ -6830,7 +6848,7 @@ class ContextPipelineService:
         config: PersonalContextConfig,
         input_queue: asyncio.Queue[object],
         embedding_config: EmbeddingConfig | None = None,
-        progress_callback: Callable[[str, str, str], None] | None = None,
+        progress_callback: Callable[[str, str, str, int], None] | None = None,
     ) -> None:
         self._home = home.expanduser().resolve()
         self._config = config
@@ -7302,6 +7320,7 @@ class ContextPipelineService:
                 alias_targets=alias_targets,
                 deleted_source_ids=deleted_source_ids,
                 service_id=service_id,
+                run_id=run_id,
                 provider=provider,
                 source_ids_by_logical_id=logical_sources,
                 run_time=run_time,
@@ -7309,7 +7328,7 @@ class ContextPipelineService:
             )
             self._raise_if_publication_fenced(key)
             if self._progress_callback is not None:
-                self._progress_callback(service_id, run_id, "validating")
+                self._progress_callback(service_id, run_id, "validating", 90)
             if retaining:
                 processed["_retaining"] = True
             actual_profile = filesystem_profile
@@ -7808,6 +7827,11 @@ class ContextPipelineService:
                 _make_tree_writable(target)
                 _remove_tree(target)
             except OSError as exc:
+                logger.warning(
+                    "PersonalContext run sandbox removal failed: %s (winerror=%s)",
+                    exc,
+                    getattr(exc, "winerror", None),
+                )
                 raise _publish_error("run sandbox could not be removed") from exc
         service_root = target.parent
         with contextlib.suppress(OSError):
@@ -7910,6 +7934,7 @@ class ContextPipelineService:
         alias_targets: Mapping[str, str] | None = None,
         deleted_source_ids: set[str] | None = None,
         service_id: str | None = None,
+        run_id: str,
         provider: str | None = None,
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
@@ -7927,6 +7952,11 @@ class ContextPipelineService:
             source_ids_by_logical_id=source_ids_by_logical_id,
             alias_targets=alias_targets,
         )
+
+        def report_progress(percent: int) -> None:
+            if self._progress_callback is not None and service_id is not None:
+                self._progress_callback(service_id, run_id, "organizing", percent)
+        report_progress(50)
 
         def log_agent_fallback(profile: str) -> None:
             if requested == "agent":
@@ -8007,7 +8037,9 @@ class ContextPipelineService:
             await prepare_rules_candidate(
                 preserve_existing_paths=retaining or requested == "agent",
             )
+            report_progress(60)
             log_agent_fallback("rules")
+            report_progress(85)
             return "rules"
         profiles = [
             candidate
@@ -8029,7 +8061,9 @@ class ContextPipelineService:
         for candidate in profiles:
             if candidate == "rules":
                 await prepare_rules_candidate(preserve_existing_paths=requested == "agent")
+                report_progress(60)
                 log_agent_fallback("rules")
+                report_progress(85)
                 return "rules"
             try:
                 preserve_existing_paths = requested == "agent" and candidate in {"balanced", "rules"}
@@ -8059,6 +8093,7 @@ class ContextPipelineService:
                 }
                 preexisting_managed_source_ids = frozenset(preexisting_managed_pages_by_source)
                 balanced_baseline_managed_pages_by_source = preexisting_managed_pages_by_source or None
+                report_progress(60)
                 if candidate == "agent":
                     await _cancel_safe_to_thread(
                         _remove_rules_pages_for_deleted_source_ids,
@@ -8306,6 +8341,7 @@ class ContextPipelineService:
                         }
                         balanced_baseline_managed_pages_by_source.update(preexisting_managed_pages_by_source)
 
+                report_progress(70)
                 _validate_agent_candidate(
                     sandbox / "context",
                     baseline=context_baseline,
@@ -8364,6 +8400,7 @@ class ContextPipelineService:
                 processed["_filesystem_candidate_profile"] = final_candidate
                 if preserve_existing_paths:
                     log_agent_fallback(final_candidate)
+                report_progress(85)
                 return final_candidate
             except (OSError, UnicodeError) as error:
                 raise _publish_error("filesystem candidate could not be prepared") from error
@@ -8371,6 +8408,7 @@ class ContextPipelineService:
                 if not _profile_fallback_allowed(error):
                     raise
                 continue
+        report_progress(85)
         return "rules"
 
     async def _filesystem_balanced_model_attempt(
@@ -8778,7 +8816,7 @@ class ContextPipelineService:
                 )
             self._raise_if_publication_fenced((service_id, run_id))
             if self._progress_callback is not None:
-                self._progress_callback(service_id, run_id, "committing")
+                self._progress_callback(service_id, run_id, "committing", 97)
             await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
 
     def _fail_active(self, error: BaseError) -> None:
@@ -8931,9 +8969,10 @@ def _make_tree_read_only(root: Path) -> None:
 
     if not root.exists() or root.is_symlink():
         return
-    for path in [*root.rglob("*"), root]:
-        mode = path.stat().st_mode
-        path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    for path in [*list(_walk_tree_paths(root)), root]:
+        extended = _extended_path(path)
+        mode = extended.stat().st_mode
+        extended.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
 
 def _prepare_agent_inputs(
@@ -9594,9 +9633,10 @@ def _materialize_candidate_source(
         _assert_no_symlinks(source)
         target = sandbox / "materialized-source"
         _copy_tree(source, target)
-        for path in [target, *target.rglob("*")]:
-            mode = path.stat().st_mode
-            path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        for path in [target, *list(_walk_tree_paths(target))]:
+            extended = _extended_path(path)
+            mode = extended.stat().st_mode
+            extended.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
         return "materialized-source"
     except (OSError, ValueError) as exc:
         raise _publish_error("materialized source could not be safely copied") from exc
