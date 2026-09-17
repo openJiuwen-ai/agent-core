@@ -36,6 +36,7 @@ _ORG_TASK_NEW_COLUMNS = (
 def ensure_org_static_tables(sync_conn) -> None:
     SQLModel.metadata.create_all(sync_conn, tables=org_static_tables())
     _ensure_org_task_columns(sync_conn)
+    _ensure_org_summary_execution_columns(sync_conn)
     inspector = inspect(sync_conn)
     if "unclaimed_task_policy_json" not in {col["name"] for col in inspector.get_columns("org_info")}:
         sync_conn.exec_driver_sql("ALTER TABLE org_info ADD COLUMN unclaimed_task_policy_json TEXT")
@@ -62,6 +63,19 @@ def _ensure_org_task_columns(sync_conn) -> None:
             f"failure_code = '{failure_code.value}', "
             "failed_at = COALESCE(failed_at, updated_at) "
             f"WHERE status = '{legacy_status}' AND failure_code IS NULL"
+        )
+
+
+def _ensure_org_summary_execution_columns(sync_conn) -> None:
+    """Add columns introduced after org_summary_execution was first created."""
+
+    inspector = inspect(sync_conn)
+    if "org_summary_execution" not in inspector.get_table_names():
+        return
+    columns = {col["name"] for col in inspector.get_columns("org_summary_execution")}
+    if "updated_at" not in columns:
+        sync_conn.exec_driver_sql(
+            "ALTER TABLE org_summary_execution ADD COLUMN updated_at BIGINT NOT NULL DEFAULT 0"
         )
 
 
