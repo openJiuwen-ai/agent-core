@@ -658,6 +658,59 @@ class TestApproveToolCallTool:
         assert result.success is True
         assert result.error is None
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_rejects_missing_tool_call_id(self, agent_team, t):
+        tool = ApproveToolCallTool(agent_team, t)
+        agent_team.approve_tool = AsyncMock()
+        result = await tool.invoke(
+            {
+                "member_name": "member1",
+                "approved": True,
+            }
+        )
+
+        assert result.success is False
+        assert "tool_call_id" in result.error
+        assert "Got keys: approved, member_name" in result.error
+        agent_team.approve_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_invoke_rejects_dotted_alias_key(self, agent_team, t):
+        tool = ApproveToolCallTool(agent_team, t)
+        agent_team.approve_tool = AsyncMock()
+        result = await tool.invoke(
+            {
+                "member_name": "member1",
+                ".tool_call_id": "call-1",
+                "approved": True,
+            }
+        )
+
+        assert result.success is False
+        assert "tool_call_id" in result.error
+        assert ".tool_call_id" in result.error
+        agent_team.approve_tool.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize("tool_call_id", [None, ""])
+    async def test_invoke_rejects_none_and_empty_tool_call_id(self, agent_team, t, tool_call_id):
+        tool = ApproveToolCallTool(agent_team, t)
+        agent_team.approve_tool = AsyncMock()
+        result = await tool.invoke(
+            {
+                "member_name": "member1",
+                "tool_call_id": tool_call_id,
+                "approved": True,
+            }
+        )
+
+        assert result.success is False
+        assert "tool_call_id" in result.error
+        agent_team.approve_tool.assert_not_awaited()
+
 
 class TestListMembersTool:
     """Test ListMembersTool"""

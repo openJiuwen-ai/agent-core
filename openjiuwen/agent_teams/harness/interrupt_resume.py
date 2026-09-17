@@ -13,6 +13,34 @@ from openjiuwen.core.single_agent.interrupt.state import (
 )
 
 
+def build_approval_interactive_input(
+    tool_call_id: Any,
+    *,
+    approved: Any,
+    feedback: str = "",
+    auto_confirm: bool = False,
+) -> InteractiveInput | None:
+    """Build the HITL resume payload for one leader tool-approval decision.
+
+    Event-bus and mailbox delivery must construct the same ``InteractiveInput``
+    shape; a raw dict does not match a pending interrupt. Returns ``None``
+    when ``tool_call_id`` is missing or not a non-empty string — callers must
+    not invent aliases or coerce other keys.
+    """
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    interactive_input = InteractiveInput()
+    interactive_input.update(
+        tool_call_id,
+        {
+            "approved": approved,
+            "feedback": feedback or "",
+            "auto_confirm": auto_confirm,
+        },
+    )
+    return interactive_input
+
+
 def pending_tool_resume_ids(state: Any) -> frozenset[str]:
     """Return tool request IDs that are still awaiting input in ``state``."""
     if not isinstance(state, ToolInterruptionState):
