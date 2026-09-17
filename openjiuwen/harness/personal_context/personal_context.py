@@ -355,6 +355,7 @@ class PersonalContext:
         self._fetch_run_progress: dict[str, dict[str, object]] = {}
         self._fetch_run_history: dict[str, list[dict[str, object]]] = {}
         self._fetch_run_identity: dict[str, dict[str, object]] = {}
+        self._fetch_run_profile: dict[str, str] = {}
         self._invalidated_fetch_runs: set[tuple[str, str]] = set()
         self._query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-query")
 
@@ -715,6 +716,12 @@ class PersonalContext:
                 progress_percent=progress_percent,
             )
 
+        def report_pipeline_profile(service_id: str, run_id: str, profile: str) -> None:
+            identity = self._fetch_run_identity.get(service_id)
+            if identity is None or identity.get("run_id") != run_id:
+                return
+            self._fetch_run_profile[service_id] = profile
+
         try:
             # A stopped runtime never reuses its old queue.  The previous
             # pipeline has already drained or failed every item before the
@@ -727,6 +734,7 @@ class PersonalContext:
                 input_queue=self._pipeline_queue,
                 embedding_config=self._embedding_config,
                 progress_callback=report_pipeline_phase,
+                profile_callback=report_pipeline_profile,
             )
             await pipeline.start()
             self._pipeline_service = pipeline
@@ -1608,13 +1616,20 @@ class PersonalContext:
                 raise ValueError("invalid history retention")
             seen: set[str] = set()
             progress_fields = set(_fetch_run_status(service_id, run_state="idle"))
+            required_fields = progress_fields | {"run_id", "started_at", "finished_at"}
             for record in records:
-                if not isinstance(record, dict) or set(record) != progress_fields | {
-                    "run_id",
-                    "started_at",
-                    "finished_at",
-                }:
+                if not isinstance(record, dict) or set(record) not in (
+                    required_fields,
+                    required_fields | {"actual_profile"},
+                ):
                     raise ValueError("invalid history fields")
+                if record.get("actual_profile") is not None and record["actual_profile"] not in {
+                    "agent",
+                    "balanced",
+                    "rules",
+                    "deterministic",
+                }:
+                    raise ValueError("invalid history profile")
                 PersonalContextStatus.validate_fetch_run_progress(
                     {service_id: {key: record[key] for key in progress_fields}}
                 )
@@ -1711,6 +1726,9 @@ class PersonalContext:
             self._fetch_run_progress[service_id] = progress
         identity["finished_at"] = _utc_now()
         record = {**progress, **identity}
+        actual_profile = self._fetch_run_profile.pop(service_id, None)
+        if actual_profile is not None:
+            record["actual_profile"] = actual_profile
         retained = [record] + [
             entry for entry in self._fetch_run_history.get(service_id, []) if entry["run_id"] != identity["run_id"]
         ]
