@@ -159,12 +159,21 @@ async def _terminate_task_in_session(
         return task, []
 
     if not is_valid_transition(TaskStatus(task.status), new_status, TASK_TRANSITIONS):
-        team_logger.error(
-            "Invalid state transition for task %s: %s -> %s",
-            task_id,
-            task.status,
-            new_status.value,
-        )
+        # 竞态：任务已被 reset 回 pending（如暂停/释放 claim）后，complete/cancel
+        # 仍被旧持有者调用。pending 本就不该被终止，这是正确的拒绝，降级为
+        # debug，避免恢复/断点续跑流程刷 ERROR（issue #4318 的 task 部分）。
+        if task.status == TaskStatus.PENDING.value:
+            team_logger.debug(
+                "Task %s is pending (released); ignoring terminal %s",
+                task_id, new_status.value,
+            )
+        else:
+            team_logger.error(
+                "Invalid state transition for task %s: %s -> %s",
+                task_id,
+                task.status,
+                new_status.value,
+            )
         return None
 
     task.status = new_status.value
