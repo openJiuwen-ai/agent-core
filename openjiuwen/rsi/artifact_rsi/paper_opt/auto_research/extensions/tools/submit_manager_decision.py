@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import ManagerDecision
 
@@ -23,7 +24,10 @@ class SubmitManagerDecisionTool(Tool):
                 "DONE / BLOCKED with no contract. Do not invent artifact paths, "
                 "run IDs, or module constructor arguments."
             ),
-            input_params=ManagerDecision.model_json_schema(),
+            # Expand nested-model $ref inline; see submit_experiment_design.py
+            # for why a bare $ref against $defs breaks weaker function-calling
+            # models (observed with GLM-5.2).
+            input_params=CallableSchemaExtractor.get_base_model_schema(ManagerDecision),
             parallel_safe=False,
             idempotent=False,
         )
