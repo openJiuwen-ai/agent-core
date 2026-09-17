@@ -2917,6 +2917,24 @@ class DeepAgent(BaseAgent):
                 )
 
             self.save_state(session)
+            # 记录本轮 request_id，作为 checkpointer 优先恢复时的增量起点指针。
+            # cancel 轮不执行到此处（CancelledError 是 BaseException），因此指针
+            # 永远落在最近一次正常结束的轮次，恰好是需要的基线边界。
+            _rid = getattr(work, "request_id", None)
+            if _rid:
+                session.update_state({"_last_committed_request_id": str(_rid)})
+            # 把本轮的 deepagent 状态 + ContextEngine 上下文真正落库。
+            # 外部传入 session 时 ReActAgent.stream 的 need_cleanup 为 False，
+            # SDK 自身的 post_agent_execute 永远不会触发，checkpointer 恒为空；
+            # 这里补一次 commit 让持久化通道闭环。失败只告警，不阻断本轮返回。
+            try:
+                await session.commit()
+            except Exception:
+                logger.warning(
+                    "[DeepAgent] session commit failed for round task_id=%s",
+                    task_id,
+                    exc_info=True,
+                )
             self.clear_state(session)
             return RoundOutcome(next_work=next_work)
         except Exception as exc:
