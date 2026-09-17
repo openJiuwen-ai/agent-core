@@ -347,6 +347,26 @@ def _is_number_cell(text: str) -> bool:
     return bool(_NUMBER_CELL_RE.fullmatch(text.strip()))
 
 
+def _is_metric_header_cell(index: int, tokens: list[str]) -> bool:
+    """Whether ``cell`` (split into ``tokens``) looks like "<metric name> <first variant>"."""
+    return (
+        index > 0
+        and len(tokens) >= 2
+        and _NAME_TOKEN_RE.fullmatch(tokens[-1])
+        and not _is_number_cell(tokens[-1])
+    )
+
+
+def _is_variant_boundary_cell(tokens: list[str], values_collected: int, n_metrics: int) -> bool:
+    """Whether ``tokens`` is the last value of one row immediately followed by the next variant name."""
+    return (
+        values_collected == n_metrics - 1
+        and len(tokens) >= 2
+        and _is_number_cell(tokens[0])
+        and _NAME_TOKEN_RE.fullmatch(tokens[-1])
+    )
+
+
 def parse_flattened_variant_table(
     text: str,
 ) -> tuple[list[str], list[tuple[str, list[str]]]] | None:
@@ -354,7 +374,9 @@ def parse_flattened_variant_table(
     match = re.search(r"Variant\s*&", text, flags=re.IGNORECASE)
     if match is None:
         return None
-    body = re.split(r"\btabular\b|\bThe proposed\b", text[match.end() :], maxsplit=1)[0]
+    body_start = match.end()
+    tail = text[body_start:]
+    body = re.split(r"\btabular\b|\bThe proposed\b", tail, maxsplit=1)[0]
     cells = [cell.strip() for cell in body.split("&") if cell.strip()]
     if len(cells) < 3:
         return None
@@ -364,12 +386,7 @@ def parse_flattened_variant_table(
     rest_start = 0
     for index, cell in enumerate(cells):
         tokens = cell.split()
-        if (
-            index > 0
-            and len(tokens) >= 2
-            and _NAME_TOKEN_RE.fullmatch(tokens[-1])
-            and not _is_number_cell(tokens[-1])
-        ):
+        if _is_metric_header_cell(index, tokens):
             metric_tokens = tokens[:-1]
             if metric_tokens and all(not _is_number_cell(token) for token in metric_tokens):
                 metrics.append(" ".join(metric_tokens).replace(" ", "_"))
@@ -392,12 +409,7 @@ def parse_flattened_variant_table(
         while len(values) < n_metrics and remaining:
             cell = remaining.pop(0)
             tokens = cell.split()
-            if (
-                len(values) == n_metrics - 1
-                and len(tokens) >= 2
-                and _is_number_cell(tokens[0])
-                and _NAME_TOKEN_RE.fullmatch(tokens[-1])
-            ):
+            if _is_variant_boundary_cell(tokens, len(values), n_metrics):
                 values.append(tokens[0])
                 next_variant = tokens[-1]
                 break

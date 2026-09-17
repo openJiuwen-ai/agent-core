@@ -134,9 +134,9 @@ def build_initial_prompt(document: LatexPaperDocument, evidence: PaperEvidence) 
         [
             "",
             "IMPROVEMENT TASK",
-            "Design, implement, and evaluate one concrete improvement to this baseline paper. Preserve the original paper "
-            "as the baseline; do not present its reported results as new measurements. Every new claim must be supported "
-            "by newly measured evidence and compared explicitly with the baseline.",
+            "Design, implement, and evaluate one concrete improvement to this baseline paper. Preserve the original "
+            "paper as the baseline; do not present its reported results as new measurements. Every new claim must be "
+            "supported by newly measured evidence and compared explicitly with the baseline.",
             "",
             "PROMISING STARTING POINTS",
         ]
@@ -204,7 +204,8 @@ def _load_bibliography(document: LatexPaperDocument) -> tuple[str, list[str], di
             seen_keys.add(key)
             keys.append(key)
             start = match.start()
-            title_match = _BIB_TITLE_RE.search(text[start : start + 800])
+            end = start + 800
+            title_match = _BIB_TITLE_RE.search(text[start:end])
             if title_match:
                 title_to_key.setdefault(title_match.group(1).strip(), key)
     return "\n\n".join(texts), keys, title_to_key
