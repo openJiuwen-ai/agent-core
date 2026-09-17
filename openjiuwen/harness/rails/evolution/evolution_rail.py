@@ -58,6 +58,7 @@ from openjiuwen.extensions.observability import semconv as observability_semconv
 from openjiuwen.extensions.observability.span_context import get_root_span
 from openjiuwen.core.common.background_tasks import BackgroundTask
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.llm.call_scope import LlmObservationSuppression
 from openjiuwen.core.runner import Runner
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.single_agent.rail.base import (
@@ -1056,10 +1057,13 @@ class EvolutionRail(DeepAgentRail):
         outcome: dict[str, str] | None = None
         try:
             total_timeout = self._get_evolution_total_timeout_secs()
-            # Suppression must cover the actual execution body so spans from
-            # optimizer/judge/review calls are exporter-visible but never routed
-            # into the triggering Agent subscription.
-            with self._trajectory_span_processor.suppress():
+            # Judge / induce / review LLM calls outlive after_invoke. Parenting
+            # them under the still-open agent root lets flush_child_spans mark
+            # them trace_safety_flush and the trajectory UI shows empty
+            # inference cells. TrajectorySpanProcessor.suppress keeps them out
+            # of the invoke subscription; LlmObservationSuppression stops
+            # OtelCallbackHandler from opening llm.call spans on that trace.
+            with LlmObservationSuppression(), self._trajectory_span_processor.suppress():
                 if total_timeout is None:
                     async with self._evolution_sem:
                         await self.run_evolution(prepared)
