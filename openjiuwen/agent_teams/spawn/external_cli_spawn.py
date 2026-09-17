@@ -23,6 +23,7 @@ from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.prompts import build_team_member_system_prompt
+from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
@@ -497,16 +498,22 @@ async def external_cli_spawn(
         if session_id:
             set_session_id(session_id)
         team_logger.info("[external-cli] member {} started", member_name)
+        crashed = False
         try:
             return await Runner.run_agent_team(teammate, inputs, member=True, session=session_id)
         except asyncio.CancelledError:
             team_logger.info("[external-cli] member {} cancelled", member_name)
             raise
         except Exception:
+            crashed = True
             team_logger.exception("[external-cli] member {} crashed", member_name)
             raise
         finally:
             await runtime.stop()
+            if crashed:
+                # Written after the runtime stopped so no late harness state
+                # event can map the member back to BUSY/READY afterwards.
+                await _mark_crashed_member_error(teammate, member_name)
 
     task = run_ctx.run(asyncio.get_running_loop().create_task, _run())
     handle = InProcessSpawnHandle(
@@ -516,6 +523,24 @@ async def external_cli_spawn(
     )
     team_logger.info("[external-cli] spawned member {} as {}", member_name, handle.process_id)
     return handle
+
+
+async def _mark_crashed_member_error(teammate: "TeamAgent", member_name: str) -> None:
+    """Persist ERROR for an external-CLI member whose run task crashed.
+
+    The crashed task leaves whatever status the aborted run cycle last wrote
+    (typically BUSY), so the member looks alive while nothing consumes its
+    mailbox. ERROR is what the leader's auto-start funnel restarts on the next
+    message, and what the roster should show for a dead member.
+
+    Args:
+        teammate: The crashed member's ``TeamAgent``.
+        member_name: Member name used for logging.
+    """
+    try:
+        await teammate.update_status(MemberStatus.ERROR)
+    except Exception:
+        team_logger.exception("[external-cli] failed to mark crashed member {} as error", member_name)
 
 
 __all__ = ["external_cli_spawn"]

@@ -13,7 +13,7 @@ import pytest
 
 from openjiuwen.agent_teams.schema.blueprint import DeepAgentSpec, TeamAgentSpec
 from openjiuwen.agent_teams.schema.build_context import BuildContext
-from openjiuwen.agent_teams.schema.status import MemberMode
+from openjiuwen.agent_teams.schema.status import MemberMode, MemberStatus
 from openjiuwen.agent_teams.schema.team import TeamLifecycle, TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.spawn import external_cli_spawn as spawn_mod
 from openjiuwen.core.runner.runner import Runner
@@ -132,6 +132,107 @@ async def test_external_cli_spawn_stops_runtime_on_cancel(monkeypatch):
     release.set()
 
     assert runtime.stopped
+
+
+def _claude_spawn_args() -> tuple[TeamAgentSpec, TeamRuntimeContext]:
+    """Build the minimal spec/context pair for a Claude external member."""
+    spec = TeamAgentSpec(
+        agents={"leader": DeepAgentSpec()},
+        team_name="ext_team",
+        display_name="Ext",
+        lifecycle=TeamLifecycle.PERSISTENT,
+        teammate_mode=MemberMode.BUILD_MODE,
+    )
+    ctx = TeamRuntimeContext(
+        role=TeamRole.TEAMMATE,
+        member_name="claude-1",
+        cli_agent="claude",
+        team_spec=TeamSpec(team_name="ext_team", display_name="Ext"),
+    )
+    return spec, ctx
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_cli_spawn_marks_member_error_after_crash(monkeypatch):
+    """A crashed run task must leave the member ERROR, written after the runtime stopped."""
+    runtime = _FakeRuntime()
+    events: list[str] = []
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args, kwargs
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        raise RuntimeError("harness 'claude-code' does not support pause/resume")
+
+    async def _record_stop() -> None:
+        events.append("stop")
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+    monkeypatch.setattr(runtime, "stop", _record_stop)
+
+    spec, ctx = _claude_spawn_args()
+    handle = await spawn_mod.external_cli_spawn(
+        team_agent=_team_agent_mock(),
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
+        session_id="sess-1",
+    )
+    teammate = handle.agent_ref
+
+    async def _record_status(status: MemberStatus) -> None:
+        events.append(status.value)
+
+    monkeypatch.setattr(teammate, "update_status", _record_status)
+
+    with pytest.raises(RuntimeError, match="pause/resume"):
+        await handle._task
+
+    assert events == ["stop", MemberStatus.ERROR.value]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_external_cli_spawn_cancel_does_not_mark_member_error(monkeypatch):
+    """Cancellation is a lifecycle teardown, not a crash: status is left alone."""
+    runtime = _FakeRuntime()
+    started = asyncio.Event()
+    statuses: list[MemberStatus] = []
+
+    async def _fake_build_cli_runtime(*args: Any, **kwargs: Any) -> _FakeRuntime:
+        _ = args, kwargs
+        return runtime
+
+    async def _fake_run_agent_team(*args: Any, **kwargs: Any) -> None:
+        _ = args, kwargs
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(spawn_mod, "build_cli_runtime", _fake_build_cli_runtime)
+    monkeypatch.setattr(Runner, "run_agent_team", _fake_run_agent_team)
+
+    spec, ctx = _claude_spawn_args()
+    handle = await spawn_mod.external_cli_spawn(
+        team_agent=_team_agent_mock(),
+        spec=spec,
+        ctx=ctx,
+        hitt_enabled=False,
+        session_id="sess-1",
+    )
+
+    async def _record_status(status: MemberStatus) -> None:
+        statuses.append(status)
+
+    monkeypatch.setattr(handle.agent_ref, "update_status", _record_status)
+    await started.wait()
+    await handle.force_kill()
+
+    assert runtime.stopped
+    assert statuses == []
 
 
 @pytest.mark.asyncio
