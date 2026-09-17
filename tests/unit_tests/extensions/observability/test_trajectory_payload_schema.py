@@ -18,6 +18,7 @@ from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcess
 from openjiuwen.agent_evolving.trajectory.windows import replay_windows
 from openjiuwen.core.context_engine.schema.context_state import (
     ContextCompressionMetric,
+    ContextCompressionModifiedMessage,
     ContextCompressionState,
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UserMessage
@@ -123,6 +124,14 @@ async def test_emitted_events_follow_the_schema_and_replay_cleanly() -> None:
                 processor="RoundLevelCompressor",
                 before=ContextCompressionMetric(messages=4, tokens=400),
                 after=ContextCompressionMetric(messages=2, tokens=100),
+                modified_messages=[
+                    ContextCompressionModifiedMessage(
+                        message_id="u2",
+                        role="user",
+                        offload_handle="handle-u2",
+                        offload_type="filesystem",
+                    ),
+                ],
                 summary="Compressed 4 -> 2 messages",
             ),
         )
@@ -154,6 +163,10 @@ async def test_emitted_events_follow_the_schema_and_replay_cleanly() -> None:
     ]
     for kind, payload in payloads:
         assert _validate(kind, payload) == [], kind
+    compaction = next(payload for kind, payload in payloads if kind == "compaction.completed")
+    assert [(item["message_id"], item["offload_handle"]) for item in compaction["modified_messages"]] == [
+        ("u2", "handle-u2"),
+    ]
 
     trajectory, issues = processor.drain(subscription)
     provider.shutdown()
