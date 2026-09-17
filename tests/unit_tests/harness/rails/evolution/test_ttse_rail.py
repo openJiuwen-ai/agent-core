@@ -559,13 +559,13 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
         if "review a rule bank" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
-            return "[FACT] lesson fact"
+            return "[FACT] rustc fails when source files are encoded as GBK"
         return "NONE"
 
     llm = ScriptedLLM(handler)
     rail = _make_rail(tmp_path, llm)
-    await rail._ttse_store.add_fact("F1 bad fact")
-    await rail._ttse_store.add_fact("F2 keeper fact")
+    await rail._ttse_store.add_fact("the grader rejects lowercase column names")
+    await rail._ttse_store.add_fact("PresentBench expects slides.md on disk")
     await rail._ttse_store.add_tip("T1 keeper tip")  # so >= 2 rules remain after retire
     snap = {
         "messages": [{"role": "user", "content": "q"}],
@@ -575,9 +575,9 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
 
-    assert [r["text"] for r in rail._ttse_store.retired] == ["F1 bad fact"]
-    assert "F1 bad fact" not in rail._ttse_store.facts_texts()
-    assert "lesson fact" in rail._ttse_store.facts_texts()
+    assert [r["text"] for r in rail._ttse_store.retired] == ["the grader rejects lowercase column names"]
+    assert "the grader rejects lowercase column names" not in rail._ttse_store.facts_texts()
+    assert "rustc fails when source files are encoded as GBK" in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
     assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
 
