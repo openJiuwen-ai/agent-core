@@ -159,6 +159,23 @@ def test_claude_turn_stall_policy_is_validated_and_claude_only():
         ExternalCliAgentSpec(cli_agent="codex", claude_turn_idle_timeout_s=45.0)
 
 
+def test_claude_max_buffer_size_survives_codex_config_round_trip():
+    config = ExternalCliAgentSpec(cli_agent="codex")
+
+    restored = ExternalCliAgentSpec.model_validate(config.model_dump(mode="json"))
+
+    assert restored.cli_agent == "codex"
+    assert restored.claude_max_buffer_size is None
+
+
+def test_claude_max_buffer_size_is_validated_and_claude_only():
+    config = ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=64 * 1024 * 1024)
+    assert config.claude_max_buffer_size == 64 * 1024 * 1024
+
+    with pytest.raises(ValidationError, match="claude_max_buffer_size is only valid"):
+        ExternalCliAgentSpec(cli_agent="codex", claude_max_buffer_size=64 * 1024 * 1024)
+
+
 def test_unknown_backend_returns_none():
     """Unknown backend names are rejected by registry helpers."""
     assert backend_for("not-a-real-cli") is None

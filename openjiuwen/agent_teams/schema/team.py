@@ -451,7 +451,7 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("codex_turn_idle_retries is only valid when cli_agent='codex'")
         if self.cli_agent != "claude" and self.claude_turn_idle_timeout_s is not None:
             raise ValueError("claude_turn_idle_timeout_s is only valid when cli_agent='claude'")
-        if self.cli_agent != "claude" and "claude_max_buffer_size" in self.model_fields_set:
+        if self.cli_agent != "claude" and self.claude_max_buffer_size is not None:
             raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
