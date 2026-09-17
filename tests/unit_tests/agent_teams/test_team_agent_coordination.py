@@ -914,6 +914,85 @@ async def test_tool_approval_event_resumes_interrupt():
     assert interactive_input.user_inputs["call-1"]["auto_confirm"] is True
 
 
+@pytest.mark.level0
+def test_build_approval_interactive_input_wraps_payload():
+    from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
+
+    interactive_input = build_approval_interactive_input(
+        "call-1",
+        approved=True,
+        feedback="ok",
+        auto_confirm=True,
+    )
+
+    assert interactive_input is not None
+    assert interactive_input.user_inputs["call-1"] == {
+        "approved": True,
+        "feedback": "ok",
+        "auto_confirm": True,
+    }
+
+
+@pytest.mark.level0
+@pytest.mark.parametrize("tool_call_id", [None, "", 1])
+def test_build_approval_interactive_input_rejects_invalid_id(tool_call_id):
+    from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
+
+    assert build_approval_interactive_input(tool_call_id, approved=True) is None
+
+
+@pytest.mark.level0
+def test_mailbox_approval_json_wraps_as_interactive_input():
+    from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
+
+    handler = object.__new__(MessageHandler)
+    msg = SimpleNamespace(
+        protocol="json",
+        content=json.dumps(
+            {
+                "type": "tool_approval_result",
+                "tool_call_id": "call-1",
+                "approved": True,
+                "feedback": "ok",
+                "auto_confirm": True,
+            }
+        ),
+    )
+    payload = handler._try_parse_approval_payload(msg)
+    interactive_input = build_approval_interactive_input(
+        payload.get("tool_call_id"),
+        approved=payload.get("approved"),
+        feedback=payload.get("feedback") or "",
+        auto_confirm=bool(payload.get("auto_confirm", False)),
+    )
+
+    assert interactive_input is not None
+    assert interactive_input.user_inputs["call-1"]["approved"] is True
+    assert interactive_input.user_inputs["call-1"]["feedback"] == "ok"
+
+
+@pytest.mark.level0
+def test_mailbox_approval_json_null_id_is_not_resumable():
+    from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
+
+    handler = object.__new__(MessageHandler)
+    msg = SimpleNamespace(
+        protocol="json",
+        content=json.dumps(
+            {
+                "type": "tool_approval_result",
+                "tool_call_id": None,
+                "approved": True,
+            }
+        ),
+    )
+    payload = handler._try_parse_approval_payload(msg)
+    assert payload is not None
+    assert (
+        build_approval_interactive_input(payload.get("tool_call_id"), approved=True) is None
+    )
+
+
 def _interactive_input(tool_call_id: str) -> InteractiveInput:
     ii = InteractiveInput()
     ii.update(tool_call_id, {"approved": True, "feedback": "", "auto_confirm": False})

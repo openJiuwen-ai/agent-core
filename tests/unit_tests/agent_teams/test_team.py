@@ -397,6 +397,22 @@ class TestApproveTool:
 
         assert result is False
 
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    @pytest.mark.parametrize("tool_call_id", [None, ""])
+    async def test_approve_tool_rejects_empty_id(self, agent_team, tool_call_id):
+        agent_team.message_manager.send_message = AsyncMock()
+
+        result = await agent_team.approve_tool(
+            member_name="member1",
+            tool_call_id=tool_call_id,
+            approved=True,
+        )
+
+        assert result is False
+        agent_team.message_manager.send_message.assert_not_awaited()
+        agent_team.messager.publish.assert_not_awaited()
+
 
 class TestShutdownMember:
     """Test shutdown_member functionality"""
