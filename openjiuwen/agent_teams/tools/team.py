@@ -225,6 +225,9 @@ class TeamBackend:
                 ``build_team`` caller (LLM-filled tool arg).
         """
         self.team_name = team_name
+        self.group_chat_spec = None
+        self.group_session_id = ""
+        self._group_conversation = None
         self.member_name = member_name
         self.is_leader = is_leader
         self.leader_member_name = str(leader_member_name or (member_name if is_leader else "")).strip()
@@ -404,6 +407,36 @@ class TeamBackend:
         of its description.
         """
         return self._enable_fork
+
+    def bind_group_session(self, session_id: str) -> None:
+        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
+            return
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise ValueError("Group chat requires a nonempty runtime session_id")
+        if self.group_session_id and self.group_session_id != session_id:
+            raise ValueError("A group backend cannot switch sessions; stop and rebuild the team")
+        self.group_session_id = session_id
+
+    async def group_conversation(self):
+        if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
+            raise ValueError("Group chat is disabled")
+        if self._group_conversation is None:
+            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+            workspace = self.group_chat_spec.workspace
+            self._group_conversation = await asyncio.to_thread(
+                GroupConversationLog, self.team_name, self.group_session_id,
+                workspace_path=workspace.root_path if workspace else None,
+            )
+        return self._group_conversation
+
+    async def append_group_message(self, sender, content, *, client_message_id, mentions=(), attachments=()):
+        conversation = await self.group_conversation()
+        return await conversation.post(
+            self.message_manager, sender, content, client_message_id=client_message_id,
+            mentions=mentions, attachments=attachments, tail_count=self.group_chat_spec.group_context_tail,
+            language=self.group_chat_spec.language or "cn",
+        )
 
     def set_snapshot_length(self, fn) -> None:
         """Register the callback that returns this member's message count."""

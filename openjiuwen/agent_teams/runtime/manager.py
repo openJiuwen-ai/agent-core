@@ -165,13 +165,17 @@ class TeamRuntimeManager:
             team_db_state,
             pool_entry is not None,
         )
-        return await self._apply_action(
+        activation = await self._apply_action(
             action,
             spec=spec,
             team_session=team_session,
             pool_entry=pool_entry,
             inputs=inputs,
         )
+        backend = getattr(activation.agent, "team_backend", None)
+        if backend is not None and hasattr(backend, "bind_group_session"):
+            backend.bind_group_session(target_session_id)
+        return activation
 
     async def finalize(
         self,
@@ -725,15 +729,13 @@ class TeamRuntimeManager:
                 session_id,
             )
             return False
+        # A failed shutdown is still a live, owned runtime. Preserve the entry
+        # and propagate the failure so callers can retry instead of orphaning it.
+        token = set_session_id(session_id)
         try:
             await entry.agent.stop_coordination()
-        except Exception as exc:
-            team_logger.warning(
-                "Failed to stop team {} on session {}: {}",
-                team_name,
-                session_id,
-                exc,
-            )
+        finally:
+            reset_session_id(token)
         await self._pool.remove(team_name)
         team_logger.info(
             "stop_team: team {} session {} stopped and removed from pool",
@@ -861,6 +863,9 @@ class TeamRuntimeManager:
                 team_names=[team_name],
                 db=db,
             )
+        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+        await asyncio.to_thread(GroupConversationLog.delete_registered, team_name)
         for session_id in session_ids:
             await db.drop_session_tables_by_id(session_id)
             if not await remove_session_worktrees(team_name, session_id):
@@ -950,6 +955,10 @@ class TeamRuntimeManager:
             team_names=release_info.team_names,
             db=db,
         )
+        from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+
+        for team_name in release_info.team_names:
+            await asyncio.to_thread(GroupConversationLog.delete_registered, team_name, session_id)
         await db.drop_session_tables_by_id(session_id)
         for team_name in release_info.team_names:
             if not await remove_session_worktrees(team_name, session_id):

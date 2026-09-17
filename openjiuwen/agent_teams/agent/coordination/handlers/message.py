@@ -84,12 +84,14 @@ class MessageHandler(BaseCoordinationHandler):
         if self._blueprint.role == TeamRole.LEADER:
             if event.event_type == TeamEvent.MESSAGE:
                 await self._ack_user_bound_message(event)
+                await self._start_unread_members()
             await self._notify_human_agent_inbound(event)
         await self._poll.resume_polls()
         await self._process_unread_messages(member_name)
 
     async def on_poll_mailbox(self, event) -> None:
-        """Periodic mailbox sweep: drain any unread messages."""
+        """Periodic mailbox sweep: start waiting recipients and drain own messages."""
+        await self._start_unread_members()
         member_name = self._blueprint.member_name
         team_logger.debug("poll mailbox: member_name={}", member_name)
         if member_name and self._infra.message_manager:
@@ -125,6 +127,19 @@ class MessageHandler(BaseCoordinationHandler):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    async def _start_unread_members(self) -> None:
+        """Reuse member startup for direct messages queued while recipients were offline."""
+        backend = self._infra.team_backend
+        if self._blueprint.role != TeamRole.LEADER or backend is None:
+            return
+        try:
+            members = await backend.db.message.get_unread_startable_members(backend.team_name)
+            for member_name in members:
+                if member_name != self._blueprint.member_name:
+                    await self._lifecycle.auto_start_member(member_name)
+        except Exception:
+            team_logger.error("Failed to start members with unread messages", exc_info=True)
 
     async def _harness_input_blocked(self, member_name: str) -> bool:
         """Whether this member's harness must not be fed — settling it if idle.

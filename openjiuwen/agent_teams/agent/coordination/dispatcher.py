@@ -119,6 +119,10 @@ class TeamLifecycleController(Protocol):
     controller.
     """
 
+    async def auto_start_member(self, member_name: str) -> bool:
+        """Start or recover a named member with queued mailbox input."""
+        ...
+
     async def shutdown_self(self) -> None:
         """Force-shutdown this agent in response to team dissolution."""
         ...

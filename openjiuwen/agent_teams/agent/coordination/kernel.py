@@ -579,7 +579,7 @@ class CoordinationKernel:
         if not messager or not self._event_bus:
             return
         from openjiuwen.agent_teams.context import get_session_id
-        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+        from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 
         local_member_name = host.member_name or ""
 
@@ -589,7 +589,10 @@ class CoordinationKernel:
                     await listener(event)
                 except Exception as e:
                     team_logger.error("Event listener error: {}", e)
-            if local_member_name and event.sender_id == local_member_name:
+            mailbox_wakeup = event.event_type == TeamEvent.MESSAGE and (
+                host.role == TeamRole.LEADER or event.get_payload().to_member_name == local_member_name
+            )
+            if local_member_name and event.sender_id == local_member_name and not mailbox_wakeup:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 # F_62: the scheduler must observe board changes the leader
                 # process performed itself (create_task, settle). Coordination

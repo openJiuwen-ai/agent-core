@@ -40,6 +40,7 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
+from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType
@@ -626,7 +627,7 @@ class AgentConfigurator:
             RailSpec(
                 type=TEAM_POLICY,
                 params={
-                    "prompt": ctx.prompt or "",
+                    "prompt": (ctx.prompt or "") + group_chat_prompt(spec),
                     "display_name": ctx.display_name or "",
                     "member_workspace_path": workspace_root_path,
                     "lifecycle": spec.lifecycle,
@@ -1046,6 +1047,7 @@ class AgentConfigurator:
                     return len(native.get_current_context())
             return 0
 
+        agent_team.group_chat_spec = spec
         agent_team.set_snapshot_length(_snapshot_length)
 
         self.team_backend = agent_team

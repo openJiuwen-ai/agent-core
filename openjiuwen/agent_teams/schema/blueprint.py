@@ -205,6 +205,8 @@ class TeamAgentSpec(BaseModel):
 
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
+    enable_group_chat: bool = False
+    group_context_tail: int = Field(default=5, ge=1, le=20)
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
     """Team switch for self-evolution coverage.

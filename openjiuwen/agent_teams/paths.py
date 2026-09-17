@@ -278,6 +278,33 @@ def team_session_dir(team_name: str, session_id: str) -> Path:
     return team_sessions_dir(team_name) / _safe_segment(session_id)
 
 
+def group_conversation_registry_dir(team_name: str) -> Path:
+    """Return the default-home registry locating custom conversation workspaces."""
+    if not team_name or team_name in (".", ".."):
+        raise ValueError("Conversation team_name must be a single path component of at most 255 UTF-8 bytes")
+    if "/" in team_name or "\\" in team_name or len(team_name.encode("utf-8")) > 255:
+        raise ValueError("Conversation team_name must be a single path component of at most 255 UTF-8 bytes")
+    root = get_agent_teams_home().resolve() / team_name / "conversation-workspaces"
+    if root.resolve() != root:
+        raise ValueError("Conversation registry must not follow directory symlinks")
+    return root
+
+
+def group_conversation_dir(
+    team_name: str, session_id: str, *, workspace_path: str | Path | None = None,
+) -> Path:
+    """Return a team/session-isolated public archive inside the shared workspace."""
+    group_conversation_registry_dir(team_name)
+    root = Path(workspace_path).expanduser() if workspace_path is not None else team_workspace_dir(team_name)
+    root = root.resolve()
+    team_scope = _safe_segment(team_name) + "-" + hashlib.sha256(team_name.encode("utf-8")).hexdigest()
+    session_scope = _safe_segment(session_id) + "-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    path = root / "conversations" / team_scope / session_scope
+    if path.resolve() != path:
+        raise ValueError("Conversation history must remain inside its own workspace directory without symlinks")
+    return path
+
+
 def project_worktree_hash(project_dir: str) -> str:
     """Return the stable project hash segment for session-scoped worktrees.
 

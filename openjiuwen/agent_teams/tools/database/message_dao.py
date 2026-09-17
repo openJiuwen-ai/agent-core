@@ -334,6 +334,24 @@ class MessageDao:
 
             return self._hydrate_rows(rows)
 
+    async def get_unread_startable_members(self, team_name: str) -> List[str]:
+        """Read only the names of offline members with direct work waiting."""
+        message_model = _get_message_model()
+        async with self._sessions.read() as session:
+            result = await session.execute(
+                select(message_model.to_member_name).join(
+                    TeamMember,
+                    (TeamMember.team_name == message_model.team_name)
+                    & (TeamMember.member_name == message_model.to_member_name),
+                ).where(
+                    message_model.team_name == team_name,
+                    message_model.broadcast.is_(False),
+                    message_model.is_read.is_(False),
+                    TeamMember.status.in_((MemberStatus.UNSTARTED.value, MemberStatus.ERROR.value)),
+                ).distinct()
+            )
+            return list(result.scalars().all())
+
     async def get_broadcast_messages(
         self,
         team_name: str,

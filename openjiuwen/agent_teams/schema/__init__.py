@@ -12,6 +12,10 @@ from openjiuwen.agent_teams.schema.blueprint import (
     register_storage,
     register_transport,
 )
+from openjiuwen.agent_teams.schema.conversation import (
+    ConversationAppendResult,
+    ConversationMessage,
+)
 from openjiuwen.agent_teams.schema.deep_agent_spec import (
     AudioModelSpec,
     ProgressiveToolSpec,
@@ -31,6 +35,7 @@ from openjiuwen.agent_teams.schema.team import (
 )
 
 __all__ = [
+    "ConversationMessage", "ConversationAppendResult",
     "AudioModelSpec",
     "DeepAgentSpec",
     "LeaderSpec",
