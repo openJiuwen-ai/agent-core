@@ -215,6 +215,10 @@ def normalize_prior_paper_evidence(context: ResearchContext) -> list[Evidence]:
     return evidence
 
 
+def _is_numeric_value(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def classify_prior_vs_current(
     prior: list[Evidence], current: list[Evidence]
 ) -> list[tuple[Evidence | None, Evidence | None, ClaimStatus | None]]:
@@ -232,17 +236,12 @@ def classify_prior_vs_current(
     used_ids: set[str] = set()
     for old in prior:
         match: Evidence | None = None
-        if old.metric and unused.get(old.metric):
-            match = unused[old.metric].pop(0)
+        bucket = unused.get(old.metric) if old.metric else None
+        if bucket:
+            match = bucket.pop(0)
             used_ids.add(match.evidence_id)
         status: ClaimStatus | None = None
-        if (
-            match is not None
-            and isinstance(old.value, (int, float))
-            and not isinstance(old.value, bool)
-            and isinstance(match.value, (int, float))
-            and not isinstance(match.value, bool)
-        ):
+        if match is not None and _is_numeric_value(old.value) and _is_numeric_value(match.value):
             status = classify_numeric_status(old, match)
         pairs.append((old, match, status))
 
