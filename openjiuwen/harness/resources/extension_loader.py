@@ -466,11 +466,19 @@ def _build_rail_specs(items: Any, *, base_dir: Path, package_root: Path) -> list
 def _build_skill_specs(items: Any, *, base_dir: Path, package_root: Path) -> list[SkillSpec]:
     specs: list[SkillSpec] = []
     for raw_item in _as_list(items):
+        # 空值条目跳过：null 条目、缺 'dir' 键、dir 为 None/空串。
+        # 空串 dir 继续解析会命中 base_dir（包根）被静默误挂为 skill 目录；
+        # 非空残缺（目录不存在等）仍在 _resolve_new_manifest_path 报错。
+        if raw_item is None:
+            continue
         item = {"dir": raw_item} if isinstance(raw_item, str) else raw_item
-        if not isinstance(item, dict) or "dir" not in item:
-            raise ValueError(f"skill entry must be a mapping with 'dir': {raw_item!r}")
+        if not isinstance(item, dict):
+            raise ValueError(f"skill entry must be a mapping or path string: {raw_item!r}")
+        dir_value = item.get("dir")
+        if dir_value is None or (isinstance(dir_value, str) and not dir_value.strip()):
+            continue
         directory = _resolve_new_manifest_path(
-            str(item["dir"]), base_dir=base_dir, package_root=package_root, must_be_dir=True
+            str(dir_value), base_dir=base_dir, package_root=package_root, must_be_dir=True
         )
         specs.append(
             SkillSpec(

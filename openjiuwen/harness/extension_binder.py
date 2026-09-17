@@ -181,6 +181,9 @@ def _skill_paths_to_rail_mounts(skill_paths: list[str]) -> tuple[list[str], list
     roots: list[str] = []
     enabled_names: list[str] = []
     for raw_path in skill_paths:
+        # 空路径跳过：Path("") 会 resolve 成 cwd，导致整个工作目录被误挂为 skill 根
+        if not raw_path or not str(raw_path).strip():
+            continue
         path = Path(raw_path).expanduser().resolve()
         if (path / "SKILL.md").is_file():
             root = str(path.parent)
