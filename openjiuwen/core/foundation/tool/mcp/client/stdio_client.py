@@ -92,8 +92,8 @@ class StdioClient(McpClient):
                 McpToolCard(
                     name=tool.name,
                     server_name=self._name,
-                    description=getattr(tool, "description", ""),
-                    input_params=getattr(tool, "inputSchema", {}),
+                    description=getattr(tool, "description", "") or "",
+                    input_params=getattr(tool, "inputSchema", {}) or {},
                 )
                 for tool in tools_response.tools
             ]
