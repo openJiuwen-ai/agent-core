@@ -224,13 +224,10 @@ class TeamRuntimeManager:
                     session_id,
                 )
                 await agent.pause_coordination()
-                # Run boundary: the cache instance survives
-                # the pause (the pool entry keeps the agent, and with it the
-                # workspace manager + cache), so drop its resident values now
-                # — the resumed run's first read-side ``get*`` re-reads the
-                # md files the evolution party may have edited between runs.
-                # No file IO here; pure dict clear.
-                agent.invalidate_workspace_cache()
+                # Evolvable-cache drop moved to the Runner finally
+                # (team_runner.py): the drop must be sync and ahead of every
+                # await so a mid-round pause's cancellation cannot skip it —
+                # an await here can be cut short by CancelledError.
                 entry.state = RuntimeState.PAUSED
         except Exception as exc:
             team_logger.warning(
