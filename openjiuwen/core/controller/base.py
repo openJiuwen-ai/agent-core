@@ -220,8 +220,11 @@ class Controller:
             state_dict = controller_state["task_manager_state"]
             task_manager_state = TaskManagerState.model_validate(state_dict)
 
-            # Load state into task_manager
-            await self._task_manager.load_state(task_manager_state)
+            # Load state into task_manager, scoped to this session.
+            await self._task_manager.load_state(
+                task_manager_state,
+                session_id=session.get_session_id()
+            )
             logger.info(
                 f"Successfully restored TaskManager state: "
                 f"{len(task_manager_state.tasks)} tasks, "
@@ -251,7 +254,10 @@ class Controller:
             logger.info("Task persistence disabled, no need to save TaskManager state for session")
             return
         try:
-            task_manager_state = await self._task_manager.get_state()
+            # Scoped to this session.
+            task_manager_state = await self._task_manager.get_state(
+                session_id=session.get_session_id()
+            )
             controller_state = {
                 "task_manager_state": task_manager_state.model_dump()
             }

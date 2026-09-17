@@ -189,33 +189,107 @@ class TaskManager:
         """Update configuration"""
         self._config = config
 
-    async def get_state(self) -> TaskManagerState:
+    async def get_state(self, session_id: Optional[str] = None) -> TaskManagerState:
         """Get task manager state
+
+        When ``session_id`` is provided, only tasks belonging to that session
+        are exported. All index structures are derived from the filtered task
+        set so the snapshot is self-consistent, and a task whose parent
+        belongs to another session is exported as a root task. When
+        ``session_id`` is None, the full state is exported (backward
+        compatible).
+
+        Args:
+            session_id: If given, export only tasks of this session;
+                otherwise export all tasks.
 
         Returns:
             TaskManagerState: Task manager state object
         """
         async with self._lock:
+            if session_id is None:
+                return TaskManagerState(
+                    tasks={k: v.model_copy(deep=True) for k, v in self.tasks.items()},
+                    priority_index={k: list(v) for k, v in self._priority_index.items()},
+                    parent_to_children={k: v.copy() for k, v in self._parent_to_children.items()},
+                    children_to_parent=self._child_to_parent.copy(),
+                    root_tasks=self._root_tasks.copy()
+                )
+
+            tasks: Dict[str, Task] = {}
+            for tid, t in self.tasks.items():
+                if t.session_id != session_id:
+                    continue
+                snapshot = t.model_copy(deep=True)
+                # Cut cross-session parent-child edges: the parent cannot be
+                # restored from this session's snapshot, so export the task
+                # as a root task.
+                if snapshot.parent_task_id is not None:
+                    parent = self.tasks.get(snapshot.parent_task_id)
+                    if parent is None or parent.session_id != session_id:
+                        snapshot.parent_task_id = None
+                tasks[tid] = snapshot
+
+            # Derive all indexes from the filtered task set. Indexes are
+            # derived data: rebuilding them keeps the snapshot
+            # self-consistent regardless of the in-memory index state.
+            priority_index: Dict[int, List[str]] = {}
+            parent_to_children: Dict[str, Set[str]] = {}
+            children_to_parent: Dict[str, str] = {}
+            root_tasks: Set[str] = set()
+            for tid, t in tasks.items():
+                priority_index.setdefault(t.priority, []).append(tid)
+                if t.parent_task_id is not None:
+                    parent_to_children.setdefault(t.parent_task_id, set()).add(tid)
+                    children_to_parent[tid] = t.parent_task_id
+                else:
+                    root_tasks.add(tid)
             return TaskManagerState(
-                tasks={k: v.model_copy(deep=True) for k, v in self.tasks.items()},
-                priority_index=dict(self._priority_index),
-                parent_to_children={k: v.copy() for k, v in self._parent_to_children.items()},
-                children_to_parent=self._child_to_parent.copy(),
-                root_tasks=self._root_tasks.copy()
+                tasks=tasks,
+                priority_index=priority_index,
+                parent_to_children=parent_to_children,
+                children_to_parent=children_to_parent,
+                root_tasks=root_tasks
             )
 
-    async def load_state(self, state: TaskManagerState) -> None:
+    async def load_state(self, state: TaskManagerState, session_id: Optional[str] = None) -> None:
         """Load task manager state
+
+        When ``session_id`` is provided, the snapshot is merged in a
+        session-scoped two-phase way:
+
+        1. All in-memory tasks of ``session_id`` are removed (with full
+           index maintenance, including empty priority bucket cleanup and
+           promote-to-root for cross-session orphans).
+        2. Snapshot tasks are inserted, skipping any that do not belong to
+           ``session_id`` (defensive against legacy full-state snapshots).
+           Indexes for the inserted tasks are derived from the final task
+           table; cross-session parent references are cut by promoting
+           orphans to roots.
+
+        Tasks of other concurrent sessions and their index relations are
+        left untouched. When ``session_id`` is None, the whole state is
+        replaced (backward compatible).
 
         Args:
             state: Task manager state object
+            session_id: If given, merge the snapshot into this session only;
+                otherwise replace the full state.
         """
         async with self._lock:
-            self.tasks = state.tasks.copy()
-            self._priority_index = defaultdict(list, state.priority_index)
-            self._parent_to_children = defaultdict(set, {k: v.copy() for k, v in state.parent_to_children.items()})
-            self._child_to_parent = state.children_to_parent.copy()
-            self._root_tasks = state.root_tasks.copy()
+            if session_id is None:
+                self.tasks = state.tasks.copy()
+                self._priority_index = defaultdict(list, state.priority_index)
+                self._parent_to_children = defaultdict(set, {k: v.copy() for k, v in state.parent_to_children.items()})
+                self._child_to_parent = state.children_to_parent.copy()
+                self._root_tasks = state.root_tasks.copy()
+                return
+
+            # Session-scoped merge (two-phase, both phases run under self._lock):
+            #   Phase 1: clear this session's in-memory tasks
+            #   Phase 2: merge snapshot tasks + derive indexes
+            self._remove_session_tasks_locked(session_id)
+            self._merge_session_state_locked(state, session_id)
 
     async def clear_state(self, session_id: Optional[str] = None) -> None:
         """Clear task manager state.
@@ -241,52 +315,105 @@ class TaskManager:
                 self._root_tasks.clear()
                 return
 
-            remove_ids = [
-                tid for tid, t in self.tasks.items()
-                if t.session_id == session_id
-            ]
-            for tid in remove_ids:
-                if tid not in self.tasks:
-                    continue
-                task = self.tasks.pop(tid, None)
-                if task is None:
-                    continue
+            self._remove_session_tasks_locked(session_id)
 
-                # Remove from priority index (drop empty bucket to keep the
-                # "highest priority" lookup accurate)
-                if task.priority in self._priority_index:
-                    bucket = self._priority_index[task.priority]
-                    try:
-                        bucket.remove(tid)
-                    except ValueError:
-                        pass
-                    if not bucket:
-                        del self._priority_index[task.priority]
+    # ------------------------------------------------------------------
+    # Session-scoped helpers. Must be called while holding self._lock;
+    # plain synchronous methods (asyncio.Lock is not reentrant).
+    # ------------------------------------------------------------------
 
-                # Promote survived children to roots when their parent is removed
-                # (consistent with pop_task semantics)
-                if tid in self._parent_to_children:
-                    for child_id in self._parent_to_children[tid].copy():
-                        if child_id not in self.tasks:
-                            continue
-                        child = self.tasks[child_id]
-                        child.parent_task_id = None
-                        self._root_tasks.add(child_id)
-                        self._child_to_parent.pop(child_id, None)
-                    del self._parent_to_children[tid]
+    def _remove_session_tasks_locked(self, session_id: str) -> None:
+        """Remove all in-memory tasks of ``session_id`` and maintain every index.
 
-                # Remove child-to-parent index entry
-                self._child_to_parent.pop(tid, None)
+        Must be called while holding ``self._lock``.
+        """
+        remove_ids = [
+            tid for tid, t in self.tasks.items()
+            if t.session_id == session_id
+        ]
+        for tid in remove_ids:
+            if tid not in self.tasks:
+                continue
+            task = self.tasks.pop(tid, None)
+            if task is None:
+                continue
 
-                # If the removed task is a child, detach it from its parent's set
-                if task.parent_task_id:
-                    siblings = self._parent_to_children.get(task.parent_task_id)
-                    if siblings:
-                        siblings.discard(tid)
-                        if not siblings:
-                            self._parent_to_children.pop(task.parent_task_id, None)
-                else:
-                    self._root_tasks.discard(tid)
+            # Remove from priority index (drop empty bucket to keep the
+            # "highest priority" lookup accurate)
+            if task.priority in self._priority_index:
+                bucket = self._priority_index[task.priority]
+                try:
+                    bucket.remove(tid)
+                except ValueError:
+                    pass
+                if not bucket:
+                    del self._priority_index[task.priority]
+
+            # Promote survived children to roots when their parent is removed
+            # (consistent with pop_task semantics)
+            if tid in self._parent_to_children:
+                for child_id in self._parent_to_children[tid].copy():
+                    if child_id not in self.tasks:
+                        continue
+                    child = self.tasks[child_id]
+                    child.parent_task_id = None
+                    self._root_tasks.add(child_id)
+                    self._child_to_parent.pop(child_id, None)
+                del self._parent_to_children[tid]
+
+            # Remove child-to-parent index entry
+            self._child_to_parent.pop(tid, None)
+
+            # If the removed task is a child, detach it from its parent's set
+            if task.parent_task_id:
+                siblings = self._parent_to_children.get(task.parent_task_id)
+                if siblings:
+                    siblings.discard(tid)
+                    if not siblings:
+                        self._parent_to_children.pop(task.parent_task_id, None)
+            else:
+                self._root_tasks.discard(tid)
+
+    def _merge_session_state_locked(
+        self,
+        state: TaskManagerState,
+        session_id: str,
+    ) -> None:
+        """Merge ``state.tasks`` into the in-memory task table for one session.
+
+        Must be called while holding ``self._lock``, after
+        ``_remove_session_tasks_locked`` has cleared this session's
+        in-memory tasks. Snapshot tasks not belonging to ``session_id``
+        are skipped; tasks whose parent is missing or belongs to another
+        session are promoted to roots.
+        """
+        inserted_ids: Set[str] = set()
+
+        # Phase 2a: insert snapshot tasks (defensive filter + deep copy)
+        for tid, task in state.tasks.items():
+            if task.session_id != session_id:
+                continue
+            self.tasks[tid] = task.model_copy(deep=True)
+            inserted_ids.add(tid)
+
+        # Phase 2b: derive indexes from the final task table.
+        # Check inserted_ids (not self.tasks) for parent membership: after
+        # Phase 1 cleared this session's tasks, self.tasks still contains
+        # other sessions' tasks whose IDs we must not mistake for valid
+        # parents. inserted_ids is the exact set of this session's tasks.
+        for tid in inserted_ids:
+            task = self.tasks[tid]
+            if task.parent_task_id is not None and task.parent_task_id in inserted_ids:
+                self._parent_to_children[task.parent_task_id].add(tid)
+                self._child_to_parent[tid] = task.parent_task_id
+            else:
+                # Parent missing OR parent belongs to another session
+                # → promote to root
+                task.parent_task_id = None
+                self._root_tasks.add(tid)
+            bucket = self._priority_index[task.priority]
+            if tid not in bucket:
+                bucket.append(tid)
 
     # ==================== Task CRUD Operations ====================
     async def add_task(self, task: Union[Task, List[Task]]):
