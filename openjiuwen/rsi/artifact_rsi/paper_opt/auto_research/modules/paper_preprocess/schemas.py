@@ -89,7 +89,8 @@ class ResearchContext(BaseModel):
     """Derived state from a previous paper. Reporting generates a new draft
     from this context plus the current run; it does not edit the original
     LaTeX in place. Always re-derived from a compiled paper by
-    paper_preprocess, never hand-updated by ReportingAgent."""
+    paper_preprocess, never hand-updated by ReportingAgent.
+    """
 
     title: str = ""
     abstract: str = ""
