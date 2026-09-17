@@ -552,9 +552,7 @@ class TestConversationSignalDetector:
 
         signals = await detector.detect_user_intent(messages)
 
-        assert len(signals) == 1
-        assert signals[0].signal_type == "user_intent"
-        assert not signals[0].skill_name
+        assert signals == []
 
 
 class TestConversationSignalDetectorCollaborationBoundary:
@@ -670,7 +668,8 @@ class TestTtseFromConvHelpers:
             {"role": "user", "content": "不对，你应该先检查文件是否存在"},
         ]
         detector = ConversationSignalDetector()
-        signals = await detector.detect_user_intent(messages)
+        assert await detector.detect_user_intent(messages) == []
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
         assert len(signals) == 1
         assert signals[0].signal_type == "user_intent"
         assert not signals[0].skill_name
@@ -688,7 +687,9 @@ class TestTtseFromConvHelpers:
             return_value={"content": '{"is_feedback": true, "excerpt": "use utf-8"}'}
         )
         detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
-        signals = await detector.detect_user_intent(messages)
+        assert await detector.detect_user_intent(messages) == []
+        llm.invoke.assert_not_awaited()
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
         assert len(signals) == 1
         assert signals[0].excerpt == "use utf-8"
         llm.invoke.assert_awaited()
@@ -704,6 +705,6 @@ class TestTtseFromConvHelpers:
         llm = MagicMock()
         llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
         detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
-        signals = await detector.detect_user_intent(messages)
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
         assert signals == []
 

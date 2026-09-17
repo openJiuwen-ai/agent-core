@@ -222,7 +222,12 @@ async def _has_user_intent_feedback(
     if callable(bind):
         detector = bind(llm=llm, model=model, language=language)
     try:
-        signals = await detector.detect_user_intent(list(messages or []))
+        detect = detector.detect_user_intent
+        try:
+            signals = await detect(list(messages or []), allow_skillless=True)
+        except TypeError:
+            # Test fakes / older detectors only accept ``messages``.
+            signals = await detect(list(messages or []))
     except Exception as exc:  # noqa: BLE001
         logger.warning("[TTSERail] detect user_intent failed: %s", exc)
         return False

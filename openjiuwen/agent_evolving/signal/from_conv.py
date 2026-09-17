@@ -327,8 +327,15 @@ class ConversationSignalDetector:
     async def detect_user_intent(
         self,
         messages: List[dict],
+        *,
+        allow_skillless: bool = False,
     ) -> List[EvolutionSignal]:
-        """Use LLM judgment to turn passive user messages into standard signals."""
+        """Use LLM judgment to turn passive user messages into standard signals.
+
+        Default (``allow_skillless=False``) matches skill-evolution: no inferred
+        skill means no signal. TTSE success detection opts into the
+        skill-agnostic path with ``allow_skillless=True``.
+        """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
             raise TypeError(
                 "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
@@ -343,6 +350,8 @@ class ConversationSignalDetector:
 
         skill_name = self._infer_skill_from_messages(messages)
         if not skill_name:
+            if not allow_skillless:
+                return []
             return await self._detect_skillless_user_feedback(user_messages)
 
         if self._llm is None or not self._model:
