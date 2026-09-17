@@ -148,9 +148,10 @@ class ModelUsageObserver:
 
     def _accumulate(self, tokens: RsiUsageTokens) -> None:
         previous = asdict(self.totals.tokens)
+        # A call whose counters were not reported contributes nothing; it must
+        # not erase counters already accumulated from earlier calls.
         summed = {
-            key: previous[key] + value if previous[key] is not None and value is not None else None
-            for key, value in asdict(tokens).items()
+            key: previous[key] + value if value is not None else previous[key] for key, value in asdict(tokens).items()
         }
         self.totals = RsiUsage(RsiUsageTokens(**summed), None, self.totals.call_count + 1)
 
