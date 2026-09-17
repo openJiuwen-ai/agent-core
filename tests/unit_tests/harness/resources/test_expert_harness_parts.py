@@ -70,7 +70,10 @@ def test_canonicalize_maps_subagent_short_names() -> None:
     assert out.subagents[0].factory_name == "core.subagent.explore_agent"
     subagent_rails = [r for r in out.rails if r.type == "core.subagent"]
     assert len(subagent_rails) == 1
-    assert subagent_rails[0].params == {"enable_async_subagent": False}
+    assert subagent_rails[0].params == {
+        "enable_async_subagent": False,
+        "enable_subagent_runtime": False,
+    }
 
 
 def test_canonicalize_async_subagent_rail_params() -> None:
@@ -88,7 +91,31 @@ def test_canonicalize_async_subagent_rail_params() -> None:
     out = canonicalize_expert_harness_spec(spec)
     subagent_rails = [r for r in out.rails if r.type == "core.subagent"]
     assert len(subagent_rails) == 1
-    assert subagent_rails[0].params == {"enable_async_subagent": True}
+    assert subagent_rails[0].params == {
+        "enable_async_subagent": True,
+        "enable_subagent_runtime": False,
+    }
+
+
+def test_canonicalize_runtime_subagent_rail_params() -> None:
+    """Canonicalize maps subagent_delegate_type=runtime to enable_subagent_runtime=True."""
+    spec = ExpertHarnessSpec(
+        id="canon_runtime_sub",
+        config=ExpertHarnessConfigSpec(enable_subagent=True, subagent_delegate_type="runtime"),
+        subagents=[
+            SubAgentSpec(
+                agent_card=AgentCard(name="custom", description=""),
+                system_prompt="You are custom.",
+            )
+        ],
+    )
+    out = canonicalize_expert_harness_spec(spec)
+    subagent_rails = [r for r in out.rails if r.type == "core.subagent"]
+    assert len(subagent_rails) == 1
+    assert subagent_rails[0].params == {
+        "enable_async_subagent": False,
+        "enable_subagent_runtime": True,
+    }
 
 
 def test_resolve_expert_harness_parts_builds_ask_user_with_source_root() -> None:

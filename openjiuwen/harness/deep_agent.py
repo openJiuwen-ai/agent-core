@@ -1255,6 +1255,7 @@ class DeepAgent(BaseAgent):
             ),
             "subagents": None,
             "enable_async_subagent": False,
+            "enable_subagent_runtime": False,
             "add_general_purpose_agent": False,
             "enable_plan_mode": spec.enable_plan_mode,
             "parallel_tool_calls": spec.parallel_tool_calls,
