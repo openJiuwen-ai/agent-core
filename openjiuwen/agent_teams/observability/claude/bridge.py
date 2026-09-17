@@ -8,7 +8,7 @@ from __future__ import annotations
 from contextlib import nullcontext
 import json
 import time
-from typing import Any, ContextManager
+from typing import TYPE_CHECKING, Any, ContextManager
 import uuid
 
 from opentelemetry import context as otel_context
@@ -38,9 +38,14 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TRAJECTORY_SCHEMA_VERSION,
+    OJ_TURN_ID,
+    OJ_TURN_NUMBER,
     TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
 from openjiuwen.core.session.stream.base import OutputSchema
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
 
 _TRACER_NAME = "openjiuwen.agent_teams.observability.claude"
 # Claude Code's native span names (enhanced telemetry beta).
@@ -134,6 +139,10 @@ class ClaudeSpanBridge:
         self._session_id = session_id or ""
         self._role = role or ""
         self._turn_index = 0
+        # Trajectory turn identity of the open turn, stamped on the turn span
+        # and on every span it parents.
+        self._turn_id = ""
+        self._turn_number = 0
         self._turn_span: Span | None = None
         self._config: Any | None = None
         self._output: list[str] = []
@@ -173,8 +182,15 @@ class ClaudeSpanBridge:
             role=role,
         )
 
-    def start_turn(self, *, prompt: str) -> None:
-        """Start one Claude round span under the current team span."""
+    def start_turn(self, *, prompt: str, turn: MemberTurn | None = None) -> None:
+        """Start one Claude round span under the current team span.
+
+        Args:
+            prompt: The prompt that starts the turn.
+            turn: The member's persisted trajectory turn. Without one the
+                bridge mints an identity numbered by its in-process counter,
+                which does not survive a restart.
+        """
         self.finish_turn(status="cancelled")
         runtime = self._observability_runtime()
         if runtime is None:
@@ -182,6 +198,12 @@ class ClaudeSpanBridge:
         tracer, config, team_span = runtime
 
         self._turn_index += 1
+        if turn is None:
+            self._turn_id = uuid.uuid4().hex
+            self._turn_number = self._turn_index
+        else:
+            self._turn_id = turn.turn_id
+            self._turn_number = turn.turn_number
         span = tracer.start_span(
             name=f"agent.{self._member_name}.claude_turn.{self._turn_index}",
             context=set_span_in_context(team_span, otel_context.get_current()),
@@ -196,6 +218,7 @@ class ClaudeSpanBridge:
         span.set_attribute(GEN_AI_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_ID, self._team_name)
@@ -212,6 +235,17 @@ class ClaudeSpanBridge:
         self._pending_native_calls = []
         self._pending_native_request_bodies = []
         self._pending_native_response_bodies = {}
+
+    def _stamp_turn(self, span: Span) -> None:
+        """Stamp the open turn's trajectory identity on a member span.
+
+        One Team trace holds every turn of every member, so each span states
+        the turn it belongs to rather than leaving it to the trace.
+        """
+        if not self._turn_id:
+            return
+        span.set_attribute(OJ_TURN_ID, self._turn_id)
+        span.set_attribute(OJ_TURN_NUMBER, self._turn_number)
 
     def record_chunk(self, chunk: OutputSchema) -> None:
         """Record one Claude runtime chunk into pending turn state."""
@@ -485,6 +519,7 @@ class ClaudeSpanBridge:
             if value is not None:
                 span.set_attribute(f"claude.llm_request.{key}", value)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
@@ -685,6 +720,7 @@ class ClaudeSpanBridge:
             span.set_attribute(GEN_AI_TOOL_CALL_ID, tool_call_id)
             span.set_attribute("claude.tool.call_id", tool_call_id)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
@@ -729,6 +765,7 @@ class ClaudeSpanBridge:
         )
         span.set_attribute(OJ_SPAN_OUTPUT, safe_reasoning)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         span.set_attribute("agentteam.backend", "claude")
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)

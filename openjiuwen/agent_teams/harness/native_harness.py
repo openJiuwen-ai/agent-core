@@ -83,6 +83,7 @@ from openjiuwen.agent_teams.harness.state import (
     InboxMessage,
     SafeStateSnapshot,
 )
+from openjiuwen.agent_teams.harness.turn import resolve_member_turn
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.schema.build_context import BuildContext
@@ -1155,7 +1156,7 @@ class NativeHarness(DeepAgent):
         # no replayable query, so there is nothing to drive a task-plan
         # continuation with.
         if self._has_remaining_tasks(session) and active.original_query:
-            nxt = self._start_round(active.original_query)
+            nxt = self._start_round(active.original_query, continues_turn=True)
             await self._emit_round("started", nxt.round_id)
             return
 
@@ -1193,12 +1194,19 @@ class NativeHarness(DeepAgent):
         is_follow_up: bool = False,
         failure_retry: bool = False,
         resume_continuation: bool = False,
+        continues_turn: bool = False,
     ) -> ActiveRound:
         """Create an ActiveRound (with a pre-round baseline snapshot) and schedule it.
 
         ``PhaseSnapshotRail`` locates this round through the harness back-ref
         (``harness._st.active``), which is valid from the TaskScheduler exec task
         where the inner loop runs — unlike a ContextVar set here.
+
+        The round also resolves its trajectory turn. A round keeps the member's
+        latest turn when it works on that turn's input — a resume continuation,
+        an ``InteractiveInput`` answer, a failure retry, or an explicit
+        ``continues_turn`` — and opens a new one otherwise (idle start,
+        follow-up batch). A steer never reaches here: it joins the running round.
 
         Args:
             query: Query to drive this round. A list is a batch of follow-ups
@@ -1212,10 +1220,20 @@ class NativeHarness(DeepAgent):
                 its preserved context. The inner loop then appends no user turn;
                 ``query`` is only kept as ``original_query`` so a task-plan
                 continuation can still reuse it.
+            continues_turn: Whether this round continues the latest turn for a
+                reason the other flags do not state (a task-plan continuation of
+                the round that just finished).
         """
         round_id = self._st.next_round_id()
         task_id = uuid.uuid4().hex
         pre_round = capture_snapshot(self, self._session, index=0)
+        keeps_turn = (
+            continues_turn
+            or failure_retry
+            or resume_continuation
+            or isinstance(query, InteractiveInput)
+        )
+        turn, turn_opened = resolve_member_turn(self._session, continues_turn=keeps_turn)
 
         active = ActiveRound(
             round_id=round_id,
@@ -1224,6 +1242,8 @@ class NativeHarness(DeepAgent):
             deep_agent=self,
             task=None,  # type: ignore[arg-type]  # assigned right after create_task
             steering_queue=asyncio.Queue(),
+            turn=turn,
+            turn_opened=turn_opened,
             failure_retry=failure_retry,
             pre_round_snapshot=pre_round,
         )
@@ -1235,10 +1255,12 @@ class NativeHarness(DeepAgent):
         active.task = task
         self._st.active = active
         logger.info(
-            "[NativeHarness] round_id=%s started query=%r follow_up=%s",
+            "[NativeHarness] round_id=%s started query=%r follow_up=%s turn=%s opened=%s",
             round_id,
             str(query)[:120],
             is_follow_up,
+            turn.turn_number,
+            turn_opened,
         )
         return active
 
@@ -1283,6 +1305,7 @@ class NativeHarness(DeepAgent):
         )
         ctx = AgentCallbackContext(agent=self, inputs=inv_inputs, session=self._session)
         try:
+            await self._commit_opened_turn(active)
             async with ctx.lifecycle(
                 AgentCallbackEvent.BEFORE_INVOKE,
                 AgentCallbackEvent.AFTER_INVOKE,
@@ -1325,6 +1348,29 @@ class NativeHarness(DeepAgent):
                     error=error,
                     result=result,
                 ),
+            )
+
+    async def _commit_opened_turn(self, active: ActiveRound) -> None:
+        """Checkpoint the advanced turn counter before an opening round runs.
+
+        ``_start_round`` only stages the new turn in session state. Without a
+        commit a process that dies mid-round would restart from the previous
+        counter and hand the next turn a number this one already used. A
+        failed commit is logged and ignored: the member's work matters more
+        than its turn numbering.
+
+        Args:
+            active: The round about to run.
+        """
+        if not active.turn_opened or self._session is None:
+            return
+        try:
+            await self._session.commit()
+        except Exception:
+            logger.debug(
+                "[NativeHarness] round_id=%s turn state commit failed",
+                active.round_id,
+                exc_info=True,
             )
 
     @staticmethod

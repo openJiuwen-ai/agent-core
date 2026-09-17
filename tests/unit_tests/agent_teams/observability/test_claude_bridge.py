@@ -304,3 +304,32 @@ def test_claude_bridge_build_returns_noop_when_observability_is_not_initialized(
     bridge.start_turn(prompt="ignored")
     bridge.record_chunk(_chunk("llm_output", {"content": "ignored"}))
     bridge.finish_turn(status="ok")
+
+
+def test_claude_bridge_stamps_the_member_turn_on_turn_and_child_spans(
+    in_memory_exporter: InMemorySpanExporter,
+) -> None:
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
+    from openjiuwen.extensions.observability.semconv import OJ_TURN_ID, OJ_TURN_NUMBER
+
+    bridge = ClaudeSpanBridge(member_name="coder", team_name="alpha", session_id="sess-1")
+
+    bridge.start_turn(prompt="use a tool", turn=MemberTurn(turn_id="member-turn-9", turn_number=9))
+    bridge.record_chunk(
+        _chunk("tool_call", {"name": "Bash", "arguments": "{}", "tool_call_id": "tool-1"}),
+    )
+    bridge.record_chunk(
+        _chunk("tool_result", {"tool_name": "Bash", "result": "ok", "tool_call_id": "tool-1"}),
+    )
+    bridge.finish_turn(status="ok")
+    bridge.start_turn(prompt="no persisted turn")
+    bridge.finish_turn(status="ok")
+
+    first_turn = _spans_by_name(in_memory_exporter, "agent.coder.claude_turn.1")[0]
+    tool_span = _spans_by_name(in_memory_exporter, "execute_tool Bash")[0]
+    assert (_attr(first_turn, OJ_TURN_ID), _attr(first_turn, OJ_TURN_NUMBER)) == ("member-turn-9", 9)
+    assert (_attr(tool_span, OJ_TURN_ID), _attr(tool_span, OJ_TURN_NUMBER)) == ("member-turn-9", 9)
+    # Without a persisted turn the bridge still states one, numbered in-process.
+    second_turn = _spans_by_name(in_memory_exporter, "agent.coder.claude_turn.2")[0]
+    assert _attr(second_turn, OJ_TURN_ID) not in (None, "", "member-turn-9")
+    assert _attr(second_turn, OJ_TURN_NUMBER) == 2

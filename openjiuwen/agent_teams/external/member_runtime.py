@@ -20,6 +20,7 @@ import json
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, Sequence, runtime_checkable
 
+from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
@@ -96,8 +97,8 @@ class TeamContextAwareRuntime(Protocol):
 class MemberSpanBridge(Protocol):
     """Observability bridge driven by turn lifecycle events."""
 
-    def start_turn(self, *, prompt: str, **kwargs: Any) -> None:
-        """Open the span for one member turn."""
+    def start_turn(self, *, prompt: str, turn: MemberTurn | None = None, **kwargs: Any) -> None:
+        """Open the span for one member turn, stamped with its trajectory turn."""
         ...
 
     def finish_turn(self, *, status: str, error: Any | None = None) -> None:
@@ -544,7 +545,7 @@ class ExternalHarnessMemberRuntime:
             self._current_round_id = self._round_seq
             if self._reliability_ctx is not None:
                 self._reliability_ctx.begin_attempt(phase="turn", round_id=self._current_round_id)
-            self._span_start_turn()
+            await self._span_start_turn()
         elif payload.kind is TurnEventKind.FAILED:
             await self._finalize_turn_failure(payload.result)
             await self._span_finish_turn(status="failed", error=payload.result.error if payload.result else None)
@@ -623,16 +624,31 @@ class ExternalHarnessMemberRuntime:
         )
         await ctx.mark_member_error()
 
-    def _span_start_turn(self) -> None:
+    async def _span_start_turn(self) -> None:
         bridge = self._span_bridge
         if bridge is None:
             return
+        # Every provider turn is a trajectory turn of this member; the counter
+        # lives in the member session so numbering survives a restart.
+        turn = await self._open_member_turn()
         try:
-            bridge.start_turn(prompt=self._last_prompt, thread_id=self._harness.provider_session_id)
+            bridge.start_turn(prompt=self._last_prompt, thread_id=self._harness.provider_session_id, turn=turn)
         except TypeError:
-            bridge.start_turn(prompt=self._last_prompt)
+            bridge.start_turn(prompt=self._last_prompt, turn=turn)
         except Exception:
             team_logger.debug("[{}] span bridge start_turn failed", self._member_name, exc_info=True)
+
+    async def _open_member_turn(self) -> MemberTurn:
+        """Open the next trajectory turn and checkpoint the advanced counter."""
+        member_session = self._member_session
+        turn, _ = resolve_member_turn(member_session, continues_turn=False)
+        if member_session is None:
+            return turn
+        try:
+            await member_session.commit()
+        except Exception:
+            team_logger.debug("[{}] turn state commit failed", self._member_name, exc_info=True)
+        return turn
 
     async def _span_finish_turn(self, *, status: str, error: Any | None = None) -> None:
         bridge = self._span_bridge

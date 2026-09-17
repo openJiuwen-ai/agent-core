@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 from openjiuwen.harness_protocol.state import HarnessState
 
 if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
     from openjiuwen.core.foundation.llm import BaseMessage
     from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -99,6 +100,13 @@ class ActiveRound:
         task: The asyncio.Task running ``NativeHarness._run_round``.
         steering_queue: Pushed by ``send(immediate=True)``; reaches the inner
             ReAct loop via the round's ``submit_round`` steering wiring.
+        turn: The trajectory turn this round works on. A round started from
+            idle or by draining follow-ups opens a turn; a resume, an
+            interrupt answer, a failure retry and a task-plan continuation keep
+            the latest one. Stamped on the round's agent spans so one Team
+            trace splits into per-member turns.
+        turn_opened: Whether this round opened ``turn`` (advancing the
+            member's persisted turn counter) rather than continuing it.
         graceful_abort: When True, the round is finishing under a graceful
             abort; ``_on_round_done`` must not auto-start a next round.
         failure_retry: When True, this round is the one-shot retry of a round
@@ -138,6 +146,8 @@ class ActiveRound:
     deep_agent: "DeepAgent"
     task: asyncio.Task
     steering_queue: asyncio.Queue
+    turn: "MemberTurn"
+    turn_opened: bool = False
     graceful_abort: bool = False
     failure_retry: bool = False
     pre_round_snapshot: SafeStateSnapshot | None = None

@@ -16,7 +16,11 @@ import json
 import re
 import shlex
 import time
-from typing import Any
+import uuid
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from openjiuwen.agent_teams.harness.turn import MemberTurn
 
 _TRACER_NAME = "openjiuwen.agent_teams.observability.codex"
 _NATIVE_EXPORT_QUIET_S = 0.15
@@ -326,6 +330,10 @@ class CodexSpanBridge:
         self._session_id = session_id
         self._role = role or ""
         self._turn_index = 0
+        # Trajectory turn identity of the open turn, stamped on the turn span
+        # and on every model / tool span it parents.
+        self._turn_id = ""
+        self._turn_number = 0
         self._turn_span: Any | None = None
         self._config: Any | None = None
         self._thread_id: str | None = None
@@ -381,7 +389,19 @@ class CodexSpanBridge:
         thread_id: str | None,
         developer_instructions: str | None = None,
         model: Any | None = None,
+        turn: MemberTurn | None = None,
     ) -> None:
+        """Start one Codex turn span under the current team span.
+
+        Args:
+            prompt: The prompt that starts the turn.
+            thread_id: The Codex thread the turn runs on.
+            developer_instructions: Developer instructions sent with the turn.
+            model: The model the turn runs on.
+            turn: The member's persisted trajectory turn. Without one the
+                bridge mints an identity numbered by its in-process counter,
+                which does not survive a restart.
+        """
         self.finish_turn(status="cancelled")
         runtime = self._observability_runtime() or self._captured_runtime
         if runtime is None:
@@ -409,6 +429,12 @@ class CodexSpanBridge:
         )
 
         self._turn_index += 1
+        if turn is None:
+            self._turn_id = uuid.uuid4().hex
+            self._turn_number = self._turn_index
+        else:
+            self._turn_id = turn.turn_id
+            self._turn_number = turn.turn_number
         span = tracer.start_span(
             name=f"agent.{self._member_name}.codex_turn.{self._turn_index}",
             context=set_span_in_context(team_span, otel_context.get_current()),
@@ -423,6 +449,7 @@ class CodexSpanBridge:
         span.set_attribute(GEN_AI_AGENT_NAME, self._member_name)
         span.set_attribute(AT_AGENT_ROLE, self._role or self._member_name)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         if self._team_name:
             span.set_attribute(AT_TEAM_ID, self._team_name)
             span.set_attribute(AT_TEAM_NAME, self._team_name)
@@ -461,6 +488,19 @@ class CodexSpanBridge:
         self._response_ids = []
         self._usage = _usage(None)
         self._llm_index = 0
+
+    def _stamp_turn(self, span: Any) -> None:
+        """Stamp the open turn's trajectory identity on a member span.
+
+        One Team trace holds every turn of every member, so each span states
+        the turn it belongs to rather than leaving it to the trace.
+        """
+        if not self._turn_id:
+            return
+        from openjiuwen.extensions.observability.semconv import OJ_TURN_ID, OJ_TURN_NUMBER
+
+        span.set_attribute(OJ_TURN_ID, self._turn_id)
+        span.set_attribute(OJ_TURN_NUMBER, self._turn_number)
 
     def append_output(self, delta: str) -> None:
         if self._turn_span is not None and delta:
@@ -682,6 +722,7 @@ class CodexSpanBridge:
         if self._thread_id:
             span.set_attribute("codex.thread.id", self._thread_id)
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
@@ -941,6 +982,7 @@ class CodexSpanBridge:
         if native_turn_id:
             span.set_attribute("codex.turn.id", str(native_turn_id))
         span.set_attribute(AT_MEMBER_NAME, self._member_name)
+        self._stamp_turn(span)
         if self._team_name:
             span.set_attribute(AT_TEAM_NAME, self._team_name)
         if self._session_id:
@@ -1126,6 +1168,7 @@ class CodexSpanBridge:
             if server_name:
                 span.set_attribute("codex.mcp.server", str(server_name))
             span.set_attribute(AT_MEMBER_NAME, self._member_name)
+            self._stamp_turn(span)
             if self._team_name:
                 span.set_attribute(AT_TEAM_NAME, self._team_name)
             if self._session_id:
