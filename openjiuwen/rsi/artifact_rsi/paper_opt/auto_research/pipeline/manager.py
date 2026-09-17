@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
@@ -64,6 +65,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.hitl import (
     inject_operator_followup,
     persist_pause,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.stage_activity import tail_activity
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.subagents import SubagentRegistry, build_registry
 
 logger = get_logger(__name__)
@@ -434,7 +436,7 @@ class ManagerRuntime:
         experiment_design=None,
         code_implementation=None,
         experiment_execution=None,
-        on_stage: Callable[[str], Awaitable[None]] | None = None,
+        on_stage: Callable[[str, str | None], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.on_stage = on_stage
@@ -604,7 +606,7 @@ class ManagerRuntime:
     ) -> SubagentReport:
         adapter = self.registry.get(contract.module)
         if self.on_stage is not None:
-            await self.on_stage(contract.module)
+            await self.on_stage(contract.module, None)
         attempt = 1
         if contract.module == "code_implementation":
             attempt = state.task_state.counters.code_attempts + 1
@@ -638,77 +640,107 @@ class ManagerRuntime:
             attempt,
         )
         started = time.monotonic()
-        with log_context(
-            run_id=run_id,
-            round_index=round_index,
-            module=contract.module,
-            attempt=attempt,
-            report_id=report_id,
-        ) as ctx:
-            try:
-                report = await adapter.ainvoke(
-                    contract, state, round_index=round_index, attempt=attempt
-                )
-            except Exception as exc:  # noqa: BLE001
+        tail_task = self._start_activity_tail(contract.module, run_id, round_index, attempt)
+        try:
+            with log_context(
+                run_id=run_id,
+                round_index=round_index,
+                module=contract.module,
+                attempt=attempt,
+                report_id=report_id,
+            ) as ctx:
+                try:
+                    report = await adapter.ainvoke(
+                        contract, state, round_index=round_index, attempt=attempt
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    append_event(
+                        run_id,
+                        "subagent_exception",
+                        {
+                            "round": round_index,
+                            "round_index": round_index,
+                            "module": contract.module,
+                            "attempt": attempt,
+                            "report_id": report_id,
+                            "duration_ms": duration_ms,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "attempt_dir": attempt_rel,
+                            "trace_id": ctx.trace_id if ctx is not None else "",
+                        },
+                    )
+                    logger.exception(
+                        "subagent_exception module=%s round=%s attempt=%s",
+                        contract.module,
+                        round_index,
+                        attempt,
+                    )
+                    raise
                 duration_ms = int((time.monotonic() - started) * 1000)
+                artifact_refs = _attempt_artifact_refs(
+                    run_id,
+                    contract.module,
+                    round_index,
+                    attempt,
+                    report.artifact_paths,
+                )
+                if artifact_refs and artifact_refs != list(report.artifact_paths):
+                    report = report.model_copy(update={"artifact_paths": artifact_refs})
                 append_event(
                     run_id,
-                    "subagent_exception",
+                    "subagent_finish",
                     {
                         "round": round_index,
                         "round_index": round_index,
                         "module": contract.module,
                         "attempt": attempt,
-                        "report_id": report_id,
-                        "duration_ms": duration_ms,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
+                        "report_id": report.report_id or report_id,
+                        "outcome": report.outcome,
+                        "duration_ms": report.duration_ms or duration_ms,
                         "attempt_dir": attempt_rel,
+                        "artifact_refs": artifact_refs,
                         "trace_id": ctx.trace_id if ctx is not None else "",
                     },
                 )
-                logger.exception(
-                    "subagent_exception module=%s round=%s attempt=%s",
+                logger.info(
+                    "subagent_finish module=%s round=%s attempt=%s outcome=%s duration_ms=%s",
                     contract.module,
                     round_index,
                     attempt,
+                    report.outcome,
+                    report.duration_ms or duration_ms,
                 )
-                raise
-            duration_ms = int((time.monotonic() - started) * 1000)
-            artifact_refs = _attempt_artifact_refs(
-                run_id,
-                contract.module,
-                round_index,
-                attempt,
-                report.artifact_paths,
-            )
-            if artifact_refs and artifact_refs != list(report.artifact_paths):
-                report = report.model_copy(update={"artifact_paths": artifact_refs})
-            append_event(
-                run_id,
-                "subagent_finish",
-                {
-                    "round": round_index,
-                    "round_index": round_index,
-                    "module": contract.module,
-                    "attempt": attempt,
-                    "report_id": report.report_id or report_id,
-                    "outcome": report.outcome,
-                    "duration_ms": report.duration_ms or duration_ms,
-                    "attempt_dir": attempt_rel,
-                    "artifact_refs": artifact_refs,
-                    "trace_id": ctx.trace_id if ctx is not None else "",
-                },
-            )
-            logger.info(
-                "subagent_finish module=%s round=%s attempt=%s outcome=%s duration_ms=%s",
-                contract.module,
-                round_index,
-                attempt,
-                report.outcome,
-                report.duration_ms or duration_ms,
-            )
-            return report
+                return report
+        finally:
+            await self._stop_activity_tail(tail_task)
+
+    def _start_activity_tail(
+        self, module: str, run_id: str, round_index: int, attempt: int
+    ) -> asyncio.Task | None:
+        """Start a background tailer pushing live `note` updates through
+        `on_stage` while `module` is running. Caller must pair this with
+        `_stop_activity_tail` in a `finally` so the task never outlives the
+        module's own `adapter.ainvoke(...)` call."""
+        if self.on_stage is None:
+            return None
+        on_stage = self.on_stage
+
+        async def _push(note: str) -> None:
+            await on_stage(module, note)
+
+        return asyncio.create_task(
+            tail_activity(run_id=run_id, module=module, round_index=round_index, attempt=attempt, on_note=_push)
+        )
+
+    @staticmethod
+    async def _stop_activity_tail(task: asyncio.Task | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def arun(
         self,
@@ -783,7 +815,7 @@ class ManagerRuntime:
             round_index = state.task_state.counters.rounds_used + 1
             started = utc_now()
             if self.on_stage is not None:
-                await self.on_stage("manager")
+                await self.on_stage("manager", None)
             try:
                 decision = await self._decide_with_repair(state, round_index)
             except DecisionValidationError as exc:
