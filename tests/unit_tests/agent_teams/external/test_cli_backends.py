@@ -159,21 +159,25 @@ def test_claude_turn_stall_policy_is_validated_and_claude_only():
         ExternalCliAgentSpec(cli_agent="codex", claude_turn_idle_timeout_s=45.0)
 
 
-def test_claude_max_buffer_size_survives_codex_config_round_trip():
-    config = ExternalCliAgentSpec(cli_agent="codex")
-
-    restored = ExternalCliAgentSpec.model_validate(config.model_dump(mode="json"))
-
-    assert restored.cli_agent == "codex"
-    assert restored.claude_max_buffer_size is None
-
-
 def test_claude_max_buffer_size_is_validated_and_claude_only():
-    config = ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=64 * 1024 * 1024)
-    assert config.claude_max_buffer_size == 64 * 1024 * 1024
+    config = ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=1024)
+    assert config.claude_max_buffer_size == 1024
+
+    with pytest.raises(ValidationError, match="greater than or equal to 1"):
+        ExternalCliAgentSpec(cli_agent="claude", claude_max_buffer_size=0)
 
     with pytest.raises(ValidationError, match="claude_max_buffer_size is only valid"):
-        ExternalCliAgentSpec(cli_agent="codex", claude_max_buffer_size=64 * 1024 * 1024)
+        ExternalCliAgentSpec(cli_agent="codex", claude_max_buffer_size=1024)
+
+
+@pytest.mark.parametrize("cli_agent", ["claude", "codex", "generic"])
+def test_spec_survives_model_dump_round_trip(cli_agent: str):
+    """Spawn payloads and checkpoints re-validate a full ``model_dump``."""
+    config = ExternalCliAgentSpec(cli_agent=cli_agent)
+
+    restored = ExternalCliAgentSpec.model_validate(config.model_dump(mode="json", by_alias=True))
+
+    assert restored == config
 
 
 def test_unknown_backend_returns_none():
