@@ -5,25 +5,25 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 import asyncio
+from types import SimpleNamespace
 
 import pytest
-import openjiuwen.harness.observability.rail as rail_module
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import StatusCode
 
+import openjiuwen.harness.observability.rail as rail_module
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
+from openjiuwen.core.foundation.tool import ToolCard
+from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
     TaskIterationInputs,
     ToolCallInputs,
 )
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolCard
-from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.extensions.observability import span_context as shared_span_context
 from openjiuwen.extensions.observability.callback_handler import OtelCallbackHandler
 from openjiuwen.extensions.observability.config import ObservabilityConfig
@@ -40,44 +40,44 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_TOOL_CALL_RESULT,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    OJ_REQUEST_ID,
     OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
     OJ_EXECUTION_SUBJECT_ID,
     OJ_EXECUTION_SUBJECT_KIND,
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_INFERENCE_ID,
+    OJ_REQUEST_ID,
     OJ_REQUEST_NUMBER,
     OJ_RUN_ID,
     OJ_SPAN_FORCED_CLOSE,
     OJ_SPAN_FORCED_CLOSE_REASON,
     OJ_SPAN_INPUT,
     OJ_SPAN_OUTPUT,
-    OJ_INFERENCE_ID,
     OJ_STEP_ID,
     OJ_STEP_NUMBER,
     OJ_TOOL_AUTHORITATIVE,
     OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
-    OJ_TRACE_ROOT,
     OJ_TRACE_FORCED_CLOSE,
+    OJ_TRACE_ROOT,
     OJ_TRACE_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
-)
-from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
-from openjiuwen.harness.observability.rail import (
-    AgentObservabilityRail,
-    AgentSpanDecoration,
-)
-from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.harness.execution_subject import (
-    ExecutionSubject,
-    execution_subject_scope,
 )
 from openjiuwen.extensions.observability.span_context import (
     clear_current_session_id,
     set_current_session_id,
 )
+from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
+from openjiuwen.harness.execution_subject import (
+    ExecutionSubject,
+    execution_subject_scope,
+)
+from openjiuwen.harness.observability.rail import (
+    AgentObservabilityRail,
+    AgentSpanDecoration,
+)
+from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
 @pytest.fixture
@@ -126,14 +126,12 @@ def _iteration_ctx(agent, *, iteration: int = 1, query: str = "do it"):
 
 def _finished(exporter: InMemorySpanExporter, name: str):
     if name == "llm.call":
-        return [
-            span for span in exporter.get_finished_spans()
-            if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"
-        ]
+        return [span for span in exporter.get_finished_spans() if span.attributes.get(GEN_AI_OPERATION_NAME) == "chat"]
     if name.startswith("tool."):
         tool_name = name.removeprefix("tool.")
         semantic = [
-            span for span in exporter.get_finished_spans()
+            span
+            for span in exporter.get_finished_spans()
             if span.attributes.get(GEN_AI_OPERATION_NAME) == "execute_tool"
             and span.attributes.get(GEN_AI_TOOL_NAME) == tool_name
         ]
@@ -197,10 +195,7 @@ async def test_each_llm_request_keeps_identity_parent_and_owning_step(tracing):
 
     messages = [
         {"role": "system", "content": "system"},
-        *(
-            {"role": "user", "content": f"message-{index}"}
-            for index in range(12)
-        ),
+        *({"role": "user", "content": f"message-{index}"} for index in range(12)),
     ]
     for index in range(2):
         await rail.before_model_call(model_ctx)
@@ -223,10 +218,7 @@ async def test_each_llm_request_keeps_identity_parent_and_owning_step(tracing):
     assert len(requests) == 2
     assert [span.attributes[OJ_REQUEST_NUMBER] for span in requests] == [1, 2]
     assert len({span.attributes[OJ_INFERENCE_ID] for span in requests}) == 2
-    assert all(
-        span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
-        for span in requests
-    )
+    assert all(span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}" for span in requests)
     assert all(span.parent.span_id == step_span.context.span_id for span in requests)
     assert all(span.attributes[OJ_TURN_ID] == "turn-7" for span in requests)
     assert all(span.attributes[OJ_STEP_ID] == f"{step_span.context.span_id:016x}" for span in requests)
@@ -246,6 +238,56 @@ async def test_no_agent_span_without_a_run_root(tracing):
     await rail.after_task_iteration(ctx)
 
     assert _finished(tracing.exporter, "agent.solo.task_iteration.1") == []
+
+
+class _FakeMetricsRecorder:
+    def __init__(self) -> None:
+        self.iteration_duration_calls: list[tuple] = []
+        self.iteration_error_calls: list[tuple] = []
+
+    def record_iteration_duration(self, agent_id, team_id, duration_ms) -> None:
+        self.iteration_duration_calls.append((agent_id, team_id, duration_ms))
+
+    def record_iteration_error(self, agent_id, team_id) -> None:
+        self.iteration_error_calls.append((agent_id, team_id))
+
+
+@pytest.mark.asyncio
+async def test_iteration_close_emits_iteration_metrics(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = "the answer"
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    agent_id, team_id, _duration = rec.iteration_duration_calls[0]
+    assert agent_id == "solo"
+    assert team_id == ""
+    assert rec.iteration_error_calls == []
+
+
+@pytest.mark.asyncio
+async def test_iteration_error_emits_error_metric(tracing, monkeypatch):
+    from openjiuwen.extensions.observability import metrics as metrics_mod
+
+    rec = _FakeMetricsRecorder()
+    monkeypatch.setattr(metrics_mod, "get_metrics_recorder", lambda: rec)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    ctx = _iteration_ctx(_agent())
+    ctx.exception = RuntimeError("boom")
+
+    await rail.before_task_iteration(ctx)
+    ctx.inputs.result = None
+    await rail.after_task_iteration(ctx)
+
+    assert len(rec.iteration_duration_calls) == 1
+    assert ("solo", "") in rec.iteration_error_calls
 
 
 @pytest.mark.asyncio
@@ -306,9 +348,7 @@ async def test_single_round_agent_gets_an_invoke_span(tracing):
 async def test_multi_round_agent_gets_no_invoke_span(tracing):
     """One agent tier per round: the iteration hook owns the multi-round path."""
     rail = AgentObservabilityRail(tracer=tracing.tracer)
-    ctx = AgentCallbackContext(
-        agent=_agent(enable_task_loop=True), inputs=SimpleNamespace(query="do it", result=None)
-    )
+    ctx = AgentCallbackContext(agent=_agent(enable_task_loop=True), inputs=SimpleNamespace(query="do it", result=None))
 
     await rail.before_invoke(ctx)
     await rail.after_invoke(ctx)
@@ -333,17 +373,17 @@ async def test_subagent_invoke_nests_under_the_dispatching_agent_span(tracing):
         agent=_agent("explore_agent", enable_task_loop=False),
         inputs=SimpleNamespace(query="look", result=None),
     )
-    with execution_subject_scope(ExecutionSubject(
-        subject_id="subagent:dispatch-1",
-        display_name="Explore Agent",
-        kind="subagent",
-        parent_subject_id="main",
-        session_id="session_sub_explore_1",
-    )):
-        await subagent_rail.before_invoke(subagent_ctx)
-        request = handler._open_llm_span(
-            {"messages": [{"role": "user", "content": "look"}], "model": "fake"}
+    with execution_subject_scope(
+        ExecutionSubject(
+            subject_id="subagent:dispatch-1",
+            display_name="Explore Agent",
+            kind="subagent",
+            parent_subject_id="main",
+            session_id="session_sub_explore_1",
         )
+    ):
+        await subagent_rail.before_invoke(subagent_ctx)
+        request = handler._open_llm_span({"messages": [{"role": "user", "content": "look"}], "model": "fake"})
         assert request is not None
         handler._close_llm_span(
             request.otel_llm_state,
@@ -382,9 +422,7 @@ async def test_an_orphan_span_from_the_same_agent_is_drained_not_left_open(traci
     orphan_record = _finished(tracing.exporter, "agent.solo.task_iteration.1")[0]
     assert orphan_record.status.status_code is StatusCode.UNSET
     assert orphan_record.attributes[OJ_SPAN_FORCED_CLOSE] is True
-    assert orphan_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == (
-        "missing_agent_terminal_callback"
-    )
+    assert orphan_record.attributes[OJ_SPAN_FORCED_CLOSE_REASON] == ("missing_agent_terminal_callback")
     assert tracing.root.attributes[OJ_TRACE_FORCED_CLOSE] is True
     assert _finished(tracing.exporter, "agent.solo.task_iteration.2")[0].parent.span_id == (
         tracing.root.context.span_id
@@ -497,13 +535,15 @@ async def test_subagent_invoke_nests_under_the_tool_span_that_dispatched_it(trac
         agent=_agent("explore_agent", enable_task_loop=False),
         inputs=SimpleNamespace(query="look", result=None),
     )
-    with execution_subject_scope(ExecutionSubject(
-        subject_id="subagent:dispatch-1",
-        display_name="Explore Agent",
-        kind="subagent",
-        parent_subject_id="main",
-        session_id="session_sub_explore_1",
-    )):
+    with execution_subject_scope(
+        ExecutionSubject(
+            subject_id="subagent:dispatch-1",
+            display_name="Explore Agent",
+            kind="subagent",
+            parent_subject_id="main",
+            session_id="session_sub_explore_1",
+        )
+    ):
         await subagent_rail.before_invoke(subagent_ctx)
         model_ctx = AgentCallbackContext(
             agent=subagent_ctx.agent,
@@ -524,10 +564,13 @@ async def test_subagent_invoke_nests_under_the_tool_span_that_dispatched_it(trac
     assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_KIND] == "subagent"
     assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_PARENT_ID] == "main"
     assert subagent_span.attributes[OJ_EXECUTION_SUBJECT_SESSION_ID] == "session_sub_explore_1"
-    assert OJ_SPAN_FORCED_CLOSE not in _finished(
-        tracing.exporter,
-        "tool.task_tool",
-    )[0].attributes
+    assert (
+        OJ_SPAN_FORCED_CLOSE
+        not in _finished(
+            tracing.exporter,
+            "tool.task_tool",
+        )[0].attributes
+    )
 
 
 def _tool_ctx(agent, *, call_id: str, shared_extra=None, tool_name: str = "search"):
@@ -612,7 +655,7 @@ async def test_iteration_and_tool_publish_live_snapshots_before_they_end(
 
     assert [(span.name, kind, recording) for span, kind, recording in published] == [
         ("agent.solo.task_iteration.1", "attributes", True),
-            ("execute_tool search", "attributes", True),
+        ("execute_tool search", "attributes", True),
     ]
     tool_ctx.inputs.tool_result = "done"
     await rail.after_tool_call(tool_ctx)
@@ -676,13 +719,15 @@ async def test_subagent_ambient_session_does_not_replace_trajectory_owner(tracin
         inputs=SimpleNamespace(query="look", result=None),
     )
 
-    with execution_subject_scope(ExecutionSubject(
-        subject_id="subagent:dispatch-1",
-        display_name="Explore Agent",
-        kind="subagent",
-        parent_subject_id="main",
-        session_id="session_sub_explore_1",
-    )):
+    with execution_subject_scope(
+        ExecutionSubject(
+            subject_id="subagent:dispatch-1",
+            display_name="Explore Agent",
+            kind="subagent",
+            parent_subject_id="main",
+            session_id="session_sub_explore_1",
+        )
+    ):
         await rail.before_invoke(ctx)
         set_current_session_id("session_sub_explore_1")
         try:
@@ -749,6 +794,37 @@ async def test_tool_exception_closes_authoritative_span_with_error(tracing):
     span = _finished(tracing.exporter, "tool.search")[0]
     assert span.status.status_code.name == "ERROR"
     assert span.attributes["error.type"] == "ValueError"
+
+
+@pytest.mark.asyncio
+async def test_authoritative_tool_close_counts_into_trace_rollup(tracing):
+    from openjiuwen.extensions.observability.usage_aggregation import get_accumulator
+
+    card = ToolCard(id="resource-search", name="search")
+    agent = _agent()
+    agent.ability_manager = SimpleNamespace(get=lambda name: card)
+    rail = AgentObservabilityRail(tracer=tracing.tracer)
+    accumulator = get_accumulator()
+    iteration_ctx = _iteration_ctx(agent)
+    await rail.before_task_iteration(iteration_ctx)
+
+    ok_ctx = _tool_ctx(agent, call_id="call-ok")
+    await rail.before_tool_call(ok_ctx)
+    ok_ctx.inputs.tool_result = {"answer": 42}
+    await rail.after_tool_call(ok_ctx)
+
+    err_ctx = _tool_ctx(agent, call_id="call-err")
+    await rail.before_tool_call(err_ctx)
+    err_ctx.exception = ValueError("boom")
+    await rail.on_tool_exception(err_ctx)
+
+    await rail.after_task_iteration(iteration_ctx)
+
+    trace_id = tracing.root.context.trace_id
+    snap = accumulator.snapshot(trace_id)
+    assert snap["tool_calls"] == 2
+    assert snap["tool_errors"] == 1
+    accumulator.clear(trace_id)
 
 
 @pytest.mark.asyncio
@@ -1055,9 +1131,11 @@ async def test_replayed_tool_keeps_the_step_the_interrupt_paused(tracing):
     agent.ability_manager = SimpleNamespace(get=lambda name: card)
     rail = AgentObservabilityRail(tracer=tracing.tracer)
 
-    session = _StateSession({
-        rail_module.OPEN_STEP_STATE_KEY: {"step_id": "step-paused", "step_number": 4},
-    })
+    session = _StateSession(
+        {
+            rail_module.OPEN_STEP_STATE_KEY: {"step_id": "step-paused", "step_number": 4},
+        }
+    )
 
     ctx = _resume_tool_ctx(agent, call_id="call-resume", react_iteration=4, session=session)
     await rail.before_tool_call(ctx)
