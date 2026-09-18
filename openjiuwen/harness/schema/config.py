@@ -24,6 +24,9 @@ from openjiuwen.harness.security.models import PermissionsSection
 from openjiuwen.harness.workspace.workspace import (
     Workspace,
 )
+from openjiuwen.harness.multi_rollout.config import (
+    MultiRolloutConfig,
+)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -302,6 +305,11 @@ class DeepAgentConfig:
     # Skill budget: gently truncate skill prompts by dropping whole low-ranked skills.
     skill_budget_max_skills: Optional[int] = None
     skill_budget_max_total_chars: Optional[int] = None
+
+    # Multi-rollout: spawn N parallel attempts for the same task.
+    multi_rollout: "MultiRolloutConfig" = field(
+        default_factory=lambda: MultiRolloutConfig()
+    )
 
 
 @dataclass
