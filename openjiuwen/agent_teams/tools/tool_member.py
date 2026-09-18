@@ -547,7 +547,33 @@ class ApproveToolCallTool(TeamTool):
             "required": ["member_name", "tool_call_id", "approved"],
         }
 
+    @staticmethod
+    def _validate_inputs(inputs: dict[str, Any]) -> str | None:
+        """Reject calls that omit the schema field ``tool_call_id``.
+
+        The leader LLM fills this from the approval request. A missing or
+        empty value must fail before ``approve_tool`` writes the mailbox or
+        publishes an event. Aliased keys such as ``.tool_call_id`` are not
+        accepted; the error lists the keys actually provided so the model
+        can retry with the schema name.
+        """
+        tool_call_id = inputs.get("tool_call_id")
+        if isinstance(tool_call_id, str) and tool_call_id:
+            return None
+        keys = ", ".join(sorted(str(key) for key in inputs.keys()))
+        return (
+            "approve_tool missing required parameter tool_call_id "
+            "(non-empty string). "
+            f"Got keys: {keys}. "
+            "Do not use aliased names. Call again with tool_call_id "
+            "copied from the approval request."
+        )
+
     async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        err = self._validate_inputs(inputs)
+        if err:
+            return ToolOutput(success=False, error=err)
+
         member_name = inputs.get("member_name")
         tool_call_id = inputs.get("tool_call_id")
         approved = inputs.get("approved")

@@ -18,6 +18,7 @@ from openjiuwen.agent_teams.agent.coordination.event_bus import (
 )
 from openjiuwen.agent_teams.agent.coordination.handlers.base import BaseCoordinationHandler
 from openjiuwen.agent_teams.debate import DebateRunState
+from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.common.logging import team_logger
@@ -100,17 +101,18 @@ class AgentLifecycleHandler(BaseCoordinationHandler):
         if target_id is None or target_id != member_name:
             return
 
-        from openjiuwen.core.session import InteractiveInput
-
-        interactive_input = InteractiveInput()
-        interactive_input.update(
+        interactive_input = build_approval_interactive_input(
             payload.tool_call_id,
-            {
-                "approved": payload.approved,
-                "feedback": payload.feedback,
-                "auto_confirm": payload.auto_confirm,
-            },
+            approved=payload.approved,
+            feedback=payload.feedback,
+            auto_confirm=payload.auto_confirm,
         )
+        if interactive_input is None:
+            team_logger.error(
+                "[{}] ignoring tool approval result with empty tool_call_id",
+                member_name,
+            )
+            return
         team_logger.debug(
             "[{}] received tool approval result for tool_call_id={}, approved={}",
             member_name,
