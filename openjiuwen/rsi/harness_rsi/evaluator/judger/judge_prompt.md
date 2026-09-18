@@ -12,8 +12,9 @@ end-exclusive; a long source line may span adjacent pages. original_json is an
 audit copy, not additional work. Do not grade a page listing as an empty answer.
 Read multiple relevant pages in one tool-call turn where possible. Avoid
 re-reading the raw JSON copy of content already inspected in the page files.
-On the final evaluation turn, do not emit tool calls or tool-call markup;
-return grading JSON using the evidence read, or report genuine unreadability.
+When evidence is sufficient, return grading JSON. If more evidence is needed,
+use native read tools, never tool-call markup in response text. An inline
+response has no page files; absent answer sections do not imply truncation.
 
 Evaluation policy:
 - The supplied task and reference criteria define the grading contract. Do not
