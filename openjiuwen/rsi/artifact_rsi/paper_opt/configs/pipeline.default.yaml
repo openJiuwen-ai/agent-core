@@ -138,10 +138,9 @@ experiment_execution:
   max_transient_retries: 1
 
 reflection:
-  # Input is fully known upfront (plan + result) — one completion, one
-  # write_file call. A low cap catches a stuck/looping model instead of
-  # burning the same budget code_implementation needs for iterative work.
-  max_iterations: 20
+  # Summary is preloaded; grep/read_file pull item records, logs, and code.
+  # Cap high enough for a few targeted searches, then submit_reflection.
+  max_iterations: 30
 
 reporting:
   # Skills-driven DeepAgent session (ts-plan/ts-write/ts-review/ts-latex)

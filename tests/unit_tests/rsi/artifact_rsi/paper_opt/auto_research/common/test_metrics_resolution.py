@@ -5,10 +5,12 @@ from __future__ import annotations
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     compact_metrics,
     compact_metrics_for_manager,
+    item_failure_rate,
     materialize_handoff_metrics,
     metric_number,
+    primary_metric_unresolved,
     resolve_metric,
-    scientific_status_from_comparison,
+    run_sanity,
     score_number,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
@@ -120,17 +122,6 @@ def test_manager_compact_pins_declared_name():
     assert pinned["macro_f1"] == 0.91
 
 
-def test_comparison_unknown_when_declared_metric_is_ambiguous():
-    status = scientific_status_from_comparison(
-        ["accuracy"],
-        [
-            _variant("zero_shot", {"rows": [{"accuracy": 0.4}, {"accuracy": 0.9}]}),
-            _variant("proposed", {"rows": [{"accuracy": 0.4}, {"accuracy": 0.9}]}),
-        ],
-    )
-    assert status == "unknown"
-
-
 def test_score_number_reads_nested_accuracy():
     assert score_number({"evaluation": {"accuracy": 0.6}}) == 0.6
 
@@ -152,3 +143,45 @@ def test_reporting_uses_resolved_plan_metrics():
         ("proposed", 0.9),
         ("zero_shot", 0.8),
     }
+
+
+def _completed_items(*statuses: str) -> dict:
+    return {
+        "status": "completed",
+        "n_questions": len(statuses),
+        "method": "proposed",
+        "metrics": {"accuracy": 0.5},
+        "per_question": [{"status": status} for status in statuses],
+    }
+
+
+def test_primary_metric_unresolved_when_missing():
+    issue = primary_metric_unresolved({"status": "completed"}, "accuracy")
+    assert issue is not None
+    assert issue.reason == "primary_metric_unresolved"
+
+
+def test_primary_metric_unresolved_accepts_canonical_number():
+    assert primary_metric_unresolved({"metrics": {"accuracy": 0.81}}, "accuracy") is None
+
+
+def test_run_sanity_ok_with_minority_item_failures():
+    metrics = _completed_items("ok", "ok", "failed", "ok")
+    assert run_sanity(metrics, primary_metric="accuracy") == "ok"
+    assert item_failure_rate(metrics) == 0.25
+
+
+def test_run_sanity_invalid_when_all_item_records_failed():
+    metrics = _completed_items("failed", "failed")
+    assert run_sanity(metrics, primary_metric="accuracy") == "invalid_run"
+    assert item_failure_rate(metrics) == 1.0
+
+
+def test_run_sanity_invalid_when_primary_missing():
+    metrics = {
+        "status": "completed",
+        "method": "proposed",
+        "metrics": {"macro_f1": 0.4},
+    }
+    assert run_sanity(metrics, primary_metric="accuracy") == "invalid_run"
+

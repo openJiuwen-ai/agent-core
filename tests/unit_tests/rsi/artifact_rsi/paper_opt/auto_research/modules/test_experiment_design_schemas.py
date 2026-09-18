@@ -31,6 +31,8 @@ _DRAFT_KWARGS = dict(
     objective="objective",
     hypothesis="hypothesis",
     metrics=[{"name": "accuracy", "spec": "top-1 accuracy on test set"}],
+    primary_metric="accuracy",
+    primary_direction="higher_is_better",
     experiment="experiment plan",
     grounding=["grounded claim"],
 )
@@ -60,3 +62,21 @@ def test_code_agent_instruction_rejects_malformed_json_string():
             **_DRAFT_KWARGS,
             code_agent_instruction="{not json",
         )
+
+
+def test_primary_metric_must_match_declared_name():
+    with pytest.raises(Exception, match="primary_metric"):
+        ExperimentDesignDraft(
+            **{**_DRAFT_KWARGS, "primary_metric": "macro_f1"},
+            code_agent_instruction=dict(_INSTRUCTION_KWARGS),
+        )
+
+
+def test_observations_are_advisory_and_optional():
+    draft = ExperimentDesignDraft(
+        **_DRAFT_KWARGS,
+        observations=["parsed_count", "latency_ms"],
+        code_agent_instruction=dict(_INSTRUCTION_KWARGS),
+    )
+    assert draft.observations == ["parsed_count", "latency_ms"]
+    assert draft.primary_direction == "higher_is_better"

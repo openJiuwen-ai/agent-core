@@ -332,7 +332,7 @@ class ExecutionHandoff(BaseModel):
     kind: Literal["experiment_execution"] = "experiment_execution"
     status: str = "failed"
     process_status: Literal["completed", "failed"] = "failed"
-    scientific_status: Literal["accepted", "below_threshold", "unknown"] = "unknown"
+    sanity: Literal["ok", "invalid_run", "unknown"] = "unknown"
     failure_kind: str = ""
     variants: list[VariantHandoff] = Field(default_factory=list)
     notes: str = ""
@@ -349,9 +349,20 @@ class ExecutionHandoff(BaseModel):
 
 class ReflectionHandoff(BaseModel):
     kind: Literal["reflection"] = "reflection"
-    verdict: Literal["supported", "refuted", "mixed", "inconclusive"] = "inconclusive"
+    verdict: Literal[
+        "supported", "partially_supported", "contradicted", "inconclusive"
+    ] = "inconclusive"
+    validity: Literal["valid", "suspect", "invalid_run"] = "suspect"
+    recommendation: Literal[
+        "iterate_design",
+        "repair_code",
+        "rerun_execution",
+        "gather_more_evidence",
+        "accept_and_report",
+    ] = "gather_more_evidence"
     summary: str = ""
     reflection_path: str = ""
+    reinterpreted: bool = False
 
 
 class ReportHandoff(BaseModel):
@@ -553,7 +564,10 @@ class RoutingHint(BaseModel):
     executed_variants: list[str] = Field(default_factory=list)
     code_head: str = ""
     latest_process_status: str = ""
-    latest_scientific_status: str = ""
+    latest_sanity: str = ""
+    latest_verdict: str = ""
+    latest_validity: str = ""
+    latest_recommendation: str = ""
     latest_failure_kind: str = ""
     latest_failure_stage: str = ""
     latest_failure_substage: str = ""

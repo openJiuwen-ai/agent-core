@@ -109,12 +109,13 @@ the first pass can still advance.
 
 Typical order:
 `topic_survey` → `experiment_design/create` → `code_implementation` →
-`experiment_execution` → (`reflection` and/or `experiment_design/update`) →
-new `code_implementation` → `experiment_execution` → `reporting` → `DONE`.
+`experiment_execution` → `reflection` → (`experiment_design/update` or
+`reporting`) → `DONE`.
 
-- Treat `process_status` and `scientific_status` separately. A completed
-  process with metrics can still be `below_threshold`. `status=completed` is
-  not scientific acceptance. A plateau or negative result is still a result.
+- Treat `process_status`, `sanity`, and reflection's `verdict` separately.
+  `sanity` is mechanical only (`ok` / `invalid_run` / `unknown`): crash,
+  missing metrics, unresolved primary metric, or every item record failed.
+  Partial item failures stay `ok`. Scientific meaning lives in reflection.
 - `routing.latest_metrics` is the **proposed** variant's last measured row.
   Comparator scores live in `routing.variant_metrics` (last row per method,
   any commit). `routing.execution_history` is every past
@@ -124,11 +125,21 @@ new `code_implementation` → `experiment_execution` → `reporting` → `DONE`.
   invent `--method all`. A single-condition artifact may still mark pair
   metrics (for example `one_shot_accuracy_gain`) as indeterminate. Ignore
   that when both methods already have last rows — the host fills the pair
-  from `routing.variant_metrics` and `scientific_status` reflects that
-  comparison. Do not re-run a completed method only to pair; compare later.
-- After a **process-failed** execution (crash, timeout, missing metrics,
-  dataset/API failure), `code_implementation` repair is next. Skip reflection
-  and reporting. Do not re-run execution until a newer implementation exists.
+  from `routing.variant_metrics`. Do not re-run a completed method only to
+  pair; compare later.
+- After a **process-failed** or **invalid_run** execution (crash, timeout,
+  missing metrics, unresolved primary metric, dataset/API failure),
+  `code_implementation` repair is next. Skip reflection and reporting. Do
+  not re-run execution until a newer implementation exists.
+- After a **process-completed** execution with `sanity=ok`, **reflection is
+  required** before reporting or a design update. Reflection judges the
+  evidence; you decide the next move.
+- You decide iterate versus report. `routing.latest_recommendation` plus
+  its reason are a hint, not an order. `legal_actions` listing both
+  `experiment_design/update` and `reporting` is not an instruction to
+  report. If you diverge from the hint, say why in the decision rationale.
+  `reinterpreted: true` is a signal to re-commit the design rather than
+  accept.
 - After a **process-completed** execution whose numbers look wrong (harness
   bug, inverted metric, method not actually running), `code_implementation`
   with `repair_instruction` is allowed without a design update. Execute the
@@ -142,11 +153,11 @@ new `code_implementation` → `experiment_execution` → `reporting` → `DONE`.
   methods belong in the next `experiment_execution` `target_variants`, not in
   the paper.
 - After a **process-completed** execution, keep iterating while original-task
-  work remains or a concrete next change exists: reflect if metrics need
-  interpretation; `experiment_design/update` for a **different proposed
-  method**; code repair for harness/implementation bugs; restore for "this
-  commit was better"; re-run named `target_variants` for another measurement
-  while science is not yet accepted; survey again only if stuck.
+  work remains or a concrete next change exists: reflect; `experiment_design/update`
+  for a **different proposed method**; code repair for harness/implementation
+  bugs; restore for "this commit was better"; re-run named `target_variants`
+  for another measurement while reflection has not accepted the hypothesis;
+  survey again only if stuck.
   Do **not** spend a code retry on a scientific miss until the design has been
   updated or revised — unless the numbers themselves look like a harness bug.
 - If the execution report marks the failure `retryable=false` and its diagnostic
@@ -154,36 +165,48 @@ new `code_implementation` → `experiment_execution` → `reporting` → `DONE`.
   other prerequisite, do not spend a code-repair round on it. Emit `BLOCKED`
   with the concrete prerequisite so the caller can fix the input and retry the
   task; only retryable execution failures should enter code repair.
-- Call `reporting` when either (1) the latest completed execution is already
-  enough for the original task — acceptance bar met **and** no remaining
-  required methods, phases, or panels — or (2) the loop is stuck (scores
-  plateaued, budgets nearly exhausted, no concrete remaining change) and no
-  other legal action can still help. A tied or negative result may be written
-  up only under (2), not as an early exit while a specific retry remains.
-- `scientific_status=accepted` means the comparison bar was met. It is not
-  automatically the original task being finished. If the original task still
-  names further experiments, continue those before reporting. Do not redesign
-  a passing proposed method just to delay the paper.
-- After reflection: `refuted` / `mixed` / `inconclusive` → `experiment_design/update`
-  with a different proposed method, then re-implement and re-execute — or
-  `reporting` if you are done iterating. `supported` → continue only if the
-  original task still names unrun work; otherwise reporting, then `DONE`.
-  Do not update the same evidence twice.
+- After `validity=suspect`, prefer `experiment_design/update` or
+  `code_implementation` repair (parse/format/`max_tokens`) over reporting,
+  unless no concrete next change remains. Do not write a reflection contract
+  that says to “account for” a higher unparsed or parse-failure rate, or
+  that a zero-shot / baseline win is not an implementation failure, when
+  the parse gap itself is the issue.
+- Call `reporting` when either (1) remaining original-task work is done
+  (no further required methods, phases, panels, or a concrete next
+  experiment) **or** (2) the loop is stuck (scores plateaued, budgets
+  nearly exhausted, no concrete remaining change) and no other legal
+  action can still help. `validity=valid` means the numbers are
+  trustworthy, not that the paper is due. `valid` + `supported` is not
+  sufficient by itself: if the original task still names further methods,
+  panels, datasets, or a concrete next experiment, `experiment_design/update`
+  then implement and execute even if the last verdict was `supported`.
+  Do not treat `accept_and_report` as an order. A tied or negative
+  result may be written up only under (2), not as an early exit while a
+  specific retry remains. Reporting still requires a fresh reflection.
+  Do not redesign a passing proposed method just to delay the paper.
+- After reflection: `contradicted` / `partially_supported` / `inconclusive`
+  → `experiment_design/update` with a different proposed method, then
+  re-implement and re-execute — or `reporting` if you are done iterating.
+  `supported` → continue if the original task still names unrun work or a
+  concrete follow-up; otherwise reporting, then `DONE`. Do not update the
+  same evidence twice.
 - After `experiment_design/update` or `revise_research`, implement the new
   design before executing or reporting.
-- `reporting` does not require `scientific_status=accepted`. It stays legal
-  after a process-completed execution once any newer design is implemented and
-  executed. Then `DONE`. Do not re-run `reporting` for the same execution.
+- `reporting` does not require `hypothesis_verdict=supported`. It stays
+  legal after a process-completed valid run once a fresh reflection exists
+  and any newer design is implemented and executed. Then `DONE`. Do not
+  re-run `reporting` for the same execution.
 - `DONE` requires every requirement completed, no unresolved issues, a
   successful completed execution, and — whenever `reporting` is enabled — a
   successful `reporting` report. The host marks those requirements complete
   from succeeded module reports; you do not need `state_changes` for that.
   If `routing.can_complete` is true, emit `DONE` immediately.
-  Reflection is optional; reporting is not.
+  Reflection is required after every process-completed valid run; reporting
+  is not optional.
   Do not claim DONE from executor notes or from beating a dummy random
-  baseline when the original objective or thresholds remain unmet.
+  baseline when the original objective remains unmet.
 - If reflection is listed under `missing_capabilities`, continue without it;
-  it is optional and must not be the sole reason for `BLOCKED`.
+  it must not be the sole reason for `BLOCKED`.
 - `max_code_retries` / `max_execution_retries` / `max_reporting_retries` are
   extra attempts after the first. If those or round budgets are exhausted
   and reporting is not legal, emit `BLOCKED`.

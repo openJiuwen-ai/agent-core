@@ -12,6 +12,9 @@ rounds). ``CallableSchemaExtractor.get_base_model_schema`` expands every
 
 import json
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_reflection import (
+    SubmitReflectionTool,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_experiment_design import (
     SubmitExperimentDesignTool,
 )
@@ -47,3 +50,13 @@ def test_submit_manager_decision_schema_has_no_bare_refs():
 def test_submit_topic_survey_schema_has_no_bare_refs():
     tool = SubmitTopicSurveyTool()
     _assert_no_bare_refs(tool.card.input_params)
+
+
+def test_submit_reflection_schema_has_no_bare_refs():
+    tool = SubmitReflectionTool()
+    schema = tool.card.input_params
+    _assert_no_bare_refs(schema)
+    assert schema["properties"]["evidence"]["type"] == "array"
+    nested = schema["properties"]["evidence"]["items"]
+    assert nested["type"] == "object"
+    assert "metric" in nested["properties"]

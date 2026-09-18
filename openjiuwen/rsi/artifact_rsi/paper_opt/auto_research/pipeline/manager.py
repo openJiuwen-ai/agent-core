@@ -355,14 +355,14 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
             task.unresolved_issues = [
                 item for item in task.unresolved_issues if not item.startswith("execution failed")
             ]
-        science = ""
+        sanity = ""
         if isinstance(report.handoff, ExecutionHandoff):
-            science = report.handoff.scientific_status
+            sanity = report.handoff.sanity
         _upsert_fact(
             task,
             "fact-latest-execution",
             bounded_text(
-                f"process={process_status} science={science or 'unknown'}: {report.summary}",
+                f"process={process_status} sanity={sanity or 'unknown'}: {report.summary}",
                 400,
             ),
             report_id=report.report_id,
@@ -382,12 +382,19 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
                 )
             )
         verdict = ""
+        validity = ""
+        recommendation = ""
         if isinstance(report.handoff, ReflectionHandoff):
             verdict = report.handoff.verdict
+            validity = report.handoff.validity
+            recommendation = report.handoff.recommendation
         _upsert_fact(
             task,
             "fact-latest-reflection",
-            bounded_text(f"verdict={verdict}: {report.summary}", 400),
+            bounded_text(
+                f"verdict={verdict} validity={validity} recommendation={recommendation}: {report.summary}",
+                400,
+            ),
             report_id=report.report_id,
         )
         return
@@ -477,7 +484,10 @@ class ManagerRuntime:
         latest_metrics: dict[str, Any] = {}
         variant_metrics: dict[str, dict[str, Any]] = {}
         process_status = task.latest_execution_status or ""
-        scientific_status = ""
+        sanity = ""
+        latest_verdict = ""
+        latest_validity = ""
+        latest_recommendation = ""
         failure_kind = ""
         failure_stage = ""
         failure_substage = ""
@@ -520,7 +530,7 @@ class ManagerRuntime:
                 )
                 if code_head and not matches_head:
                     continue
-                scientific_status = handoff.scientific_status
+                sanity = handoff.sanity
                 failure_kind = handoff.failure_kind
                 failure_stage = handoff.failure_stage
                 failure_substage = handoff.failure_substage
@@ -556,6 +566,16 @@ class ManagerRuntime:
                         diagnostic_paths.append(path)
                 break
             break
+        for report in reversed(state.reports):
+            if report.module != "reflection":
+                continue
+            handoff = report.handoff
+            if isinstance(handoff, ReflectionHandoff):
+                latest_verdict = handoff.verdict
+                latest_validity = handoff.validity
+                latest_recommendation = handoff.recommendation
+                break
+            break
         complete_ok, complete_reason = can_complete(state)
         return RoutingHint(
             remaining_rounds=max(0, task.limits.max_rounds - task.counters.rounds_used),
@@ -581,7 +601,10 @@ class ManagerRuntime:
             code_head=code_head,
             latest_metrics=latest_metrics,
             latest_process_status=process_status,
-            latest_scientific_status=scientific_status,
+            latest_sanity=sanity,
+            latest_verdict=latest_verdict,
+            latest_validity=latest_validity,
+            latest_recommendation=latest_recommendation,
             latest_failure_kind=failure_kind,
             latest_failure_stage=failure_stage,
             latest_failure_substage=failure_substage,

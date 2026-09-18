@@ -160,10 +160,15 @@ class ExperimentDesignResearchRevisionInput(BaseModel):
         return [_reject_unsafe_relative_path(path) for path in value]
 
 
-class MetricDefinition(BaseModel):
-    """One falsifiable decision metric.
+PrimaryDirection = Literal["higher_is_better", "lower_is_better"]
 
-    ``spec`` is a single sentence covering measurement, direction, and threshold.
+
+class MetricDefinition(BaseModel):
+    """One named metric to log.
+
+    ``spec`` is a short sentence covering how it is measured. Direction for
+    the primary metric lives on ``ExperimentDesignDraft.primary_direction``;
+    whether a result supports the hypothesis is judged after the run.
     """
 
     name: str = Field(min_length=1)
@@ -213,6 +218,7 @@ CORE_CLAIM_SLOTS = frozenset({"objective", "hypothesis"})
 SECTION_UPDATE_FIELDS = (
     "grounding",
     "experiment",
+    "observations",
 )
 
 
@@ -290,11 +296,12 @@ class SectionUpdates(BaseModel):
     """Partial section patches. Omitted / null fields leave markdown unchanged.
 
     Metrics are versioned claims under ``## Decision Metrics``, not section patches.
-    Grounding is append-only (new bullets are merged in).
+    Grounding and observations are append-only (new bullets are merged in).
     """
 
     grounding: list[str] | None = None
     experiment: str | None = None
+    observations: list[str] | None = None
 
 
 class ExperimentDesignDraft(BaseModel):
@@ -309,6 +316,9 @@ class ExperimentDesignDraft(BaseModel):
     objective: str = Field(min_length=1)
     hypothesis: str = Field(min_length=1)
     metrics: list[MetricDefinition] = Field(min_length=1)
+    primary_metric: str = Field(min_length=1)
+    primary_direction: PrimaryDirection
+    observations: list[str] = Field(default_factory=list)
     experiment: str = Field(min_length=1)
     grounding: list[str] = Field(min_length=1)
     code_agent_instruction: CodeAgentInstruction
@@ -330,6 +340,14 @@ class ExperimentDesignDraft(BaseModel):
                 return value
         return value
 
+    @field_validator("primary_metric")
+    @classmethod
+    def _strip_primary_metric(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned:
+            raise ValueError("primary_metric must be non-empty")
+        return cleaned
+
     @model_validator(mode="after")
     def _reject_empty_lists(self) -> ExperimentDesignDraft:
         for field_name in ("grounding", "metrics"):
@@ -338,6 +356,11 @@ class ExperimentDesignDraft(BaseModel):
                 raise ValueError(f"{field_name} must be non-empty")
         if not self.experiment.strip():
             raise ValueError("experiment must be non-empty")
+        names = {metric.name for metric in self.metrics}
+        if self.primary_metric not in names:
+            raise ValueError(
+                f"primary_metric {self.primary_metric!r} must match a declared metric name"
+            )
         return self
 
 
@@ -369,6 +392,9 @@ class ExperimentPlan(BaseModel):
     variables: list[str] = Field(default_factory=list)
     baselines: list[str] = Field(default_factory=list)
     metrics: list[str] = Field(default_factory=list)
+    primary_metric: str = ""
+    primary_direction: str = ""
+    observations: list[str] = Field(default_factory=list)
     expected_outcomes: str = ""
 
     @field_validator("created_at", "updated_at")
