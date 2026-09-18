@@ -336,7 +336,7 @@ class ExperimentDesignDraft(BaseModel):
         if isinstance(value, str):
             try:
                 return json.loads(value)
-            except (TypeError, ValueError, json.JSONDecodeError):
+            except (TypeError, ValueError):
                 return value
         return value
 

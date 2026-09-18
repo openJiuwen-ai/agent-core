@@ -289,7 +289,8 @@ def replace_directory(src: Path, dest: Path, *, attempts: int = 8) -> None:
             last_exc = exc
             time.sleep(delay)
             delay = min(delay * 2, 0.5)
-    assert last_exc is not None
+    if last_exc is None:
+        raise RuntimeError("replace_directory: exhausted retries without recording a PermissionError")
     raise last_exc
 
 

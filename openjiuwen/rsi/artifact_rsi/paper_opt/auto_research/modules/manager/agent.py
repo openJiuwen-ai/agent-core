@@ -105,7 +105,8 @@ def parse_manager_query_state(query: str) -> dict[str, Any]:
     idx = query.rfind(_STATE_MARKER)
     if idx < 0:
         raise ValueError("manager query is missing STATE")
-    return json.loads(query[idx + len(_STATE_MARKER) :].strip())
+    state_start = idx + len(_STATE_MARKER)
+    return json.loads(query[state_start:].strip())
 
 
 def _clip_text(text: str, max_chars: int) -> tuple[str, int]:

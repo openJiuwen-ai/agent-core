@@ -186,6 +186,63 @@ async def test_tail_activity_pushes_note_for_new_lines_and_tracks_offset(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_tail_activity_uses_model_call_start_only_as_bootstrap(tmp_path, monkeypatch):
+    """`model_call_start` should surface once before any real action exists,
+    but never clobber a concrete action note (e.g. a file write) just
+    because the model is still thinking about what to do next."""
+    trace_path = tmp_path / "agent_trace.jsonl"
+    trace_path.write_text("", encoding="utf-8")
+
+    import openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.stage_activity as mod
+
+    monkeypatch.setattr(mod, "agent_trace_path", lambda *a, **k: trace_path)
+
+    notes: list[str] = []
+
+    async def on_note(note: str) -> None:
+        notes.append(note)
+
+    task = asyncio.create_task(
+        tail_activity(
+            run_id="r1",
+            module="reporting",
+            round_index=1,
+            attempt=1,
+            on_note=on_note,
+            poll_seconds=0.01,
+        )
+    )
+    try:
+        # First event of the run is model_call_start -- bootstrap note.
+        trace_path.write_text(json.dumps({"event": "model_call_start"}) + "\n", encoding="utf-8")
+        await asyncio.sleep(0.05)
+        assert notes == ["最近动作：等待模型响应中"]
+
+        # A real action follows -- overwrites the bootstrap note.
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    {"event": "tool_call_start", "tool_name": "write_file", "arguments": {"path": "sections/method.tex"}}
+                )
+                + "\n"
+            )
+        await asyncio.sleep(0.05)
+        assert notes == ["最近动作：等待模型响应中", "最近动作：编写 `sections/method.tex`"]
+
+        # The model thinking about the next step must not clobber that note.
+        with trace_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"event": "model_call_start"}) + "\n")
+        await asyncio.sleep(0.05)
+        assert notes == ["最近动作：等待模型响应中", "最近动作：编写 `sections/method.tex`"]
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
 async def test_tail_activity_tolerates_missing_file(monkeypatch, tmp_path):
     import openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.stage_activity as mod
 

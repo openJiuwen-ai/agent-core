@@ -455,7 +455,7 @@ class CodeImplementationAgent:
             last_exc: BaseException | None = None
             for promote_attempt in range(_PROMOTE_ATTEMPTS):
                 try:
-                    self._promote_output(
+                    self.promote_output(
                         output_dir,
                         code_dir,
                         log_path=smoke_root / _PROMOTION_LOG,
@@ -524,7 +524,7 @@ class CodeImplementationAgent:
         return sync_tree_into_repo(source_dir, destination_dir)
 
     @classmethod
-    def _promote_output(
+    def promote_output(
         cls, output_dir: Path, code_dir: Path, *, log_path: Path | None = None
     ) -> None:
         """Copy a passing staged candidate into generated_code/ in place.
