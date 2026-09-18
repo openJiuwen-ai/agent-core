@@ -21,8 +21,8 @@ async def test_timeout_retries_frozen_evidence_and_never_fabricates_grade(tmp_pa
     calls = []
     cancelled = []
 
-    async def run(_config, workspace, prompt, _log):
-        calls.append((workspace, prompt, (workspace / "request.json").read_bytes()))
+    async def run(_config, workspace, prompt, _log, *, budget):
+        calls.append((workspace, prompt, (workspace / "request.json").read_bytes(), budget))
         if len(calls) == 1 or not recovers:
             try:
                 await asyncio.sleep(10)

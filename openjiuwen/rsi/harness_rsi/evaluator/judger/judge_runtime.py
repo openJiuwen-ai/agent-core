@@ -124,7 +124,8 @@ def build_judge_agent(
         payload = await asyncio.to_thread(
             inline_evidence, workspace, max_bytes=MAX_CLOSEOUT_BYTES, required=True,
         )
-        assert payload is not None
+        if payload is None:
+            raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
         return await _invoke_complete_evidence(model, payload)
 
     budget.continuation = complete_evidence_verdict
@@ -152,6 +153,7 @@ async def run_judge_agent(
     payload = await asyncio.to_thread(inline_evidence, workspace) if budget is not None else None
     if payload is not None:
         model = _judge_model(config)
+
         async def invoke_direct() -> str:
             return await _invoke_complete_evidence(model, payload)
 

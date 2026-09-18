@@ -16,38 +16,43 @@ def inline_evidence(
     workspace: Path, *, max_bytes: int = MAX_INLINE_BYTES, required: bool = False,
 ) -> str | None:
     """Return complete text, or defer to the reader; never clip evidence."""
-    def unavailable(reason: str) -> None:
+    try:
+        return _inline_evidence(workspace, max_bytes)
+    except EvaluationInfrastructureError as exc:
         if required:
-            raise EvaluationInfrastructureError(f"Judge closeout unavailable: {reason}; no score produced")
+            raise EvaluationInfrastructureError(f"Judge closeout unavailable: {exc}; no score produced") from exc
         return None
 
+
+def _inline_evidence(workspace: Path, max_bytes: int) -> str:
+    """Read the complete snapshot or explain why it cannot be inlined."""
     root = _io_path(workspace).resolve()
     request_path = root / "request.json"
     try:
         size = request_path.stat().st_size
         if size > max_bytes:
-            return unavailable(f"evidence exceeds {max_bytes} bytes at request.json ({size} bytes)")
+            raise EvaluationInfrastructureError(f"evidence exceeds {max_bytes} bytes at request.json ({size} bytes)")
         request = json.loads(request_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        return unavailable(f"cannot read request.json ({type(exc).__name__})")
+    except (OSError, ValueError) as exc:
+        raise EvaluationInfrastructureError(f"cannot read request.json ({type(exc).__name__})") from exc
     files = {}
     for name in request.get("evidence_files", []):
         path = (root / name).resolve()
         if not path.is_relative_to(root):
-            return unavailable(f"evidence path escapes snapshot: {name}")
+            raise EvaluationInfrastructureError(f"evidence path escapes snapshot: {name}")
         if path.suffix.lower() not in TEXT_SUFFIXES:
-            return unavailable(f"unsupported text evidence format: {name}")
+            raise EvaluationInfrastructureError(f"unsupported text evidence format: {name}")
         try:
             if not path.is_file():
-                return unavailable(f"evidence file missing or not a regular file: {name}")
+                raise EvaluationInfrastructureError(f"evidence file missing or not a regular file: {name}")
             size += path.stat().st_size
             if size > max_bytes:
-                return unavailable(f"evidence exceeds {max_bytes} bytes at {name} ({size} bytes)")
+                raise EvaluationInfrastructureError(f"evidence exceeds {max_bytes} bytes at {name} ({size} bytes)")
             files[name] = path.read_text(encoding="utf-8")
-        except UnicodeError:
-            return unavailable(f"evidence is not valid UTF-8: {name}")
+        except UnicodeError as exc:
+            raise EvaluationInfrastructureError(f"evidence is not valid UTF-8: {name}") from exc
         except OSError as exc:
-            return unavailable(f"cannot read evidence file: {name} ({type(exc).__name__})")
+            raise EvaluationInfrastructureError(f"cannot read evidence file: {name} ({type(exc).__name__})") from exc
     request["evidence_files"] = files
     request["evidence_note"] = (
         "All listed evidence files are included in full as path-to-content entries. "
@@ -57,5 +62,5 @@ def inline_evidence(
     payload = json.dumps(request, ensure_ascii=False)
     payload_bytes = len(payload.encode("utf-8"))
     if payload_bytes > max_bytes:
-        return unavailable(f"serialized evidence exceeds {max_bytes} bytes ({payload_bytes} bytes)")
+        raise EvaluationInfrastructureError(f"serialized evidence exceeds {max_bytes} bytes ({payload_bytes} bytes)")
     return payload

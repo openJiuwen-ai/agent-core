@@ -129,15 +129,18 @@ class LlmAsJudgeJudger(EvaluationJudger):
             "Missing work is not evaluator unavailability. "
         )
         budget = JudgeBudgetRail(self._config.judge_agent_max_iterations, judge_dir / "tool_events.jsonl")
+        raw = ""
         # One recovery from complete frozen evidence, never best-of scoring.
         for attempt in range(2):
 
-            async def invoke(current_prompt: str = prompt) -> str:
+            async def invoke(
+                current_prompt: str = prompt, current_attempt: int = attempt, previous_output: str = raw,
+            ) -> str:
                 # Timeout must be inside the retry boundary, with the same frozen evidence.
                 try:
                     async with asyncio.timeout(self._config.judge_timeout_sec):
-                        if attempt:
-                            return await budget.closeout(raw)
+                        if current_attempt:
+                            return await budget.closeout(previous_output)
                         return await run_judge_agent(
                             self._config, workspace, current_prompt + output_contract,
                             judge_dir / "tool_events.jsonl", budget=budget,

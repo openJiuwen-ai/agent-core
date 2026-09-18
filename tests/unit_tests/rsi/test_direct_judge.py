@@ -68,6 +68,7 @@ def test_serialized_payload_limit_includes_json_escaping(tmp_path):
     ("utf8", "evidence is not valid UTF-8: evidence.jsonl"),
     ("outside", "evidence path escapes snapshot"),
     ("request", "cannot read request.json"),
+    ("request_utf8", "cannot read request.json \\(UnicodeDecodeError\\)"),
     ("escaped", "serialized evidence exceeds"),
 ])
 def test_required_evidence_reports_specific_failure(tmp_path, kind, expected):
@@ -85,6 +86,8 @@ def test_required_evidence_reports_specific_failure(tmp_path, kind, expected):
         (tmp_path / name).write_bytes(data)
     request = "invalid" if kind == "request" else json.dumps({"evidence_files": [name]})
     (tmp_path / "request.json").write_text(request, encoding="utf-8")
+    if kind == "request_utf8":
+        (tmp_path / "request.json").write_bytes(b"\xff")
     assert inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES) is None
     with pytest.raises(EvaluationInfrastructureError, match=expected):
         inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES, required=True)
@@ -107,6 +110,19 @@ def test_unreadable_file_names_the_file_without_exposing_exception_details(tmp_p
         inline_evidence(tmp_path, required=True)
     assert "PermissionError" in str(error.value)
     assert "private detail" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_missing_closeout_payload_never_calls_model(tmp_path, monkeypatch):
+    model = AsyncMock()
+    monkeypatch.setattr(judge_runtime, "_judge_model", lambda _: model)
+    monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *args, **kwargs: None)
+    monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: object())
+    budget = judge_runtime.JudgeBudgetRail(20, tmp_path / "tools.jsonl")
+    judge_runtime.build_judge_agent(EvaluatorConfig(), tmp_path, tmp_path / "tools.jsonl", budget=budget)
+    with pytest.raises(EvaluationInfrastructureError, match="evidence is unavailable"):
+        await budget.closeout("")
+    model.invoke.assert_not_called()
 
 
 @pytest.mark.asyncio
