@@ -69,6 +69,21 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 - 配对：`api_response_body` 是组装后的完整消息，`id` 即 SDK `AssistantMessage.message_id`；请求体按
   时间取响应之前最近的一条，并要求其历史里包含上一次主对话回复（排除子 agent / 侧路查询交错的请求）。
   历史消息 id 用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），命中过往回复时沿用 `msg_` id。
+- **OTel 说得出的事实一律以 OTel 为准**，SDK 消息流只提供 OTel 不记录的东西（工具入参与结果正文，
+  OTel 只记大小）。实测各信号的用途：
+
+  | 信号 | 用途 |
+  |---|---|
+  | `claude_code.api_request_body` / `api_response_body` 日志 | 请求与回复正文、usage、`msg_` id（file 模式无截断） |
+  | `claude_code.llm_request` span | 请求窗口、ttft、attempt、speed、finish reason，按 `request_id` 与响应体配对 |
+  | `claude_code.api_request` 日志 | 本次成本（`cost_usd_micros`）、reasoning effort、query_source |
+  | `claude_code.tool` span | 工具执行窗口 |
+  | `claude_code.tool.execution` span / `tool_result` 日志 | 工具成败 |
+  | `claude_code.tool_decision` 日志 | 权限决策与来源 |
+  | `claude_code.interaction` span | 未用：成员轮次窗口由宿主自己的事件界定 |
+  | `assistant_response` / `user_prompt` 日志 | 未用：与响应体、宿主输入重复 |
+  | `mcp_server_connection` / `plugin_loaded` / `hook_*` 日志 | 未用：启动与 hook 诊断，轨迹无消费方 |
+
 - 系统提示里第一块是 Claude Code 自己的 `x-anthropic-billing-header`（含每次请求变化的 id）。它是请求
   元数据而非指令，移到 `data.claude-code.billing_header`，否则系统提示每步都像被改写。
 - 工具定义的 `input_schema` 归一为 `parameters`；采样参数取自请求体（max_tokens / temperature /
@@ -141,7 +156,9 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 
 - 子 agent（Claude `parent_tool_use_id`）的请求不进成员 lane。
 - 宿主输入的识别靠文本匹配（provider 不说明哪条消息装着它）；匹配不上时该条仍记为上下文。
-- Codex 没有 TTFT：rollout 只记录推理的起止，不记首 token 时间。
+- Codex 没有 TTFT、成本与权限决策：rollout 只记录推理的起止与内容。
+- 工具项的开始时间仍是观测时间：`claude_code.tool` span 在工具结束后才导出，那时无法再改已发出的
+  STARTED（实测两者相差 3ms）。结束时间与成败取自 OTel。
 - Codex `thread_resume` 的协议参数没有 raw events 字段，恢复的线程只能依赖 rollout。
 - `TurnUsage` 没有缓存写入字段，provider 的 cache-creation token 只留在 `provider_data`，未进 span。
 - 关联不上模型 call id 的 Codex tool item 最多等待 `request_observation_wait_s` 后无归属发出。

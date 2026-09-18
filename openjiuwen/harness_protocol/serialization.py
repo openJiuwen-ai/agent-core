@@ -152,6 +152,7 @@ def _model_request_to_dict(event: ModelRequestEvent) -> dict[str, object]:
         "time_to_first_chunk": event.time_to_first_chunk,
         "finish_reasons": list(event.finish_reasons),
         "usage": _usage_to_dict(event.usage) if event.usage is not None else None,
+        "cost": {"micros": event.cost.micros, "currency": event.cost.currency} if event.cost is not None else None,
         "error": _error_to_dict(event.error) if event.error is not None else None,
         "data": _json(event.data),
     }
@@ -162,7 +163,12 @@ def _model_request_from_dict(data: Mapping[str, object]) -> ModelRequestEvent:
     input_data = _list(data.get("input_messages", []), "model_request.input_messages")
     output_data = data.get("output_message")
     usage_data = data.get("usage")
+    cost_data = data.get("cost")
     error_data = data.get("error")
+    cost = None
+    if cost_data is not None:
+        cost_object = _mapping(cost_data, "model_request.cost")
+        cost = MonetaryAmount(micros=_integer(cost_object, "micros"), currency=_string(cost_object, "currency"))
     return ModelRequestEvent(
         request_id=_string(data, "request_id"),
         status=_enum(ModelRequestStatus, data.get("status"), "model_request.status"),
@@ -185,6 +191,7 @@ def _model_request_from_dict(data: Mapping[str, object]) -> ModelRequestEvent:
             for reason in _list(data.get("finish_reasons", []), "model_request.finish_reasons")
         ),
         usage=_usage_from_dict(_mapping(usage_data, "model_request.usage")) if usage_data is not None else None,
+        cost=cost,
         error=_error_from_dict(error_data, "model_request.error") if error_data is not None else None,
         data=_json_object(data.get("data", {}), "model_request.data"),
     )

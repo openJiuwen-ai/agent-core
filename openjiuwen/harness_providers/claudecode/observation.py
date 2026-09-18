@@ -30,7 +30,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +39,7 @@ from openjiuwen.harness_protocol import (
     ItemEventKind,
     ItemLifecycleEvent,
     MessageRole,
+    MonetaryAmount,
     ModelRequestEvent,
     ModelRequestStatus,
     TurnError,
@@ -60,6 +61,14 @@ _BODY_EVENTS = frozenset({_REQUEST_BODY_EVENT, _RESPONSE_BODY_EVENT})
 # The per-request span of Claude Code's enhanced telemetry: the only place the
 # CLI states time-to-first-token, attempts and the exact request window.
 _LLM_REQUEST_SPAN = "claude_code.llm_request"
+# What the CLI states about one tool call: the execution window on the span,
+# the outcome and the permission decision on its logs.
+_TOOL_SPAN = "claude_code.tool"
+_TOOL_RESULT_EVENT = "claude_code.tool_result"
+_TOOL_DECISION_EVENT = "claude_code.tool_decision"
+# One model request as the CLI accounts for it: cost and reasoning effort are
+# stated nowhere else.
+_API_REQUEST_EVENT = "claude_code.api_request"
 _MODEL_PROVIDER = "anthropic"
 _DATA_NAMESPACE = "claude-code"
 _DRAIN_INTERVAL_S = 0.25
@@ -99,6 +108,23 @@ class _NativeRequestSpan:
     start_ns: int
     end_ns: int
     attributes: dict[str, Any]
+
+
+@dataclass
+class _ToolFacts:
+    """What Claude Code states about one tool call, keyed by its call id."""
+
+    tool_use_id: str
+    started_at: float | None = None
+    ended_at: float | None = None
+    success: bool | None = None
+    decision: str | None = None
+    decision_source: str | None = None
+
+    @property
+    def settled(self) -> bool:
+        """Report whether the CLI stated how the call ended."""
+        return self.ended_at is not None or self.success is not None
 
 
 @dataclass
@@ -143,8 +169,10 @@ class ClaudeRequestObserver:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._body_dir: Path | None = None
         self._incoming: list[_BodyEvent] = []
-        self._incoming_spans: list[_NativeRequestSpan] = []
+        self._incoming_observations: list[Any] = []
         self._spans: dict[str, _NativeRequestSpan] = {}
+        self._api_requests: dict[str, dict[str, Any]] = {}
+        self._tool_facts: dict[str, _ToolFacts] = {}
         self._changed = asyncio.Event()
         self._lock = asyncio.Lock()
         self._requests: list[_BodyEvent] = []
@@ -360,6 +388,13 @@ class ClaudeRequestObserver:
         if force:
             await self._release_items(force=True)
 
+    def _merge_tool_facts(self, facts: _ToolFacts) -> None:
+        known = self._tool_facts.setdefault(facts.tool_use_id, _ToolFacts(tool_use_id=facts.tool_use_id))
+        for name in ("started_at", "ended_at", "success", "decision", "decision_source"):
+            value = getattr(facts, name)
+            if value is not None:
+                setattr(known, name, value)
+
     def _reply_ready(self, snapshot: _ReplySnapshot) -> bool:
         """Report whether this reply's records have all arrived.
 
@@ -379,9 +414,33 @@ class ClaudeRequestObserver:
             owner = self._replies.get(head.owner) if head.owner else None
             if owner is not None and not owner.emitted and not force:
                 return
+            facts = self._tool_facts.get(head.item_id or "")
+            completing = head.payload.kind is ItemEventKind.COMPLETED
+            if completing and not force and (facts is None or not facts.settled):
+                # The CLI states the execution window and the outcome on its
+                # own span; wait for them rather than timing the SDK stream.
+                if time.time() < head.observed_at + self._wait_s:
+                    return
             self._held.popleft()
             causes = (head.owner,) if owner is not None and owner.emitted else ()
-            await self._emit_event(head.payload, head.item_id, causes, head.observed_at)
+            payload, timestamp = self._tool_observation(head, facts)
+            await self._emit_event(payload, head.item_id, causes, timestamp)
+
+    def _tool_observation(self, held: _HeldItem, facts: _ToolFacts | None) -> tuple[ItemLifecycleEvent, float]:
+        """State a tool item the way Claude Code accounted for it."""
+        payload = held.payload
+        if facts is None:
+            return payload, held.observed_at
+        data = dict(json_value_to_builtin(payload.data) or {})
+        if payload.kind is ItemEventKind.STARTED:
+            return payload, facts.started_at or held.observed_at
+        if facts.success is not None:
+            data["is_error"] = not facts.success
+        if facts.decision:
+            data["decision"] = facts.decision
+        if facts.decision_source:
+            data["decision_source"] = facts.decision_source
+        return replace(payload, data=data), facts.ended_at or held.observed_at
 
     async def _emit_event(
         self,
@@ -408,6 +467,7 @@ class ClaudeRequestObserver:
         attributes = dict(attributes) if isinstance(attributes, dict) else {}
         signal = event.get("signal")
         name = str(event.get("name") or "")
+        tool_use_id = str(attributes.get("tool_use_id") or "")
         accepted: Any
         if signal == "log" and name in _BODY_EVENTS:
             accepted = _BodyEvent(
@@ -422,6 +482,22 @@ class ClaudeRequestObserver:
                 end_ns=int(event.get("end_time_ns") or 0),
                 attributes=attributes,
             )
+        elif signal == "log" and name == _API_REQUEST_EVENT and attributes.get("request_id"):
+            accepted = ("api_request", str(attributes["request_id"]), attributes)
+        elif signal == "trace" and name == _TOOL_SPAN and tool_use_id:
+            accepted = _ToolFacts(
+                tool_use_id=tool_use_id,
+                started_at=_optional_seconds(event.get("start_time_ns")),
+                ended_at=_optional_seconds(event.get("end_time_ns")),
+            )
+        elif signal == "log" and name == _TOOL_RESULT_EVENT and tool_use_id:
+            accepted = _ToolFacts(tool_use_id=tool_use_id, success=_flag(attributes.get("success")))
+        elif signal == "log" and name == _TOOL_DECISION_EVENT and tool_use_id:
+            accepted = _ToolFacts(
+                tool_use_id=tool_use_id,
+                decision=str(attributes.get("decision") or "") or None,
+                decision_source=str(attributes.get("source") or "") or None,
+            )
         else:
             return
         loop = self._loop
@@ -430,16 +506,22 @@ class ClaudeRequestObserver:
         loop.call_soon_threadsafe(self._accept_observation, accepted)
 
     def _accept_observation(self, observation: Any) -> None:
-        if isinstance(observation, _NativeRequestSpan):
-            self._incoming_spans.append(observation)
-        else:
+        if isinstance(observation, _BodyEvent):
             self._incoming.append(observation)
+        else:
+            self._incoming_observations.append(observation)
         self._changed.set()
 
     async def _absorb_bodies(self) -> None:
-        spans, self._incoming_spans = self._incoming_spans, []
-        for span in spans:
-            self._spans[span.request_id] = span
+        observations, self._incoming_observations = self._incoming_observations, []
+        for observation in observations:
+            if isinstance(observation, _NativeRequestSpan):
+                self._spans[observation.request_id] = observation
+            elif isinstance(observation, _ToolFacts):
+                self._merge_tool_facts(observation)
+            else:
+                _kind, request_id, attributes = observation
+                self._api_requests[request_id] = attributes
         incoming, self._incoming = self._incoming, []
         for body_event in incoming:
             if body_event.name == _REQUEST_BODY_EVENT:
@@ -544,6 +626,10 @@ class ClaudeRequestObserver:
         else:
             started_at = request_event.time_ns / 1e9 if request_event is not None else snapshot.started_at
             ended_at = max(response_event.time_ns / 1e9, started_at)
+        accounting = self._api_requests.pop(str(response_event.attributes.get("request_id") or ""), {})
+        effort = accounting.get("effort")
+        if isinstance(effort, str) and effort:
+            request_parameters["reasoning_level"] = effort
         stop_reason = response.get("stop_reason")
         return ModelRequestEvent(
             request_id=snapshot.message_id,
@@ -562,11 +648,13 @@ class ClaudeRequestObserver:
             time_to_first_chunk=_seconds(native.attributes.get("ttft_ms")) if native is not None else None,
             finish_reasons=(stop_reason,) if isinstance(stop_reason, str) and stop_reason else (),
             usage=claude_turn_usage(response.get("usage")) or snapshot.usage,
+            cost=_cost(accounting.get("cost_usd_micros")),
             data={
                 _DATA_NAMESPACE: {
                     "observation": "api_bodies",
                     "billing_header": billing_header or None,
                     **_native_diagnostics(native),
+                    "query_source": accounting.get("query_source"),
                 },
             },
         )
@@ -760,6 +848,27 @@ def _native_diagnostics(native: _NativeRequestSpan | None) -> dict[str, Any]:
             facts[key.replace(".", "_")] = value
     facts["api_request_id"] = native.request_id
     return facts
+
+
+def _cost(micros: Any) -> MonetaryAmount | None:
+    """Return what the CLI charged for one request, in exact micros."""
+    if isinstance(micros, bool) or not isinstance(micros, (int, float)) or micros < 0:
+        return None
+    return MonetaryAmount(micros=int(micros))
+
+
+def _flag(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    return None
+
+
+def _optional_seconds(nanoseconds: Any) -> float | None:
+    if isinstance(nanoseconds, bool) or not isinstance(nanoseconds, (int, float)) or nanoseconds <= 0:
+        return None
+    return float(nanoseconds) / 1e9
 
 
 def _seconds(milliseconds: Any) -> float | None:

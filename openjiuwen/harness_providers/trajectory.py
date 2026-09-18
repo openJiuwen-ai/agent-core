@@ -73,6 +73,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
@@ -425,6 +426,8 @@ class HarnessTrajectoryRecorder:
             attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] = event.time_to_first_chunk
         attributes.update(_request_parameter_attributes(event))
         attributes.update(_usage_attributes(event))
+        if event.cost is not None:
+            attributes[OJ_GEN_AI_USAGE_TOTAL_COST] = event.cost.micros / 1_000_000
         span = self._tracer.start_span(
             name=f"chat {model}" if model else "chat",
             kind=SpanKind.CLIENT,

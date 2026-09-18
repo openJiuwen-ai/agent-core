@@ -88,6 +88,66 @@ def _body_event(
     )
 
 
+def _tool_events(
+    receiver: _FakeReceiver,
+    client: Any,
+    *,
+    tool_use_id: str,
+    start_ns: int,
+    end_ns: int,
+    success: bool,
+) -> None:
+    """Publish what the CLI states about one tool call."""
+    source = _source_id(client)
+    receiver.publish(
+        {
+            "signal": "trace",
+            "name": "claude_code.tool",
+            "start_time_ns": start_ns,
+            "end_time_ns": end_ns,
+            "attributes": {"tool_use_id": tool_use_id, "tool_name": "Bash"},
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: source},
+        }
+    )
+    receiver.publish(
+        {
+            "signal": "log",
+            "name": "claude_code.tool_result",
+            "time_ns": end_ns,
+            "attributes": {"tool_use_id": tool_use_id, "success": success, "duration_ms": (end_ns - start_ns) // 1_000_000},
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: source},
+        }
+    )
+    receiver.publish(
+        {
+            "signal": "log",
+            "name": "claude_code.tool_decision",
+            "time_ns": start_ns,
+            "attributes": {"tool_use_id": tool_use_id, "decision": "accept", "source": "config"},
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: source},
+        }
+    )
+
+
+def _api_request_event(receiver: _FakeReceiver, client: Any, *, request_id: str) -> None:
+    """Publish the CLI's own accounting of one model request."""
+    receiver.publish(
+        {
+            "signal": "log",
+            "name": "claude_code.api_request",
+            "time_ns": 1_002_100_000_000,
+            "attributes": {
+                "request_id": request_id,
+                "cost_usd_micros": 33228,
+                "effort": "high",
+                "speed": "normal",
+                "query_source": "sdk",
+            },
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: _source_id(client)},
+        }
+    )
+
+
 def _request_span(receiver: _FakeReceiver, client: Any, *, request_id: str, start_ns: int, end_ns: int) -> None:
     """Publish the CLI's own per-request span."""
     receiver.publish(
@@ -151,10 +211,21 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             request_id="req-1",
         )
         _request_span(receiver, client, request_id="req-1", start_ns=1_000_100_000_000, end_ns=1_001_900_000_000)
+        _api_request_event(receiver, client, request_id="req-1")
 
     async def side_query(client: Any) -> None:
         body = {"model": "claude-haiku", "messages": [{"role": "user", "content": "title this"}]}
         _body_event(receiver, client, "claude_code.api_request_body", body, time_ns=1_003_500_000_000)
+
+    async def tool_facts(client: Any) -> None:
+        _tool_events(
+            receiver,
+            client,
+            tool_use_id="tool-1",
+            start_ns=1_002_100_000_000,
+            end_ns=1_002_600_000_000,
+            success=True,
+        )
 
     async def second_request(client: Any) -> None:
         history = [_USER, {"role": "assistant", "content": _FIRST_REPLY}, _TOOL_RESULT]
@@ -191,6 +262,7 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             parent_tool_use_id=None,
             tool_use_result=None,
         ),
+        tool_facts,
         second_request,
         side_query,
         sdk.AssistantMessage(
@@ -253,7 +325,12 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
     assert [block.content for block in first.system_instructions] == ["You are Claude Code."]
     assert first.data["claude-code"]["billing_header"].startswith("x-anthropic-billing-header:")
     assert first.tool_definitions == ({"name": "Bash", "description": "run", "parameters": {"type": "object"}},)
-    assert first.request_parameters == {"max_tokens": 4096, "temperature": 0.2, "stream": True}
+    assert first.request_parameters == {
+        "max_tokens": 4096,
+        "temperature": 0.2,
+        "stream": True,
+        "reasoning_level": "high",
+    }
     assert first.response_id == "msg-1" and first.finish_reasons == ("tool_use",)
     # The CLI's own span states the request window and its first-token time.
     assert (first.started_at, first.ended_at) == (1000.1, 1001.9)
@@ -276,6 +353,13 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
     tool_started = next(event for event in events if _kinds([event]) == ["tool:tool-1:started"])
     assert "msg-1" in tool_started.causation_ids
     assert isinstance(tool_started.event, ItemLifecycleEvent) and tool_started.event.kind is ItemEventKind.STARTED
+    # The CLI's own tool span states the window and the outcome.
+    tool_completed = next(event for event in events if _kinds([event]) == ["tool:tool-1:completed"])
+    assert (tool_started.timestamp, tool_completed.timestamp) == (1002.1, 1002.6)
+    assert tool_completed.event.data["is_error"] is False
+    assert tool_completed.event.data["decision"] == "accept"
+    assert first.cost is not None and first.cost.micros == 33228
+    assert first.data["claude-code"]["query_source"] == "sdk"
 
     await harness.stop()
     assert not body_dir.exists()

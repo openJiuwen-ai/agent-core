@@ -18,6 +18,7 @@ from openjiuwen.harness_protocol.models import (
 )
 from openjiuwen.harness_protocol.results import (
     ContentBlock,
+    MonetaryAmount,
     TurnError,
     TurnMessage,
     TurnResult,
@@ -220,6 +221,7 @@ class ModelRequestEvent:
         time_to_first_chunk: Seconds from sending the request to its first
             streamed chunk, when the provider measures it.
         finish_reasons: Why generation stopped, in the provider's words.
+        cost: What this request cost, when the provider states it.
         usage: Token usage of this request alone. Counters follow the GenAI
             conventions: ``input_tokens`` is the whole prompt, and cached
             input is a breakdown inside it, not a separate amount.
@@ -243,6 +245,7 @@ class ModelRequestEvent:
     time_to_first_chunk: float | None = None
     finish_reasons: tuple[str, ...] = ()
     usage: TurnUsage | None = None
+    cost: MonetaryAmount | None = None
     error: TurnError | None = None
     data: JsonObject = field(default_factory=dict)
 
