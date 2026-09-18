@@ -76,6 +76,7 @@ from openjiuwen.harness.rails.subagent import (
 )
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
+from openjiuwen.harness.rails.task_description_rail import TaskDescriptionRail
 from openjiuwen.harness.rails.task_planning_rail import TaskPlanningRail
 # fmt: on
 
@@ -128,6 +129,7 @@ __all__ = [
     "TeamInsightBuffer",
     "TeamInsightEntry",
     "TaskCompletionRail",
+    "TaskDescriptionRail",
     "TaskPlanningRail",
     "TeamSkillCreateRail",
     "TeamSkillEvolutionRail",
