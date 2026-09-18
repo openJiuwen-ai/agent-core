@@ -22,6 +22,7 @@ persisted session id.
 
 from __future__ import annotations
 
+import dataclasses
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -46,6 +47,7 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.rail.base import AgentRail
     from openjiuwen.harness.deep_agent import DeepAgent
     from openjiuwen.harness.schema.config import DeepAgentConfig
+    from openjiuwen.harness.schema.deep_agent_spec import TeamModelConfig
 
 
 class TeamHarness:
@@ -495,6 +497,52 @@ class TeamHarness:
         self._bg_controller = controller
         if self._native is not None:
             self._native.background_task_controller = controller
+
+    # ------------------------------------------------------------------
+    # Runtime model switch
+    # ------------------------------------------------------------------
+
+    def apply_model_config(self, model_config: "TeamModelConfig") -> None:
+        """Apply a new model configuration for current and future run cycles.
+
+        Updates both the stored DeepAgentSpec (survives start/stop rebuild)
+        and the live NativeHarness (immediate effect on next LLM call).
+
+        Build is attempted *before* mutating state so a broken config never
+        overwrites the stored ``_agent_spec.model`` — on failure the
+        previous model is kept and a warning is logged. This avoids a
+        ``None`` ``deep_config.model`` on the live native and prevents the
+        next ``start()``/``stop→start`` rebuild (``NativeHarness(self._agent_spec, …)``
+        at team_harness.py:141/190) from re-running ``build()`` on the bad
+        config and breaking recovery.
+        """
+        # Validate the new config by materializing a Model first. Only when
+        # build succeeds do we touch the stored spec or the live native.
+        try:
+            built_model = model_config.build()
+        except Exception as exc:
+            logger.warning(
+                "[TeamHarness] model build failed, keep previous model: member=%s model_name=%s error=%s",
+                self._member_name,
+                model_config.model_request_config.model_name if model_config.model_request_config else None,
+                exc,
+            )
+            return
+        self._agent_spec.model = model_config
+        if self._native is not None:
+            deep_config = self._native.deep_config
+            if deep_config is not None:
+                # DeepAgentConfig is a @dataclass (not Pydantic BaseModel), so
+                # no model_copy; use dataclasses.replace. model_config is a
+                # TeamModelConfig spec — build() materializes a live Model
+                # instance matching DeepAgentConfig.model: Optional[Model].
+                updated = dataclasses.replace(deep_config, model=built_model)
+                self._native.configure(updated)
+        logger.info(
+            "[TeamHarness] model config applied: member=%s model_name=%s",
+            self._member_name,
+            model_config.model_request_config.model_name if model_config.model_request_config else None,
+        )
 
     # ------------------------------------------------------------------
     # Internal access

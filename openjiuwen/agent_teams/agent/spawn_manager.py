@@ -366,14 +366,46 @@ class SpawnManager:
 
         model_ref = get_member_model_ref(teammate)
         member_model = None
-        if model_ref is not None:
-            team_spec = self._configurator.team_spec
-            if team_spec is not None:
-                member_model = resolve_member_model(
-                    team_spec,
-                    model_name=model_ref.model_name,
-                    model_index=model_ref.model_index,
-                )
+        team_spec = self._configurator.team_spec
+        # ``predefined_members`` lives on ``TeamAgentSpec`` (not ``TeamSpec``),
+        # so read it from the configurator's ``spec``. The DB ``model_ref`` is
+        # written once at first spawn and never auto-refreshes with spec
+        # updates, so a model switch made via the live
+        # ``predefined_members[*].model_name`` (e.g. relay-claw "继续执行"
+        # carrying a new model_name, re-injected into the spec by
+        # ``recover_from_session`` or the RESUME_FROM_PAUSE reinjection in
+        # ``TeamRuntimeManager._apply_action``) must take precedence: when
+        # the spec's per-member ``model_name`` diverges from the stale DB
+        # ref, trust the spec — that is the user's most recent intent.
+        agent_spec = self._configurator.spec
+        spec_model_name = None
+        if agent_spec is not None:
+            for pm in getattr(agent_spec, 'predefined_members', None) or []:
+                if getattr(pm, 'member_name', None) == member_name:
+                    spec_model_name = getattr(pm, 'model_name', None)
+                    break
+        # Resolution priority — only override the sticky DB ref when the spec
+        # actually diverges. When spec and DB agree on the same model_name, keep
+        # the DB ``model_index`` so a multi-entry same-name pool (e.g. several
+        # api_keys for the same model) does NOT collapse to group[0] on every
+        # restart, which would shift a teammate between endpoints needlessly.
+        db_name = model_ref.model_name if model_ref is not None else None
+        db_index = model_ref.model_index if model_ref is not None else None
+        if spec_model_name is not None and spec_model_name != db_name:
+            resolved_name = spec_model_name
+            resolved_index = None
+        elif db_name is not None:
+            resolved_name = db_name
+            resolved_index = db_index
+        else:
+            resolved_name = spec_model_name
+            resolved_index = None
+        if resolved_name is not None and team_spec is not None:
+            member_model = resolve_member_model(
+                team_spec,
+                model_name=resolved_name,
+                model_index=resolved_index,
+            )
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
