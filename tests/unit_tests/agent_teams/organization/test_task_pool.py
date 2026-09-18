@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDescriptionRevisedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -3480,6 +3481,45 @@ async def test_created_task_only_wakes_capability_matched_team(active_organizati
         team_id="team-b",
     )
     assert turns == []
+
+
+@pytest.mark.asyncio
+async def test_description_revised_wakes_capability_matched_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["legal", "compliance"]
+    org_id = "org-revised-claim-wake"
+    manager, _ = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    await manager.create_task(
+        task_id="legal-open",
+        title="Legal",
+        description="Need a clearer scope before claim.",
+        required_capabilities=["legal", "compliance"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id=org_id,
+        ),
+    )
+
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents,
+        session_id,
+        org_id,
+        OrgTaskDescriptionRevisedEvent(
+            organization_id=org_id,
+            team_id="team-a",
+            task_id="legal-open",
+            request_id="org-revision-1",
+            description_revision=1,
+            deadline_at=1,
+        ),
+        team_id="team-b",
+    )
+
+    assert turns[0]["team_name"] == "team-b"
+    assert "legal-open" in turns[0]["inputs"]["query"]
+    assert "MUST call org_claim_task" in turns[0]["inputs"]["query"]
 
 
 @pytest.mark.asyncio
