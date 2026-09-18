@@ -845,6 +845,9 @@ class ReActAgent(BaseAgent):
         return {
             "system_messages": final_system,
             "tools": ctx.inputs.tools if ctx.inputs.tools else None,
+            "model_name": getattr(self._config.model_config_obj, "model_name", None),
+            "model_config": self._config.model_config_obj,
+            "model_client_config": self._config.model_client_config,
         }
 
     async def _sync_prompt_attachments(

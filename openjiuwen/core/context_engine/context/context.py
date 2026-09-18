@@ -424,7 +424,7 @@ class SessionModelContext(ModelContext):
                 before_messages = None
                 started_emitted = False
                 try:
-                    if await processor.trigger_get_context_window(self, window):
+                    if await processor.trigger_get_context_window(self, window, **kwargs):
                         logger.info(f"trigger context processor {processor.processor_type()} on GET")
                         operation_id = uuid.uuid4().hex
                         started_at = time.time()
