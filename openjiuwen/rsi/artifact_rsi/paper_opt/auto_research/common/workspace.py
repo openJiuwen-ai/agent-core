@@ -133,6 +133,11 @@ def reflection_path(run_id: str, revision: int) -> Path:
     return reflection_dir(run_id) / f"revision-{revision}.md"
 
 
+def reflection_metrics_summary_path(run_id: str, revision: int) -> Path:
+    """Host-built compact metrics dump shown to the reflection agent."""
+    return reflection_dir(run_id) / f"revision-{revision}.metrics_summary.json"
+
+
 def report_path(run_id: str) -> Path:
     """The final reporting artifact — experiments/<run_id>/report.md."""
     return workspace_dir(run_id) / "report.md"

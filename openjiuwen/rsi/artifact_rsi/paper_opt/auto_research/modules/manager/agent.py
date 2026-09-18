@@ -419,9 +419,11 @@ def _minimal_handoff(handoff: Any) -> dict[str, Any] | None:
     payload = {
         "kind": handoff.get("kind"),
         "status": handoff.get("status"),
-        "scientific_status": handoff.get("scientific_status"),
+        "sanity": handoff.get("sanity"),
         "process_status": handoff.get("process_status"),
         "verdict": handoff.get("verdict"),
+        "validity": handoff.get("validity"),
+        "recommendation": handoff.get("recommendation"),
         "revision": handoff.get("revision"),
         "design_path": handoff.get("design_path"),
         "report_path": handoff.get("report_path"),

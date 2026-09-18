@@ -686,6 +686,7 @@ class CodeImplementationAgent:
 
     @staticmethod
     def _render_design_report(plan: ExperimentPlan) -> str:
+        observations = [f"- {item}" for item in plan.observations] or ["- (none)"]
         lines = [
             f"# Experiment design report — {plan.run_id}",
             "",
@@ -700,6 +701,12 @@ class CodeImplementationAgent:
             "",
             "## Metrics",
             *(f"- {m}" for m in plan.metrics),
+            "",
+            "## Primary metric",
+            f"{plan.primary_metric or '(unspecified)'} ({plan.primary_direction or 'unspecified'})",
+            "",
+            "## Observations to log (advisory)",
+            *observations,
             "",
             "## Expected outcomes",
             plan.expected_outcomes,
@@ -1087,12 +1094,32 @@ class CodeImplementationAgent:
             "so the host can recover the result even if the file above did not end up "
             "where it asked. If you print this line more than once, only the last one "
             "is read.\n\n"
-            f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n"
-            "Write every declared plan metric under a top-level `metrics` object keyed by "
+            f"Declared plan metrics, identically across all variants: {', '.join(plan.metrics) or '(none)'}.\n"
+            + (
+                f"Primary metric (must always be present as a finite number): "
+                f"`{plan.primary_metric}` ({plan.primary_direction or 'unspecified'}).\n"
+                if plan.primary_metric
+                else ""
+            )
+            + (
+                "Requested observations (best effort, under `metrics.observations.<name>`; "
+                "missing ones are noted by reflection, never rejected by the host): "
+                + ", ".join(plan.observations)
+                + ".\n"
+                if plan.observations
+                else ""
+            )
+            + "Write every declared plan metric under a top-level `metrics` object keyed by "
             "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
             "metadata (`method`, `status`, `n_questions`, `model_call_count`, item records) "
             "stays at the root. You may also duplicate scalars at the root, but "
-            "`metrics.<name>` is the canonical location the host reads.\n\n"
+            "`metrics.<name>` is the canonical location the host reads.\n"
+            "Unknown extra keys are never rejected. Log anything else that would help a "
+            "later judge: per-item records, parse-failure counts (`parsed_count`), latency, "
+            "token/call counts. An unparseable model reply is a number to record, not a "
+            "fatal error — do not raise and exit non-zero for a bad completion; exit "
+            "non-zero only for infrastructure faults (dataset download, agent init, "
+            "metrics write, runtime setup).\n\n"
             "If the non-smoke path fails, still write `--output` as JSON so the host can "
             "diagnose it, and print one stderr line: "
             "`Harness failed at {failure_stage}/{failure_substage}: {detail}`. "

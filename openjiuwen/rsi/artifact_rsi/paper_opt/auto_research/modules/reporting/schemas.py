@@ -32,8 +32,8 @@ class ReportingInput(BaseModel):
     survey: ResearchBrief
     plan: ExperimentPlan
     result: ExperimentResult
-    # Optional: a failed/timed-out reflection must never block reaching this
-    # module — same rule docs/reflection_design.md §9 established for reporting.
+    # Optional at the module boundary so a standalone reporting call still
+    # works. The manager requires a fresh reflection before dispatching here.
     reflection: Reflection | None = None
     # Previous paper's derived state, if this run is extending/updating a
     # prior paper rather than writing from scratch — see

@@ -18,6 +18,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     ModuleMode,
     PersistedManagerState,
     RecordStatus,
+    ReflectionHandoff,
     RequirementRecord,
     StateChange,
     SubagentReport,
@@ -146,34 +147,42 @@ def _process_completed(state: TaskState) -> bool:
     return state.latest_execution_status == "completed"
 
 
-def _latest_scientific_status(reports: list[SubagentReport]) -> str:
+def _latest_sanity(reports: list[SubagentReport]) -> str:
     last_exec = _latest_module_report(reports, "experiment_execution")
     if isinstance(last_exec, SubagentReport) and isinstance(last_exec.handoff, ExecutionHandoff):
-        return last_exec.handoff.scientific_status
+        return last_exec.handoff.sanity
     return "unknown" if last_exec is not None else ""
 
 
-def _science_accepted(
+def _run_invalid(reports: list[SubagentReport]) -> bool:
+    return _latest_sanity(reports) == "invalid_run"
+
+
+def _reflection_accepted(
     reports: list[SubagentReport],
     *,
     code_commit: str = "",
     execution_history: list[ExecutionHistoryRecord] | None = None,
 ) -> bool:
+    last_reflection = _latest_succeeded(reports, "reflection")
+    if last_reflection is None or not isinstance(last_reflection.handoff, ReflectionHandoff):
+        return False
+    handoff = last_reflection.handoff
+    if handoff.validity != "valid" or handoff.verdict != "supported":
+        return False
+    last_exec = _latest_module_report(reports, "experiment_execution")
+    if _round_index(last_reflection) < _round_index(last_exec):
+        return False
     if execution_history is not None and code_commit:
         if not history_slice_for_commit(execution_history, code_commit):
             return False
-        for report in reversed(reports):
-            if report.module != "experiment_execution":
-                continue
-            if not isinstance(report.handoff, ExecutionHandoff):
-                continue
+        if isinstance(last_exec, SubagentReport) and isinstance(last_exec.handoff, ExecutionHandoff):
             variant_commits = {
-                item.code_commit for item in report.handoff.variants if item.code_commit
+                item.code_commit for item in last_exec.handoff.variants if item.code_commit
             }
-            if report.handoff.code_commit == code_commit or code_commit in variant_commits:
-                return report.handoff.scientific_status == "accepted"
-        return False
-    return _latest_scientific_status(reports) == "accepted"
+            if last_exec.handoff.code_commit != code_commit and code_commit not in variant_commits:
+                return False
+    return True
 
 
 def _has_succeeded_survey(reports: list[SubagentReport]) -> bool:
@@ -325,7 +334,7 @@ def _stuck_for_survey(
     code_commit: str = "",
     execution_history: list[ExecutionHistoryRecord] | None = None,
 ) -> bool:
-    if _science_accepted(reports, code_commit=code_commit, execution_history=execution_history):
+    if _reflection_accepted(reports, code_commit=code_commit, execution_history=execution_history):
         return False
     if _process_completed(state) and not _redesign_after_execution(reports):
         return True
@@ -420,7 +429,7 @@ def validate_contract(
         )
 
     def science_ok() -> bool:
-        return _science_accepted(
+        return _reflection_accepted(
             reports, code_commit=code_commit, execution_history=execution_history
         )
 
@@ -479,10 +488,6 @@ def validate_contract(
                 raise DecisionValidationError(
                     "new research must be incorporated via revise_research before update"
                 )
-            if _science_accepted(
-                reports, code_commit=code_commit, execution_history=execution_history
-            ):
-                raise DecisionValidationError("science already accepted; reporting is next")
             if not _can_produce_new_evidence(state):
                 raise DecisionValidationError(
                     "no code/execution capacity remains to act on a design update"
@@ -495,13 +500,13 @@ def validate_contract(
             last_reflection = _latest_succeeded(reports, "reflection")
             last_exec = _latest_module_report(reports, "experiment_execution")
             reflection_fresh = _round_index(last_reflection) > _round_index(last_redesign)
-            simple_fresh = (
-                _process_completed(state)
+            invalid_fresh = (
+                _run_invalid(reports)
                 and _round_index(last_exec) > _round_index(last_redesign)
             )
-            if not reflection_fresh and not simple_fresh:
+            if not reflection_fresh and not invalid_fresh:
                 raise DecisionValidationError(
-                    "design update requires newer reflection or a process-completed execution"
+                    "design update requires a newer reflection for the latest execution"
                 )
         return
 
@@ -548,12 +553,12 @@ def validate_contract(
             )
         last_exec = _latest_module_report(reports, "experiment_execution")
         last_code = _latest_module_report(reports, "code_implementation")
-        if process_failed():
+        if process_failed() or _run_invalid(reports):
             if last_exec is not None and (
                 last_code is None or last_code.round_index < last_exec.round_index
             ):
                 raise DecisionValidationError(
-                    "failed execution must be repaired via code_implementation before another execution"
+                    "failed or invalid execution must be repaired via code_implementation before another execution"
                 )
             return
         if unexecuted():
@@ -608,10 +613,16 @@ def validate_contract(
                 raise DecisionValidationError("new design must be implemented before reporting")
         if _execution_already_reported(reports):
             raise DecisionValidationError("this execution was already reported; emit DONE")
-        # Reporting stays legal after a process-completed run even when science
-        # is below_threshold or accepted and other modules are still legal.
-        # The manager should treat it as the last step: enough original-task
-        # evidence, or stuck.
+        if _run_invalid(reports):
+            raise DecisionValidationError(
+                "reporting requires a valid run; repair code after an invalid run"
+            )
+        last_reflection = _latest_succeeded(reports, "reflection")
+        last_exec = _latest_module_report(reports, "experiment_execution")
+        if _round_index(last_reflection) < _round_index(last_exec):
+            raise DecisionValidationError(
+                "reporting requires a fresh reflection for the latest execution"
+            )
         return
 
 
@@ -823,7 +834,7 @@ def _action_reason(
             last_reflection = _latest_succeeded(reports, "reflection")
             if _round_index(last_reflection) > _round_index(last_redesign):
                 return "update after reflection"
-            return "update after execution"
+            return "update after invalid run"
         return "revise after new survey"
     if module == "code_implementation":
         if _code_needs_repair(state, reports) and not _code_needs_create(reports):
@@ -846,7 +857,7 @@ def _action_reason(
             state, reports, code_commit=code_commit, execution_history=execution_history
         ):
             return "science loop exhausted"
-        if _science_accepted(
+        if _reflection_accepted(
             reports, code_commit=code_commit, execution_history=execution_history
         ):
             return "last step if original task is complete"

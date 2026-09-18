@@ -1,11 +1,10 @@
-"""Host pairing of subset experiment rows for scientific status."""
+"""Host pairing of subset experiment rows."""
 
 from __future__ import annotations
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     infer_proposed_name,
     overlay_paired_metrics,
-    scientific_status_from_comparison,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
     VariantResult,
@@ -88,84 +87,6 @@ def test_overlay_skips_when_sibling_deltas_disagree():
     assert names["c"].metrics["metrics"]["delta"] is None
 
 
-
-def test_comparison_unknown_until_both_methods_exist():
-    assert (
-        scientific_status_from_comparison(
-            ["one_shot_accuracy_gain"],
-            [_variant("one_shot", {"metrics": {"accuracy": 1.0}})],
-        )
-        == "unknown"
-    )
-
-
-def test_comparison_below_threshold_on_tied_accuracy():
-    assert (
-        scientific_status_from_comparison(
-            ["one_shot_accuracy_gain", "valid_prediction_coverage"],
-            [
-                _variant(
-                    "zero_shot",
-                    {
-                        "metrics": {
-                            "accuracy": 1.0,
-                            "valid_prediction_coverage": 1.0,
-                            "one_shot_accuracy_gain": None,
-                        }
-                    },
-                ),
-                _variant(
-                    "one_shot",
-                    {
-                        "metrics": {
-                            "accuracy": 1.0,
-                            "valid_prediction_coverage": 1.0,
-                            "one_shot_accuracy_gain": None,
-                        }
-                    },
-                ),
-            ],
-        )
-        == "below_threshold"
-    )
-
-
-def test_comparison_accepted_when_gain_is_positive():
-    assert (
-        scientific_status_from_comparison(
-            ["one_shot_accuracy_gain"],
-            [
-                _variant("zero_shot", {"metrics": {"accuracy": 0.5}}),
-                _variant("one_shot", {"metrics": {"accuracy": 1.0}}),
-            ],
-        )
-        == "accepted"
-    )
-
-
-def test_named_proposed_still_compares_shared_metric():
-    assert (
-        scientific_status_from_comparison(
-            ["accuracy"],
-            [
-                _variant("baseline", {"accuracy": 0.8}),
-                _variant("proposed", {"accuracy": 0.9}),
-            ],
-        )
-        == "accepted"
-    )
-    assert (
-        scientific_status_from_comparison(
-            ["accuracy"],
-            [
-                _variant("baseline", {"accuracy": 0.9}),
-                _variant("proposed", {"accuracy": 0.8}),
-            ],
-        )
-        == "below_threshold"
-    )
-
-
 def test_overlay_fills_gain_from_nested_accuracy():
     rows = overlay_paired_metrics(
         [
@@ -176,16 +97,3 @@ def test_overlay_fills_gain_from_nested_accuracy():
     )
     names = {item.name: item for item in rows}
     assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
-
-
-def test_comparison_unknown_on_unresolved_declared_metric():
-    assert (
-        scientific_status_from_comparison(
-            ["accuracy"],
-            [
-                _variant("zero_shot", {"rows": [{"accuracy": 0.2}, {"accuracy": 0.9}]}),
-                _variant("proposed", {"rows": [{"accuracy": 0.2}, {"accuracy": 0.9}]}),
-            ],
-        )
-        == "unknown"
-    )

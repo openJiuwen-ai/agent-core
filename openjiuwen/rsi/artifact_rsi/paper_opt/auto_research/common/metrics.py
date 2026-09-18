@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import math
 import re
 from dataclasses import dataclass, field
@@ -30,6 +31,10 @@ _DISPLAY_SKIP_METRIC_KEYS = frozenset(
 )
 _MAX_COMPACT_METRICS = 40
 _MAX_METRIC_STRING = 120
+_PROMPT_SUMMARY_MAX_CHARS = 8000
+_PROMPT_SUMMARY_MAX_STRING = 240
+_PROMPT_SUMMARY_MAX_SCALAR_LIST = 24
+_PROMPT_SUMMARY_MAX_KEYS = 40
 _MAX_EVENT_CLASSES = 12
 _MAX_EXAMPLE_TASKS = 3
 _MAX_RESOLVE_DEPTH = 16
@@ -52,8 +57,6 @@ _SKIP_BASELINE_NAMES = frozenset(
         "model_name",
     }
 )
-_ACCEPTED_STATUSES = frozenset({"accepted"})
-_FAILED_STATUSES = frozenset({"non_acceptable", "diagnostic_failed", "failed"})
 _HARNESS_FAILED_STATUSES = frozenset({"failed", "diagnostic_failed"})
 _COMPLETED_RUN_STATUSES = frozenset(
     {
@@ -418,6 +421,136 @@ def compact_metrics(
     return compact
 
 
+def _prompt_summary_stub(
+    kind: str,
+    *,
+    n: int | None = None,
+    keys: list[str] | None = None,
+    path: str = "",
+) -> dict[str, Any]:
+    stub: dict[str, Any] = {"_omitted": kind}
+    if n is not None:
+        stub["n"] = n
+    if keys:
+        stub["keys"] = keys[:_PROMPT_SUMMARY_MAX_KEYS]
+    if path:
+        stub["path"] = path
+    return stub
+
+
+def _object_list_keys(items: list[Any]) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for key in item:
+            name = str(key)
+            if name in seen:
+                continue
+            seen.add(name)
+            keys.append(name)
+            if len(keys) >= _PROMPT_SUMMARY_MAX_KEYS:
+                return keys
+    return keys
+
+
+def _clip_prompt_string(value: str) -> str:
+    if len(value) <= _PROMPT_SUMMARY_MAX_STRING:
+        return value
+    return value[: _PROMPT_SUMMARY_MAX_STRING - 1] + "…"
+
+
+def _is_prompt_stub(value: Any) -> bool:
+    return isinstance(value, dict) and str(value.get("_omitted") or "") in {
+        "object_list",
+        "scalar_list",
+        "object",
+    }
+
+
+def _dump_prompt_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, default=str, ensure_ascii=False))
+    except (TypeError, ValueError):
+        return len(str(value))
+
+
+def _summarize_prompt_value(value: Any, *, path: str) -> Any:
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return _clip_prompt_string(value)
+    if isinstance(value, list):
+        if not value:
+            return []
+        if any(isinstance(item, dict) for item in value):
+            return _prompt_summary_stub(
+                "object_list",
+                n=len(value),
+                keys=_object_list_keys(value),
+                path=path,
+            )
+        if len(value) > _PROMPT_SUMMARY_MAX_SCALAR_LIST:
+            head = [_summarize_prompt_value(item, path=path) for item in value[:3]]
+            stub = _prompt_summary_stub("scalar_list", n=len(value), path=path)
+            stub["head"] = head
+            return stub
+        return [_summarize_prompt_value(item, path=path) for item in value]
+    if isinstance(value, dict):
+        return {
+            str(key): _summarize_prompt_value(child, path=path) for key, child in value.items()
+        }
+    return _clip_prompt_string(str(value))
+
+
+def _shrink_prompt_summary(summarized: dict[str, Any], *, path: str, max_chars: int) -> dict[str, Any]:
+    result = dict(summarized)
+    while _dump_prompt_size(result) > max_chars:
+        candidates = [
+            (key, _dump_prompt_size(value))
+            for key, value in result.items()
+            if isinstance(value, dict) and not _is_prompt_stub(value)
+        ]
+        if not candidates:
+            return _prompt_summary_stub(
+                "object",
+                n=len(result),
+                keys=list(result),
+                path=path,
+            )
+        key, _ = max(candidates, key=lambda item: item[1])
+        child = result[key]
+        result[key] = _prompt_summary_stub(
+            "object",
+            keys=list(child) if isinstance(child, dict) else [],
+            path=path,
+        )
+    return result
+
+
+def summarize_metrics_for_prompt(
+    metrics: dict[str, Any] | None,
+    *,
+    path: str = "",
+    max_chars: int = _PROMPT_SUMMARY_MAX_CHARS,
+) -> dict[str, Any]:
+    """Keep scalars and small objects; stub lists of objects for a judge prompt.
+
+    Shape-only: no metric-name vocabulary. Item-record arrays stay off the
+    prompt (count + keys + path) so n=100+ payloads remain bounded.
+    """
+    raw = dict(metrics) if isinstance(metrics, dict) else {}
+    summarized = _summarize_prompt_value(raw, path=path)
+    if not isinstance(summarized, dict):
+        summarized = {"value": summarized}
+    if _dump_prompt_size(summarized) <= max_chars:
+        return summarized
+    return _shrink_prompt_summary(summarized, path=path, max_chars=max_chars)
+
+
 def _metric_leaf(key: str) -> str:
     return str(key).rsplit(".", 1)[-1].lower()
 
@@ -510,14 +643,6 @@ def _truthy_flag(value: Any) -> bool | None:
         if lowered in {"false", "0", "no"}:
             return False
     return None
-
-
-def _score_below_one(metrics: dict[str, Any]) -> bool:
-    for leaf in _COMPAT_SCORE_LEAVES:
-        hit = resolve_metric(metrics, leaf)
-        if hit.status == "resolved" and hit.value is not None and float(hit.value) < 1.0:
-            return True
-    return False
 
 
 def _metric_str(metrics: dict[str, Any], *keys: str) -> str:
@@ -745,6 +870,62 @@ def validate_metrics_contract(
     return MetricsContractResult(ok=not issues, issues=issues)
 
 
+def primary_metric_unresolved(
+    metrics: dict[str, Any] | None,
+    primary_metric: str,
+) -> MetricsContractIssue | None:
+    """Mechanical check: the committed primary metric must resolve to a finite number."""
+    cleaned = str(primary_metric or "").strip()
+    if not cleaned:
+        return None
+    hit = resolve_metric(metrics, cleaned)
+    if hit.status == "resolved" and hit.value is not None:
+        return None
+    return _contract_issue(
+        "primary_metric_unresolved",
+        f"primary metric {cleaned!r} did not resolve to a finite number (status={hit.status})",
+    )
+
+
+def item_failure_rate(metrics: dict[str, Any] | None) -> float | None:
+    """Failed item records / total records. None when no item records exist."""
+    if not isinstance(metrics, dict) or not metrics:
+        return None
+    records = _item_records(metrics)
+    if not records:
+        return None
+    failed = sum(1 for item in records if _item_operationally_failed(item))
+    return failed / len(records)
+
+
+SanityStatus = Literal["ok", "invalid_run", "unknown"]
+
+
+def run_sanity(
+    metrics: dict[str, Any] | None,
+    *,
+    expected_method: str = "",
+    metrics_state: str = "present",
+    primary_metric: str = "",
+    process_status: str = "",
+) -> SanityStatus:
+    """Mechanical run validity. Partial item failures never invalidate a run."""
+    if process_status == "failed":
+        return "invalid_run"
+    contract = validate_metrics_contract(
+        metrics,
+        expected_method=expected_method,
+        metrics_state=metrics_state,
+    )
+    if not contract.ok:
+        return "invalid_run"
+    if primary_metric_unresolved(metrics, primary_metric) is not None:
+        return "invalid_run"
+    if not metrics:
+        return "unknown"
+    return "ok"
+
+
 def validate_smoke_live_path(metrics: dict[str, Any] | None) -> MetricsContractResult:
     """Smoke-only checks: one real item record and a live model call.
 
@@ -817,45 +998,10 @@ def failure_class_from_metrics(
     metrics: dict[str, Any] | None,
     *,
     process_status: str = "",
-    scientific_status: str = "",
+    sanity: str = "",
 ) -> str:
-    if harness_failed(metrics) or process_status == "failed":
+    if harness_failed(metrics) or process_status == "failed" or sanity == "invalid_run":
         return "infrastructure"
-    if scientific_status in {"accepted", "below_threshold"}:
-        return "scientific"
-    return "unknown"
-
-
-def scientific_status_from_metrics(metrics: dict[str, Any]) -> str:
-    """Map harness scalars onto a routing label. Unknown when metrics are empty.
-
-    Process-complete statuses (`completed`, `ok`, …) are not scientific
-    acceptance. Only an explicit acceptance flag or `status=accepted` counts.
-    Infrastructure failures (`failure_stage`, acquisition errors, `status=failed`)
-    are `unknown`, not `below_threshold`.
-    """
-    if not metrics:
-        return "unknown"
-    if harness_failed(metrics):
-        return "unknown"
-    flagged = _truthy_flag(metrics.get("acceptance"))
-    if flagged is None:
-        nested = metrics.get(_CANONICAL_METRICS_KEY)
-        if isinstance(nested, dict):
-            flagged = _truthy_flag(nested.get("acceptance"))
-            if flagged is None:
-                flagged = _truthy_flag(nested.get("eligible_for_acceptance"))
-    if flagged is None:
-        flagged = _truthy_flag(metrics.get("eligible_for_acceptance"))
-    if flagged is not None:
-        return "accepted" if flagged else "below_threshold"
-    status = _metric_str(metrics, "status").lower()
-    if status in _FAILED_STATUSES:
-        return "below_threshold"
-    if status in _ACCEPTED_STATUSES:
-        return "accepted"
-    if _score_below_one(metrics):
-        return "below_threshold"
     return "unknown"
 
 
@@ -1033,66 +1179,6 @@ def _split_proposed_baselines(
     return proposed, peers
 
 
-def scientific_status_from_comparison(
-    metric_names: list[str],
-    variants: list[VariantResult],
-    *,
-    baselines: list[str] | None = None,
-) -> str:
-    """Compare the treatment method against stored baseline rows.
-
-    Pair/gain plan metrics are filled from last-measured sibling scores so a
-    one-variant run can still be scored against an earlier method. Acceptance
-    is "not worse than any baseline on any declared metric, and strictly
-    better on at least one" (a derived gain is strictly better when > 0).
-    "unknown" when there isn't enough data to compare.
-    """
-    compare_variants = overlay_paired_metrics(
-        variants, metric_names, baselines=baselines
-    )
-    proposed, baseline_rows = _split_proposed_baselines(
-        compare_variants, metric_names, baselines=baselines
-    )
-    if not metric_names or proposed is None or not baseline_rows:
-        return "unknown"
-    if proposed.process_status != "completed":
-        return "unknown"
-    strictly_better = False
-    compared = False
-    for metric in metric_names:
-        proposed_hit = resolve_metric(proposed.metrics, metric)
-        if proposed_hit.status == "ambiguous":
-            return "unknown"
-        p_val = proposed_hit.value if proposed_hit.status == "resolved" else None
-        if p_val is None:
-            continue
-        shared = False
-        for baseline in baseline_rows:
-            baseline_hit = resolve_metric(baseline.metrics, metric)
-            if baseline_hit.status == "ambiguous":
-                return "unknown"
-            if baseline_hit.status != "resolved" or baseline_hit.value is None:
-                continue
-            b_val = baseline_hit.value
-            shared = True
-            compared = True
-            if p_val < b_val:
-                return "below_threshold"
-            if p_val > b_val:
-                strictly_better = True
-        if shared:
-            continue
-        # Present only on the treatment row: a host-filled difference.
-        compared = True
-        if p_val < 0:
-            return "below_threshold"
-        if p_val > 0:
-            strictly_better = True
-    if not compared:
-        return "unknown"
-    return "accepted" if strictly_better else "below_threshold"
-
-
 def metric_diagnostics(
     metrics: dict[str, Any],
     *,
@@ -1111,6 +1197,9 @@ def metric_diagnostics(
         diagnostic["duration_ms"] = duration_ms
     if exit_code is not None:
         diagnostic["exit_code"] = exit_code
+    rate = item_failure_rate(metrics)
+    if rate is not None:
+        diagnostic["item_failure_rate"] = rate
 
     stage = _metric_str(metrics, "failure_stage")
     substage = _metric_str(metrics, "failure_substage")

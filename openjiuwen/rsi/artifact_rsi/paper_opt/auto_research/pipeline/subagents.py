@@ -15,12 +15,13 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     compact_metrics,
     failure_class_from_metrics,
     failure_fingerprint,
+    item_failure_rate,
     materialize_handoff_metrics,
     metric_diagnostics,
     overlay_paired_metrics,
+    primary_metric_unresolved,
+    run_sanity,
     sanitize_diagnostic_payload,
-    scientific_status_from_comparison,
-    scientific_status_from_metrics,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     agent_trace_path,
@@ -503,7 +504,7 @@ def _path_kind(path: str) -> str:
 def _structured_failure_summary(handoff: Any) -> str:
     bits: list[str] = []
     process_status = getattr(handoff, "process_status", "") or ""
-    scientific_status = getattr(handoff, "scientific_status", "") or ""
+    sanity = getattr(handoff, "sanity", "") or ""
     failure_kind = getattr(handoff, "failure_kind", "") or ""
     failure_class = getattr(handoff, "failure_class", "") or ""
     stage = getattr(handoff, "failure_stage", "") or ""
@@ -512,8 +513,8 @@ def _structured_failure_summary(handoff: Any) -> str:
     status_line: list[str] = []
     if process_status:
         status_line.append(f"process={process_status}")
-    if scientific_status:
-        status_line.append(f"science={scientific_status}")
+    if sanity:
+        status_line.append(f"sanity={sanity}")
     if failure_kind:
         status_line.append(f"failure_kind={failure_kind}")
     if failure_class:
@@ -1594,18 +1595,30 @@ class ExperimentExecutionAdapter:
             seen.add(item.name)
             ordered.append(latest_by_name.get(item.name, item))
         variants: list[VariantHandoff] = []
-        sciences: list[str] = []
+        sanities: list[str] = []
         diagnostic_paths: list[str] = []
         failure_excerpts: list[str] = []
         plan = state.task_state.latest_plan
         plan_metrics = list(plan.metrics) if plan is not None else []
+        primary_metric = plan.primary_metric if plan is not None else ""
         for source in ordered:
             compact, resolution_diag = materialize_handoff_metrics(
                 dict(source.metrics), plan_metrics=plan_metrics
             )
-            science = scientific_status_from_metrics(dict(source.metrics))
+            process_status = source.process_status or (
+                "completed"
+                if source.exit_code == 0 and source.metrics_state == "present"
+                else "failed"
+            )
+            sanity = run_sanity(
+                dict(source.metrics),
+                expected_method=source.name,
+                metrics_state=source.metrics_state or "present",
+                primary_metric=primary_metric,
+                process_status=process_status,
+            )
             if source.name in this_run_names:
-                sciences.append(science)
+                sanities.append(sanity)
             diagnostic = metric_diagnostics(
                 dict(source.metrics),
                 failure_kind=source.failure_kind,
@@ -1615,16 +1628,17 @@ class ExperimentExecutionAdapter:
             )
             if resolution_diag:
                 diagnostic["metric_resolution"] = resolution_diag
-            process_status = source.process_status or (
-                "completed"
-                if source.exit_code == 0 and source.metrics_state == "present"
-                else "failed"
-            )
+            unresolved = primary_metric_unresolved(dict(source.metrics), primary_metric)
+            if unresolved is not None:
+                diagnostic["primary_metric_unresolved"] = unresolved.detail
+            rate = item_failure_rate(dict(source.metrics))
+            if rate is not None:
+                diagnostic["item_failure_rate"] = rate
             sidecar_rel = _safe_rel(source.diagnostics_path) if source.diagnostics_path else ""
             variants.append(
                 VariantHandoff(
                     name=source.name,
-                    passed=process_status == "completed" and science == "accepted",
+                    passed=process_status == "completed" and sanity == "ok",
                     exit_code=source.exit_code,
                     metrics=compact,
                     log_path=_safe_rel(source.log_path),
@@ -1682,28 +1696,14 @@ class ExperimentExecutionAdapter:
         process_ok = result.status == "completed" and all(
             item.process_status == "completed" for item in result.variants
         )
-        status_by_name = {
-            item.name: science for item, science in zip(result.variants, sciences)
-        }
-        compare_variants = (
-            state.latest_execution.variants
-            if state.latest_execution is not None and state.latest_execution.variants
-            else result.variants
-        )
-        scientific = scientific_status_from_comparison(
-            plan_metrics,
-            compare_variants,
-            baselines=list(plan.baselines) if plan is not None else None,
-        )
-        if scientific == "unknown":
-            if "proposed" in status_by_name:
-                scientific = status_by_name["proposed"]
-            elif "below_threshold" in sciences:
-                scientific = "below_threshold"
-            elif sciences and all(item == "accepted" for item in sciences):
-                scientific = "accepted"
         if not process_ok:
-            scientific = "unknown"
+            sanity = "invalid_run"
+        elif "invalid_run" in sanities:
+            sanity = "invalid_run"
+        elif sanities and all(item == "ok" for item in sanities):
+            sanity = "ok"
+        else:
+            sanity = "unknown"
         failure_kind = next((item.failure_kind for item in result.variants if item.failure_kind), "")
         proposed_handoff = next((item for item in variants if item.name == "proposed"), None)
         diagnostic = (
@@ -1716,7 +1716,7 @@ class ExperimentExecutionAdapter:
         failure_class = failure_class_from_metrics(
             dict(proposed_handoff.metrics) if proposed_handoff is not None else {},
             process_status="completed" if process_ok else "failed",
-            scientific_status=scientific,
+            sanity=sanity,
         )
         if not process_ok:
             failure_class = "infrastructure"
@@ -1744,7 +1744,7 @@ class ExperimentExecutionAdapter:
         goal_note = bounded_text(contract.goal, 200)
         summary_bits = [
             f"process={'completed' if process_ok else 'failed'}",
-            f"science={scientific}",
+            f"sanity={sanity}",
         ]
         if failure_kind:
             summary_bits.append(f"failure_kind={failure_kind}")
@@ -1779,7 +1779,7 @@ class ExperimentExecutionAdapter:
             handoff=ExecutionHandoff(
                 status="completed" if process_ok else "failed",
                 process_status="completed" if process_ok else "failed",
-                scientific_status=scientific,  # type: ignore[arg-type]
+                sanity=sanity,  # type: ignore[arg-type]
                 failure_kind=failure_kind,
                 variants=variants,
                 notes=result.notes,
@@ -1794,17 +1794,6 @@ class ExperimentExecutionAdapter:
                 code_commit=head,
             ),
         )
-
-
-_REFLECTION_VERDICT_RE = re.compile(
-    r"\*\*Hypothesis verdict:\*\*\s*(supported|refuted|mixed|inconclusive)\b",
-    re.IGNORECASE,
-)
-
-
-def _reflection_verdict(content: str) -> str:
-    match = _REFLECTION_VERDICT_RE.search(content)
-    return match.group(1).lower() if match else "inconclusive"
 
 
 def _reflection_feedback(
@@ -1881,8 +1870,9 @@ class ReflectionAdapter:
                 related_report_ids=contract.related_report_ids,
             )
         reflection = output.reflection
-        verdict = _reflection_verdict(reflection.content)
-        summary = bounded_text(reflection.content, state.task_state.limits.excerpt_chars)
+        judgment = reflection.judgment
+        verdict = judgment.hypothesis_verdict
+        summary = bounded_text(judgment.summary, state.task_state.limits.excerpt_chars)
         state.latest_reflection = reflection
         state.task_state.latest_evaluation = _reflection_feedback(
             plan=plan,
@@ -1902,9 +1892,12 @@ class ReflectionAdapter:
             duration_ms=int((time.monotonic() - started) * 1000),
             related_report_ids=contract.related_report_ids,
             handoff=ReflectionHandoff(
-                verdict=verdict,  # type: ignore[arg-type]
+                verdict=verdict,
+                validity=judgment.validity,
+                recommendation=judgment.recommendation,
                 summary=summary,
                 reflection_path=reflection.reflection_path,
+                reinterpreted=judgment.reinterpreted,
             ),
         )
 
