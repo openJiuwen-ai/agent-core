@@ -52,7 +52,7 @@ def test_overlay_computes_gain_from_zero_shot_sibling():
                 {"metrics": {"accuracy": 1.0, "one_shot_accuracy_gain": None}},
             ),
         ],
-        ["one_shot_accuracy_gain"],
+        ["accuracy", "one_shot_accuracy_gain"],
     )
     names = {item.name: item for item in rows}
     assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
@@ -66,7 +66,7 @@ def test_overlay_uses_plan_baselines_not_method_vocabulary():
             _variant("control", {"metrics": {"accuracy": 0.5, "delta": None}}),
             _variant("treatment", {"metrics": {"accuracy": 0.75, "delta": None}}),
         ],
-        ["delta"],
+        ["accuracy", "delta"],
         baselines=["control"],
     )
     names = {item.name: item for item in rows}
@@ -81,13 +81,25 @@ def test_overlay_skips_when_sibling_deltas_disagree():
             _variant("b", {"metrics": {"accuracy": 0.75, "delta": None}}),
             _variant("c", {"metrics": {"accuracy": 1.0, "delta": None}}),
         ],
-        ["delta"],
+        ["accuracy", "delta"],
     )
     names = {item.name: item for item in rows}
     assert names["c"].metrics["metrics"]["delta"] is None
 
 
-def test_overlay_fills_gain_from_nested_accuracy():
+def test_overlay_fills_gain_from_nested_plan_score():
+    rows = overlay_paired_metrics(
+        [
+            _variant("zero_shot", {"evaluation": {"accuracy": 0.5}}),
+            _variant("one_shot", {"evaluation": {"accuracy": 0.75}}),
+        ],
+        ["accuracy", "one_shot_accuracy_gain"],
+    )
+    names = {item.name: item for item in rows}
+    assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
+
+
+def test_overlay_does_not_hunt_undeclared_accuracy():
     rows = overlay_paired_metrics(
         [
             _variant("zero_shot", {"evaluation": {"accuracy": 0.5}}),
@@ -96,4 +108,4 @@ def test_overlay_fills_gain_from_nested_accuracy():
         ["one_shot_accuracy_gain"],
     )
     names = {item.name: item for item in rows}
-    assert names["one_shot"].metrics["one_shot_accuracy_gain"] == 0.25
+    assert "one_shot_accuracy_gain" not in names["one_shot"].metrics
