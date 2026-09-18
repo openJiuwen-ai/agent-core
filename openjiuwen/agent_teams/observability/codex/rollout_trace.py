@@ -81,6 +81,19 @@ def _remove_root(root: Path) -> None:
     shutil.rmtree(root, ignore_errors=True)
 
 
+def _is_owned_by_current_user(root: Path) -> bool:
+    """Return whether *root* belongs to the account running this process."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is None:
+        # Windows reports st_uid as 0 for every entry, but each account
+        # gets its own temporary directory, so the glob stays within it.
+        return True
+    try:
+        return root.stat().st_uid == getuid()
+    except OSError:
+        return False
+
+
 def _cleanup_stale_roots(
     *,
     base_dir: Path | None = None,
@@ -92,6 +105,11 @@ def _cleanup_stale_roots(
     removed = 0
     for root in base.glob(f"{_ROOT_PREFIX}*"):
         if not root.is_dir():
+            continue
+        if not _is_owned_by_current_user(root):
+            # The glob also matches other accounts' roots, whose recorded
+            # pid belongs to another session, so liveness cannot be judged
+            # from here. Leave them to their owner.
             continue
         try:
             age_s = max(0.0, current_time - root.stat().st_mtime)
