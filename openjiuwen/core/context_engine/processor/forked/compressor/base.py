@@ -4,7 +4,7 @@ import asyncio
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -50,6 +50,12 @@ _TRANSIENT_COMPRESSION_ERROR_KINDS = {
 }
 _TRANSIENT_COMPRESSION_MAX_RETRIES = 2
 _TRANSIENT_COMPRESSION_RETRY_BASE_DELAY_SECONDS = 0.05
+_AUTO_COMPRESSION_FALLBACK_ERROR_KINDS = {
+    CompressionErrorKind.CONTEXT_OVERFLOW,
+    CompressionErrorKind.RATE_LIMIT,
+    CompressionErrorKind.TIMEOUT,
+    CompressionErrorKind.SERVER_UNSTABLE,
+}
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,11 @@ class PrefixCompactSpan:
     @property
     def has_target(self) -> bool:
         return bool(self.messages_to_compress)
+
+
+class AutoCompressionModelConfig(BaseModel):
+    model_name: str = ""
+    fallback_model_name: str = ""
 
 
 class PrefixCompactProcessorConfig(BaseModel):
@@ -76,6 +87,7 @@ class PrefixCompactProcessorConfig(BaseModel):
     target_retention_ratio: float | None = Field(default=None, gt=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
+    auto_compression: AutoCompressionModelConfig | None = None
     # Opt-in: persist each real compression invocation (the request sent to the
     # compression model plus the post-compression main-agent context) for offline
     # effect analysis. Disabled by default; zero overhead when off.
@@ -300,11 +312,14 @@ class PrefixCompactProcessor(ContextProcessor):
             preserve_instruction=kwargs.get("preserve_instruction"),
             summary_target_tokens=summary_target_tokens,
         )
+        executor, fallback_executor_factory = self._auto_compression_executors(kwargs)
         invoke_result = await self._invoke_compression_with_retries(
             context=context,
             context_window=context_window,
             span=span,
             prompt=prompt,
+            executor=executor,
+            fallback_executor_factory=fallback_executor_factory,
             summary_target_tokens=summary_target_tokens,
         )
         if invoke_result is None:
@@ -370,6 +385,34 @@ class PrefixCompactProcessor(ContextProcessor):
             context_window,
         )
 
+    def _auto_compression_executors(
+        self, kwargs: dict[str, Any]
+    ) -> tuple[CompressionExecutor | None, Callable[[], CompressionExecutor] | None]:
+        """Select per-call models only for passive compression."""
+        auto_config = getattr(self.config, "auto_compression", None)
+        if auto_config is None or kwargs.get("force"):
+            return None, None
+
+        request_config = kwargs.get("model_config") or getattr(self.config, "model", None)
+        client_config = kwargs.get("model_client_config") or getattr(self.config, "model_client", None)
+        if request_config is None or client_config is None:
+            return None, None
+
+        primary_name = auto_config.model_name.strip() or request_config.model_name
+        if not primary_name:
+            return None, None
+
+        def create_executor(model_name: str) -> CompressionExecutor:
+            request = request_config.model_copy(update={"model_name": model_name})
+            return CompressionExecutor(Model(client_config, request))
+
+        primary = create_executor(primary_name)
+        fallback_name = auto_config.fallback_model_name.strip()
+        fallback_factory = (
+            (lambda: create_executor(fallback_name)) if fallback_name and fallback_name != primary_name else None
+        )
+        return primary, fallback_factory
+
     async def _invoke_compression_with_retries(
         self,
         *,
@@ -378,12 +421,38 @@ class PrefixCompactProcessor(ContextProcessor):
         span: PrefixCompactSpan,
         prompt: str,
         summary_target_tokens: int | None = None,
+        executor: CompressionExecutor | None = None,
+        fallback_executor_factory: Callable[[], CompressionExecutor] | None = None,
     ) -> tuple[CompressionResult, PrefixCompactSpan, CompressionRequest] | None:
-        if self._compression_executor is None:
+        active_executor = executor or self._compression_executor
+        if active_executor is None:
             return None
 
+        original_span = span
+        fallback_used = False
         overflow_retry_index = 0
         transient_retry_count = 0
+
+        def activate_fallback(error_kind: CompressionErrorKind) -> bool:
+            nonlocal active_executor, fallback_used, span, overflow_retry_index, transient_retry_count
+            if (
+                fallback_executor_factory is None
+                or fallback_used
+                or error_kind not in _AUTO_COMPRESSION_FALLBACK_ERROR_KINDS
+            ):
+                return False
+            try:
+                active_executor = fallback_executor_factory()
+            except Exception as exc:
+                logger.warning("[%s] compression fallback model initialization failed: %s", self.processor_type(), exc)
+                return False
+            logger.warning("[%s] compression switching to fallback model after %s", self.processor_type(), error_kind.value)
+            fallback_used = True
+            span = original_span
+            overflow_retry_index = 0
+            transient_retry_count = 0
+            return True
+
         while True:
             # The agent's system prompt and callable tools are needed for the
             # main model call, but not for summarizing conversation history.
@@ -395,7 +464,7 @@ class PrefixCompactProcessor(ContextProcessor):
                 max_tokens=summary_target_tokens,
             )
             try:
-                response = await self._compression_executor.invoke(request)
+                response = await active_executor.invoke(request)
                 return response, span, request
             except CompressionError as exc:
                 if exc.is_context_overflow:
@@ -415,6 +484,8 @@ class PrefixCompactProcessor(ContextProcessor):
                             retried=False,
                             reason="retry_budget_exhausted",
                         )
+                        if activate_fallback(exc.kind):
+                            continue
                         return None
                     budget_ratio = _CONTEXT_OVERFLOW_RETRY_BUDGET_RATIOS[overflow_retry_index]
                     next_span = self._build_context_overflow_retry_span(
@@ -440,6 +511,8 @@ class PrefixCompactProcessor(ContextProcessor):
                             retried=False,
                             reason="no_smaller_span",
                         )
+                        if activate_fallback(exc.kind):
+                            continue
                         return None
                     logger.warning(
                         "[%s] compression context_overflow retry attempt=%s budget_ratio=%.2f "
@@ -497,6 +570,8 @@ class PrefixCompactProcessor(ContextProcessor):
                     exc,
                     exc_info=True,
                 )
+                if activate_fallback(exc.kind):
+                    continue
                 return None
             except Exception as exc:
                 logger.warning("[%s] compression failed: %s", self.processor_type(), exc, exc_info=True)
@@ -517,10 +592,9 @@ class PrefixCompactProcessor(ContextProcessor):
         context_max = self._resolve_context_max(context, {})
         budget_tokens = max(int(context_max * budget_ratio), 1)
         fixed_tokens = self._count_messages_tokens(
-            list(context_window.system_messages or []) + list(span.preserved_prefix) + [UserMessage(content=prompt)],
+            list(span.preserved_prefix) + [UserMessage(content=prompt)],
             context,
         )
-        fixed_tokens += self._count_tools_tokens(list(context_window.tools or []), context)
         target_tokens = budget_tokens - fixed_tokens
         if target_tokens <= 0:
             return None
