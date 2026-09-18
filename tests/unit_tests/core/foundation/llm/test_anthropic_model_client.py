@@ -8,6 +8,7 @@ normalization, and usage extraction. Network/SDK paths (invoke/stream)
 are covered separately and require the optional ``anthropic`` SDK.
 """
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,7 +22,6 @@ from openjiuwen.core.foundation.llm import (
     ModelRequestConfig,
     ProviderType,
 )
-from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import (
     _ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY,
     AnthropicModelClient,
@@ -34,7 +34,7 @@ from openjiuwen.core.foundation.llm.model_clients.anthropic_model_client import 
     _mark_cache_control,
     _supports_mid_conversation_system,
 )
-
+from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode
 
 # ---------------------------------------------------------------------------
 # A. Pure converters: _content_to_blocks
@@ -856,6 +856,59 @@ class TestResponseReasoning:
             "thinking": "plan",
             "signature": "sig",
         }]
+
+
+class TestFinishReason:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("stop_reason", "expected"),
+        [
+            ("end_turn", "stop"),
+            ("stop_sequence", "stop"),
+            ("max_tokens", "length"),
+            ("vendor_specific", "vendor_specific"),
+            (None, "stop"),
+        ],
+    )
+    async def test_non_stream_finish_reason_preserves_truncation(
+        self,
+        stop_reason: str | None,
+        expected: str,
+    ):
+        response = MagicMock()
+        response.content = []
+        response.usage = None
+        response.stop_reason = stop_reason
+
+        message = await _make_client()._parse_response(response)
+
+        assert message.finish_reason == expected
+
+    @pytest.mark.parametrize(
+        ("stop_reason", "expected"),
+        [
+            ("end_turn", "stop"),
+            ("stop_sequence", "stop"),
+            ("max_tokens", "length"),
+            ("vendor_specific", "vendor_specific"),
+            (None, "stop"),
+        ],
+    )
+    def test_stream_finish_reason_preserves_truncation(
+        self,
+        stop_reason: str | None,
+        expected: str,
+    ):
+        event = SimpleNamespace(
+            type="message_delta",
+            delta=SimpleNamespace(stop_reason=stop_reason),
+            usage=None,
+        )
+
+        chunk = _make_client()._event_to_chunk(event, {})
+
+        assert chunk is not None
+        assert chunk.finish_reason == expected
 
 
 # ---------------------------------------------------------------------------
