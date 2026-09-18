@@ -208,6 +208,9 @@ class StatusCode(Enum):
     DEEPAGENT_TASK_LOOP_NOT_IMPLEMENTED = (123024, "deepagent task loop not implemented, reason: {error_msg}")
     DEEPAGENT_CREATE_SUBAGENT_NOT_FOUND = (123025, "subagent not found, reason: {error_msg}")
     DEEPAGENT_LOAD_EXPERT_HARNESS_ERROR = (123026, "deepagent load expert harness error, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_NOT_FOUND = (123029, "subagent instance not found, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_CAPACITY_INVALID = (123030, "subagent capacity invalid, reason: {error_msg}")
+    DEEPAGENT_SUBAGENT_RUNTIME_ERROR = (123031, "subagent runtime error, reason: {error_msg}")
 
     # =============================================================================================================
     # 110 Runner / Distributed 110000–110999
