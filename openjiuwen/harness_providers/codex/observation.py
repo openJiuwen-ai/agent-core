@@ -62,6 +62,9 @@ _TOOL_OUTPUT_TYPES = frozenset(
 )
 _TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text", "summary_text", "reasoning_text"})
 _SYSTEM_ROLES = frozenset({"system", "developer"})
+# Codex offers its tools as an input item rather than a request field; the
+# catalogue is a tool definition, not something the model said.
+_TOOL_CATALOGUE_TYPE = "additional_tools"
 # Responses kept to rebuild a request that only sends the input added since
 # its ``previous_response_id``; each chain only ever continues its latest one.
 _RESPONSE_HISTORY_LIMIT = 8
@@ -454,10 +457,10 @@ class CodexRequestObserver:
                 if instructions
                 else ()
             ),
-            input_messages=tuple(_conversation(conversation)),
+            input_messages=tuple(_conversation(_without_tool_catalogue(conversation))),
             input_observed=conversation is not None,
             output_message=_output_message(response_id or inference.call_id, output_items),
-            tool_definitions=to_json_safe(request.get("tools")) if isinstance(request.get("tools"), list) else None,
+            tool_definitions=_tool_definitions(request, conversation),
             usage=_usage(usage),
             error=error,
             data={
@@ -494,6 +497,28 @@ class CodexRequestObserver:
             while len(self._response_history) > _RESPONSE_HISTORY_LIMIT:
                 self._response_history.pop(next(iter(self._response_history)))
         return conversation
+
+
+def _without_tool_catalogue(items: list[Any] | None) -> list[Any] | None:
+    """Return the conversation without the tool-catalogue input items."""
+    if items is None:
+        return None
+    return [item for item in items if not (isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE)]
+
+
+def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -> Any:
+    """Return the tools offered, from the request field or its catalogue items."""
+    tools = request.get("tools")
+    if isinstance(tools, list) and tools:
+        return to_json_safe(tools)
+    catalogue = [
+        to_json_safe(item.get("tools"))
+        for item in (conversation or [])
+        if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE and item.get("tools")
+    ]
+    if not catalogue:
+        return None
+    return catalogue[0] if len(catalogue) == 1 else catalogue
 
 
 def _raw_request(raw: _RawResponse, tool_owners: dict[str, str]) -> ModelRequestEvent:

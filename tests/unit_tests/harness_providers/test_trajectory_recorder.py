@@ -285,6 +285,33 @@ def test_model_request_becomes_inference_with_window_commit(exporter: InMemorySp
     assert not [operation for operation in delta["delta"] if operation.get("op") == "remove"]
 
 
+def test_multi_block_text_messages_are_stated_as_one_body(exporter: InMemorySpanExporter) -> None:
+    recorder = _recorder()
+    stream = _Stream(recorder)
+    user = TurnMessage(
+        message_id="user-1",
+        role=MessageRole.USER,
+        content=(
+            ContentBlock(block_id="user-1:0", kind="text", content="<reminder>stay terse</reminder>"),
+            ContentBlock(block_id="user-1:1", kind="text", content="list files"),
+        ),
+    )
+    stream.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=100.0)
+    stream.emit(_request("req-1", started_at=100.5, ended_at=101.0, history=(user,)), timestamp=101.0)
+    stream.emit(_completed("done"), timestamp=102.0)
+
+    inference = _by_kind(exporter, "inference")[0]
+    commit = _by_kind(exporter, "event")[0]
+    window = json.loads(commit.attributes[OJ_TRAJECTORY_PAYLOAD])["messages"]
+    logger.info("committed window: {}", window)
+    # A reader reads one body, so the blocks are joined rather than stated as
+    # a JSON array of parts.
+    assert window[-1]["content"] == "<reminder>stay terse</reminder>\n\nlist files"
+    assert json.loads(inference.attributes[GEN_AI_INPUT_MESSAGES]) == [
+        {"role": "user", "parts": [{"type": "text", "content": "<reminder>stay terse</reminder>\n\nlist files"}]},
+    ]
+
+
 def test_tool_items_are_owned_by_the_request_that_caused_them(exporter: InMemorySpanExporter) -> None:
     recorder = _recorder()
     stream = _Stream(recorder)

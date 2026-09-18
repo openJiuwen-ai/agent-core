@@ -539,8 +539,7 @@ def _request_messages(event: ModelRequestEvent) -> list[dict[str, Any]]:
     messages: list[dict[str, Any]] = []
     system_parts = [_content_part(block) for block in event.system_instructions]
     if system_parts:
-        system_content: Any = system_parts[0]["text"] if _is_single_text(system_parts) else system_parts
-        messages.append({"role": "system", "content": system_content})
+        messages.append({"role": "system", "content": _message_content(system_parts)})
     for message in event.input_messages:
         messages.extend(_message_dicts(message))
     return messages
@@ -608,16 +607,23 @@ def _content_part(block: ContentBlock) -> dict[str, Any]:
 
 
 def _message_content(parts: list[dict[str, Any]]) -> Any:
-    """Return plain text for a text-only message, the part list otherwise."""
+    """Return the message body: text when it is all text, the parts otherwise.
+
+    A provider often splits one message into several text blocks (an injected
+    reminder plus the message itself, say). A reader reads them as one body,
+    and keeping the split would state the message as a JSON array wherever a
+    view renders it as text, so text-only blocks are joined. A message with
+    non-text parts (images, documents) keeps them.
+    """
     if not parts:
         return ""
-    if _is_single_text(parts):
-        return parts[0]["text"]
+    if _is_text_only(parts):
+        return "\n\n".join(str(part.get("text") or "") for part in parts)
     return parts
 
 
-def _is_single_text(parts: list[dict[str, Any]]) -> bool:
-    return len(parts) == 1 and parts[0].get("type") == "text"
+def _is_text_only(parts: list[dict[str, Any]]) -> bool:
+    return all(part.get("type") == "text" for part in parts)
 
 
 def _block_call_id(block: ContentBlock) -> str:

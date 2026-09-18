@@ -76,6 +76,8 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 - tool 归属：响应 `output_items` 里 tool call 的 `call_id` / `id` 对上 SDK tool item id；code mode
   下 SDK item 名为运行时 id（`exec-...`），经 rollout `tool_call_started.tool_call_id` →
   `requester.runtime_cell_id` → `code_cell_started.model_visible_call_id` 关联回模型 call id。
+- 工具目录：Codex 不用请求的 `tools` 字段，而是把工具清单作为 `additional_tools` 输入项下发；它是工具
+  定义而非对话内容，观测器将其提到 `tool_definitions`，不进 `input_messages`。
 - 降级：`rawResponseItem/completed` + `rawResponse/completed` 在 provider 内部消费（不再有
   `notification_observer`），`wait_s` 内 rollout 未记录该 `response_id` 即按输出侧报告；一旦发现
   rollout 静默（旧版 Codex 不写 rollout），后续 turn 不再等待。
@@ -91,6 +93,9 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 | `ModelRequestEvent` | turn 下 `chat {model}`（事件起止时间），`record_kind=inference`、`openjiuwen.inference.id`、step number、subject request number、`gen_ai.input/output.messages` 等；结束前以其为父 `emit_context_window_commit`；`input_observed=False` 不提交窗口 |
 | tool `ItemLifecycleEvent` | `execute_tool {name}`；`causation_ids` 命中已记录请求时写 `openjiuwen.inference.id` / step number / `openjiuwen.tool.authoritative` |
 | 终止事件 | 补结束未完成 tool（ERROR），写 turn 输出与状态 |
+
+一条消息被 provider 拆成多个文本块时（注入的 reminder + 正文），记录器把它们合成一段正文：读者读到的
+是一条消息，保留拆分会让任何以文本呈现的视图显示成 JSON 数组；含非文本块（图片、文档）的消息保留分块。
 
 消息结构化 / 脱敏 / 窗口规范化复用 `OtelCallbackHandler`，为此新增公开方法
 `record_request_input` / `record_response_output`。`record_turn_identity` 让宿主注入自己的 turn
@@ -125,6 +130,7 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 - 消息 origin 一律 `harness_internal`；provider 能确定宿主输入时可在 `TurnMessage.data["origin"]`
   标 `external_user`，目前两个 provider 都未标。
 - Codex `thread_resume` 的协议参数没有 raw events 字段，恢复的线程只能依赖 rollout。
+- `TurnUsage` 没有缓存写入字段，provider 的 cache-creation token 只留在 `provider_data`，未进 span。
 - 关联不上模型 call id 的 Codex tool item 最多等待 `request_observation_wait_s` 后无归属发出。
 - 进程内 teammate 的 team 根 span 过期问题（`get_or_create_team_span` 未按 session 注册）不在本次范围。
 
@@ -141,3 +147,5 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   `body_ref` 为绝对路径、响应 `id` 与 `AssistantMessage.message_id` 一致、`generate_session_title`
   侧路请求被主对话判据排除；Codex 第二次请求确为 `previous_response_id` 增量、`exec-...` tool 经
   code cell 关联到发起推理。两者事件顺序均为 请求 → tool → 请求 → terminal。
+- 真实 CLI 一轮 + 记录器 + 前端 projector 回放：成员 lane 的系统提示、上下文、工具调用与回答均为可读
+  文本，用量（含缓存命中）正确，无诊断告警。
