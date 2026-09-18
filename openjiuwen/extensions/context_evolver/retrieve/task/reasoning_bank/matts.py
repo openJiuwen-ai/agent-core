@@ -12,6 +12,7 @@ from openjiuwen.core.common.logging import context_engine_logger as logger
 
 from ....core.op import BaseOp
 from ....core.context import RuntimeContext
+from ....schema.memory import ReasoningBankMemory
 
 
 
@@ -352,8 +353,6 @@ Failed Trajectories ({len(failed)}):
             response = await llm.async_generate(extraction_prompt, temperature=1.0)
 
             # Parse memory items from response (simplified parsing)
-            from schema.memory import ReasoningBankMemory
-
             memories = []
             # Simple parsing - look for ## Title, ## Description, ## Content patterns
             lines = response.split('\n')
