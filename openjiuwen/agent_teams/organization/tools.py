@@ -205,7 +205,7 @@ class OrgListAvailableTeamsTool(_OrgControlTool):
             team_id=team_id,
             session_id=session_id,
         )
-        self.card.input_params = {"type": "object", "properties": {}}
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         teams = await self.runtime_manager.list_available_teams(session_id=self.session_id)
@@ -223,7 +223,7 @@ class OrgListConfiguredTeamsTool(_OrgControlTool):
             team_id=team_id,
             session_id=session_id,
         )
-        self.card.input_params = {"type": "object", "properties": {}}
+        self.card.input_params = {"type": "object", "properties": {}, "required": []}
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         teams = await self.runtime_manager.list_configured_teams(session_id=self.session_id)
@@ -261,6 +261,7 @@ class OrgListExpertGroupsTool(_OrgControlTool):
                     "description": "Optional capability tags; return groups that include all of them.",
                 },
             },
+            "required": [],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
@@ -425,8 +426,11 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             name="org_create_task",
             description=(
                 "Create an organization task. required_capabilities is required and must contain at least "
-                "one non-empty capability label, for example ['analysis'] or ['writing']. Use parent_task_id "
-                "for child tasks; root_task_id is derived."
+                "one non-empty capability label, for example ['analysis'] or ['writing']. "
+                "A Team Leader must not create another root while an active root exists. "
+                "For every work item split from that root, "
+                "set parent_task_id to the active root task ID, including work done by your own Team. "
+                "Select the root aggregation mode and start the root before creating its children."
             ),
             manager=manager,
             team_id=team_id,
@@ -436,7 +440,10 @@ class OrgCreateTaskTool(_OrgLeaderTool):
             "type": "object",
             "properties": {
                 "task_id": {"type": "string"},
-                "parent_task_id": {"type": "string"},
+                "parent_task_id": {
+                    "type": "string",
+                    "description": "Required for any work split from the active root task; omit only for a new root.",
+                },
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "required_capabilities": {
@@ -473,7 +480,7 @@ class OrgCreateTaskTool(_OrgLeaderTool):
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        """Create only hierarchical tasks; SUMMARY_TEAM uses the dedicated execution tool."""
+        """Create ordinary root or child work; Summary Tasks use the dedicated execution tool."""
         if not inputs.get("title") or not inputs.get("description"):
             return ToolOutput(success=False, error="'title' and 'description' are required")
         capabilities = inputs.get("required_capabilities")
@@ -798,6 +805,7 @@ class OrgListLeaderMessagesTool(_OrgLeaderTool):
                 "limit": {"type": "integer"},
                 "offset": {"type": "integer"},
             },
+            "required": [],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
@@ -903,6 +911,7 @@ class OrgViewPendingReviewsTool(_OrgLeaderTool):
         self.card.input_params = {
             "type": "object",
             "properties": {"limit": {"type": "integer"}},
+            "required": [],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:

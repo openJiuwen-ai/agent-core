@@ -8,6 +8,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgEventMessage,
@@ -39,10 +41,15 @@ from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.organization.tools import (
     OrgCreateSummaryExecutionTool,
     OrgCreateTaskTool,
+    OrgListAvailableTeamsTool,
+    OrgListConfiguredTeamsTool,
+    OrgListExpertGroupsTool,
+    OrgListLeaderMessagesTool,
     OrgReviewTaskTool,
     OrgSummaryGetInputsTool,
     OrgUpdateTaskTool,
     OrgViewChildTasksTool,
+    OrgViewPendingReviewsTool,
 )
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
@@ -68,6 +75,22 @@ def test_summary_input_tool_creates_its_final_tool_card() -> None:
 
     assert summary_tool.card.id == "team_org.org_summary_get_inputs"
     assert summary_tool.card.name == "org_summary_get_inputs"
+
+
+def test_optional_organization_tool_schemas_use_empty_required_arrays() -> None:
+    """Keep no-argument Organization tools valid for strict OpenAI function schemas."""
+    runtime = SimpleNamespace()
+    manager = SimpleNamespace()
+    message_service = SimpleNamespace()
+    tools = [
+        OrgListAvailableTeamsTool(runtime, "team-1", "session-1"),
+        OrgListConfiguredTeamsTool(runtime, "team-1", "session-1"),
+        OrgListExpertGroupsTool(runtime, "team-1", "session-1"),
+        OrgListLeaderMessagesTool(manager, "team-1", "leader-1", message_service),
+        OrgViewPendingReviewsTool(manager, "team-1", "leader-1"),
+    ]
+
+    assert all(tool.card.input_params["required"] == [] for tool in tools)
 
 
 class FakeHarness:
@@ -184,6 +207,7 @@ async def _seed_org1_parent_child(manager, *, parent_id: str, child_id: str):
         created_by=parent_creator,
     )
     await manager.claim_task(task_id=parent_id, team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id=parent_id)
     await manager.create_task(
         task_id=child_id,
         parent_task_id=parent_id,
@@ -231,6 +255,20 @@ async def _create_claimed_parent(manager, *, org_id: str, parent_id: str):
         ),
     )
     await manager.claim_task(task_id=parent_id, team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id=parent_id)
+
+
+async def _select_hierarchical_aggregation(manager, *, root_task_id: str, start: bool = True) -> None:
+    """Make the Root Leader's HIERARCHICAL choice explicit in test setup."""
+    selected = await manager.set_root_aggregation_mode(
+        task_id=root_task_id,
+        team_id="team-a",
+        leader_id="leader-a",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )
+    assert selected.ok
+    if start:
+        assert (await manager.start_task(task_id=root_task_id, team_id="team-a")).ok
 
 
 async def _select_summary_aggregation(manager, *, root_task_id: str, leader: OrgTaskCreator) -> None:
@@ -242,6 +280,7 @@ async def _select_summary_aggregation(manager, *, root_task_id: str, leader: Org
         aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
     )
     assert selected.ok
+    assert (await manager.start_task(task_id=root_task_id, team_id=leader.team_id or "")).ok
 
 
 async def _create_claimed_child(manager, *, creator, parent_id: str, child_id: str, claim: bool = True):
@@ -306,6 +345,53 @@ async def _rebind_owner_after_clear(runtime, agents, session_id: str):
     )
     await asyncio.sleep(0)
     return turns
+
+
+@pytest.mark.asyncio
+async def test_organization_events_reach_teams_with_same_leader_node_id():
+    """Organization listeners must not overwrite each other when Team leaders share a node ID."""
+    runtime = OrganizationRuntimeManager(TeamRuntimeManager())
+    manager = SimpleNamespace(organization_id="org-shared-leader")
+    session_id = "session-shared-leader"
+    captured: list[str] = []
+    runtime._schedule_claimed_task_execution_turn = lambda **kwargs: captured.append(kwargs["team_id"])
+    publisher = InProcessMessager(config=MessagerTransportConfig(node_id="publisher"))
+
+    try:
+        for team_id in ("team-a", "team-b"):
+            backend = SimpleNamespace(
+                team_name=team_id,
+                messager=InProcessMessager(config=MessagerTransportConfig(node_id="team-leader")),
+            )
+            await runtime._subscribe_team_events(backend, manager, session_id, capabilities=set())
+
+        for team_id in ("team-a", "team-b"):
+            await publisher.publish(
+                OrgTopic.TASK.build(session_id, manager.organization_id),
+                OrgEventMessage.from_event(
+                    OrgTaskClaimedEvent(
+                        organization_id=manager.organization_id,
+                        task_id=f"task-{team_id}",
+                        claimed_by_team_id=team_id,
+                    )
+                ),
+            )
+        assert captured == ["team-a", "team-b"]
+
+        await runtime._release_org_subscriber(manager.organization_id, session_id, "team-a")
+        await publisher.publish(
+            OrgTopic.TASK.build(session_id, manager.organization_id),
+            OrgEventMessage.from_event(
+                OrgTaskClaimedEvent(
+                    organization_id=manager.organization_id,
+                    task_id="task-team-b-again",
+                    claimed_by_team_id="team-b",
+                )
+            ),
+        )
+        assert captured == ["team-a", "team-b", "team-b"]
+    finally:
+        await runtime.close()
 
 
 @pytest.mark.asyncio
@@ -400,6 +486,7 @@ async def test_create_task_inherits_root_task_id_from_parent_chain(org_manager):
         )
     ).ok
     assert (await manager.claim_task(task_id="root-1", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="root-1")
     assert (
         await manager.create_task(
             task_id="child-1",
@@ -460,6 +547,7 @@ async def test_create_task_rejects_conflicting_root_task_id(org_manager):
     assert "root task root_task_id must equal task_id" in bad_root.reason
     assert await manager.get_task("root-2") is None
     assert (await manager.claim_task(task_id="root-1", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="root-1")
 
     assert (
         await manager.create_task(
@@ -580,6 +668,7 @@ async def test_only_assigned_team_can_create_child_tasks(org_manager):
         )
     ).ok
     assert (await manager.claim_task(task_id="parent-ownership", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="parent-ownership")
 
     wrong_team = await manager.create_task(
         task_id="wrong-team-child",
@@ -633,6 +722,17 @@ async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
         created_by=creator,
     )
     assert (await manager.claim_task(task_id="root-task-1", team_id="team-a")).ok
+    unselected_child = await manager.create_task(
+        task_id="child-task-1",
+        parent_task_id="root-task-1",
+        title="Child",
+        description="Child task",
+        required_capabilities=["analysis"],
+        created_by=creator,
+    )
+    assert not unselected_child.ok
+    assert "select aggregation mode" in unselected_child.reason
+    await _select_hierarchical_aggregation(manager, root_task_id="root-task-1")
     child = await manager.create_task(
         task_id="child-task-1",
         parent_task_id="root-task-1",
@@ -751,7 +851,7 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     assert not blocked_root.ok
     assert "Summary Task" in blocked_root.reason
     root_before_summary = await manager.get_task("summary-root")
-    assert root_before_summary is not None and root_before_summary.status is OrgTaskStatus.CLAIMED
+    assert root_before_summary is not None and root_before_summary.status is OrgTaskStatus.IN_PROGRESS
     assert (
         await manager.get_summary_inputs(
             summary_task_id="summary-sibling",
@@ -1124,6 +1224,13 @@ async def test_start_task_status_guards(org_manager):
         team_id="team-a",
     )
     assert claimed.ok
+    unselected_complete = await manager.complete_task(task_id="start-guard-task", team_id="team-a")
+    assert not unselected_complete.ok
+    assert "select aggregation mode" in unselected_complete.reason
+    await _select_hierarchical_aggregation(manager, root_task_id="start-guard-task", start=False)
+    unstarted_complete = await manager.complete_task(task_id="start-guard-task", team_id="team-a")
+    assert not unstarted_complete.ok
+    assert "must be started" in unstarted_complete.reason
 
     started = await manager.start_task(task_id="start-guard-task", team_id="team-a")
     assert started.ok
@@ -1380,25 +1487,17 @@ async def test_root_leader_selects_aggregation_mode_through_update_task_tool(org
     assert selected.success
     assert selected.data["aggregation_mode"] == OrgTaskAggregationMode.SUMMARY_TEAM
 
-    assert (
-        await manager.create_task(
-            task_id="tool-second-root",
-            title="Second root",
-            description="Must not use Summary Team concurrently.",
-            required_capabilities=["analysis"],
-            created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1"),
-        )
-    ).ok
-    assert (await manager.claim_task(task_id="tool-second-root", team_id="team-b")).ok
-    concurrent = await OrgUpdateTaskTool(manager, team_id="team-b", leader_id="leader-b").invoke(
-        {
-            "action": "set_aggregation_mode",
-            "task_id": "tool-second-root",
-            "aggregation_mode": OrgTaskAggregationMode.SUMMARY_TEAM.value,
-        }
+    concurrent = await manager.create_task(
+        task_id="tool-second-root",
+        title="Second root",
+        description="Must not use Summary Team concurrently.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader", creator_id="leader-b", organization_id="org-1", team_id="team-b"
+        ),
     )
-    assert not concurrent.success
-    assert "only one non-terminal root task" in concurrent.error
+    assert not concurrent.ok
+    assert "cannot create a parallel root" in concurrent.reason
 
     switched = await update_tool.invoke(
         {
@@ -1412,8 +1511,8 @@ async def test_root_leader_selects_aggregation_mode_through_update_task_tool(org
 
 
 @pytest.mark.asyncio
-async def test_root_leader_can_select_after_start_only_before_decomposition(org_manager):
-    """A Root Leader can correct an immediate start, but cannot change mode after child creation."""
+async def test_root_leader_can_select_after_start_and_cannot_change_after_decomposition(org_manager):
+    """A Root Leader may choose after starting, but an existing choice remains immutable."""
     manager, _ = org_manager
     creator = OrgTaskCreator(
         creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
@@ -1438,6 +1537,15 @@ async def test_root_leader_can_select_after_start_only_before_decomposition(org_
     assert selected.ok
 
     assert (
+        await manager.fail_task(
+            task_id="started-root",
+            team_id="team-a",
+            failure_code=OrgTaskFailureCode.EXECUTION_FAILED,
+            failure_reason="end this root before testing another",
+        )
+    ).ok
+
+    assert (
         await manager.create_task(
             task_id="decomposed-root",
             title="Decomposed root",
@@ -1448,6 +1556,7 @@ async def test_root_leader_can_select_after_start_only_before_decomposition(org_
     ).ok
     assert (await manager.claim_task(task_id="decomposed-root", team_id="team-a")).ok
     assert (await manager.start_task(task_id="decomposed-root", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="decomposed-root")
     assert (
         await manager.create_task(
             task_id="decomposed-child",
@@ -1465,7 +1574,7 @@ async def test_root_leader_can_select_after_start_only_before_decomposition(org_
         aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
     )
     assert not rejected.ok
-    assert "before starting root-task decomposition" in rejected.reason
+    assert "already selected" in rejected.reason
 
 
 @pytest.mark.asyncio
@@ -1483,6 +1592,7 @@ async def test_completed_event_points_to_db_result(org_manager):
         ),
     )
     await manager.claim_task(task_id="task-2", team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id="task-2")
     completed = await manager.complete_task(
         task_id="task-2",
         team_id="team-a",
@@ -1797,6 +1907,7 @@ async def test_child_task_completion_creates_pending_review(org_manager):
         ),
     )
     await manager.claim_task(task_id="parent-1", team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id="parent-1")
     child = await manager.create_task(
         task_id="child-1",
         parent_task_id="parent-1",
@@ -1903,6 +2014,7 @@ async def test_view_child_tasks_includes_latest_review_summary(org_manager):
         created_by=parent_creator,
     )
     await manager.claim_task(task_id="parent-view", team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id="parent-view")
     await manager.create_task(
         task_id="child-open",
         parent_task_id="parent-view",
@@ -1989,6 +2101,7 @@ async def test_create_task_repairs_task_id_validation(org_manager):
         ),
     )
     await manager.claim_task(task_id="parent-repair-val", team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id="parent-repair-val")
     await manager.create_task(
         task_id="child-orig",
         parent_task_id="parent-repair-val",
@@ -1999,16 +2112,14 @@ async def test_create_task_repairs_task_id_validation(org_manager):
     )
     await manager.create_task(
         task_id="other-parent",
+        parent_task_id="parent-repair-val",
         title="Other parent",
         description="Other",
         required_capabilities=["coordination"],
-        created_by=OrgTaskCreator(
-            creator_type="client",
-            creator_id="client-1",
-            organization_id="org-1",
-        ),
+        created_by=creator,
     )
     assert (await manager.claim_task(task_id="other-parent", team_id="team-a")).ok
+    assert (await manager.start_task(task_id="other-parent", team_id="team-a")).ok
     await manager.create_task(
         task_id="other-child",
         parent_task_id="other-parent",
@@ -2174,6 +2285,7 @@ async def test_create_repair_enforces_retry_limit_and_updates_retry_count(org_ma
         ),
     )
     await manager.claim_task(task_id="parent-retry", team_id="team-a")
+    await _select_hierarchical_aggregation(manager, root_task_id="parent-retry")
     await manager.create_task(
         task_id="child-retry",
         parent_task_id="parent-retry",
@@ -2735,8 +2847,10 @@ def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization
 
     assert len(prompts) == 1
     assert "HIERARCHICAL" in prompts[0]
+    assert "supporting evidence or dependent work" in prompts[0]
     assert "complete the root yourself" in prompts[0]
     assert "SUMMARY_TEAM" in prompts[0]
+    assert "independent, orthogonal conclusions" in prompts[0]
     assert "org_create_summary_execution" in prompts[0]
     assert "Do not directly complete a SUMMARY_TEAM root" in prompts[0]
 
@@ -3062,7 +3176,18 @@ async def test_rebind_resumes_durable_parent_followups(active_organization_runti
         )
     ).ok
 
-    await _create_claimed_parent(manager, org_id=org_id, parent_id="parent-ready")
+    assert (
+        await manager.create_task(
+            task_id="parent-ready",
+            parent_task_id="parent-open",
+            title="Ready branch",
+            description="A nested parent with accepted children.",
+            required_capabilities=["coordination"],
+            created_by=leader,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="parent-ready", team_id="team-a")).ok
+    assert (await manager.start_task(task_id="parent-ready", team_id="team-a")).ok
     await _create_claimed_child(manager, creator=leader, parent_id="parent-ready", child_id="child-ok")
     assert (
         await manager.complete_task(
@@ -3228,6 +3353,48 @@ async def test_accepted_review_parent_ready_wake(active_organization_runtime, si
 
 
 @pytest.mark.asyncio
+async def test_accepted_last_child_wakes_summary_team_root(active_organization_runtime):
+    """The Root Leader receives the final-step wake for SUMMARY_TEAM as well."""
+    runtime, agents, session_id = active_organization_runtime
+    org_id = "org-summary-ready-wake"
+    manager, leader = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    assert (
+        await manager.create_task(
+            task_id="summary-root",
+            title="Summary root",
+            description="Integrate specialist results.",
+            required_capabilities=["coordination"],
+            created_by=OrgTaskCreator(creator_type="client", creator_id="client", organization_id=org_id),
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="summary-root", team_id="team-a")).ok
+    await _select_summary_aggregation(manager, root_task_id="summary-root", leader=leader)
+    await _create_claimed_child(manager, creator=leader, parent_id="summary-root", child_id="source")
+    assert (await manager.complete_task(task_id="source", team_id="team-b", output_abstract="Result")).ok
+    assert (
+        await manager.review_task(
+            task_id="source", reviewer_team_id="team-a", review_status=OrgTaskReviewStatus.ACCEPTED
+        )
+    ).ok
+
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents,
+        session_id,
+        org_id,
+        OrgTaskReviewedEvent(
+            organization_id=org_id,
+            team_id="team-a",
+            task_id="source",
+            review_id="summary-ready-review",
+            review_status=OrgTaskReviewStatus.ACCEPTED.value,
+        ),
+    )
+    assert turns[0]["team_name"] == "team-a"
+    assert "org_create_summary_execution" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
 async def test_completed_child_does_not_schedule_parent_review_turn(active_organization_runtime):
     runtime, agents, session_id = active_organization_runtime
     org_id = "org-completed-no-review-wake"
@@ -3329,12 +3496,20 @@ async def test_completed_task_rewakes_team_for_matching_open_task(active_organiz
         required_capabilities=["backend"],
         created_by=client,
     )
+    assert (await manager.claim_task(task_id="backend-complete", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="backend-complete")
     await manager.create_task(
         task_id="test-open",
+        parent_task_id="backend-complete",
         title="Tests",
         description="Tests wait for the backend result.",
         required_capabilities=["testing", "unit-test", "api-test"],
-        created_by=client,
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id=org_id,
+            team_id="team-a",
+        ),
     )
 
     turns = _capture_org_turns(runtime)

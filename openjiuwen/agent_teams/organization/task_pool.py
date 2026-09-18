@@ -505,6 +505,18 @@ class OrgTaskManager:
                     )
                 if parent.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                     return OrgTaskOpResult(ok=False, reason=f"parent task is terminal: {parent_task_id}")
+                if parent.parent_task_id is None and parent.task_type != "organization.summary":
+                    aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(parent.aggregation_json, {}))
+                    if not aggregation.controller_team_id:
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason="root task leader must select aggregation mode before creating child tasks",
+                        )
+                    if parent.status != OrgTaskStatus.IN_PROGRESS.value:
+                        return OrgTaskOpResult(
+                            ok=False,
+                            reason="root task must be started before creating child tasks",
+                        )
                 expected_root = parent.root_task_id
                 if root_task_id is not None and root_task_id != expected_root:
                     return OrgTaskOpResult(
@@ -521,34 +533,41 @@ class OrgTaskManager:
                         reason=f"root task root_task_id must equal task_id ({task_id!r}); got {root_task_id!r}",
                     )
                 root_task_id = task_id
-                # The MVP serializes only SUMMARY_TEAM roots. Existing
-                # HIERARCHICAL callers retain their established multi-root behavior.
-                if mode is OrgTaskAggregationMode.SUMMARY_TEAM:
-                    active_root = (
-                        (
-                            await session.execute(
-                                select(OrgTaskRecord).where(
-                                    OrgTaskRecord.organization_id == self.organization_id,
-                                    OrgTaskRecord.parent_task_id.is_(None),
-                                    or_(
-                                        OrgTaskRecord.task_type.is_(None),
-                                        OrgTaskRecord.task_type != "organization.summary",
-                                    ),
-                                    OrgTaskRecord.status.not_in(ORG_TASK_TERMINAL_STATUS_VALUES),
-                                )
+                # Client-supplied roots may be queued by the host. A Team
+                # Leader must split its claimed root into children, not create
+                # another independent root to bypass the final aggregation.
+                active_root = (
+                    (
+                        await session.execute(
+                            select(OrgTaskRecord).where(
+                                OrgTaskRecord.organization_id == self.organization_id,
+                                OrgTaskRecord.parent_task_id.is_(None),
+                                or_(
+                                    OrgTaskRecord.task_type.is_(None),
+                                    OrgTaskRecord.task_type != "organization.summary",
+                                ),
+                                OrgTaskRecord.status.in_(
+                                    (
+                                        OrgTaskStatus.CLAIMED.value,
+                                        OrgTaskStatus.DELEGATED.value,
+                                        OrgTaskStatus.IN_PROGRESS.value,
+                                    )
+                                ),
                             )
                         )
-                        .scalars()
-                        .first()
                     )
-                    if active_root is not None:
-                        return OrgTaskOpResult(
-                            ok=False,
-                            reason=(
-                                "only one non-terminal root task is supported per organization; "
-                                f"active root is {active_root.task_id}"
-                            ),
-                        )
+                    .scalars()
+                    .first()
+                )
+                if active_root is not None and created_by.creator_type == "team_leader":
+                    return OrgTaskOpResult(
+                        ok=False,
+                        reason=(
+                            "cannot create a parallel root while another root is claimed or running; "
+                            f"active root is {active_root.task_id}. "
+                            f"For work under that root, set parent_task_id='{active_root.task_id}'."
+                        ),
+                    )
             if repairs_target is not None:
                 repaired = await session.get(OrgTaskRecord, repairs_target)
                 if repaired is None or repaired.organization_id != self.organization_id:
@@ -1305,6 +1324,8 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
             if row.parent_task_id is None and row.task_type != "organization.summary":
                 aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(row.aggregation_json, {}))
+                if not aggregation.controller_team_id:
+                    return OrgTaskOpResult(ok=False, reason="root task leader must select aggregation mode first")
                 if aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM:
                     return OrgTaskOpResult(
                         ok=False,
@@ -1319,6 +1340,9 @@ class OrgTaskManager:
             blocked_reason = await self._parent_complete_blocked_reason(session, child_rows)
             if blocked_reason is not None:
                 return OrgTaskOpResult(ok=False, reason=blocked_reason)
+            if row.parent_task_id is None and row.task_type != "organization.summary":
+                if row.status != OrgTaskStatus.IN_PROGRESS.value:
+                    return OrgTaskOpResult(ok=False, reason="root task must be started before completion")
             row.status = OrgTaskStatus.COMPLETED.value
             if context_model is not None:
                 row.output_context_json = _json_dumps(context_model.model_dump())

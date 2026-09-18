@@ -12,6 +12,7 @@ from sqlalchemy import select
 
 from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 from openjiuwen.agent_teams.organization.schema import (
+    OrgTaskAggregationMode,
     OrgTaskCreator,
     OrgTaskEventRecord,
     OrgTaskFailureCode,
@@ -323,6 +324,15 @@ async def test_expiration_recreation_is_idempotent_and_keeps_tree(lifecycle, chi
         parent_id = "parent"
         await create(manager, parent_id)
         assert (await manager.task_pool.claim_task(task_id=parent_id, team_id="creator")).ok
+        assert (
+            await manager.task_pool.set_root_aggregation_mode(
+                task_id=parent_id,
+                team_id="creator",
+                leader_id="creator",
+                aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+            )
+        ).ok
+        assert (await manager.task_pool.start_task(task_id=parent_id, team_id="creator")).ok
     await create(manager, parent_task_id=parent_id)
     expired = await expire(manager, clock)
     assert expired.failure_reason == "description_update_timeout"
@@ -392,6 +402,15 @@ async def test_second_repair_uses_original_target_and_respects_budget(lifecycle)
     manager, clock = lifecycle
     await create(manager, "parent")
     await manager.task_pool.claim_task(task_id="parent", team_id="creator")
+    assert (
+        await manager.task_pool.set_root_aggregation_mode(
+            task_id="parent",
+            team_id="creator",
+            leader_id="creator",
+            aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+        )
+    ).ok
+    assert (await manager.task_pool.start_task(task_id="parent", team_id="creator")).ok
     await create(manager, metadata={"retry_limit": 1}, parent_task_id="parent")
     await expire(manager, clock)
     expired_request = next(
