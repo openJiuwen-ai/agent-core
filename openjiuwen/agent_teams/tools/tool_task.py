@@ -239,6 +239,8 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
+        await self._auto_start_members()
+
         briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
@@ -246,6 +248,34 @@ class TaskCreateTool(TeamTool):
             success=True,
             data={"tasks": briefs, "count": len(briefs)},
         )
+
+    async def _auto_start_members(self) -> None:
+        """Bring unstarted members up now that the board has work on it.
+
+        Under autonomous dispatch, work reaches members two ways: a message
+        the leader writes, and a task it puts on the board. Only the first
+        used to start anybody, so a leader that created tasks and then never
+        broadcast left the whole roster parked at UNSTARTED — with nothing
+        subscribed, the TaskCreatedEvent went out to nobody, and the
+        leader-side stale-pending sweep could not recover it either (that
+        sweep requires at least one READY member). Members are started here
+        for the same reason the message path starts them: an unstarted member
+        cannot be handed anything.
+
+        Every unstarted member is started, not just the assignees — an
+        unassigned task goes to the shared claim pool, where any member may
+        turn out to be the claimant. Best-effort: the tasks are already
+        committed, so a spawn failure is logged and left to the leader's
+        round-idle reconcile rather than turned into a tool failure that
+        would invite the model to create the tasks a second time.
+        """
+        try:
+            started = await self.agent_team.autostart_unstarted()
+        except Exception as e:
+            team_logger.error("create_task failed to auto-start members: {}", e, exc_info=True)
+            return
+        if started:
+            team_logger.info(f"Auto-started members: {started}")
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:

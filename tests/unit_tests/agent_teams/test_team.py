@@ -1445,6 +1445,135 @@ async def test_startup_delegates_to_startup_member(db, message_bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_autostart_unstarted_leader_starts_all(db, message_bus):
+    """autostart_unstarted：leader 后端持 spawn 回调时拉起全部 UNSTARTED 成员，
+    且重复调用幂等（startup_member 的 UNSTARTED→STARTING CAS 兜底）。"""
+    team_id = "autostart_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Autostart Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id,
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        on_member_started=on_started,
+    )
+    await backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev1", description="d1", version="1.0.0"),
+    )
+    await backend.spawn_member(
+        member_name="dev-2", display_name="Dev 2",
+        agent_card=AgentCard(name="Dev2", description="d2", version="1.0.0"),
+    )
+
+    started = await backend.autostart_unstarted()
+
+    assert sorted(started) == ["dev-1", "dev-2"]
+    assert on_started.await_count == 2
+    m1 = await db.member.get_member("dev-1", team_id)
+    assert m1.status == MemberStatus.STARTING.value
+    # 幂等：第二趟没有 UNSTARTED 可拉起
+    assert await backend.autostart_unstarted() == []
+    assert on_started.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_non_leader_noop(db, message_bus):
+    """非 leader 后端不持有拉起权：返回空、不触回调、成员维持 UNSTARTED。"""
+    team_id = "autostart_non_leader"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Non Leader Team",
+        leader_member_name="leader1",
+    )
+    leader_backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True,
+    )
+    await leader_backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev1", description="d1", version="1.0.0"),
+    )
+    on_started = AsyncMock()
+    member_backend = TeamBackend(
+        team_name=team_id, member_name="dev-1", db=db,
+        messager=message_bus, is_leader=False, on_member_started=on_started,
+    )
+
+    assert await member_backend.autostart_unstarted() == []
+    on_started.assert_not_awaited()
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_autostart_unstarted_without_callback_noop(db, message_bus):
+    """无 spawn 回调（进程外后端）是设计上的 no-op：返回空而非报错。"""
+    team_id = "autostart_no_cb"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="No Callback Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True,
+    )
+    await backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev1", description="d1", version="1.0.0"),
+    )
+
+    assert await backend.autostart_unstarted() == []
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.UNSTARTED.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_tool_autostarts_unstarted_members(db, message_bus):
+    """create_task 落板后自动拉起 UNSTARTED 成员：任务不能落在从未启动的
+    成员身上（leader 只建任务不喊话时 roster 全员 UNSTARTED 的死锁场景）。"""
+    from openjiuwen.agent_teams.tools.locales import make_translator
+    from openjiuwen.agent_teams.tools.tool_task import TaskCreateTool
+
+    team_id = "create_task_autostart_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="CT Autostart Team",
+        leader_member_name="leader1",
+    )
+    on_started = AsyncMock()
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True, on_member_started=on_started,
+    )
+    await backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev1", description="d1", version="1.0.0"),
+    )
+
+    tool = TaskCreateTool(backend, make_translator("cn"))
+    result = await tool.invoke(
+        {"tasks": [{"title": "t1", "content": "c1", "assignee": "dev-1"}]}
+    )
+
+    assert result.success
+    on_started.assert_awaited_once_with("dev-1")
+    member = await db.member.get_member("dev-1", team_id)
+    assert member.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_try_transition_member_status_atomic_cas(db):
     """try_transition_member_status uses atomic UPDATE WHERE, only one caller succeeds."""
     team_id = "cas_team"
