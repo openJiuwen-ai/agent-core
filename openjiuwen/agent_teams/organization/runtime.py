@@ -9,6 +9,9 @@ import asyncio
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from openjiuwen.core.common.logging import team_logger
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
+from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.organization.events import (
     OrgEvent,
     OrgTaskClaimedEvent,
@@ -75,7 +78,12 @@ _ORG_COLLABORATION_PROMPT = {
         "对于已委派给其他 Team 的直接子任务，DELEGATED、CLAIMED 和 IN_PROGRESS 均表示对方 "
         "正在负责处理；暂未出现 output_context 或 output_abstract 不代表失败。不得重新委派、"
         "认领、启动、完成该任务，也不得为绕过等待创建内容重复的替代子任务。结束当前回合并等待 "
-        "完成事件；只有 FAILED、REJECTED 或 NEEDS_REVISION 时，才按既有修复流程创建修复子任务。"
+        "完成事件；只有 FAILED、REJECTED 或 NEEDS_REVISION 时，才按既有修复流程创建修复子任务。\n"
+        "认领根任务后，先按职责选择汇总模式：本 Team 能独立作最终判断、其他 Team 仅提供佐证时选 "
+        "HIERARCHICAL；财务、法律、技术、市场等独立领域需要跨域形成最终判断，或本 Team 只负责其中 "
+        "一部分时选 SUMMARY_TEAM。选择并启动根任务后，所有拆分工作都必须以该根任务为直接父任务，"
+        "不能创建并列根任务。SUMMARY_TEAM 下，本 Team 自己的贡献也必须写成 "
+        "根任务的直接子任务并完成验收，才能作为最终汇总来源；不要只留在 Team 内部任务中。"
     ),
     "en": (
         "## Team Organization collaboration record\n"
@@ -85,7 +93,13 @@ _ORG_COLLABORATION_PROMPT = {
         "For a direct child delegated to another Team, DELEGATED, CLAIMED, and IN_PROGRESS mean that Team "
         "owns its execution; missing output does not mean failure. Do not re-delegate, claim, start, or complete "
         "it, and do not create a duplicate replacement merely to bypass waiting. End the current turn and wait "
-        "for its completion event. Create a repair child only after FAILED, REJECTED, or NEEDS_REVISION."
+        "for its completion event. Create a repair child only after FAILED, REJECTED, or NEEDS_REVISION.\n"
+        "After claiming a root, choose its aggregation mode before decomposition: use HIERARCHICAL only when "
+        "your Team can independently make the final judgment and other Teams supply supporting evidence. "
+        "Use SUMMARY_TEAM for independent specialist domains requiring a cross-domain final judgment, or when "
+        "your Team handles only one part. After choosing and starting the root, create every work item as "
+        "its direct child, never as a parallel root. In SUMMARY_TEAM mode, record your own contribution as a direct "
+        "root child and have it accepted; an internal Team task alone is not a summary source."
     ),
 }
 
@@ -129,6 +143,8 @@ class OrganizationRuntimeManager:
         self._membership_lock = asyncio.Lock()
         self._unclaimed_services: dict[tuple[str, str], OrgUnclaimedTaskService] = {}
         self._subscribed_topics: set[tuple[str, str, str, OrgTopic, int]] = set()
+        self._org_subscribers: dict[tuple[str, str, str], Any] = {}
+        self._org_subscriber_sources: dict[tuple[str, str, str], int] = {}
         self._team_organizations: dict[tuple[str, str], str] = {}
         self._leader_turn_queues: dict[tuple[str, str], deque[object]] = {}
         self._leader_turn_workers: dict[tuple[str, str], asyncio.Task[Any]] = {}
@@ -486,29 +502,13 @@ class OrganizationRuntimeManager:
                 self._scheduled_summary_executions = {
                     summary_key for summary_key in self._scheduled_summary_executions if summary_key[:2] != key
                 }
+                await self._release_org_subscriber(organization_id, session_id, team_id)
                 entry = await self._team_runtime_manager.pool.get(team_id)
                 if entry is None or entry.current_session_id != session_id:
                     continue
                 backend = getattr(entry.agent, "team_backend", None)
                 if backend is None:
                     continue
-                unsubscribe = getattr(backend.messager, "unsubscribe", None)
-                for subscribed in tuple(self._subscribed_topics):
-                    subscribed_org, subscribed_session, subscribed_team, topic, messager_id = subscribed
-                    if (
-                        subscribed_org == organization_id
-                        and subscribed_session == session_id
-                        and subscribed_team == team_id
-                    ):
-                        if callable(unsubscribe) and messager_id == id(backend.messager):
-                            await unsubscribe(
-                                topic.build(
-                                    session_id,
-                                    organization_id,
-                                    team_id if topic is OrgTopic.TEAM_INBOX else None,
-                                )
-                            )
-                        self._subscribed_topics.discard(subscribed)
                 backend.org_task_manager = None
                 backend.org_message_service = None
                 self._set_owner_lifecycle_prompt(entry.agent, is_owner=False)
@@ -720,6 +720,7 @@ class OrganizationRuntimeManager:
                     return
                 message_key = (session_id, team_id, message["message_id"])
                 if message_key in self._scheduled_leader_messages:
+                    self._ensure_leader_turn_worker(team_id, session_id)
                     return
                 self._scheduled_leader_messages.add(message_key)
                 self._schedule_leader_turn(
@@ -748,6 +749,8 @@ class OrganizationRuntimeManager:
             await asyncio.gather(worker, return_exceptions=True)
         queue = self._leader_turn_queues.pop(key, deque())
         self._clear_leader_turn_queue(queue)
+        if organization_id:
+            await self._release_org_subscriber(organization_id, session_id, team_id)
         if organization_id and not any(
             session == session_id and org == organization_id for (session, _), org in self._team_organizations.items()
         ):
@@ -770,6 +773,8 @@ class OrganizationRuntimeManager:
         self._scheduled_leader_messages.clear()
         self._scheduled_parent_reviews.clear()
         self._scheduled_summary_executions.clear()
+        for session_id, organization_id, team_id in tuple(self._org_subscribers):
+            await self._release_org_subscriber(organization_id, session_id, team_id)
 
     @staticmethod
     def _set_owner_lifecycle_prompt(agent: "TeamAgent", *, is_owner: bool) -> None:
@@ -1113,9 +1118,28 @@ class OrganizationRuntimeManager:
         *,
         capabilities: set[str],
     ) -> None:
-        messager = backend.messager
-        if messager is None:
+        backend_messager = backend.messager
+        if backend_messager is None:
             return
+        subscriber_key = (session_id, manager.organization_id, backend.team_name)
+        if self._org_subscriber_sources.get(subscriber_key) not in (None, id(backend_messager)):
+            await self._release_org_subscriber(manager.organization_id, session_id, backend.team_name)
+        messager = self._org_subscribers.get(subscriber_key)
+        if messager is None:
+            # InProcessMessager keys topic subscribers by node_id. Team leaders
+            # commonly share the same member name, so organization listeners
+            # need their own organization/team-scoped subscriber identity.
+            messager = (
+                InProcessMessager(
+                    config=MessagerTransportConfig(
+                        node_id=f"org:{session_id}:{manager.organization_id}:{backend.team_name}"
+                    )
+                )
+                if isinstance(backend_messager, InProcessMessager)
+                else backend_messager
+            )
+            self._org_subscribers[subscriber_key] = messager
+            self._org_subscriber_sources[subscriber_key] = id(backend_messager)
 
         async def _on_task_event(message: Any) -> None:
             event = message.get_payload()
@@ -1269,6 +1293,7 @@ class OrganizationRuntimeManager:
                 if not message_id:
                     return
                 if (session_id, backend.team_name, message_id) in self._scheduled_leader_messages:
+                    self._ensure_leader_turn_worker(backend.team_name, session_id)
                     return
                 persisted = await manager.message_service.get_leader_message(
                     message_id=message_id,
@@ -1300,6 +1325,21 @@ class OrganizationRuntimeManager:
             team_id=backend.team_name,
             handler=_on_inbox_event,
         )
+
+    async def _release_org_subscriber(self, organization_id: str, session_id: str, team_id: str) -> None:
+        """Unsubscribe one team's organization-only listener without touching its Team transport."""
+        messager = self._org_subscribers.pop((session_id, organization_id, team_id), None)
+        self._org_subscriber_sources.pop((session_id, organization_id, team_id), None)
+        for subscribed in tuple(self._subscribed_topics):
+            subscribed_org, subscribed_session, subscribed_team, topic, messager_id = subscribed
+            if (subscribed_org, subscribed_session, subscribed_team) != (organization_id, session_id, team_id):
+                continue
+            unsubscribe = getattr(messager, "unsubscribe", None)
+            if callable(unsubscribe) and messager_id == id(messager):
+                await unsubscribe(
+                    topic.build(session_id, organization_id, team_id if topic is OrgTopic.TEAM_INBOX else None)
+                )
+            self._subscribed_topics.discard(subscribed)
 
     @staticmethod
     def _is_unclaimed_expiration(task: Any, event: OrgTaskFailedEvent) -> bool:
@@ -1406,6 +1446,7 @@ class OrganizationRuntimeManager:
 
         summary_key = (session_id, team_id, task_id)
         if summary_key in self._scheduled_summary_executions:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_summary_executions.add(summary_key)
 
@@ -1446,6 +1487,7 @@ class OrganizationRuntimeManager:
     ) -> None:
         message_key = (session_id, team_id, message_id)
         if message_key in self._scheduled_leader_messages:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_leader_messages.add(message_key)
         prompt = (
@@ -1479,7 +1521,14 @@ class OrganizationRuntimeManager:
         prompt = (
             f"Your team claimed organization task {task_id} in {organization_id}. "
             "Inspect it with org_view_tasks(action='get'). If it is a root task and still CLAIMED, first "
-            "call org_update_task(action='set_aggregation_mode') to choose HIERARCHICAL or SUMMARY_TEAM. "
+            "choose its aggregation mode before starting it. Choose HIERARCHICAL only when your Team can "
+            "independently make the final decision and other Teams provide supporting evidence or dependent "
+            "work. Choose SUMMARY_TEAM when the root needs independent, orthogonal conclusions from two or "
+            "more specialist domains, or when your Team can complete only one part and cannot reasonably "
+            "represent the final cross-domain judgment. Do not choose HIERARCHICAL merely because it is the "
+            "default, shorter, or because your Team coordinates the work; prefer SUMMARY_TEAM for independent "
+            "multi-domain due diligence unless your Team truly owns the final integration. Call "
+            "org_update_task(action='set_aggregation_mode') with that choice. "
             "Then call org_update_task(action='start') and execute the "
             "defined scope through your Team workflow. If an independent part requires another organization "
             "team's capabilities, keep this parent task assigned to your team and create a focused OPEN child "
@@ -1489,7 +1538,7 @@ class OrganizationRuntimeManager:
             "child is delegated to another Team and is DELEGATED, CLAIMED, or IN_PROGRESS, it is still being "
             "executed: do not re-delegate it or create a duplicate replacement; end this turn and wait for "
             "its completion event. "
-            "root uses HIERARCHICAL, integrate those accepted outputs and complete the root yourself with "
+            "If the root uses HIERARCHICAL, integrate those accepted outputs and complete the root yourself with "
             "org_update_task(action='complete'). If the root uses SUMMARY_TEAM, include every contribution "
             "(including work your own Team performs) as a direct child, then call "
             "org_create_summary_execution with all direct child ids after they are accepted. Do not directly "
@@ -1509,6 +1558,7 @@ class OrganizationRuntimeManager:
     ) -> None:
         review_key = (session_id, team_id, child_task_id)
         if review_key in self._scheduled_parent_reviews:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_parent_reviews.add(review_key)
         prompt = (
@@ -1544,6 +1594,7 @@ class OrganizationRuntimeManager:
     ) -> None:
         review_key = (session_id, team_id, f"repair:{child_task_id}")
         if review_key in self._scheduled_parent_reviews:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
@@ -1574,6 +1625,7 @@ class OrganizationRuntimeManager:
     ) -> None:
         review_key = (session_id, team_id, f"complete:{parent_task_id}")
         if review_key in self._scheduled_parent_reviews:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_parent_reviews.add(review_key)
         prompt = (
@@ -1606,6 +1658,7 @@ class OrganizationRuntimeManager:
     ) -> None:
         review_key = (session_id, team_id, f"failed:{child_task_id}")
         if review_key in self._scheduled_parent_reviews:
+            self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_parent_reviews.add(review_key)
         target_id = repairs_task_id or child_task_id
@@ -1683,6 +1736,13 @@ class OrganizationRuntimeManager:
                 "_org_unclaimed_notification": unclaimed_notification,
             }
         )
+        self._ensure_leader_turn_worker(team_id, session_id)
+
+    def _ensure_leader_turn_worker(self, team_id: str, session_id: str) -> None:
+        """Restart a retained organization turn when another event reaches this team."""
+        key = (session_id, team_id)
+        if not self._leader_turn_queues.get(key):
+            return
         worker = self._leader_turn_workers.get(key)
         if worker is None or worker.done():
             worker = asyncio.create_task(self._drain_leader_turns(team_id, session_id))
@@ -1703,9 +1763,11 @@ class OrganizationRuntimeManager:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
                 inputs = queue.popleft()
+                original_inputs = dict(inputs) if isinstance(inputs, dict) else inputs
                 message_key = None
                 review_key = None
                 summary_key = None
+                turn_failed = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
@@ -1744,17 +1806,29 @@ class OrganizationRuntimeManager:
                             )
                             .content
                         )
-                    await self._run_leader_turn(team_id, session_id, inputs)
+                    if not await self._run_leader_turn(team_id, session_id, inputs):
+                        turn_failed = True
+                        queue.appendleft(original_inputs)
+                        team_logger.warning("Organization leader turn was not run for team {} session {}", team_id, session_id)
+                        return
+                except Exception:
+                    turn_failed = True
+                    queue.appendleft(original_inputs)
+                    team_logger.warning(
+                        "Organization leader turn failed for team {} session {}", team_id, session_id, exc_info=True
+                    )
+                    return
                 finally:
-                    if message_key is not None:
+                    if not turn_failed and message_key is not None:
                         self._scheduled_leader_messages.discard(message_key)
-                    if review_key is not None:
+                    if not turn_failed and review_key is not None:
                         self._scheduled_parent_reviews.discard(review_key)
-                    if summary_key is not None:
+                    if not turn_failed and summary_key is not None:
                         self._scheduled_summary_executions.discard(summary_key)
         finally:
             self._leader_turn_workers.pop(key, None)
-            self._leader_turn_queues.pop(key, None)
+            if not self._leader_turn_queues.get(key):
+                self._leader_turn_queues.pop(key, None)
 
     def _clear_leader_turn_queue(self, queue: deque[object]) -> None:
         for inputs in queue:
