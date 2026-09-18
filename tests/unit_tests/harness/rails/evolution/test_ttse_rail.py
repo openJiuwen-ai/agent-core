@@ -44,6 +44,7 @@ from openjiuwen.harness.rails.evolution import (
 )
 from openjiuwen.agent_evolving.ttse.stores import reset_shared_stores, shared_store, _new_record
 from openjiuwen.agent_evolving.ttse.catalog import project_catalog
+from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
 from openjiuwen.agent_evolving.ttse.consult import (
     MAX_CONSULT_CATEGORIES,
@@ -1710,6 +1711,43 @@ async def test_after_task_iteration_schedules_dream(tmp_path):
     await rail.after_task_iteration(ctx)
     await asyncio.sleep(0)
     assert called["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_dream_interval_survives_rail_remount(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_interval=2,
+        dream_min_hours=0,
+        dream_min_rules=100,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=False,
+    )
+    called = {"n": 0}
+    ctx = SimpleNamespace(
+        inputs=SimpleNamespace(is_follow_up=False),
+        extra={},
+        agent=None,
+        session=None,
+    )
+
+    first = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
+    first.run_dream = (lambda **_: None)  # type: ignore[method-assign]
+    await first.after_task_iteration(ctx)
+    assert called["n"] == 0
+    assert load_dream_state(cfg.resolved_dream_state_path()).non_followup_count == 1
+
+    second = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
+
+    async def fake_run_dream(*, capabilities=None):
+        called["n"] += 1
+
+    second.run_dream = fake_run_dream  # type: ignore[method-assign]
+    await second.after_task_iteration(ctx)
+    await asyncio.sleep(0)
+    assert called["n"] == 1
+    assert load_dream_state(cfg.resolved_dream_state_path()).non_followup_count == 0
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,8 @@ import pytest
 from openjiuwen.agent_evolving.ttse import TTSEConfig, TTSERecordStore
 from openjiuwen.agent_evolving.ttse.dream import (
     DreamState,
+    bump_dream_session_count,
+    load_dream_state,
     parse_merge_verdict,
     prune_stale,
     run_dream_pass,
@@ -556,6 +558,26 @@ async def test_dream_purge_bad_tips(tmp_path):
 # ----------------------------------------------------------------------
 # gates + lock
 # ----------------------------------------------------------------------
+
+
+def test_bump_dream_session_count_persists_and_resets_at_interval(tmp_path):
+    path = str(tmp_path / "dream-state.json")
+    count, reached = bump_dream_session_count(path, interval=3)
+    assert (count, reached) == (1, False)
+    assert load_dream_state(path).non_followup_count == 1
+    count, reached = bump_dream_session_count(path, interval=3)
+    assert (count, reached) == (2, False)
+    count, reached = bump_dream_session_count(path, interval=3)
+    assert (count, reached) == (3, True)
+    assert load_dream_state(path).non_followup_count == 0
+
+
+def test_dream_state_legacy_json_defaults_count_to_zero(tmp_path):
+    path = tmp_path / "dream-state.json"
+    path.write_text(json.dumps({"last_dream_at": 1.0}), encoding="utf-8")
+    state = load_dream_state(str(path))
+    assert state.last_dream_at == 1.0
+    assert state.non_followup_count == 0
 
 
 def test_should_run_dream_min_hours():
