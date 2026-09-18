@@ -40,6 +40,9 @@ class DreamState:
     last_pruned: int = 0
     last_merged_clusters: int = 0
     last_purged_tips: int = 0
+    # Non-follow-up task iterations since the last scheduled dream. Lives on
+    # disk so a remounted TTSERail does not restart the interval at 0.
+    non_followup_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -47,6 +50,7 @@ class DreamState:
             "last_pruned": self.last_pruned,
             "last_merged_clusters": self.last_merged_clusters,
             "last_purged_tips": self.last_purged_tips,
+            "non_followup_count": self.non_followup_count,
         }
 
     @classmethod
@@ -57,6 +61,7 @@ class DreamState:
             last_pruned=int(data.get("last_pruned") or 0),
             last_merged_clusters=int(data.get("last_merged_clusters") or 0),
             last_purged_tips=int(data.get("last_purged_tips") or 0),
+            non_followup_count=int(data.get("non_followup_count") or 0),
         )
 
 
@@ -127,6 +132,24 @@ def save_dream_state(path: str, state: DreamState) -> None:
         os.replace(tmp, path)
     except OSError as exc:
         logger.warning("[TTSERail] dream-state save failed at %s: %s", path, exc)
+
+
+def bump_dream_session_count(path: str, interval: int) -> Tuple[int, bool]:
+    """Persist +1 non-follow-up iteration toward ``dream_interval``.
+
+    Returns ``(count_after_increment, interval_reached)``. When the interval
+    is reached the stored count is reset to 0 so the next rail instance does
+    not immediately fire again.
+    """
+    interval = max(1, int(interval))
+    state = load_dream_state(path)
+    state.non_followup_count = max(0, int(state.non_followup_count or 0)) + 1
+    count = state.non_followup_count
+    reached = count >= interval
+    if reached:
+        state.non_followup_count = 0
+    save_dream_state(path, state)
+    return count, reached
 
 
 def should_run_dream(
@@ -627,6 +650,7 @@ __all__ = [
     "MergeVerdict",
     "load_dream_state",
     "save_dream_state",
+    "bump_dream_session_count",
     "should_run_dream",
     "prune_stale",
     "parse_merge_verdict",
