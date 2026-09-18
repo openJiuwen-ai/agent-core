@@ -146,13 +146,13 @@ def _fetch_run_status(
     elif run_state == "succeeded":
         percent = 100
     elif phase == "organizing":
-        percent = 45
+        percent = 25
     elif phase == "validating":
         percent = 90
     elif phase == "committing":
         percent = 97
     elif total_items > 0:
-        percent = 5 + min(70, completed_items * 70 // total_items)
+        percent = 5 + min(15, completed_items * 15 // total_items)
     else:
         percent = 0
     return {
@@ -707,13 +707,16 @@ class PersonalContext:
             is_running = progress is not None and progress.get("run_state") == "running"
             if not is_current_run or not is_running:
                 return
+            # Progress is monotonic within one run: profile fallback replays
+            # lower organizing milestones and must not move the bar backwards.
+            clamped_percent = max(progress_percent, cast(int, progress["progress_percent"]))
             self._fetch_run_progress[service_id] = _fetch_run_status(
                 service_id,
                 run_state="running",
                 total_items=cast(int, progress["total_items"]),
                 completed_items=cast(int, progress["completed_items"]),
                 phase=phase,
-                progress_percent=progress_percent,
+                progress_percent=clamped_percent,
             )
 
         def report_pipeline_profile(service_id: str, run_id: str, profile: str) -> None:

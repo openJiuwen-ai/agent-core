@@ -2720,3 +2720,45 @@ async def test_agent_capacity_prompt_omits_reversed_near_limit_ranges(
     assert "2 to 1 direct child directories" not in system_prompt
     assert "1 or more ordinary Markdown pages" in system_prompt
     assert "2 or more" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_register_agent_callbacks_reports_turn_progress(tmp_path: Path) -> None:
+    reported: list[int] = []
+    registered: dict[AgentCallbackEvent, object] = {}
+
+    class _ReactAgent:
+        @staticmethod
+        def register_callback(event: object, callback: object) -> None:
+            registered[cast(AgentCallbackEvent, event)] = callback
+
+    agent = SimpleNamespace(react_agent=_ReactAgent())
+    _, state = await agent_support._register_agent_callbacks(agent, tmp_path, progress_hook=reported.append)
+
+    assert state["turn_count"] == 0
+    iteration_callback = registered[AgentCallbackEvent.AFTER_REACT_ITERATION]
+    ctx = SimpleNamespace(context=None, inputs=None, push_steering=lambda message: None)
+    await cast(Any, iteration_callback)(cast(Any, ctx))
+    await cast(Any, iteration_callback)(cast(Any, ctx))
+
+    assert reported == [1, 2]
+    assert state["turn_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_register_agent_callbacks_without_progress_hook_still_counts_turns(tmp_path: Path) -> None:
+    registered: dict[AgentCallbackEvent, object] = {}
+
+    class _ReactAgent:
+        @staticmethod
+        def register_callback(event: object, callback: object) -> None:
+            registered[cast(AgentCallbackEvent, event)] = callback
+
+    agent = SimpleNamespace(react_agent=_ReactAgent())
+    _, state = await agent_support._register_agent_callbacks(agent, tmp_path)
+
+    iteration_callback = registered[AgentCallbackEvent.AFTER_REACT_ITERATION]
+    ctx = SimpleNamespace(context=None, inputs=None, push_steering=lambda message: None)
+    await cast(Any, iteration_callback)(cast(Any, ctx))
+
+    assert state["turn_count"] == 1

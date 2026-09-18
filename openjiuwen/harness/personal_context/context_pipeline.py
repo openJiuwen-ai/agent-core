@@ -8705,7 +8705,7 @@ class ContextPipelineService:
         def report_progress(percent: int) -> None:
             if self._progress_callback is not None and service_id is not None:
                 self._progress_callback(service_id, run_id, "organizing", percent)
-        report_progress(50)
+        report_progress(25)
 
         def log_agent_fallback(profile: str) -> None:
             if requested == "agent":
@@ -8786,9 +8786,9 @@ class ContextPipelineService:
             await prepare_rules_candidate(
                 preserve_existing_paths=retaining or requested == "agent",
             )
-            report_progress(60)
+            report_progress(30)
             log_agent_fallback("rules")
-            report_progress(85)
+            report_progress(88)
             return "rules"
         profiles = [
             candidate
@@ -8810,9 +8810,9 @@ class ContextPipelineService:
         for candidate in profiles:
             if candidate == "rules":
                 await prepare_rules_candidate(preserve_existing_paths=requested == "agent")
-                report_progress(60)
+                report_progress(30)
                 log_agent_fallback("rules")
-                report_progress(85)
+                report_progress(88)
                 return "rules"
             try:
                 preserve_existing_paths = requested == "agent" and candidate in {"balanced", "rules"}
@@ -8842,7 +8842,7 @@ class ContextPipelineService:
                 }
                 preexisting_managed_source_ids = frozenset(preexisting_managed_pages_by_source)
                 balanced_baseline_managed_pages_by_source = preexisting_managed_pages_by_source or None
-                report_progress(60)
+                report_progress(30)
                 if candidate == "agent":
                     await _cancel_safe_to_thread(
                         _remove_rules_pages_for_deleted_source_ids,
@@ -9034,6 +9034,14 @@ class ContextPipelineService:
                         )
                     )
                     recluster_plan, recluster_apply = self._agent_recluster_hooks(sandbox)
+                    run_documents = _processed_documents(processed)
+                    expected_turns = min(120, max(30, 3 * len(run_documents)))
+
+                    def report_agent_turn(turn_count: int, *, expected_turns: int = expected_turns) -> None:
+                        # expected_turns is only an estimate: this is a monotonic
+                        # liveness signal inside 30-85, not an exact loop fraction.
+                        report_progress(30 + min(55, turn_count * 55 // expected_turns))
+
                     output = await run_personal_context_agent(
                         model_client=self._config.model_client,
                         model_request=self._config.model_request,
@@ -9061,6 +9069,7 @@ class ContextPipelineService:
                         max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
                         recluster_plan=recluster_plan,
                         recluster_apply=recluster_apply,
+                        progress_hook=report_agent_turn,
                     )
                     del output
                     changed_paths = _changed_context_paths(sandbox / "context", context_baseline)
@@ -9078,6 +9087,7 @@ class ContextPipelineService:
                         provider=effective_provider,
                         run_time=effective_run_time,
                         deleted_source_ids=effective_deleted_source_ids,
+                        progress_hook=report_progress,
                     )
                     processed["_balanced_accepted_count"] = balanced_accepted_count
                     if preexisting_managed_pages_by_source:
@@ -9093,7 +9103,7 @@ class ContextPipelineService:
                         }
                         balanced_baseline_managed_pages_by_source.update(preexisting_managed_pages_by_source)
 
-                report_progress(70)
+                report_progress(85)
                 _validate_agent_candidate(
                     sandbox / "context",
                     baseline=context_baseline,
@@ -9152,7 +9162,7 @@ class ContextPipelineService:
                 processed["_filesystem_candidate_profile"] = final_candidate
                 if preserve_existing_paths:
                     log_agent_fallback(final_candidate)
-                report_progress(85)
+                report_progress(88)
                 return final_candidate
             except (OSError, UnicodeError) as error:
                 raise _publish_error("filesystem candidate could not be prepared") from error
@@ -9166,7 +9176,7 @@ class ContextPipelineService:
                     str(error),
                 )
                 continue
-        report_progress(85)
+        report_progress(88)
         return "rules"
 
     async def _filesystem_balanced_model_attempt(
@@ -9182,6 +9192,7 @@ class ContextPipelineService:
         provider: str = "local",
         run_time: datetime | None = None,
         deleted_source_ids: set[str] | None = None,
+        progress_hook: Callable[[int], None] | None = None,
     ) -> tuple[set[str], int]:
         """Summarize run inputs, let Rules own structure, then describe the final tree."""
         if self._config.model_client is None or self._config.model_request is None:
@@ -9249,9 +9260,13 @@ class ContextPipelineService:
                 )
                 page_requests.append((start, items, message))
 
+            total_page_groups = len(page_requests)
+            completed_page_groups = 0
+
             async def invoke_page_group(
                 request: tuple[int, list[dict[str, object]], UserMessage],
             ) -> tuple[int, list[dict[str, object]], dict[int, dict[str, object]]]:
+                nonlocal completed_page_groups
                 start, items, message = request
                 try:
                     async with semaphore:
@@ -9262,6 +9277,10 @@ class ContextPipelineService:
                     )
                 except Exception:
                     accepted = {}
+                completed_page_groups += 1
+                if progress_hook is not None and total_page_groups > 0:
+                    # Stage one (page semantics) spans 30-70 of organizing.
+                    progress_hook(30 + completed_page_groups * 40 // total_page_groups)
                 return start, items, accepted
 
             page_results = await asyncio.gather(*(invoke_page_group(request) for request in page_requests))
@@ -9339,6 +9358,8 @@ class ContextPipelineService:
             {len(directory.relative_to(context_root).parts) for directory in directories},
             reverse=True,
         )
+        total_depths = len(depths)
+        completed_depths = 0
         for depth in depths:
             requests: list[tuple[Path, str, str, str, dict[str, object]]] = []
             for directory in sorted(
@@ -9430,6 +9451,10 @@ class ContextPipelineService:
                 if updated != current:
                     _atomic_write(directory / "description.md", updated.encode("utf-8"))
                     accepted_count += int(presentation is not None)
+            completed_depths += 1
+            if progress_hook is not None and total_depths > 0:
+                # Stage two (directory presentations) spans 70-85 of organizing.
+                progress_hook(70 + completed_depths * 15 // total_depths)
         _rename_balanced_directories(
             context_root,
             source_root=self._source_meta_root,
