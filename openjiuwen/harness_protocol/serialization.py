@@ -149,6 +149,7 @@ def _model_request_to_dict(event: ModelRequestEvent) -> dict[str, object]:
         "tool_definitions": _json(event.tool_definitions),
         "request_parameters": _json(event.request_parameters),
         "response_id": event.response_id,
+        "time_to_first_chunk": event.time_to_first_chunk,
         "finish_reasons": list(event.finish_reasons),
         "usage": _usage_to_dict(event.usage) if event.usage is not None else None,
         "error": _error_to_dict(event.error) if event.error is not None else None,
@@ -178,6 +179,7 @@ def _model_request_from_dict(data: Mapping[str, object]) -> ModelRequestEvent:
         tool_definitions=cast(JsonValue, data.get("tool_definitions")),
         request_parameters=_json_object(data.get("request_parameters", {}), "model_request.request_parameters"),
         response_id=_optional_string(data.get("response_id"), "model_request.response_id"),
+        time_to_first_chunk=cast(float | None, data.get("time_to_first_chunk")),
         finish_reasons=tuple(
             _required_string(reason, "model_request.finish_reason")
             for reason in _list(data.get("finish_reasons", []), "model_request.finish_reasons")

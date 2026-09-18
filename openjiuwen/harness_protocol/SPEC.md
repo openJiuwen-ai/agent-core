@@ -99,7 +99,7 @@ provider `provider_session_id`、`turn_id`、`item_id`、`correlation_id` 和 `c
   子 Agent 等使用各自 item type，仅作为 provider item 观测；
 - `UsageUpdatedEvent`：标准化 token usage，显式区分 DELTA/CUMULATIVE；
 - `ModelRequestEvent`：一次物理模型请求（请求消息、system instructions、工具定义、采样参数、回复、
-  response id / finish reasons、本次 usage；usage 按 GenAI 约定，`input_tokens` 是整个 prompt，缓存命中
+  response id / finish reasons / time_to_first_chunk、本次 usage；usage 按 GenAI 约定，`input_tokens` 是整个 prompt，缓存命中
   是其中的细分），
   仅在宿主声明 `HostCapability.MODEL_REQUEST_OBSERVATION` 时发出；同一 Turn 内先于它引发的 item 与
   terminal event，被引发的 item 在 `causation_ids` 中列出其 `request_id`；无法观测请求本身时仍须

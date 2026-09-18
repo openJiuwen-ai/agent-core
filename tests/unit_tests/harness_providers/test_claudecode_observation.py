@@ -57,19 +57,47 @@ def _install_receiver(monkeypatch: pytest.MonkeyPatch, receiver: _FakeReceiver) 
     monkeypatch.setattr(observation_module, "get_shared_otlp_receiver", lambda: receiver)
 
 
-def _body_event(receiver: _FakeReceiver, client: Any, name: str, body: dict[str, Any], *, time_ns: int) -> None:
+def _source_id(client: Any) -> str:
+    return client.options.env["OTEL_RESOURCE_ATTRIBUTES"].split("=", 1)[1]
+
+
+def _body_event(
+    receiver: _FakeReceiver,
+    client: Any,
+    name: str,
+    body: dict[str, Any],
+    *,
+    time_ns: int,
+    request_id: str | None = None,
+) -> None:
     """Write one body file where the CLI would and publish its log event."""
     body_dir = Path(client.options.env["OTEL_LOG_RAW_API_BODIES"].removeprefix("file:"))
     reference = f"{uuid.uuid4().hex}.json"
     (body_dir / reference).write_text(json.dumps(body), encoding="utf-8")
-    source = client.options.env["OTEL_RESOURCE_ATTRIBUTES"].split("=", 1)[1]
+    attributes: dict[str, Any] = {"body_ref": reference}
+    if request_id is not None:
+        attributes["request_id"] = request_id
     receiver.publish(
         {
             "signal": "log",
             "name": name,
             "time_ns": time_ns,
-            "attributes": {"body_ref": reference},
-            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: source},
+            "attributes": attributes,
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: _source_id(client)},
+        }
+    )
+
+
+def _request_span(receiver: _FakeReceiver, client: Any, *, request_id: str, start_ns: int, end_ns: int) -> None:
+    """Publish the CLI's own per-request span."""
+    receiver.publish(
+        {
+            "signal": "trace",
+            "name": "claude_code.llm_request",
+            "start_time_ns": start_ns,
+            "end_time_ns": end_ns,
+            "attributes": {"request_id": request_id, "ttft_ms": 400, "attempt": 1, "speed": "normal", "success": True},
+            "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: _source_id(client)},
         }
     )
 
@@ -114,7 +142,15 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
                 "cache_creation_input_tokens": 8,
             },
         }
-        _body_event(receiver, client, "claude_code.api_response_body", body, time_ns=1_002_000_000_000)
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            body,
+            time_ns=1_002_000_000_000,
+            request_id="req-1",
+        )
+        _request_span(receiver, client, request_id="req-1", start_ns=1_000_100_000_000, end_ns=1_001_900_000_000)
 
     async def side_query(client: Any) -> None:
         body = {"model": "claude-haiku", "messages": [{"role": "user", "content": "title this"}]}
@@ -219,7 +255,11 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
     assert first.tool_definitions == ({"name": "Bash", "description": "run", "parameters": {"type": "object"}},)
     assert first.request_parameters == {"max_tokens": 4096, "temperature": 0.2, "stream": True}
     assert first.response_id == "msg-1" and first.finish_reasons == ("tool_use",)
-    assert (first.started_at, first.ended_at) == (1000.0, 1002.0)
+    # The CLI's own span states the request window and its first-token time.
+    assert (first.started_at, first.ended_at) == (1000.1, 1001.9)
+    assert first.time_to_first_chunk == 0.4
+    assert first.data["claude-code"]["attempt"] == 1
+    assert first.data["claude-code"]["api_request_id"] == "req-1"
     # GenAI states the whole prompt as input, with cached input a breakdown.
     assert first.usage.input_tokens == 50 and first.usage.cached_input_tokens == 12
     assert first.usage.total_tokens == 54

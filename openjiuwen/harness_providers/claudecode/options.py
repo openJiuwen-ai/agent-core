@@ -138,6 +138,12 @@ def claude_request_log_env(
     kept.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        # The enhanced beta adds the per-request ``claude_code.llm_request``
+        # span, the only place the CLI states time-to-first-token, attempts
+        # and the request id that joins a response body to its request.
+        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
+        "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_TRACES_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,

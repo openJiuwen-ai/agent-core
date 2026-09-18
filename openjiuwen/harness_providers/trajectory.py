@@ -55,6 +55,7 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_ID,
     GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_CALL_RESULT,
@@ -420,6 +421,8 @@ class HarnessTrajectoryRecorder:
                 ensure_ascii=False,
             )
         attributes[OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS] = (event.ended_at - event.started_at) * 1000
+        if event.time_to_first_chunk is not None:
+            attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] = event.time_to_first_chunk
         attributes.update(_request_parameter_attributes(event))
         attributes.update(_usage_attributes(event))
         span = self._tracer.start_span(

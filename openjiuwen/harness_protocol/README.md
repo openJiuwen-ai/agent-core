@@ -56,8 +56,8 @@ contain turns from multiple agents. The single-agent harness API therefore uses
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
 - `ModelRequestEvent`: one physical model request of a turn (request messages,
-  tool definitions, sampling parameters, reply, response id, finish reasons and
-  per-request usage), emitted only when the host declares
+  tool definitions, sampling parameters, reply, response id, time to first
+  chunk, finish reasons and per-request usage), emitted only when the host declares
   `HostCapability.MODEL_REQUEST_OBSERVATION`. Usage follows the GenAI
   conventions: `input_tokens` is the whole prompt and cached input is a
   breakdown inside it.

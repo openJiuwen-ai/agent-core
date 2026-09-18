@@ -217,6 +217,8 @@ class ModelRequestEvent:
             ``presence_penalty``, ``frequency_penalty``, ``reasoning_level``,
             ``stream``); anything else is provider data.
         response_id: Provider id of the response, when it states one.
+        time_to_first_chunk: Seconds from sending the request to its first
+            streamed chunk, when the provider measures it.
         finish_reasons: Why generation stopped, in the provider's words.
         usage: Token usage of this request alone. Counters follow the GenAI
             conventions: ``input_tokens`` is the whole prompt, and cached
@@ -238,6 +240,7 @@ class ModelRequestEvent:
     tool_definitions: JsonValue = None
     request_parameters: JsonObject = field(default_factory=dict)
     response_id: str | None = None
+    time_to_first_chunk: float | None = None
     finish_reasons: tuple[str, ...] = ()
     usage: TurnUsage | None = None
     error: TurnError | None = None
@@ -253,6 +256,9 @@ class ModelRequestEvent:
             raise ValueError("model request ended_at must not precede started_at")
         if self.status is ModelRequestStatus.COMPLETED and self.error is not None:
             raise ValueError("completed model request must not contain error")
+        if self.time_to_first_chunk is not None:
+            if not math.isfinite(self.time_to_first_chunk) or self.time_to_first_chunk < 0:
+                raise ValueError("model request time_to_first_chunk must be a non-negative duration")
         object.__setattr__(self, "system_instructions", tuple(self.system_instructions))
         object.__setattr__(self, "input_messages", tuple(self.input_messages))
         object.__setattr__(self, "tool_definitions", freeze_json_value(self.tool_definitions))

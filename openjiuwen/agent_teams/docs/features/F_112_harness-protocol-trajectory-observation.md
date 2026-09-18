@@ -38,7 +38,7 @@ agent_teams        ExternalHarnessMemberRuntime 只绑定 recorder 并注入成�
 `status`、`started_at` / `ended_at`、`model` / `provider_name`、`system_instructions`、
 `input_messages`（`TurnMessage`，`message_id` 在消息留在对话中时保持稳定）、`input_observed`、
 `output_message`、`tool_definitions`（统一为 `{name, description, parameters}`）、`request_parameters`
-（GenAI 名字的采样参数）、`response_id`、`finish_reasons`、`usage`（本次请求，按 GenAI 约定
+（GenAI 名字的采样参数）、`response_id`、`time_to_first_chunk`、`finish_reasons`、`usage`（本次请求，按 GenAI 约定
 `input_tokens` 为整个 prompt、缓存命中是其中的细分）、`error`、命名空间化 `data`。复用
 `TurnMessage` / `ContentBlock`（`text` / `reasoning` / `tool_call{name,arguments}` /
 `tool_result`，`data.call_id`），不新建消息模型。
@@ -56,9 +56,12 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 
 **Claude Code**（`claudecode/observation.py`，`ClaudeRequestObserver`）
 
-- 数据源是 Claude Code 的原始 API body 日志：`OTEL_LOG_RAW_API_BODIES=file:<dir>`。inline 模式在
-  60 KB 截断，长对话的请求体必然残缺；file 模式无截断，事件带 `body_ref`。只开 logs 导出，不依赖
-  `claude_code.llm_request` span，也不注入 TRACEPARENT。
+- 内容来自 Claude Code 的原始 API body 日志：`OTEL_LOG_RAW_API_BODIES=file:<dir>`。inline 模式在
+  60 KB 截断，长对话的请求体必然残缺；file 模式无截断，事件带 `body_ref`（绝对路径）。
+- 计时来自增强遥测的 `claude_code.llm_request` span（`CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1`）：它是
+  CLI 唯一说出 ttft、attempt、精确请求窗口的地方，按 `request_id` 与响应体日志配对（响应体事件带同一个
+  `req_` id）。两路导出间隔相同，所以等齐两者不额外增加延迟；span 缺失时退回按日志时间计窗口。
+  不注入 TRACEPARENT，按 source id 认领。
 - 进程级单接收器、单 gRPC 端口，所有成员共用；每个 harness 在 `_open_session` 生成 source id 写入
   `OTEL_RESOURCE_ATTRIBUTES`（同时经 `--settings` 下发，压过用户 settings），接收器广播、各实例按
   source id 认领。gRPC 线程回调经 `call_soon_threadsafe` 回到事件循环。`_close_session` 取消订阅
@@ -138,7 +141,7 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 
 - 子 agent（Claude `parent_tool_use_id`）的请求不进成员 lane。
 - 宿主输入的识别靠文本匹配（provider 不说明哪条消息装着它）；匹配不上时该条仍记为上下文。
-- TTFT / 吞吐没有数据：请求日志与 rollout 都不记录首 token 时间。
+- Codex 没有 TTFT：rollout 只记录推理的起止，不记首 token 时间。
 - Codex `thread_resume` 的协议参数没有 raw events 字段，恢复的线程只能依赖 rollout。
 - `TurnUsage` 没有缓存写入字段，provider 的 cache-creation token 只留在 `provider_data`，未进 span。
 - 关联不上模型 call id 的 Codex tool item 最多等待 `request_observation_wait_s` 后无归属发出。

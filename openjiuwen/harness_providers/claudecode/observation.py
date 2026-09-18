@@ -57,6 +57,9 @@ EmitFn = Callable[[Any, str | None, tuple[str, ...], float | None], Awaitable[No
 _REQUEST_BODY_EVENT = "claude_code.api_request_body"
 _RESPONSE_BODY_EVENT = "claude_code.api_response_body"
 _BODY_EVENTS = frozenset({_REQUEST_BODY_EVENT, _RESPONSE_BODY_EVENT})
+# The per-request span of Claude Code's enhanced telemetry: the only place the
+# CLI states time-to-first-token, attempts and the exact request window.
+_LLM_REQUEST_SPAN = "claude_code.llm_request"
 _MODEL_PROVIDER = "anthropic"
 _DATA_NAMESPACE = "claude-code"
 _DRAIN_INTERVAL_S = 0.25
@@ -86,6 +89,16 @@ class _BodyEvent:
     attributes: dict[str, Any]
     parsed: Any = None
     loaded: bool = False
+
+
+@dataclass
+class _NativeRequestSpan:
+    """One ``claude_code.llm_request`` span, keyed by its API request id."""
+
+    request_id: str
+    start_ns: int
+    end_ns: int
+    attributes: dict[str, Any]
 
 
 @dataclass
@@ -130,6 +143,8 @@ class ClaudeRequestObserver:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._body_dir: Path | None = None
         self._incoming: list[_BodyEvent] = []
+        self._incoming_spans: list[_NativeRequestSpan] = []
+        self._spans: dict[str, _NativeRequestSpan] = {}
         self._changed = asyncio.Event()
         self._lock = asyncio.Lock()
         self._requests: list[_BodyEvent] = []
@@ -334,7 +349,7 @@ class ClaudeRequestObserver:
         await self._release_items()
         while self._emitted_count < len(self._order):
             snapshot = self._replies[self._order[self._emitted_count]]
-            ready = snapshot.message_id in self._responses
+            ready = self._reply_ready(snapshot)
             if not ready and not force and time.time() < snapshot.deadline:
                 return
             event = await self._native_request(snapshot) if ready else self._stream_request(snapshot)
@@ -344,6 +359,19 @@ class ClaudeRequestObserver:
             await self._release_items()
         if force:
             await self._release_items(force=True)
+
+    def _reply_ready(self, snapshot: _ReplySnapshot) -> bool:
+        """Report whether this reply's records have all arrived.
+
+        The response body names the reply; its ``claude_code.llm_request``
+        span states the request window and its timing. They export on the same
+        interval, so waiting for both costs nothing in the normal case.
+        """
+        entry = self._responses.get(snapshot.message_id)
+        if entry is None:
+            return False
+        request_id = str(entry[0].attributes.get("request_id") or "")
+        return not request_id or request_id in self._spans
 
     async def _release_items(self, *, force: bool = False) -> None:
         while self._held:
@@ -373,27 +401,45 @@ class ClaudeRequestObserver:
 
     def _on_receiver_event(self, event: dict[str, Any]) -> None:
         """Accept one receiver event; runs on the receiver's thread or loop."""
-        if event.get("signal") != "log" or event.get("name") not in _BODY_EVENTS:
-            return
         resource = event.get("resource_attributes")
         if not isinstance(resource, dict) or resource.get(OTEL_RESOURCE_SOURCE_ID) != self._source_id:
             return
         attributes = event.get("attributes")
-        body_event = _BodyEvent(
-            name=str(event["name"]),
-            time_ns=int(event.get("time_ns") or time.time_ns()),
-            attributes=dict(attributes) if isinstance(attributes, dict) else {},
-        )
+        attributes = dict(attributes) if isinstance(attributes, dict) else {}
+        signal = event.get("signal")
+        name = str(event.get("name") or "")
+        accepted: Any
+        if signal == "log" and name in _BODY_EVENTS:
+            accepted = _BodyEvent(
+                name=name,
+                time_ns=int(event.get("time_ns") or time.time_ns()),
+                attributes=attributes,
+            )
+        elif signal == "trace" and name == _LLM_REQUEST_SPAN and attributes.get("request_id"):
+            accepted = _NativeRequestSpan(
+                request_id=str(attributes["request_id"]),
+                start_ns=int(event.get("start_time_ns") or 0),
+                end_ns=int(event.get("end_time_ns") or 0),
+                attributes=attributes,
+            )
+        else:
+            return
         loop = self._loop
         if loop is None or loop.is_closed():
             return
-        loop.call_soon_threadsafe(self._accept_body_event, body_event)
+        loop.call_soon_threadsafe(self._accept_observation, accepted)
 
-    def _accept_body_event(self, body_event: _BodyEvent) -> None:
-        self._incoming.append(body_event)
+    def _accept_observation(self, observation: Any) -> None:
+        if isinstance(observation, _NativeRequestSpan):
+            self._incoming_spans.append(observation)
+        else:
+            self._incoming.append(observation)
         self._changed.set()
 
     async def _absorb_bodies(self) -> None:
+        spans, self._incoming_spans = self._incoming_spans, []
+        for span in spans:
+            self._spans[span.request_id] = span
         incoming, self._incoming = self._incoming, []
         for body_event in incoming:
             if body_event.name == _REQUEST_BODY_EVENT:
@@ -491,8 +537,13 @@ class ClaudeRequestObserver:
         identity = _identity("assistant", response.get("content"))
         self._output_ids_by_identity[identity] = snapshot.message_id
         self._last_output_identity = identity
-        started_at = request_event.time_ns / 1e9 if request_event is not None else snapshot.started_at
-        ended_at = max(response_event.time_ns / 1e9, started_at)
+        native = self._spans.pop(str(response_event.attributes.get("request_id") or ""), None)
+        if native is not None and native.start_ns > 0 and native.end_ns >= native.start_ns:
+            started_at = native.start_ns / 1e9
+            ended_at = native.end_ns / 1e9
+        else:
+            started_at = request_event.time_ns / 1e9 if request_event is not None else snapshot.started_at
+            ended_at = max(response_event.time_ns / 1e9, started_at)
         stop_reason = response.get("stop_reason")
         return ModelRequestEvent(
             request_id=snapshot.message_id,
@@ -508,12 +559,14 @@ class ClaudeRequestObserver:
             tool_definitions=tool_definitions,
             request_parameters=request_parameters,
             response_id=str(response.get("id") or "") or None,
+            time_to_first_chunk=_seconds(native.attributes.get("ttft_ms")) if native is not None else None,
             finish_reasons=(stop_reason,) if isinstance(stop_reason, str) and stop_reason else (),
             usage=claude_turn_usage(response.get("usage")) or snapshot.usage,
             data={
                 _DATA_NAMESPACE: {
                     "observation": "api_bodies",
                     "billing_header": billing_header or None,
+                    **_native_diagnostics(native),
                 },
             },
         )
@@ -694,6 +747,25 @@ def _assistant_identities(request: dict[str, Any]) -> set[str]:
         for message in messages
         if isinstance(message, dict) and message.get("role") == "assistant"
     }
+
+
+def _native_diagnostics(native: _NativeRequestSpan | None) -> dict[str, Any]:
+    """Return the request facts only the CLI's own span states."""
+    if native is None:
+        return {}
+    facts: dict[str, Any] = {}
+    for key in ("attempt", "speed", "success", "api_request_id", "client_request_id", "llm_request.context"):
+        value = native.attributes.get(key)
+        if isinstance(value, (str, bool, int, float)):
+            facts[key.replace(".", "_")] = value
+    facts["api_request_id"] = native.request_id
+    return facts
+
+
+def _seconds(milliseconds: Any) -> float | None:
+    if isinstance(milliseconds, bool) or not isinstance(milliseconds, (int, float)):
+        return None
+    return max(float(milliseconds) / 1000, 0.0)
 
 
 def _read_text(path: Path) -> str | None:
