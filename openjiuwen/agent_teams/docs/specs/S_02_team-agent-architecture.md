@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 编号 / slug | S_02 / team-agent-architecture |
 | 关联模块 | `openjiuwen/agent_teams/agent/` |
-| 最近一次修订日期 | 2026-07-14 |
-| 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md |
+| 最近一次修订日期 | 2026-09-14 |
+| 关联 feature | F_11_leader-member-status-tracking.md、F_10_temporary-leader-clean-team-stream-end.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_100_team-task-loop-budget-rails.md |
 
 ## 范围 / 边界
 
@@ -61,6 +61,11 @@
 12. **LEADER-only 资源不外泄**：`PrivateAgentResources.model_allocator` 只在 `ctx.role == LEADER` 时构造；非 LEADER 路径访问到的 allocator 永远是 `None`。
 13. **HUMAN_AGENT 无 first-iteration gate**：`PrivateAgentResources.first_iter_gate` 在 `ctx.role == HUMAN_AGENT` 时必须为 `None`——人类成员没有自主任务循环和 mailbox 轮询，gate 在这条路径上无意义。
 14. **Spec 不持运行时引用**：`TeamAgentSpec` / `TeamRuntimeContext` 只承载 dataclass / pydantic 字段；新增字段先判断"装配数据 vs 运行时资源"，运行时资源进 Config/Manager/Runtime。
+15. **本地成员必有 task-loop 预算 rail（[[F_100]]）**：`AgentConfigurator.setup_agent` 为所有
+    `enable_task_loop=True` 的本地成员注入两个 harness 元素——`core.task_completion`
+    （`max_rounds` = 成员自己的 `max_iterations`）与 `core.budget_notice`（阈值走 rail 默认）。
+    `base_rails` 已声明同类型时以声明为准，不重复注入。token / 时间上限保持 opt-in（不注入）。
+    这样每个成员的**外层** task loop 有真实轮次上限，且耗尽前有收敛提示。
 
 ## 接口契约
 
