@@ -12,23 +12,6 @@ from typing import Any, Literal
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import VariantResult
 
-# Noisy containers omitted from *display* compaction only. Authoritative
-# metric resolution walks the full payload, including these keys.
-_DISPLAY_SKIP_METRIC_KEYS = frozenset(
-    {
-        "records",
-        "task_records",
-        "prompts",
-        "paired_item_deltas",
-        "planner_ledger",
-        "posthoc",
-        "configuration",
-        "planner_hop2_failure_analysis",
-        "ordered_page_ids",
-        "distinct_page_ids",
-        "validations",
-    }
-)
 _MAX_COMPACT_METRICS = 40
 _MAX_METRIC_STRING = 120
 _PROMPT_SUMMARY_MAX_CHARS = 8000
@@ -39,24 +22,9 @@ _MAX_EVENT_CLASSES = 12
 _MAX_EXAMPLE_TASKS = 3
 _MAX_RESOLVE_DEPTH = 16
 _MAX_RESOLVE_NODES = 10_000
+_MAX_DIAGNOSTIC_STRING = 400
 _CANONICAL_METRICS_KEY = "metrics"
 _BACKTICK_IDENT = re.compile(r"`([a-z][a-z0-9_]{2,})`")
-_SKIP_BASELINE_NAMES = frozenset(
-    {
-        "proposed",
-        "all",
-        "run",
-        "output",
-        "method",
-        "status",
-        "accuracy",
-        "create_deep_agent",
-        "reactagent",
-        "api_key",
-        "api_base",
-        "model_name",
-    }
-)
 _HARNESS_FAILED_STATUSES = frozenset({"failed", "diagnostic_failed"})
 _COMPLETED_RUN_STATUSES = frozenset(
     {
@@ -71,49 +39,6 @@ _COMPLETED_RUN_STATUSES = frozenset(
 )
 _ITEM_RECORD_KEYS = ("per_question", "task_records", "records", "item_records")
 _EXCEPTION_FAILURE_RE = re.compile(r"^[A-Za-z]+(?:Error|Exception)\s*:")
-_INFRA_STAGES = frozenset(
-    {
-        "dataset_download",
-        "agent_init",
-        "tool_call",
-        "metrics_write",
-        "runtime_setup",
-    }
-)
-_INFRA_ACQUISITION = frozenset({"dataset_acquisition_failure"})
-_UNSAFE_DIAGNOSTIC_KEYS = frozenset(
-    {
-        "failure_prefix",
-        "prefix",
-        "body",
-        "content",
-        "csv",
-        "problem",
-        "answer",
-        "canary",
-        "prompt",
-        "prompts",
-        "raw",
-        "decrypted",
-        "records",
-        "task_records",
-        "explanation",
-    }
-)
-# Compatibility defaults for pairing and manager display when the plan
-# does not name a primary score. Authoritative plan-metric reads do not
-# search this set.
-_COMPAT_SCORE_LEAVES = frozenset(
-    {
-        "accuracy",
-        "exact_match",
-        "f1",
-        "score",
-        "pass_rate",
-        "success_rate",
-        "semantic_correct",
-    }
-)
 _PAIR_METRIC_STATUS = "computed_from_last_measured_rows"
 MetricResolutionStatus = Literal["resolved", "missing", "ambiguous"]
 
@@ -139,7 +64,7 @@ def infer_baseline_names(*texts: str) -> list[str]:
     seen: set[str] = set()
     blob = "\n".join(item for item in texts if item)
     for name in _BACKTICK_IDENT.findall(blob):
-        if name in _SKIP_BASELINE_NAMES or name in seen:
+        if name in seen:
             continue
         if name.endswith("_baseline") or name.endswith("_comparator"):
             seen.add(name)
@@ -379,20 +304,32 @@ def materialize_handoff_metrics(
     return compact, metric_resolution_diagnostic(resolutions)
 
 
+def _clip_text(value: str, max_len: int) -> str:
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 1] + "…"
+
+
+def _is_object_list(value: Any) -> bool:
+    return isinstance(value, list) and any(isinstance(item, dict) for item in value)
+
+
 def compact_metrics(
     metrics: dict[str, Any],
     *,
     prefix: str = "",
     limit: int = _MAX_COMPACT_METRICS,
 ) -> dict[str, float | int | str]:
-    """Keep only scalar routing metrics; drop per-item traces and nested blobs.
+    """Keep scalars; omit lists of objects. Display-only.
 
-    Display-only. Scientific reads use :func:`resolve_metric`.
+    Scientific reads use :func:`resolve_metric`.
     """
     compact: dict[str, float | int | str] = {}
 
     def _walk(key: str, value: Any) -> None:
         if len(compact) >= limit:
+            return
+        if _is_object_list(value):
             return
         if isinstance(value, bool):
             compact[key] = str(value)
@@ -401,8 +338,7 @@ def compact_metrics(
             compact[key] = value
             return
         if isinstance(value, str):
-            if len(value) <= _MAX_METRIC_STRING:
-                compact[key] = value
+            compact[key] = _clip_text(value, _MAX_METRIC_STRING)
             return
         if isinstance(value, dict):
             nested_value = value.get("value")
@@ -410,8 +346,6 @@ def compact_metrics(
                 compact[key] = nested_value
                 return
             for child_key, child in value.items():
-                if child_key in _DISPLAY_SKIP_METRIC_KEYS:
-                    continue
                 next_key = f"{key}.{child_key}" if key else str(child_key)
                 _walk(next_key, child)
                 if len(compact) >= limit:
@@ -456,9 +390,7 @@ def _object_list_keys(items: list[Any]) -> list[str]:
 
 
 def _clip_prompt_string(value: str) -> str:
-    if len(value) <= _PROMPT_SUMMARY_MAX_STRING:
-        return value
-    return value[: _PROMPT_SUMMARY_MAX_STRING - 1] + "…"
+    return _clip_text(value, _PROMPT_SUMMARY_MAX_STRING)
 
 
 def _is_prompt_stub(value: Any) -> bool:
@@ -486,7 +418,7 @@ def _summarize_prompt_value(value: Any, *, path: str) -> Any:
     if isinstance(value, list):
         if not value:
             return []
-        if any(isinstance(item, dict) for item in value):
+        if _is_object_list(value):
             return _prompt_summary_stub(
                 "object_list",
                 n=len(value),
@@ -551,42 +483,6 @@ def summarize_metrics_for_prompt(
     return _shrink_prompt_summary(summarized, path=path, max_chars=max_chars)
 
 
-def _metric_leaf(key: str) -> str:
-    return str(key).rsplit(".", 1)[-1].lower()
-
-
-def _is_pinned_score_leaf(leaf: str, plan_metrics: set[str]) -> bool:
-    if leaf in _COMPAT_SCORE_LEAVES or "accuracy" in leaf:
-        return True
-    return leaf in plan_metrics
-
-
-def _collect_numeric_leaves(metrics: dict[str, Any], *, prefix: str = "") -> dict[str, float | int]:
-    """Walk nested dicts for numeric leaves. Skip lists and skipped blobs. No cap."""
-    found: dict[str, float | int] = {}
-
-    def _walk(key: str, value: Any) -> None:
-        if isinstance(value, bool):
-            return
-        if isinstance(value, (int, float)):
-            if key:
-                found[key] = value
-            return
-        if not isinstance(value, dict):
-            return
-        nested_value = value.get("value")
-        if isinstance(nested_value, (int, float)) and not isinstance(nested_value, bool) and key:
-            found[key] = nested_value
-        for child_key, child in value.items():
-            if child_key in _DISPLAY_SKIP_METRIC_KEYS:
-                continue
-            next_key = f"{key}.{child_key}" if key else str(child_key)
-            _walk(next_key, child)
-
-    _walk(prefix, metrics)
-    return found
-
-
 def compact_metrics_for_manager(
     metrics: dict[str, Any],
     *,
@@ -597,10 +493,10 @@ def compact_metrics_for_manager(
 
     Display compaction is insertion-order + limit. Resolved plan metrics are
     written under their declared names before the cap so nested endpoints
-    survive noisy payloads.
+    survive noisy payloads. Remaining slots are structural scalars, not a
+    hardcoded score-name hunt.
     """
     names = [str(name).strip() for name in (plan_metrics or []) if str(name).strip()]
-    plan = {name.lower() for name in names}
     out: dict[str, float | int | str] = {}
     for name in names:
         hit = resolve_metric(metrics, name)
@@ -612,18 +508,13 @@ def compact_metrics_for_manager(
                 out[hit.path] = hit.value
         elif hit.status == "ambiguous":
             out[f"{name}_status"] = "ambiguous"
-    pinned: dict[str, float | int | str] = {}
-    for key, value in _collect_numeric_leaves(metrics).items():
-        if _is_pinned_score_leaf(_metric_leaf(key), plan):
-            pinned[key] = value
-    rest = compact_metrics(dict(metrics), limit=max(limit, len(pinned) + limit))
-    for source in (pinned, rest):
-        for key, value in source.items():
-            if key in out:
-                continue
-            if len(out) >= limit:
-                return out
-            out[key] = value
+    rest = compact_metrics(dict(metrics), limit=limit)
+    for key, value in rest.items():
+        if key in out:
+            continue
+        if len(out) >= limit:
+            return out
+        out[key] = value
     return out
 
 
@@ -661,15 +552,9 @@ def harness_failed(metrics: dict[str, Any] | None) -> bool:
     if not metrics:
         return False
     status = _metric_str(metrics, "status").lower()
-    stage = _metric_str(metrics, "failure_stage")
-    acquisition = _metric_str(metrics, "acquisition_status")
     if status in _HARNESS_FAILED_STATUSES:
         return True
-    if stage in _INFRA_STAGES:
-        return True
-    if acquisition in _INFRA_ACQUISITION:
-        return True
-    return False
+    return bool(_metric_str(metrics, "failure_stage"))
 
 
 def failure_fingerprint(metrics: dict[str, Any] | None) -> str:
@@ -971,14 +856,14 @@ def validate_smoke_live_path(metrics: dict[str, Any] | None) -> MetricsContractR
 
 
 def sanitize_diagnostic_payload(value: Any, *, depth: int = 0) -> Any:
-    """Drop protected/raw payload fields from a diagnostic JSON object."""
+    """Copy a diagnostic sidecar: omit object lists, clip long strings, keep scalars."""
     if depth > 8:
+        return None
+    if _is_object_list(value):
         return None
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, child in value.items():
-            if str(key).lower() in _UNSAFE_DIAGNOSTIC_KEYS:
-                continue
             sanitized = sanitize_diagnostic_payload(child, depth=depth + 1)
             if sanitized is not None:
                 cleaned[str(key)] = sanitized
@@ -989,8 +874,8 @@ def sanitize_diagnostic_payload(value: Any, *, depth: int = 0) -> Any:
             for item in (sanitize_diagnostic_payload(child, depth=depth + 1) for child in value[:40])
             if item is not None
         ][:20]
-    if isinstance(value, str) and len(value) > 400:
-        return value[:399] + "…"
+    if isinstance(value, str):
+        return _clip_text(value, _MAX_DIAGNOSTIC_STRING)
     return value
 
 
@@ -1013,16 +898,15 @@ def metric_number(metrics: dict[str, Any], name: str) -> float | int | None:
     return hit.value
 
 
-def score_number(metrics: dict[str, Any]) -> float | None:
-    """Primary score used to pair subset runs (accuracy, then correct/n)."""
-    for leaf in _COMPAT_SCORE_LEAVES:
-        value = metric_number(metrics, leaf)
+def score_number(
+    metrics: dict[str, Any],
+    plan_metrics: list[str] | None = None,
+) -> float | None:
+    """First resolved committed plan metric on this row."""
+    for name in plan_metrics or []:
+        value = metric_number(metrics, name)
         if value is not None:
             return float(value)
-    correct = metric_number(metrics, "correct")
-    denominator = metric_number(metrics, "denominator")
-    if correct is not None and denominator not in {None, 0}:
-        return float(correct) / float(denominator)
     return None
 
 
@@ -1137,16 +1021,25 @@ def overlay_paired_metrics(
         if blocked or not missing:
             overlaid.append(item)
             continue
-        proposed_score = score_number(item.metrics)
-        peer_scores: list[float] = []
-        for peer in _peer_variants(item, variants, baseline_names):
-            peer_score = score_number(peer.metrics)
-            if peer_score is not None:
-                peer_scores.append(peer_score)
-        if proposed_score is None or not peer_scores:
+        peers = _peer_variants(item, variants, baseline_names)
+        score_name = None
+        for name in metric_names:
+            if name in missing:
+                continue
+            if metric_number(item.metrics, name) is None:
+                continue
+            if all(metric_number(peer.metrics, name) is not None for peer in peers):
+                score_name = name
+                break
+        if score_name is None:
             overlaid.append(item)
             continue
-        deltas = [proposed_score - score for score in peer_scores]
+        proposed_score = score_number(item.metrics, [score_name])
+        peer_scores = [score_number(peer.metrics, [score_name]) for peer in peers]
+        if proposed_score is None or any(score is None for score in peer_scores) or not peer_scores:
+            overlaid.append(item)
+            continue
+        deltas = [proposed_score - float(score) for score in peer_scores if score is not None]
         if len(set(deltas)) != 1:
             overlaid.append(item)
             continue
@@ -1155,28 +1048,6 @@ def overlay_paired_metrics(
             metrics = _write_pair_metric(metrics, metric, deltas[0])
         overlaid.append(item.model_copy(update={"metrics": metrics}))
     return overlaid
-
-
-def _split_proposed_baselines(
-    variants: list[VariantResult],
-    metric_names: list[str],
-    *,
-    baselines: list[str] | None = None,
-) -> tuple[VariantResult | None, list[VariantResult]]:
-    names = [item.name for item in variants]
-    proposed_name = infer_proposed_name(names, metric_names=metric_names, baselines=baselines)
-    if proposed_name is None:
-        return None, []
-    proposed = next((item for item in variants if item.name == proposed_name), None)
-    baseline_names = infer_baseline_variant_names(names, baselines=baselines)
-    peers = [
-        item
-        for item in variants
-        if item.name in baseline_names and item.name != proposed_name
-    ]
-    if not peers:
-        peers = [item for item in variants if item.name != proposed_name]
-    return proposed, peers
 
 
 def metric_diagnostics(

@@ -5,12 +5,14 @@ from __future__ import annotations
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     compact_metrics,
     compact_metrics_for_manager,
+    harness_failed,
     item_failure_rate,
     materialize_handoff_metrics,
     metric_number,
     primary_metric_unresolved,
     resolve_metric,
     run_sanity,
+    sanitize_diagnostic_payload,
     score_number,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
@@ -122,8 +124,54 @@ def test_manager_compact_pins_declared_name():
     assert pinned["macro_f1"] == 0.91
 
 
-def test_score_number_reads_nested_accuracy():
-    assert score_number({"evaluation": {"accuracy": 0.6}}) == 0.6
+def test_manager_compact_surfaces_custom_primary():
+    payload = {f"aux_{index}": index for index in range(30)}
+    payload["metrics"] = {"weird_custom_score": 0.42}
+    pinned = compact_metrics_for_manager(
+        payload, plan_metrics=["weird_custom_score"], limit=20
+    )
+    assert pinned["weird_custom_score"] == 0.42
+
+
+def test_compact_skips_unknown_object_lists():
+    payload = {
+        "accuracy": 0.9,
+        "observations": [
+            {"id": "a", "prompt": "long prompt text"},
+            {"id": "b", "prompt": "another prompt"},
+        ],
+    }
+    compact = compact_metrics(payload)
+    assert compact["accuracy"] == 0.9
+    dumped = str(compact)
+    assert "long prompt text" not in dumped
+    assert not any("observations" in str(key) for key in compact)
+
+
+def test_score_number_reads_nested_plan_metric():
+    assert score_number({"evaluation": {"accuracy": 0.6}}, ["accuracy"]) == 0.6
+    assert score_number({"evaluation": {"accuracy": 0.6}}) is None
+
+
+def test_sanitize_drops_object_lists_keeps_short_scalars():
+    payload = {
+        "answer": "42",
+        "user_prompt": [{"role": "user", "content": "secret item text"}],
+        "gold_label": [{"id": 1, "text": "gold"}],
+        "detail": "x" * 500,
+    }
+    cleaned = sanitize_diagnostic_payload(payload)
+    assert cleaned["answer"] == "42"
+    assert "user_prompt" not in cleaned
+    assert "gold_label" not in cleaned
+    assert cleaned["detail"].endswith("…")
+    assert len(cleaned["detail"]) == 400
+
+
+def test_harness_failed_on_status_or_any_stage():
+    assert harness_failed({"status": "failed"})
+    assert harness_failed({"status": "completed", "failure_stage": "gpu_init"})
+    assert not harness_failed({"status": "completed", "accuracy": 0.8})
 
 
 def test_reporting_uses_resolved_plan_metrics():
