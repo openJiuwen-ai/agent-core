@@ -95,6 +95,12 @@ boundary. Do not introduce Round aliases for these concepts.
 15. Public event cursors provide idempotent `aclose()` so early consumer exit
     releases the single-consumer lease. Wire events use the official codec and
     preserve unknown event types.
+16. `ModelRequestEvent` is gated by `HostCapability.MODEL_REQUEST_OBSERVATION`.
+    A provider reports every model request once, before the items it caused
+    (which cite its `request_id` in `causation_ids`) and before the terminal
+    turn event; an unobservable request is still reported from its reply with
+    `input_observed=False`. Input `message_id` values stay stable while the
+    message remains in the conversation.
 
 ## Compatibility
 

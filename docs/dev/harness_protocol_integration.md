@@ -235,6 +235,7 @@ message/turn ID 在 agent + host session 内唯一，item/call ID 在 Turn 内�
 | `OutputEvent` | 稳定 block ID/index，TEXT/STRUCTURED 表示，ANSWER/REASONING/SYSTEM channel，DELTA/SNAPSHOT/FINAL operation |
 | `ItemLifecycleEvent` | `item_type="step"` 表示 Agent Loop 控制循环；tool、command、subagent 等是普通 provider item |
 | `UsageUpdatedEvent` | 标准化 token usage |
+| `ModelRequestEvent` | 一次物理模型请求：请求消息、回复与本次 usage；仅当宿主声明 `MODEL_REQUEST_OBSERVATION` 时发出，先于其引发的 item 与 terminal |
 | `StateChangedEvent` | Harness state 转换 |
 | `TurnLifecycleEvent` | Turn start、pause/resume 和唯一 terminal |
 | `HookObservedEvent` | hook 执行观测，不参与授权 |

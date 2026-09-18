@@ -1,0 +1,656 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
+"""Observe the model requests of one Claude Code session.
+
+The Claude Agent SDK message stream carries each assistant reply, but not the
+request that produced it: the system prompt, the conversation actually sent
+and the tools offered live only inside the CLI. Claude Code logs both sides of
+every Messages API call as ``api_request_body`` / ``api_response_body`` OTLP
+log events; :class:`ClaudeRequestObserver` points that export at the
+process-wide loopback receiver, pairs each assembled response with the SDK
+assistant message of the same ``msg_`` id and with the request that produced
+it, and reports the pair as one ``ModelRequestEvent``.
+
+Tool items a reply caused are held back until that reply's request event is
+out, so the observation stream stays in causal order. A request whose logs do
+not arrive in time is still reported, built from the SDK message alone with
+``input_observed=False``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+import json
+import shutil
+import tempfile
+import time
+import uuid
+from collections import deque
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from openjiuwen.harness_protocol import (
+    ContentBlock,
+    ItemEventKind,
+    ItemLifecycleEvent,
+    MessageRole,
+    ModelRequestEvent,
+    ModelRequestStatus,
+    TurnError,
+    TurnMessage,
+    TurnUsage,
+    json_value_to_builtin,
+)
+from openjiuwen.harness_providers.base import logger
+from openjiuwen.harness_providers.claudecode.mapping import ClaudeTurnAccumulator, MappedClaudeEvent, claude_turn_usage
+from openjiuwen.harness_providers.claudecode.options import claude_request_log_env
+from openjiuwen.harness_providers.jsonsafe import to_json_safe
+from openjiuwen.harness_providers.telemetry.otlp_receiver import OTEL_RESOURCE_SOURCE_ID, get_shared_otlp_receiver
+
+EmitFn = Callable[[Any, str | None, tuple[str, ...], float | None], Awaitable[None]]
+
+_REQUEST_BODY_EVENT = "claude_code.api_request_body"
+_RESPONSE_BODY_EVENT = "claude_code.api_response_body"
+_BODY_EVENTS = frozenset({_REQUEST_BODY_EVENT, _RESPONSE_BODY_EVENT})
+_MODEL_PROVIDER = "anthropic"
+_DATA_NAMESPACE = "claude-code"
+_DRAIN_INTERVAL_S = 0.25
+_DEFAULT_WAIT_S = 5.0
+_OMITTED_KEYS = frozenset({"cache_control"})
+
+
+@dataclass
+class _BodyEvent:
+    """One raw API body log event, read from disk on demand."""
+
+    name: str
+    time_ns: int
+    attributes: dict[str, Any]
+    parsed: Any = None
+    loaded: bool = False
+
+
+@dataclass
+class _ReplySnapshot:
+    """What the SDK stream showed of one top-level assistant reply."""
+
+    message_id: str
+    started_at: float
+    ended_at: float
+    deadline: float
+    model: str | None = None
+    usage: TurnUsage | None = None
+    blocks: list[ContentBlock] = field(default_factory=list)
+    error: TurnError | None = None
+    emitted: bool = False
+
+
+@dataclass
+class _HeldItem:
+    """A tool item waiting for the request event of the reply that caused it."""
+
+    payload: ItemLifecycleEvent
+    item_id: str | None
+    owner: str | None
+    observed_at: float
+
+
+class ClaudeRequestObserver:
+    """Report each model request of a Claude Code session as a protocol event.
+
+    Args:
+        sdk: The loaded ``claude_agent_sdk`` module.
+        wait_s: How long a reply waits for its request logs before it is
+            reported from the SDK message alone.
+    """
+
+    def __init__(self, *, sdk: Any, wait_s: float = _DEFAULT_WAIT_S) -> None:
+        self._sdk = sdk
+        self._wait_s = wait_s
+        self._source_id = uuid.uuid4().hex
+        self._subscriber_id: int | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._body_dir: Path | None = None
+        self._incoming: list[_BodyEvent] = []
+        self._changed = asyncio.Event()
+        self._lock = asyncio.Lock()
+        self._requests: list[_BodyEvent] = []
+        self._responses: dict[str, tuple[_BodyEvent, dict[str, Any]]] = {}
+        self._output_ids_by_identity: dict[str, str] = {}
+        self._last_output_identity = ""
+        self._emit: EmitFn | None = None
+        self._drain_task: asyncio.Task[None] | None = None
+        self._reset_turn()
+
+    @property
+    def logs_attached(self) -> bool:
+        """Return whether request logs are being received for this session."""
+        return self._subscriber_id is not None
+
+    # ------------------------------------------------------------------
+    # Session lifecycle
+    # ------------------------------------------------------------------
+
+    async def attach(self, *, resource_attributes: str = "") -> dict[str, str]:
+        """Start receiving this session's request logs.
+
+        Args:
+            resource_attributes: ``OTEL_RESOURCE_ATTRIBUTES`` the CLI process
+                would otherwise carry.
+
+        Returns:
+            Env the CLI subprocess needs to export its request logs; empty
+            when the loopback receiver is unavailable, in which case requests
+            are reported from the SDK stream alone.
+        """
+        receiver = get_shared_otlp_receiver()
+        subscriber_id = await receiver.subscribe(self._on_receiver_event)
+        endpoint = receiver.grpc_endpoint
+        if subscriber_id is None or not endpoint:
+            if subscriber_id is not None:
+                receiver.unsubscribe(subscriber_id)
+            logger.info("[claude-code] model request logs unavailable; reporting requests from the SDK stream")
+            return {}
+        self._subscriber_id = subscriber_id
+        self._loop = asyncio.get_running_loop()
+        self._body_dir = Path(tempfile.mkdtemp(prefix="openjiuwen-claude-bodies-"))
+        return claude_request_log_env(
+            endpoint=endpoint,
+            body_dir=str(self._body_dir),
+            source_id=self._source_id,
+            resource_attributes=resource_attributes,
+        )
+
+    async def close(self) -> None:
+        """Stop receiving request logs and remove the body directory."""
+        await self._stop_drain()
+        subscriber_id = self._subscriber_id
+        self._subscriber_id = None
+        if subscriber_id is not None:
+            get_shared_otlp_receiver().unsubscribe(subscriber_id)
+        body_dir = self._body_dir
+        self._body_dir = None
+        if body_dir is not None:
+            await asyncio.to_thread(shutil.rmtree, body_dir, True)
+
+    # ------------------------------------------------------------------
+    # Turn lifecycle
+    # ------------------------------------------------------------------
+
+    def begin_turn(self, emit: EmitFn) -> None:
+        """Start observing a turn whose events go out through ``emit``."""
+        self._reset_turn()
+        self._emit = emit
+        if self.logs_attached:
+            self._drain_task = asyncio.create_task(self._drain(), name="claude_request_observer_drain")
+
+    async def observe(self, message: Any, mapped: list[MappedClaudeEvent], accumulator: ClaudeTurnAccumulator) -> None:
+        """Emit the events one SDK message mapped to, holding tool items as needed.
+
+        Args:
+            message: The SDK message just consumed.
+            mapped: The events the accumulator mapped it to, in order.
+            accumulator: The turn accumulator, whose last message is the
+                normalized form of an assistant ``message``.
+        """
+        now = time.time()
+        self._note_message(message, accumulator, now)
+        async with self._lock:
+            for event in mapped:
+                payload = event.payload
+                if isinstance(payload, ItemLifecycleEvent):
+                    self._held.append(
+                        _HeldItem(payload=payload, item_id=event.item_id, owner=self._item_owner(event), observed_at=now)
+                    )
+                else:
+                    await self._emit_event(payload, event.item_id, (), None)
+            await self._flush(force=False)
+
+    async def end_turn(self, *, wait: bool) -> None:
+        """Report everything the turn still owes before its terminal event.
+
+        Args:
+            wait: Give outstanding replies until their deadline for request
+                logs; ``False`` (an aborted or failed turn) reports at once.
+        """
+        await self._stop_drain()
+        if wait and self.logs_attached:
+            while True:
+                async with self._lock:
+                    await self._flush(force=False)
+                    outstanding = [snapshot for snapshot in self._replies.values() if not snapshot.emitted]
+                if not outstanding or time.time() >= max(snapshot.deadline for snapshot in outstanding):
+                    break
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._changed.wait(), timeout=_DRAIN_INTERVAL_S)
+                self._changed.clear()
+        async with self._lock:
+            await self._flush(force=True)
+            await asyncio.to_thread(self._discard_bodies, self._requests)
+            self._requests = []
+            self._responses.clear()
+        self._emit = None
+
+    # ------------------------------------------------------------------
+    # SDK stream
+    # ------------------------------------------------------------------
+
+    def _reset_turn(self) -> None:
+        self._replies: dict[str, _ReplySnapshot] = {}
+        self._order: list[str] = []
+        self._emitted_count = 0
+        self._held: deque[_HeldItem] = deque()
+        self._call_owners: dict[str, str | None] = {}
+        self._current_owner: str | None = None
+        self._next_started_at: float | None = None
+
+    def _note_message(self, message: Any, accumulator: ClaudeTurnAccumulator, now: float) -> None:
+        if getattr(message, "parent_tool_use_id", None):
+            return
+        event = getattr(message, "event", None)
+        if isinstance(event, Mapping):
+            if event.get("type") == "message_start" and self._next_started_at is None:
+                self._next_started_at = now
+            return
+        if not isinstance(message, self._sdk.AssistantMessage) or not accumulator.messages:
+            return
+        normalized = accumulator.messages[-1]
+        message_id = normalized.message_id
+        snapshot = self._replies.get(message_id)
+        if snapshot is None:
+            started_at = self._next_started_at if self._next_started_at is not None else now
+            snapshot = _ReplySnapshot(message_id=message_id, started_at=started_at, ended_at=now, deadline=now)
+            self._replies[message_id] = snapshot
+            self._order.append(message_id)
+            self._next_started_at = None
+        snapshot.blocks.extend(normalized.content)
+        snapshot.ended_at = now
+        snapshot.model = str(getattr(message, "model", "") or "") or snapshot.model
+        snapshot.usage = claude_turn_usage(getattr(message, "usage", None)) or snapshot.usage
+        if getattr(message, "error", None):
+            snapshot.error = accumulator.pending_error or TurnError(message=str(message.error))
+        waits = self.logs_attached and snapshot.error is None
+        snapshot.deadline = now + self._wait_s if waits else now
+        self._current_owner = message_id
+
+    def _item_owner(self, event: MappedClaudeEvent) -> str | None:
+        payload = event.payload
+        item_id = event.item_id or ""
+        if payload.kind is ItemEventKind.STARTED:
+            data = json_value_to_builtin(payload.data)
+            nested = isinstance(data, dict) and bool(data.get("parent_tool_use_id"))
+            owner = None if nested else self._current_owner
+            self._call_owners[item_id] = owner
+            return owner
+        return self._call_owners.get(item_id)
+
+    # ------------------------------------------------------------------
+    # Ordered emission
+    # ------------------------------------------------------------------
+
+    async def _drain(self) -> None:
+        while True:
+            with contextlib.suppress(asyncio.TimeoutError):
+                await asyncio.wait_for(self._changed.wait(), timeout=_DRAIN_INTERVAL_S)
+            self._changed.clear()
+            try:
+                async with self._lock:
+                    await self._flush(force=False)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug("[claude-code] model request observation flush failed", exc_info=True)
+
+    async def _stop_drain(self) -> None:
+        task = self._drain_task
+        self._drain_task = None
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    async def _flush(self, *, force: bool) -> None:
+        """Emit ready request events in reply order, releasing the items they caused."""
+        await self._absorb_bodies()
+        await self._release_items()
+        while self._emitted_count < len(self._order):
+            snapshot = self._replies[self._order[self._emitted_count]]
+            ready = snapshot.message_id in self._responses
+            if not ready and not force and time.time() < snapshot.deadline:
+                return
+            event = await self._native_request(snapshot) if ready else self._stream_request(snapshot)
+            await self._emit_event(event, None, (), None)
+            snapshot.emitted = True
+            self._emitted_count += 1
+            await self._release_items()
+        if force:
+            await self._release_items(force=True)
+
+    async def _release_items(self, *, force: bool = False) -> None:
+        while self._held:
+            head = self._held[0]
+            owner = self._replies.get(head.owner) if head.owner else None
+            if owner is not None and not owner.emitted and not force:
+                return
+            self._held.popleft()
+            causes = (head.owner,) if owner is not None and owner.emitted else ()
+            await self._emit_event(head.payload, head.item_id, causes, head.observed_at)
+
+    async def _emit_event(
+        self,
+        payload: Any,
+        item_id: str | None,
+        causation_ids: tuple[str, ...],
+        timestamp: float | None,
+    ) -> None:
+        emit = self._emit
+        if emit is None:
+            return
+        await emit(payload, item_id, causation_ids, timestamp)
+
+    # ------------------------------------------------------------------
+    # Request logs
+    # ------------------------------------------------------------------
+
+    def _on_receiver_event(self, event: dict[str, Any]) -> None:
+        """Accept one receiver event; runs on the receiver's thread or loop."""
+        if event.get("signal") != "log" or event.get("name") not in _BODY_EVENTS:
+            return
+        resource = event.get("resource_attributes")
+        if not isinstance(resource, dict) or resource.get(OTEL_RESOURCE_SOURCE_ID) != self._source_id:
+            return
+        attributes = event.get("attributes")
+        body_event = _BodyEvent(
+            name=str(event["name"]),
+            time_ns=int(event.get("time_ns") or time.time_ns()),
+            attributes=dict(attributes) if isinstance(attributes, dict) else {},
+        )
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        loop.call_soon_threadsafe(self._accept_body_event, body_event)
+
+    def _accept_body_event(self, body_event: _BodyEvent) -> None:
+        self._incoming.append(body_event)
+        self._changed.set()
+
+    async def _absorb_bodies(self) -> None:
+        incoming, self._incoming = self._incoming, []
+        for body_event in incoming:
+            if body_event.name == _REQUEST_BODY_EVENT:
+                self._requests.append(body_event)
+                continue
+            response = await self._load_body(body_event, keep_file=False)
+            message_id = response.get("id") if isinstance(response, dict) else None
+            if isinstance(message_id, str) and message_id:
+                self._responses[message_id] = (body_event, response)
+
+    async def _load_body(self, body_event: _BodyEvent, *, keep_file: bool) -> Any:
+        if body_event.loaded:
+            return body_event.parsed
+        body_event.loaded = True
+        inline = body_event.attributes.get("body")
+        text: str | None = inline if isinstance(inline, str) and inline else None
+        path = self._body_path(body_event)
+        if text is None and path is not None:
+            text = await asyncio.to_thread(_read_text, path)
+        if path is not None and not keep_file:
+            await asyncio.to_thread(_unlink, path)
+        if text is None:
+            return None
+        try:
+            body_event.parsed = json.loads(text)
+        except ValueError:
+            logger.debug("[claude-code] unparseable {} body", body_event.name)
+        return body_event.parsed
+
+    def _body_path(self, body_event: _BodyEvent) -> Path | None:
+        body_dir = self._body_dir
+        reference = body_event.attributes.get("body_ref")
+        if body_dir is None or not isinstance(reference, str) or not reference:
+            return None
+        candidate = Path(reference)
+        path = candidate if candidate.is_absolute() else body_dir / candidate
+        try:
+            path.resolve().relative_to(body_dir.resolve())
+        except ValueError:
+            # A body reference outside the directory this session owns is
+            # never read or deleted.
+            return None
+        return path
+
+    def _discard_bodies(self, body_events: list[_BodyEvent]) -> None:
+        for body_event in body_events:
+            path = self._body_path(body_event)
+            if path is not None:
+                _unlink(path)
+
+    async def _pick_request(self, response_event: _BodyEvent) -> _BodyEvent | None:
+        """Return the request log that produced a main-conversation reply.
+
+        Requests from sub-agents and side queries interleave with the main
+        conversation. A main-conversation request states the previous
+        main-conversation reply in its history, which rules the others out.
+        """
+        candidates = sorted(
+            (item for item in self._requests if item.time_ns <= response_event.time_ns),
+            key=lambda item: item.time_ns,
+            reverse=True,
+        )
+        chosen: _BodyEvent | None = None
+        for candidate in candidates:
+            request = await self._load_body(candidate, keep_file=True)
+            if not isinstance(request, dict) or not isinstance(request.get("messages"), list):
+                continue
+            if self._last_output_identity and self._last_output_identity not in _assistant_identities(request):
+                continue
+            chosen = candidate
+            break
+        if chosen is None:
+            return None
+        consumed = [item for item in self._requests if item.time_ns <= chosen.time_ns]
+        self._requests = [item for item in self._requests if item.time_ns > chosen.time_ns]
+        await asyncio.to_thread(self._discard_bodies, consumed)
+        return chosen
+
+    async def _native_request(self, snapshot: _ReplySnapshot) -> ModelRequestEvent:
+        response_event, response = self._responses.pop(snapshot.message_id)
+        request_event = await self._pick_request(response_event)
+        request = request_event.parsed if request_event is not None else None
+        input_messages: tuple[TurnMessage, ...] = ()
+        system_instructions: tuple[ContentBlock, ...] = ()
+        tool_definitions: Any = None
+        if isinstance(request, dict):
+            input_messages = tuple(self._conversation(request.get("messages")))
+            system_instructions = tuple(_system_blocks(request.get("system")))
+            tools = request.get("tools")
+            tool_definitions = _sanitize(tools) if isinstance(tools, list) else None
+        output = _message(snapshot.message_id, MessageRole.ASSISTANT, response.get("content"))
+        identity = _identity("assistant", response.get("content"))
+        self._output_ids_by_identity[identity] = snapshot.message_id
+        self._last_output_identity = identity
+        started_at = request_event.time_ns / 1e9 if request_event is not None else snapshot.started_at
+        ended_at = max(response_event.time_ns / 1e9, started_at)
+        stop_reason = response.get("stop_reason")
+        return ModelRequestEvent(
+            request_id=snapshot.message_id,
+            status=ModelRequestStatus.COMPLETED,
+            started_at=started_at,
+            ended_at=ended_at,
+            model=str(response.get("model") or snapshot.model or "") or None,
+            provider_name=_MODEL_PROVIDER,
+            system_instructions=system_instructions,
+            input_messages=input_messages,
+            input_observed=request_event is not None,
+            output_message=output,
+            tool_definitions=tool_definitions,
+            usage=claude_turn_usage(response.get("usage")) or snapshot.usage,
+            data={
+                _DATA_NAMESPACE: {
+                    "observation": "api_bodies",
+                    "stop_reason": stop_reason if isinstance(stop_reason, str) else None,
+                },
+            },
+        )
+
+    def _stream_request(self, snapshot: _ReplySnapshot) -> ModelRequestEvent:
+        failed = snapshot.error is not None
+        return ModelRequestEvent(
+            request_id=snapshot.message_id,
+            status=ModelRequestStatus.FAILED if failed else ModelRequestStatus.COMPLETED,
+            started_at=snapshot.started_at,
+            ended_at=max(snapshot.ended_at, snapshot.started_at),
+            model=snapshot.model or None,
+            provider_name=_MODEL_PROVIDER,
+            output_message=TurnMessage(
+                message_id=snapshot.message_id,
+                role=MessageRole.ASSISTANT,
+                content=tuple(snapshot.blocks),
+            ),
+            usage=snapshot.usage,
+            error=snapshot.error,
+            data={_DATA_NAMESPACE: {"observation": "sdk_stream"}},
+        )
+
+    def _conversation(self, messages: Any) -> list[TurnMessage]:
+        result: list[TurnMessage] = []
+        if not isinstance(messages, list):
+            return result
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role") or "user")
+            content = message.get("content")
+            identity = _identity(role, content)
+            message_id = self._output_ids_by_identity.get(identity) or f"claude-context:{identity}"
+            message_role = MessageRole.ASSISTANT if role == "assistant" else MessageRole.USER
+            result.append(_message(message_id, message_role, content))
+        return result
+
+
+def _content_list(content: Any) -> list[Any]:
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    if isinstance(content, list):
+        return content
+    return []
+
+
+def _message(message_id: str, role: MessageRole, content: Any) -> TurnMessage:
+    blocks = [
+        _content_block(f"{message_id}:{index}", block)
+        for index, block in enumerate(_content_list(content))
+        if isinstance(block, dict)
+    ]
+    return TurnMessage(message_id=message_id, role=role, content=tuple(block for block in blocks if block is not None))
+
+
+def _content_block(block_id: str, block: dict[str, Any]) -> ContentBlock | None:
+    block_type = str(block.get("type") or "unknown")
+    if block_type == "text":
+        return ContentBlock(block_id=block_id, kind="text", content=str(block.get("text") or ""))
+    if block_type == "thinking":
+        return ContentBlock(block_id=block_id, kind="reasoning", content=str(block.get("thinking") or ""))
+    if block_type == "redacted_thinking":
+        return None
+    if block_type in ("tool_use", "server_tool_use", "mcp_tool_use"):
+        return ContentBlock(
+            block_id=block_id,
+            kind="tool_call",
+            content={"name": str(block.get("name") or ""), "arguments": to_json_safe(block.get("input"))},
+            data={"call_id": str(block.get("id") or "")},
+        )
+    if block_type.endswith("tool_result"):
+        return ContentBlock(
+            block_id=block_id,
+            kind="tool_result",
+            content=_tool_result_content(block.get("content")),
+            data={"call_id": str(block.get("tool_use_id") or ""), "is_error": bool(block.get("is_error"))},
+        )
+    return ContentBlock(block_id=block_id, kind=block_type, content=_sanitize(block))
+
+
+def _tool_result_content(content: Any) -> Any:
+    if isinstance(content, list) and all(isinstance(item, dict) and item.get("type") == "text" for item in content):
+        return "\n".join(str(item.get("text") or "") for item in content)
+    return _sanitize(content)
+
+
+def _system_blocks(system: Any) -> list[ContentBlock]:
+    return [
+        ContentBlock(block_id=f"claude-system:{index}", kind="text", content=str(block.get("text") or ""))
+        for index, block in enumerate(_content_list(system))
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+
+
+def _sanitize(value: Any) -> Any:
+    """Drop request-shaping keys and inline binary data from a body fragment."""
+    if isinstance(value, dict):
+        source = value.get("source")
+        result = {key: _sanitize(item) for key, item in value.items() if key not in _OMITTED_KEYS}
+        if isinstance(source, dict) and source.get("type") == "base64":
+            data = source.get("data")
+            size = len(data) if isinstance(data, str) else 0
+            result["source"] = {**result["source"], "data": f"<{size} base64 characters omitted>"}
+        return result
+    if isinstance(value, list):
+        return [_sanitize(item) for item in value]
+    return to_json_safe(value)
+
+
+def _identity(role: str, content: Any) -> str:
+    """Return a content identity of a message that survives cache-marker moves.
+
+    Claude Code moves ``cache_control`` markers between requests and may
+    re-serialize blocks, so only the facts that identify a block count.
+    """
+    facts: list[Any] = [role]
+    for block in _content_list(content):
+        if not isinstance(block, dict):
+            continue
+        block_type = block.get("type")
+        if block_type == "text":
+            facts.append(["text", block.get("text")])
+        elif block_type == "thinking":
+            facts.append(["thinking", block.get("thinking")])
+        elif block_type in ("tool_use", "server_tool_use", "mcp_tool_use"):
+            facts.append(["tool_use", block.get("id")])
+        elif isinstance(block_type, str) and block_type.endswith("tool_result"):
+            facts.append(["tool_result", block.get("tool_use_id"), _tool_result_content(block.get("content"))])
+        elif block_type != "redacted_thinking":
+            facts.append(_sanitize(block))
+    encoded = json.dumps(facts, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:32]
+
+
+def _assistant_identities(request: dict[str, Any]) -> set[str]:
+    messages = request.get("messages")
+    if not isinstance(messages, list):
+        return set()
+    return {
+        _identity("assistant", message.get("content"))
+        for message in messages
+        if isinstance(message, dict) and message.get("role") == "assistant"
+    }
+
+
+def _read_text(path: Path) -> str | None:
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _unlink(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+__all__ = ["ClaudeRequestObserver", "EmitFn"]

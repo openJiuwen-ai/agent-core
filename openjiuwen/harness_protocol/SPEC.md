@@ -98,6 +98,10 @@ provider `provider_session_id`、`turn_id`、`item_id`、`correlation_id` 和 `c
 - `ItemLifecycleEvent`：`item_type="step"` 表示一次 Agent Loop 控制循环；工具调用、命令、文件变更、
   子 Agent 等使用各自 item type，仅作为 provider item 观测；
 - `UsageUpdatedEvent`：标准化 token usage，显式区分 DELTA/CUMULATIVE；
+- `ModelRequestEvent`：一次物理模型请求（请求消息、system instructions、工具定义、回复、本次 usage），
+  仅在宿主声明 `HostCapability.MODEL_REQUEST_OBSERVATION` 时发出；同一 Turn 内先于它引发的 item 与
+  terminal event，被引发的 item 在 `causation_ids` 中列出其 `request_id`；无法观测请求本身时仍须
+  以回复侧降级发出（`input_observed=False`），`input_messages` 的 `message_id` 在消息留在对话中时稳定；
 - `StateChangedEvent` 和 `TurnLifecycleEvent`；
 - `HookObservedEvent` 和 `DiagnosticEvent`；
 - `ProviderEvent`：带 provider、event type、schema version 的 JSON 扩展。

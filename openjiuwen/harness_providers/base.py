@@ -476,16 +476,33 @@ class SerializedTurnHarness(ABC):
         turn: PendingTurn | None = None,
         item_id: str | None = None,
         provider_session_id: str | None = None,
+        causation_ids: tuple[str, ...] = (),
+        timestamp: float | None = None,
     ) -> None:
+        """Put one event on the observation stream.
+
+        Args:
+            payload: The protocol event payload.
+            turn: The turn the event belongs to, when any.
+            item_id: Provider item the event is about, when any.
+            provider_session_id: Override for the envelope provider session.
+            causation_ids: Extra causes beyond the turn's input message, such
+                as the model request that produced a tool item.
+            timestamp: When the event was observed, for an event the provider
+                held back to keep causal order; defaults to now.
+        """
         context = self._context
         buffer = self._event_buffer
         if context is None or buffer is None:
             raise HarnessProtocolError(f"cannot emit a {self.card.name} event outside an active cycle")
         self._sequence += 1
+        causes = ((turn.message_id,) if turn else ()) + tuple(
+            cause for cause in causation_ids if not turn or cause != turn.message_id
+        )
         await buffer.put(
             HarnessEvent(
                 sequence=self._sequence,
-                timestamp=time.time(),
+                timestamp=time.time() if timestamp is None else timestamp,
                 event=payload,
                 host_session_id=context.host_session_id,
                 agent_id=context.agent_id,
@@ -493,7 +510,7 @@ class SerializedTurnHarness(ABC):
                 turn_id=turn.turn_id if turn else None,
                 item_id=item_id,
                 correlation_id=turn.message_id if turn else None,
-                causation_ids=(turn.message_id,) if turn else (),
+                causation_ids=causes,
             )
         )
 

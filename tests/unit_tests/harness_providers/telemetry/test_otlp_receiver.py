@@ -1,7 +1,7 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for the shared loopback OTLP receiver and Codex's filtered handle."""
+"""Tests for the process-wide loopback OTLP receiver shared by harness providers."""
 
 from __future__ import annotations
 
@@ -52,12 +52,12 @@ def _trace_payload() -> bytes:
 @pytest.mark.level0
 def test_decode_spans_keeps_every_native_span():
     pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability.shared_otlp import _decode_spans
+    from openjiuwen.harness_providers.telemetry.otlp_receiver import _decode_spans
 
     events = _decode_spans(_trace_payload())
 
-    # The shared receiver decodes all spans; per-member filtering happens in
-    # each subscriber (e.g. CodexOtelTraceReceiver keeps run_sampling_request).
+    # The shared receiver decodes all spans; filtering is each subscriber's
+    # own concern.
     assert len(events) == 2
     model = next(event for event in events if event["name"] == "run_sampling_request")
     assert model["start_time_ns"] == 1_700_000_000_000_000_000
@@ -74,7 +74,7 @@ def test_decode_spans_keeps_every_native_span():
 @pytest.mark.level0
 def test_gzip_decompression_has_expansion_limit(monkeypatch):
     pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability import shared_otlp
+    from openjiuwen.harness_providers.telemetry import otlp_receiver as shared_otlp
 
     monkeypatch.setattr(shared_otlp, "_MAX_DECOMPRESSED_BYTES", 64)
 
@@ -108,50 +108,15 @@ async def _post(endpoint_url: str, payload: bytes, *, timeout_s: float | None = 
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_codex_handle_filters_logical_model_spans(monkeypatch):
-    pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability.codex.otel_receiver import (
-        CodexOtelTraceReceiver,
-    )
-    from openjiuwen.agent_teams.observability.shared_otlp import get_shared_otlp_receiver
-
-    # Private shared-receiver instance so closing it cannot disable the
-    # process-wide singleton for other tests.
-    shared = get_shared_otlp_receiver().__class__()
-    monkeypatch.setattr(
-        "openjiuwen.agent_teams.observability.shared_otlp._receiver",
-        shared,
-    )
-    received = []
-    receiver = await CodexOtelTraceReceiver.start(received.append)
-    if receiver is None:
-        monkeypatch.undo()
-        pytest.skip("loopback sockets are unavailable in this execution sandbox")
-    try:
-        assert receiver.endpoint == shared.endpoint
-        response = await _post(receiver.endpoint, _trace_payload(), timeout_s=2.0)
-        assert response.startswith(b"HTTP/1.1 200 OK")
-        # Only the logical model span reaches the Codex callback; the noise
-        # span ("auth") is filtered by the per-member handle.
-        assert len(received) == 1
-        assert received[0]["attributes"]["turn_id"] == "turn-1"
-    finally:
-        await receiver.aclose()
-        await shared.aclose()
-        monkeypatch.undo()
-
-
-@pytest.mark.asyncio
-@pytest.mark.level0
 async def test_shared_receiver_fans_out_and_detaches(monkeypatch):
     pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability.shared_otlp import get_shared_otlp_receiver
+    from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
 
     # Use a private receiver instance: the process-wide singleton is shared
     # with other tests, and closing it here would disable it for them.
     shared = get_shared_otlp_receiver().__class__()
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.observability.shared_otlp._receiver",
+        "openjiuwen.harness_providers.telemetry.otlp_receiver._receiver",
         shared,
     )
     received_a: list[dict] = []
@@ -183,8 +148,8 @@ async def test_shared_receiver_fans_out_and_detaches(monkeypatch):
 @pytest.mark.level0
 async def test_loopback_receiver_times_out_incomplete_request(monkeypatch):
     pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability import shared_otlp
-    from openjiuwen.agent_teams.observability.shared_otlp import get_shared_otlp_receiver
+    from openjiuwen.harness_providers.telemetry import otlp_receiver as shared_otlp
+    from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
 
     monkeypatch.setattr(shared_otlp, "_REQUEST_READ_TIMEOUT_S", 0.01)
     shared = get_shared_otlp_receiver()
@@ -243,12 +208,12 @@ async def test_grpc_listener_serves_traces_and_logs(monkeypatch):
     )
     from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 
-    from openjiuwen.agent_teams.observability.shared_otlp import get_shared_otlp_receiver
+    from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
 
     # Private instance so closing it cannot disable the process-wide singleton.
     shared = get_shared_otlp_receiver().__class__()
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.observability.shared_otlp._receiver",
+        "openjiuwen.harness_providers.telemetry.otlp_receiver._receiver",
         shared,
     )
     received: list[dict] = []
@@ -324,10 +289,10 @@ async def test_grpc_listener_serves_traces_and_logs(monkeypatch):
 @pytest.mark.level0
 async def test_receiver_close_cancels_stalled_handlers(monkeypatch):
     pytest.importorskip("opentelemetry.sdk")
-    from openjiuwen.agent_teams.observability.shared_otlp import SharedOtlpReceiver
+    from openjiuwen.harness_providers.telemetry.otlp_receiver import SharedOtlpReceiver
 
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.observability.shared_otlp._receiver",
+        "openjiuwen.harness_providers.telemetry.otlp_receiver._receiver",
         None,
     )
     receiver = SharedOtlpReceiver()

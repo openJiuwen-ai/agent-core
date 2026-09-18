@@ -281,7 +281,7 @@ class ClaudeTurnAccumulator:
 
     @staticmethod
     def _map_result_observations(message: Any) -> list[MappedClaudeEvent]:
-        usage = _turn_usage(getattr(message, "usage", None))
+        usage = claude_turn_usage(getattr(message, "usage", None))
         if usage is None:
             return []
         return [MappedClaudeEvent(UsageUpdatedEvent(usage=usage, mode=UsageUpdateMode.CUMULATIVE))]
@@ -299,7 +299,7 @@ class ClaudeTurnAccumulator:
     ) -> tuple[TurnEventKind, TurnResult]:
         """Build the external terminal result from a Claude ``ResultMessage``."""
 
-        usage = _turn_usage(getattr(result_message, "usage", None))
+        usage = claude_turn_usage(getattr(result_message, "usage", None))
         final_output = getattr(result_message, "result", None)
         if not isinstance(final_output, str) or not final_output:
             final_output = self.last_text_output
@@ -412,7 +412,8 @@ def _non_negative(value: Any) -> int | None:
     return value
 
 
-def _turn_usage(usage: Any) -> TurnUsage | None:
+def claude_turn_usage(usage: Any) -> TurnUsage | None:
+    """Normalize a Claude ``usage`` mapping; ``None`` when it states no counters."""
     if not isinstance(usage, Mapping):
         return None
     input_tokens = _non_negative(usage.get("input_tokens"))
@@ -443,4 +444,4 @@ def _monetary(total_cost_usd: Any) -> MonetaryAmount | None:
     return MonetaryAmount(micros=micros, currency="USD")
 
 
-__all__ = ["ClaudeTurnAccumulator", "MappedClaudeEvent", "PROVIDER_NAME"]
+__all__ = ["ClaudeTurnAccumulator", "MappedClaudeEvent", "PROVIDER_NAME", "claude_turn_usage"]

@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Callable, Mapping
 
 from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
+from openjiuwen.harness_providers.telemetry.otlp_receiver import OTEL_RESOURCE_SOURCE_ID
 
 if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeAgentOptions
@@ -21,6 +22,7 @@ _CLAUDE_ENV_STRIP_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_")
 _ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 _CLAUDE_OTEL_EXPORT_INTERVAL_MS = "1000"
+_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
 
 
 def load_claude_sdk() -> Any:
@@ -99,35 +101,51 @@ def model_settings(
     return json.dumps({"env": flag_env})
 
 
-def claude_otel_env(endpoint: str) -> dict[str, str]:
-    """Build the env pointing Claude Code's own OTel export at ``endpoint``.
+def claude_request_log_env(
+    *,
+    endpoint: str,
+    body_dir: str,
+    source_id: str,
+    resource_attributes: str = "",
+) -> dict[str, str]:
+    """Build the env making Claude Code log each model request to a receiver.
 
-    Claude Code's OTLP exporter only speaks gRPC — with ``http/protobuf`` it
-    silently connects and never sends data (verified against CLI 2.1.206 and
-    2.1.259) — so the protocol is pinned to grpc and ``endpoint`` must be the
-    receiver's gRPC listener. Raw API body log events
-    (``OTEL_LOG_RAW_API_BODIES=1``) carry the full Messages API
-    request/response JSON to that receiver, so the consumer is responsible for
-    redacting content before it lands in a span.
+    Claude Code's raw API body events (``OTEL_LOG_RAW_API_BODIES``) carry the
+    full Messages API request and the assembled response of every model call.
+    ``file:<dir>`` mode writes the bodies untruncated to ``body_dir`` and puts
+    a ``body_ref`` pointer on the event; inline mode truncates at 60 KB, which
+    cuts every long conversation. Claude Code's OTLP exporter only speaks gRPC
+    — with ``http/protobuf`` it silently connects and never sends data — so the
+    protocol is pinned to grpc and ``endpoint`` must be the receiver's gRPC
+    listener.
 
     Args:
-        endpoint: gRPC OTLP endpoint of the receiver collecting the spans.
+        endpoint: gRPC OTLP endpoint of the receiver collecting the events.
+        body_dir: Directory the CLI writes request and response bodies into.
+        source_id: Identity stamped on the resource so a receiver shared by
+            several processes can tell this one apart.
+        resource_attributes: ``OTEL_RESOURCE_ATTRIBUTES`` the process already
+            carries; kept, with any stale source identity replaced.
 
     Returns:
         The env vars enabling the export.
     """
+    kept = [
+        item
+        for item in resource_attributes.split(",")
+        if item and not item.startswith(f"{OTEL_RESOURCE_SOURCE_ID}=")
+    ]
+    kept.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
-        "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
-        "OTEL_TRACES_EXPORTER": "otlp",
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
         # The CLI fails silently on exporter errors, so a short export interval
-        # keeps spans flowing before the turn ends.
-        "OTEL_TRACES_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
+        # keeps events flowing while the turn still runs.
         "OTEL_LOGS_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
-        "OTEL_LOG_RAW_API_BODIES": "1",
+        "OTEL_LOG_RAW_API_BODIES": f"file:{body_dir}",
+        _OTEL_RESOURCE_ATTRIBUTES_ENV: ",".join(kept),
         # The gRPC client honors http_proxy/https_proxy and would route the
         # loopback export through the user's proxy, which may not forward
         # 127.0.0.1 traffic. Exempt loopback instead of clearing the proxy
@@ -135,6 +153,16 @@ def claude_otel_env(endpoint: str) -> dict[str, str]:
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     }
+
+
+def claude_request_log_settings_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return the part of the request-log env that must also win over user settings.
+
+    The CLI applies user settings after the process env, so the resource
+    identity a receiver filters on is injected through ``--settings`` as well.
+    """
+    value = env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV)
+    return {_OTEL_RESOURCE_ATTRIBUTES_ENV: value} if value else {}
 
 
 def mcp_servers_to_sdk(servers: tuple[McpServerConfig, ...]) -> dict[str, Any]:
@@ -172,14 +200,19 @@ def build_claude_options(
     mcp_servers: dict[str, Any],
     can_use_tool: Callable[..., Any] | None,
     stderr: Callable[[str], None] | None,
+    settings_env: Mapping[str, str] = MappingProxyType({}),
 ) -> "ClaudeAgentOptions":
-    """Build ``ClaudeAgentOptions`` for one harness session."""
+    """Build ``ClaudeAgentOptions`` for one harness session.
+
+    ``settings_env`` is merged over ``config.settings_env`` into the
+    ``--settings`` env, for env the harness itself must pin above user settings.
+    """
     if config.system_prompt_mode == "replace" and system_prompt:
         prompt_option: Any = system_prompt
     else:
         prompt_option = {"type": "preset", "append": system_prompt or ""}
     settings = config.settings
-    endpoint_settings = model_settings(model, config.settings_env)
+    endpoint_settings = model_settings(model, {**config.settings_env, **settings_env})
     if endpoint_settings is not None:
         settings = endpoint_settings
     return sdk.ClaudeAgentOptions(
@@ -205,7 +238,8 @@ def build_claude_options(
 
 
 __all__ = [
-    "claude_otel_env",
+    "claude_request_log_env",
+    "claude_request_log_settings_env",
     "build_claude_options",
     "build_claude_session_id",
     "build_process_env",

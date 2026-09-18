@@ -82,9 +82,15 @@ class CodexHarnessConfig:
     client_title: str = "OpenJiuwen Harness"
     experimental_raw_events: bool = True
     event_buffer_capacity: int = 1024
+    # How long a tool item or turn end waits for the rollout record of a model
+    # request before the request is reported from raw events alone.
+    request_observation_wait_s: float = 5.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
+        wait_s = self.request_observation_wait_s
+        if isinstance(wait_s, bool) or not isinstance(wait_s, (int, float)) or wait_s < 0:
+            raise ValueError("Codex request_observation_wait_s must be a non-negative number")
         if self.system_prompt_mode not in ("append", "replace"):
             raise ValueError("system_prompt_mode must be 'append' or 'replace'")
         for name in ("cwd", "codex_bin", "client_name", "client_title"):

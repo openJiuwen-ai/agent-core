@@ -51,6 +51,8 @@ from openjiuwen.harness_protocol import (
     McpServerConfig,
     McpTransport,
     MessageRole,
+    ModelRequestEvent,
+    ModelRequestStatus,
     MonetaryAmount,
     OutputChannel,
     OutputEvent,
@@ -768,6 +770,87 @@ def test_event_json_codec_round_trips_and_preserves_unknown_events() -> None:
     assert isinstance(decoded.event, UnknownEvent)
     assert decoded.event.payload == {"new_field": (1, 2, 3)}
     assert harness_event_to_dict(decoded)["event_type"] == "future_event"
+
+
+def _model_request_event() -> ModelRequestEvent:
+    return ModelRequestEvent(
+        request_id="request-1",
+        status=ModelRequestStatus.COMPLETED,
+        started_at=10.0,
+        ended_at=12.5,
+        model="model-a",
+        provider_name="vendor-a",
+        system_instructions=(ContentBlock(block_id="system-0", kind="text", content="be brief"),),
+        input_messages=(
+            TurnMessage(
+                message_id="user-1",
+                role=MessageRole.USER,
+                content=(ContentBlock(block_id="user-1:0", kind="text", content="list files"),),
+                data={"origin": "external_user"},
+            ),
+        ),
+        input_observed=True,
+        output_message=TurnMessage(
+            message_id="assistant-1",
+            role=MessageRole.ASSISTANT,
+            content=(
+                ContentBlock(block_id="assistant-1:0", kind="reasoning", content="look first"),
+                ContentBlock(
+                    block_id="assistant-1:1",
+                    kind="tool_call",
+                    content={"id": "call-1", "name": "ls", "arguments": {"path": "."}},
+                ),
+            ),
+        ),
+        tool_definitions=[{"name": "ls", "input_schema": {"type": "object"}}],
+        usage=TurnUsage(input_tokens=30, output_tokens=5, cached_input_tokens=10),
+        data={"vendor-a": {"ttft_ms": 120}},
+    )
+
+
+def test_model_request_event_round_trips_and_is_required_retention() -> None:
+    event = HarnessEvent(
+        sequence=3,
+        timestamp=12.5,
+        event=_model_request_event(),
+        host_session_id="team-session-1",
+        agent_id="member-a",
+        turn_id="turn-1",
+    )
+
+    wire = harness_event_to_dict(event)
+    json.dumps(wire)
+
+    assert wire["event_type"] == "model_request"
+    assert harness_event_from_dict(wire) == event
+    assert event_retention(event.event) is EventRetention.REQUIRED
+    assert HostCapability.MODEL_REQUEST_OBSERVATION.value == "model_request_observation"
+
+
+def test_model_request_event_validates_timing_status_and_turn_scope() -> None:
+    with pytest.raises(ValueError, match="must not precede"):
+        ModelRequestEvent(
+            request_id="request-1",
+            status=ModelRequestStatus.COMPLETED,
+            started_at=5.0,
+            ended_at=4.0,
+        )
+    with pytest.raises(ValueError, match="must not contain error"):
+        ModelRequestEvent(
+            request_id="request-1",
+            status=ModelRequestStatus.COMPLETED,
+            started_at=1.0,
+            ended_at=2.0,
+            error=TurnError(message="boom"),
+        )
+    with pytest.raises(ValueError, match="requires turn_id"):
+        HarnessEvent(
+            sequence=1,
+            timestamp=1.0,
+            event=_model_request_event(),
+            host_session_id="team-session-1",
+            agent_id="member-a",
+        )
 
 
 def test_event_scope_time_and_causation_are_validated() -> None:

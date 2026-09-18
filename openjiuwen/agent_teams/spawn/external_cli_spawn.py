@@ -271,11 +271,49 @@ def _bind_protocol_member_team_tools(
         messager=teammate.infra.messager,
         team_name=team_name,
         team_permissions_enabled=spec.enable_permissions,
-        span_bridge=runtime.span_bridge,
     )
     runtime.bind_mcp_servers(
         [McpServerConfig(name=runtime.mcp_server_name, transport=McpTransport.IN_PROCESS, instance=tool_set.server)]
     )
+
+
+def _bind_trajectory_recorder(
+    runtime: Any,
+    *,
+    teammate: "TeamAgent",
+    session_id: str,
+    team_name: str,
+) -> None:
+    """Record the member's protocol event stream under its trajectory lane.
+
+    The recorder files every record under the same execution subject an
+    in-process member uses, so the member gets its own lane. Nothing is bound
+    when observability is not initialized or the member has no session.
+    """
+    if not session_id:
+        return
+    try:
+        from openjiuwen.harness_providers.trajectory import HarnessTrajectoryRecorder
+    except ImportError:
+        return
+    from openjiuwen.extensions.observability.semconv import AT_MEMBER_NAME, AT_TEAM_NAME
+
+    subject = teammate.observability_execution_subject(session_id)
+    try:
+        recorder = HarnessTrajectoryRecorder.create(
+            subject=subject,
+            agent_name=subject.display_name,
+            agent_mode="team",
+            attributes={
+                AT_TEAM_NAME: team_name,
+                AT_MEMBER_NAME: teammate.member_name or subject.display_name,
+                "agentteam.backend": runtime.provider_name,
+            },
+        )
+    except ValueError:
+        team_logger.warning("[external-cli] trajectory disabled for member {}: incomplete subject", subject.subject_id)
+        return
+    runtime.bind_trajectory_recorder(recorder)
 
 
 async def external_cli_spawn(
@@ -462,6 +500,13 @@ async def external_cli_spawn(
     )
     from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
 
+    if isinstance(runtime, ExternalHarnessMemberRuntime):
+        _bind_trajectory_recorder(
+            runtime,
+            teammate=teammate,
+            session_id=session_id or "",
+            team_name=team_name,
+        )
     if isinstance(runtime, ExternalHarnessMemberRuntime) and teammate_backend is not None:
         _bind_protocol_member_team_tools(
             runtime,

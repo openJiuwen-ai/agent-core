@@ -16,9 +16,11 @@ harness_providers/
 ├── skills.py       # Portable bundle copying to CLI project discovery roots; skip/replace conflicts
 ├── inputs.py       # harness_input_text: HarnessInput -> prompt text
 ├── jsonsafe.py     # to_json_safe: vendor objects -> protocol JSON values
+├── trajectory.py   # HarnessTrajectoryRecorder: protocol events -> trajectory spans (host glue, like io_adapter)
+├── telemetry/      # otlp_receiver.py: process-wide loopback OTLP receiver shared by providers
 ├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
-├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier)
-├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier)
+├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier / observation)
+├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier / observation / rollout_trace)
 └── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
 ```
 
@@ -56,10 +58,17 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    network_timeout / process_start_failed / sdk_error / unknown`;
    `provider_data` carries `sdk_error_type` / `http_status`. The team
    reliability layer maps this one-to-one.
-5. **Provider-private seams do not leak.** `CodexHarness(notification_observer=...)`
-   and `ClaudeCodeHarness(transport_factory=...)` are constructor-only hooks for
-   hosts that own SDK objects (observability bridges, ssh transports). They never
-   appear in the public event stream or in JSON provider config.
+5. **Provider-private seams do not leak.** `ClaudeCodeHarness(transport_factory=...)`
+   is the only constructor-only hook, for hosts that own the SDK transport (ssh).
+   Vendor observation channels (Claude request-body logs through the shared
+   loopback receiver, Codex rollout trace and raw response notifications) stay
+   inside the provider: they switch on only when the host declares
+   `MODEL_REQUEST_OBSERVATION` and surface as `ModelRequestEvent`s. Tool items a
+   request caused are held until that request is reported and cite it in
+   `causation_ids`; a request whose vendor record does not arrive within
+   `request_observation_wait_s` is reported from its reply
+   (`input_observed=False`). Hosts record trajectories with
+   `HarnessTrajectoryRecorder`, never by reading vendor data.
 6. **User input is an interaction.** Claude `AskUserQuestion`, Codex
    `request_user_input` (App Server request `item/tool/requestUserInput`,
    parsed from the raw `_approval_handler` params because the SDK has no

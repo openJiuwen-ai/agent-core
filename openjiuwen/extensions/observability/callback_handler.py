@@ -405,6 +405,33 @@ class OtelCallbackHandler:
             source_metadata=(),
         )
 
+    def record_request_input(self, span: Span, messages: Any) -> None:
+        """Record a model request's messages on an inference span.
+
+        Writes the same standard input attributes a framework model call gets
+        (``gen_ai.system_instructions`` / ``gen_ai.input.messages``, message
+        provenance and count), for hosts that observe a request made outside
+        the framework model client, such as a third-party harness.
+
+        Args:
+            span: The recording inference span.
+            messages: Request messages, objects or dicts, system entries first.
+        """
+        normalized = self._normalize_messages(messages)
+        span.set_attribute(OJ_REQUEST_MESSAGE_COUNT, len(normalized))
+        self._record_input_message_provenance(span, normalized)
+        self._record_standard_structured_input(span, normalized)
+
+    def record_response_output(self, span: Span, message: Any) -> None:
+        """Record a model reply on an inference span as ``gen_ai.output.messages``.
+
+        Args:
+            span: The recording inference span.
+            message: The assistant message, an object or a dict carrying
+                ``content`` / ``reasoning_content`` / ``tool_calls``.
+        """
+        self._record_structured_output(span, message)
+
     @staticmethod
     def _get_parent_context_for_llm_tool() -> Any:
         """Resolve parent context for LLM/tool span creation.

@@ -18,6 +18,8 @@ from openjiuwen.harness_protocol.events import (
     HookObservedEvent,
     ItemEventKind,
     ItemLifecycleEvent,
+    ModelRequestEvent,
+    ModelRequestStatus,
     OutputChannel,
     OutputEvent,
     OutputKind,
@@ -111,16 +113,74 @@ def _message_from_dict(data: Mapping[str, object]) -> TurnMessage:
     )
 
 
+def _error_to_dict(error: TurnError) -> dict[str, object]:
+    return {
+        "message": error.message,
+        "code": error.code,
+        "category": error.category,
+        "retryable": error.retryable,
+        "provider_data": _json(error.provider_data),
+    }
+
+
+def _error_from_dict(data: object, field_name: str) -> TurnError:
+    error_object = _mapping(data, field_name)
+    return TurnError(
+        message=_string(error_object, "message"),
+        code=_optional_string(error_object.get("code"), f"{field_name}.code"),
+        category=_optional_string(error_object.get("category"), f"{field_name}.category"),
+        retryable=cast(bool | None, error_object.get("retryable")),
+        provider_data=_json_object(error_object.get("provider_data", {}), f"{field_name}.provider_data"),
+    )
+
+
+def _model_request_to_dict(event: ModelRequestEvent) -> dict[str, object]:
+    return {
+        "request_id": event.request_id,
+        "status": event.status.value,
+        "started_at": event.started_at,
+        "ended_at": event.ended_at,
+        "model": event.model,
+        "provider_name": event.provider_name,
+        "system_instructions": [_block_to_dict(block) for block in event.system_instructions],
+        "input_messages": [_message_to_dict(message) for message in event.input_messages],
+        "input_observed": event.input_observed,
+        "output_message": _message_to_dict(event.output_message) if event.output_message is not None else None,
+        "tool_definitions": _json(event.tool_definitions),
+        "usage": _usage_to_dict(event.usage) if event.usage is not None else None,
+        "error": _error_to_dict(event.error) if event.error is not None else None,
+        "data": _json(event.data),
+    }
+
+
+def _model_request_from_dict(data: Mapping[str, object]) -> ModelRequestEvent:
+    system_data = _list(data.get("system_instructions", []), "model_request.system_instructions")
+    input_data = _list(data.get("input_messages", []), "model_request.input_messages")
+    output_data = data.get("output_message")
+    usage_data = data.get("usage")
+    error_data = data.get("error")
+    return ModelRequestEvent(
+        request_id=_string(data, "request_id"),
+        status=_enum(ModelRequestStatus, data.get("status"), "model_request.status"),
+        started_at=_number(data, "started_at"),
+        ended_at=_number(data, "ended_at"),
+        model=_optional_string(data.get("model"), "model_request.model"),
+        provider_name=_optional_string(data.get("provider_name"), "model_request.provider_name"),
+        system_instructions=tuple(_block_from_dict(_mapping(block, "content_block")) for block in system_data),
+        input_messages=tuple(_message_from_dict(_mapping(message, "turn_message")) for message in input_data),
+        input_observed=bool(data.get("input_observed", False)),
+        output_message=_message_from_dict(_mapping(output_data, "model_request.output_message"))
+        if output_data is not None
+        else None,
+        tool_definitions=cast(JsonValue, data.get("tool_definitions")),
+        usage=_usage_from_dict(_mapping(usage_data, "model_request.usage")) if usage_data is not None else None,
+        error=_error_from_dict(error_data, "model_request.error") if error_data is not None else None,
+        data=_json_object(data.get("data", {}), "model_request.data"),
+    )
+
+
 def _result_to_dict(result: TurnResult) -> dict[str, object]:
-    error = None
-    if result.error is not None:
-        error = {
-            "message": result.error.message,
-            "code": result.error.code,
-            "category": result.error.category,
-            "retryable": result.error.retryable,
-            "provider_data": _json(result.error.provider_data),
-        }
+    error = _error_to_dict(result.error) if result.error is not None else None
     termination = None
     if result.termination is not None:
         termination = {
@@ -151,16 +211,7 @@ def _result_to_dict(result: TurnResult) -> dict[str, object]:
 
 def _result_from_dict(data: Mapping[str, object]) -> TurnResult:
     error_data = data.get("error")
-    error = None
-    if error_data is not None:
-        error_object = _mapping(error_data, "turn_result.error")
-        error = TurnError(
-            message=_string(error_object, "message"),
-            code=_optional_string(error_object.get("code"), "turn_result.error.code"),
-            category=_optional_string(error_object.get("category"), "turn_result.error.category"),
-            retryable=cast(bool | None, error_object.get("retryable")),
-            provider_data=_json_object(error_object.get("provider_data", {}), "turn_result.error.provider_data"),
-        )
+    error = _error_from_dict(error_data, "turn_result.error") if error_data is not None else None
     termination_data = data.get("termination")
     termination = None
     if termination_data is not None:
@@ -240,6 +291,8 @@ def _payload_to_wire(event: HarnessEventPayload) -> tuple[str, str, dict[str, ob
                 "mode": event.mode.value,
             },
         )
+    if isinstance(event, ModelRequestEvent):
+        return "model_request", EVENT_WIRE_SCHEMA_VERSION, _model_request_to_dict(event)
     if isinstance(event, StateChangedEvent):
         return "state_changed", EVENT_WIRE_SCHEMA_VERSION, {"old": event.old.value, "new": event.new.value}
     if isinstance(event, TurnLifecycleEvent):
@@ -333,6 +386,8 @@ def _payload_from_wire(event_type: str, schema_version: str, data: Mapping[str, 
             usage=_usage_from_dict(_mapping(data.get("usage"), "usage_updated.usage")),
             mode=_enum(UsageUpdateMode, data.get("mode"), "usage_updated.mode"),
         )
+    if event_type == "model_request":
+        return _model_request_from_dict(data)
     if event_type == "state_changed":
         return StateChangedEvent(
             old=_enum(HarnessState, data.get("old"), "state_changed.old"),

@@ -81,6 +81,9 @@ class ClaudeCodeHarnessConfig:
     settings: str | None = None
     settings_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     event_buffer_capacity: int = 1024
+    # How long a reply waits for the CLI's request logs before its model
+    # request is reported from the SDK message alone.
+    request_observation_wait_s: float = 5.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
@@ -116,6 +119,10 @@ class ClaudeCodeHarnessConfig:
             raise TypeError("Claude event_buffer_capacity must be an integer")
         if self.event_buffer_capacity <= 0:
             raise ValueError("Claude event_buffer_capacity must be positive")
+        if isinstance(self.request_observation_wait_s, bool) or not isinstance(self.request_observation_wait_s, (int, float)):
+            raise TypeError("Claude request_observation_wait_s must be a number")
+        if self.request_observation_wait_s < 0:
+            raise ValueError("Claude request_observation_wait_s must not be negative")
         if self.model is not None and not isinstance(self.model, ClaudeModelConfig):
             raise TypeError("Claude model must be a ClaudeModelConfig")
         if self.fallback_model is not None and not isinstance(self.fallback_model, ClaudeModelConfig):

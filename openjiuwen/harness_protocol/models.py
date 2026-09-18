@@ -103,6 +103,9 @@ class HostCapability(str, Enum):
     DYNAMIC_TOOL_CALL = "dynamic_tool_call"
     PROVIDER_INTERACTION = "provider_interaction"
     TELEMETRY = "telemetry"
+    # The host consumes ``ModelRequestEvent`` observations; providers open
+    # their vendor-side observation channels only when it is declared.
+    MODEL_REQUEST_OBSERVATION = "model_request_observation"
 
 
 class DeliveryMode(str, Enum):

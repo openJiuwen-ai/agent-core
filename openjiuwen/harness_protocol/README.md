@@ -55,6 +55,9 @@ contain turns from multiple agents. The single-agent harness API therefore uses
 - `HarnessEvent`: an event envelope with global ordering and correlation IDs.
   Its payload is provider-neutral; `ProviderEvent` preserves namespaced
   extensions without changing the shared protocol.
+- `ModelRequestEvent`: one physical model request of a turn (request messages,
+  reply, per-request usage), emitted only when the host declares
+  `HostCapability.MODEL_REQUEST_OBSERVATION`.
 - `HarnessEventCursor`: a closable async cursor that releases the observation
   consumer lease on normal completion or early `aclose()`.
 - `EventBufferConfig` and `event_retention`: bounded backpressure with derived
@@ -171,6 +174,11 @@ class MyHarness:
     unknown event types and schema versions.
 15. Environment values, credentials, and provider client objects must never be
    copied into events, checkpoints, exceptions, or logs.
+16. When the host declares `MODEL_REQUEST_OBSERVATION`, every model request of a
+    turn is reported by one `ModelRequestEvent` before any item it caused and
+    before the turn's terminal event; caused items list its `request_id` in
+    `causation_ids`. A request the provider could not observe is still reported
+    from its reply with `input_observed=False`.
 
 ## Documents
 

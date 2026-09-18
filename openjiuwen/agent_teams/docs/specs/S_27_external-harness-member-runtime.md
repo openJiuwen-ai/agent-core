@@ -44,10 +44,12 @@
    `UnsupportedHarnessCapabilityError`。
 7. **团队上下文搭车语义不变**。`send` 在投递前把 `TeamContextTracker.pending_text` 拼到正文最前，
    投递成功后才 `commit`；`announce_team_context` 单独投递；`InteractiveInput` 不搭车。
-8. **provider-private 观测接线不进公共协议**。Codex `notification_observer` 与 Claude
-   `transport_factory` 只在 `build_cli_runtime` 构造 harness 时注入；span bridge 经
-   `bind_span_bridge` 绑定，按 Protocol（`MemberSpanBridge` / `ChunkRecordingSpanBridge` /
-   `NativeObservationSpanBridge`）而非 `hasattr` 分派。
+8. **轨迹观测只消费协议事件**。runtime 不接任何厂商观测通道；`bind_trajectory_recorder` 绑定
+   `HarnessTrajectoryRecorder` 后，`_host_context` 声明 `HostCapability.MODEL_REQUEST_OBSERVATION`，
+   每个 envelope 原样交给 recorder，`TurnLifecycleEvent(STARTED)` 前先经 `resolve_member_turn` 开成员
+   turn 并 `record_turn_identity`，`send` 时 `record_input`，`stop` 时 `close`。recorder 异常只记
+   debug 日志，不影响成员。Claude `transport_factory` 仍只在 `build_cli_runtime` 构造 harness 时注入。
+   见 [[F_112_harness-protocol-trajectory-observation]]。
 9. **legacy 回调名保留**。`harness.state`（`old` / `new` / `session_id`）与 `harness.round`
    （`kind` / `round_id` = 协议 `turn_id` / `result` = `TurnResult | None`）是 `StreamController`
    的兼容契约；不得反向把 `round` 写进公共协议。
@@ -67,7 +69,7 @@ class ExternalHarnessMemberRuntime:
                  resume_external_backend=False, agent_kind: str | None = None,
                  inject_mcp=False, mcp_server_name="openjiuwen-team") -> None
     # pre-start bindings
-    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_span_bridge(bridge)
+    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_trajectory_recorder(recorder)
     def bind_fallback_promotion(promote)   # promote: () -> Awaitable[bool]; answers the auth_fallback interaction
     def add_teardown_hook(hook)
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)
@@ -78,7 +80,7 @@ class ExternalHarnessMemberRuntime:
     async subscribe(*, on_state=None, on_round=None)
     has_pending_interrupt() / is_pending_interrupt_resume_valid(user_input)
     # read-only
-    provider_name; reliability_agent_kind; span_bridge; inject_mcp; mcp_server_name
+    provider_name; reliability_agent_kind; trajectory_recorder; inject_mcp; mcp_server_name
 ```
 
 `build_cli_runtime(ctx, ...)` 对 `ctx.cli_agent == "claude" | "codex"` 返回

@@ -70,7 +70,7 @@ agent_teams/
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
-├── observability/       # 团队 OpenTelemetry 观测；Codex 专用桥接 / OTLP 接收 / rollout trace 集中在 codex/ 子包。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider）
+├── observability/       # 团队 OpenTelemetry 观测。三方 harness 成员不在这里：其模型请求由 provider 以 ModelRequestEvent 交付，`harness_providers/trajectory.py` 记录（F_112）。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider）
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
@@ -256,7 +256,8 @@ provider session/Turn 协议合并。
   行为：成员 child AgentSession（provider checkpoint sink + `TeamContextTracker` 投递基线）、
   `harness.state` / `harness.round`（legacy 兼容名）回调、外部 runtime 可靠性上下文
   （`bind_reliability_context`：FAILED terminal / 启动失败 → leader 邮箱失败消息，retrying 诊断 →
-  进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`：以
+  进度事件）、轨迹记录（`bind_trajectory_recorder`：协议事件 → `HarnessTrajectoryRecorder`，STARTED
+  前注入持久化成员 turn 身份，见 [[F_112_harness-protocol-trajectory-observation]]）、认证 fallback 持久化（`bind_fallback_promotion`：以
   `auth_fallback` provider interaction 先持久化再放行，持久化失败 provider 回退原生端点）与
   MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
   `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
@@ -264,8 +265,8 @@ provider session/Turn 协议合并。
 - `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
   `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经
   `ClaudeCodeHarness(transport_factory=...)` 注入）、`options.py`（team 命名的 session id 助手）。
-  `external/cli_agent/codex/`：`observer.py`（把原始 SDK notification 喂给 `CodexSpanBridge` 的
-  provider-private observer）+ `options.py`（team MCP overrides 助手）。DSH 的 Turn 边界与限制见
+  `external/cli_agent/codex/`：只有 `options.py`（team MCP overrides 助手）；Codex 观测在
+  `harness_providers/codex/observation.py`。DSH 的 Turn 边界与限制见
   [[F_95_dsh-external-harness-adapter]]。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +

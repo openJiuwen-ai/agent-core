@@ -1,0 +1,143 @@
+# F_112 三方 harness 成员的轨迹观测：协议事件驱动
+
+日期：2026-09-17
+
+## 背景
+
+集群模式下，Claude Code / Codex 外部成员在轨迹 UI 上完全不显示。排查确认三层问题：
+
+1. **写入侧没产出**：team 层的 `ClaudeSpanBridge` / `CodexSpanBridge` 每轮通过 `get_team_span()`
+   取 team 根 span 作为父。该 span 只绑在 leader 的 ContextVar，且每次 leader run 结束都会换新；成员
+   pump 任务要么找不到，要么拿到已结束的 span，整轮直接跳过。
+2. **归属错误**：bridge span 不带 `openjiuwen.execution.subject.*`，入库 subject 默认 `main`，team 视图
+   只保留 `team_leader` / `team_member` lane，全部被过滤。
+3. **记录形态不对**：模型调用 span 没有 `record_kind=inference`；Claude 把内容写在
+   `openjiuwen.span.input/output`（viewer 不读）；tool span 时长≈0；Claude team MCP 工具重复出 span。
+
+根因是分层错位：team 层直接耦合厂商细节——`cli_agent/spawn.py` 替 provider 接 Claude OTel env /
+settings 与 Codex rollout 目录 / otel overrides，`cli_agent/codex/observer.py` 解析 Codex 通知
+method，`CodexHarness(notification_observer=)` 把原始 SDK 通知漏给宿主，bridge 按鸭子类型分派。
+
+## 决策
+
+**team 层只适配 `HarnessProtocol` 事件；各 harness 的数据差异全部收进 provider。**
+
+```
+harness_protocol   ModelRequestEvent + HostCapability.MODEL_REQUEST_OBSERVATION（纯契约）
+harness_providers
+  ├─ telemetry/otlp_receiver.py   进程级 loopback OTLP 接收器（原 agent_teams/observability/shared_otlp.py）
+  ├─ claudecode/observation.py    Claude 请求日志（api_request_body / api_response_body）→ ModelRequestEvent
+  ├─ codex/observation.py         Codex rollout trace + raw events → ModelRequestEvent
+  └─ trajectory.py                HarnessTrajectoryRecorder：协议事件 → trajectory span（宿主胶水）
+agent_teams        ExternalHarnessMemberRuntime 只绑定 recorder 并注入成员 turn 身份；bridge 全部删除
+```
+
+### 1. 协议：`ModelRequestEvent`
+
+一次物理模型请求一个事件，请求结束后发出，字段见 `harness_protocol/events.py`：`request_id`、
+`status`、`started_at` / `ended_at`、`model` / `provider_name`、`system_instructions`、
+`input_messages`（`TurnMessage`，`message_id` 在消息留在对话中时保持稳定）、`input_observed`、
+`output_message`、`tool_definitions`、`usage`（本次请求）、`error`、命名空间化 `data`。复用
+`TurnMessage` / `ContentBlock`（`text` / `reasoning` / `tool_call{name,arguments}` /
+`tool_result`，`data.call_id`），不新建消息模型。
+
+provider 仅在宿主声明 `HostCapability.MODEL_REQUEST_OBSERVATION` 时开启厂商侧通道，并保证：
+
+- 同一 turn 内，请求事件先于它引发的 tool item，也先于 turn 终止事件；
+- tool item 的 envelope `causation_ids` 带上引发它的 `request_id`；
+- 通道超时或不可用时仍然发出（从 SDK 流降级，`input_observed=False`），不漏报。
+
+tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`SerializedTurnHarness._emit` 新增
+`causation_ids` 与 `timestamp`：被暂缓发出的 tool item 保留真实观测时间。
+
+### 2. provider 内部
+
+**Claude Code**（`claudecode/observation.py`，`ClaudeRequestObserver`）
+
+- 数据源是 Claude Code 的原始 API body 日志：`OTEL_LOG_RAW_API_BODIES=file:<dir>`。inline 模式在
+  60 KB 截断，长对话的请求体必然残缺；file 模式无截断，事件带 `body_ref`。只开 logs 导出，不依赖
+  `claude_code.llm_request` span，也不注入 TRACEPARENT。
+- 进程级单接收器、单 gRPC 端口，所有成员共用；每个 harness 在 `_open_session` 生成 source id 写入
+  `OTEL_RESOURCE_ATTRIBUTES`（同时经 `--settings` 下发，压过用户 settings），接收器广播、各实例按
+  source id 认领。gRPC 线程回调经 `call_soon_threadsafe` 回到事件循环。`_close_session` 取消订阅
+  并删除 body 目录。
+- 配对：`api_response_body` 是组装后的完整消息，`id` 即 SDK `AssistantMessage.message_id`；请求体按
+  时间取响应之前最近的一条，并要求其历史里包含上一次主对话回复（排除子 agent / 侧路查询交错的请求）。
+  历史消息 id 用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），命中过往回复时沿用 `msg_` id。
+- SSH transport 无法回连 loopback：观测器不 attach，所有请求从 SDK 回复降级报告。
+
+**Codex**（`codex/observation.py`，`CodexRequestObserver`）
+
+- 主数据源是 rollout trace（`CODEX_ROLLOUT_TRACE_ROOT`，reader 从 team 层迁入
+  `codex/rollout_trace.py`）：`inference_started` / `inference_completed|failed|cancelled` 按
+  `inference_call_id` 配对，带精确窗口、完整请求（`instructions` / `input` / `tools`）与响应。
+- 续写请求：Codex 以 `previous_response_id` 链式请求时请求体只带新增输入；完整对话 = 上一响应的
+  对话 + 其输出 + 本次输入，由观测器在进程内拼回（链头未知时 `input_observed=False`）。
+- tool 归属：响应 `output_items` 里 tool call 的 `call_id` / `id` 对上 SDK tool item id；code mode
+  下 SDK item 名为运行时 id（`exec-...`），经 rollout `tool_call_started.tool_call_id` →
+  `requester.runtime_cell_id` → `code_cell_started.model_visible_call_id` 关联回模型 call id。
+- 降级：`rawResponseItem/completed` + `rawResponse/completed` 在 provider 内部消费（不再有
+  `notification_observer`），`wait_s` 内 rollout 未记录该 `response_id` 即按输出侧报告；一旦发现
+  rollout 静默（旧版 Codex 不写 rollout），后续 turn 不再等待。
+- 删除 Codex native OTel receiver：`run_sampling_request` 只有时间边界没有内容，rollout 已覆盖。
+
+### 3. 宿主记录器：`HarnessTrajectoryRecorder`
+
+`harness_providers/trajectory.py`，与 `HarnessIOAdapter` 同级，不依赖 team：
+
+| 协议事件 | 记录 |
+|---|---|
+| `TurnLifecycleEvent.STARTED` | **每 turn 一条独立 trace**：根 span `invoke_agent {agent}`，`record_kind=turn`、`openjiuwen.trace.root`、`openjiuwen.agent.mode`、完整 subject 块、`gen_ai.conversation.id`、turn id / number；属性经 `start_span(attributes=...)` 一次写入，started 快照即可按 lane 路由 |
+| `ModelRequestEvent` | turn 下 `chat {model}`（事件起止时间），`record_kind=inference`、`openjiuwen.inference.id`、step number、subject request number、`gen_ai.input/output.messages` 等；结束前以其为父 `emit_context_window_commit`；`input_observed=False` 不提交窗口 |
+| tool `ItemLifecycleEvent` | `execute_tool {name}`；`causation_ids` 命中已记录请求时写 `openjiuwen.inference.id` / step number / `openjiuwen.tool.authoritative` |
+| 终止事件 | 补结束未完成 tool（ERROR），写 turn 输出与状态 |
+
+消息结构化 / 脱敏 / 窗口规范化复用 `OtelCallbackHandler`，为此新增公开方法
+`record_request_input` / `record_response_output`。`record_turn_identity` 让宿主注入自己的 turn
+身份；`record_failure` 承接可靠性失败（无活动 turn 时发零时长失败 turn）。
+
+### 4. team 层
+
+- `ExternalHarnessMemberRuntime`：删除 `MemberSpanBridge` 三个 Protocol、`bind_span_bridge`、
+  `_RecordingOutputs`；新增 `bind_trajectory_recorder`。`_on_event` 把每个 envelope 交给 recorder；
+  STARTED 前经 `resolve_member_turn` 开成员 turn（持久化编号，见 `agent_teams/harness/turn.py`）并
+  `record_turn_identity`；`send` 时 `record_input`；绑定 recorder 时 `_host_context` 声明
+  `MODEL_REQUEST_OBSERVATION`；`stop` 时 `close` 兜底。
+- `external_cli_spawn` 在 `configure` 后用 `teammate.observability_execution_subject(session_id)`
+  构造 recorder（observability 未初始化时为 `None`）。
+- `RuntimeReliabilityContext(trajectory_recorder=...)` 取代 `span_bridge`。
+- `cli_agent/spawn.py` 不再注入任何 OTel / rollout 配置；`sdk_mcp.py` 去掉 `tool_execution_context`，
+  team MCP 工具只由协议 tool item 产生 span。
+
+## 拒绝的方案
+
+- **继续在 team 层修 bridge**（按 session 注册根 span、补 subject 属性）：能止血，但厂商细节仍在 team
+  层，每接一个 harness 都要再写一个 bridge；且 Claude 请求体截断、Codex 通知私有钩子的问题不解决。
+- **成员 span 挂在 team 根 span 下**：team span 随 leader run 结束，成员常在其后工作；viewer 以 trace
+  划分 turn，共用 trace 会把成员多个 turn 合并。每 turn 独立 trace 同时解决两者。
+- **请求事件先发、后补输入**：协议事件不可变且只发一次；先发残缺事件再无法修正窗口提交。
+- **保留 Claude `llm_request` span 作为计时源**：响应 body 已带 usage，请求 / 响应日志时间即请求窗口；
+  多接一路 traces 信号只增加配对复杂度。
+
+## 已知遗留
+
+- 子 agent（Claude `parent_tool_use_id`）的请求不进成员 lane。
+- 消息 origin 一律 `harness_internal`；provider 能确定宿主输入时可在 `TurnMessage.data["origin"]`
+  标 `external_user`，目前两个 provider 都未标。
+- Codex `thread_resume` 的协议参数没有 raw events 字段，恢复的线程只能依赖 rollout。
+- 关联不上模型 call id 的 Codex tool item 最多等待 `request_observation_wait_s` 后无归属发出。
+- 进程内 teammate 的 team 根 span 过期问题（`get_or_create_team_span` 未按 session 注册）不在本次范围。
+
+## 验证
+
+- `tests/unit_tests/harness_protocol/test_protocol.py`：事件编解码 round-trip、校验、REQUIRED 保留。
+- `tests/unit_tests/harness_providers/test_trajectory_recorder.py`：独立 trace、subject 块、inference
+  与 commit 父子及序号、tool 归属、宿主 turn 身份、失败记录。
+- `tests/unit_tests/harness_providers/test_claudecode_observation.py` / `test_codex_observation.py`：
+  事件顺序、causation、降级路径、未声明能力时不观测；`telemetry/test_otlp_receiver.py`、
+  `test_codex_rollout_trace.py` 迁移自 team 层。
+- `tests/unit_tests/agent_teams/external/test_member_runtime.py`：recorder 分派、成员 turn 注入、能力声明。
+- 真实 CLI（2026-09-17，Claude Code + claude-agent-sdk 0.2.115；codex-cli 0.154.0）：Claude
+  `body_ref` 为绝对路径、响应 `id` 与 `AssistantMessage.message_id` 一致、`generate_session_title`
+  侧路请求被主对话判据排除；Codex 第二次请求确为 `previous_response_id` 增量、`exec-...` tool 经
+  code cell 关联到发起推理。两者事件顺序均为 请求 → tool → 请求 → terminal。

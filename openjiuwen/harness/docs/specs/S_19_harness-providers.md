@@ -27,8 +27,8 @@
    |---|---|---|---|
    | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
    | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
-   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
-   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
+   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
+   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
    | `dsh` | `deepseek-harness` | MCP_TOOLS | MCP_SERVERS |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
@@ -37,9 +37,10 @@
 4. **失败词汇统一**：`TurnError.category ∈ {auth_required, quota_exceeded, rate_limited,
    server_unavailable, network_timeout, process_start_failed, sdk_error, unknown}`；
    `provider_data` 可带 `sdk_error_type` / `http_status`；`retryable` 由类别推导。
-5. **JSON 边界**：进入事件的 vendor 对象一律先 `to_json_safe`；原始 SDK 对象只经
-   provider-private 构造参数（`CodexHarness(notification_observer)`、
-   `ClaudeCodeHarness(transport_factory)`）流向宿主。
+5. **JSON 边界**：进入事件的 vendor 对象一律先 `to_json_safe`；原始 SDK 对象不流向宿主，唯一的
+   provider-private 构造参数是 `ClaudeCodeHarness(transport_factory)`（宿主提供 SDK transport）。
+   模型请求观测由 provider 内部完成（Claude 请求日志 / Codex rollout trace），以
+   `ModelRequestEvent` 交付，见 [[F_112_harness-protocol-trajectory-observation]]。
 6. **用户输入是 interaction**：Claude `AskUserQuestion`、Codex `request_user_input`
    （App Server 请求 `item/tool/requestUserInput`）与 DeepAgent `ask_user` 中断映射为
    `UserInputRequest`，Turn 在应答前保持 RUNNING；宿主未提供 handler 时 Claude 拒绝该工具、Codex 回

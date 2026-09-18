@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
@@ -41,7 +41,8 @@ from openjiuwen.harness_providers.base import (
 )
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
 from openjiuwen.harness_providers.codex.failure_classifier import classify_codex_exception
-from openjiuwen.harness_providers.codex.mapping import PROVIDER_NAME, CodexTurnAccumulator
+from openjiuwen.harness_providers.codex.mapping import PROVIDER_NAME, CodexTurnAccumulator, MappedCodexEvent
+from openjiuwen.harness_providers.codex.observation import CodexRequestObserver
 from openjiuwen.harness_providers.codex.options import (
     append_developer_instructions,
     build_codex_config,
@@ -71,8 +72,6 @@ AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 # Provider event announcing the active model (session activation / fallback
 # switch) so the host reliability context can attribute failures to it.
 _MODEL_CHANGED_EVENT = "session/model_changed"
-
-NotificationObserver = Callable[[Any], None]
 
 
 class _TurnIdleTimeout(RuntimeError):
@@ -121,27 +120,21 @@ class CodexHarness(SerializedTurnHarness):
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
                 HostCapability.PROVIDER_INTERACTION,
+                HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
     )
 
-    def __init__(
-        self,
-        config: CodexHarnessConfig | None = None,
-        *,
-        notification_observer: NotificationObserver | None = None,
-    ) -> None:
+    def __init__(self, config: CodexHarnessConfig | None = None) -> None:
         """Bind the provider configuration; the SDK client starts on ``start``.
 
         Args:
             config: Provider-owned options; defaults use the local Codex CLI.
-            notification_observer: Provider-private hook receiving every raw
-                SDK notification (observability bridges).  It must not raise
-                and it never reaches the public event stream.
         """
         self._config = config or CodexHarnessConfig()
         super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
-        self._notification_observer = notification_observer
+        self._request_observer: CodexRequestObserver | None = None
+        self._rollout_env: dict[str, str] = {}
         self._sdk: Any = None
         self._client: Any = None
         self._thread: Any = None
@@ -173,6 +166,7 @@ class CodexHarness(SerializedTurnHarness):
         sdk = load_codex_sdk()
         self._sdk = sdk
         self._loop = asyncio.get_running_loop()
+        await self._attach_request_observer(context)
         restored = self._restored_checkpoint_data(context)
         restored_thread = restored.get("thread_id") if restored else None
         resume_thread_id: str | None = None
@@ -199,12 +193,24 @@ class CodexHarness(SerializedTurnHarness):
                     provider_data=error.provider_data,
                 )
             raise ProviderStartupError(f"Codex startup failed: {type(exc).__name__}", error=error) from exc
+        if self._request_observer is not None:
+            self._request_observer.bind_thread(self._thread_id)
         await self._emit_model_changed()
         await self._publish_checkpoint(
             {"thread_id": self._thread_id, "resumed": resume_thread_id is not None},
             reason=CheckpointReason.SESSION_ACTIVATED,
         )
         return self._thread_id
+
+    async def _attach_request_observer(self, context: HarnessContext) -> None:
+        """Observe model requests when the host consumes them."""
+        self._rollout_env = {}
+        if HostCapability.MODEL_REQUEST_OBSERVATION not in context.host_capabilities:
+            self._request_observer = None
+            return
+        observer = CodexRequestObserver(wait_s=float(self._config.request_observation_wait_s))
+        self._request_observer = observer
+        self._rollout_env = await observer.attach()
 
     async def _connect(
         self,
@@ -220,7 +226,7 @@ class CodexHarness(SerializedTurnHarness):
             config=self._config,
             model=model,
             cwd=cwd,
-            env=build_process_env(self._config, context.env),
+            env={**build_process_env(self._config, context.env), **self._rollout_env},
             mcp_servers=context.mcp_servers,
             enable_user_input=HostCapability.USER_INPUT in context.host_capabilities,
         )
@@ -269,6 +275,17 @@ class CodexHarness(SerializedTurnHarness):
         self._confirmed_model = confirmed_model
 
     async def _close_session(self) -> None:
+        try:
+            await self._disconnect_client()
+        finally:
+            observer = self._request_observer
+            self._request_observer = None
+            self._rollout_env = {}
+            if observer is not None:
+                await observer.close()
+
+    async def _disconnect_client(self) -> None:
+        """Drop the SDK client; the next turn reconnects the same thread."""
         handle = self._active_handle
         self._active_handle = None
         if handle is not None:
@@ -282,6 +299,27 @@ class CodexHarness(SerializedTurnHarness):
                 await client.close()
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        observer = self._request_observer
+        if observer is None:
+            return await self._drive_turn(turn)
+
+        async def emit(payload: Any, item_id: str | None, causation_ids: tuple[str, ...], timestamp: float | None) -> None:
+            await self._emit(payload, turn=turn, item_id=item_id, causation_ids=causation_ids, timestamp=timestamp)
+
+        observer.begin_turn(emit)
+        kind: TurnEventKind | None = None
+        try:
+            kind, result = await self._drive_turn(turn)
+            return kind, result
+        finally:
+            try:
+                # Every model request of the turn is reported before its
+                # terminal event; only a completed turn waits for late records.
+                await observer.end_turn(wait=kind is TurnEventKind.FINISHED)
+            except Exception:
+                logger.debug("[codex] model request observation did not settle", exc_info=True)
+
+    async def _drive_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
         text = harness_input_text(turn.content)
         accumulator = CodexTurnAccumulator(turn_id=turn.turn_id)
@@ -298,7 +336,7 @@ class CodexHarness(SerializedTurnHarness):
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
         if turn.abort_requested:
             self._pending_steers.clear()
-            await self._close_session()
+            await self._disconnect_client()
             return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
         for _attempt in range(2):
             idle_retries = 0
@@ -390,10 +428,8 @@ class CodexHarness(SerializedTurnHarness):
                         notifications_seen=accumulator.notifications_seen,
                         interrupted=interrupted,
                     ) from exc
-                self._observe(notification)
                 mapped_events, retrying = accumulator.consume(notification)
-                for mapped in mapped_events:
-                    await self._emit(mapped.payload, turn=turn, item_id=mapped.item_id)
+                await self._publish(notification, mapped_events, turn)
                 if retrying is not None:
                     will_retry_count += 1
                     if will_retry_count > self._config.max_will_retry_count:
@@ -404,14 +440,14 @@ class CodexHarness(SerializedTurnHarness):
                 self._active_handle = None
             self._pending_steers.clear()
 
-    def _observe(self, notification: Any) -> None:
-        observer = self._notification_observer
-        if observer is None:
+    async def _publish(self, notification: Any, mapped: list[MappedCodexEvent], turn: PendingTurn) -> None:
+        """Emit the events one notification maps to, through the observer when present."""
+        observer = self._request_observer
+        if observer is not None:
+            await observer.observe(notification, mapped)
             return
-        try:
-            observer(notification)
-        except Exception:
-            logger.exception("[codex] notification observer raised")
+        for event in mapped:
+            await self._emit(event.payload, turn=turn, item_id=event.item_id)
 
     async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
         text = harness_input_text(content)
@@ -517,7 +553,7 @@ class CodexHarness(SerializedTurnHarness):
         if context is None:
             return False
         thread_id = self._thread_id
-        await self._close_session()
+        await self._disconnect_client()
         try:
             await self._connect(context, model=fallback, resume_thread_id=thread_id)
         except Exception as exc:
@@ -531,7 +567,7 @@ class CodexHarness(SerializedTurnHarness):
             # The host could not persist the switch; resume the thread on the
             # native endpoint so the member does not run on an unrecorded one.
             logger.warning("[codex] host declined the authentication fallback; restoring the native endpoint")
-            await self._close_session()
+            await self._disconnect_client()
             try:
                 await self._connect(context, model=self._config.model, resume_thread_id=thread_id)
             except Exception as exc:
@@ -753,4 +789,4 @@ def _is_no_active_turn_to_steer(exc: Exception) -> bool:
     )
 
 
-__all__ = ["ADAPTER_VERSION", "USER_INPUT_METHOD", "CodexHarness", "NotificationObserver"]
+__all__ = ["ADAPTER_VERSION", "USER_INPUT_METHOD", "CodexHarness"]

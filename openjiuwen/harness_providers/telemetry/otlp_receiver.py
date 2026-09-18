@@ -1,18 +1,20 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Process-wide loopback OTLP/HTTP trace receiver shared by external CLI members.
+"""Process-wide loopback OTLP receiver shared by harness providers.
 
-Codex and Claude runtimes both ingest native OTel spans from their CLI
-subprocesses over a loopback OTLP endpoint. Binding one receiver per member
-scales the listening sockets (and ports) with team size; this module keeps a
-single process-wide server and fans decoded span events out to subscriber
-callbacks. Subscribers filter events by their own active turn/trace context,
-so one socket serves every member.
+A provider whose CLI subprocess reports its model requests only through its
+own OpenTelemetry export (Claude Code) points that export at this loopback
+endpoint. Binding one receiver per harness would scale listening sockets (and
+ports) with the number of running agents; this module keeps a single
+process-wide server and fans decoded span and log events out to subscriber
+callbacks. Each subscriber claims only events carrying its own
+``OTEL_RESOURCE_SOURCE_ID`` resource attribute, so one socket serves every
+harness in the process.
 
 The receiver is lazy: the first subscriber starts it, and it stays up for the
 process lifetime. A bind failure disables native span ingestion process-wide
-(observability is best-effort and must never block member startup).
+(observability is best-effort and must never block harness startup).
 """
 
 from __future__ import annotations
@@ -24,16 +26,18 @@ import io
 from collections.abc import Callable
 from typing import Any
 
-from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.logging import LazyLogger, LogManager
+
+logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 _MAX_REQUEST_BYTES = 16 * 1024 * 1024
 _MAX_DECOMPRESSED_BYTES = 32 * 1024 * 1024
 _REQUEST_READ_TIMEOUT_S = 5.0
 _RESPONSE_WRITE_TIMEOUT_S = 2.0
 _CLOSE_TIMEOUT_S = 1.0
-# Resource attribute injected into each external CLI process so subscribers
-# can distinguish concurrent members that intentionally share one team trace.
-OTEL_RESOURCE_SOURCE_ID = "openjiuwen.agent_teams.source.id"
+# Resource attribute injected into each CLI process so a subscriber can tell
+# its own events from those of other harnesses sharing the receiver.
+OTEL_RESOURCE_SOURCE_ID = "openjiuwen.harness.source.id"
 
 
 def _decompress_gzip_limited(payload: bytes) -> bytes:
@@ -193,7 +197,7 @@ class SharedOtlpReceiver:
                 try:
                     callback(event)
                 except Exception as exc:  # noqa: BLE001 - telemetry is best effort
-                    team_logger.warning(
+                    logger.warning(
                         "otel: shared OTLP receiver subscriber callback failed: {}",
                         exc,
                     )
@@ -219,7 +223,7 @@ class SharedOtlpReceiver:
                 port=0,
             )
         except OSError as exc:
-            team_logger.warning(
+            logger.warning(
                 "otel: shared loopback OTLP receiver could not start; native spans disabled: {}",
                 exc,
             )
@@ -237,7 +241,7 @@ class SharedOtlpReceiver:
         # rides alongside the HTTP one. Failure is non-fatal: the HTTP side
         # keeps serving exporters that speak it.
         self._start_grpc()
-        team_logger.info(
+        logger.info(
             "otel: shared loopback OTLP receiver started endpoint={} grpc_endpoint={} subscribers={}",
             self.endpoint,
             self.grpc_endpoint,
@@ -275,13 +279,13 @@ class SharedOtlpReceiver:
             logs_service_pb2_grpc.add_LogsServiceServicer_to_server(_LogsServicer(), server)
             port = server.add_insecure_port("127.0.0.1:0")
             if port == 0:
-                team_logger.warning("otel: shared OTLP gRPC listener could not bind; claude native spans disabled")
+                logger.warning("otel: shared OTLP gRPC listener could not bind; native model-request observation disabled")
                 return
             server.start()
             self._grpc_server = server
             self.grpc_endpoint = f"http://127.0.0.1:{port}"
         except Exception as exc:  # noqa: BLE001 - gRPC is an optional side channel
-            team_logger.warning("otel: shared OTLP gRPC listener failed to start: {}", exc)
+            logger.warning("otel: shared OTLP gRPC listener failed to start: {}", exc)
 
     async def _accept(
         self,
@@ -298,8 +302,8 @@ class SharedOtlpReceiver:
                 await self._respond(writer, status="408 Request Timeout")
         except (asyncio.IncompleteReadError, ConnectionError):
             pass
-        except Exception as exc:  # noqa: BLE001 - telemetry must not affect members
-            team_logger.warning("otel: shared OTLP receiver rejected a request: {}", exc)
+        except Exception as exc:  # noqa: BLE001 - telemetry must not affect harnesses
+            logger.warning("otel: shared OTLP receiver rejected a request: {}", exc)
             with contextlib.suppress(ConnectionError, TimeoutError):
                 await self._respond(writer, status="400 Bad Request")
         finally:

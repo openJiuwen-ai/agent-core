@@ -41,14 +41,16 @@ from openjiuwen.harness_providers.base import (
 )
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
 from openjiuwen.harness_providers.claudecode.failure_classifier import classify_claude_exception
-from openjiuwen.harness_providers.claudecode.mapping import PROVIDER_NAME, ClaudeTurnAccumulator
+from openjiuwen.harness_providers.claudecode.mapping import PROVIDER_NAME, ClaudeTurnAccumulator, MappedClaudeEvent
 from openjiuwen.harness_providers.claudecode.options import (
     build_claude_options,
     build_claude_session_id,
     build_process_env,
+    claude_request_log_settings_env,
     load_claude_sdk,
     mcp_servers_to_sdk,
 )
+from openjiuwen.harness_providers.claudecode.observation import ClaudeRequestObserver
 from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 from openjiuwen.harness_providers.skills import install_skills
@@ -113,6 +115,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
                 HostCapability.PROVIDER_INTERACTION,
+                HostCapability.MODEL_REQUEST_OBSERVATION,
             }
         ),
     )
@@ -139,6 +142,8 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         self._active_model: ClaudeModelConfig | None = self._config.model
         self._fallback_activated = False
         self._claude_session_id: str | None = None
+        self._request_observer: ClaudeRequestObserver | None = None
+        self._request_log_env: dict[str, str] = {}
 
     @property
     def fallback_activated(self) -> bool:
@@ -156,6 +161,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                                 cwd=context.cwd or self._config.cwd, conflict=self._config.skill_conflict)
         sdk = load_claude_sdk()
         self._sdk = sdk
+        await self._attach_request_observer(context)
         restored = self._restored_checkpoint_data(context)
         restored_session = restored.get("session_id") if restored else None
         derived = self._config.session_id or build_claude_session_id(
@@ -181,6 +187,26 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         )
         return self._claude_session_id
 
+    async def _attach_request_observer(self, context: HarnessContext) -> None:
+        """Observe model requests when the host consumes them.
+
+        Request logs reach the loopback receiver only from a local CLI; a
+        remote transport still gets its requests reported from the SDK stream.
+        """
+        self._request_log_env = {}
+        if HostCapability.MODEL_REQUEST_OBSERVATION not in context.host_capabilities:
+            self._request_observer = None
+            return
+        observer = ClaudeRequestObserver(sdk=self._sdk, wait_s=float(self._config.request_observation_wait_s))
+        self._request_observer = observer
+        if self._transport_factory is not None:
+            logger.info("[claude-code] request logs need a local CLI; reporting requests from the SDK stream")
+            return
+        process_env = build_process_env(self._config, context.env)
+        self._request_log_env = await observer.attach(
+            resource_attributes=process_env.get("OTEL_RESOURCE_ATTRIBUTES", ""),
+        )
+
     async def _connect(
         self,
         context: HarnessContext,
@@ -195,13 +221,14 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             config=self._config,
             model=model,
             cwd=context.cwd or self._config.cwd,
-            env=build_process_env(self._config, context.env),
+            env={**build_process_env(self._config, context.env), **self._request_log_env},
             system_prompt=context.system_prompt,
             session_id=session_id,
             resume=resume,
             mcp_servers=mcp_servers_to_sdk(context.mcp_servers),
             can_use_tool=self._can_use_tool if interactive else None,
             stderr=self._stderr_tail.append,
+            settings_env=claude_request_log_settings_env(self._request_log_env),
         )
         if interactive:
             # ``bypassPermissions`` never consults ``can_use_tool``; the host
@@ -229,6 +256,17 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         return client
 
     async def _close_session(self) -> None:
+        try:
+            await self._disconnect_client()
+        finally:
+            observer = self._request_observer
+            self._request_observer = None
+            self._request_log_env = {}
+            if observer is not None:
+                await observer.close()
+
+    async def _disconnect_client(self) -> None:
+        """Drop the SDK client; the next turn reconnects the same session."""
         client = self._client
         self._client = None
         if client is None:
@@ -239,6 +277,37 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             logger.debug("[claude-code] disconnect failed during teardown: %s", exc)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        observer = self._request_observer
+        if observer is None:
+            return await self._run_turn(turn)
+
+        async def emit(payload: Any, item_id: str | None, causation_ids: tuple[str, ...], timestamp: float | None) -> None:
+            await self._emit(payload, turn=turn, item_id=item_id, causation_ids=causation_ids, timestamp=timestamp)
+
+        observer.begin_turn(emit)
+        kind: TurnEventKind | None = None
+        try:
+            kind, result = await self._run_turn(turn)
+            return kind, result
+        finally:
+            try:
+                # Every model request of the turn is reported before its
+                # terminal event; only a completed turn waits for late logs.
+                await observer.end_turn(wait=kind is TurnEventKind.FINISHED)
+            except Exception:
+                logger.debug("[claude-code] model request observation did not settle", exc_info=True)
+
+    async def _publish(self, message: Any, accumulator: ClaudeTurnAccumulator, turn: PendingTurn) -> None:
+        """Emit the events one SDK message maps to, through the observer when present."""
+        mapped: list[MappedClaudeEvent] = accumulator.consume(message)
+        observer = self._request_observer
+        if observer is not None:
+            await observer.observe(message, mapped, accumulator)
+            return
+        for event in mapped:
+            await self._emit(event.payload, turn=turn, item_id=event.item_id)
+
+    async def _run_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
         accumulator = ClaudeTurnAccumulator(turn_id=turn.turn_id, sdk=self._sdk)
         text = harness_input_text(turn.content)
@@ -261,7 +330,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                     error = classify_claude_exception(exc, phase="startup")
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
         if turn.abort_requested:
-            await self._close_session()
+            await self._disconnect_client()
             return TurnEventKind.ABORTED, interrupted_result(turn, provider_name=PROVIDER_NAME, timing=timing)
         for _attempt in range(2):
             client = self._client
@@ -270,8 +339,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             try:
                 await client.query(text)
                 async for message in client.receive_response():
-                    for mapped in accumulator.consume(message):
-                        await self._emit(mapped.payload, turn=turn, item_id=mapped.item_id)
+                    await self._publish(message, accumulator, turn)
                     if isinstance(message, self._sdk.ResultMessage):
                         kind, result = accumulator.build_terminal_result(message, turn=turn, timing=timing)
                         if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(
@@ -290,7 +358,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                     # to a still-open stdin while ``receive_response`` drains a
                     # closed stream and yields nothing. The client cannot
                     # recover in place, so drop it; the next turn reconnects.
-                    await self._close_session()
+                    await self._disconnect_client()
                     return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
             except Exception as exc:
                 if turn.abort_requested:
@@ -309,7 +377,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 # ``query`` (stdin is fine) but returns an empty stream, so the
                 # member would look READY while silently producing nothing.
                 # Drop the client here so the next turn reconnects cleanly.
-                await self._close_session()
+                await self._disconnect_client()
                 return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
         error = TurnError(
             message="Claude Code authentication fallback did not recover the turn",
