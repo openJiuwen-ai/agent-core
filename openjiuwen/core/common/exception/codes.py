@@ -864,6 +864,17 @@ class StatusCode(Enum):
     MODEL_CONFIG_ERROR = (181003, "model config error, reason: {error_msg}")
     MODEL_INVOKE_PARAM_ERROR = (181004, "model invoke parameter error, reason: {error_msg}")
     MODEL_CLIENT_CONFIG_INVALID = (181005, "model client_config is invalid, reason: {error_msg}")
+    MODEL_SELECTION_NOT_FOUND = (181006, "model selection not found, reason: {error_msg}")
+    MODEL_SELECTION_DISABLED = (181007, "model selection is disabled, reason: {error_msg}")
+    MODEL_SELECTION_FORBIDDEN = (181008, "model selection is forbidden, reason: {error_msg}")
+    MODEL_GROUP_INVALID = (181009, "model group is invalid, reason: {error_msg}")
+    MODEL_GROUP_NO_AVAILABLE_ROUTE = (181010, "model group has no available route, reason: {error_msg}")
+    MODEL_REQUEST_CONFIG_INVALID = (181011, "model request config is invalid, reason: {error_msg}")
+    MODEL_ROUTE_FAILED = (181012, "model route failed, reason: {error_msg}")
+    MODEL_STREAM_INTERRUPTED = (181013, "model stream interrupted, reason: {error_msg}")
+    MODEL_OUTCOME_UNKNOWN = (181014, "model outcome is unknown, reason: {error_msg}")
+    MODEL_SELECTION_REFERENCED = (181015, "model selection is referenced, reason: {error_msg}")
+    MODEL_RUNTIME_UNAVAILABLE = (181016, "model runtime is unavailable, reason: {error_msg}")
 
     # 2. Foundation - Tool Definition and Execution 182000 - 182999
     # 0. basic tool
