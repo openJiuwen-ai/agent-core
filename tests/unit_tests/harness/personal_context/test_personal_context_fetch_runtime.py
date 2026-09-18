@@ -336,6 +336,62 @@ async def test_append_fetch_service_updates_live_config_without_restarting_exist
     assert "bookmarks" not in personal_context._fetch_run_progress
 
 
+@pytest.mark.asyncio
+async def test_update_fetch_service_config_changes_only_named_service_schedule(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"notes": True, "bookmarks": True}),
+    )
+    pipeline = personal_context._pipeline_service
+    assert isinstance(pipeline, _RunningPipeline)
+    original = personal_context._config
+    notes = next(
+        service
+        for service in original.fetch_services
+        if service.service_id == "notes"
+    )
+    updated = notes.model_copy(
+        update={"interval_seconds": 7200.0, "max_items_per_run": 42}
+    )
+
+    await personal_context._update_fetch_service_config(updated)
+
+    by_id = {
+        service.service_id: service
+        for service in personal_context._config.fetch_services
+    }
+    assert by_id["notes"].interval_seconds == 7200.0
+    assert by_id["notes"].max_items_per_run == 42
+    assert by_id["bookmarks"].interval_seconds == 3600.0
+    assert pipeline.configurations[-1] is personal_context._config
+
+
+@pytest.mark.asyncio
+async def test_update_fetch_service_config_rejects_non_schedule_and_unknown_fields(
+    tmp_path: Path,
+) -> None:
+    personal_context = await _ready_manual_personal_context(
+        tmp_path,
+        _manual_config(tmp_path, services={"notes": True}),
+    )
+    original = personal_context._config
+    notes = original.fetch_services[0]
+
+    with pytest.raises(BaseError, match="only fetch service schedule fields"):
+        await personal_context._update_fetch_service_config(
+            notes.model_copy(update={"enabled": False})
+        )
+
+    with pytest.raises(BaseError, match="unknown fetch service"):
+        await personal_context._update_fetch_service_config(
+            notes.model_copy(update={"service_id": "missing"})
+        )
+
+    assert personal_context._config is original
+
+
 def _gitcode_runtime_service() -> PersonalContextFetchServiceConfig:
     return PersonalContextFetchServiceConfig.model_validate(
         {

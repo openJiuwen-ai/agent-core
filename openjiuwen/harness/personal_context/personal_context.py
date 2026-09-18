@@ -965,6 +965,62 @@ class PersonalContext:
             if pipeline is not None:
                 pipeline.replace_configuration(updated)
 
+    async def _update_fetch_service_config(
+        self,
+        service: PersonalContextFetchServiceConfig,
+    ) -> None:
+        """Update one service's schedule fields without touching unrelated services."""
+
+        if not isinstance(service, PersonalContextFetchServiceConfig):
+            raise _state_error("service must be PersonalContextFetchServiceConfig")
+        safe_id = _safe_service_id(service.service_id)
+        async with self._state_lock:
+            config = self._config
+            if config is None:
+                raise _state_error("PersonalContext has not been configured")
+            services = list(config.fetch_services)
+            index = next(
+                (index for index, item in enumerate(services) if item.service_id == safe_id),
+                None,
+            )
+            if index is None:
+                raise _state_error("unknown fetch service")
+            current = services[index]
+            if (
+                current.model_copy(
+                    update={
+                        "interval_seconds": service.interval_seconds,
+                        "max_items_per_run": service.max_items_per_run,
+                        "source": service.source,
+                        "time_range": service.time_range,
+                    }
+                )
+                != service
+            ):
+                raise _state_error("only fetch service schedule fields may be updated")
+            source_changed = current.source != service.source
+            interval_changed = current.interval_seconds != service.interval_seconds
+            services[index] = service
+            updated = config.model_copy(update={"fetch_services": tuple(services)})
+            new_provider = self._create_fetch_provider(service) if source_changed else None
+            async with self._fetch_lock:
+                pipeline = self._pipeline_service
+                if pipeline is not None:
+                    pipeline.replace_configuration(updated)
+                self._config = updated
+                if new_provider is not None and safe_id in self._fetch_providers:
+                    self._fetch_providers[safe_id] = new_provider
+            should_restart = (
+                interval_changed
+                and self._state == "RUNNING"
+                and service.enabled
+                and safe_id in self._fetch_tasks
+                and safe_id not in self._fetch_running
+            )
+        if should_restart:
+            await self.stop_fetch_service(safe_id)
+            await self.start_fetch_service(safe_id)
+
     async def run_fetch(
         self,
         *,
