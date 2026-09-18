@@ -12,11 +12,12 @@ Rail 只新增工具、不改写 prompt，符合 Harness 的 Rail 扩展范式�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, Optional
 
-from openjiuwen.core.common.logging import logger
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 from openjiuwen.contrib.scholar_rails.arxiv_tool import (
@@ -53,49 +54,35 @@ class LiteratureGroundingRail(DeepAgentRail):
         super().init(agent) if hasattr(super(), "init") else None
         self._tools = self._build_tools()
         for tool in self._tools:
-            try:
-                agent.ability_manager.add(tool)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("[LiteratureGroundingRail] register tool failed: %s", exc)
+            agent.ability_manager.add_ability(tool.card, tool)
+            if agent.ability_manager.get(tool.card.name) is not tool.card:
+                raise RuntimeError(f"literature tool registration failed: {tool.card.name}")
 
     def uninit(self, agent) -> None:  # noqa: D102
         for tool in self._tools:
-            try:
-                agent.ability_manager.remove(tool)
-            except Exception:  # noqa: BLE001
-                pass
+            # Do not remove another rail's later replacement of the same name.
+            if agent.ability_manager.get(tool.card.name) is tool.card:
+                agent.ability_manager.remove_ability(tool.card.name)
         self._tools = []
         super().uninit(agent) if hasattr(super(), "uninit") else None
 
     # ---------------------------------------------------------------- tools
     def _build_tools(self) -> list[Any]:
-        """构建三个底层能力函数对应的 Tool 对象。
+        """构建四个底层能力函数对应的原生 Tool 对象。
 
         openJiuwen 的 Tool 需要 ToolCard + 可调用入口。这里用最小封装，
-        通过 ``ability_manager.add`` 注册（与 SysOperationRail 同一机制）。
+        通过 ``ability_manager.add_ability(card, tool)`` 注册元数据和执行实例。
         """
         rail = self
 
-        class _FnTool:
-            """最小 Tool 封装：name/description/parameters + async invoke。"""
-
-            def __init__(self, name: str, description: str, parameters: dict, fn):
-                self.name = name
-                self.description = description
-                self.parameters = parameters
-                self._fn = fn
-
-            async def invoke(self, **kwargs):  # noqa: D102
-                return self._fn(**kwargs)
-
-            # openJiuwen ability_manager 期望的元数据属性
-            @property
-            def card(self):  # noqa: D102
-                return {
-                    "name": self.name,
-                    "description": self.description,
-                    "parameters": self.parameters,
-                }
+        def _FnTool(name: str, description: str, parameters: dict, fn):
+            async def invoke(**kwargs):
+                # arXiv rate limiting and network I/O must not block the agent loop.
+                return await asyncio.to_thread(fn, **kwargs)
+            return LocalFunction(ToolCard(
+                name=name, description=description, input_params=parameters,
+                parallel_safe=False, idempotent=True,
+            ), invoke)
 
         def arxiv_search(query: str, max_results: Optional[int] = None) -> str:
             records = search_arxiv(query, max_results=max_results or rail._max_results)

@@ -48,7 +48,7 @@ Score each dimension from 1-10 and give a short justification:
 - clarity
 - reproducibility
 
-Then give an overall score (1-10) and a decision in {accept, borderline, reject}.
+Then give an overall score (1-10) and a decision in {{accept, borderline, reject}}.
 Finally list concrete, actionable revision comments (bullet points).
 
 Respond ONLY with a JSON object of the form:
@@ -97,7 +97,14 @@ class ICLRReviewRail(DeepAgentRail):
     async def _run_review(self, draft: str) -> ReviewScore:
         self._round += 1
         prompt = _REVIEW_PROMPT.format(draft=draft[:120_000])  # 防爆长度
-        resp = await self._judge.generate(messages=[{"role": "user", "content": prompt}])
+        messages = [{"role": "user", "content": prompt}]
+        # Native Model exposes invoke; retain ainvoke/generate adapter compatibility.
+        if hasattr(self._judge, "ainvoke"):
+            resp = await self._judge.ainvoke(messages)
+        elif hasattr(self._judge, "invoke"):
+            resp = await self._judge.invoke(messages)
+        else:
+            resp = await self._judge.generate(messages=messages)
         text = getattr(resp, "content", None) or (resp if isinstance(resp, str) else str(resp))
         score = self._parse_review(text)
         self._scores.append(score)
