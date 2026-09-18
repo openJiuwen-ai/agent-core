@@ -156,6 +156,10 @@ def _root_node_id(task_id: str) -> str:
     return f"artifact:{task_id}:root"
 
 
+_ROOT_BASELINE_SUMMARY = "已上传原始论文，作为任务的基线输入。"
+_ROOT_NO_UPLOAD_SUMMARY = "未上传起始论文，将从零开始撰写。"
+
+
 def _has_paper(run_id: str) -> bool:
     return paper_tex_path(run_id).exists() or paper_output_path(run_id).exists()
 
@@ -217,13 +221,36 @@ def _friendly_pruned_reason(
         if marker in context:
             return "实验验证效果不佳，已剪枝。"
 
-    paper_markers = ("reporting", "latex", "paper", "report", "pdf", "tex")
+    # Do not use a bare "paper" marker: it matches task_mode names
+    # (modify_paper / create_new_paper) and mislabels constructor failures
+    # as a content-quality prune.
+    paper_markers = ("reporting", "latex", "paper_generation", "report", "pdf", "tex")
     if phase == "paper_generation":
         return "论文内容质量未达到要求，已剪枝。"
     for marker in paper_markers:
-        if marker in context:
+        if _contains_token(context, marker):
             return "论文内容质量未达到要求，已剪枝。"
     return "当前方案效果未达到要求，已剪枝。"
+
+
+def _contains_token(text: str, marker: str) -> bool:
+    """True when ``marker`` is its own token, not a substring of a longer word.
+
+    Bare ``"paper"`` / ``"tex"`` substring matches hit ``modify_paper`` and
+    ``previous_context`` and were mislabeling constructor failures as a
+    content-quality prune.
+    """
+    start = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx < 0:
+            return False
+        before = text[idx - 1] if idx else ""
+        after_idx = idx + len(marker)
+        after = text[after_idx] if after_idx < len(text) else ""
+        if not before.isalpha() and not after.isalpha():
+            return True
+        start = idx + 1
 
 
 def _artifact_ref_for_node(node_id: str, run_id: str) -> ArtifactRef | None:
@@ -299,6 +326,7 @@ class PaperTreeOrchestrator:
         self.artifact_path = artifact_path
         self.initial_prompt = ""
         self.initial_research_paths: list[str] = []
+        self.previous_context = None
         # AgentServer-resolved openjiuwen.core.foundation.llm.Model
         # instance (ArtifactEngineRequest.model), shared by scoring and all
         # model-backed pipeline modules. None retains standalone config/env
@@ -399,6 +427,7 @@ class PaperTreeOrchestrator:
         """Create the manager-facing context and paths for an uploaded paper."""
         self.initial_prompt = ""
         self.initial_research_paths = []
+        self.previous_context = None
         if not self.artifact_path:
             return
 
@@ -417,34 +446,32 @@ class PaperTreeOrchestrator:
         )
 
         initial_prompt = "TASK MODE: modify_paper\n\n" + artifact_instruction
-        research_paths = [context_path_relative]
+        # Paper directory/file first so the manager's initial_research_paths
+        # match the original modify_paper contract (the baseline paper itself).
+        research_paths = [relative_snapshot]
         main_tex = snapshot / "main.tex" if snapshot.is_dir() else None
         if main_tex is not None and main_tex.is_file():
             main_relative = to_project_relative(main_tex, root=run_dir)
             try:
-                processed = PaperPreprocessAgent().run(PaperPreprocessInput(paper_dir=str(snapshot))).initial_prompt
+                processed = PaperPreprocessAgent().run(PaperPreprocessInput(paper_dir=str(snapshot)))
             except LatexValidationError as exc:
-                processed = (
+                processed = None
+                initial_prompt = (
                     "TASK MODE: modify_paper\n\n"
                     f"The staged directory could not be validated as a complete LaTeX paper: {exc}. "
                     f"Inspect `{main_relative}` and the other files under `{relative_snapshot}` directly."
                 )
             else:
-                # Keep the prompt portable and consistent with the relative
-                # resource paths exposed to downstream agents.
-                processed = processed.replace(str(main_tex), main_relative)
-                processed = f"{processed}\n\n{artifact_instruction}"
-            initial_prompt = processed
-            # The explicit main.tex path is useful to experiment design even
-            # though directory expansion intentionally ignores .tex files.
-            research_paths.append(main_relative)
+                prompt = processed.initial_prompt.replace(str(main_tex), main_relative)
+                initial_prompt = f"{prompt}\n\n{artifact_instruction}"
+                self.previous_context = processed.research_context
+            if main_relative not in research_paths:
+                research_paths.append(main_relative)
         elif snapshot.is_dir():
-            # Directory expansion can still expose supported resources (for
-            # example an uploaded PDF plus sidecar notes).
             initial_prompt += f" The directory contains the uploaded paper resources; inspect `{relative_snapshot}`."
-            research_paths.append(relative_snapshot)
-        else:
-            research_paths.append(relative_snapshot)
+
+        if context_path_relative not in research_paths:
+            research_paths.append(context_path_relative)
 
         context_path.write_text(
             "\n".join(
@@ -501,11 +528,7 @@ class PaperTreeOrchestrator:
             parent_id=None,
             type="root",
             adopted=True,
-            summary=(
-                "Uploaded starting paper staged as the task-local baseline input."
-                if has_upload
-                else "No starting paper; first node writes from scratch."
-            ),
+            summary=_ROOT_BASELINE_SUMMARY if has_upload else _ROOT_NO_UPLOAD_SUMMARY,
             extra={
                 "paper": PaperNodeExtra(
                     logical_kind="root",
@@ -561,6 +584,12 @@ class PaperTreeOrchestrator:
             )
             return
 
+        await self._emit(
+            NodeStageEvent(
+                node_ref=_root_node_id(self.task_id),
+                stage={"id": "score", "name": "正在评估论文"},
+            )
+        )
         try:
             set_usage_node(_root_node_id(self.task_id))
             baseline_score = await score_paper(
@@ -576,6 +605,19 @@ class PaperTreeOrchestrator:
                 tex_path,
                 exc,
             )
+            root = next(
+                (node for node in self.storage.load_tree() if node.node_id == _root_node_id(self.task_id)),
+                None,
+            )
+            if root is not None:
+                root = root.model_copy(
+                    update={
+                        "summary": _ROOT_BASELINE_SUMMARY,
+                        "extra": {"paper": root.extra.get("paper", {})},
+                    }
+                )
+                self.storage.append_node(root)
+                await self._emit(EventNode(node=root))
             return
 
         state.baseline = baseline_score.overall
@@ -597,6 +639,7 @@ class PaperTreeOrchestrator:
                 root = root.model_copy(
                     update={
                         "score": baseline_score.overall,
+                        "summary": _ROOT_BASELINE_SUMMARY,
                         "extra": {"paper": updated_extra.model_dump(mode="json")},
                     }
                 )
@@ -762,6 +805,7 @@ class PaperTreeOrchestrator:
             parent_run_id=_node_run_id(frontier),
             initial_research_paths=self.initial_research_paths,
             initial_prompt=self.initial_prompt,
+            previous_context=self.previous_context,
             task_mode="modify_paper" if self.artifact_path else "create_new_paper",
         )
 
@@ -894,15 +938,22 @@ class PaperTreeOrchestrator:
         try:
             set_usage_node(seed.run_id)
 
-            async def on_stage(module: str) -> None:
+            async def on_stage(module: str, note: str | None = None) -> None:
+                # No "正在" prefix: the frontend's own isStageDescription()
+                # filter (jiuwenswarm's rsiPresentation.ts) treats any
+                # description containing "正在" as stage boilerplate and
+                # hides it from the node summary line, which is the only
+                # place the live `note` this label gets concatenated with
+                # (see PaperTreeOrchestrator._emit's NodeStageEvent handling
+                # below) can actually surface without frontend changes.
                 labels = {
-                    "manager": "正在规划下一阶段",
-                    "topic_survey": "正在调研文献",
-                    "experiment_design": "正在设计实验",
-                    "code_implementation": "正在实现代码",
-                    "experiment_execution": "正在执行实验",
-                    "reflection": "正在分析与反思",
-                    "reporting": "正在撰写论文",
+                    "manager": "规划下一阶段中",
+                    "topic_survey": "调研文献中",
+                    "experiment_design": "设计实验中",
+                    "code_implementation": "实现代码中",
+                    "experiment_execution": "执行实验中",
+                    "reflection": "分析与反思中",
+                    "reporting": "撰写论文中",
                 }
                 node = next(
                     (n for n in self.storage.load_tree() if _node_run_id(n) == seed.run_id),
@@ -913,6 +964,7 @@ class PaperTreeOrchestrator:
                         NodeStageEvent(
                             node_ref=node.node_id,
                             stage={"id": module, "name": labels.get(module, module)},
+                            note=note,
                         )
                     )
 
@@ -949,8 +1001,9 @@ class PaperTreeOrchestrator:
                     run_id=seed.run_id,
                     objective=seed.objective,
                     constraints=seed.constraints or None,
-                    initial_prompt=getattr(seed, "initial_prompt", ""),
-                    task_mode=getattr(seed, "task_mode", "create_new_paper"),
+                    initial_prompt=seed.initial_prompt,
+                    task_mode=seed.task_mode,
+                    previous_context=seed.previous_context,
                 )
         except Exception as exc:  # noqa: BLE001 -- defensive: arun() itself already
             # turns internal failures into a TerminalReport; this only
@@ -1206,11 +1259,17 @@ class PaperTreeOrchestrator:
         if isinstance(event, NodeStageEvent):
             for node in self.storage.load_tree():
                 if node.node_id == event.node_ref:
+                    label = event.stage.get("name")
+                    # `note` is a live "what just happened" hint (see
+                    # pipeline/stage_activity.py) folded straight into the
+                    # same summary string the frontend already renders, so
+                    # showing it needs no new field on the frontend side.
+                    summary = f"{label} · {event.note}" if event.note else label
                     self.storage.append_node(
                         node.model_copy(
                             update={
-                                "summary": event.stage.get("name"),
-                                "extra": {**node.extra, "stage": dict(event.stage)},
+                                "summary": summary,
+                                "extra": {**node.extra, "stage": {**dict(event.stage), "note": event.note}},
                             }
                         )
                     )

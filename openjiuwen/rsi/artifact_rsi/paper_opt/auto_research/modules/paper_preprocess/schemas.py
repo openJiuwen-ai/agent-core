@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -69,7 +71,44 @@ class PaperEvidence(BaseModel):
     improvement_opportunities: list[str] = Field(default_factory=list)
 
 
+class ResearchClaim(BaseModel):
+    """A prior-paper claim with enough provenance for later numeric linting."""
+
+    claim_id: str
+    text: str
+    kind: Literal["quantitative", "qualitative"] = "qualitative"
+    source_section: str = ""
+    evidence: str = ""
+    metric: str | None = None
+    value: float | None = None
+    values: list[float] = Field(default_factory=list)
+    provenance: dict[str, str] = Field(default_factory=dict)
+
+
+class ResearchContext(BaseModel):
+    """Derived state from a previous paper. Reporting generates a new draft
+    from this context plus the current run; it does not edit the original
+    LaTeX in place. Always re-derived from a compiled paper by
+    paper_preprocess, never hand-updated by ReportingAgent.
+    """
+
+    title: str = ""
+    abstract: str = ""
+    problem: str = ""
+    method: str = ""
+    experiment_setup: list[str] = Field(default_factory=list)
+    claims: list[ResearchClaim] = Field(default_factory=list)
+    conclusions: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
+    improvement_opportunities: list[str] = Field(default_factory=list)
+    bibliography_text: str = ""
+    citation_keys: list[str] = Field(default_factory=list)
+    title_to_key: dict[str, str] = Field(default_factory=dict)
+    extracted_numbers: list[float] = Field(default_factory=list)
+
+
 class PaperPreprocessOutput(BaseModel):
     document: LatexPaperDocument
     evidence: PaperEvidence
     initial_prompt: str
+    research_context: ResearchContext

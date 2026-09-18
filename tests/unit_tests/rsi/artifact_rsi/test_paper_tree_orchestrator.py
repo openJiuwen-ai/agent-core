@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
@@ -58,6 +60,23 @@ def test_scoring_pruned_reason_does_not_expose_exception():
     assert "provider error" not in reason
 
 
+def test_pruned_reason_does_not_treat_modify_paper_as_quality_failure():
+    reason = module._friendly_pruned_reason(  # noqa: SLF001
+        terminal=TerminalReport(
+            status="failed",
+            run_id="run-r2",
+            failure_reason="previous_context is only accepted when task_mode='modify_paper'",
+            summary=(
+                "orchestrator: unexpected exception running node: "
+                "previous_context is only accepted when task_mode='modify_paper'"
+            ),
+        ),
+    )
+
+    assert reason != "论文内容质量未达到要求，已剪枝。"
+    assert "modify_paper" not in reason
+
+
 @pytest.mark.asyncio
 async def test_uploaded_latex_baseline_score_is_persisted_and_projected(tmp_path, monkeypatch):
     source = tmp_path / "uploaded-paper"
@@ -92,7 +111,8 @@ async def test_uploaded_latex_baseline_score_is_persisted_and_projected(tmp_path
     assert root.score == 7.25
     assert root.paper_extra is not None
     assert root.paper_extra.score_overall == 7.25
-    assert calls and calls[0][0].endswith("input/paper/uploaded-paper/main.tex")
+    assert calls
+    assert Path(calls[0][0]).as_posix().endswith("input/paper/uploaded-paper/main.tex")
 
     projected_state = project_engine_state(state)
     projected_report = project_engine_report(state, artifact_index=[])

@@ -17,6 +17,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
     _reject_unsafe_relative_path,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import ExperimentResult
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import Reflection
 
 ControlSignal = Literal["EXECUTE", "DONE", "BLOCKED"]
@@ -70,6 +71,7 @@ class OriginalTask(BaseModel):
     task_mode: TaskMode = "create_new_paper"
     initial_prompt: str = ""
     initial_research_paths: list[str] = Field(default_factory=list)
+    previous_context: ResearchContext | None = None
     run_id: str = Field(default_factory=new_run_id)
 
     @field_validator("topic")
@@ -166,7 +168,10 @@ class BudgetLimits(BaseModel):
     # retry from a cold, fresh workspace every ~10 minutes with nothing to
     # stop it short of max_rounds.
     max_reporting_retries: int = Field(default=3, ge=0)
-    max_history_chars: int = Field(default=16_000, ge=500)
+    # Fail-loud ceiling for rendered manager STATE JSON after structured
+    # compaction (~32k tokens at 4 chars/token). The host never truncates
+    # serialized JSON to fit this budget.
+    max_history_chars: int = Field(default=128_000, ge=500)
     max_report_chars: int = Field(default=8_000, ge=200)
     excerpt_chars: int = Field(default=4_000, ge=80)
 
@@ -182,11 +187,33 @@ class SubtaskContract(BaseModel):
     related_report_ids: list[str] = Field(default_factory=list)
     repair_instruction: str = ""
     followup_query: str = ""
+    target_variants: list[str] = Field(default_factory=list)
+    restore_code_commit: str = ""
 
     @field_validator("goal")
     @classmethod
     def _strip_goal(cls, value: str) -> str:
         return _strip_nonempty(value, field_name="goal")
+
+    @field_validator("restore_code_commit")
+    @classmethod
+    def _strip_restore(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("target_variants")
+    @classmethod
+    def _unique_variants(cls, value: list[str]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            if cleaned in seen:
+                raise ValueError("target_variants must not contain duplicates")
+            seen.add(cleaned)
+            unique.append(cleaned)
+        return unique
 
     @model_validator(mode="after")
     def _mode_matches_module(self) -> SubtaskContract:
@@ -284,12 +311,13 @@ class VariantHandoff(BaseModel):
     process_status: str = ""
     diagnostic: dict[str, Any] = Field(default_factory=dict)
     diagnostics_path: str = ""
+    code_commit: str = ""
 
 
 class CodeHandoff(BaseModel):
     kind: Literal["code_implementation"] = "code_implementation"
     status: str = "failed"
-    readiness: Literal["smoke_ready", "failed"] = "failed"
+    readiness: Literal["smoke_ready", "failed", "promotion_failed"] = "failed"
     smoke_test_passed: bool = False
     smoke_failures: dict[str, str] = Field(default_factory=dict)
     variants: list[VariantHandoff] = Field(default_factory=list)
@@ -297,6 +325,7 @@ class CodeHandoff(BaseModel):
     workspace_dir: str = ""
     log_paths: list[str] = Field(default_factory=list)
     failure_excerpts: list[str] = Field(default_factory=list)
+    code_commit: str = ""
 
 
 class ExecutionHandoff(BaseModel):
@@ -315,6 +344,7 @@ class ExecutionHandoff(BaseModel):
     failure_class: str = ""
     fingerprint: str = ""
     diagnostic_paths: list[str] = Field(default_factory=list)
+    code_commit: str = ""
 
 
 class ReflectionHandoff(BaseModel):
@@ -429,6 +459,67 @@ class TerminalReport(BaseModel):
     completion_satisfied: bool = False
 
 
+class ExecutionHistoryRecord(BaseModel):
+    """One variant run at a host-owned generated_code commit."""
+
+    name: str
+    code_commit: str = ""
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    exit_code: int = 0
+    log_path: str = ""
+    failure_kind: str = ""
+    metrics_state: str = ""
+    duration_ms: int | None = None
+    process_status: Literal["completed", "failed"] = "failed"
+    attempts: int = 1
+    diagnostics_path: str = ""
+    report_id: str = ""
+    round_index: int = 0
+
+    @classmethod
+    def from_variant_result(
+        cls,
+        variant: Any,
+        *,
+        report_id: str = "",
+        round_index: int = 0,
+    ) -> "ExecutionHistoryRecord":
+        return cls(
+            name=variant.name,
+            code_commit=getattr(variant, "code_commit", "") or "",
+            metrics=dict(getattr(variant, "metrics", {}) or {}),
+            exit_code=int(getattr(variant, "exit_code", 0) or 0),
+            log_path=str(getattr(variant, "log_path", "") or ""),
+            failure_kind=str(getattr(variant, "failure_kind", "") or ""),
+            metrics_state=str(getattr(variant, "metrics_state", "") or ""),
+            duration_ms=getattr(variant, "duration_ms", None),
+            process_status=getattr(variant, "process_status", "failed") or "failed",
+            attempts=int(getattr(variant, "attempts", 1) or 1),
+            diagnostics_path=str(getattr(variant, "diagnostics_path", "") or ""),
+            report_id=report_id,
+            round_index=round_index,
+        )
+
+    def as_variant_result(self) -> Any:
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_execution.schemas import (
+            VariantResult,
+        )
+
+        return VariantResult(
+            name=self.name,
+            metrics=dict(self.metrics),
+            exit_code=self.exit_code,
+            log_path=self.log_path,
+            failure_kind=self.failure_kind,
+            metrics_state=self.metrics_state,
+            duration_ms=self.duration_ms,
+            process_status=self.process_status,
+            attempts=self.attempts,
+            diagnostics_path=self.diagnostics_path,
+            code_commit=self.code_commit,
+        )
+
+
 class PersistedManagerState(BaseModel):
     schema_version: int = 1
     original_task: OriginalTask
@@ -441,6 +532,7 @@ class PersistedManagerState(BaseModel):
     latest_implementation: CodeImplementationManifest | None = None
     latest_execution: ExperimentResult | None = None
     latest_reflection: Reflection | None = None
+    execution_history: list[ExecutionHistoryRecord] = Field(default_factory=list)
 
 
 class RoutingHint(BaseModel):
@@ -453,10 +545,13 @@ class RoutingHint(BaseModel):
     remaining_design_revisions: int = 0
     remaining_reporting_retries: int = 0
     known_record_ids: list[str] = Field(default_factory=list)
+    known_report_ids: list[str] = Field(default_factory=list)
     legal_actions: list[dict[str, str]] = Field(default_factory=list)
     can_complete: bool = False
     can_complete_reason: str = ""
-    latest_metrics: dict[str, Any] = Field(default_factory=dict)
+    implemented_variants: list[str] = Field(default_factory=list)
+    executed_variants: list[str] = Field(default_factory=list)
+    code_head: str = ""
     latest_process_status: str = ""
     latest_scientific_status: str = ""
     latest_failure_kind: str = ""
@@ -464,8 +559,10 @@ class RoutingHint(BaseModel):
     latest_failure_substage: str = ""
     latest_failure_class: str = ""
     latest_failure_fingerprint: str = ""
-    diagnostic_paths: list[str] = Field(default_factory=list)
     variant_metrics: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    latest_metrics: dict[str, Any] = Field(default_factory=dict)
+    execution_history: list[dict[str, Any]] = Field(default_factory=list)
+    diagnostic_paths: list[str] = Field(default_factory=list)
 
 
 class ManagerSnapshot(BaseModel):
@@ -499,6 +596,114 @@ def default_requirements(topic: str) -> list[RequirementRecord]:
             description="Run the experiment and collect per-variant metrics",
         ),
     ]
+
+
+def unique_executed_variant_names(history: list[ExecutionHistoryRecord]) -> list[str]:
+    """First-seen variant names from execution history."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for record in history:
+        if not record.name or record.name in seen:
+            continue
+        seen.add(record.name)
+        names.append(record.name)
+    return names
+
+
+def compact_execution_history_rows(
+    history: list[ExecutionHistoryRecord],
+) -> list[dict[str, Any]]:
+    """Compact (variant, commit, status, metrics) rows for the manager prompt."""
+    rows: list[dict[str, Any]] = []
+    for record in history:
+        rows.append(
+            {
+                "name": record.name,
+                "code_commit": record.code_commit,
+                "process_status": record.process_status,
+                "metrics": dict(record.metrics),
+                "failure_kind": record.failure_kind,
+                "report_id": record.report_id,
+            }
+        )
+    return rows
+
+
+def history_slice_for_commit(
+    history: list[ExecutionHistoryRecord],
+    code_commit: str,
+) -> list[ExecutionHistoryRecord]:
+    """Last record per variant name at ``code_commit`` (current HEAD slice)."""
+    if not code_commit:
+        return []
+    latest: dict[str, ExecutionHistoryRecord] = {}
+    for record in history:
+        if record.code_commit == code_commit:
+            latest[record.name] = record
+    return list(latest.values())
+
+
+def latest_records_per_variant_name(
+    history: list[ExecutionHistoryRecord],
+) -> list[ExecutionHistoryRecord]:
+    """Last record per variant name across all commits (append order)."""
+    latest: dict[str, ExecutionHistoryRecord] = {}
+    for record in history:
+        latest[record.name] = record
+    return list(latest.values())
+
+
+def _experiment_result_from_records(
+    records: list[ExecutionHistoryRecord],
+    *,
+    run_id: str,
+    workspace_dir: str,
+    notes: str = "",
+) -> ExperimentResult | None:
+    if not records:
+        return None
+    variants = [record.as_variant_result() for record in records]
+    process_complete = all(item.process_status == "completed" for item in variants)
+    return ExperimentResult(
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        variants=variants,
+        status="completed" if process_complete else "failed",
+        notes=notes,
+    )
+
+
+def experiment_result_from_history_slice(
+    history: list[ExecutionHistoryRecord],
+    code_commit: str,
+    *,
+    run_id: str,
+    workspace_dir: str,
+    notes: str = "",
+) -> ExperimentResult | None:
+    """Rebuild ``ExperimentResult.variants`` from the current-HEAD history slice."""
+    return _experiment_result_from_records(
+        history_slice_for_commit(history, code_commit),
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        notes=notes,
+    )
+
+
+def experiment_result_from_latest_variants(
+    history: list[ExecutionHistoryRecord],
+    *,
+    run_id: str,
+    workspace_dir: str,
+    notes: str = "",
+) -> ExperimentResult | None:
+    """Rebuild ``ExperimentResult.variants`` from the last row per variant name."""
+    return _experiment_result_from_records(
+        latest_records_per_variant_name(history),
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        notes=notes,
+    )
 
 
 def report_requirement() -> RequirementRecord:

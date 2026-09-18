@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,13 +15,16 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     compact_metrics,
     failure_class_from_metrics,
     failure_fingerprint,
+    materialize_handoff_metrics,
     metric_diagnostics,
-    scientific_status_from_comparison,
+    overlay_paired_metrics,
     sanitize_diagnostic_payload,
+    scientific_status_from_comparison,
     scientific_status_from_metrics,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     agent_trace_path,
+    agent_workspace_dir,
     ensure_manager_dir,
     find_harness_run_dirs,
     generated_code_dir,
@@ -29,13 +33,24 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
     results_dir,
     smoke_test_dir,
     to_project_relative,
+    workspace_dir,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
+    _ENTRY_POINT,
+    _PROMOTION_LOG,
     CodeImplementationAgent,
+    _discover_variant_names,
+)
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
+    current_commit,
+    restore_commit,
+    seed_output_from_head,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
     CodeImplementationInput,
+    CodeImplementationManifest,
     CodeImplementationOutput,
+    ImplementedVariant,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.agent import (
     ExperimentDesignAgent,
@@ -61,6 +76,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     CodeHandoff,
     DesignHandoff,
     ExecutionHandoff,
+    ExecutionHistoryRecord,
     ModuleId,
     ModuleMode,
     PersistedManagerState,
@@ -70,6 +86,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     SubtaskContract,
     SurveyHandoff,
     VariantHandoff,
+    experiment_result_from_latest_variants,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import ReflectionInput
@@ -150,6 +167,13 @@ def _contract_brief(contract: SubtaskContract) -> str:
         parts.extend(["## Repair instruction", "", contract.repair_instruction.strip(), ""])
     if contract.followup_query.strip():
         parts.extend(["## Follow-up query", "", contract.followup_query.strip(), ""])
+    if contract.target_variants:
+        named = ", ".join(f"`{name}`" for name in contract.target_variants)
+        parts.extend(["## Target variants", "", named, ""])
+    if contract.restore_code_commit.strip():
+        parts.extend(
+            ["## Restore code commit", "", contract.restore_code_commit.strip(), ""]
+        )
     return "\n".join(parts)
 
 
@@ -772,6 +796,42 @@ def _variant_handoffs_from_logs(
     return variants, log_paths
 
 
+def _apply_latest_per_variant(state: PersistedManagerState) -> None:
+    """Point ``latest_execution`` at the last history row per variant name."""
+    run_id = state.task_state.run_id
+    result = experiment_result_from_latest_variants(
+        state.execution_history,
+        run_id=run_id,
+        workspace_dir=str(workspace_dir(run_id).resolve()),
+    )
+    plan = state.task_state.latest_plan
+    if result is not None and plan is not None and plan.metrics:
+        result = result.model_copy(
+            update={
+                "variants": overlay_paired_metrics(
+                    result.variants,
+                    list(plan.metrics),
+                    baselines=list(plan.baselines),
+                )
+            }
+        )
+    state.latest_execution = result
+    if result is None:
+        state.task_state.latest_execution_status = None
+    else:
+        state.task_state.latest_execution_status = result.status
+
+
+def _manifest_files(code_dir: Path) -> list[str]:
+    if not code_dir.exists():
+        return []
+    return sorted(
+        path.relative_to(code_dir).as_posix()
+        for path in code_dir.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    )
+
+
 def _report(
     *,
     module: ModuleId,
@@ -833,7 +893,7 @@ class TopicSurveyAdapter:
             max_web_pages=int(survey_cfg.get("max_web_pages", 10)),
             initial_context=bounded_text(
                 state.original_task.initial_prompt,
-                int(manager_cfg.get("max_history_chars", 16_000)),
+                int(manager_cfg.get("max_history_chars", 128_000)),
             ),
         )
         started = time.monotonic()
@@ -880,6 +940,18 @@ class TopicSurveyAdapter:
         )
 
 
+def _prefixed_observed(
+    metrics: dict[str, Any],
+    *,
+    prefix: str,
+    plan_metrics: list[str] | None = None,
+) -> dict[str, float | int | str]:
+    compact, _diag = materialize_handoff_metrics(dict(metrics), plan_metrics=plan_metrics)
+    if not prefix:
+        return compact
+    return {f"{prefix}.{key}": value for key, value in compact.items()}
+
+
 def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedback:
     """Host-synthesized feedback so design/update can follow a simple completed run."""
     plan = state.task_state.latest_plan
@@ -887,9 +959,13 @@ def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedba
     observed: dict[str, float | int | str] = {}
     paths: list[str] = []
     result = state.latest_execution
+    plan_metrics = list(plan.metrics) if plan is not None else []
     if result is not None:
         for variant in result.variants:
-            observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+            compact = _prefixed_observed(
+                dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+            )
+            observed.update(compact)
             if variant.log_path:
                 rel = _safe_rel(variant.log_path)
                 if rel:
@@ -913,7 +989,11 @@ def _evaluation_from_execution(state: PersistedManagerState) -> EvaluationFeedba
             if rel and rel not in paths:
                 paths.append(rel)
         for variant in last_exec.handoff.variants:
-            observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+            observed.update(
+                _prefixed_observed(
+                    dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+                )
+            )
     if not paths:
         paths = [f"experiments/{run_id}/results/proposed.metrics.json"]
     if observed:
@@ -1127,6 +1207,15 @@ def _latest_survey_paths(state: PersistedManagerState) -> list[str]:
     return []
 
 
+def _promotion_retry_pending(state: PersistedManagerState) -> bool:
+    for report in reversed(state.reports):
+        if report.module != "code_implementation":
+            continue
+        handoff = report.handoff
+        return isinstance(handoff, CodeHandoff) and handoff.readiness == "promotion_failed"
+    return False
+
+
 class CodeImplementationAdapter:
     module: ModuleId = "code_implementation"
 
@@ -1144,6 +1233,14 @@ class CodeImplementationAdapter:
     ) -> SubagentReport:
         if state.task_state.latest_plan is None:
             raise RuntimeError("code implementation requires a design plan")
+        if contract.restore_code_commit.strip():
+            return self._restore(
+                contract, state, round_index=round_index, attempt=attempt
+            )
+        if _promotion_retry_pending(state):
+            return self._retry_promote(
+                contract, state, round_index=round_index, attempt=attempt
+            )
         plan = _plan_with_inferred_baselines(state.task_state.latest_plan, state)
         if plan is not None:
             state.task_state.latest_plan = plan
@@ -1239,6 +1336,185 @@ class CodeImplementationAdapter:
                 workspace_dir=_safe_rel(impl.workspace_dir),
                 log_paths=log_paths,
                 failure_excerpts=failure_excerpts,
+                code_commit=impl.code_commit,
+            ),
+        )
+
+    def _retry_promote(
+        self,
+        contract: SubtaskContract,
+        state: PersistedManagerState,
+        *,
+        round_index: int,
+        attempt: int,
+    ) -> SubagentReport:
+        started = time.monotonic()
+        run_id = state.task_state.run_id
+        code_dir = generated_code_dir(run_id).resolve()
+        output_dir = agent_workspace_dir(run_id).resolve() / "output"
+        smoke_dir = module_attempt_dir(run_id, "code_implementation", round_index, attempt)
+        try:
+            CodeImplementationAgent.promote_output(
+                output_dir,
+                code_dir,
+                log_path=smoke_dir / _PROMOTION_LOG,
+            )
+        except Exception as exc:  # noqa: BLE001
+            summary = (
+                "promotion failed after a passing candidate; previous generated_code/ retained. "
+                f"{type(exc).__name__}: {exc}"
+            )
+            return _report(
+                module=self.module,
+                mode="run",
+                round_index=round_index,
+                attempt=attempt,
+                outcome="failed",
+                summary=summary,
+                retryable=True,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                runtime_failure=_normalize_failure(exc),
+                related_report_ids=contract.related_report_ids,
+                handoff=CodeHandoff(
+                    status="failed",
+                    readiness="promotion_failed",
+                    smoke_test_passed=True,
+                    smoke_failures={"promotion": f"{type(exc).__name__}: {exc}"},
+                    notes=summary,
+                    workspace_dir=_safe_rel(str(code_dir)),
+                    code_commit="",
+                ),
+            )
+        names = _discover_variant_names(code_dir)
+        if not names and state.latest_implementation is not None:
+            names = [item.name for item in state.latest_implementation.variants]
+        variants = [
+            ImplementedVariant(
+                name=name,
+                invocation=[sys.executable, _ENTRY_POINT, "--method", name],
+            )
+            for name in names
+        ]
+        sha = current_commit(code_dir)
+        impl = CodeImplementationManifest(
+            run_id=run_id,
+            workspace_dir=str(code_dir),
+            files=_manifest_files(code_dir),
+            variants=variants,
+            smoke_test_passed=True,
+            status="ready",
+            readiness="smoke_ready",
+            notes=f"host retried promotion of passing output/ to {sha}",
+            code_commit=sha,
+        )
+        state.latest_implementation = impl
+        handoff_variants = [
+            VariantHandoff(name=item.name, passed=True, code_commit=sha)
+            for item in variants
+        ]
+        return _report(
+            module=self.module,
+            mode="run",
+            round_index=round_index,
+            attempt=attempt,
+            outcome="succeeded",
+            summary=impl.notes,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            related_report_ids=contract.related_report_ids,
+            handoff=CodeHandoff(
+                status="ready",
+                readiness="smoke_ready",
+                smoke_test_passed=True,
+                variants=handoff_variants,
+                notes=impl.notes,
+                workspace_dir=_safe_rel(str(code_dir)),
+                code_commit=sha,
+            ),
+        )
+
+    def _restore(
+        self,
+        contract: SubtaskContract,
+        state: PersistedManagerState,
+        *,
+        round_index: int,
+        attempt: int,
+    ) -> SubagentReport:
+        started = time.monotonic()
+        run_id = state.task_state.run_id
+        code_dir = generated_code_dir(run_id).resolve()
+        sha = contract.restore_code_commit.strip()
+        try:
+            restored = restore_commit(code_dir, sha)
+            output_dir = agent_workspace_dir(run_id).resolve() / "output"
+            seed_output_from_head(code_dir, output_dir)
+        except Exception as exc:  # noqa: BLE001
+            summary = str(exc)
+            return _report(
+                module=self.module,
+                mode="run",
+                round_index=round_index,
+                attempt=attempt,
+                outcome="failed",
+                summary=summary,
+                retryable=True,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                runtime_failure=_normalize_failure(exc),
+                related_report_ids=contract.related_report_ids,
+                handoff=CodeHandoff(
+                    status="failed",
+                    readiness="failed",
+                    notes=summary,
+                    workspace_dir=_safe_rel(str(code_dir)),
+                    code_commit="",
+                ),
+            )
+        names = _discover_variant_names(code_dir)
+        if not names and state.latest_implementation is not None:
+            names = [item.name for item in state.latest_implementation.variants]
+        variants = [
+            ImplementedVariant(
+                name=name,
+                invocation=[sys.executable, _ENTRY_POINT, "--method", name],
+            )
+            for name in names
+        ]
+        impl = CodeImplementationManifest(
+            run_id=run_id,
+            workspace_dir=str(code_dir),
+            files=_manifest_files(code_dir),
+            variants=variants,
+            smoke_test_passed=True,
+            status="ready",
+            readiness="smoke_ready",
+            notes=f"host restored generated_code HEAD to {restored}",
+            code_commit=restored,
+        )
+        state.latest_implementation = impl
+        _apply_latest_per_variant(state)
+        handoff_variants = [
+            VariantHandoff(name=item.name, passed=True, code_commit=restored)
+            for item in variants
+        ]
+        return _report(
+            module=self.module,
+            mode="run",
+            round_index=round_index,
+            attempt=attempt,
+            outcome="succeeded",
+            retryable=False,
+            summary=impl.notes,
+            artifact_paths=[_safe_rel(str(code_dir))],
+            duration_ms=int((time.monotonic() - started) * 1000),
+            related_report_ids=contract.related_report_ids,
+            handoff=CodeHandoff(
+                status="ready",
+                readiness="smoke_ready",
+                smoke_test_passed=True,
+                variants=handoff_variants,
+                notes=impl.notes,
+                workspace_dir=_safe_rel(str(code_dir)),
+                code_commit=restored,
             ),
         )
 
@@ -1272,6 +1548,7 @@ class ExperimentExecutionAdapter:
                     plan=state.task_state.latest_plan,
                     implementation=implementation,
                     artifact_path=self.artifact_path,
+                    target_variants=list(contract.target_variants),
                 ),
             )
         except Exception as exc:  # noqa: BLE001
@@ -1288,40 +1565,76 @@ class ExperimentExecutionAdapter:
                 related_report_ids=contract.related_report_ids,
             )
         self._last_result = output
-        state.latest_execution = output.result
         result = output.result
+        report_id = f"{self.module}:{round_index}:{attempt}"
+        for item in result.variants:
+            state.execution_history.append(
+                ExecutionHistoryRecord.from_variant_result(
+                    item, report_id=report_id, round_index=round_index
+                )
+            )
+        head = next((item.code_commit for item in result.variants if item.code_commit), "")
+        if not head and state.latest_implementation is not None:
+            head = state.latest_implementation.code_commit
+        _apply_latest_per_variant(state)
+        if state.latest_execution is None:
+            state.latest_execution = result
+        this_run_names = {item.name for item in result.variants}
+        latest_rows = (
+            list(state.latest_execution.variants)
+            if state.latest_execution is not None and state.latest_execution.variants
+            else list(result.variants)
+        )
+        latest_by_name = {item.name: item for item in latest_rows}
+        ordered = []
+        seen: set[str] = set()
+        for item in (*result.variants, *latest_rows):
+            if item.name in seen:
+                continue
+            seen.add(item.name)
+            ordered.append(latest_by_name.get(item.name, item))
         variants: list[VariantHandoff] = []
         sciences: list[str] = []
         diagnostic_paths: list[str] = []
         failure_excerpts: list[str] = []
-        for item in result.variants:
-            compact = compact_metrics(dict(item.metrics))
-            science = scientific_status_from_metrics(dict(item.metrics))
-            sciences.append(science)
+        plan = state.task_state.latest_plan
+        plan_metrics = list(plan.metrics) if plan is not None else []
+        for source in ordered:
+            compact, resolution_diag = materialize_handoff_metrics(
+                dict(source.metrics), plan_metrics=plan_metrics
+            )
+            science = scientific_status_from_metrics(dict(source.metrics))
+            if source.name in this_run_names:
+                sciences.append(science)
             diagnostic = metric_diagnostics(
-                dict(item.metrics),
-                failure_kind=item.failure_kind,
-                metrics_state=item.metrics_state,
-                duration_ms=item.duration_ms,
-                exit_code=item.exit_code,
+                dict(source.metrics),
+                failure_kind=source.failure_kind,
+                metrics_state=source.metrics_state,
+                duration_ms=source.duration_ms,
+                exit_code=source.exit_code,
             )
-            process_status = item.process_status or (
-                "completed" if item.exit_code == 0 and item.metrics_state == "present" else "failed"
+            if resolution_diag:
+                diagnostic["metric_resolution"] = resolution_diag
+            process_status = source.process_status or (
+                "completed"
+                if source.exit_code == 0 and source.metrics_state == "present"
+                else "failed"
             )
-            sidecar_rel = _safe_rel(item.diagnostics_path) if item.diagnostics_path else ""
+            sidecar_rel = _safe_rel(source.diagnostics_path) if source.diagnostics_path else ""
             variants.append(
                 VariantHandoff(
-                    name=item.name,
+                    name=source.name,
                     passed=process_status == "completed" and science == "accepted",
-                    exit_code=item.exit_code,
+                    exit_code=source.exit_code,
                     metrics=compact,
-                    log_path=_safe_rel(item.log_path),
-                    failure_kind=item.failure_kind,
-                    metrics_state=item.metrics_state,
-                    duration_ms=item.duration_ms,
+                    log_path=_safe_rel(source.log_path),
+                    failure_kind=source.failure_kind,
+                    metrics_state=source.metrics_state,
+                    duration_ms=source.duration_ms,
                     process_status=process_status,
                     diagnostic=diagnostic,
                     diagnostics_path=sidecar_rel,
+                    code_commit=source.code_commit,
                 )
             )
             if sidecar_rel:
@@ -1367,28 +1680,28 @@ class ExperimentExecutionAdapter:
         result_paths = _unique_paths(result_paths)
         diagnostic_paths = _unique_paths(diagnostic_paths)
         process_ok = result.status == "completed" and all(
-            item.process_status == "completed" for item in variants
+            item.process_status == "completed" for item in result.variants
         )
         status_by_name = {
             item.name: science for item, science in zip(result.variants, sciences)
         }
-        if "proposed" in status_by_name:
-            # Compare the real numbers; fall back to
-            # the old self-report-based value when there's nothing to compare
-            # (no declared metrics, or no baseline variant present).
-            # state.task_state.latest_plan is guaranteed non-None here (see
-            # the guard at the top of this method).
-            scientific = scientific_status_from_comparison(
-                state.task_state.latest_plan.metrics, result.variants
-            )
-            if scientific == "unknown":
+        compare_variants = (
+            state.latest_execution.variants
+            if state.latest_execution is not None and state.latest_execution.variants
+            else result.variants
+        )
+        scientific = scientific_status_from_comparison(
+            plan_metrics,
+            compare_variants,
+            baselines=list(plan.baselines) if plan is not None else None,
+        )
+        if scientific == "unknown":
+            if "proposed" in status_by_name:
                 scientific = status_by_name["proposed"]
-        elif "below_threshold" in sciences:
-            scientific = "below_threshold"
-        elif sciences and all(item == "accepted" for item in sciences):
-            scientific = "accepted"
-        else:
-            scientific = "unknown"
+            elif "below_threshold" in sciences:
+                scientific = "below_threshold"
+            elif sciences and all(item == "accepted" for item in sciences):
+                scientific = "accepted"
         if not process_ok:
             scientific = "unknown"
         failure_kind = next((item.failure_kind for item in result.variants if item.failure_kind), "")
@@ -1478,6 +1791,7 @@ class ExperimentExecutionAdapter:
                 failure_class=failure_class,
                 fingerprint=fingerprint,
                 diagnostic_paths=diagnostic_paths,
+                code_commit=head,
             ),
         )
 
@@ -1502,8 +1816,13 @@ def _reflection_feedback(
     summary: str,
 ) -> EvaluationFeedback:
     observed: dict[str, float | int | str] = {}
+    plan_metrics = list(plan.metrics) if plan is not None else []
     for variant in result.variants:
-        observed.update(compact_metrics(dict(variant.metrics), prefix=variant.name))
+        observed.update(
+            _prefixed_observed(
+                dict(variant.metrics), prefix=variant.name, plan_metrics=plan_metrics
+            )
+        )
     return EvaluationFeedback(
         verdict="accept" if verdict == "supported" else "continue",
         summary=summary,
@@ -1617,6 +1936,7 @@ class ReportingAdapter:
                     plan=plan,
                     result=result,
                     reflection=state.latest_reflection,
+                    previous_context=state.original_task.previous_context,
                     repair_instruction=contract.repair_instruction,
                     attempt=attempt,
                 )

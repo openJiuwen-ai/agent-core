@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import get_logger
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import resolve_metric
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     paper_figures_dir,
     paper_output_path,
@@ -47,8 +48,14 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting import bibliography, figures, lint
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.bibliography import Bibliography
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.evidence import (
+    classify_prior_vs_current,
+    normalize_current_run_evidence,
+    normalize_prior_paper_evidence,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex import (
     escape_latex,
+    render_prior_results_table,
     render_results_table,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.latex_runtime import (
@@ -61,7 +68,13 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.schem
     ReportingInput,
     ReportingOutput,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import DOCUMENT_ORDER, SECTIONS
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.sections import (
+    DOCUMENT_ORDER,
+    LINT_OVERRIDES_FILENAME,
+    SECTIONS,
+    section_specs,
+    word_band_instructions,
+)
 
 _LOGGER = get_logger(__name__)
 
@@ -74,7 +87,6 @@ _MATERIALIZED_SKILLS_DIRNAME = ".skills"
 _ALL_SKILL_NAMES = ("ts-plan", "ts-write", "ts-figure", "ts-review", "ts-latex")
 _SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 _REVIEWER_SYSTEM_PROMPT_PATH = Path(__file__).parent / "prompts" / "reviewer_system_prompt.md"
-_SECTIONS_BY_ID = {spec.id: spec for spec in SECTIONS}
 _CURRENT_EXPERIMENT_HEADING = "## Current Experiment"
 _RESEARCH_GROUNDING_HEADING = "## Research Grounding"
 _SURVEY_SOURCE_EXCERPT_CHARS = 6_000
@@ -130,6 +142,16 @@ def _format_metric(value: Any) -> str:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "--"
     return f"{value:.4g}"
+
+
+def _resolved_metric_value(metrics: dict[str, Any], name: str) -> float | int | None:
+    hit = resolve_metric(metrics, name)
+    if hit.status == "resolved":
+        return hit.value
+    value = metrics.get(name)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    return None
 
 
 class ReportingAgent:
@@ -208,10 +230,21 @@ class ReportingAgent:
             if summary_path is not None
             else Bibliography(bib_text="", title_to_key={}, known_keys=set())
         )
+        if inputs.previous_context is not None:
+            bib = bibliography.merge_bibliographies(
+                bib,
+                prior_text=inputs.previous_context.bibliography_text,
+                prior_title_to_key=inputs.previous_context.title_to_key,
+            )
+            bib.known_keys.update(inputs.previous_context.citation_keys)
         refs_bib_path = paper_refs_bib_path(run_id)
         refs_bib_path.write_text(bib.bib_text, encoding="utf-8")
 
-        figure_path = figures.build_results_figure(inputs.result, figures_dir / "results.pdf")
+        figure_path = figures.build_results_figure(
+            inputs.result,
+            figures_dir / "results.pdf",
+            plan_metrics=list(inputs.plan.metrics),
+        )
         figure_paths = [str(figure_path)] if figure_path else []
 
         # Data for the skill scripts (ts-review/ts-latex) — the agent's own
@@ -220,6 +253,13 @@ class ReportingAgent:
         # from; the system prompt says so explicitly.
         (workspace / "results.json").write_text(inputs.result.model_dump_json(), encoding="utf-8")
         (workspace / "known_citation_keys.json").write_text(json.dumps(sorted(bib.known_keys)), encoding="utf-8")
+        extra_known = (
+            lint.known_numbers_from_context(inputs.previous_context)
+            if inputs.previous_context is not None
+            else None
+        )
+        specs = section_specs(modify_paper=inputs.previous_context is not None)
+        self._write_lint_overrides(workspace, specs=specs, extra_known=extra_known)
 
         evidence = self._build_evidence_blocks(inputs, design_context, background, bib, figure_path)
         # Host-authored (previous_attempt_notes, from the deterministic
@@ -233,7 +273,9 @@ class ReportingAgent:
                 "an unavailable compiler; complete and preserve the paper source artifacts."
             )
         repair_text = "\n\n".join(repair_parts)
-        query = self._build_task_query(evidence, repair_text)
+        query = self._build_task_query(
+            evidence, repair_text, previous_context=inputs.previous_context
+        )
 
         session_error = await self._run_paper_agent(run_id=run_id, query=query)
 
@@ -245,6 +287,8 @@ class ReportingAgent:
             figure_paths=figure_paths,
             known_keys=bib.known_keys,
             result=inputs.result,
+            extra_known=extra_known,
+            specs=specs,
             session_error=session_error,
             preflight_note=latex_preflight_note,
         )
@@ -303,27 +347,25 @@ class ReportingAgent:
         """Read the curated summary plus bounded local source evidence.
 
         ``research_summary.md`` remains the first and authoritative handoff,
-        but metadata-only and directly downloaded HTML sources contain useful
-        context that should not be discarded before reporting.  The host reads
-        those files here instead of giving the paper agent an unrestricted file
-        tool.  Raw PDFs remain represented by the survey summary unless a
-        downstream extractor has already produced text.
+        but it may sit anywhere in ``resource_paths`` (including a paper
+        directory). Metadata-only and directly downloaded HTML sources contain
+        useful context that should not be discarded before reporting. The host
+        reads those files here instead of giving the paper agent an
+        unrestricted file tool. Raw PDFs remain represented by the survey
+        summary unless a downstream extractor has already produced text.
         """
-        try:
-            abs_path = resolve_project_reference(survey.resource_paths[0])
-        except ValueError:
-            return None
-        if not abs_path.is_file():
+        summary_path = ReportingAgent._resolve_summary_path(survey)
+        if summary_path is None:
             return None
         try:
-            summary = abs_path.read_text(encoding="utf-8")
+            summary = summary_path.read_text(encoding="utf-8")
         except OSError:
             return None
 
         chunks = [summary]
         total_chars = len(summary)
-        seen: set[Path] = {abs_path.resolve()}
-        for reference in survey.resource_paths[1:]:
+        seen: set[Path] = {summary_path.resolve()}
+        for reference in survey.resource_paths:
             if total_chars >= _SURVEY_EVIDENCE_TOTAL_CHARS:
                 break
             try:
@@ -370,12 +412,42 @@ class ReportingAgent:
         return parser.text()
 
     @staticmethod
+    def _research_files(survey: ResearchBrief) -> list[Path]:
+        files: list[Path] = []
+        seen: set[Path] = set()
+        for raw in survey.resource_paths:
+            try:
+                path = resolve_project_reference(raw)
+            except ValueError:
+                continue
+            candidates: list[Path] = []
+            if path.is_file():
+                candidates.append(path)
+            elif path.is_dir():
+                named = path / "research_summary.md"
+                if named.is_file():
+                    candidates.append(named)
+                candidates.extend(
+                    sorted(item for item in path.rglob("research_summary.md") if item.is_file())
+                )
+                candidates.extend(sorted(item for item in path.glob("*.md") if item.is_file()))
+            for candidate in candidates:
+                resolved = candidate.resolve()
+                if resolved not in seen:
+                    seen.add(resolved)
+                    files.append(resolved)
+        return files
+
+    @staticmethod
     def _resolve_summary_path(survey: ResearchBrief) -> Path | None:
-        try:
-            path = resolve_project_reference(survey.resource_paths[0])
-        except ValueError:
-            return None
-        return path if path.is_file() else None
+        files = ReportingAgent._research_files(survey)
+        for path in files:
+            if path.name == "research_summary.md":
+                return path
+        for path in files:
+            if path.suffix.lower() == ".md":
+                return path
+        return files[0] if files else None
 
     # -- evidence blocks: one per section, host-built ------------------------
 
@@ -394,20 +466,30 @@ class ReportingAgent:
         )
         evidence_only_list = "\n".join(f"- {item}" for item in bib.evidence_only_sources) or "(none)"
 
-        metric_name_set: set[str] = set()
-        for variant in result.variants:
-            for name, value in variant.metrics.items():
-                if isinstance(value, (int, float)) and not isinstance(value, bool):
-                    metric_name_set.add(name)
-        metric_names = sorted(metric_name_set)
+        metric_names = figures.numeric_metric_names(
+            result, plan_metrics=list(inputs.plan.metrics)
+        )
         rows = [
             (
                 escape_latex(variant.name),
-                {escape_latex(name): _format_metric(variant.metrics.get(name)) for name in metric_names},
+                {
+                    escape_latex(name): _format_metric(
+                        _resolved_metric_value(variant.metrics, name)
+                    )
+                    for name in metric_names
+                },
             )
             for variant in result.variants
         ]
-        table_tex = render_results_table(rows, [escape_latex(name) for name in metric_names])
+        table_tex = render_results_table(
+            rows,
+            [escape_latex(name) for name in metric_names],
+            caption=(
+                "This run's newly measured results (additional table; not a replacement of the prior-paper results)."
+                if inputs.previous_context is not None
+                else "Results by variant."
+            ),
+        )
 
         figure_tex = ""
         if figure_path is not None:
@@ -420,7 +502,10 @@ class ReportingAgent:
         variant_lines = [
             f"- {escape_latex(variant.name)} (exit_code={variant.exit_code}): "
             + (
-                ", ".join(f"{escape_latex(k)}={_format_metric(v)}" for k, v in variant.metrics.items())
+                ", ".join(
+                    f"{escape_latex(name)}={_format_metric(_resolved_metric_value(variant.metrics, name))}"
+                    for name in metric_names
+                )
                 or "(no metrics)"
             )
             for variant in result.variants
@@ -443,10 +528,84 @@ class ReportingAgent:
         results_block = (
             f"Run status: {result.status}\n"
             + "\n".join(variant_lines)
-            + "\n\nHost-rendered results table — include exactly as given, do not redraw it:\n\n"
+            + "\n\nHost-rendered results table — include exactly as given, do not redraw it. "
+            "This table covers only the current run's variants:\n\n"
             + (table_tex or "(no numeric metrics to tabulate)")
             + ("\n\nHost-rendered figure — include exactly as given:\n\n" + figure_tex if figure_tex else "")
         )
+
+        prior = inputs.previous_context
+        if prior is not None:
+            setup = "\n".join(f"- {item}" for item in prior.experiment_setup) or "(not extracted)"
+            background = (
+                "PRIOR PAPER PROBLEM / BACKGROUND — historical context, not this run:\n"
+                f"Title: {prior.title}\n"
+                f"Abstract: {prior.abstract}\n"
+                f"Problem: {prior.problem}\n\n"
+                "CURRENT SURVEY BACKGROUND:\n" + (background or "(not available)")
+            )
+            method_block = (
+                "PRIOR PAPER METHOD — historical description, not this run:\n"
+                f"{prior.method}\n\n"
+                f"PRIOR EXPERIMENT SETUP:\n{setup}\n\n"
+                "CURRENT RUN METHOD / DESIGN:\n" + method_block
+            )
+            prior_lines = []
+            pairs = classify_prior_vs_current(
+                normalize_prior_paper_evidence(prior),
+                normalize_current_run_evidence(
+                    result, plan_metrics=list(inputs.plan.metrics)
+                ),
+            )
+            for old, new, status in pairs:
+                if old is None:
+                    continue
+                metric = old.metric or "untyped"
+                status_note = f"; vs current: {status}" if status else "; prior-only (no matching current metric)"
+                current_note = ""
+                if new is not None and isinstance(new.value, (int, float)) and not isinstance(new.value, bool):
+                    current_note = f"; current {new.metric}={_format_metric(new.value)}"
+                prior_lines.append(
+                    f"- [{old.provenance.get('kind', 'claim')}] {metric}={old.value} "
+                    f"({old.provenance.get('section', '')}){status_note}{current_note}"
+                )
+            claims_block = "\n".join(prior_lines) or "(no prior claims extracted)"
+            prior_table = render_prior_results_table(
+                [claim.text for claim in prior.claims] + list(prior.experiment_setup) + [prior.method]
+            )
+            keep_prior = (
+                "Keep the prior paper's published results in Experiments. Include BOTH of the "
+                "following tables, in this order: (1) the historical prior-paper table, then "
+                "(2) this run's host-rendered table and figure. Do not drop table (1). Do not "
+                "merge historical rows into table (2). The new table is an additional follow-up, "
+                "not a replacement of the prior published results.\n\n"
+            )
+            historical_table = (
+                "Host-rendered prior-paper results table — include exactly as given; these rows "
+                "were not re-run:\n\n" + prior_table + "\n\n"
+                if prior_table
+                else (
+                    "No structured prior table could be recovered; still report every prior-paper "
+                    "variant and number below as a clearly labeled historical table in Experiments, "
+                    "separate from this run's table.\n\n"
+                )
+            )
+            results_block = (
+                keep_prior
+                + historical_table
+                + "PRIOR PAPER CLAIMS / RESULTS — historical evidence, not this run's measurements:\n"
+                f"{claims_block}\n\n"
+                "CURRENT RUN MEASUREMENTS:\n" + results_block
+            )
+            limits = "\n".join(f"- {item}" for item in prior.limitations) or "(not extracted)"
+            conclusions = "\n".join(f"- {item}" for item in prior.conclusions) or "(not extracted)"
+            discussion_block = (
+                "PRIOR PAPER CONCLUSIONS:\n"
+                f"{conclusions}\n\n"
+                "PRIOR PAPER LIMITATIONS:\n"
+                f"{limits}\n\n"
+                "CURRENT RUN REFLECTION / DISCUSSION EVIDENCE:\n" + discussion_block
+            )
 
         # Every section that's allowed to cite needs the exact valid keys —
         # a section grounded in "background" (introduction, related_work) is
@@ -467,22 +626,59 @@ class ReportingAgent:
         }
 
     @staticmethod
-    def _build_task_query(evidence: dict[str, str], repair_instruction: str = "") -> str:
-        preamble = (
-            "Write and compile the paper for this completed run using your skill set: ts-plan; "
-            "ts-write; ts-review; ts-latex skills."
-        )
-        if repair_instruction:
-            # The workspace itself is still wiped fresh (no section-file
-            # resumability, see _run_async) — this is a heads-up, not
-            # partial state to resume. Surfaced first, ahead of the
-            # preamble, so it isn't buried under the evidence blocks.
+    def _write_lint_overrides(workspace: Path, *, specs, extra_known: set[float] | None) -> None:
+        payload = {
+            "min_words": {spec.id: spec.min_words for spec in specs},
+            "max_words": {spec.id: spec.max_words for spec in specs},
+            "extra_known": sorted(extra_known) if extra_known else [],
+        }
+        (workspace / LINT_OVERRIDES_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    @staticmethod
+    def _build_task_query(
+        evidence: dict[str, str],
+        repair_instruction: str = "",
+        previous_context=None,
+    ) -> str:
+        modify = previous_context is not None
+        if modify:
+            bands = word_band_instructions(section_specs(modify_paper=True))
+            if repair_instruction:
+                preamble = (
+                    f"A previous attempt at this report did not finish cleanly: "
+                    f"{repair_instruction}\n"
+                    "This is a retry in the same workspace: existing sections/*.tex, title.txt, "
+                    "and figures may already be present. Do not start a new paper from scratch. "
+                    "Expand or repair the short/missing sections named above, then compile with "
+                    "ts-latex. Prioritize actually finishing every section, compiling, and staying "
+                    "within word/citation/traceable-number requirements over polish.\n\n"
+                    f"{bands}"
+                )
+            else:
+                preamble = (
+                    "Write a complete updated paper for this completed run using your skill set: "
+                    "ts-plan; ts-write; ts-review; ts-latex skills. Do not copy the previous paper's "
+                    "LaTeX verbatim. Keep the prior paper's published main results in the document as "
+                    "a clearly labeled historical table; the host-rendered current-run table is an "
+                    "additional table, not a replacement. Title and abstract should still state the "
+                    "prior main finding, then this run's follow-up. Retain prior claims that this run "
+                    "still supports, clearly labeling them as historical/prior-paper evidence rather "
+                    "than new measurements. Revise or retract prior claims that this run contradicts. "
+                    "Layout, prose, and figures may be regenerated.\n\n"
+                    f"{bands}"
+                )
+        else:
             preamble = (
-                f"A previous attempt at this report did not finish cleanly: "
-                f"{repair_instruction}\nPrioritize actually finishing every "
-                f"section, compiling, and staying within word/citation/"
-                f"traceable-number requirements over polish. "
-            ) + preamble
+                "Write and compile the paper for this completed run using your skill set: ts-plan; "
+                "ts-write; ts-review; ts-latex skills."
+            )
+            if repair_instruction:
+                preamble = (
+                    f"A previous attempt at this report did not finish cleanly: "
+                    f"{repair_instruction}\nPrioritize actually finishing every "
+                    f"section, compiling, and staying within word/citation/"
+                    f"traceable-number requirements over polish. "
+                ) + preamble
         return preamble + "\n\n" + "\n\n".join(f"## Evidence: {key}\n\n{value}" for key, value in evidence.items())
 
     def _enabled_skill_dirs(self, skills_root: Path | None = None) -> list[str]:
@@ -547,7 +743,6 @@ class ReportingAgent:
         from openjiuwen.harness import create_deep_agent
         from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
         from openjiuwen.harness.schema.config import SubAgentConfig
-
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
             with_observability,
         )
@@ -809,6 +1004,8 @@ class ReportingAgent:
         figure_paths: list[str],
         known_keys: set[str],
         result: Any,
+        extra_known: set[float] | None = None,
+        specs=None,
         session_error: str | None = None,
         preflight_note: str | None = None,
     ) -> ReportingOutput:
@@ -827,11 +1024,12 @@ class ReportingAgent:
         if missing:
             notes.append(f"section(s) never written: {', '.join(missing)}")
 
+        section_lookup = {spec.id: spec for spec in (specs or SECTIONS)}
         for section_id, text in drafts.items():
-            spec = _SECTIONS_BY_ID.get(section_id)
+            spec = section_lookup.get(section_id)
             if spec is None:
                 continue
-            violations = lint.lint_section(text, spec, result)
+            violations = lint.lint_section(text, spec, result, extra_known=extra_known)
             if violations:
                 notes.append(f"section {section_id!r} unresolved issues: {'; '.join(violations)}")
 
