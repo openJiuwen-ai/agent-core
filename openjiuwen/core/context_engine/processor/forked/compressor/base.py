@@ -66,6 +66,14 @@ class PrefixCompactSpan:
 class PrefixCompactProcessorConfig(BaseModel):
     trigger_context_ratio: float = Field(default=0.4, gt=0.0, lt=1.0)
     min_target_context_ratio: float = Field(default=0.1, ge=0.0, lt=1.0)
+    # Optional absolute token threshold. When set, it overrides
+    # trigger_context_ratio and compression triggers once the context window
+    # (system + tools + messages) reaches this many tokens.
+    trigger_token_threshold: int | None = Field(default=None, gt=0)
+    # Optional target retention ratio. When set, the compression summary aims
+    # for ~this fraction of the compressed messages' tokens (0.3 keeps ~30%).
+    # When None, no output-size control is applied (current behaviour).
+    target_retention_ratio: float | None = Field(default=None, gt=0.0, lt=1.0)
     model: ModelRequestConfig | None = None
     model_client: ModelClientConfig | None = None
     # Opt-in: persist each real compression invocation (the request sent to the
@@ -190,8 +198,7 @@ class PrefixCompactProcessor(ContextProcessor):
         span = self._build_span(context_window.context_messages)
         if not span.has_target:
             logger.debug(
-                "[%s not-triggered] reason=no_compressible_span total_tokens=%s threshold=%s "
-                "context_max=%s",
+                "[%s not-triggered] reason=no_compressible_span total_tokens=%s threshold=%s context_max=%s",
                 self.processor_type(),
                 total_tokens,
                 absolute_threshold,
@@ -287,12 +294,18 @@ class PrefixCompactProcessor(ContextProcessor):
             protected_tail=self._span_summary(span.protected_tail),
         )
 
-        prompt = self._build_prompt(span, preserve_instruction=kwargs.get("preserve_instruction"))
+        summary_target_tokens = self._resolve_compression_target_tokens(span, context)
+        prompt = self._build_prompt(
+            span,
+            preserve_instruction=kwargs.get("preserve_instruction"),
+            summary_target_tokens=summary_target_tokens,
+        )
         invoke_result = await self._invoke_compression_with_retries(
             context=context,
             context_window=context_window,
             span=span,
             prompt=prompt,
+            summary_target_tokens=summary_target_tokens,
         )
         if invoke_result is None:
             logger.info(
@@ -319,9 +332,7 @@ class PrefixCompactProcessor(ContextProcessor):
             span=span,
         )
         memory_message = UserMessage(
-            content=self._wrap_memory_block(
-                summary, memory_id=archive.memory_id if archive is not None else None
-            )
+            content=self._wrap_memory_block(summary, memory_id=archive.memory_id if archive is not None else None)
         )
         new_messages = self._build_compacted_messages(
             context=context,
@@ -366,6 +377,7 @@ class PrefixCompactProcessor(ContextProcessor):
         context_window: ContextWindow,
         span: PrefixCompactSpan,
         prompt: str,
+        summary_target_tokens: int | None = None,
     ) -> tuple[CompressionResult, PrefixCompactSpan, CompressionRequest] | None:
         if self._compression_executor is None:
             return None
@@ -380,6 +392,7 @@ class PrefixCompactProcessor(ContextProcessor):
                 context_messages=list(context_window.context_messages or []),
                 tools=[],
                 exclude_recent_messages=len(span.protected_tail),
+                max_tokens=summary_target_tokens,
             )
             try:
                 response = await self._compression_executor.invoke(request)
@@ -624,15 +637,52 @@ class PrefixCompactProcessor(ContextProcessor):
         return trace_context
 
     def _resolve_trigger_token_limit(self, context_max: int) -> int:
+        token_threshold = getattr(self.config, "trigger_token_threshold", None)
+        if token_threshold is not None:
+            return max(int(token_threshold), 1)
         return resolve_ratio_token_threshold(context_max, self.config.trigger_context_ratio)
 
-    def _build_prompt(self, span: PrefixCompactSpan, *, preserve_instruction: str | None = None) -> str:
+    def _resolve_compression_target_tokens(
+        self,
+        span: PrefixCompactSpan,
+        context: ModelContext,
+    ) -> int | None:
+        """Return the target summary size in tokens, or None to keep the
+        current behaviour (no output-size control).
+
+        When ``target_retention_ratio`` is configured, the compression summary
+        aims for approximately ``ratio * tokens(messages_to_compress)``, so a
+        value of 0.3 keeps roughly 30% of the compressed messages' tokens.
+        """
+        ratio = getattr(self.config, "target_retention_ratio", None)
+        if ratio is None:
+            return None
+        compress_tokens = self._count_messages_tokens(span.messages_to_compress, context)
+        return max(int(compress_tokens * ratio), 1)
+
+    def _build_prompt(
+        self,
+        span: PrefixCompactSpan,
+        *,
+        preserve_instruction: str | None = None,
+        summary_target_tokens: int | None = None,
+    ) -> str:
         _ = span
+        prompt = self.default_prompt
+        if summary_target_tokens is not None:
+            prompt = (
+                f"{prompt.rstrip()}\n\n"
+                "Output length target:\n"
+                f"Aim for a state snapshot of approximately {summary_target_tokens} tokens. "
+                "Keep it dense and information-rich: retain only what is needed to "
+                "continue the task correctly, and drop repetition, superseded details, "
+                "and already-resolved information.\n"
+            )
         instruction = str(preserve_instruction or "").strip()
         if not instruction:
-            return self.default_prompt
+            return prompt
         return (
-            f"{self.default_prompt.rstrip()}\n\n"
+            f"{prompt.rstrip()}\n\n"
             "User preservation instruction:\n"
             "The user specifically asked this compaction to preserve the following information when relevant:\n"
             f"{instruction}\n\n"
@@ -747,8 +797,7 @@ class PrefixCompactProcessor(ContextProcessor):
         new_tokens = self._count_messages_tokens(new_messages, context)
         if not (original_tokens <= 0 or new_tokens < original_tokens):
             logger.info(
-                "[%s not-compressed] reason=no_token_benefit original_tokens=%s "
-                "new_tokens=%s saved=%s",
+                "[%s not-compressed] reason=no_token_benefit original_tokens=%s new_tokens=%s saved=%s",
                 self.processor_type(),
                 original_tokens,
                 new_tokens,

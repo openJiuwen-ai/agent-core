@@ -77,6 +77,7 @@ class CompressionRequest:
     tools: list[Any] | None = None
     exclude_recent_messages: int = 0
     output_parser: Any = None
+    max_tokens: int | None = None
 
     @classmethod
     def from_context_window(
@@ -129,6 +130,8 @@ class CompressionExecutor:
         kwargs: dict[str, Any] = {"messages": messages, "tools": request.tools}
         if request.output_parser is not None:
             kwargs["output_parser"] = request.output_parser
+        if request.max_tokens is not None:
+            kwargs["max_tokens"] = request.max_tokens
         try:
             response = await self._model.invoke(**kwargs)
         except Exception as exc:
