@@ -146,6 +146,13 @@ context_engine.clear_context(session_id="s1")
 context_engine.clear_context(session_id="s1", context_id="chat")
 ```
 
+## Compression Trigger and Target Retention
+
+The forked LLM compressors (`DialogueCompressor`, `CurrentRoundCompressor`, `RoundLevelCompressor`) share `PrefixCompactProcessorConfig`, which exposes two optional knobs (both default to `None`, so behaviour is unchanged when omitted):
+
+- **`trigger_token_threshold`** (`int | None`): an absolute token trigger threshold. When set, it takes precedence over `trigger_context_ratio`, and compression triggers only once the context window (system prompt + tool definitions + messages) reaches this many tokens.
+- **`target_retention_ratio`** (`float | None`): a target retention ratio. When set, the compression summary aims for approximately `ratio × tokens(compressed messages)` (e.g. `0.3` keeps ~30%), implemented by appending a length instruction to the compression prompt and setting a `max_tokens` cap on the compression call. When `None`, no output-size control is applied.
+
 ## Summary
 
 - **ContextEngine is a member at the Agent level**, created and held by the Agent during initialization.
