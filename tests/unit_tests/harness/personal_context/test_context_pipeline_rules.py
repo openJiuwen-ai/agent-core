@@ -1443,9 +1443,9 @@ async def test_finish_reports_validation_and_commit_phases(tmp_path: Path) -> No
         await service.stop(timeout_seconds=1)
 
     assert phases == [
-        ("local", "run-progress", "organizing", 50),
-        ("local", "run-progress", "organizing", 60),
-        ("local", "run-progress", "organizing", 85),
+        ("local", "run-progress", "organizing", 25),
+        ("local", "run-progress", "organizing", 30),
+        ("local", "run-progress", "organizing", 88),
         ("local", "run-progress", "validating", 90),
         ("local", "run-progress", "committing", 97),
     ]

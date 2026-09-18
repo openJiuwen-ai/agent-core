@@ -4930,6 +4930,7 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
             "max_subdirectories_per_directory",
             "recluster_plan",
             "recluster_apply",
+            "progress_hook",
         }
         profile = _message_profile(messages, kwargs)
         calls.append((profile, content))
@@ -7552,3 +7553,63 @@ async def test_source_link_target_registered_in_later_batch_is_resolved(tmp_path
         for page in pages
     )
     assert all("pcs-source-link:" not in page.read_text(encoding="utf-8") for page in pages)
+
+
+@pytest.mark.asyncio
+async def test_balanced_reports_group_level_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[tuple[str, str, str, int]] = []
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("balanced"),
+        input_queue=asyncio.Queue(),
+        progress_callback=lambda service_id, run_id, phase, percent: events.append(
+            (service_id, run_id, phase, percent)
+        ),
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    documents = [
+        {
+            "logical_id": f"notes/{index}",
+            "revision_id": f"rev-{index}",
+            "title": f"Note {index}",
+            "markdown": f"Source content {index}.\n",
+        }
+        for index in range(10)
+    ]
+    outputs: list[str] = []
+    for start in range(0, 10, 5):
+        outputs.append(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "item_index": index,
+                            "summary": f"模型摘要 {index}。",
+                            "page_title": f"笔记 {index}",
+                            "keywords": [str(f"笔记 {index}")[:40]],
+                        }
+                        for index in range(start, min(start + 5, 10))
+                    ]
+                }
+            )
+        )
+    _FakeDirectModel.instances.clear()
+    _FakeDirectModel.outputs = outputs
+    monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
+
+    result = await service._filesystem_with_fallback(
+        processed={"documents": documents, "blocks": [], "deleted_ids": []},
+        sandbox=sandbox,
+        batch=_processing_batch(10),
+        service_id="local",
+        run_id="run-progress",
+    )
+
+    assert result == "balanced"
+    organizing = [percent for _, _, phase, percent in events if phase == "organizing"]
+    assert organizing[:2] == [25, 30]
+    assert organizing[-2:] == [85, 88]
+    assert organizing == sorted(organizing)
+    # Two five-document page groups complete inside stage one (30-70).
+    assert [percent for percent in organizing if 30 < percent <= 70] == [50, 70]
