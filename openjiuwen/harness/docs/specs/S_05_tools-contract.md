@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-16 |
+| 最近一次修订日期 | 2026-09-14 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md` |
 
 ## 范围 / 边界
@@ -69,7 +69,9 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
      （`tools/subagent/subagent_tools.py`），消费 `subagent_runtime` —— `S_10`。
    - worktree：`WorktreeManager` / `WorktreeConfig` / `WorktreeLifecyclePolicy` +
      `EnterWorktreeTool` / `ExitWorktreeTool`（`tools/worktree/`）。
-   - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）。
+   - shell：`BashTool` / `PowerShellTool` / `CodeTool`（`tools/shell/` + `code.py`）；
+     大输出（> `max_output_chars`，默认 20000）落盘并在 `<persisted-output>` 中以 head+tail
+     预览回显（`truncate_output`，`head_ratio` 默认 0.6），保证尾部错误/结束状态可见。
    - cron：`create_cron_tools()` + `CronToolContext` / `CronToolBackend`(Protocol)。
    - memory：`MemorySearchTool` / `MemoryGetTool` / `ReadMemoryTool` / `WriteMemoryTool` /
      `EditMemoryTool` + `CompressionRecallTool` + `CodingMemory{Read,Write,Edit}Tool`。
@@ -120,6 +122,10 @@ i18n、工具生命周期。`tools/` 是 harness 最大的子模块（130 文件
       不进 `model_dump` / `str()`，只由 `ToolCallTool.render_for_llm` 读取。
     - 外部协议出口（team MCP server / Claude SDK MCP / skill CLI / 被动成员执行器）同样调用
       `render_for_llm`，保证与进程内模型看到的文本一致。
+12. **Shell 大输出以 head+tail 回显**：`BashTool` / `PowerShellTool` 对超过
+    `max_output_chars`（默认 20000）的输出落盘并在 `<persisted-output>` 块中回显带缺口标记的
+    head+tail 预览（`truncate_output`，`head_ratio` 默认 0.6），使尾部错误/结束状态可见；
+    小输出内联、不落盘。
 
 ## 接口契约
 
