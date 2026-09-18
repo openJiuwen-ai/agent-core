@@ -635,17 +635,17 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     submit_release[0].set()
     await asyncio.wait_for(submit_entered[1].wait(), timeout=1)
     first = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (first["completed_items"], first["progress_percent"]) == (2, 12)
+    assert (first["completed_items"], first["progress_percent"]) == (2, 6)
 
     submit_release[1].set()
     await asyncio.wait_for(submit_entered[2].wait(), timeout=1)
     second = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (second["completed_items"], second["progress_percent"]) == (3, 15)
+    assert (second["completed_items"], second["progress_percent"]) == (3, 7)
 
     submit_release[2].set()
     await asyncio.wait_for(finish_entered.wait(), timeout=1)
     publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 45)
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 25)
 
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
@@ -714,7 +714,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await personal_context._run_fetch_once("notes", failed)
     failed_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert failed_status["run_state"] == "failed"
-    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 12)
+    assert (failed_status["completed_items"], failed_status["progress_percent"]) == (2, 6)
     assert isinstance(failed_status["last_error"], str)
 
     cancelled = CancelledProvider(service_config, home=tmp_path)
@@ -726,7 +726,7 @@ async def test_run_progress_preserves_counts_for_failure_and_cancellation(tmp_pa
         await task
     cancelled_status = (await personal_context.snapshot()).fetch_run_progress["notes"]
     assert cancelled_status["run_state"] == "cancelled"
-    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 12)
+    assert (cancelled_status["completed_items"], cancelled_status["progress_percent"]) == (2, 6)
     assert cancelled_status["last_error"] is None
 
 
@@ -2444,7 +2444,7 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         1,
-        40,
+        12,
     )
     assert personal_context._config is not None
     assert personal_context._config.fetch_services[0].enabled is True
@@ -2545,7 +2545,7 @@ async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
         progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
         assert progress["run_state"] == "failed"
-        assert progress["progress_percent"] == 45
+        assert progress["progress_percent"] == 25
         assert personal_context._fetch_states["notes"] == "FAILED"
     finally:
         release.set()
@@ -2876,7 +2876,7 @@ async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         2,
-        45,
+        25,
     )
 
 
@@ -3228,3 +3228,43 @@ async def test_retained_run_history_stop_during_result_write_keeps_success(tmp_p
     assert progress["run_state"] == "succeeded"
     result = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
     assert result["run_state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_report_pipeline_phase_never_moves_percent_backwards(tmp_path: Path) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config(tmp_path, interval=3600))
+    await personal_context.activate_runtime()
+    try:
+        pipeline = personal_context._pipeline_service
+        assert pipeline is not None
+        report = pipeline._progress_callback
+        assert report is not None
+        personal_context._fetch_run_identity["notes"] = {"run_id": "run-1"}
+        personal_context._fetch_run_progress["notes"] = personal_context_module._fetch_run_status(
+            "notes",
+            run_state="running",
+            total_items=20,
+            completed_items=20,
+            phase="organizing",
+        )
+
+        report("notes", "run-1", "organizing", 60)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 60
+
+        # Profile fallback replays lower milestones; the bar must not regress.
+        report("notes", "run-1", "organizing", 30)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 60
+
+        report("notes", "run-1", "organizing", 85)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 85
+
+        # Stale run ids are still ignored entirely.
+        report("notes", "run-other", "organizing", 99)
+        progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+        assert progress["progress_percent"] == 85
+    finally:
+        await personal_context.deactivate_runtime(timeout_seconds=1)

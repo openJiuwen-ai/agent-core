@@ -861,6 +861,7 @@ async def _register_agent_callbacks(
     *,
     max_pages_per_directory: int = DEFAULT_MAX_PAGES_PER_DIRECTORY,
     max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
+    progress_hook: Callable[[int], None] | None = None,
 ) -> tuple[list[tuple[AgentCallbackEvent, object]], dict[str, Any]]:
     react_agent = getattr(agent, "react_agent", None)
     register_callback = getattr(react_agent, "register_callback", None)
@@ -890,6 +891,8 @@ async def _register_agent_callbacks(
     async def personal_context_after_react_iteration_callback(ctx: AgentCallbackContext) -> None:
         await _after_react_iteration_context_compression(ctx, state=state)
         await _after_react_iteration_reminder(ctx, state=state)
+        if progress_hook is not None:
+            progress_hook(int(state.get("turn_count", 0)))
 
     callbacks = [
         (
@@ -1172,6 +1175,7 @@ async def run_personal_context_agent(
     max_subdirectories_per_directory: int = DEFAULT_MAX_SUBDIRECTORIES_PER_DIRECTORY,
     recluster_plan: _ReclusterPlan | None = None,
     recluster_apply: _ReclusterApply | None = None,
+    progress_hook: Callable[[int], None] | None = None,
 ) -> str:
     """Run a real DeepAgent with one in-place repair and one clean redo."""
 
@@ -1209,6 +1213,7 @@ async def run_personal_context_agent(
             sandbox,
             max_pages_per_directory=max_pages_per_directory,
             max_subdirectories_per_directory=max_subdirectories_per_directory,
+            progress_hook=progress_hook,
         )
         session_id = f"personal-context-agent-{uuid.uuid4().hex}"
         session = create_agent_session(
@@ -1300,6 +1305,7 @@ async def run_personal_context_agent(
             sandbox,
             max_pages_per_directory=max_pages_per_directory,
             max_subdirectories_per_directory=max_subdirectories_per_directory,
+            progress_hook=progress_hook,
         )
         session_id = f"personal-context-agent-{uuid.uuid4().hex}"
         session = create_agent_session(
