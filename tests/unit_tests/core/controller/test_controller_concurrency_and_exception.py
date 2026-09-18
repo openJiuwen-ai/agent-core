@@ -407,6 +407,31 @@ class TimeoutTestEventHandler(EventHandler):
         return {"status": "success"}
 
 
+class ManualCancelEventHandler(EventHandler):
+    """Create one long-running task for the manual-cancellation scenario."""
+
+    async def handle_input(self, event_input: EventHandlerInput):
+        task = Task(
+            session_id=event_input.session.get_session_id(),
+            task_id="manual_cancel_task",
+            task_type="slow",
+            priority=1,
+            status=TaskStatus.SUBMITTED,
+            context_id="manual_cancel_context",
+        )
+        await self._task_manager.add_task([task])
+        return {"status": "success"}
+
+    async def handle_task_completion(self, event_input: EventHandlerInput):
+        return {"status": "success"}
+
+    async def handle_task_interaction(self, event_input: EventHandlerInput):
+        return {"status": "success"}
+
+    async def handle_task_failed(self, event_input: EventHandlerInput):
+        return {"status": "success"}
+
+
 # ==================== Factory functions ====================
 
 def build_normal_executor(dependencies: TaskExecutorDependencies):
@@ -1029,7 +1054,7 @@ class TestControllerConfig:
         # Create agent with long timeout
         agent = await build_test_agent(
             agent_id="test_timeout_vs_cancel",
-            event_handler=TimeoutTestEventHandler(),
+            event_handler=ManualCancelEventHandler(),
             task_executors={
                 "slow": build_slow_executor_factory(sleep_time=10.0)
             }
@@ -1057,15 +1082,13 @@ class TestControllerConfig:
             # Manually cancel the task (before timeout)
             task_manager = agent.controller.task_scheduler.task_manager
             tasks = await task_manager.get_task(task_filter=TaskFilter(session_id=session.get_session_id()))
-            assert len(tasks) > 0, "Should have at least one task"
-            
+            assert len(tasks) == 1, "Manual-cancellation test should create one task"
+
             task_id = tasks[0].task_id
             logger.info(f"Manually cancelling task {task_id}")
             
             success = await agent.controller.task_scheduler.cancel_task(task_id)
             assert success, "Manual cancellation should succeed"
-            
-            await asyncio.sleep(0.5)
             
             # Verify task is CANCELED (not FAILED from timeout)
             tasks = await task_manager.get_task(task_filter=TaskFilter(task_id=task_id))
