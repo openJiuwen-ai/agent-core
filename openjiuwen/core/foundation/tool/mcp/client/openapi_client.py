@@ -104,7 +104,7 @@ class OpenApiClient(McpClient):
         else:
             new_name = f"{name}_{self._used_names[name]}"
             logger.debug(
-                f"tool_ame collision: '{name}' already used,using '{new_name}' instead. "
+                f"tool_name collision: '{name}' already used, using '{new_name}' instead. "
             )
 
         return new_name
@@ -114,7 +114,7 @@ class OpenApiClient(McpClient):
             http_route: "HTTPRoute",
             original_name: str,
             http_tags: set[str],
-            timout: float,
+            timeout: float,
     ):
         from fastmcp.utilities.openapi import (
             extract_output_schema_from_responses,
@@ -148,7 +148,7 @@ class OpenApiClient(McpClient):
             parameters=http_route.flat_param_schema,
             output_schema=output_schema,
             tags=set(http_route.tags or []) | http_tags,
-            timeout=timout,
+            timeout=timeout,
         )
 
         # add tool to tool_manager
