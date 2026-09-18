@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.topic_survey.schemas import TopicSurveyDraft
 
@@ -22,7 +23,10 @@ class SubmitTopicSurveyTool(Tool):
                     "Submit the final topic survey after every listed source has been "
                     "saved under the host-provided download directory. Call exactly once."
                 ),
-                input_params=TopicSurveyDraft.model_json_schema(),
+                # Expand nested-model $ref inline; see submit_experiment_design.py
+                # for why a bare $ref against $defs breaks weaker function-calling
+                # models (observed with GLM-5.2).
+                input_params=CallableSchemaExtractor.get_base_model_schema(TopicSurveyDraft),
                 parallel_safe=False,
                 idempotent=False,
             )

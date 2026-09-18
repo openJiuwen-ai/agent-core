@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
+from openjiuwen.core.foundation.tool.utils.callable_schema_extractor import CallableSchemaExtractor
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_design.schemas import ExperimentDesignDraft
 
@@ -25,7 +26,13 @@ class SubmitExperimentDesignTool(Tool):
             ),
             # Released openjiuwen serializes tool parameters as JSON for token
             # counting; pass a schema dict (built-in tools do the same).
-            input_params=ExperimentDesignDraft.model_json_schema(),
+            # Expand every nested-model $ref inline instead of using raw
+            # model_json_schema(): a bare $ref against a separate $defs block
+            # is exactly what weaker function-calling models (observed with
+            # GLM-5.2 on code_agent_instruction: CodeAgentInstruction) fail to
+            # resolve, serializing the nested object as a JSON string instead
+            # and failing validation on every single submission attempt.
+            input_params=CallableSchemaExtractor.get_base_model_schema(ExperimentDesignDraft),
             parallel_safe=False,
             idempotent=False,
         )

@@ -1,29 +1,26 @@
 """Reflection Agent: judges an ExperimentResult against its plan's hypothesis.
 
-See docs/reflection_design.md. Deliberately lightweight: plan + result are fully known
-upfront, so it uses a single-shot completion rather than a multi-turn DeepAgent — no 
-checkpointer or context-engine config.
-
-Unlike experiment_design, reflection directly writes a small markdown artifact via a
-scoped write_file tool. Since the output is prose and nothing downstream branches on
-it, there is no schema or host-side templating; the host only specifies the output
-path and reads the result back.
-
-Must-have context (design story, implementation assumptions, final metrics) is preloaded
-in the prompt. For anything else, the agent can use ReflectionToolsRail's read_file/list_files
-over the run workspace to inspect logs, design docs, or generated code on demand.
+The host preloads a structural metrics summary (not item-record lists or
+generated code). The model may grep/read workspace files, then submits a
+structured ReflectionJudgment via submit_reflection; the host validates the
+primary-metric citation, renders markdown, and stamps provenance.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
+    summarize_metrics_for_prompt,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     reflection_dir,
+    reflection_metrics_summary_path,
     reflection_path,
     resolve_project_reference,
     to_project_relative,
@@ -40,19 +37,23 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.experiment_desi
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.schemas import (
     Reflection,
     ReflectionInput,
+    ReflectionJudgment,
     ReflectionOutput,
+    judgment_cites_primary,
+    render_reflection_markdown,
 )
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
+_ENTRY_POINT = "run.py"
+_ITEM_RECORD_KEYS = frozenset({"per_question", "task_records", "records", "item_records"})
+_OBSERVATIONS_KEY = "observations"
 
 
 class ReflectionAgent:
-    """Turns an ExperimentResult (+ its plan) into a Reflection: the model
-    writes a grounded markdown judgment straight to reflection_path(run_id,
-    revision) via a scoped write_file tool; the host reads it back and stamps
-    provenance. Runs right after experiment_execution — there is no
-    evaluation module in this pipeline; reflection is the only thing that
-    judges a result against its hypothesis.
+    """Turns an ExperimentResult (+ its plan) into a Reflection.
+
+    The model submits a structured judgment; the host renders markdown to
+    reflection_path(run_id, revision) and stamps provenance.
     """
 
     def __init__(self, config: dict[str, Any], *, model: Any | None = None):
@@ -75,20 +76,25 @@ class ReflectionAgent:
         workspace = workspace_dir(plan.run_id).resolve()
         reflection_dir(plan.run_id).mkdir(parents=True, exist_ok=True)
         target_path = reflection_path(plan.run_id, plan.revision)
-        # Path relative to the (now wider) workspace root — mirrors
-        # reflection_path's own reflection_dir(run_id)/revision-N.md shape.
-        target_filename = f"reflection/revision-{plan.revision}.md"
+        request_id = f"reflection-{plan.run_id}-{plan.revision}"
+        summary_payload = ReflectionAgent._metrics_summary_payload(plan, result=inputs.result)
+        ReflectionAgent._write_metrics_summary(plan, summary_payload)
         task_prompt = inputs.extra_host_instructions + self._build_task_prompt(
-            inputs, hypothesis_text, objective_text, design_context, target_filename
+            inputs, hypothesis_text, objective_text, design_context, summary_payload
         )
 
         from openjiuwen.core.runner import Runner
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.tools.submit_reflection import (
+            SubmitReflectionTool,
+        )
 
-        session_id = f"reflection-{plan.run_id}-{plan.revision}"
+        session_id = request_id
+        submit_tool = SubmitReflectionTool()
+        submit_tool.reset(request_id=request_id)
         await Runner.start()
         agent = None
         try:
-            agent = self._build_reflection_agent(workspace)
+            agent = self._build_reflection_agent(workspace, submit_tool=submit_tool)
             await Runner.run_agent(
                 agent,
                 {"query": task_prompt, "conversation_id": session_id},
@@ -125,7 +131,11 @@ class ReflectionAgent:
                     # Cleanup must not mask the agent result.
                     pass
 
-        return ReflectionOutput(reflection=self._finalize_reflection(plan, target_path))
+        judgment = submit_tool.require_submission(request_id=request_id)
+        judgment_cites_primary(judgment, plan.primary_metric)
+        return ReflectionOutput(
+            reflection=self._finalize_reflection(plan, target_path, judgment)
+        )
 
     # -- reading the plan's design story --------------------------------------
 
@@ -165,7 +175,7 @@ class ReflectionAgent:
 
     # -- agent construction ---------------------------------------------------
 
-    def _build_reflection_agent(self, workspace: Path):
+    def _build_reflection_agent(self, workspace: Path, *, submit_tool):
         from openjiuwen.core.foundation.llm import init_model
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness import create_deep_agent
@@ -191,15 +201,14 @@ class ReflectionAgent:
                 name="reflection_agent",
                 description=(
                     "Judges an experiment result against its hypothesis and "
-                    "writes a grounded markdown reflection."
+                    "submits a structured scientific judgment."
                 ),
             ),
             system_prompt=self._render_system_prompt(),
+            tools=[submit_tool],
             rails=with_observability([ReflectionToolsRail()]),
-            # No task loop — but a couple of extra iterations beyond "read
-            # then write" are still bounded, not unbounded exploration.
             enable_task_loop=False,
-            max_iterations=int(module_cfg.get("max_iterations", 6)),
+            max_iterations=int(module_cfg.get("max_iterations", 20)),
             tool_owner_id=f"rsi-reflection-{workspace.name}",
             workspace=str(workspace),
             auto_create_workspace=False,
@@ -251,81 +260,214 @@ class ReflectionAgent:
         return "\n\n".join(lines)
 
     @staticmethod
+    def _dump_metrics(metrics: dict[str, Any]) -> str:
+        try:
+            return json.dumps(metrics, indent=2, default=str, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(metrics)
+
+    @staticmethod
+    def _logged_payload_keys(metrics: dict[str, Any]) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+
+        def add(name: str) -> None:
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+
+        for key in metrics:
+            if str(key) in _ITEM_RECORD_KEYS:
+                continue
+            add(str(key))
+        nested = metrics.get("metrics")
+        if isinstance(nested, dict):
+            for key in nested:
+                if str(key) == _OBSERVATIONS_KEY:
+                    continue
+                add(f"metrics.{key}")
+        observations = metrics.get(_OBSERVATIONS_KEY)
+        if not isinstance(observations, dict) and isinstance(nested, dict):
+            observations = nested.get(_OBSERVATIONS_KEY)
+        if isinstance(observations, dict):
+            for key in observations:
+                add(f"observations.{key}")
+        return names
+
+    @staticmethod
+    def _observations_block(plan: ExperimentPlan, variants: list[Any]) -> str:
+        requested = [item.strip() for item in plan.observations if str(item).strip()]
+        logged: list[str] = []
+        seen: set[str] = set()
+        for variant in variants:
+            for name in ReflectionAgent._logged_payload_keys(dict(variant.metrics or {})):
+                if name not in seen:
+                    seen.add(name)
+                    logged.append(name)
+        requested_text = "\n".join(f"- {item}" for item in requested) or "- (none requested)"
+        logged_text = "\n".join(f"- `{item}`" for item in logged) or "- (none found in the payloads)"
+        return (
+            "Requested (advisory phrases from the design — not JSON keys):\n"
+            f"{requested_text}\n\n"
+            "Keys actually present in the metrics payloads:\n"
+            f"{logged_text}"
+        )
+
+    @staticmethod
+    def _workspace_rel(run_id: str, path: str, *, fallback: str) -> str:
+        cleaned = str(path or "").strip().replace("\\", "/")
+        if not cleaned:
+            return fallback
+        workspace = workspace_dir(run_id).resolve()
+        candidate = Path(cleaned)
+        try:
+            if not candidate.is_absolute():
+                candidate = resolve_project_reference(cleaned)
+            return candidate.resolve().relative_to(workspace).as_posix()
+        except (ValueError, OSError):
+            prefix = f"experiments/{run_id}/"
+            if cleaned.startswith(prefix):
+                return cleaned[len(prefix):]
+            if not Path(cleaned).is_absolute():
+                return cleaned.lstrip("./")
+            return fallback
+
+    @staticmethod
+    def _workspace_catalog(plan: ExperimentPlan, result: Any) -> str:
+        lines: list[str] = []
+        for variant in result.variants:
+            metrics_rel = f"results/{variant.name}.metrics.json"
+            log_rel = ReflectionAgent._workspace_rel(
+                plan.run_id,
+                str(getattr(variant, "log_path", "") or ""),
+                fallback=f"logs/{variant.name}.log",
+            )
+            lines.append(
+                f"- `{metrics_rel}` — full metrics JSON for `{variant.name}` "
+                "(item-record lists omitted from the summary above)"
+            )
+            lines.append(f"- `{log_rel}` — run log for `{variant.name}`")
+        lines.append("- `design/experiment_design.md` — living design summary")
+        lines.append(
+            f"- `generated_code/{_ENTRY_POINT}` — generated entry point "
+            "(read if you suspect the code measured the wrong thing)"
+        )
+        lines.append("- `generated_code/` — rest of the implementation")
+        lines.append(
+            f"- `reflection/revision-{plan.revision}.metrics_summary.json` — "
+            "host-built compact summary (same payload as the prompt)"
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _metrics_summary_payload(plan: ExperimentPlan, *, result: Any) -> dict[str, Any]:
+        variants: list[dict[str, Any]] = []
+        for variant in result.variants:
+            metrics_path = f"results/{variant.name}.metrics.json"
+            variants.append(
+                {
+                    "name": variant.name,
+                    "exit_code": variant.exit_code,
+                    "process_status": variant.process_status,
+                    "metrics_state": variant.metrics_state,
+                    "metrics_path": metrics_path,
+                    "log_path": ReflectionAgent._workspace_rel(
+                        plan.run_id,
+                        str(getattr(variant, "log_path", "") or ""),
+                        fallback=f"logs/{variant.name}.log",
+                    ),
+                    "summary": summarize_metrics_for_prompt(
+                        dict(variant.metrics or {}), path=metrics_path
+                    ),
+                }
+            )
+        return {
+            "run_id": plan.run_id,
+            "revision": plan.revision,
+            "primary_metric": plan.primary_metric,
+            "primary_direction": plan.primary_direction,
+            "result_status": result.status,
+            "variants": variants,
+        }
+
+    @staticmethod
+    def _write_metrics_summary(plan: ExperimentPlan, payload: dict[str, Any]) -> Path:
+        path = reflection_metrics_summary_path(plan.run_id, plan.revision)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2, default=str, ensure_ascii=False) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
     def _build_task_prompt(
         inputs: ReflectionInput,
         hypothesis_text: str | None,
         objective_text: str | None,
         design_context: str | None,
-        target_filename: str,
+        summary_payload: dict[str, Any] | None = None,
     ) -> str:
+        plan = inputs.plan
         result = inputs.result
-        variant_lines = [
-            f"- **{variant.name}** (exit_code={variant.exit_code}): "
-            + (", ".join(f"{k}={v}" for k, v in variant.metrics.items()) or "(no metrics)")
-            for variant in result.variants
-        ] or ["(no variants)"]
+        payload = summary_payload or ReflectionAgent._metrics_summary_payload(plan, result=result)
+        variant_blocks: list[str] = []
+        for variant in payload.get("variants") or []:
+            body = ReflectionAgent._dump_metrics(dict(variant.get("summary") or {}))
+            variant_blocks.append(
+                f"### {variant.get('name')}\n\n"
+                f"exit_code={variant.get('exit_code')}; "
+                f"process_status={variant.get('process_status')}; "
+                f"metrics_state={variant.get('metrics_state')}\n\n"
+                f"```json\n{body}\n```"
+            )
+        variants_text = "\n\n".join(variant_blocks) or "(no variants)"
         implementation_block = ReflectionAgent._build_implementation_block(inputs.implementation)
-        extra_material_lines = [f"- `logs/{variant.name}.log`" for variant in result.variants]
-        extra_material_lines.append("- `design/experiment_design.md` (the raw design document)")
-        extra_material_lines.append("- `generated_code/` (the actual implementation)")
+        primary = plan.primary_metric or "(unspecified)"
+        direction = plan.primary_direction or "unspecified"
+        observations_block = ReflectionAgent._observations_block(plan, list(result.variants))
+        catalog = ReflectionAgent._workspace_catalog(plan, result)
 
         return (
-            "Reflect on this experiment result against the plan's hypothesis. You are "
-            "given the whole story of this one experiment round below — the design, "
-            "what was actually built, and the real results — not just the headline "
-            "numbers; use all of it.\n\n"
+            "Judge this experiment result against the pre-committed hypothesis and "
+            "primary metric. The metrics below are a **summary**: object lists "
+            "(item records) are omitted. Use grep/read_file for item-level or "
+            "code detail, then submit exactly one structured judgment.\n\n"
             f"## Objective\n\n{objective_text or '(not available)'}\n\n"
             f"## Hypothesis\n\n{hypothesis_text or '(not available)'}\n\n"
+            f"## Primary metric\n\n`{primary}` ({direction})\n\n"
+            "At least one `evidence` item must cite this primary metric name. "
+            "If you call the round a success on other grounds, set "
+            "`reinterpreted: true` and explain.\n\n"
+            f"## Requested observations (advisory)\n\n{observations_block}\n\n"
             f"## Full experiment design\n\n{design_context or '(not available)'}\n\n"
             f"## What was actually implemented\n\n{implementation_block}\n\n"
             f"## Result status\n\n{result.status}\n\n"
-            f"## Per-variant results\n\n" + "\n".join(variant_lines) + "\n\n"
-            "## Extra material (optional)\n\n"
-            "Everything above should usually be enough. If something specific is "
-            "still unclear, you also have read_file/list_files, scoped to this run's "
-            "full experiment folder, to look further — for example:\n"
-            + "\n".join(extra_material_lines) + "\n\n"
-            "Only read something if the context above leaves a real gap in what you "
-            "need to judge the hypothesis — don't read speculatively.\n\n"
-            "TASK: Judge whether this result supports, refutes, is mixed on, or is "
-            "inconclusive about the hypothesis above. Ground your reasoning in the "
-            "concrete numbers under 'Per-variant results' — do not invent data. Use "
-            "'Full experiment design' and 'What was actually implemented' to notice "
-            "things the numbers alone can't tell you: where the implementation had to "
-            "diverge from the design (synthetic data, a substituted library, a "
-            "narrower scope than the hypothesis actually claims), which of the "
-            "design's stated risks/assumptions turned out to matter, and what about "
-            "the protocol would need to change to test the hypothesis more directly. "
-            "Follow-up ideas grounded in those specifics are far more useful than "
-            "ones grounded only in whether a number went up or down.\n\n"
-            f"Use the write_file tool to write your reflection to `{target_filename}` "
-            "(a path relative to your workspace root — do not use an absolute path or "
-            "any other filename) using this structure, then stop:\n\n"
-            "```\n"
-            "# Reflection\n\n"
-            "**Hypothesis verdict:** <supported|refuted|mixed|inconclusive>\n\n"
-            "## Rationale\n\n<grounded in the numbers above>\n\n"
-            "## Insights\n\n- <what's surprising or generalizable, or omit this "
-            "section if there's nothing beyond the headline verdict>\n\n"
-            "## Follow-up ideas\n\n- <candidate directions this result's outcome "
-            "suggests, specific to what actually happened in this round — not "
-            "generic advice like \"run more experiments\" — or omit this section "
-            "if none>\n"
-            "```\n"
+            f"## Per-variant metrics (summary)\n\n{variants_text}\n\n"
+            "## Workspace files\n\n"
+            "Use grep, read_file (offset/limit), glob, or list_files on this run "
+            "folder. Prefer grep on large JSON/logs; do not slurp an entire file.\n"
+            + catalog
+            + "\n\n"
+            "TASK: Call `submit_reflection` exactly once with a structured "
+            "judgment after you have enough evidence. Judge validity first, then "
+            "the hypothesis against the primary metric and direction, then "
+            "objective progress. `recommendation` is a hint for the manager, "
+            "not an instruction. Ground every evidence item in the summary or "
+            "in files you read. Then stop.\n"
         )
 
-    # -- finalizing the artifact ------------------------------------------------
-
     @staticmethod
-    def _finalize_reflection(plan: ExperimentPlan, target_path: Path) -> Reflection:
-        if not target_path.is_file():
-            raise RuntimeError(
-                f"reflection agent did not write {to_project_relative(target_path)}"
-            )
+    def _finalize_reflection(
+        plan: ExperimentPlan,
+        target_path: Path,
+        judgment: ReflectionJudgment,
+    ) -> Reflection:
+        content = render_reflection_markdown(judgment, primary_metric=plan.primary_metric)
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(content, encoding="utf-8")
         return Reflection(
             run_id=plan.run_id,
             revision=plan.revision,
             reflection_path=to_project_relative(target_path),
-            content=target_path.read_text(encoding="utf-8"),
+            content=content,
             created_at=datetime.now(UTC),
+            judgment=judgment,
         )

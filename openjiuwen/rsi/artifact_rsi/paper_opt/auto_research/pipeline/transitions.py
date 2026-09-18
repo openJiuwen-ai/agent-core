@@ -2,21 +2,29 @@
 
 from __future__ import annotations
 
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import generated_code_dir
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
+    commit_exists,
+    current_commit,
+)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
     ArtifactRecord,
     CodeHandoff,
     ExecutionHandoff,
+    ExecutionHistoryRecord,
     FactRecord,
     ManagerDecision,
     ModuleId,
     ModuleMode,
     PersistedManagerState,
     RecordStatus,
+    ReflectionHandoff,
     RequirementRecord,
     StateChange,
     SubagentReport,
     SubtaskContract,
     TaskState,
+    history_slice_for_commit,
 )
 
 
@@ -72,23 +80,29 @@ def _code_is_ready(state: TaskState, reports: list[SubagentReport]) -> bool:
     if last is not None and last.outcome == "failed":
         return False
     if last is not None and isinstance(last.handoff, CodeHandoff):
-        if (
-            last.handoff.status == "ready"
-            or last.handoff.smoke_test_passed
-            or last.handoff.readiness == "smoke_ready"
-        ):
+        if last.handoff.status == "ready" or last.handoff.readiness == "smoke_ready":
             return True
-        if last.handoff.status == "failed":
-            return False
+        return False
     return state.latest_implementation_status == "ready"
 
 
-def _unexecuted_ready_code(state: TaskState, reports: list[SubagentReport]) -> bool:
+def _unexecuted_ready_code(
+    state: TaskState,
+    reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> bool:
     if not _code_is_ready(state, reports):
         return False
     last_code = _latest_module_report(reports, "code_implementation")
     if last_code is None:
         return False
+    if execution_history is not None:
+        if not code_commit:
+            last_exec = _latest_module_report(reports, "experiment_execution")
+            return _round_index(last_code) > _round_index(last_exec)
+        return not any(record.code_commit == code_commit for record in execution_history)
     last_exec = _latest_module_report(reports, "experiment_execution")
     return _round_index(last_code) > _round_index(last_exec)
 
@@ -111,7 +125,14 @@ def _redesign_after_execution(reports: list[SubagentReport]) -> bool:
     return _round_index(last_redesign) > _round_index(last_exec)
 
 
-def _process_failed(state: TaskState, reports: list[SubagentReport]) -> bool:
+def _process_failed(
+    state: TaskState,
+    reports: list[SubagentReport],
+    *,
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> bool:
+    if execution_history is not None:
+        return state.latest_execution_status == "failed"
     last_exec = _latest_module_report(reports, "experiment_execution")
     if state.latest_execution_status == "failed":
         return True
@@ -126,15 +147,42 @@ def _process_completed(state: TaskState) -> bool:
     return state.latest_execution_status == "completed"
 
 
-def _latest_scientific_status(reports: list[SubagentReport]) -> str:
+def _latest_sanity(reports: list[SubagentReport]) -> str:
     last_exec = _latest_module_report(reports, "experiment_execution")
     if isinstance(last_exec, SubagentReport) and isinstance(last_exec.handoff, ExecutionHandoff):
-        return last_exec.handoff.scientific_status
+        return last_exec.handoff.sanity
     return "unknown" if last_exec is not None else ""
 
 
-def _science_accepted(reports: list[SubagentReport]) -> bool:
-    return _latest_scientific_status(reports) == "accepted"
+def _run_invalid(reports: list[SubagentReport]) -> bool:
+    return _latest_sanity(reports) == "invalid_run"
+
+
+def _reflection_accepted(
+    reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> bool:
+    last_reflection = _latest_succeeded(reports, "reflection")
+    if last_reflection is None or not isinstance(last_reflection.handoff, ReflectionHandoff):
+        return False
+    handoff = last_reflection.handoff
+    if handoff.validity != "valid" or handoff.verdict != "supported":
+        return False
+    last_exec = _latest_module_report(reports, "experiment_execution")
+    if _round_index(last_reflection) < _round_index(last_exec):
+        return False
+    if execution_history is not None and code_commit:
+        if not history_slice_for_commit(execution_history, code_commit):
+            return False
+        if isinstance(last_exec, SubagentReport) and isinstance(last_exec.handoff, ExecutionHandoff):
+            variant_commits = {
+                item.code_commit for item in last_exec.handoff.variants if item.code_commit
+            }
+            if last_exec.handoff.code_commit != code_commit and code_commit not in variant_commits:
+                return False
+    return True
 
 
 def _has_succeeded_survey(reports: list[SubagentReport]) -> bool:
@@ -279,21 +327,39 @@ _PROBE_CONTRACT = SubtaskContract(
 )
 
 
-def _stuck_for_survey(state: TaskState, reports: list[SubagentReport]) -> bool:
-    if _science_accepted(reports):
+def _stuck_for_survey(
+    state: TaskState,
+    reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> bool:
+    if _reflection_accepted(reports, code_commit=code_commit, execution_history=execution_history):
         return False
     if _process_completed(state) and not _redesign_after_execution(reports):
         return True
-    return _process_failed(state, reports) and remaining_code_retries(state) <= 0
+    return _process_failed(state, reports, execution_history=execution_history) and remaining_code_retries(state) <= 0
 
 
-def _science_loop_open(state: TaskState, reports: list[SubagentReport]) -> bool:
+def _science_loop_open(
+    state: TaskState,
+    reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> bool:
     for module, mode in _LEGAL_PAIRS:
         if module == "reporting":
             continue
         probe = _PROBE_CONTRACT.model_copy(update={"module": module, "mode": mode})
         try:
-            validate_contract(state, reports, probe)
+            validate_contract(
+                state,
+                reports,
+                probe,
+                code_commit=code_commit,
+                execution_history=execution_history,
+            )
         except DecisionValidationError:
             continue
         return True
@@ -312,20 +378,63 @@ def _code_needs_repair(state: TaskState, reports: list[SubagentReport]) -> bool:
     if not _code_is_ready(state, reports):
         last_code = _latest_module_report(reports, "code_implementation")
         return last_code is not None
-    if not _process_failed(state, reports):
-        return False
     last_code = _latest_module_report(reports, "code_implementation")
     last_exec = _latest_module_report(reports, "experiment_execution")
     return last_exec is not None and _round_index(last_code) < _round_index(last_exec)
 
 
-def validate_contract(state: TaskState, reports: list[SubagentReport], contract: SubtaskContract) -> None:
+def _can_restore_prior_commit(
+    state: TaskState,
+    *,
+    code_commit: str,
+    execution_history: list[ExecutionHistoryRecord] | None,
+) -> bool:
+    if execution_history is None or state.latest_plan is None:
+        return False
+    if state.pending_research_revision:
+        return False
+    if state.latest_plan.status == "stopped":
+        return False
+    return any(
+        record.code_commit and record.code_commit != code_commit
+        for record in execution_history
+    )
+
+
+def code_head_from_state(state: PersistedManagerState) -> str:
+    impl = state.latest_implementation
+    if impl is not None and impl.code_commit:
+        return impl.code_commit
+    return current_commit(generated_code_dir(state.task_state.run_id))
+
+
+def validate_contract(
+    state: TaskState,
+    reports: list[SubagentReport],
+    contract: SubtaskContract,
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> None:
     if not _module_enabled(state, contract.module):
         raise DecisionValidationError(f"module {contract.module} is not enabled")
     counters = state.counters
     limits = state.limits
     if counters.rounds_used >= limits.max_rounds:
         raise DecisionValidationError("round budget exhausted")
+
+    def unexecuted() -> bool:
+        return _unexecuted_ready_code(
+            state, reports, code_commit=code_commit, execution_history=execution_history
+        )
+
+    def science_ok() -> bool:
+        return _reflection_accepted(
+            reports, code_commit=code_commit, execution_history=execution_history
+        )
+
+    def process_failed() -> bool:
+        return _process_failed(state, reports, execution_history=execution_history)
 
     if contract.module == "topic_survey":
         if counters.survey_calls >= limits.max_survey_calls:
@@ -334,9 +443,11 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             raise DecisionValidationError(
                 "new research must be incorporated via revise_research before another survey"
             )
-        if _unexecuted_ready_code(state, reports):
+        if unexecuted():
             raise DecisionValidationError("unexecuted ready implementation must run first")
-        if _has_succeeded_survey(reports) and not _stuck_for_survey(state, reports):
+        if _has_succeeded_survey(reports) and not _stuck_for_survey(
+            state, reports, code_commit=code_commit, execution_history=execution_history
+        ):
             raise DecisionValidationError(
                 "follow-up survey is only allowed when the experiment is stuck"
             )
@@ -377,8 +488,6 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
                 raise DecisionValidationError(
                     "new research must be incorporated via revise_research before update"
                 )
-            if _science_accepted(reports):
-                raise DecisionValidationError("science already accepted; reporting is next")
             if not _can_produce_new_evidence(state):
                 raise DecisionValidationError(
                     "no code/execution capacity remains to act on a design update"
@@ -391,13 +500,13 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             last_reflection = _latest_succeeded(reports, "reflection")
             last_exec = _latest_module_report(reports, "experiment_execution")
             reflection_fresh = _round_index(last_reflection) > _round_index(last_redesign)
-            simple_fresh = (
-                _process_completed(state)
+            invalid_fresh = (
+                _run_invalid(reports)
                 and _round_index(last_exec) > _round_index(last_redesign)
             )
-            if not reflection_fresh and not simple_fresh:
+            if not reflection_fresh and not invalid_fresh:
                 raise DecisionValidationError(
-                    "design update requires newer reflection or a process-completed execution"
+                    "design update requires a newer reflection for the latest execution"
                 )
         return
 
@@ -410,9 +519,12 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             )
         if state.latest_plan.status == "stopped":
             raise DecisionValidationError("terminal design has no further implementation work")
+        restoring = bool(contract.restore_code_commit.strip())
+        if restoring:
+            return
         if remaining_code_retries(state) <= 0 and state.counters.code_attempts > 0:
             raise DecisionValidationError("code retry budget exhausted")
-        if _unexecuted_ready_code(state, reports):
+        if unexecuted():
             raise DecisionValidationError("unexecuted ready implementation must run first")
         needs_create = _code_needs_create(reports)
         needs_repair = _code_needs_repair(state, reports)
@@ -435,21 +547,21 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             raise DecisionValidationError(
                 "new design must be implemented before execution"
             )
-        if _science_accepted(reports) and not _unexecuted_ready_code(state, reports):
+        if science_ok() and not unexecuted():
             raise DecisionValidationError(
                 "science already accepted; another execution requires a newer implementation"
             )
         last_exec = _latest_module_report(reports, "experiment_execution")
         last_code = _latest_module_report(reports, "code_implementation")
-        if _process_failed(state, reports):
+        if process_failed() or _run_invalid(reports):
             if last_exec is not None and (
                 last_code is None or last_code.round_index < last_exec.round_index
             ):
                 raise DecisionValidationError(
-                    "failed execution must be repaired via code_implementation before another execution"
+                    "failed or invalid execution must be repaired via code_implementation before another execution"
                 )
             return
-        if _unexecuted_ready_code(state, reports):
+        if unexecuted():
             return
         if _process_completed(state) and not _design_newer_than_code(reports):
             return
@@ -470,7 +582,7 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             raise DecisionValidationError(
                 "new research must be incorporated via revise_research before reflection"
             )
-        if _unexecuted_ready_code(state, reports):
+        if unexecuted():
             raise DecisionValidationError("unexecuted ready implementation must run first")
         if _redesign_after_execution(reports):
             raise DecisionValidationError("latest execution was already consumed by a design change")
@@ -489,7 +601,7 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
             )
         if remaining_reporting_retries(state) <= 0 and state.counters.reporting_attempts > 0:
             raise DecisionValidationError("reporting retry budget exhausted")
-        if _unexecuted_ready_code(state, reports):
+        if unexecuted():
             raise DecisionValidationError("unexecuted ready implementation must run first")
         if state.pending_research_revision:
             raise DecisionValidationError(
@@ -501,10 +613,16 @@ def validate_contract(state: TaskState, reports: list[SubagentReport], contract:
                 raise DecisionValidationError("new design must be implemented before reporting")
         if _execution_already_reported(reports):
             raise DecisionValidationError("this execution was already reported; emit DONE")
-        # Reporting stays legal after a process-completed run even when science
-        # is below_threshold or accepted and other modules are still legal.
-        # The manager should treat it as the last step: enough original-task
-        # evidence, or stuck.
+        if _run_invalid(reports):
+            raise DecisionValidationError(
+                "reporting requires a valid run; repair code after an invalid run"
+            )
+        last_reflection = _latest_succeeded(reports, "reflection")
+        last_exec = _latest_module_report(reports, "experiment_execution")
+        if _round_index(last_reflection) < _round_index(last_exec):
+            raise DecisionValidationError(
+                "reporting requires a fresh reflection for the latest execution"
+            )
         return
 
 
@@ -592,7 +710,35 @@ def validate_decision(state: PersistedManagerState, decision: ManagerDecision) -
         ]
         if unknown:
             raise DecisionValidationError(f"unknown related_report_ids: {unknown}")
-        validate_contract(state.task_state, state.reports, decision.contract)
+        contract = decision.contract
+        head = code_head_from_state(state)
+        history = state.execution_history
+        if contract.restore_code_commit:
+            if contract.module != "code_implementation":
+                raise DecisionValidationError(
+                    "restore_code_commit is only valid on code_implementation"
+                )
+            if not commit_exists(generated_code_dir(state.task_state.run_id), contract.restore_code_commit):
+                raise DecisionValidationError(
+                    f"unknown restore_code_commit: {contract.restore_code_commit}"
+                )
+        if contract.module == "experiment_execution":
+            if not contract.target_variants:
+                raise DecisionValidationError(
+                    "experiment_execution requires non-empty target_variants"
+                )
+            impl = state.latest_implementation
+            known = {item.name for item in (impl.variants if impl is not None else [])}
+            missing = [name for name in contract.target_variants if name not in known]
+            if missing:
+                raise DecisionValidationError(f"unknown target_variants: {missing}")
+        validate_contract(
+            state.task_state,
+            state.reports,
+            contract,
+            code_commit=head,
+            execution_history=history,
+        )
         return
     if decision.signal == "DONE":
         tentative = apply_state_changes(state.task_state, decision.state_changes)
@@ -668,6 +814,9 @@ def _action_reason(
     mode: ModuleMode,
     state: TaskState,
     reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
 ) -> str:
     if module == "topic_survey":
         if not _has_succeeded_survey(reports):
@@ -685,42 +834,79 @@ def _action_reason(
             last_reflection = _latest_succeeded(reports, "reflection")
             if _round_index(last_reflection) > _round_index(last_redesign):
                 return "update after reflection"
-            return "update after execution"
+            return "update after invalid run"
         return "revise after new survey"
     if module == "code_implementation":
         if _code_needs_repair(state, reports) and not _code_needs_create(reports):
             if not _code_is_ready(state, reports):
                 return "repair smoke test error"
-            return "repair process failure"
+            if _process_failed(state, reports, execution_history=execution_history):
+                return "repair process failure"
+            return "repair after execution"
         return "create after design"
     if module == "experiment_execution":
-        if _unexecuted_ready_code(state, reports):
+        if _unexecuted_ready_code(
+            state, reports, code_commit=code_commit, execution_history=execution_history
+        ):
             return "unexecuted implementation"
         return "re-run without code change"
     if module == "reflection":
         return "after process-completed execution"
     if module == "reporting":
-        if not _science_loop_open(state, reports):
+        if not _science_loop_open(
+            state, reports, code_commit=code_commit, execution_history=execution_history
+        ):
             return "science loop exhausted"
-        if _science_accepted(reports):
+        if _reflection_accepted(
+            reports, code_commit=code_commit, execution_history=execution_history
+        ):
             return "last step if original task is complete"
         return "last step if enough or stuck"
     return "permitted"
 
 
-def list_legal_actions(state: TaskState, reports: list[SubagentReport]) -> list[dict[str, str]]:
+def list_legal_actions(
+    state: TaskState,
+    reports: list[SubagentReport],
+    *,
+    code_commit: str = "",
+    execution_history: list[ExecutionHistoryRecord] | None = None,
+) -> list[dict[str, str]]:
     actions: list[dict[str, str]] = []
     for module, mode in _LEGAL_PAIRS:
         probe = _PROBE_CONTRACT.model_copy(update={"module": module, "mode": mode})
         try:
-            validate_contract(state, reports, probe)
+            validate_contract(
+                state,
+                reports,
+                probe,
+                code_commit=code_commit,
+                execution_history=execution_history,
+            )
         except DecisionValidationError:
             continue
         actions.append(
             {
                 "module": module,
                 "mode": mode,
-                "reason": _action_reason(module, mode, state, reports),
+                "reason": _action_reason(
+                    module,
+                    mode,
+                    state,
+                    reports,
+                    code_commit=code_commit,
+                    execution_history=execution_history,
+                ),
+            }
+        )
+    if not any(item["module"] == "code_implementation" for item in actions) and _can_restore_prior_commit(
+        state, code_commit=code_commit, execution_history=execution_history
+    ):
+        actions.append(
+            {
+                "module": "code_implementation",
+                "mode": "run",
+                "reason": "restore prior commit",
             }
         )
     return actions

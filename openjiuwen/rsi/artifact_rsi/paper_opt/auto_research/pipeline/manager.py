@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
 from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
@@ -13,6 +14,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import (
     get_logger,
     log_context,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import infer_proposed_name
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import (
     find_harness_run_dirs,
     module_attempt_dir,
@@ -50,11 +52,14 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas
     SurveyHandoff,
     TaskState,
     TerminalReport,
+    compact_execution_history_rows,
     default_requirements,
     limits_from_config,
     report_requirement,
+    unique_executed_variant_names,
     utc_now,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.paper_preprocess.schemas import ResearchContext
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reflection.agent import ReflectionAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.reporting.agent import ReportingAgent
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.hitl import (
@@ -63,6 +68,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.hitl import (
     inject_operator_followup,
     persist_pause,
 )
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.stage_activity import tail_activity
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.subagents import SubagentRegistry, build_registry
 
 logger = get_logger(__name__)
@@ -70,6 +76,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.transitions im
     DecisionValidationError,
     apply_state_changes,
     can_complete,
+    code_head_from_state,
     list_legal_actions,
     remaining_code_retries,
     remaining_execution_retries,
@@ -290,7 +297,16 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
         return
 
     if report.module == "code_implementation":
-        task.counters.code_attempts += 1
+        restored = bool(
+            state.task_state.last_contract
+            and state.task_state.last_contract.restore_code_commit.strip()
+        )
+        promotion_failed = (
+            isinstance(report.handoff, CodeHandoff)
+            and report.handoff.readiness == "promotion_failed"
+        )
+        if not restored and not promotion_failed:
+            task.counters.code_attempts += 1
         if state.latest_implementation is not None:
             task.latest_implementation_status = state.latest_implementation.status
         task.phase = "code"
@@ -339,14 +355,14 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
             task.unresolved_issues = [
                 item for item in task.unresolved_issues if not item.startswith("execution failed")
             ]
-        science = ""
+        sanity = ""
         if isinstance(report.handoff, ExecutionHandoff):
-            science = report.handoff.scientific_status
+            sanity = report.handoff.sanity
         _upsert_fact(
             task,
             "fact-latest-execution",
             bounded_text(
-                f"process={process_status} science={science or 'unknown'}: {report.summary}",
+                f"process={process_status} sanity={sanity or 'unknown'}: {report.summary}",
                 400,
             ),
             report_id=report.report_id,
@@ -366,12 +382,19 @@ def _apply_report_effects(state: PersistedManagerState, report: SubagentReport) 
                 )
             )
         verdict = ""
+        validity = ""
+        recommendation = ""
         if isinstance(report.handoff, ReflectionHandoff):
             verdict = report.handoff.verdict
+            validity = report.handoff.validity
+            recommendation = report.handoff.recommendation
         _upsert_fact(
             task,
             "fact-latest-reflection",
-            bounded_text(f"verdict={verdict}: {report.summary}", 400),
+            bounded_text(
+                f"verdict={verdict} validity={validity} recommendation={recommendation}: {report.summary}",
+                400,
+            ),
             report_id=report.report_id,
         )
         return
@@ -433,7 +456,7 @@ class ManagerRuntime:
         experiment_design=None,
         code_implementation=None,
         experiment_execution=None,
-        on_stage: Callable[[str], Awaitable[None]] | None = None,
+        on_stage: Callable[[str, str | None], Awaitable[None]] | None = None,
     ):
         self.config = config
         self.on_stage = on_stage
@@ -461,47 +484,96 @@ class ManagerRuntime:
         latest_metrics: dict[str, Any] = {}
         variant_metrics: dict[str, dict[str, Any]] = {}
         process_status = task.latest_execution_status or ""
-        scientific_status = ""
+        sanity = ""
+        latest_verdict = ""
+        latest_validity = ""
+        latest_recommendation = ""
         failure_kind = ""
         failure_stage = ""
         failure_substage = ""
         failure_class = ""
         fingerprint = ""
         diagnostic_paths: list[str] = []
+        code_head = code_head_from_state(state)
+        implemented_variants: list[str] = []
+        if state.latest_implementation is not None:
+            implemented_variants = [item.name for item in state.latest_implementation.variants]
+        if state.latest_execution is not None and state.latest_execution.variants:
+            process_status = state.latest_execution.status or process_status
+            variant_metrics = {
+                item.name: dict(item.metrics) for item in state.latest_execution.variants
+            }
+            plan = state.task_state.latest_plan
+            proposed_name = infer_proposed_name(
+                [item.name for item in state.latest_execution.variants],
+                metric_names=list(plan.metrics) if plan is not None else [],
+                baselines=list(plan.baselines) if plan is not None else [],
+            )
+            proposed = next(
+                (
+                    item
+                    for item in state.latest_execution.variants
+                    if item.name == (proposed_name or "proposed")
+                ),
+                None,
+            )
+            primary = proposed or state.latest_execution.variants[0]
+            latest_metrics = dict(primary.metrics)
+        head_slice_set = bool(variant_metrics)
         for report in reversed(state.reports):
             if report.module != "experiment_execution":
                 continue
             handoff = report.handoff
             if isinstance(handoff, ExecutionHandoff):
-                process_status = handoff.process_status or process_status
-                scientific_status = handoff.scientific_status
+                matches_head = (not code_head) or handoff.code_commit == code_head or any(
+                    item.code_commit == code_head for item in handoff.variants if item.code_commit
+                )
+                if code_head and not matches_head:
+                    continue
+                sanity = handoff.sanity
                 failure_kind = handoff.failure_kind
                 failure_stage = handoff.failure_stage
                 failure_substage = handoff.failure_substage
                 failure_class = handoff.failure_class
                 fingerprint = handoff.fingerprint
                 diagnostic_paths = list(handoff.diagnostic_paths)
-                if handoff.diagnostic:
-                    latest_metrics = dict(handoff.diagnostic)
-                    failure_stage = failure_stage or str(handoff.diagnostic.get("failure_stage") or "")
-                    failure_substage = failure_substage or str(
-                        handoff.diagnostic.get("failure_substage") or ""
-                    )
-                    fingerprint = fingerprint or str(handoff.diagnostic.get("fingerprint") or "")
-                if handoff.variants:
-                    variant_metrics = {
-                        item.name: dict(item.metrics) for item in handoff.variants
-                    }
-                    proposed = next(
-                        (item for item in handoff.variants if item.name == "proposed"),
-                        None,
-                    )
-                    primary = proposed or handoff.variants[0]
-                    latest_metrics = {**dict(primary.metrics), **latest_metrics}
-                    for item in handoff.variants:
-                        path = getattr(item, "diagnostics_path", "") or ""
-                        if path and path not in diagnostic_paths:
-                            diagnostic_paths.append(path)
+                if not head_slice_set:
+                    process_status = handoff.process_status or process_status
+                    if handoff.diagnostic:
+                        latest_metrics = dict(handoff.diagnostic)
+                    if handoff.variants:
+                        variant_metrics = {
+                            item.name: dict(item.metrics) for item in handoff.variants
+                        }
+                        proposed = next(
+                            (item for item in handoff.variants if item.name == "proposed"),
+                            None,
+                        )
+                        primary = proposed or handoff.variants[0]
+                        latest_metrics = {**dict(primary.metrics), **latest_metrics}
+                else:
+                    if handoff.diagnostic:
+                        failure_stage = failure_stage or str(
+                            handoff.diagnostic.get("failure_stage") or ""
+                        )
+                        failure_substage = failure_substage or str(
+                            handoff.diagnostic.get("failure_substage") or ""
+                        )
+                        fingerprint = fingerprint or str(handoff.diagnostic.get("fingerprint") or "")
+                for item in handoff.variants:
+                    path = getattr(item, "diagnostics_path", "") or ""
+                    if path and path not in diagnostic_paths:
+                        diagnostic_paths.append(path)
+                break
+            break
+        for report in reversed(state.reports):
+            if report.module != "reflection":
+                continue
+            handoff = report.handoff
+            if isinstance(handoff, ReflectionHandoff):
+                latest_verdict = handoff.verdict
+                latest_validity = handoff.validity
+                latest_recommendation = handoff.recommendation
                 break
             break
         complete_ok, complete_reason = can_complete(state)
@@ -515,12 +587,24 @@ class ManagerRuntime:
             ),
             remaining_reporting_retries=remaining_reporting_retries(task),
             known_record_ids=known,
-            legal_actions=list_legal_actions(task, state.reports),
+            known_report_ids=[item.report_id for item in state.reports],
+            legal_actions=list_legal_actions(
+                task,
+                state.reports,
+                code_commit=code_head,
+                execution_history=state.execution_history,
+            ),
             can_complete=complete_ok,
             can_complete_reason="" if complete_ok else complete_reason,
+            implemented_variants=implemented_variants,
+            executed_variants=unique_executed_variant_names(state.execution_history),
+            code_head=code_head,
             latest_metrics=latest_metrics,
             latest_process_status=process_status,
-            latest_scientific_status=scientific_status,
+            latest_sanity=sanity,
+            latest_verdict=latest_verdict,
+            latest_validity=latest_validity,
+            latest_recommendation=latest_recommendation,
             latest_failure_kind=failure_kind,
             latest_failure_stage=failure_stage,
             latest_failure_substage=failure_substage,
@@ -528,6 +612,7 @@ class ManagerRuntime:
             latest_failure_fingerprint=fingerprint,
             diagnostic_paths=diagnostic_paths,
             variant_metrics=variant_metrics,
+            execution_history=compact_execution_history_rows(state.execution_history),
         )
 
     def _snapshot(self, state: PersistedManagerState, round_index: int) -> ManagerSnapshot:
@@ -563,7 +648,7 @@ class ManagerRuntime:
                 report_id=f"manager:{round_index}:{attempt + 1}",
             ):
                 try:
-                    decision = await self.manager.adecide(snapshot)
+                    decision = await self.manager.adecide(snapshot, query=query)
                     if decision.signal == "EXECUTE":
                         kept, dropped = sanitize_execute_state_changes(
                             state.task_state, decision.state_changes
@@ -603,7 +688,7 @@ class ManagerRuntime:
     ) -> SubagentReport:
         adapter = self.registry.get(contract.module)
         if self.on_stage is not None:
-            await self.on_stage(contract.module)
+            await self.on_stage(contract.module, None)
         attempt = 1
         if contract.module == "code_implementation":
             attempt = state.task_state.counters.code_attempts + 1
@@ -637,77 +722,107 @@ class ManagerRuntime:
             attempt,
         )
         started = time.monotonic()
-        with log_context(
-            run_id=run_id,
-            round_index=round_index,
-            module=contract.module,
-            attempt=attempt,
-            report_id=report_id,
-        ) as ctx:
-            try:
-                report = await adapter.ainvoke(
-                    contract, state, round_index=round_index, attempt=attempt
-                )
-            except Exception as exc:  # noqa: BLE001
+        tail_task = self._start_activity_tail(contract.module, run_id, round_index, attempt)
+        try:
+            with log_context(
+                run_id=run_id,
+                round_index=round_index,
+                module=contract.module,
+                attempt=attempt,
+                report_id=report_id,
+            ) as ctx:
+                try:
+                    report = await adapter.ainvoke(
+                        contract, state, round_index=round_index, attempt=attempt
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    duration_ms = int((time.monotonic() - started) * 1000)
+                    append_event(
+                        run_id,
+                        "subagent_exception",
+                        {
+                            "round": round_index,
+                            "round_index": round_index,
+                            "module": contract.module,
+                            "attempt": attempt,
+                            "report_id": report_id,
+                            "duration_ms": duration_ms,
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                            "attempt_dir": attempt_rel,
+                            "trace_id": ctx.trace_id if ctx is not None else "",
+                        },
+                    )
+                    logger.exception(
+                        "subagent_exception module=%s round=%s attempt=%s",
+                        contract.module,
+                        round_index,
+                        attempt,
+                    )
+                    raise
                 duration_ms = int((time.monotonic() - started) * 1000)
+                artifact_refs = _attempt_artifact_refs(
+                    run_id,
+                    contract.module,
+                    round_index,
+                    attempt,
+                    report.artifact_paths,
+                )
+                if artifact_refs and artifact_refs != list(report.artifact_paths):
+                    report = report.model_copy(update={"artifact_paths": artifact_refs})
                 append_event(
                     run_id,
-                    "subagent_exception",
+                    "subagent_finish",
                     {
                         "round": round_index,
                         "round_index": round_index,
                         "module": contract.module,
                         "attempt": attempt,
-                        "report_id": report_id,
-                        "duration_ms": duration_ms,
-                        "error_type": type(exc).__name__,
-                        "error": str(exc),
+                        "report_id": report.report_id or report_id,
+                        "outcome": report.outcome,
+                        "duration_ms": report.duration_ms or duration_ms,
                         "attempt_dir": attempt_rel,
+                        "artifact_refs": artifact_refs,
                         "trace_id": ctx.trace_id if ctx is not None else "",
                     },
                 )
-                logger.exception(
-                    "subagent_exception module=%s round=%s attempt=%s",
+                logger.info(
+                    "subagent_finish module=%s round=%s attempt=%s outcome=%s duration_ms=%s",
                     contract.module,
                     round_index,
                     attempt,
+                    report.outcome,
+                    report.duration_ms or duration_ms,
                 )
-                raise
-            duration_ms = int((time.monotonic() - started) * 1000)
-            artifact_refs = _attempt_artifact_refs(
-                run_id,
-                contract.module,
-                round_index,
-                attempt,
-                report.artifact_paths,
-            )
-            if artifact_refs and artifact_refs != list(report.artifact_paths):
-                report = report.model_copy(update={"artifact_paths": artifact_refs})
-            append_event(
-                run_id,
-                "subagent_finish",
-                {
-                    "round": round_index,
-                    "round_index": round_index,
-                    "module": contract.module,
-                    "attempt": attempt,
-                    "report_id": report.report_id or report_id,
-                    "outcome": report.outcome,
-                    "duration_ms": report.duration_ms or duration_ms,
-                    "attempt_dir": attempt_rel,
-                    "artifact_refs": artifact_refs,
-                    "trace_id": ctx.trace_id if ctx is not None else "",
-                },
-            )
-            logger.info(
-                "subagent_finish module=%s round=%s attempt=%s outcome=%s duration_ms=%s",
-                contract.module,
-                round_index,
-                attempt,
-                report.outcome,
-                report.duration_ms or duration_ms,
-            )
-            return report
+                return report
+        finally:
+            await self._stop_activity_tail(tail_task)
+
+    def _start_activity_tail(
+        self, module: str, run_id: str, round_index: int, attempt: int
+    ) -> asyncio.Task | None:
+        """Start a background tailer pushing live `note` updates through
+        `on_stage` while `module` is running. Caller must pair this with
+        `_stop_activity_tail` in a `finally` so the task never outlives the
+        module's own `adapter.ainvoke(...)` call."""
+        if self.on_stage is None:
+            return None
+        on_stage = self.on_stage
+
+        async def _push(note: str) -> None:
+            await on_stage(module, note)
+
+        return asyncio.create_task(
+            tail_activity(run_id=run_id, module=module, round_index=round_index, attempt=attempt, on_note=_push)
+        )
+
+    @staticmethod
+    async def _stop_activity_tail(task: asyncio.Task | None) -> None:
+        if task is None:
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
     async def arun(
         self,
@@ -721,6 +836,7 @@ class ManagerRuntime:
         initial_prompt: str = "",
         task_mode: str = "create_new_paper",
         followup: str = "",
+        previous_context: ResearchContext | None = None,
     ) -> TerminalReport:
         existing = try_load_state(run_id) if resume and run_id else None
         if resume and run_id and existing is None:
@@ -732,6 +848,8 @@ class ManagerRuntime:
             if not should_continue:
                 return state.terminal  # type: ignore[return-value]
         else:
+            if task_mode != "modify_paper" and previous_context is not None:
+                raise ValueError("previous_context is only accepted when task_mode='modify_paper'")
             task = OriginalTask(
                 topic=topic,
                 objective=objective,
@@ -739,6 +857,7 @@ class ManagerRuntime:
                 initial_prompt=initial_prompt,
                 task_mode=task_mode,
                 initial_research_paths=list(research_paths or []),
+                previous_context=previous_context,
                 run_id=run_id or new_run_id(),
             )
             state = build_initial_state(
@@ -778,7 +897,7 @@ class ManagerRuntime:
             round_index = state.task_state.counters.rounds_used + 1
             started = utc_now()
             if self.on_stage is not None:
-                await self.on_stage("manager")
+                await self.on_stage("manager", None)
             try:
                 decision = await self._decide_with_repair(state, round_index)
             except DecisionValidationError as exc:
