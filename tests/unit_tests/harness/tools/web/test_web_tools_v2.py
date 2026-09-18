@@ -894,3 +894,53 @@ async def test_request_extracts_inline_proxy_auth(monkeypatch):
     await _request(session, "GET", "https://target.example.com", timeout_seconds=5)
     assert session.last_kwargs["proxy"] == "http://gw.example.com:8080"
     assert session.last_kwargs["proxy_auth"] == aiohttp.BasicAuth("puser", "ppass")
+
+
+# --------------------------------------------------------------------------- #
+# Fetch webpage — JS-shell reader fallback
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_fetch_js_shell_falls_back_to_reader(monkeypatch):
+    # A JS-rendered page returns an HTML shell with no extractable text; the
+    # fetch must fall back to the reader instead of crashing. The fallback
+    # used to call _fetch_via_jina_reader with bare ``session``/``url`` names
+    # that do not exist in scope, so every JS shell raised NameError.
+    def handler(method, url, json_body):
+        if url.startswith("https://r.jina.ai/"):
+            return _resp(200, b"rendered by reader", headers={"Content-Type": "text/plain"})
+        return _resp(
+            200,
+            b"<html><head></head><body><div id=\"app\"></div></body></html>",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            final_url="https://example.com/app",
+        )
+
+    recorder = _patch_request(monkeypatch, handler)
+
+    tool = WebFetchWebpageTool(language="cn")
+    result = await tool.invoke({"url": "https://example.com/app"})
+
+    assert "rendered by reader" in result
+    assert recorder.calls[1]["url"] == "https://r.jina.ai/https://example.com/app"
+    assert recorder.calls[1]["timeout_seconds"] == recorder.calls[0]["timeout_seconds"]
+    assert recorder.calls[1]["max_bytes"] == recorder.calls[0]["max_bytes"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_js_shell_fallback_forwards_configured_proxy(monkeypatch):
+    def handler(method, url, json_body):
+        if url.startswith("https://r.jina.ai/"):
+            return _resp(200, b"rendered", headers={"Content-Type": "text/plain"})
+        return _resp(
+            200,
+            b"<html><body><div id=\"root\"></div></body></html>",
+            headers={"Content-Type": "text/html; charset=utf-8"},
+        )
+
+    recorder = _patch_request(monkeypatch, handler)
+
+    tool = WebFetchWebpageTool(language="cn", proxy_url="http://task-proxy:7890")
+    result = await tool.invoke({"url": "https://example.com/app"})
+
+    assert "rendered" in result
+    assert recorder.calls[1]["proxy_url"] == "http://task-proxy:7890"
