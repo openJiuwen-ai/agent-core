@@ -54,7 +54,18 @@ Built-in tools available to `DeepAgent`. Tools are registered via `ToolCard` ent
 | `TodoCreateTool` | Create a new to-do item. |
 | `TodoListTool` | List existing to-do items. |
 | `TodoModifyTool` | Modify or complete a to-do item. |
-| `TaskTool` | Interact with the task plan (view, add, update tasks). |
+| `TaskTool` | Delegate a task to a subagent. |
+
+Task-loop subagents use an isolated Session. If a subagent returns an error,
+`TaskTool` returns `ToolOutput(success=False, error=...)` and preserves any existing
+`output`. A round timeout returns `success=False, error="completion_timeout"`
+after waiting for that round's execution task to be cancelled.
+For single-round subagents, `TaskTool` also applies the child's `completion_timeout`
+to the entire invocation, including model/tool calls and permission waits, and waits
+for cancellation cleanup before returning `completion_timeout`. Caller cancellation
+and errors originating inside tools retain their existing semantics. This deadline
+applies to each invocation; it does not accumulate across separately resumed calls.
+This ends the subagent invocation; the parent agent can continue handling the tool result.
 
 ### Progressive Tool Discovery
 

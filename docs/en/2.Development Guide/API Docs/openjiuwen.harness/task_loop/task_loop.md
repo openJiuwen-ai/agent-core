@@ -20,18 +20,23 @@ Called before each task-loop round. Use for pre-round setup such as refreshing c
 ### async method wait_completion
 
 ```python
-async wait_completion(session: Session) -> dict
+async wait_completion(timeout: Optional[float] = None) -> dict
 ```
 
 Wait for the inner `ReActAgent` to finish a single round and return its result.
+On timeout, cancel the scheduled task and wait for it to exit before returning
+`{"error": "completion_timeout"}`. This aborts the current loop and rejects late
+input events for that round. Independent background tasks remain unaffected.
+If cancellation cannot be confirmed, raise a task execution error.
+The scheduled task retains the `canceled` status; the result dictionary carries the timeout reason.
 
 **Parameters**:
 
-- **session** (Session): The current session.
+- **timeout** (Optional[float]): Maximum wait in seconds; `None` means no limit.
 
 **Returns**:
 
-**dict**: The round result from the inner agent.
+**dict**: The round result from the inner agent, or a timeout error dictionary.
 
 ### async method handle_input
 

@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import anyio
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.controller.modules.event_handler import (
     EventHandler,
@@ -78,6 +80,8 @@ class TaskLoopEventHandler(EventHandler):
             asyncio.Future
         ] = None
         self._round_id: int = 0
+        self._current_task_id: Optional[str] = None
+        self._submission_lock = asyncio.Lock()
         self._interaction_queues: Optional[
             LoopQueues
         ] = None
@@ -124,6 +128,7 @@ class TaskLoopEventHandler(EventHandler):
         ):
             self._current_future.cancel()
         self._round_id += 1
+        self._current_task_id = None
         self._current_future = asyncio.Future()
         return self._round_id
 
@@ -138,17 +143,32 @@ class TaskLoopEventHandler(EventHandler):
                 None means no limit.
 
         Returns:
-            Result dict. On timeout returns error dict.
+            Result dict. On timeout, cancel and await the scheduled task,
+            abort the loop, and return an error dict.
         """
         if self._current_future is None:
             return {"error": "no active round"}
+        future = self._current_future
+        round_id = self._round_id
         try:
             if timeout is not None:
                 with anyio.fail_after(timeout):
-                    result = await self._current_future
+                    result = await future
             else:
-                result = await self._current_future
+                result = await future
         except TimeoutError:
+            # The Future only signals completion. Cancel the scheduled execution
+            # separately, including a submission still in progress at timeout.
+            async with self._submission_lock:
+                task_id = self._current_task_id if round_id == self._round_id else None
+                if round_id == self._round_id and self._deep_agent.loop_coordinator is not None:
+                    self._deep_agent.loop_coordinator.request_abort()
+            if task_id is not None:
+                if self._task_scheduler is None or not await self._task_scheduler.cancel_task(task_id):
+                    raise build_error(
+                        StatusCode.AGENT_CONTROLLER_TASK_EXECUTION_ERROR,
+                        error_msg=f"Failed to cancel timed-out task {task_id}",
+                    )
             result = {"error": "completion_timeout"}
         except asyncio.CancelledError:
             result = {"error": "cancelled"}
@@ -312,9 +332,13 @@ class TaskLoopEventHandler(EventHandler):
                 inputs=[event] if isinstance(event, InputEvent) else None,
             )
             if self._task_manager is not None:
-                await self._task_manager.add_task(
-                    core_task
-                )
+                async with self._submission_lock:
+                    if current_round != self._round_id or (
+                        self._current_future is not None and self._current_future.done()
+                    ):
+                        return {"status": "cancelled"}
+                    await self._task_manager.add_task(core_task)
+                    self._current_task_id = task_id
             else:
                 self._resolve_future(
                     {"error": "task_manager is None"},

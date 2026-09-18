@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
@@ -16,7 +17,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
-from openjiuwen.core.session.agent import Session
+from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.harness.execution_subject import (
     ExecutionSubject,
     current_execution_subject,
@@ -285,17 +286,49 @@ class TaskTool(Tool):
                 }
                 if affinity_enabled:
                     subagent_inputs["parent_session_id"] = parent_session_id
-                result = await subagent.invoke(subagent_inputs)
-                succeeded = True
+                if getattr(getattr(subagent, "deep_config", None), "enable_task_loop", False):
+                    child_session = create_agent_session(
+                        session_id=sub_session_id,
+                        card=subagent.card,
+                        parent_session_id=parent_session_id,
+                    )
+                    await child_session.pre_run(inputs=subagent_inputs)
+                    try:
+                        result = await subagent.invoke(subagent_inputs, session=child_session)
+                    finally:
+                        await child_session.post_run()
+                else:
+                    # Single-round agents do not enter the task-loop completion
+                    # waiter. Bound their whole invocation here as well.
+                    timeout = getattr(getattr(subagent, "deep_config", None), "completion_timeout", None)
+                    deadline = asyncio.timeout(timeout)
+                    try:
+                        async with deadline:
+                            result = await subagent.invoke(subagent_inputs)
+                    except TimeoutError:
+                        if not deadline.expired():
+                            raise
+                    if deadline.expired():
+                        logger.warning("[TaskTool] Subagent %s exceeded completion_timeout=%s", sub_session_id, timeout)
+                        result = {"error": "completion_timeout"}
                 if (
                     isinstance(result, dict)
                     and result.get("result_type") == "interrupt"
                     and "interrupt_ids" in result
                 ):
                     interrupted = True
+                    succeeded = True
                     self._pending_subagents[sub_session_id] = (subagent, affinity_enabled)
                     return result
                 output = result.get("output", "")
+                error = result.get("error")
+                if error or result.get("result_type") == "error":
+                    return ToolOutput(
+                        success=False,
+                        data={"output": output, "agent_id": subagent.card.id},
+                        error=str(error or output or "Subagent execution failed"),
+                    )
+                succeeded = True
                 return ToolOutput(
                     success=True,
                     data={"output": output, "agent_id": subagent.card.id},

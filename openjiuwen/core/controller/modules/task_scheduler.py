@@ -719,7 +719,7 @@ class TaskScheduler:
         Can be called directly by EventHandler in callbacks.
 
         Execution flow:
-        1. Check task status; if SUBMITTED, mark as CANCELED directly
+        1. If SUBMITTED and not scheduled yet, mark as CANCELED directly
         2. If WORKING, get executor and call can_cancel; if cannot be canceled, return reason
         3. After calling executor.cancel, cancel the corresponding asyncio.Task
         4. Update task status to CANCELED in task_manager
@@ -743,9 +743,13 @@ class TaskScheduler:
 
         # Handle SUBMITTED tasks (not yet running)
         if task.status == TaskStatus.SUBMITTED:
-            await self._task_manager.update_task_status(task_id, TaskStatus.CANCELED)
-            logger.info(f"Task {task_id} cancelled (was SUBMITTED, not yet started)")
-            return True
+            async with self._lock:
+                if task_id not in self._running_tasks:
+                    await self._task_manager.update_task_status(task_id, TaskStatus.CANCELED)
+                    logger.info("Task %s cancelled before scheduling", task_id)
+                    return True
+            # A wrapper may already be scheduled before it changes the status
+            # to WORKING. Cancel and await it through the running-task path.
 
         # Handle already terminal states (idempotent)
         if task.status in (TaskStatus.CANCELED, TaskStatus.COMPLETED, TaskStatus.FAILED):
@@ -797,6 +801,13 @@ class TaskScheduler:
                 logger.error(f"Error cancelling task {task_id}: {e}", exc_info=True)
                 return False
 
+        # A task cancelled before its coroutine starts never runs its finally
+        # block, so it cannot remove its own running-task entry.
+        async with self._lock:
+            running = self._running_tasks.get(task_id)
+            if running is not None and running[1] is exec_task:
+                self._running_tasks.pop(task_id)
+
         logger.info(f"Task {task_id} cancelled successfully")
         return True
 
@@ -836,6 +847,12 @@ class TaskScheduler:
 
                         # Check whether it is already running
                         if task.task_id in self._running_tasks:
+                            continue
+
+                        # The scan may predate cancel_task. Recheck while holding
+                        # the same lock used to cancel tasks before scheduling.
+                        current = await self._task_manager.get_task(task_filter=TaskFilter(task_id=task.task_id))
+                        if not current or current[0].status != TaskStatus.SUBMITTED:
                             continue
 
                         # Start non-blockingly using create_task

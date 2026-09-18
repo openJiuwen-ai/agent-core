@@ -48,6 +48,28 @@ def _make_tool(*, enabled: bool = True, subagent: _FakeSubAgent | None = None) -
 
 
 @pytest.mark.asyncio
+async def test_sticky_subagent_timeout_result_is_failure_and_evicts_cache() -> None:
+    subagent = _FakeSubAgent("browser")
+    subagent.invoke = AsyncMock(return_value={"error": "completion_timeout"})
+    tool, model = _make_tool(subagent=subagent)
+    with patch(
+        "openjiuwen.harness.kv_cache.kv_cache_hooks.dispatch_session_kv_cache_signal", return_value=True,
+    ) as dispatch, patch(
+        "openjiuwen.harness.kv_cache.kv_cache_hooks.evict_session_kv_cache", new=AsyncMock(return_value=True),
+    ) as evict:
+        result = await tool.invoke(
+            {"subagent_type": "browser_agent", "task_description": "slow"},
+            session=Session(session_id="timeout-parent"),
+        )
+    assert result.success is False
+    assert result.error == "completion_timeout"
+    assert [item.args[1] for item in dispatch.call_args_list] == ["prefetch"]
+    evict.assert_awaited_once_with(
+        model, session_id="timeout-parent_sub_browser_agent", parent_session_id="timeout-parent", enabled=True,
+    )
+
+
+@pytest.mark.asyncio
 async def test_sticky_subagent_prefetches_before_invoke_and_offloads_after_success() -> None:
     subagent = _FakeSubAgent("browser")
     tool, model = _make_tool(subagent=subagent)

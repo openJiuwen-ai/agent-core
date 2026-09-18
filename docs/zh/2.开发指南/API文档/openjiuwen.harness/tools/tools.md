@@ -62,6 +62,16 @@ DeepAgent 内置工具实现。所有工具通过 Rails 或 `create_deep_agent()
 | `TodoListTool` | 列出待办事项 |
 | `TodoModifyTool` | 修改待办事项状态 |
 
+### 子代理工具
+
+`TaskTool`（`task_tool`）委派任务给子代理。启用 task-loop 的子代理使用独立 Session。
+子代理返回错误时，工具返回 `ToolOutput(success=False, error=...)` 并保留已有的 `output`。
+例如，轮次超时返回 `success=False, error="completion_timeout"`，且在返回前等待该轮执行任务取消。
+单轮子代理也由 `TaskTool` 使用子代理的 `completion_timeout` 限制整次调用，包含模型调用、工具调用及授权等待；
+到期后等待取消清理完成，再返回 `completion_timeout`。调用方主动取消及工具内部错误保持原有语义。
+该期限按每次调用计算，不跨独立的恢复调用累计。
+这会结束子代理本次执行；父代理仍可根据工具结果继续处理任务。
+
 ### 技能工具
 
 | 工具 | 说明 |

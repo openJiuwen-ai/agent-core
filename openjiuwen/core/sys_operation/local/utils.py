@@ -4,6 +4,7 @@
 import asyncio
 import os
 import signal
+import subprocess
 import tempfile
 from datetime import (
     datetime,
@@ -120,12 +121,12 @@ class AsyncProcessHandler:
                 sys_operation_logger.warning("Failed to decode output with GB18030 encoding")
                 return data.decode("latin-1", errors="replace")
 
-    def _kill_process_tree(self) -> None:
+    async def _kill_process_tree(self) -> None:
         """Kill the subprocess and all its children using process group.
 
         Requires ``start_new_session=True`` when creating the subprocess
-        for full process-tree coverage.  Falls back to ``process.kill()``
-        when the process group is not available (e.g. Windows).
+        for full process-tree coverage on POSIX. Windows uses taskkill /T
+        to include children of the command interpreter.
         """
         pid = self._process.pid
         if pid is None:
@@ -134,8 +135,25 @@ class AsyncProcessHandler:
             if os.name != "nt":
                 os.killpg(pid, signal.SIGKILL)
             else:
-                self._process.kill()
-        except OSError:
+                killer = await asyncio.create_subprocess_exec(
+                    os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe"),
+                    "/PID", str(pid), "/T", "/F",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW,
+                )
+                try:
+                    returncode = await asyncio.wait_for(killer.wait(), timeout=5)
+                finally:
+                    if killer.returncode is None:
+                        killer.kill()
+                        await killer.wait()
+                if returncode != 0:
+                    raise OSError(f"taskkill exited with code {returncode}")
+        except (OSError, asyncio.TimeoutError) as exc:
+            sys_operation_logger.warning(
+                "Process-tree cleanup failed; falling back to terminating the root process: %s", exc,
+            )
             try:
                 self._process.kill()
             except ProcessLookupError:
@@ -200,7 +218,7 @@ class AsyncProcessHandler:
                 event_type=LogEventType.SYS_OP_ERROR,
                 metadata={"pid": self._process.pid},
             )
-            self._kill_process_tree()
+            await self._kill_process_tree()
             await _finish_readers(5)
             raise
         except asyncio.TimeoutError as ori_ex:
@@ -209,7 +227,7 @@ class AsyncProcessHandler:
                                        error_message=f"Process timed out after {self._overall_timeout} seconds",
                                        exception=ori_ex,
                                        metadata={"timeout": self._overall_timeout})
-            self._kill_process_tree()
+            await self._kill_process_tree()
             # Killing closes the pipes; collect whatever was written before the kill.
             await _finish_readers(30)
             return InvokeData(
@@ -276,7 +294,7 @@ class AsyncProcessHandler:
                 event_type=LogEventType.SYS_OP_ERROR,
                 metadata={"pid": self._process.pid},
             )
-            self._kill_process_tree()
+            await self._kill_process_tree()
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -286,7 +304,7 @@ class AsyncProcessHandler:
             )
             return
         except asyncio.TimeoutError:
-            self._kill_process_tree()
+            await self._kill_process_tree()
             await self._process.wait()
             yield StreamEvent(
                 type=StreamEventType.ERROR,

@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock
 from typing import Any, Dict, List
 
 import pytest
@@ -42,6 +43,73 @@ from openjiuwen.harness.task_loop.task_loop_event_executor import (
 from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
 )
+
+
+@pytest.mark.asyncio
+async def test_timeout_rejects_late_input_and_allows_next_round() -> None:
+    handler = TaskLoopEventHandler(_make_agent())
+    handler._task_manager = FakeTaskManager()
+    old_round = handler.prepare_round()
+    assert await handler.wait_completion(timeout=0) == {"error": "completion_timeout"}
+    event = InputEvent.from_user_input("late")
+    event.metadata = {"_handler_round_id": old_round}
+    inputs = EventHandlerInput.model_construct(event=event, session=FakeSession())
+    assert await handler.handle_input(inputs) == {"status": "cancelled"}
+    handler.prepare_round()
+    assert await handler.handle_input(inputs) == {"status": "cancelled"}
+    assert handler._task_manager.added_tasks == []
+    event.metadata = {"_handler_round_id": handler._round_id}
+    assert (await handler.handle_input(inputs))["status"] == "submitted"
+    handler._resolve_future({"output": "next"}, handler._round_id)
+    assert await handler.wait_completion(timeout=1) == {"output": "next"}
+
+
+@pytest.mark.asyncio
+async def test_timeout_waits_for_inflight_submission_and_cancellation() -> None:
+    agent = _make_agent()
+    handler = TaskLoopEventHandler(agent)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def add_task(_task):
+        entered.set()
+        await release.wait()
+
+    async def cancel_task(_task_id):
+        await asyncio.sleep(0)
+        cancelled.set()
+        return True
+
+    handler._task_manager = FakeTaskManager()
+    handler._task_manager.add_task = add_task
+    handler._task_scheduler = AsyncMock()
+    handler._task_scheduler.cancel_task.side_effect = cancel_task
+    handler.prepare_round()
+    event = InputEvent.from_user_input("slow submit")
+    inputs = EventHandlerInput.model_construct(event=event, session=FakeSession())
+    submission = asyncio.create_task(handler.handle_input(inputs))
+    waiting = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        waiting = asyncio.create_task(handler.wait_completion(timeout=0))
+        # Observe the timeout itself before allowing add_task to finish.
+        async with asyncio.timeout(1):
+            while not handler._current_future.cancelled():
+                await asyncio.sleep(0)
+        assert not waiting.done()
+        release.set()
+        ack = await submission
+        assert await asyncio.wait_for(waiting, 1) == {"error": "completion_timeout"}
+        handler._task_scheduler.cancel_task.assert_awaited_once_with(ack["task_id"])
+        assert cancelled.is_set()
+        assert agent.loop_coordinator.is_aborted
+    finally:
+        release.set()
+        pending = [task for task in (submission, waiting) if task is not None]
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
 
 
 class FakeController:

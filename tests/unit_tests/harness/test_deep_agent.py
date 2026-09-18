@@ -63,7 +63,7 @@ from openjiuwen.harness.subagents.research_agent import (
 from openjiuwen.harness.task_loop.loop_coordinator import LoopCoordinator
 from openjiuwen.harness.task_loop.task_loop_event_executor import DEEP_TASK_TYPE
 from openjiuwen.harness.task_loop.task_loop_event_handler import TaskLoopEventHandler
-from openjiuwen.harness.tools import WebFreeSearchTool
+from openjiuwen.harness.tools import TaskTool, WebFreeSearchTool
 from openjiuwen.harness.tools.subagent.session_tools import SessionToolkit
 
 
@@ -1620,6 +1620,123 @@ async def test_stream_cancel_waits_for_cleanup() -> None:
         assert agent._bound_session_id is None
         assert agent._loop_controller is None
     finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keep_controller", [False, True])
+async def test_task_tool_timeout_cancels_child_before_returning(keep_controller) -> None:
+    """Exercise task_tool -> isolated session -> real controller/scheduler."""
+    await Runner.start()
+    child = DeepAgent(AgentCard(name="child", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=True, completion_timeout=0.1)
+    )
+    slow_react = SlowReactAgent()
+    child.set_react_agent(slow_react, initialized=True)
+    toolkit = SessionToolkit()
+    if keep_controller:
+        toolkit.upsert_running("spawn-running", "other-session", "keep controller alive")
+        child.set_session_toolkit(toolkit)
+    parent = DeepAgent(AgentCard(name="parent", description="test"))
+    tool = TaskTool(ToolCard(id="timeout_task_tool", name="task_tool", description="test"), parent)
+    parent_session = Session(session_id="timeout-parent")
+    parent_session.update_state({"parent_marker": "preserved"})
+    controller = None
+    invocation = None
+    try:
+        with patch.object(parent, "create_subagent", return_value=child):
+            invocation = asyncio.create_task(tool.invoke(
+                {"subagent_type": "code", "task_description": "slow"}, session=parent_session,
+            ))
+            await asyncio.wait_for(slow_react.started.wait(), 5)
+            controller = child.loop_controller
+            controller.enqueue_follow_up("must not run after timeout")
+            result = await asyncio.wait_for(invocation, 5)
+        assert result.success is False
+        assert result.error == "completion_timeout"
+        assert slow_react.cancelled.is_set()
+        assert len(slow_react.invoke_calls) == 1
+        child_session = slow_react.invoke_calls[0]["session"]
+        assert child_session is not parent_session
+        assert child_session.get_session_id().startswith("timeout-parent_sub_code_")
+        assert child_session.get_parent_session_id() == "timeout-parent"
+        assert child_session._post_run_done
+        assert controller.task_scheduler._running_tasks == {}
+        tasks = await controller.task_scheduler.task_manager.get_task()
+        assert tasks and all(task.status.value == "canceled" for task in tasks)
+        assert parent_session.get_state("parent_marker") == "preserved"
+        assert not parent_session._post_run_done
+        if keep_controller:
+            assert child.loop_controller is controller
+            assert toolkit.get("spawn-running").status == "running"
+        else:
+            assert child.loop_controller is None
+    finally:
+        if invocation is not None and not invocation.done():
+            invocation.cancel()
+            await asyncio.gather(invocation, return_exceptions=True)
+        if controller is not None:
+            await controller.stop()
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow", [False, True])
+async def test_task_tool_single_round_completion_deadline(slow) -> None:
+    await Runner.start()
+    child = DeepAgent(AgentCard(name="general-purpose", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=False, completion_timeout=0.1)
+    )
+    react = SlowReactAgent() if slow else FakeReactAgent()
+    child.set_react_agent(react, initialized=True)
+    parent = DeepAgent(AgentCard(name="parent", description="test"))
+    tool = TaskTool(ToolCard(id="single_round_task_tool", name="task_tool", description="test"), parent)
+    try:
+        with patch.object(parent, "create_subagent", return_value=child):
+            result = await asyncio.wait_for(tool.invoke(
+                {"subagent_type": "general-purpose", "task_description": "hello"},
+                session=Session(session_id="single-round-parent"),
+            ), 5)
+        assert result.success is (not slow)
+        assert result.error == ("completion_timeout" if slow else None)
+        assert not child._invoke_active
+        assert len(react.invoke_calls) == 1
+        if slow:
+            assert react.cancelled.is_set()
+        else:
+            assert result.data["output"] == "echo:hello"
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_task_tool_task_loop_success_preserves_parent_session() -> None:
+    await Runner.start()
+    child = DeepAgent(AgentCard(name="child", description="test")).configure(
+        DeepAgentConfig(enable_task_loop=True)
+    )
+    react = FakeReactAgent()
+    child.set_react_agent(react, initialized=True)
+    parent = DeepAgent(AgentCard(name="parent", description="test"))
+    tool = TaskTool(ToolCard(id="success_task_tool", name="task_tool", description="test"), parent)
+    parent_session = Session(session_id="success-parent")
+    parent_session.update_state({"parent_marker": "preserved"})
+    try:
+        with patch.object(parent, "create_subagent", return_value=child):
+            result = await asyncio.wait_for(tool.invoke(
+                {"subagent_type": "code", "task_description": "hello"}, session=parent_session,
+            ), 5)
+        assert result.success is True
+        assert result.error is None
+        assert result.data["output"] == "echo:hello"
+        child_session = react.invoke_calls[0]["session"]
+        assert child_session is not parent_session
+        assert child_session._pre_run_done and child_session._post_run_done
+        assert parent_session.get_state("parent_marker") == "preserved"
+        assert not parent_session._post_run_done
+    finally:
+        if child.loop_controller is not None:
+            await child.loop_controller.stop()
         await Runner.stop()
 
 

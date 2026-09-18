@@ -53,7 +53,7 @@ async def wait_completion(
 |---|---|---|
 | `timeout` | `Optional[float]` | 最大等待秒数。None 表示无限制 |
 
-**返回值**: `Dict[str, Any]` — 结果字典。超时时返回错误字典。
+**返回值**: `Dict[str, Any]` — 结果字典。超时时取消对应的调度任务并等待其退出，然后返回 `{"error": "completion_timeout"}`，终止本次循环；迟到的该轮输入事件不会再创建任务。其他独立的后台任务不受影响。如果无法确认取消成功，则抛出任务执行异常。调度任务沿用 `canceled` 状态，超时原因通过结果字典返回。
 
 ---
 

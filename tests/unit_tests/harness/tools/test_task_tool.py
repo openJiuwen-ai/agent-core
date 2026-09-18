@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 import re
 
 from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
@@ -89,6 +89,112 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
                 called_inputs["conversation_id"],
             ),
         )
+
+    async def test_error_results_are_not_reported_as_success(self) -> None:
+        for child_result, expected_error in [
+            ({"error": "completion_timeout"}, "completion_timeout"),
+            ({"output": "partial", "error": "failed"}, "failed"),
+            ({"result_type": "error"}, "Subagent execution failed"),
+            ({"result_type": "error", "output": "iteration limit reached"}, "iteration limit reached"),
+        ]:
+            with self.subTest(child_result=child_result):
+                child = SimpleNamespace(
+                    card=AgentCard(id="child", name="child"),
+                    invoke=AsyncMock(return_value=child_result),
+                )
+                parent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: child)
+                tool = TaskTool(ToolCard(id="task_tool", name="task_tool", description="test"), parent)
+                result = await tool.invoke(
+                    {"subagent_type": "code", "task_description": "run"}, session=Session(session_id="parent"),
+                )
+                self.assertFalse(result.success)
+                self.assertEqual(result.error, expected_error)
+                self.assertEqual(result.data["output"], child_result.get("output", ""))
+
+    async def test_single_round_timeout_waits_for_cleanup(self) -> None:
+        started = asyncio.Event()
+        cleaning = asyncio.Event()
+        release_cleanup = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def invoke(_inputs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaning.set()
+                await release_cleanup.wait()
+                cleaned.set()
+
+        child = SimpleNamespace(
+            card=AgentCard(id="child", name="general-purpose"),
+            deep_config=DeepAgentConfig(enable_task_loop=False, completion_timeout=0.05),
+            invoke=invoke,
+        )
+        parent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: child)
+        tool = TaskTool(ToolCard(id="task_tool", name="task_tool", description="test"), parent)
+        invocation = asyncio.create_task(tool.invoke(
+            {"subagent_type": "general-purpose", "task_description": "slow"}, session=Session(session_id="parent"),
+        ))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            await asyncio.wait_for(cleaning.wait(), 5)
+            self.assertFalse(invocation.done())
+            release_cleanup.set()
+            result = await asyncio.wait_for(invocation, 5)
+            self.assertTrue(cleaned.is_set())
+            self.assertFalse(result.success)
+            self.assertEqual(result.error, "completion_timeout")
+        finally:
+            release_cleanup.set()
+            if not invocation.done():
+                invocation.cancel()
+            await asyncio.gather(invocation, return_exceptions=True)
+
+    async def test_single_round_external_cancel_is_not_completion_timeout(self) -> None:
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def invoke(_inputs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cleaned.set()
+
+        child = SimpleNamespace(
+            card=AgentCard(id="child", name="general-purpose"),
+            deep_config=DeepAgentConfig(enable_task_loop=False, completion_timeout=60),
+            invoke=invoke,
+        )
+        parent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: child)
+        tool = TaskTool(ToolCard(id="task_tool", name="task_tool", description="test"), parent)
+        invocation = asyncio.create_task(tool.invoke(
+            {"subagent_type": "general-purpose", "task_description": "slow"}, session=Session(session_id="parent"),
+        ))
+        try:
+            await asyncio.wait_for(started.wait(), 5)
+            invocation.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await invocation
+            self.assertTrue(cleaned.is_set())
+        finally:
+            if not invocation.done():
+                invocation.cancel()
+            await asyncio.gather(invocation, return_exceptions=True)
+
+    async def test_single_round_inner_timeout_keeps_its_reason(self) -> None:
+        child = SimpleNamespace(
+            card=AgentCard(id="child", name="general-purpose"),
+            deep_config=DeepAgentConfig(enable_task_loop=False, completion_timeout=60),
+            invoke=AsyncMock(side_effect=TimeoutError("inner transport timeout")),
+        )
+        parent = SimpleNamespace(create_subagent=lambda *_args, **_kwargs: child)
+        tool = TaskTool(ToolCard(id="task_tool", name="task_tool", description="test"), parent)
+        with self.assertRaisesRegex(Exception, "inner transport timeout"):
+            await tool.invoke(
+                {"subagent_type": "general-purpose", "task_description": "run"}, session=Session(session_id="parent"),
+            )
 
     async def test_repeated_concurrent_calls_get_isolated_execution_subjects(self) -> None:
         observed_subjects = []
