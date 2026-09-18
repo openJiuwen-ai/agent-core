@@ -175,7 +175,7 @@ class PrefixCompactProcessor(ContextProcessor):
         absolute_threshold = self._resolve_trigger_token_limit(context_max)
         if total_tokens < absolute_threshold:
             logger.debug(
-                "[%s not-triggered] reason=below_threshold total_tokens=%s threshold=%s "
+                "[%s not-triggered] reason=below_threshold total_tokens=%s(usage) threshold=%s "
                 "context_max=%s trigger_context_ratio=%s",
                 self.processor_type(),
                 total_tokens,
@@ -198,7 +198,7 @@ class PrefixCompactProcessor(ContextProcessor):
         span = self._build_span(context_window.context_messages)
         if not span.has_target:
             logger.debug(
-                "[%s not-triggered] reason=no_compressible_span total_tokens=%s threshold=%s context_max=%s",
+                "[%s not-triggered] reason=no_compressible_span total_tokens=%s(usage) threshold=%s context_max=%s",
                 self.processor_type(),
                 total_tokens,
                 absolute_threshold,
@@ -239,7 +239,7 @@ class PrefixCompactProcessor(ContextProcessor):
             return False
 
         logger.info(
-            "[%s triggered] context tokens %s reached threshold %s of max %s "
+            "[%s triggered] context tokens %s(usage) reached threshold %s of max %s "
             "trigger_context_ratio=%s min_target_context_ratio=%s "
             "target_tokens=%s min_target_tokens=%s "
             "keep_recent_messages=%s",
@@ -358,6 +358,33 @@ class PrefixCompactProcessor(ContextProcessor):
             response_content=response.content or "",
             summary=summary,
             new_messages=new_messages,
+        )
+
+        target_before_tokens = self._count_messages_tokens(span.messages_to_compress, context)
+        target_after_tokens = self._count_messages_tokens([memory_message], context)
+        system_messages = list(context_window.system_messages or [])
+        tools = list(context_window.tools or [])
+        total_before_tokens = (
+            self._count_messages_tokens(system_messages + original_messages, context)
+            + self._count_tools_tokens(tools, context)
+        )
+        total_after_tokens = (
+            self._count_messages_tokens(system_messages + new_messages, context)
+            + self._count_tools_tokens(tools, context)
+        )
+        logger.info(
+            "[%s compression-detail] status=completed "
+            "target(messages_to_compress)_tokens(tokenizer)=%s->%s "
+            "total(system+context+tools)_tokens(tokenizer)=%s->%s "
+            "target_messages=%s total_messages=%s->%s",
+            self.processor_type(),
+            target_before_tokens,
+            target_after_tokens,
+            total_before_tokens,
+            total_after_tokens,
+            len(span.messages_to_compress),
+            len(original_messages),
+            len(new_messages),
         )
 
         return (
