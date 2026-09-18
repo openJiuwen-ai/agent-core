@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDescriptionRevisedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -1143,7 +1144,7 @@ class OrganizationRuntimeManager:
 
         async def _on_task_event(message: Any) -> None:
             event = message.get_payload()
-            if isinstance(event, OrgTaskCreatedEvent):
+            if isinstance(event, (OrgTaskCreatedEvent, OrgTaskDescriptionRevisedEvent)):
                 if event.team_id == backend.team_name:
                     return
                 task = await manager.task_pool.get_task(event.task_id)
