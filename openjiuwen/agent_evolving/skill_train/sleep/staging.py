@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Mapping, Optional
 
 from openjiuwen.agent_evolving.skill_train.sleep.types import SleepReport
 
-_SAFE_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+_SAFE_ASCII_NAME = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Windows-forbidden filename chars + C0 controls.
+_UNSAFE_FS_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
 def _sha256_text(text: str) -> str:
@@ -26,10 +28,31 @@ def _ts_dir(clock: Optional[float] = None) -> str:
 
 
 def proposed_skill_filename(skill_name: str) -> str:
+    """Build a staging filename for ``skill_name``.
+
+    ASCII slug names stay as ``proposed_SKILL.<name>.md``. Unicode names
+    (e.g. ``天气``) and titles with spaces/punctuation are sanitized so the
+    file is safe on Windows while remaining readable; a short hash suffix
+    keeps long or colliding names unique.
+    """
     name = (skill_name or "").strip()
-    if not name or not _SAFE_NAME.match(name):
+    if not name:
         raise ValueError(f"unsafe skill name for staging file: {skill_name!r}")
-    return f"proposed_SKILL.{name}.md"
+    if _SAFE_ASCII_NAME.match(name):
+        return f"proposed_SKILL.{name}.md"
+
+    cleaned = _UNSAFE_FS_CHARS.sub("_", name)
+    cleaned = cleaned.replace("\n", "_").replace("\r", "_").replace("\t", "_")
+    cleaned = re.sub(r"[_\s]+", "_", cleaned).strip(" ._")
+    digest = _sha256_text(name)[:8]
+    if not cleaned:
+        cleaned = f"skill_{digest}"
+    elif len(cleaned) > 80:
+        cleaned = f"{cleaned[:70].rstrip('_')}_{digest}"
+    else:
+        # Disambiguate sanitized titles that may collide (e.g. punctuation-only diffs).
+        cleaned = f"{cleaned}_{digest}"
+    return f"proposed_SKILL.{cleaned}.md"
 
 
 def new_staging_dir(root: Path | str, clock: Optional[float] = None) -> Path:
@@ -54,13 +77,20 @@ def write_staging(
     baseline_skill: str = "",
     skill_name: str = "",
     skill_proposals: Optional[Mapping[str, str]] = None,
+    skill_proposal_edits: Optional[Mapping[str, Any]] = None,
 ) -> Path:
     """Write proposal artifacts. Never touches live EvolutionStore skills.
 
     ``skill_proposals`` maps skill_name -> proposed SKILL.md body for multi-skill
     nights. Each lands as ``proposed_SKILL.<name>.md``. The legacy single-file
     ``proposed_SKILL.md`` is still written when ``proposed_skill`` is set.
+
+    ``skill_proposal_edits`` optionally maps skill_name -> applied EditRecord
+    list (or dicts) persisted on each ``skill_proposals[]`` manifest entry for
+    EvolutionStore SemVer / changelog finalize on adopt.
     """
+    from openjiuwen.agent_evolving.skill_train.sleep.evolution_records import edits_to_dicts
+
     path = Path(staging_dir)
     path.mkdir(parents=True, exist_ok=True)
 
@@ -68,6 +98,7 @@ def write_staging(
         (path / "proposed_SKILL.md").write_text(proposed_skill, encoding="utf-8")
 
     proposals = dict(skill_proposals or {})
+    edits_by_skill = dict(skill_proposal_edits or {})
     proposal_meta: List[Dict[str, Any]] = []
     for name, body in proposals.items():
         filename = proposed_skill_filename(name)
@@ -77,6 +108,7 @@ def write_staging(
                 "skill_name": name,
                 "filename": filename,
                 "sha256": _sha256_text(body),
+                "applied_edits": edits_to_dicts(edits_by_skill.get(name)),
             }
         )
 
@@ -152,6 +184,27 @@ def list_skill_proposals(staging_dir: Path | str) -> Dict[str, str]:
         name = str(manifest.get("skill_name") or "").strip()
         if name:
             out[name] = read_proposed_skill(path)
+    return out
+
+
+def list_skill_proposal_edits(staging_dir: Path | str) -> Dict[str, List[Dict[str, Any]]]:
+    """Return skill_name -> applied_edits dicts from staging manifest."""
+    path = Path(staging_dir)
+    manifest = load_manifest(path)
+    out: Dict[str, List[Dict[str, Any]]] = {}
+    for item in manifest.get("skill_proposals") or []:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("skill_name") or "").strip()
+        if not name:
+            continue
+        raw_edits = item.get("applied_edits") or []
+        edits: List[Dict[str, Any]] = []
+        if isinstance(raw_edits, list):
+            for entry in raw_edits:
+                if isinstance(entry, dict):
+                    edits.append(dict(entry))
+        out[name] = edits
     return out
 
 

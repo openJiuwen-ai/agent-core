@@ -9,7 +9,7 @@ from typing import Callable, Dict, List, Optional, Sequence
 
 from openjiuwen.agent_evolving.skill_train.sleep.backend import Backend
 from openjiuwen.agent_evolving.skill_train.sleep.consolidate import ConsolidationResult, consolidate
-from openjiuwen.agent_evolving.skill_train.sleep.types import SkillGroupReport, TaskRecord
+from openjiuwen.agent_evolving.skill_train.sleep.types import EditRecord, SkillGroupReport, TaskRecord
 
 CONSOLIDATED = "consolidated"
 SKIPPED = "skipped"
@@ -123,3 +123,13 @@ def accepted_group_skills(outcomes: Dict[str, GroupConsolidation]) -> Dict[str, 
         for name, outcome in outcomes.items()
         if outcome.accepted and outcome.result is not None
     }
+
+
+def accepted_group_edits(outcomes: Dict[str, GroupConsolidation]) -> Dict[str, List[EditRecord]]:
+    """Per-accepted-skill applied edits for staging / EvolutionStore finalize."""
+    out: Dict[str, List[EditRecord]] = {}
+    for name, outcome in outcomes.items():
+        if not outcome.accepted or outcome.result is None:
+            continue
+        out[name] = list(outcome.result.applied_edits or [])
+    return out
