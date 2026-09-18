@@ -206,9 +206,11 @@ class Controller:
         """
         controller_state = session.get_state("controller")
         if not controller_state or "task_manager_state" not in controller_state:
-            # No saved state, clear all task manager state
+            # No saved state, clear this session's task manager state
             logger.info(f"No saved state found for session {session.get_session_id()}, clearing task manager")
-            await self._task_manager.clear_state()
+            await self._task_manager.clear_state(
+                session_id=session.get_session_id()
+            )
             return False
 
         try:
@@ -218,8 +220,11 @@ class Controller:
             state_dict = controller_state["task_manager_state"]
             task_manager_state = TaskManagerState.model_validate(state_dict)
 
-            # Load state into task_manager
-            await self._task_manager.load_state(task_manager_state)
+            # Load state into task_manager, scoped to this session.
+            await self._task_manager.load_state(
+                task_manager_state,
+                session_id=session.get_session_id()
+            )
             logger.info(
                 f"Successfully restored TaskManager state: "
                 f"{len(task_manager_state.tasks)} tasks, "
@@ -233,8 +238,10 @@ class Controller:
                 f"clearing task manager state instead",
                 exc_info=True
             )
-            # Fallback: clear all task manager state to allow user to continue
-            await self._task_manager.clear_state()
+            # Fallback: clear this session's task manager state to allow user to continue
+            await self._task_manager.clear_state(
+                session_id=session.get_session_id()
+            )
             return False
 
     async def _save_task_manager_state(self, session: Session) -> None:
@@ -247,7 +254,10 @@ class Controller:
             logger.info("Task persistence disabled, no need to save TaskManager state for session")
             return
         try:
-            task_manager_state = await self._task_manager.get_state()
+            # Scoped to this session.
+            task_manager_state = await self._task_manager.get_state(
+                session_id=session.get_session_id()
+            )
             controller_state = {
                 "task_manager_state": task_manager_state.model_dump()
             }
