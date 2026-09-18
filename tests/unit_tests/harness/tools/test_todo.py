@@ -112,8 +112,7 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         )
         self.mock_fs.read_file.return_value = mock_read_result
         tool = TodoTool(MagicMock(), self.mock_operation)
-        with patch("os.path.abspath", return_value="/mock/path"), \
-             patch("os.path.isfile", return_value=True):
+        with patch("os.path.abspath", return_value="/mock/path"):
             loaded = await tool.load_todos("test_session")
         self.assertEqual(len(loaded), 2)
         self.assertEqual(loaded[0].content, "Task 1")
@@ -123,8 +122,20 @@ class TestTodoTool(unittest.IsolatedAsyncioTestCase):
         """load_todos raises FrameworkError on read failure."""
         self.mock_fs.read_file.return_value = MagicMock(code=1, data=None)
         tool = TodoTool(MagicMock(), self.mock_operation)
-        with patch("os.path.abspath", return_value="/mock/path"), \
-             patch("os.path.isfile", return_value=True):
+        with patch("os.path.abspath", return_value="/mock/path"):
+            with self.assertRaises(FrameworkError) as cm:
+                await tool.load_todos("test_session")
+        self.assertIn("todo tool loads failed", str(cm.exception))
+
+    async def test_load_todos_sandbox_gateway_raise(self):
+        """load_todos raises FrameworkError when fs.read_file raises (sandbox mode).
+
+        沙箱模式下文件不存在时网关直接抛异常（而非返回 code != 0），
+        存在性检查必须由 fs.read_file 自身完成，不能依赖本地 os.path.isfile。
+        """
+        self.mock_fs.read_file = AsyncMock(side_effect=Exception("File not found: /sandbox/todo.json"))
+        tool = TodoTool(MagicMock(), self.mock_operation)
+        with patch("os.path.abspath", return_value="/mock/path"):
             with self.assertRaises(FrameworkError) as cm:
                 await tool.load_todos("test_session")
         self.assertIn("todo tool loads failed", str(cm.exception))
