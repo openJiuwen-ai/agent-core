@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.context_engine import ModelContext
-from openjiuwen.core.foundation.llm import AssistantMessage
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.interaction.interaction import InteractionOutput
@@ -323,6 +323,30 @@ class ToolInterruptHandler:
         for schema in schemas:
             await session.write_stream(schema)
 
+    async def abandon_unmatched_confirm_interrupt(
+            self,
+            state: ToolInterruptionState,
+            session: Optional[Session],
+            context: Optional[ModelContext],
+    ) -> None:
+        """Close leftover permission HITL without reemitting the same ASK.
+
+        Re-writing the original ``tool_call_id`` is swallowed by RelayClaw
+        dedup after the card was dismissed. Write a cancelled ``ToolMessage``
+        instead, then clear ``INTERRUPTION_KEY`` so the unmatched input can
+        be admitted as a new query.
+        """
+        pending = _pending_confirm_tool_calls(state)
+        try:
+            await _append_cancelled_tool_results(context, pending)
+        except Exception:
+            logger.warning(
+                "[ToolInterruptHandler] failed to write cancelled tool results; "
+                "still clearing leftover confirm interrupt",
+                exc_info=True,
+            )
+        self.clear(session)
+
     async def handle_resume(
             self,
             resume_ctx: ResumeContext,
@@ -436,3 +460,64 @@ class ToolInterruptHandler:
 
         tool_call.arguments = args
         return tool_call
+
+
+def _pending_confirm_tool_calls(state: ToolInterruptionState) -> list[tuple[str, str]]:
+    pending: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    interrupted = getattr(state, "interrupted_tools", None)
+    if not isinstance(interrupted, dict):
+        return pending
+    for outer_id, entry in interrupted.items():
+        tool_call = getattr(entry, "tool_call", None)
+        tool_call_id = str(getattr(tool_call, "id", "") or outer_id or "").strip()
+        if not tool_call_id or tool_call_id in seen:
+            continue
+        seen.add(tool_call_id)
+        pending.append((tool_call_id, str(getattr(tool_call, "name", "") or "tool")))
+    return pending
+
+
+async def _append_cancelled_tool_results(
+        context: Optional[ModelContext],
+        pending: list[tuple[str, str]],
+) -> None:
+    if context is None or not pending:
+        return
+
+    existing: set[str] = set()
+    getter = getattr(context, "get_messages", None)
+    if callable(getter):
+        try:
+            messages = list(getter() or [])
+        except Exception:
+            messages = []
+        for message in messages:
+            tool_call_id = ""
+            if isinstance(message, ToolMessage):
+                tool_call_id = str(message.tool_call_id or "")
+            elif isinstance(message, dict):
+                tool_call_id = str(message.get("tool_call_id") or "")
+            if tool_call_id:
+                existing.add(tool_call_id)
+
+    to_add = [
+        ToolMessage(
+            content=(
+                "[Tool execution interrupted] Tool "
+                f"{tool_name} was interrupted, no result available."
+            ),
+            tool_call_id=tool_call_id,
+        )
+        for tool_call_id, tool_name in pending
+        if tool_call_id and tool_call_id not in existing
+    ]
+    if not to_add:
+        return
+
+    adder = getattr(context, "add_messages", None)
+    if not callable(adder):
+        return
+    result = adder(to_add)
+    if hasattr(result, "__await__"):
+        await result
