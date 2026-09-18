@@ -37,7 +37,9 @@ agent_teams        ExternalHarnessMemberRuntime 只绑定 recorder 并注入成�
 一次物理模型请求一个事件，请求结束后发出，字段见 `harness_protocol/events.py`：`request_id`、
 `status`、`started_at` / `ended_at`、`model` / `provider_name`、`system_instructions`、
 `input_messages`（`TurnMessage`，`message_id` 在消息留在对话中时保持稳定）、`input_observed`、
-`output_message`、`tool_definitions`、`usage`（本次请求）、`error`、命名空间化 `data`。复用
+`output_message`、`tool_definitions`（统一为 `{name, description, parameters}`）、`request_parameters`
+（GenAI 名字的采样参数）、`response_id`、`finish_reasons`、`usage`（本次请求，按 GenAI 约定
+`input_tokens` 为整个 prompt、缓存命中是其中的细分）、`error`、命名空间化 `data`。复用
 `TurnMessage` / `ContentBlock`（`text` / `reasoning` / `tool_call{name,arguments}` /
 `tool_result`，`data.call_id`），不新建消息模型。
 
@@ -64,6 +66,10 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 - 配对：`api_response_body` 是组装后的完整消息，`id` 即 SDK `AssistantMessage.message_id`；请求体按
   时间取响应之前最近的一条，并要求其历史里包含上一次主对话回复（排除子 agent / 侧路查询交错的请求）。
   历史消息 id 用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），命中过往回复时沿用 `msg_` id。
+- 系统提示里第一块是 Claude Code 自己的 `x-anthropic-billing-header`（含每次请求变化的 id）。它是请求
+  元数据而非指令，移到 `data.claude-code.billing_header`，否则系统提示每步都像被改写。
+- 工具定义的 `input_schema` 归一为 `parameters`；采样参数取自请求体（max_tokens / temperature /
+  top_p / top_k / stop_sequences / stream）。
 - SSH transport 无法回连 loopback：观测器不 attach，所有请求从 SDK 回复降级报告。
 
 **Codex**（`codex/observation.py`，`CodexRequestObserver`）
@@ -77,7 +83,8 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   下 SDK item 名为运行时 id（`exec-...`），经 rollout `tool_call_started.tool_call_id` →
   `requester.runtime_cell_id` → `code_cell_started.model_visible_call_id` 关联回模型 call id。
 - 工具目录：Codex 不用请求的 `tools` 字段，而是把工具清单作为 `additional_tools` 输入项下发；它是工具
-  定义而非对话内容，观测器将其提到 `tool_definitions`，不进 `input_messages`。
+  定义而非对话内容，观测器将其提到 `tool_definitions`，按命名空间摊平成可调用工具，不进 `input_messages`。
+  采样参数取 `stream` 与 `reasoning.effort`。
 - 降级：`rawResponseItem/completed` + `rawResponse/completed` 在 provider 内部消费（不再有
   `notification_observer`），`wait_s` 内 rollout 未记录该 `response_id` 即按输出侧报告；一旦发现
   rollout 静默（旧版 Codex 不写 rollout），后续 turn 不再等待。
@@ -90,9 +97,12 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 | 协议事件 | 记录 |
 |---|---|
 | `TurnLifecycleEvent.STARTED` | **每 turn 一条独立 trace**：根 span `invoke_agent {agent}`，`record_kind=turn`、`openjiuwen.trace.root`、`openjiuwen.agent.mode`、完整 subject 块、`gen_ai.conversation.id`、turn id / number；属性经 `start_span(attributes=...)` 一次写入，started 快照即可按 lane 路由 |
-| `ModelRequestEvent` | turn 下 `chat {model}`（事件起止时间），`record_kind=inference`、`openjiuwen.inference.id`、step number、subject request number、`gen_ai.input/output.messages` 等；结束前以其为父 `emit_context_window_commit`；`input_observed=False` 不提交窗口 |
+| `ModelRequestEvent` | turn 下 `chat {model}`（事件起止时间），`record_kind=inference`、`openjiuwen.inference.id`、step number、subject request number、`gen_ai.input/output.messages`、采样参数、response id / finish reasons、总时延等；结束前以其为父 `emit_context_window_commit`；`input_observed=False` 不提交窗口 |
 | tool `ItemLifecycleEvent` | `execute_tool {name}`；`causation_ids` 命中已记录请求时写 `openjiuwen.inference.id` / step number / `openjiuwen.tool.authoritative` |
 | 终止事件 | 补结束未完成 tool（ERROR），写 turn 输出与状态 |
+
+宿主输入所在的那条 user 消息标为 `external_user`（按宿主发出的文本匹配最后一条含它的 user 消息），
+其余为 `harness_internal`，这样视图里能区分用户消息与上下文。
 
 一条消息被 provider 拆成多个文本块时（注入的 reminder + 正文），记录器把它们合成一段正文：读者读到的
 是一条消息，保留拆分会让任何以文本呈现的视图显示成 JSON 数组；含非文本块（图片、文档）的消息保留分块。
@@ -127,8 +137,8 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 ## 已知遗留
 
 - 子 agent（Claude `parent_tool_use_id`）的请求不进成员 lane。
-- 消息 origin 一律 `harness_internal`；provider 能确定宿主输入时可在 `TurnMessage.data["origin"]`
-  标 `external_user`，目前两个 provider 都未标。
+- 宿主输入的识别靠文本匹配（provider 不说明哪条消息装着它）；匹配不上时该条仍记为上下文。
+- TTFT / 吞吐没有数据：请求日志与 rollout 都不记录首 token 时间。
 - Codex `thread_resume` 的协议参数没有 raw events 字段，恢复的线程只能依赖 rollout。
 - `TurnUsage` 没有缓存写入字段，provider 的 cache-creation token 只留在 `provider_data`，未进 span。
 - 关联不上模型 call id 的 Codex tool item 最多等待 `request_observation_wait_s` 后无归属发出。

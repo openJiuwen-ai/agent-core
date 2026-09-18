@@ -209,8 +209,18 @@ class ModelRequestEvent:
         input_observed: Whether ``system_instructions`` / ``input_messages``
             were observed from the request itself.
         output_message: The assistant message the request produced.
-        tool_definitions: Tool schemas offered to the model, as JSON.
-        usage: Token usage of this request alone.
+        tool_definitions: Tools offered to the model, each ``{"name",
+            "description", "parameters"}`` with a JSON-Schema ``parameters``.
+        request_parameters: Sampling parameters the request carried, under the
+            GenAI names (``temperature``, ``top_p``, ``top_k``, ``max_tokens``,
+            ``stop_sequences``, ``seed``, ``choice_count``,
+            ``presence_penalty``, ``frequency_penalty``, ``reasoning_level``,
+            ``stream``); anything else is provider data.
+        response_id: Provider id of the response, when it states one.
+        finish_reasons: Why generation stopped, in the provider's words.
+        usage: Token usage of this request alone. Counters follow the GenAI
+            conventions: ``input_tokens`` is the whole prompt, and cached
+            input is a breakdown inside it, not a separate amount.
         error: Normalized failure when ``status`` is not completed.
         data: Namespaced provider diagnostics (timing, attempts, upstream ids).
     """
@@ -226,6 +236,9 @@ class ModelRequestEvent:
     input_observed: bool = False
     output_message: TurnMessage | None = None
     tool_definitions: JsonValue = None
+    request_parameters: JsonObject = field(default_factory=dict)
+    response_id: str | None = None
+    finish_reasons: tuple[str, ...] = ()
     usage: TurnUsage | None = None
     error: TurnError | None = None
     data: JsonObject = field(default_factory=dict)
@@ -243,6 +256,8 @@ class ModelRequestEvent:
         object.__setattr__(self, "system_instructions", tuple(self.system_instructions))
         object.__setattr__(self, "input_messages", tuple(self.input_messages))
         object.__setattr__(self, "tool_definitions", freeze_json_value(self.tool_definitions))
+        object.__setattr__(self, "request_parameters", freeze_json_object(self.request_parameters))
+        object.__setattr__(self, "finish_reasons", tuple(self.finish_reasons))
         object.__setattr__(self, "data", freeze_json_object(self.data))
 
 

@@ -74,7 +74,11 @@ def _body_event(receiver: _FakeReceiver, client: Any, name: str, body: dict[str,
     )
 
 
-_SYSTEM = [{"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}}]
+_SYSTEM = [
+    # Claude Code's own request metadata, which changes on every request.
+    {"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1; cc_prompt_id=p-1;"},
+    {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
+]
 _TOOLS = [{"name": "Bash", "description": "run", "input_schema": {"type": "object"}}]
 _USER = {"role": "user", "content": [{"type": "text", "text": "list files"}]}
 _FIRST_REPLY = [{"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "ls"}}]
@@ -86,7 +90,15 @@ _TOOL_RESULT = {
 
 def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
     async def first_request(client: Any) -> None:
-        body = {"model": "claude-x", "system": _SYSTEM, "tools": _TOOLS, "messages": [_USER]}
+        body = {
+            "model": "claude-x",
+            "system": _SYSTEM,
+            "tools": _TOOLS,
+            "messages": [_USER],
+            "max_tokens": 4096,
+            "temperature": 0.2,
+            "stream": True,
+        }
         _body_event(receiver, client, "claude_code.api_request_body", body, time_ns=1_000_000_000_000)
 
     async def first_response(client: Any) -> None:
@@ -95,7 +107,12 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             "model": "claude-x",
             "content": _FIRST_REPLY,
             "stop_reason": "tool_use",
-            "usage": {"input_tokens": 30, "output_tokens": 4, "cache_read_input_tokens": 12},
+            "usage": {
+                "input_tokens": 30,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 12,
+                "cache_creation_input_tokens": 8,
+            },
         }
         _body_event(receiver, client, "claude_code.api_response_body", body, time_ns=1_002_000_000_000)
 
@@ -196,10 +213,16 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
     requests = [event.event for event in events if isinstance(event.event, ModelRequestEvent)]
     first, second = requests
     assert first.input_observed and second.input_observed
+    # The billing header is request metadata, not part of the instructions.
     assert [block.content for block in first.system_instructions] == ["You are Claude Code."]
-    assert first.tool_definitions == ({"name": "Bash", "description": "run", "input_schema": {"type": "object"}},)
+    assert first.data["claude-code"]["billing_header"].startswith("x-anthropic-billing-header:")
+    assert first.tool_definitions == ({"name": "Bash", "description": "run", "parameters": {"type": "object"}},)
+    assert first.request_parameters == {"max_tokens": 4096, "temperature": 0.2, "stream": True}
+    assert first.response_id == "msg-1" and first.finish_reasons == ("tool_use",)
     assert (first.started_at, first.ended_at) == (1000.0, 1002.0)
-    assert first.usage.input_tokens == 30 and first.usage.cached_input_tokens == 12
+    # GenAI states the whole prompt as input, with cached input a breakdown.
+    assert first.usage.input_tokens == 50 and first.usage.cached_input_tokens == 12
+    assert first.usage.total_tokens == 54
     assert [block.kind for block in first.output_message.content] == ["tool_call"]
     assert first.output_message.content[0].data["call_id"] == "tool-1"
     assert [message.role for message in second.input_messages] == [

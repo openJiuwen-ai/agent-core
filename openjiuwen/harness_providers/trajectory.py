@@ -40,7 +40,20 @@ from openjiuwen.extensions.observability.semconv import (
     GEN_AI_CONVERSATION_ID,
     GEN_AI_OPERATION_NAME,
     GEN_AI_PROVIDER_NAME,
+    GEN_AI_REQUEST_CHOICE_COUNT,
+    GEN_AI_REQUEST_FREQUENCY_PENALTY,
+    GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_PRESENCE_PENALTY,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_SEED,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
+    GEN_AI_REQUEST_STREAM,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_REQUEST_TOP_K,
+    GEN_AI_REQUEST_TOP_P,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_ID,
     GEN_AI_RESPONSE_MODEL,
     GEN_AI_TOOL_CALL_ARGUMENTS,
     GEN_AI_TOOL_CALL_ID,
@@ -58,6 +71,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_PARENT_ID,
     OJ_EXECUTION_SUBJECT_REQUEST_NUMBER,
     OJ_EXECUTION_SUBJECT_SESSION_ID,
+    OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS,
     OJ_INFERENCE_ID,
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
@@ -95,6 +109,19 @@ logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 _TRACER_NAME = "openjiuwen.harness_providers.trajectory"
 _TOOL_ITEM_TYPE = "tool"
 _ASSISTANT_REQUEST_PURPOSE = "assistant"
+# Sampling parameters a provider may state, mapped to their GenAI attribute.
+_REQUEST_PARAMETER_ATTRIBUTES = {
+    "temperature": GEN_AI_REQUEST_TEMPERATURE,
+    "top_p": GEN_AI_REQUEST_TOP_P,
+    "top_k": GEN_AI_REQUEST_TOP_K,
+    "max_tokens": GEN_AI_REQUEST_MAX_TOKENS,
+    "seed": GEN_AI_REQUEST_SEED,
+    "choice_count": GEN_AI_REQUEST_CHOICE_COUNT,
+    "presence_penalty": GEN_AI_REQUEST_PRESENCE_PENALTY,
+    "frequency_penalty": GEN_AI_REQUEST_FREQUENCY_PENALTY,
+    "reasoning_level": GEN_AI_REQUEST_REASONING_LEVEL,
+    "stream": GEN_AI_REQUEST_STREAM,
+}
 
 AttributeValue = str | bool | int | float
 
@@ -150,6 +177,7 @@ class HarnessTrajectoryRecorder:
         self._handler = OtelCallbackHandler(config, tracer=tracer)
         self._turns: dict[str, _TurnRecord] = {}
         self._pending_inputs: dict[str, str] = {}
+        self._turn_inputs: dict[str, str] = {}
         self._pending_identities: dict[str, tuple[str, int]] = {}
         self._active_turn_id: str | None = None
 
@@ -199,6 +227,7 @@ class HarnessTrajectoryRecorder:
         if not text or turn_id in self._turns:
             return
         self._pending_inputs[turn_id] = text
+        self._turn_inputs[turn_id] = text
 
     def record_turn_identity(self, protocol_turn_id: str, *, turn_id: str, turn_number: int) -> None:
         """Assign the host's trajectory turn identity to a protocol turn.
@@ -328,6 +357,7 @@ class HarnessTrajectoryRecorder:
 
     def _finish_turn(self, turn_id: str, *, result: TurnResult | None, end_time: int | None) -> None:
         record = self._turns.pop(turn_id, None)
+        self._turn_inputs.pop(turn_id, None)
         if self._active_turn_id == turn_id:
             self._active_turn_id = None
         if record is None:
@@ -382,6 +412,15 @@ class HarnessTrajectoryRecorder:
             attributes[GEN_AI_RESPONSE_MODEL] = model
         if event.provider_name:
             attributes[GEN_AI_PROVIDER_NAME] = event.provider_name
+        if event.response_id:
+            attributes[GEN_AI_RESPONSE_ID] = event.response_id
+        if event.finish_reasons:
+            attributes[GEN_AI_RESPONSE_FINISH_REASONS] = json.dumps(
+                list(event.finish_reasons),
+                ensure_ascii=False,
+            )
+        attributes[OJ_GEN_AI_RESPONSE_TOTAL_LATENCY_MS] = (event.ended_at - event.started_at) * 1000
+        attributes.update(_request_parameter_attributes(event))
         attributes.update(_usage_attributes(event))
         span = self._tracer.start_span(
             name=f"chat {model}" if model else "chat",
@@ -393,7 +432,7 @@ class HarnessTrajectoryRecorder:
         inference_id = f"{span.get_span_context().span_id:016x}"
         span.set_attribute(OJ_INFERENCE_ID, inference_id)
         try:
-            request_messages = _request_messages(event)
+            request_messages = _request_messages(event, self._turn_inputs.get(envelope.turn_id or ""))
             if request_messages:
                 self._handler.record_request_input(span, request_messages)
             tool_definitions = json_value_to_builtin(event.tool_definitions)
@@ -521,6 +560,22 @@ def _set_request_status(span: Span, event: ModelRequestEvent, config: Observabil
     span.set_status(Status(StatusCode.ERROR, redact_error_summary(reason, config)))
 
 
+def _request_parameter_attributes(event: ModelRequestEvent) -> dict[str, AttributeValue]:
+    """Return the sampling parameters a viewer states as request options."""
+    attributes: dict[str, AttributeValue] = {}
+    parameters = json_value_to_builtin(event.request_parameters)
+    if not isinstance(parameters, dict):
+        return attributes
+    for name, key in _REQUEST_PARAMETER_ATTRIBUTES.items():
+        value = parameters.get(name)
+        if isinstance(value, (str, bool, int, float)):
+            attributes[key] = value
+    stop_sequences = parameters.get("stop_sequences")
+    if isinstance(stop_sequences, list) and stop_sequences:
+        attributes[GEN_AI_REQUEST_STOP_SEQUENCES] = json.dumps(stop_sequences, ensure_ascii=False)
+    return attributes
+
+
 def _usage_attributes(event: ModelRequestEvent) -> dict[str, AttributeValue]:
     usage = event.usage
     if usage is None:
@@ -534,15 +589,37 @@ def _usage_attributes(event: ModelRequestEvent) -> dict[str, AttributeValue]:
     return {key: value for key, value in pairs if value is not None}
 
 
-def _request_messages(event: ModelRequestEvent) -> list[dict[str, Any]]:
-    """Return the request as framework-shaped message dicts, system slot first."""
+def _request_messages(event: ModelRequestEvent, host_input: str | None) -> list[dict[str, Any]]:
+    """Return the request as framework-shaped message dicts, system slot first.
+
+    ``host_input`` is the text the host sent into the turn. A provider states
+    its conversation without saying which message carries it, so the last user
+    message that contains it is marked as the external user's, the way an
+    in-process agent marks the input it was given.
+    """
     messages: list[dict[str, Any]] = []
     system_parts = [_content_part(block) for block in event.system_instructions]
     if system_parts:
         messages.append({"role": "system", "content": _message_content(system_parts)})
     for message in event.input_messages:
         messages.extend(_message_dicts(message))
+    _mark_host_input(messages, host_input)
     return messages
+
+
+def _mark_host_input(messages: list[dict[str, Any]], host_input: str | None) -> None:
+    text = (host_input or "").strip()
+    if not text:
+        return
+    for message in reversed(messages):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        if isinstance(content, str) and text in content:
+            metadata = dict(message.get("metadata") or {})
+            metadata[OPENJIUWEN_MESSAGE_ORIGIN_METADATA] = OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER
+            message["metadata"] = metadata
+            return
 
 
 def _message_dicts(message: TurnMessage) -> list[dict[str, Any]]:

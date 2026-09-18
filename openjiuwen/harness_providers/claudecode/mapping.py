@@ -413,19 +413,31 @@ def _non_negative(value: Any) -> int | None:
 
 
 def claude_turn_usage(usage: Any) -> TurnUsage | None:
-    """Normalize a Claude ``usage`` mapping; ``None`` when it states no counters."""
+    """Normalize a Claude ``usage`` mapping; ``None`` when it states no counters.
+
+    Anthropic reports ``input_tokens`` as the part of the prompt it had to
+    read, with cache hits and cache writes counted beside it. The GenAI
+    conventions state the whole prompt in ``input_tokens`` and treat cached
+    input as a breakdown inside it, so the cache counters are folded in;
+    a reader that wants the uncached part subtracts them.
+    """
     if not isinstance(usage, Mapping):
         return None
-    input_tokens = _non_negative(usage.get("input_tokens"))
+    uncached_tokens = _non_negative(usage.get("input_tokens"))
     output_tokens = _non_negative(usage.get("output_tokens"))
     cache_read = _non_negative(usage.get("cache_read_input_tokens"))
     cache_write = _non_negative(usage.get("cache_creation_input_tokens"))
-    if input_tokens is None and output_tokens is None and cache_read is None:
+    if uncached_tokens is None and output_tokens is None and cache_read is None:
         return None
-    total = sum(value or 0 for value in (input_tokens, output_tokens, cache_read, cache_write))
+    input_tokens = None
+    if uncached_tokens is not None or cache_read is not None or cache_write is not None:
+        input_tokens = (uncached_tokens or 0) + (cache_read or 0) + (cache_write or 0)
+    total = (input_tokens or 0) + (output_tokens or 0)
     provider_data: dict[str, JsonValue] = {}
     if cache_write is not None:
         provider_data["cache_creation_input_tokens"] = cache_write
+    if uncached_tokens is not None:
+        provider_data["uncached_input_tokens"] = uncached_tokens
     return TurnUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,

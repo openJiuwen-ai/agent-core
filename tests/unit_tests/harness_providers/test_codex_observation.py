@@ -98,7 +98,18 @@ def _kinds(events: list[HarnessEvent]) -> list[str]:
 _SHELL_CALL = {"type": "function_call", "id": "fc-1", "call_id": "cmd-1", "name": "shell", "arguments": '{"command":"ls"}'}
 _USER_INPUT = {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "list files"}]}
 # Codex offers its tools as an input item instead of a request field.
-_TOOL_CATALOGUE = {"type": "additional_tools", "id": "at-1", "role": "developer", "tools": [{"type": "custom", "name": "shell"}]}
+_TOOL_CATALOGUE = {
+    "type": "additional_tools",
+    "id": "at-1",
+    "role": "developer",
+    "tools": [
+        {
+            "type": "namespace",
+            "name": "functions",
+            "tools": [{"type": "custom", "name": "shell", "description": "run", "parameters": {"type": "object"}}],
+        },
+    ],
+}
 
 
 def _command(**fields: Any) -> dict[str, Any]:
@@ -121,6 +132,8 @@ async def test_rollout_inferences_become_ordered_model_request_events(monkeypatc
                     "request_payload": {
                         "instructions": "be brief",
                         "input": [_TOOL_CATALOGUE, _USER_INPUT],
+                        "stream": True,
+                        "reasoning": {"effort": "medium"},
                     },
                 },
             ),
@@ -192,7 +205,9 @@ async def test_rollout_inferences_become_ordered_model_request_events(monkeypatc
     assert first.input_observed and first.model == "gpt-test" and first.provider_name == "openai"
     assert [block.content for block in first.system_instructions] == ["be brief"]
     # The tool catalogue is a tool definition, not something the model said.
-    assert first.tool_definitions == ({"type": "custom", "name": "shell"},)
+    assert first.tool_definitions == ({"name": "functions.shell", "description": "run", "parameters": {"type": "object"}},)
+    assert first.request_parameters == {"stream": True, "reasoning_level": "medium"}
+    assert first.response_id == "resp-1"
     assert [message.role for message in first.input_messages] == [MessageRole.USER]
     assert first.usage.input_tokens == 20 and first.usage.cached_input_tokens == 5
     assert [block.kind for block in first.output_message.content] == ["reasoning", "tool_call"]

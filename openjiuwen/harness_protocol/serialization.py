@@ -147,6 +147,9 @@ def _model_request_to_dict(event: ModelRequestEvent) -> dict[str, object]:
         "input_observed": event.input_observed,
         "output_message": _message_to_dict(event.output_message) if event.output_message is not None else None,
         "tool_definitions": _json(event.tool_definitions),
+        "request_parameters": _json(event.request_parameters),
+        "response_id": event.response_id,
+        "finish_reasons": list(event.finish_reasons),
         "usage": _usage_to_dict(event.usage) if event.usage is not None else None,
         "error": _error_to_dict(event.error) if event.error is not None else None,
         "data": _json(event.data),
@@ -173,6 +176,12 @@ def _model_request_from_dict(data: Mapping[str, object]) -> ModelRequestEvent:
         if output_data is not None
         else None,
         tool_definitions=cast(JsonValue, data.get("tool_definitions")),
+        request_parameters=_json_object(data.get("request_parameters", {}), "model_request.request_parameters"),
+        response_id=_optional_string(data.get("response_id"), "model_request.response_id"),
+        finish_reasons=tuple(
+            _required_string(reason, "model_request.finish_reason")
+            for reason in _list(data.get("finish_reasons", []), "model_request.finish_reasons")
+        ),
         usage=_usage_from_dict(_mapping(usage_data, "model_request.usage")) if usage_data is not None else None,
         error=_error_from_dict(error_data, "model_request.error") if error_data is not None else None,
         data=_json_object(data.get("data", {}), "model_request.data"),

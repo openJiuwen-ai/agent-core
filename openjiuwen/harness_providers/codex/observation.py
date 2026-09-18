@@ -461,6 +461,8 @@ class CodexRequestObserver:
             input_observed=conversation is not None,
             output_message=_output_message(response_id or inference.call_id, output_items),
             tool_definitions=_tool_definitions(request, conversation),
+            request_parameters=_request_parameters(request),
+            response_id=response_id or None,
             usage=_usage(usage),
             error=error,
             data={
@@ -507,18 +509,61 @@ def _without_tool_catalogue(items: list[Any] | None) -> list[Any] | None:
 
 
 def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -> Any:
-    """Return the tools offered, from the request field or its catalogue items."""
-    tools = request.get("tools")
-    if isinstance(tools, list) and tools:
-        return to_json_safe(tools)
-    catalogue = [
-        to_json_safe(item.get("tools"))
-        for item in (conversation or [])
-        if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE and item.get("tools")
-    ]
-    if not catalogue:
-        return None
-    return catalogue[0] if len(catalogue) == 1 else catalogue
+    """Return the offered tools as flat ``{name, description, parameters}``.
+
+    Codex states its tools either as a request field or as catalogue input
+    items, and groups them into namespaces; a reader of a tool schema wants
+    each callable tool, named as the model addresses it.
+    """
+    offered = request.get("tools")
+    if not isinstance(offered, list) or not offered:
+        offered = [
+            tool
+            for item in (conversation or [])
+            if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE
+            for tool in (item.get("tools") or [])
+        ]
+    definitions = _flatten_tools(offered, namespace="")
+    return definitions or None
+
+
+def _flatten_tools(tools: Any, *, namespace: str) -> list[dict[str, Any]]:
+    definitions: list[dict[str, Any]] = []
+    if not isinstance(tools, list):
+        return definitions
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("name") or "")
+        if tool.get("type") == "namespace":
+            definitions.extend(_flatten_tools(tool.get("tools"), namespace=name))
+            continue
+        if not name:
+            continue
+        schema = tool.get("parameters") or tool.get("input_schema") or {}
+        definitions.append({
+            "name": f"{namespace}.{name}" if namespace else name,
+            "description": str(tool.get("description") or ""),
+            "parameters": to_json_safe(schema),
+        })
+    return definitions
+
+
+def _request_parameters(request: dict[str, Any]) -> dict[str, Any]:
+    """Return the sampling parameters the request carried, under GenAI names."""
+    parameters: dict[str, Any] = {}
+    stream = request.get("stream")
+    if stream is not None:
+        parameters["stream"] = to_json_safe(stream)
+    reasoning = request.get("reasoning")
+    effort = reasoning.get("effort") if isinstance(reasoning, dict) else None
+    if isinstance(effort, str) and effort:
+        parameters["reasoning_level"] = effort
+    for source, name in (("temperature", "temperature"), ("top_p", "top_p"), ("max_output_tokens", "max_tokens")):
+        value = request.get(source)
+        if value is not None:
+            parameters[name] = to_json_safe(value)
+    return parameters
 
 
 def _raw_request(raw: _RawResponse, tool_owners: dict[str, str]) -> ModelRequestEvent:

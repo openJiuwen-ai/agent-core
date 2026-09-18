@@ -62,6 +62,19 @@ _DATA_NAMESPACE = "claude-code"
 _DRAIN_INTERVAL_S = 0.25
 _DEFAULT_WAIT_S = 5.0
 _OMITTED_KEYS = frozenset({"cache_control"})
+# Claude Code puts its own billing/telemetry header in the first system block.
+# It is request metadata rather than instructions, and it carries per-request
+# ids that would otherwise make the system prompt read as rewritten every time.
+_BILLING_HEADER_PREFIX = "x-anthropic-billing-header:"
+# Messages API sampling parameters, mapped to their GenAI names.
+_REQUEST_PARAMETERS = {
+    "temperature": "temperature",
+    "top_p": "top_p",
+    "top_k": "top_k",
+    "max_tokens": "max_tokens",
+    "stop_sequences": "stop_sequences",
+    "stream": "stream",
+}
 
 
 @dataclass
@@ -466,11 +479,14 @@ class ClaudeRequestObserver:
         input_messages: tuple[TurnMessage, ...] = ()
         system_instructions: tuple[ContentBlock, ...] = ()
         tool_definitions: Any = None
+        request_parameters: dict[str, Any] = {}
+        billing_header = ""
         if isinstance(request, dict):
             input_messages = tuple(self._conversation(request.get("messages")))
-            system_instructions = tuple(_system_blocks(request.get("system")))
+            system_instructions, billing_header = _system_instructions(request.get("system"))
             tools = request.get("tools")
-            tool_definitions = _sanitize(tools) if isinstance(tools, list) else None
+            tool_definitions = _tool_definitions(tools) if isinstance(tools, list) else None
+            request_parameters = _request_parameters(request)
         output = _message(snapshot.message_id, MessageRole.ASSISTANT, response.get("content"))
         identity = _identity("assistant", response.get("content"))
         self._output_ids_by_identity[identity] = snapshot.message_id
@@ -490,11 +506,14 @@ class ClaudeRequestObserver:
             input_observed=request_event is not None,
             output_message=output,
             tool_definitions=tool_definitions,
+            request_parameters=request_parameters,
+            response_id=str(response.get("id") or "") or None,
+            finish_reasons=(stop_reason,) if isinstance(stop_reason, str) and stop_reason else (),
             usage=claude_turn_usage(response.get("usage")) or snapshot.usage,
             data={
                 _DATA_NAMESPACE: {
                     "observation": "api_bodies",
-                    "stop_reason": stop_reason if isinstance(stop_reason, str) else None,
+                    "billing_header": billing_header or None,
                 },
             },
         )
@@ -582,12 +601,48 @@ def _tool_result_content(content: Any) -> Any:
     return _sanitize(content)
 
 
-def _system_blocks(system: Any) -> list[ContentBlock]:
-    return [
-        ContentBlock(block_id=f"claude-system:{index}", kind="text", content=str(block.get("text") or ""))
-        for index, block in enumerate(_content_list(system))
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
+def _system_instructions(system: Any) -> tuple[tuple[ContentBlock, ...], str]:
+    """Split the system prompt from Claude Code's billing header block.
+
+    Returns:
+        The instruction blocks, and the billing header when the request
+        carried one.
+    """
+    blocks: list[ContentBlock] = []
+    billing_header = ""
+    for index, block in enumerate(_content_list(system)):
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = str(block.get("text") or "")
+        if text.startswith(_BILLING_HEADER_PREFIX):
+            billing_header = text
+            continue
+        blocks.append(ContentBlock(block_id=f"claude-system:{index}", kind="text", content=text))
+    return tuple(blocks), billing_header
+
+
+def _tool_definitions(tools: list[Any]) -> list[dict[str, Any]]:
+    """State the offered tools the way every reader of a tool schema expects."""
+    definitions: list[dict[str, Any]] = []
+    for tool in tools:
+        if not isinstance(tool, dict) or not tool.get("name"):
+            continue
+        definitions.append({
+            "name": str(tool["name"]),
+            "description": str(tool.get("description") or ""),
+            "parameters": _sanitize(tool.get("input_schema") or {}),
+        })
+    return definitions
+
+
+def _request_parameters(request: dict[str, Any]) -> dict[str, Any]:
+    """Return the sampling parameters the request carried, under GenAI names."""
+    parameters: dict[str, Any] = {}
+    for source, name in _REQUEST_PARAMETERS.items():
+        value = request.get(source)
+        if value is not None:
+            parameters[name] = to_json_safe(value)
+    return parameters
 
 
 def _sanitize(value: Any) -> Any:

@@ -292,7 +292,8 @@ async def test_full_turn_maps_messages_to_protocol_events(monkeypatch: pytest.Mo
     assert terminal.kind is TurnEventKind.FINISHED
     result = terminal.result
     assert result.final_output == "Hello world"
-    assert result.usage.input_tokens == 10 and result.usage.cached_input_tokens == 2
+    # GenAI states the whole prompt as input; the cache hit is a breakdown of it.
+    assert result.usage.input_tokens == 12 and result.usage.cached_input_tokens == 2
     assert result.cost.micros == 2500
     assert [message.role.value for message in result.messages] == ["assistant", "tool"]
     assert client.queries == ["hi"]
