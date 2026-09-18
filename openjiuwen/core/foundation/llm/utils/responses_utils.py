@@ -599,6 +599,11 @@ def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadat
             _first_present(token_details, "cache_creation_tokens", "cache_write_tokens")
         )
 
+    reasoning_tokens = 0
+    output_details = usage.get("output_tokens_details") or usage.get("completion_tokens_details")
+    if isinstance(output_details, dict):
+        reasoning_tokens = _int_or_zero(output_details.get("reasoning_tokens"))
+
     return UsageMetadata(
         model_name=model_name,
         input_tokens=input_tokens,
@@ -610,6 +615,7 @@ def _usage_from_payload(usage: Any, *, model_name: str) -> Optional[UsageMetadat
         cache_source="provider_usage" if token_details is not None else None,
         cache_authoritative=token_details is not None,
         cache_creation_input_tokens=cache_creation_tokens,
+        reasoning_tokens=reasoning_tokens,
     )
 
 
