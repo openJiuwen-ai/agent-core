@@ -236,6 +236,7 @@ class DeepAgent(BaseAgent):
         self._interaction_control_lock = asyncio.Lock()
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
+        self._interaction_lease_hold = False
         self._interaction_started = False
         self._agent_ras_setting: Any = None
         super().__init__(card)
@@ -2984,6 +2985,7 @@ class DeepAgent(BaseAgent):
         if not self._interaction_started:
             return
         self._interaction_phase = InteractionPhase.TERMINATED
+        self._interaction_lease_hold = False
         await self._interaction_output.shutdown()
         self._event_manager.discard_all_work()
         await self._cancel_active_round(reason="stop")
@@ -3019,10 +3021,16 @@ class DeepAgent(BaseAgent):
         self._active_interaction_round = None
         self._interaction_round_task = None
 
-    async def attach_output(self) -> Optional[InteractionOutputStream]:
+    async def attach_output(self, *, steal: bool = False) -> Optional[InteractionOutputStream]:
         """Claim the sole output reader for this interaction.
 
-        Returns ``None`` when another consumer already holds the lease.
+        Returns ``None`` when another consumer already holds the lease and
+        ``steal`` is false.
+
+        ``steal=True`` is for a fresh user turn that must replace the current
+        host stream (multi-replica Gateway ``chat.send``). Any in-flight round
+        is cancelled, the session→lease forwarder is restarted so residual
+        tokens cannot land on the new request_id, then the lease is transferred.
 
         If an ACTIVE goal exists, missing goal work is ensured even when this
         call does not obtain the lease, so an already-attached reader continues
@@ -3033,11 +3041,40 @@ class DeepAgent(BaseAgent):
 
         async with self._interaction_send_lock:
             async with self._interaction_control_lock:
-                stream = await self._attach_output_locked()
+                if steal:
+                    round_task = self._interaction_round_task
+                    has_active_round = (
+                        self._active_interaction_round is not None
+                        or (round_task is not None and not round_task.done())
+                    )
+                    has_consumer = self._interaction_output.has_consumer()
+                    if has_active_round or has_consumer:
+                        logger.info("[DeepAgent] stealing output lease from current consumer")
+                        if has_active_round:
+                            # Interrupt first while the old lease still owns the queue.
+                            await self._cancel_active_round(reason="output_stolen")
+                        self._event_manager.discard_all_work()
+                        # Stop the forwarder and drop session-stream leftovers before
+                        # the new lease is installed; otherwise residual chunks from
+                        # the cancelled round would emit into the replacement SSE.
+                        await self._restart_interaction_forwarder_locked(force=True)
+                        # Keep the new lease open until send_input queues the
+                        # replacement turn. Otherwise the supervisor can
+                        # finish_current() in the gap and drop the new round's
+                        # tokens (or hang the new SSE if _OUTPUT_END is lost).
+                        self._interaction_lease_hold = True
+                stream = await self._attach_output_locked(steal=steal)
+                if steal:
+                    # cancel may have closed the shared emitter; repair if needed.
+                    await self._restart_interaction_forwarder_locked(force=False)
                 if self.goal_manager is not None:
                     record = self._load_goal_record_locked()
                     if record is not None and record.status is GoalStatus.ACTIVE:
                         self.goal_manager.ensure_active_goal_work_locked()
+                        # Goal work itself keeps the stream open; clear the
+                        # attach→send_input hold so finish_current can run if
+                        # the host never calls send_input (attach_goal style).
+                        self._interaction_lease_hold = False
                         self._notify_work()
                 return stream
 
@@ -3081,6 +3118,7 @@ class DeepAgent(BaseAgent):
                         reset_loop=False,
                     )
                 )
+                self._interaction_lease_hold = False
                 self._notify_work()
                 return
 
@@ -3098,6 +3136,7 @@ class DeepAgent(BaseAgent):
                 if loop is None:
                     raise RuntimeError("active interaction round cannot accept steer without loop_controller")
                 loop.enqueue_steer(str(inputs["query"]))
+                self._interaction_lease_hold = False
                 self._notify_work()
                 return
 
@@ -3111,6 +3150,7 @@ class DeepAgent(BaseAgent):
                         reset_loop=False,
                     )
                 )
+                self._interaction_lease_hold = False
                 self._notify_work()
                 return
 
@@ -3119,10 +3159,11 @@ class DeepAgent(BaseAgent):
             self._event_manager.push_user(
                 RoundWorkItem.user(request_id=request.request_id, inputs=inputs)
             )
+            self._interaction_lease_hold = False
             self._notify_work()
 
-    async def _attach_output_locked(self) -> Optional[InteractionOutputStream]:
-        lease = await self._interaction_output.attach()
+    async def _attach_output_locked(self, *, steal: bool = False) -> Optional[InteractionOutputStream]:
+        lease = await self._interaction_output.attach(steal=steal)
         return InteractionOutputStream(self, lease) if lease is not None else None
 
     async def next_output(self, lease: OutputLease) -> Optional[Any]:
@@ -3133,6 +3174,7 @@ class DeepAgent(BaseAgent):
             detached = await self._interaction_output.detach(token)
             if not detached:
                 return
+            self._interaction_lease_hold = False
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_detached")
@@ -3142,6 +3184,7 @@ class DeepAgent(BaseAgent):
         if lease is None:
             return
         if await self._interaction_output.detach(lease.token):
+            self._interaction_lease_hold = False
             self._event_manager.discard_all_work()
             if abort_active_round:
                 await self._cancel_active_round(reason="output_replaced")
@@ -3319,6 +3362,8 @@ class DeepAgent(BaseAgent):
     async def _close_idle_output_if_finished(self) -> None:
         """End an ordinary response stream after its final queued round."""
         async with self._interaction_control_lock:
+            if self._interaction_lease_hold:
+                return
             if self._should_keep_interaction_open_locked():
                 return
             await self._interaction_output.finish_current()
@@ -3342,6 +3387,57 @@ class DeepAgent(BaseAgent):
                 self.goal_manager.ensure_active_goal_work_locked()
             return True
         return False
+
+    def _session_stream_is_closed(self, session: "Session") -> bool:
+        try:
+            return session.is_stream_emitter_closed()
+        except Exception:
+            return False
+
+    def _replace_session_stream(self, session: "Session") -> bool:
+        try:
+            from openjiuwen.core.session.stream.emitter import StreamEmitter
+            from openjiuwen.core.session.stream.manager import StreamWriterManager
+
+            session.replace_stream_writer_manager(StreamWriterManager(StreamEmitter()))
+            return True
+        except Exception:
+            logger.debug("[DeepAgent] unable to replace session stream", exc_info=True)
+            return False
+
+    async def _restart_interaction_forwarder_locked(self, *, force: bool) -> None:
+        """Restart the session→lease forwarder after steal.
+
+        ``force=True`` always cancels the current forwarder and replaces the
+        session stream so buffered chunks from a cancelled round cannot emit
+        into the replacement lease.
+
+        ``force=False`` only repairs a dead forwarder / closed emitter (cancel
+        may have closed the shared session stream via ReAct ``close_stream``).
+        """
+        session = self._interaction_session
+        if session is None:
+            return
+        task = self._interaction_forwarder_task
+        alive = task is not None and not task.done()
+        closed = self._session_stream_is_closed(session)
+        if not force and alive and not closed:
+            return
+        if alive and task is not None:
+            task.cancel()
+            with suppress(asyncio.CancelledError, Exception):
+                await task
+        if force or closed:
+            if self._replace_session_stream(session):
+                logger.info(
+                    "[DeepAgent] revived session stream after output steal (force=%s closed=%s)",
+                    force,
+                    closed,
+                )
+        sid = session.get_session_id()
+        self._interaction_forwarder_task = asyncio.create_task(
+            self._forward_session_stream(), name=f"interaction_forwarder[{sid}]"
+        )
 
     async def _forward_session_stream(self) -> None:
         session = self._interaction_session

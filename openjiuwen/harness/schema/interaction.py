@@ -256,10 +256,28 @@ class OutputLeaseManager:
         lease = self.current_lease()
         return lease.token if lease is not None else None
 
-    async def attach(self) -> Optional[OutputLease]:
+    async def attach(self, *, steal: bool = False) -> Optional[OutputLease]:
+        """Claim the sole consumer lease.
+
+        ``steal=True`` detaches the current consumer first so a replacement
+        host (for example another Gateway replica handling a new ``chat.send``)
+        can read subsequent output. Leftover queued items are discarded so
+        they cannot land on the new request_id.
+        """
         async with self._lock:
-            if self._closed or self.has_consumer():
+            if self._closed:
                 return None
+            if self.has_consumer():
+                if not steal:
+                    return None
+                old = self._lease
+                self._lease = None
+                if old is not None:
+                    old.closed.set()
+                self._drain_queue()
+                # Drop the old queue so a predecessor next_item waiter cannot
+                # consume the replacement lease's items or its _OUTPUT_END.
+                self._queue = asyncio.Queue()
             lease = OutputLease(token=uuid.uuid4().hex, closed=asyncio.Event())
             self._lease = lease
             return lease
