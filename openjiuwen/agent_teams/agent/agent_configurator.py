@@ -882,6 +882,7 @@ class AgentConfigurator:
             on_team_built=on_team_built,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
             member_reviver=self._on_teammate_revive,
+            on_member_started=self._on_teammate_created,
         )
         self.team_backend = agent_team
         self.task_manager = agent_team.task_manager
