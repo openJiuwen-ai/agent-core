@@ -21,7 +21,7 @@ _RESPONSE_PAGE_LINES = 1000
 def judge_protocol_identity() -> dict[str, str]:
     """Invalidate cached grades when the evidence layout or grading policy changes."""
     return {
-        "evidence_layout": "complete_evidence_closeout_v4",
+        "evidence_layout": "complete_evidence_closeout_v5",
         "prompt_sha256": hashlib.sha256(Path(__file__).with_name("judge_prompt.md").read_bytes()).hexdigest(),
     }
 

@@ -16,6 +16,7 @@ The case score remains binary; the continuous score is retained in metadata.
   Explicit overrides are preserved.
 - Long submitted responses remain lossless ordered pages. Files are not
   silently clipped to fit the direct route.
+- UTF-8 `.jsonl` logs are supported as text evidence, including during recovery.
 
 ## One recovery attempt
 
@@ -27,7 +28,10 @@ reuses the complete original payload.
 
 If the inventory cannot be included completely (size, file type or read
 failure), recovery fails as evaluation infrastructure unavailability. It
-does not fabricate a zero task score. A valid zero verdict is accepted
+does not fabricate a zero task score. Recovery errors distinguish unsupported formats, missing or
+unreadable files, invalid UTF-8, snapshot path escapes and byte-limit failures.
+File-specific errors identify the evidence filename; serialized size failures
+identify the complete payload size. A valid zero verdict is accepted
 without recovery. An explicit unavailable verdict is propagated without
 requesting a reclassification. Recovery has no transient model retries;
 normal calls retain `judge_max_retries` (default: 2). Each attempt has the

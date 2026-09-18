@@ -121,12 +121,10 @@ def build_judge_agent(
     model = _judge_model(config)
 
     async def complete_evidence_verdict() -> str:
-        payload = await asyncio.to_thread(inline_evidence, workspace, max_bytes=MAX_CLOSEOUT_BYTES)
-        if payload is None:
-            raise EvaluationInfrastructureError(
-                "Judge closeout unavailable: complete text evidence cannot fit within "
-                f"{MAX_CLOSEOUT_BYTES} bytes or an evidence file is unreadable/non-text; no score produced"
-            )
+        payload = await asyncio.to_thread(
+            inline_evidence, workspace, max_bytes=MAX_CLOSEOUT_BYTES, required=True,
+        )
+        assert payload is not None
         return await _invoke_complete_evidence(model, payload)
 
     budget.continuation = complete_evidence_verdict

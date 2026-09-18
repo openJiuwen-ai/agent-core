@@ -8,6 +8,7 @@ import pytest
 
 from openjiuwen.core.foundation.llm import AssistantMessage
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
+from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_runtime
 from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import (
     MAX_CLOSEOUT_BYTES,
@@ -16,10 +17,13 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import (
 )
 
 
-@pytest.mark.parametrize("kind", ["text", "binary", "large", "outside", "missing", "invalid_utf8"])
+@pytest.mark.parametrize("kind", ["text", "jsonl", "binary", "large", "outside", "missing", "invalid_utf8"])
 def test_lossless_route(tmp_path, kind):
     name = "answer.txt"
     data = b"complete evidence"
+    if kind == "jsonl":
+        name = "evidence.jsonl"
+        data = b'{"step":1}\n{"step":2}\n'
     if kind == "binary":
         name = "answer.pdf"
     elif kind == "large":
@@ -32,19 +36,20 @@ def test_lossless_route(tmp_path, kind):
         (tmp_path / name).write_bytes(data)
     (tmp_path / "request.json").write_text(json.dumps({"evidence_files": [name]}), encoding="utf-8")
     result = inline_evidence(tmp_path)
-    if kind == "text":
+    if kind in {"text", "jsonl"}:
         assert json.loads(result)["evidence_files"][name] == data.decode()
     else:
         assert result is None
 
 
-def test_closeout_includes_large_evidence_without_clipping(tmp_path):
+@pytest.mark.parametrize("name", ["answer.txt", "evidence.jsonl"])
+def test_closeout_includes_large_evidence_without_clipping(tmp_path, name):
     content = "\u8bc1\u636e" * 15000
-    (tmp_path / "answer.txt").write_text(content, encoding="utf-8")
-    (tmp_path / "request.json").write_text('{"evidence_files":["answer.txt"]}', encoding="utf-8")
+    (tmp_path / name).write_text(content, encoding="utf-8")
+    (tmp_path / "request.json").write_text(json.dumps({"evidence_files": [name]}), encoding="utf-8")
     assert inline_evidence(tmp_path) is None
     payload = inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES)
-    assert json.loads(payload)["evidence_files"]["answer.txt"] == content
+    assert json.loads(payload)["evidence_files"][name] == content
     assert len(payload.encode("utf-8")) <= MAX_CLOSEOUT_BYTES
 
 
@@ -52,6 +57,56 @@ def test_serialized_payload_limit_includes_json_escaping(tmp_path):
     (tmp_path / "answer.txt").write_text("\\" * (MAX_CLOSEOUT_BYTES // 2), encoding="utf-8")
     (tmp_path / "request.json").write_text('{"evidence_files":["answer.txt"]}', encoding="utf-8")
     assert inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES) is None
+
+
+
+
+@pytest.mark.parametrize("kind, expected", [
+    ("large", "exceeds 262144 bytes at evidence.jsonl"),
+    ("binary", "unsupported text evidence format: evidence.pdf"),
+    ("missing", "evidence file missing or not a regular file: evidence.jsonl"),
+    ("utf8", "evidence is not valid UTF-8: evidence.jsonl"),
+    ("outside", "evidence path escapes snapshot"),
+    ("request", "cannot read request.json"),
+    ("escaped", "serialized evidence exceeds"),
+])
+def test_required_evidence_reports_specific_failure(tmp_path, kind, expected):
+    name = "evidence.pdf" if kind == "binary" else "evidence.jsonl"
+    if kind == "outside":
+        name = "../outside.jsonl"
+    data = b'{"ok": true}\n'
+    if kind == "large":
+        data = b"x" * MAX_CLOSEOUT_BYTES
+    elif kind == "utf8":
+        data = b"\xff"
+    elif kind == "escaped":
+        data = b"\\" * (MAX_CLOSEOUT_BYTES // 2)
+    if kind not in {"missing", "outside"}:
+        (tmp_path / name).write_bytes(data)
+    request = "invalid" if kind == "request" else json.dumps({"evidence_files": [name]})
+    (tmp_path / "request.json").write_text(request, encoding="utf-8")
+    assert inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES) is None
+    with pytest.raises(EvaluationInfrastructureError, match=expected):
+        inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES, required=True)
+
+
+def test_unreadable_file_names_the_file_without_exposing_exception_details(tmp_path, monkeypatch):
+    target = tmp_path / "evidence.jsonl"
+    target.write_text("{}\n", encoding="utf-8")
+    (tmp_path / "request.json").write_text('{"evidence_files":["evidence.jsonl"]}', encoding="utf-8")
+    original = type(target).read_text
+
+    def read_text(path, *args, **kwargs):
+        if path.name == target.name:
+            raise PermissionError("private detail")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(target), "read_text", read_text)
+    assert inline_evidence(tmp_path) is None
+    with pytest.raises(EvaluationInfrastructureError, match="evidence.jsonl") as error:
+        inline_evidence(tmp_path, required=True)
+    assert "PermissionError" in str(error.value)
+    assert "private detail" not in str(error.value)
 
 
 @pytest.mark.asyncio

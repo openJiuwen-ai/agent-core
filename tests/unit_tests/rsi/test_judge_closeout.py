@@ -41,6 +41,7 @@ async def test_native_unread_artifact_is_completed_before_closeout(tmp_path, mon
     }), encoding="utf-8")
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
+    (artifacts / "evidence.jsonl").write_text('{"step": 1}\n{"step": 2}\n', encoding="utf-8")
     (artifacts / "answer.txt").write_text("VERIFIED_EVIDENCE = 1729\n", encoding="utf-8")
     # Exceed the direct route, so a real native reader gets only one turn.
     (artifacts / "scratch.txt").write_text("scratch\n" * 12000, encoding="utf-8")
@@ -69,6 +70,7 @@ async def test_native_unread_artifact_is_completed_before_closeout(tmp_path, mon
         assert kwargs.get("tools") is None
         assert len(messages) == 2
         payload = json.loads(messages[1].content)
+        assert payload["evidence_files"]["artifacts/evidence.jsonl"] == '{"step": 1}\n{"step": 2}\n'
         assert payload["evidence_files"]["artifacts/answer.txt"] == "VERIFIED_EVIDENCE = 1729\n"
         assert payload["evidence_files"]["artifacts/scratch.txt"] == "scratch\n" * 12000
         if outcome == "timeout":
