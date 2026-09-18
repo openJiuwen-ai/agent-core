@@ -13,6 +13,7 @@ from typing import (
 )
 from pydantic import BaseModel
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.kv_cache.kv_cache_config import KVCacheAffinityConfig
 from openjiuwen.core.foundation.llm import (
     Model,
@@ -270,16 +271,23 @@ class RailSpec(BaseModel):
 
         Returns:
             A rail, a list of rails, or ``None``; callers flatten the result.
+            An unknown rail type (e.g. one persisted by an older release whose
+            provider no longer exists) logs a warning and returns ``None`` so
+            the remaining rails still build.
         """
         from openjiuwen.harness.manifest import ensure_builtin_elements_registered
 
         ensure_builtin_elements_registered()
         factory = _RAIL_PROVIDER_REGISTRY.get(self.type)
         if factory is None:
-            raise ValueError(
-                f"Unknown rail type '{self.type}'. "
-                f"Registered types: {list(_RAIL_PROVIDER_REGISTRY)}"
+            logger.warning(
+                "Unknown rail type '{}' in RailSpec; skipping it. This usually "
+                "means the rail was removed or renamed in a newer release while "
+                "the spec still references the old name (e.g. a session "
+                "checkpoint persisted by an older version).",
+                self.type,
             )
+            return None
         if context is None:
             context = BuildContext(language=language, workspace=workspace)
         return factory(dict(self.params), context)
