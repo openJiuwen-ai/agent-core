@@ -1809,7 +1809,11 @@ class OrganizationRuntimeManager:
                     if not await self._run_leader_turn(team_id, session_id, inputs):
                         turn_failed = True
                         queue.appendleft(original_inputs)
-                        team_logger.warning("Organization leader turn was not run for team {} session {}", team_id, session_id)
+                        team_logger.warning(
+                            "Organization leader turn was not run for team {} session {}",
+                            team_id,
+                            session_id,
+                        )
                         return
                 except Exception:
                     turn_failed = True
