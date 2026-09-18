@@ -496,6 +496,44 @@ class MemberDao:
             )
             return False
 
+    async def reset_member_execution_status(
+        self,
+        member_name: str,
+        team_name: str,
+        execution_status: str,
+    ) -> bool:
+        """Reset member execution status without predecessor checks.
+
+        This is intentionally NOT a normal state-machine transition; it is
+        used only during recovery/restart when the previous execution context
+        has been cleaned up and the member is about to begin a brand-new task
+        lifecycle. Skipping the predecessor guard allows RUNNING/STARTING/etc.
+        to be forced back to IDLE, eliminating illegal-transition noise like
+        ``RUNNING -> STARTING`` on restart (issue #4318).
+        """
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                update(TeamMember)
+                .where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+                .values(execution_status=execution_status)
+            )
+            if result.rowcount == 1:
+                await session.commit()
+                team_logger.debug(
+                    "Member %s execution status reset to %s", member_name, execution_status
+                )
+                return True
+
+            team_logger.warning(
+                "Failed to reset execution status for member %s: rowcount=%s",
+                member_name,
+                result.rowcount,
+            )
+            return False
+
     async def update_member_worktree(
         self,
         member_name: str,
