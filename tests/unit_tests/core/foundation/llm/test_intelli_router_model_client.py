@@ -68,9 +68,10 @@ def intelli_router_client_config():
 
 @pytest.fixture(autouse=True)
 def clear_router_cache():
-    """Clean router cache after each test to avoid cross-test interference."""
+    """Clean router/web-server caches after each test to avoid cross-test interference."""
     yield
     _router_cache.clear()
+    _web_servers.clear()
 
 
 @dataclass
