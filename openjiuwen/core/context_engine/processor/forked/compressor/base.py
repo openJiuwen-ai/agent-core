@@ -446,7 +446,11 @@ class PrefixCompactProcessor(ContextProcessor):
             except Exception as exc:
                 logger.warning("[%s] compression fallback model initialization failed: %s", self.processor_type(), exc)
                 return False
-            logger.warning("[%s] compression switching to fallback model after %s", self.processor_type(), error_kind.value)
+            logger.warning(
+                "[%s] compression switching to fallback model after %s",
+                self.processor_type(),
+                error_kind.value,
+            )
             fallback_used = True
             span = original_span
             overflow_retry_index = 0
