@@ -450,6 +450,7 @@ class SessionModelContext(ModelContext):
                                 messages_to_modify=[],
                                 force=False,
                                 context_max=context_max,
+                                overhead_tokens=self._measure_window_overhead(window),
                             )
                         )
                         started_emitted = True
@@ -473,6 +474,7 @@ class SessionModelContext(ModelContext):
                                 context_max=context_max,
                                 compact_summary=str(getattr(event, "compact_summary", "") or ""),
                                 compression_usage=getattr(event, "compression_usage", None),
+                                overhead_tokens=self._measure_window_overhead(window),
                             )
                         )
                 except asyncio.CancelledError:
@@ -491,6 +493,7 @@ class SessionModelContext(ModelContext):
                                 fallback_context_window_tokens=self._context_window_tokens,
                                 model_context_window_tokens=self._model_context_window_tokens,
                             ),
+                            overhead_tokens=self._measure_window_overhead(window),
                         )
                     raise
                 except Exception as e:
@@ -514,6 +517,7 @@ class SessionModelContext(ModelContext):
                                 fallback_context_window_tokens=self._context_window_tokens,
                                 model_context_window_tokens=self._model_context_window_tokens,
                             ),
+                            overhead_tokens=self._measure_window_overhead(window),
                         )
                     )
                     logger.warning(
@@ -681,6 +685,18 @@ class SessionModelContext(ModelContext):
 
     def token_counter(self) -> TokenCounter:
         return self._token_counter
+
+    def _measure_window_overhead(self, window: ContextWindow) -> int:
+        """Compute system+tools token overhead for the full-context metric."""
+        token_counter = self._token_counter
+        if token_counter is None:
+            return 0
+        try:
+            tokens = token_counter.count_messages(list(window.system_messages or []))
+            tokens += token_counter.count_tools(list(window.tools or []))
+            return max(int(tokens or 0), 0)
+        except Exception:
+            return 0
 
     async def _run_add_processors(
         self,
@@ -992,6 +1008,7 @@ class SessionModelContext(ModelContext):
         started_at: float,
         force: bool,
         context_max: Optional[int],
+        overhead_tokens: int = 0,
     ) -> None:
         await self._build_and_emit_compression_state(
             ContextProcessorStateInput(
@@ -1009,6 +1026,7 @@ class SessionModelContext(ModelContext):
                 messages_to_modify=[],
                 force=force,
                 context_max=context_max,
+                overhead_tokens=max(int(overhead_tokens or 0), 0),
             )
         )
 

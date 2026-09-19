@@ -42,6 +42,7 @@ class ContextProcessorStateInput:
     context_max: Optional[int]
     compact_summary: str = ""
     compression_usage: Optional[dict[str, Any]] = None
+    overhead_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -152,16 +153,19 @@ class ContextProcessorStateRecorder:
             self,
             state_input: ContextProcessorStateInput,
     ) -> ContextCompressionState:
+        overhead_tokens = max(int(state_input.overhead_tokens or 0), 0)
         before = self._build_metric(
             state_input.before_messages,
             state_input.context_max,
             observed_at=state_input.started_at,
+            overhead_tokens=overhead_tokens,
         )
         after = (
             self._build_metric(
                 state_input.after_messages,
                 state_input.context_max,
                 observed_at=state_input.ended_at,
+                overhead_tokens=overhead_tokens,
             )
             if state_input.after_messages is not None
             else None
@@ -218,9 +222,10 @@ class ContextProcessorStateRecorder:
             context_max: Optional[int],
             *,
             observed_at: Optional[float],
+            overhead_tokens: int = 0,
     ) -> ContextCompressionMetric:
         messages = list(messages or [])
-        tokens = self._measure_messages(messages)
+        tokens = self._measure_messages(messages) + max(int(overhead_tokens or 0), 0)
         return ContextCompressionMetric(
             time=self._format_time(observed_at),
             messages=len(messages),
@@ -299,7 +304,7 @@ class ContextProcessorStateRecorder:
         if metric is None:
             return None
         return (
-            f"messages={metric.messages} tokens={metric.tokens} "
+            f"messages={metric.messages} tokens={metric.tokens}(tokenizer) "
             f"percent={metric.context_percent} time={metric.time}"
         )
 
