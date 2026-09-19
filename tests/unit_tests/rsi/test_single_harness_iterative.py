@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 import yaml
 
-from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, EventUsage, NodeStageEvent
+from openjiuwen.rsi.events import EngineEvent, EventNode, EventProgress, EventStatus, EventUsage, NodeStageEvent
 from openjiuwen.rsi.harness_rsi.config import (
     AutoCoordinatingHarnessConfig,
     DataLoaderConfig,
@@ -45,6 +45,143 @@ from openjiuwen.rsi.harness_rsi.single_harness.iterative import (
     _validate_and_filter_planned_batches,
 )
 from openjiuwen.rsi.usage import record_model_usage
+
+
+def test_cancelled_run_stops_evaluator_and_persists_terminated_artifacts(tmp_path: Path) -> None:
+    events: list[EngineEvent] = []
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+        evaluator_cancelled = asyncio.Event()
+
+        class Evaluator:
+            async def evaluate_batch(self, **kwargs: Any) -> str:
+                started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    evaluator_cancelled.set()
+                raise AssertionError("the evaluator must be cancelled")
+
+        async def sink(event: EngineEvent) -> None:
+            events.append(event)
+
+        dataset = tmp_path / "cases.json"
+        dataset.write_text(json.dumps({"cases": [{"case_id": "one", "input": "fix"}]}), encoding="utf-8")
+        refs = tmp_path / "refs.yaml"
+        refs.write_text(yaml.safe_dump({"harness_refs": {"solver": "baseline"}}), encoding="utf-8")
+        output_dir = tmp_path / "run"
+        output_dir.mkdir()
+        (output_dir / "single_harness_report.yaml").write_text(
+            yaml.safe_dump({"status": "running", "best_score": None}, sort_keys=False),
+            encoding="utf-8",
+        )
+        orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+            AutoCoordinatingHarnessConfig(
+                max_epochs=1,
+                evaluator=EvaluatorConfig(backend="single_harness"),
+                data_loader=DataLoaderConfig(batch_size=1),
+            ),
+            evaluator=Evaluator(),
+            analyzer=object(),
+            member_optimizer=object(),
+        )
+        task = asyncio.create_task(
+            orchestrator.run(
+                IterativeSingleHarnessRequest(
+                    dataset_files=[str(dataset)],
+                    harness_refs_path=str(refs),
+                    output_dir=str(output_dir),
+                ),
+                on_event=sink,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert evaluator_cancelled.is_set()
+        state = yaml.safe_load((output_dir / "single_harness_state.yaml").read_text(encoding="utf-8"))
+        report = yaml.safe_load((output_dir / "single_harness_report.yaml").read_text(encoding="utf-8"))
+        assert state["status"] == "terminated"
+        assert report["status"] == "terminated"
+        assert any(isinstance(event, EventStatus) and event.status == "terminated" for event in events)
+
+    asyncio.run(exercise())
+
+
+def test_cancelled_evaluator_task_marks_run_terminated(tmp_path: Path) -> None:
+    events: list[EngineEvent] = []
+
+    async def exercise() -> None:
+        started = asyncio.Event()
+        execution_finished = asyncio.Event()
+
+        class Evaluator:
+            def __init__(self) -> None:
+                self.execution_task: asyncio.Task[str] | None = None
+
+            async def _execute(self) -> str:
+                started.set()
+                try:
+                    await asyncio.Future()
+                finally:
+                    execution_finished.set()
+                return "unreachable"
+
+            async def evaluate_batch(self, **kwargs: Any) -> str:
+                self.execution_task = asyncio.create_task(self._execute())
+                return await self.execution_task
+
+        async def sink(event: EngineEvent) -> None:
+            events.append(event)
+
+        dataset = tmp_path / "cases.json"
+        dataset.write_text(json.dumps({"cases": [{"case_id": "one", "input": "fix"}]}), encoding="utf-8")
+        refs = tmp_path / "refs.yaml"
+        refs.write_text(yaml.safe_dump({"harness_refs": {"solver": "baseline"}}), encoding="utf-8")
+        output_dir = tmp_path / "run"
+        output_dir.mkdir()
+        (output_dir / "single_harness_report.yaml").write_text(
+            yaml.safe_dump({"status": "running", "best_score": None}, sort_keys=False),
+            encoding="utf-8",
+        )
+        evaluator = Evaluator()
+        orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+            AutoCoordinatingHarnessConfig(
+                max_epochs=1,
+                evaluator=EvaluatorConfig(backend="single_harness"),
+                data_loader=DataLoaderConfig(batch_size=1),
+            ),
+            evaluator=evaluator,
+            analyzer=object(),
+            member_optimizer=object(),
+        )
+        task = asyncio.create_task(
+            orchestrator.run(
+                IterativeSingleHarnessRequest(
+                    dataset_files=[str(dataset)],
+                    harness_refs_path=str(refs),
+                    output_dir=str(output_dir),
+                ),
+                on_event=sink,
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assert evaluator.execution_task is not None
+        evaluator.execution_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert execution_finished.is_set()
+        state = yaml.safe_load((output_dir / "single_harness_state.yaml").read_text(encoding="utf-8"))
+        report = yaml.safe_load((output_dir / "single_harness_report.yaml").read_text(encoding="utf-8"))
+        assert state["status"] == "terminated"
+        assert report["status"] == "terminated"
+        assert any(isinstance(event, EventStatus) and event.status == "terminated" for event in events)
+
+    asyncio.run(exercise())
 
 
 def test_failed_route_cannot_consume_budget_reserved_for_queued_alternative() -> None:
