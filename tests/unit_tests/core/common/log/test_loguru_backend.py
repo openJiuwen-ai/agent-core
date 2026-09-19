@@ -12,6 +12,7 @@ pytest.importorskip("loguru")
 from openjiuwen.core.common.exception.errors import BaseError  # noqa: E402
 from openjiuwen.core.common.logging import (  # noqa: E402
     LogManager,
+    reset_session_id,
     set_session_id,
 )
 from openjiuwen.core.common.logging.events import (  # noqa: E402
@@ -510,6 +511,65 @@ def test_loguru_stack_info_downgraded_not_fabricated(tmp_path):
     # _enrich_exception_payload; stack_info must not fabricate one
     assert "stacktrace" not in event
     assert "call_stack" not in event
+
+
+def test_exc_info_none_omits_exception_in_payload(tmp_path):
+    """B01: exc_info=None does not enrich the payload (boundary parity with
+    exc_info=False)."""
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_none.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-NONE")
+        try:
+            raise RuntimeError("none-should-not-enrich")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=None)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert not payload.get("exception")
+    assert not payload.get("stacktrace")
+
+
+def test_exc_info_tuple_enriches_payload(tmp_path):
+    """B01: exc_info=(type, value, tb) enriches the payload via
+    _enrich_exception_payload (same path as .exception() and exc_info=True)."""
+    config_file_path = os.path.join(tmp_path, "loguru_exc_info_tuple.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-TUPLE")
+        try:
+            raise RuntimeError("tuple-boom")
+        except RuntimeError as e:
+            logger.error("plain failure", exc_info=(type(e), e, e.__traceback__))
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "tuple-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
+def test_loguru_trace_id_slot_after_reset_is_empty(tmp_path):
+    """B02: after set_session_id then reset_session_id, the Loguru trace_id
+    slot returns to empty (sentinel does not re-leak)."""
+    config_file_path = os.path.join(tmp_path, "loguru_trace_reset.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        token = set_session_id("real-trace")
+        logger.info("with-real-trace")
+        reset_session_id(token)
+        logger.info("after-reset")
+
+    records = _read_json_records(os.path.join(tmp_path, "common.jsonl"))
+    assert records[-1]["record"]["extra"]["trace_id"] == ""
+    assert records[-2]["record"]["extra"]["trace_id"] == "real-trace"
+    assert "default_trace_id" not in json.dumps(records[-1])
 
 
 def test_logger_level_override_affects_only_logger_threshold(tmp_path, capsys):
