@@ -96,13 +96,26 @@ logging/
 
 日志相关的所有路径（`LogConfig._load_config` / `DefaultLogger` 创建文件）都走 `normalize_and_validate_log_path` → `is_sensitive_path`。新增 backend 的 file sink 配置同样走这条。**禁止**在 backend 里裸用 `open(path)` / `os.makedirs(path)`。
 
-### 8. exc_info/stack_info 是控制参数，不是结构化事件字段
+### 8. 后端控制参数（exc_info / stack_info）必须两个后端一致处理
 
-`exc_info`（stdlib `Logger.error(msg, exc_info=True)` 捕获在飞异常 traceback）与 `stack_info`（stdlib `Logger.log(stack_info=True)` 附带调用栈）是 backend 控制参数，**不是**结构化事件字段。两后端处理约定：
+`exc_info` 和 `stack_info` 是 stdlib logging 的后端控制参数，**不是业务事件字段**。调用方可以经任意等级方法或通用 `log()` 传入（`logger.error(..., exc_info=True)` / `logger.log(level, ..., exc_info=True)`），两个后端都必须：
 
-- **Default backend**：`_emit()` 与 `log()` 都在 `_process_log_message`（结构化事件构建）**之前** pop 这两个参数，放入共享 `extra` dict，随 `**extra` 转发给 stdlib logger。pop 顺序不能放后——`stack_info` 一旦漏进 `create_log_event` 会被当未知字段丢弃并触发 "Ignoring undefined fields" 警告（`create_log_event` 的白名单过滤会掩盖此回归，须用 spy `_process_log_message` 的测试守住）。browser-agent 镜像分支复用同一 `extra` dict，控制参数随之转发。
-- **Loguru backend**：`_emit()` 在 `_build_structured_event_dict` 之前 pop `exc_info`，映射到 `opt(exception=exc_info, depth=...)`（与 `.exception()` 同走 `_enrich_exception_payload` 填充 event JSON 的 `exception`/`error_message`/`stacktrace`）；`stack_info` 被 pop 消费（Loguru 无原生等价物，不伪造调用栈）。
-- **边界**：`exc_info=False` 与 `exc_info=None` 都不捕获 traceback——只有 truthy `exc_info` 才捕获。`exc_info=False` 不得伪造 stack。
+- 在 `_build_structured_event_dict()` / `_process_log_message()` **之前** `pop` 出来，避免污染事件 JSON；
+- 把有效值交给底层 logger，使异常栈/调用栈真正输出。
+
+**exc_info 一致性**：
+
+- Default 后端：`exc_info` 透传给 stdlib logger → traceback 进控制台/文件输出；**不**因此向 event JSON 新增字段。
+- Loguru 后端：`exc_info` 映射到 `bound_logger.opt(exception=exc_info, depth=stacklevel)`；record 带 exception 后，由现有 `_enrich_exception_payload()` 自动填充 event payload 的 `exception` / `error_message` / `stacktrace`（这三个是 `BaseLogEvent` 既有可选标准字段，与 `.exception()` 行为对齐）。这是既有 schema 内的字段填充变化，**不是 schema 变更**。
+- `exc_info` 可为 `True`、`(type, value, traceback)` 元组、`Exception` 实例；loguru `opt(exception=)` 原生接受这三种形式，Default 交给 stdlib 同样接受。
+- 未传或 `False` / `None`：不增加异常栈，也不虚构。
+
+**stack_info 降级边界**：
+
+- Default 后端遵循 stdlib 语义：`stack_info=True` 输出当前调用栈。
+- Loguru 没有与 stdlib 完全等价的 `stack_info` 参数。**只消费、降级**：从 kwargs `pop` 出来避免污染事件，不使用 `capture=True` 冒充，也不把人工拼接的栈塞进业务 `message`。若后续有 Loguru 模式必须输出调用栈的真实需求，单独定义跨后端 `call_stack` 字段，不在本参数上扩大设计。
+
+`.exception()` 不受影响——它走独立路径（Default 用 stdlib `Logger.exception()`，Loguru 用 `opt(exception=True)`），等级方法和 `log()` 的 `exc_info/stack_info` 修复统一在 `_emit()` 出口完成。
 
 ## 与项目其它模块的边界
 
