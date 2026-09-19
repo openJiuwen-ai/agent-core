@@ -484,6 +484,34 @@ def test_loguru_no_context_trace_id_slot_is_empty_not_sentinel(tmp_path):
     assert "default_trace_id" not in json.dumps(payload)
 
 
+def test_loguru_stack_info_downgraded_not_fabricated(tmp_path):
+    """§8 (accepted by作业单 B01, user decision 2026-09-19): Loguru has no
+    native stack_info. It is consumed (not leaked into the event, not
+    fabricated via capture=True, no hand-stitched stack in the message) — a
+    deliberate downgrade. Default's stack_info=True outputs the stdlib call
+    stack; Loguru does not, and must not fake one."""
+    config_file_path = os.path.join(tmp_path, "loguru_stack_info_downgrade.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-STACK-DOWNGRADE")
+        logger.info("plain with stack info", stack_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    record = payload["record"]
+
+    assert record["message"] == "plain with stack info"
+    # stack_info is consumed at _emit, not leaked into the record/event
+    assert "stack_info" not in record["extra"]
+    event = record["extra"].get("event") or {}
+    assert "stack_info" not in event
+    # no fabricated call stack: stacktrace only comes from exc_info via
+    # _enrich_exception_payload; stack_info must not fabricate one
+    assert "stacktrace" not in event
+    assert "call_stack" not in event
+
+
 def test_logger_level_override_affects_only_logger_threshold(tmp_path, capsys):
     config_file_path = os.path.join(tmp_path, "loguru_logger_level.yaml")
     config = _make_loguru_config(tmp_path)
