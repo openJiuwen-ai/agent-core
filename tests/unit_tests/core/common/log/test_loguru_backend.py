@@ -463,6 +463,27 @@ def test_loguru_pops_control_params_before_event_build(tmp_path):
     assert "stack_info" not in payload
 
 
+def test_loguru_no_context_trace_id_slot_is_empty_not_sentinel(tmp_path):
+    """DEF-05: with no request context the Loguru trace_id slot is empty, not
+    the internal sentinel. _patch_record normalizes default_trace_id to an
+    empty slot, matching Default's ContextFilter."""
+    config_file_path = os.path.join(tmp_path, "loguru_no_context_trace.yaml")
+    write_yaml_config(config_file_path, _make_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        # reset_log_manager fixture left context at the sentinel (no real request)
+        logger.info("no-context-trace-slot")
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    record = payload["record"]
+
+    assert record["message"] == "no-context-trace-slot"
+    assert record["extra"]["trace_id"] == ""
+    # the sentinel must not leak anywhere in the record
+    assert "default_trace_id" not in json.dumps(payload)
+
+
 def test_logger_level_override_affects_only_logger_threshold(tmp_path, capsys):
     config_file_path = os.path.join(tmp_path, "loguru_logger_level.yaml")
     config = _make_loguru_config(tmp_path)
