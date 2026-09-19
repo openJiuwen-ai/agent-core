@@ -1103,52 +1103,115 @@ class TestDefaultLogger:
         assert "Traceback" in output
         assert "RuntimeError: tuple-case-boom" in output
 
-    def test_propagate_true_routes_to_parent_logger(self, initialized_logger, stdout_capture):
-        """B02: with propagate=True (default config reaches the instance),
-        records reach the parent (root) logger handler."""
+    def test_log_method_exc_info_none_omits_traceback(self, initialized_logger, stdout_capture):
+        """B01 (generic log() entry): exc_info=None through log() does not capture
+        a traceback (boundary parity with the .error entry)."""
         logger = LogManager.get_logger("common")
-        logger.set_level(logging.INFO)
-        logger._logger.propagate = True
-        assert logger._logger.propagate is True  # config flowed to the instance
+        logger.set_level(logging.ERROR)
 
-        root = logging.getLogger()
-        root.setLevel(logging.DEBUG)
-        seen = []
-
-        class _Capture(logging.Handler):
-            def emit(self, record):
-                seen.append(record.getMessage())
-
-        cap = _Capture()
-        root.addHandler(cap)
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
         try:
-            logger.info("propagate-true-to-parent")
-        finally:
-            root.removeHandler(cap)
-        assert any("propagate-true-to-parent" in m for m in seen)
+            raise ValueError("log-none-case")
+        except ValueError:
+            logger.log(logging.ERROR, "log exc info none", exc_info=None)
 
-    def test_propagate_false_blocks_parent_logger(self, initialized_logger, stdout_capture):
-        """B02: with propagate=False, records do NOT reach the parent logger."""
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "log exc info none" in output
+        assert "Traceback" not in output
+
+    def test_log_method_exc_info_tuple_prints_specified_traceback(self, initialized_logger, stdout_capture):
+        """B01 (generic log() entry): exc_info=(type, value, tb) through log()
+        prints that specific exception's traceback."""
         logger = LogManager.get_logger("common")
-        logger.set_level(logging.INFO)
-        logger._logger.propagate = False
+        logger.set_level(logging.ERROR)
 
-        root = logging.getLogger()
-        root.setLevel(logging.DEBUG)
-        seen = []
-
-        class _Capture(logging.Handler):
-            def emit(self, record):
-                seen.append(record.getMessage())
-
-        cap = _Capture()
-        root.addHandler(cap)
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
         try:
-            logger.info("propagate-false-to-parent")
-        finally:
-            root.removeHandler(cap)
-            logger._logger.propagate = True  # restore
-        assert not any("propagate-false-to-parent" in m for m in seen)
+            raise RuntimeError("log-tuple-case")
+        except RuntimeError as e:
+            logger.log(logging.ERROR, "log exc info tuple", exc_info=(type(e), e, e.__traceback__))
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "log exc info tuple" in output
+        assert "Traceback" in output
+        assert "RuntimeError: log-tuple-case" in output
+
+    def test_propagate_true_config_reaches_logger_and_routes_to_parent(self, temp_config_dir):
+        """B02: root propagate=True flows config -> build_default_logger_config ->
+        DefaultLogger instance ._logger.propagate (no manual toggle), and the
+        parent (root) logger receives records."""
+        config = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "propagate": True,
+                "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+            }
+        }
+        config_file_path = os.path.join(temp_config_dir.name, "propagate_true.yaml")
+        write_yaml_config(config_file_path, config)
+        with patched_logging_config(config_file_path):
+            logger = LogManager.get_logger("common")
+            assert logger._logger.propagate is True  # config -> instance (not manual)
+
+            root = logging.getLogger()
+            root.setLevel(logging.DEBUG)
+            seen = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record):
+                    seen.append(record.getMessage())
+
+            cap = _Capture()
+            root.addHandler(cap)
+            try:
+                logger.info("propagate-true-config")
+            finally:
+                root.removeHandler(cap)
+            assert any("propagate-true-config" in m for m in seen)
+
+    def test_propagate_false_config_reaches_logger_and_blocks_parent(self, temp_config_dir):
+        """B02: root propagate=False flows config -> instance ._logger.propagate,
+        and the parent (root) logger does NOT receive records. Verifies the
+        config_provider -> DefaultLogger chain (7fd8c944); deleting that pass-through
+        would make this fail (propagate stuck at True)."""
+        config = {
+            "logging": {
+                "level": "INFO",
+                "output": ["console"],
+                "log_path": temp_config_dir.name,
+                "propagate": False,
+                "format": "%(asctime)s | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s",
+            }
+        }
+        config_file_path = os.path.join(temp_config_dir.name, "propagate_false.yaml")
+        write_yaml_config(config_file_path, config)
+        with patched_logging_config(config_file_path):
+            logger = LogManager.get_logger("common")
+            assert logger._logger.propagate is False  # config -> instance (not manual)
+
+            root = logging.getLogger()
+            root.setLevel(logging.DEBUG)
+            seen = []
+
+            class _Capture(logging.Handler):
+                def emit(self, record):
+                    seen.append(record.getMessage())
+
+            cap = _Capture()
+            root.addHandler(cap)
+            try:
+                logger.info("propagate-false-config")
+            finally:
+                root.removeHandler(cap)
+            assert not any("propagate-false-config" in m for m in seen)
 
 
 class TestLogManagerReset:
