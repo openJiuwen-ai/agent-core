@@ -553,6 +553,27 @@ def test_exc_info_tuple_enriches_payload(tmp_path):
     assert "RuntimeError" in payload["stacktrace"]
 
 
+def test_loguru_log_method_exc_info_enriches_payload(tmp_path):
+    """B01 (generic log() entry, Loguru): log() shares _emit with the level
+    methods; exc_info=True through log() enriches the payload via
+    _enrich_exception_payload (same path as .error())."""
+    config_file_path = os.path.join(tmp_path, "loguru_log_exc_info.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-LOG-EXC")
+        try:
+            raise RuntimeError("log-entry-boom")
+        except RuntimeError:
+            logger.log(logging.ERROR, "plain failure", exc_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "log-entry-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
 def test_loguru_trace_id_slot_after_reset_is_empty(tmp_path):
     """B02: after set_session_id then reset_session_id, the Loguru trace_id
     slot returns to empty (sentinel does not re-leak)."""
