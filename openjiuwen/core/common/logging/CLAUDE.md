@@ -96,6 +96,14 @@ logging/
 
 日志相关的所有路径（`LogConfig._load_config` / `DefaultLogger` 创建文件）都走 `normalize_and_validate_log_path` → `is_sensitive_path`。新增 backend 的 file sink 配置同样走这条。**禁止**在 backend 里裸用 `open(path)` / `os.makedirs(path)`。
 
+### 8. exc_info/stack_info 是控制参数，不是结构化事件字段
+
+`exc_info`（stdlib `Logger.error(msg, exc_info=True)` 捕获在飞异常 traceback）与 `stack_info`（stdlib `Logger.log(stack_info=True)` 附带调用栈）是 backend 控制参数，**不是**结构化事件字段。两后端处理约定：
+
+- **Default backend**：`_emit()` 与 `log()` 都在 `_process_log_message`（结构化事件构建）**之前** pop 这两个参数，放入共享 `extra` dict，随 `**extra` 转发给 stdlib logger。pop 顺序不能放后——`stack_info` 一旦漏进 `create_log_event` 会被当未知字段丢弃并触发 "Ignoring undefined fields" 警告（`create_log_event` 的白名单过滤会掩盖此回归，须用 spy `_process_log_message` 的测试守住）。browser-agent 镜像分支复用同一 `extra` dict，控制参数随之转发。
+- **Loguru backend**：`_emit()` 在 `_build_structured_event_dict` 之前 pop `exc_info`，映射到 `opt(exception=exc_info, depth=...)`（与 `.exception()` 同走 `_enrich_exception_payload` 填充 event JSON 的 `exception`/`error_message`/`stacktrace`）；`stack_info` 被 pop 消费（Loguru 无原生等价物，不伪造调用栈）。
+- **边界**：`exc_info=False` 与 `exc_info=None` 都不捕获 traceback——只有 truthy `exc_info` 才捕获。`exc_info=False` 不得伪造 stack。
+
 ## 与项目其它模块的边界
 
 - **不要**在库代码里用 `print()` 或 `logging.getLogger(__name__)`。入口只有本模块的 `*_logger`。

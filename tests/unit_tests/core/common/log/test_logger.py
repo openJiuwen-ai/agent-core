@@ -876,6 +876,122 @@ class TestDefaultLogger:
         assert "plain error without exc info" in output
         assert "Traceback" not in output
 
+    def test_log_method_forwards_exc_info(self, initialized_logger, stdout_capture):
+        """``logger.log(level, msg, exc_info=True)`` forwards exc_info through
+        the generic ``log()`` entry so the traceback is not silently dropped."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        try:
+            raise ValueError("boom-via-log-entry")
+        except ValueError:
+            logger.log(logging.ERROR, "crash via log", exc_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "crash via log" in output
+        assert "Traceback" in output
+        assert "ValueError: boom-via-log-entry" in output
+
+    def test_log_method_forwards_stack_info(self, initialized_logger, stdout_capture):
+        """``logger.log(level, msg, stack_info=True)`` forwards stack_info so
+        stdlib appends the call stack to the record."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        logger.log(logging.INFO, "with stack info", stack_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "with stack info" in output
+        assert "Stack (most recent call last)" in output
+
+    def test_log_method_pops_control_params_before_event_build(self, initialized_logger, stdout_capture):
+        """exc_info/stack_info are control params, not structured-event fields:
+        they must be popped before ``_process_log_message`` so they cannot reach
+        ``create_log_event`` (whose unknown-field filtering would mask the
+        regression) and trigger an "undefined fields" warning."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        with mock.patch.object(
+            logger, "_process_log_message", wraps=logger._process_log_message
+        ) as spy:
+            logger.log(logging.INFO, "isolated", exc_info=False, stack_info=True)
+
+        assert spy.called
+        assert "exc_info" not in spy.call_args.kwargs
+        assert "stack_info" not in spy.call_args.kwargs
+
+    def test_exc_info_false_does_not_print_traceback(self, initialized_logger, stdout_capture):
+        """``exc_info=False`` is an explicit boundary: no traceback captured,
+        mirroring stdlib semantics where only a truthy exc_info captures it."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        try:
+            raise ValueError("should-not-print")
+        except ValueError:
+            logger.error("boundary exc info false", exc_info=False)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "boundary exc info false" in output
+        assert "Traceback" not in output
+
+    def test_browser_agent_mirror_forwards_control_params(self, initialized_logger, stdout_capture):
+        """In browser-agent log context the mirrored browser logger receives
+        exc_info/stack_info via the shared control-param dict (mirror off so
+        only the browser branch runs)."""
+        import openjiuwen.core.common.logging.default.default_impl as default_impl_mod
+
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        browser_logger = logging.getLogger("openjiuwen.browser_agent")
+        for handler in browser_logger.handlers[:]:
+            browser_logger.removeHandler(handler)
+        browser_logger.setLevel(logging.DEBUG)
+        browser_capture = StringIO()
+        browser_handler = logging.StreamHandler(browser_capture)
+        browser_logger.addHandler(browser_handler)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+
+        with mock.patch.object(default_impl_mod, "is_browser_agent_log_context", return_value=True), \
+             mock.patch.dict(os.environ, {"OPENJIUWEN_BROWSER_AGENT_LOG_MIRROR_COMMON": "0"}):
+            try:
+                raise ValueError("browser-mirror-boom")
+            except ValueError:
+                logger.error("browser mirror crash", exc_info=True, stack_info=True)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        browser_handler.flush()
+        browser_out = browser_capture.getvalue()
+        browser_logger.removeHandler(browser_handler)
+
+        assert "browser mirror crash" in browser_out
+        assert "Traceback" in browser_out
+        assert "ValueError: browser-mirror-boom" in browser_out
+        assert "Stack (most recent call last)" in browser_out
+
 
 class TestLogManagerReset:
     """Test the log manager reset function"""
