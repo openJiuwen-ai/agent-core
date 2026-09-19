@@ -185,13 +185,22 @@ class SingleHarnessIterativeOptimizationOrchestrator:
         on_event: OnEvent | None = None,
     ) -> IterativeSingleHarnessResult:
         async with ModelUsageObserver(on_event).observe() as observer:
+            cancelled = False
             try:
                 return await self._run(request, on_event=on_event)
+            except asyncio.CancelledError:
+                # The provider may cancel the evaluator's execution task
+                # directly.  In that case the CancelledError reaches this
+                # coroutine without incrementing this task's cancelling()
+                # counter, but the whole RSI run is still terminated.
+                cancelled = True
+                raise
             finally:
                 # A worker-initiated termination cancels the running
                 # orchestrator coroutine.  Persist a durable ``terminated``
                 # state so restarts/recovery do not resurrect this run.
-                cancelled = asyncio.current_task().cancelling() > 0
+                task = asyncio.current_task()
+                cancelled = cancelled or (task is not None and task.cancelling() > 0)
                 if cancelled and observer.state is not None:
                     observer.state["status"] = "terminated"
                 # Include interrupted calls even when the controller aborts.
