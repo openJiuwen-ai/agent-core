@@ -120,6 +120,81 @@ class TestSessionIdTokenLifecycle:
 
         assert default_reset is reset_session_id
 
+    def test_set_reset_in_finally_restores_after_exception(self) -> None:
+        """The canonical safe usage: a token captured before a try block
+        restores the prior trace_id in a finally, even when the try raises."""
+        outer = set_session_id("before-try")
+        token = set_session_id("inside-try")
+        try:
+            raise RuntimeError("boom-in-try")
+        except RuntimeError:
+            pass
+        finally:
+            reset_session_id(token)
+        assert get_session_id() == "before-try"
+        reset_session_id(outer)
+
+    def test_reset_token_from_different_context_raises(self) -> None:
+        """B03: a token created in a different Context cannot be reset in the
+        current one — it raises ValueError rather than silently no-op."""
+        ctx = contextvars.copy_context()
+
+        def make_token() -> contextvars.Token[str]:
+            return set_session_id("in-other-context")
+
+        other_token = ctx.run(make_token)
+        with pytest.raises(ValueError):
+            reset_session_id(other_token)
+
+    def test_trace_id_isolated_across_threads(self) -> None:
+        """contextvars isolate trace_id across threads: a fresh thread does
+        not inherit the main thread's trace_id, and its own set does not
+        leak back."""
+        import threading
+
+        outer = set_session_id("main-trace")
+        seen: dict = {}
+
+        def worker() -> None:
+            seen["initial"] = get_session_id()
+            set_session_id("worker-trace")
+            seen["after_set"] = get_session_id()
+
+        t = threading.Thread(target=worker)
+        t.start()
+        t.join()
+        assert seen["initial"] == "default_trace_id"
+        assert seen["after_set"] == "worker-trace"
+        assert get_session_id() == "main-trace"
+        reset_session_id(outer)
+
+    def test_trace_id_isolated_across_asyncio_tasks(self) -> None:
+        """An asyncio Task copies the context: it inherits the creator's
+        trace_id, its own set does not leak back, and reset inside the task
+        does not affect the caller."""
+        import asyncio
+
+        outer = set_session_id("main-trace")
+        seen: dict = {}
+
+        async def child() -> None:
+            seen["inherited"] = get_session_id()
+            token = set_session_id("child-trace")
+            seen["after_set"] = get_session_id()
+            reset_session_id(token)
+
+        async def main() -> None:
+            seen["main_before"] = get_session_id()
+            await asyncio.create_task(child())
+            seen["main_after"] = get_session_id()
+
+        asyncio.run(main())
+        assert seen["main_before"] == "main-trace"
+        assert seen["inherited"] == "main-trace"
+        assert seen["after_set"] == "child-trace"
+        assert seen["main_after"] == "main-trace"
+        reset_session_id(outer)
+
     def test_logging_api_is_distinct_from_agent_teams(self) -> None:
         """D-04: the logging trace_id API is separate from agent_teams' session
         context — different packages, different contextvars, tokens not
