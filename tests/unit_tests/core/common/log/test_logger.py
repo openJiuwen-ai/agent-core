@@ -597,6 +597,55 @@ class TestLogConfig:
         assert agent_config["output"] == ["console"]
         assert agent_config["log_file"] == os.path.join(temp_config_dir.name, "agent.log")
 
+    def test_propagate_passes_through_to_built_logger_config(self, temp_config_dir):
+        """Root ``propagate`` must flow into each built per-logger config.
+
+        ``build_default_logger_config`` materializes the config consumed by
+        ``DefaultLogger``, which reads ``config.get("propagate", True)``.
+        Without pass-through, setting ``propagate: false`` at the root has no
+        effect and every built-in logger keeps propagating to the stdlib root
+        handler (DEF-05)."""
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+            load_default_backend_config,
+        )
+
+        normalized = load_default_backend_config(
+            {
+                "level": "INFO",
+                "output": ["file"],
+                "log_path": temp_config_dir.name,
+                "propagate": False,
+            }
+        )
+
+        for log_type in ("common", "interface", "prompt_builder", "performance"):
+            built = build_default_logger_config(normalized, log_type)
+            assert "propagate" in built, f"{log_type} config missing propagate key"
+            assert built["propagate"] is False, f"{log_type} propagate not False"
+
+    def test_propagate_defaults_to_true_when_unset(self, temp_config_dir):
+        """When ``propagate`` is unset, built configs default to True.
+
+        Preserves existing behavior (``DefaultLogger`` reads
+        ``config.get("propagate", True)``) so loggers that did propagate keep
+        doing so unless a caller explicitly opts out."""
+        from openjiuwen.core.common.logging.default.config_provider import (
+            build_default_logger_config,
+            load_default_backend_config,
+        )
+
+        normalized = load_default_backend_config(
+            {
+                "level": "INFO",
+                "output": ["file"],
+                "log_path": temp_config_dir.name,
+            }
+        )
+
+        built = build_default_logger_config(normalized, "common")
+        assert built.get("propagate") is True
+
     def test_invalid_per_logger_level_falls_back_to_warning(self, temp_config_dir):
         """Invalid per-logger levels should fall back to WARNING."""
         from openjiuwen.core.common.logging.log_config import LogConfig
@@ -991,6 +1040,29 @@ class TestDefaultLogger:
         assert "Traceback" in browser_out
         assert "ValueError: browser-mirror-boom" in browser_out
         assert "Stack (most recent call last)" in browser_out
+
+    def test_fresh_context_trace_id_slot_is_empty_not_sentinel(self, initialized_logger, stdout_capture):
+        """DEF-05: with no request context, the trace_id slot is empty.
+
+        The internal ``default_trace_id`` sentinel marks "no context set" in
+        the contextvar, but must NOT leak into the formatted log line — the
+        fixed outer layer requires an empty slot. ``initialized_logger`` leaves
+        the context at the sentinel (no real request), so this is the
+        fresh-process / pre-request state."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        logger.info("fresh-trace-slot-test")
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+
+        output = stdout_capture.getvalue()
+        assert "fresh-trace-slot-test" in output
+        # the sentinel must not appear in the formatted line
+        assert "default_trace_id" not in output
 
 
 class TestLogManagerReset:
