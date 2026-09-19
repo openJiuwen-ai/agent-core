@@ -29,7 +29,7 @@ from openjiuwen.core.common.logging.events import (
     ModuleType,
 )
 from openjiuwen.core.common.logging.protocol import LoggerProtocol
-from openjiuwen.core.common.logging.utils import get_session_id
+from openjiuwen.core.common.logging.utils import _DEFAULT_TRACE_ID, get_session_id
 
 
 def _get_loguru():
@@ -174,7 +174,11 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
     def _patch_record(self, record: Dict[str, Any]) -> None:
         extra = record["extra"]
         extra.setdefault("log_type", self._log_type_label)
-        extra.setdefault("trace_id", get_session_id())
+        _trace_id = get_session_id()
+        # Normalize the internal "no context" sentinel to an empty slot — the
+        # fixed outer layer requires empty (not the sentinel) when there is no
+        # request context (matches Default's ContextFilter, DEF-05).
+        extra.setdefault("trace_id", "" if _trace_id == _DEFAULT_TRACE_ID else _trace_id)
         from openjiuwen.core.common.logging.utils import get_member_id
         extra.setdefault("member_id", get_member_id())
         extra.setdefault("event", None)
