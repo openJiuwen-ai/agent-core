@@ -1064,6 +1064,92 @@ class TestDefaultLogger:
         # the sentinel must not appear in the formatted line
         assert "default_trace_id" not in output
 
+    def test_exc_info_none_omits_traceback(self, initialized_logger, stdout_capture):
+        """B01: exc_info=None is a boundary — no traceback captured (same as
+        not passing exc_info)."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise ValueError("none-case-boom")
+        except ValueError:
+            logger.error("exc info none", exc_info=None)
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "exc info none" in output
+        assert "Traceback" not in output
+
+    def test_exc_info_tuple_prints_specified_traceback(self, initialized_logger, stdout_capture):
+        """B01: exc_info=(type, value, tb) prints that specific exception's
+        traceback through the stdlib logger."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.ERROR)
+
+        stdout_capture.truncate(0)
+        stdout_capture.seek(0)
+        try:
+            raise RuntimeError("tuple-case-boom")
+        except RuntimeError as e:
+            logger.error("exc info tuple", exc_info=(type(e), e, e.__traceback__))
+
+        for handler in logger._logger.handlers:
+            handler.flush()
+        output = stdout_capture.getvalue()
+        assert "exc info tuple" in output
+        assert "Traceback" in output
+        assert "RuntimeError: tuple-case-boom" in output
+
+    def test_propagate_true_routes_to_parent_logger(self, initialized_logger, stdout_capture):
+        """B02: with propagate=True (default config reaches the instance),
+        records reach the parent (root) logger handler."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+        logger._logger.propagate = True
+        assert logger._logger.propagate is True  # config flowed to the instance
+
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        seen = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                seen.append(record.getMessage())
+
+        cap = _Capture()
+        root.addHandler(cap)
+        try:
+            logger.info("propagate-true-to-parent")
+        finally:
+            root.removeHandler(cap)
+        assert any("propagate-true-to-parent" in m for m in seen)
+
+    def test_propagate_false_blocks_parent_logger(self, initialized_logger, stdout_capture):
+        """B02: with propagate=False, records do NOT reach the parent logger."""
+        logger = LogManager.get_logger("common")
+        logger.set_level(logging.INFO)
+        logger._logger.propagate = False
+
+        root = logging.getLogger()
+        root.setLevel(logging.DEBUG)
+        seen = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                seen.append(record.getMessage())
+
+        cap = _Capture()
+        root.addHandler(cap)
+        try:
+            logger.info("propagate-false-to-parent")
+        finally:
+            root.removeHandler(cap)
+            logger._logger.propagate = True  # restore
+        assert not any("propagate-false-to-parent" in m for m in seen)
+
 
 class TestLogManagerReset:
     """Test the log manager reset function"""
