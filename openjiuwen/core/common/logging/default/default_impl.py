@@ -425,7 +425,16 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         # so tracebacks actually print. Without this, every
         # ``logger.error(..., exc_info=True)`` call silently lost its stack.
         exc_info = kwargs.pop("exc_info", None)
-        extra = {"exc_info": exc_info} if exc_info is not None else {}
+        # ``stack_info`` is the stdlib ``Logger.log(stack_info=True)`` contract:
+        # when enabled, stdlib appends the call stack to the record. Like
+        # ``exc_info`` it is a control param, not a structured-event field, so
+        # pop it here and forward it alongside ``exc_info`` in the shared
+        # parameter dict (browser-agent and common branches reuse it).
+        extra: Dict[str, Any] = {}
+        if exc_info is not None:
+            extra["exc_info"] = exc_info
+        if kwargs.pop("stack_info", False):
+            extra["stack_info"] = True
         formatted_msg = self._auto_format_message(msg, args)
         processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
         if is_browser_agent_log_context():
@@ -506,9 +515,21 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
+        exc_info = kwargs.pop("exc_info", None)
+        # ``exc_info``/``stack_info`` are backend control params, not
+        # structured-event fields. Pop them before structured-event
+        # construction (else ``stack_info`` leaks into ``create_log_event``
+        # as an unknown field and triggers a warning) and forward to the
+        # stdlib logger so tracebacks/call stacks are not silently dropped
+        # through the generic ``log()`` entry.
+        extra: Dict[str, Any] = {}
+        if exc_info is not None:
+            extra["exc_info"] = exc_info
+        if kwargs.pop("stack_info", False):
+            extra["stack_info"] = True
         formatted_msg = self._auto_format_message(msg, args)
         processed_msg = self._process_log_message(log_level, formatted_msg, event_type, event, **kwargs)
-        self._logger.log(level, processed_msg, stacklevel=stacklevel)
+        self._logger.log(level, processed_msg, stacklevel=stacklevel, **extra)
 
     def set_level(self, level: int) -> None:
         """Set log level"""

@@ -387,6 +387,82 @@ def test_exception_can_emit_event_first_json_failure_payload(tmp_path):
     assert payload["metadata"]["_log_context"]["log_type"] == "common"
 
 
+def test_exc_info_prints_traceback_in_payload(tmp_path):
+    """``logger.error(msg, exc_info=True)`` maps onto ``opt(exception=...)`` so
+    loguru formats the traceback and ``_enrich_exception_payload`` fills the
+    event JSON ``exception``/``error_message``/``stacktrace`` fields (same path
+    as ``.exception()``)."""
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_exc_info.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-INFO")
+
+        try:
+            raise RuntimeError("exc-info-boom")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=True)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+
+    assert payload["message"] == "plain failure"
+    assert payload["exception"] == "exc-info-boom"
+    assert payload["error_message"] == "exc-info-boom"
+    assert "RuntimeError" in payload["stacktrace"]
+
+
+def test_exc_info_false_omits_exception_in_payload(tmp_path):
+    """``exc_info=False`` is an explicit boundary: no exception payload is
+    fabricated, mirroring the Default backend contract."""
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_exc_info_false.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-EXC-INFO-FALSE")
+
+        try:
+            raise RuntimeError("should-not-enrich")
+        except RuntimeError:
+            logger.error("plain failure", exc_info=False)
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+
+    assert payload["message"] == "plain failure"
+    assert not payload.get("exception")
+    assert not payload.get("stacktrace")
+
+
+def test_loguru_pops_control_params_before_event_build(tmp_path):
+    """exc_info/stack_info are control params, not structured-event fields:
+    they are popped before ``_build_structured_event_dict`` so they neither
+    leak into the event JSON nor reach ``create_log_event`` (whose unknown-field
+    filtering would mask the regression)."""
+    from unittest import mock
+
+    config_file_path = os.path.join(tmp_path, "loguru_event_first_control_params.yaml")
+    write_yaml_config(config_file_path, _make_event_first_loguru_config(tmp_path))
+
+    with patched_logging_config(config_file_path):
+        logger = LogManager.get_logger("common")
+        set_session_id("TRACE-CONTROL-PARAMS")
+
+        with mock.patch.object(
+            logger, "_build_structured_event_dict",
+            wraps=logger._build_structured_event_dict,
+        ) as spy:
+            logger.info("isolated", exc_info=False, stack_info=True)
+
+        assert spy.called
+        assert "exc_info" not in spy.call_args.kwargs
+        assert "stack_info" not in spy.call_args.kwargs
+
+    payload = _read_last_json_record(os.path.join(tmp_path, "common.jsonl"))
+    assert payload["message"] == "isolated"
+    assert "stack_info" not in payload
+
+
 def test_logger_level_override_affects_only_logger_threshold(tmp_path, capsys):
     config_file_path = os.path.join(tmp_path, "loguru_logger_level.yaml")
     config = _make_loguru_config(tmp_path)

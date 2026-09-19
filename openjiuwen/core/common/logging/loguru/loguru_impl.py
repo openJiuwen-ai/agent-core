@@ -538,19 +538,31 @@ class LoguruLogger(StructuredLoggerMixin, LoggerProtocol):
         event_type = kwargs.pop("event_type", None)
         event = kwargs.pop("event", None)
         stacklevel = kwargs.pop("stacklevel", 2)
+        # ``exc_info`` is a control param, not a structured-event field: pop it
+        # before event construction so it neither pollutes the payload nor is
+        # dropped. Map it onto ``opt(exception=...)`` so loguru formats the
+        # traceback and the existing ``_enrich_exception_payload`` fills the
+        # event JSON ``exception``/``error_message``/``stacktrace`` fields
+        # (same path as ``.exception()``).
+        exc_info = kwargs.pop("exc_info", None)
+        # Loguru has no native ``stack_info`` equivalent. Consume it here so it
+        # cannot leak into the structured event; do not fabricate a call stack.
+        kwargs.pop("stack_info", False)
 
         formatted_msg = self._auto_format_message(msg, args)
         sanitized_msg = self._sanitize_message(formatted_msg)
         event_dict = self._build_structured_event_dict(log_level, sanitized_msg, event_type, event, **kwargs)
         event_text = self._render_event_text(event_dict) if event_dict else ""
-        rendered_message = self._build_rendered_message(sanitized_msg, event_text)
 
         bound_logger = self._logger.bind(
             event=event_dict,
             event_text=event_text,
-            rendered_message=rendered_message,
+            rendered_message=self._build_rendered_message(sanitized_msg, event_text),
         )
-        bound_logger.opt(depth=stacklevel).log(level, sanitized_msg)
+        if exc_info is not None:
+            bound_logger.opt(exception=exc_info, depth=stacklevel).log(level, sanitized_msg)
+        else:
+            bound_logger.opt(depth=stacklevel).log(level, sanitized_msg)
 
     def debug(self, msg: str, *args: Any, **kwargs: Any) -> None:
         self._emit("DEBUG", LogLevel.DEBUG, msg, args, **kwargs)
