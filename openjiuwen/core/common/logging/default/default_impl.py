@@ -226,10 +226,13 @@ class ContextFilter(logging.Filter):
         Returns:
             Always returns True (does not filter any records)
         """
-        # Get trace_id from context variable (adapted for async environments)
-        record.trace_id = get_session_id()
+        # Get trace_id from context variable (adapted for async environments).
+        # Normalize the internal "no context" sentinel to an empty slot — the fixed
+        # outer layer requires empty (not the sentinel) when there is no request context.
+        from openjiuwen.core.common.logging.utils import _DEFAULT_TRACE_ID, get_member_id
 
-        from openjiuwen.core.common.logging.utils import get_member_id
+        trace_id = get_session_id()
+        record.trace_id = "" if trace_id == _DEFAULT_TRACE_ID else trace_id
         record.member_id = get_member_id()
 
         # Set log type, special handling for performance type

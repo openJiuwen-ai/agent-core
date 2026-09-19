@@ -21,11 +21,17 @@ from openjiuwen.core.common.security.path_checker import is_sensitive_path
 
 # Use ContextVar instead of threading.local() to support async environments
 # ContextVar maintains context isolation in async call chains, each coroutine has independent context
-_trace_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="default_trace_id")
+
+# Internal sentinel marking "no trace_id set". The contextvar keeps this value when
+# unset, but it must NOT leak into formal log output — the fixed outer layer requires an
+# empty slot when there is no request context. ContextFilter normalizes it at the
+# output boundary (see default/default_impl.py).
+_DEFAULT_TRACE_ID = "default_trace_id"
+_trace_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default=_DEFAULT_TRACE_ID)
 _member_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("member_id", default="")
 
 
-def set_session_id(trace_id: str = "default_trace_id") -> None:
+def set_session_id(trace_id: str = _DEFAULT_TRACE_ID) -> None:
     """
     Set trace_id in current context
 
@@ -60,7 +66,7 @@ def get_session_id() -> Optional[str]:
         return _trace_id_context.get()
     except LookupError:
         # If no value in context, return default value
-        return "default_trace_id"
+        return _DEFAULT_TRACE_ID
 
 
 def set_member_id(member_id: str) -> None:
