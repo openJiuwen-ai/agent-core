@@ -13,7 +13,7 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.messager import Messager
-from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ExternalCliBuiltinModel
+from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec, ExternalCliBuiltinModel, ModelPoolEntry
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.member_options import (
@@ -149,6 +149,51 @@ async def test_spawn_rejects_invalid_builtin_choices(db: TeamDatabase) -> None:
     assert "unavailable" in gated.error, "MCP clients bypass the schema, so the tool rejects gated input"
 
 
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_a_builtin_name_in_model_name_is_redirected_to_builtin_model(db: TeamDatabase) -> None:
+    backend = _backend(db, _claude_spec())
+
+    redirected = await _spawn(backend, model_name="sonnet")
+    assert "pass it as 'builtin_model' instead" in redirected.error
+    assert "built-in model of cli_agent 'claude'" in redirected.error
+
+    unknown = await _spawn(backend, model_name="gpt-4o")
+    assert "the team model pool has no compatible model" in unknown.error
+    assert "via 'builtin_model': sonnet, haiku" in unknown.error
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_unallocatable_model_name_lists_the_pool_and_the_catalog(db: TeamDatabase) -> None:
+    backend = _backend(db, _claude_spec())
+    backend.get_model_pool = lambda: [_pool_entry("claude-3-7-sonnet")]
+    tool = SpawnExternalCliTool(backend, make_translator("en"), model_config_allocator=lambda name, **kwargs: None)
+
+    result = await tool.invoke(
+        {
+            "member_name": "claude-1",
+            "display_name": "Claude One",
+            "prompt": "worker",
+            "cli_agent": "claude",
+            "fallback_model_name": None,
+            "model_name": "gpt-4o",
+        }
+    )
+    assert "is unavailable or incompatible" in result.error
+    assert "the team model pool offers: claude-3-7-sonnet" in result.error
+    assert "via 'builtin_model': sonnet, haiku" in result.error
+    logger.info("model_name rejection: %s", result.error)
+
+
+@pytest.mark.level1
+@pytest.mark.asyncio
+async def test_model_name_failure_without_a_catalog_mentions_no_builtin_models(db: TeamDatabase) -> None:
+    plain = await _spawn(_backend(db, ExternalCliAgentSpec(cli_agent="claude")), model_name="sonnet")
+    assert "is unavailable or incompatible" in plain.error or "without a team model pool" in plain.error
+    assert "builtin_model" not in plain.error
+
+
 @pytest.mark.level0
 @pytest.mark.asyncio
 async def test_builtin_parameters_and_prose_follow_the_catalog_gate(db: TeamDatabase) -> None:
@@ -244,6 +289,16 @@ async def test_set_member_model_rejects_members_it_cannot_switch(db: TeamDatabas
     member = _backend(db, _claude_spec())
     member.is_leader = False
     assert "Only the leader" in (await member.set_member_model("pool-member", model="sonnet", effort=None)).reason
+
+
+def _pool_entry(model_name: str) -> ModelPoolEntry:
+    """Build an Anthropic pool entry the claude CLI kind accepts."""
+    return ModelPoolEntry(
+        model_name=model_name,
+        api_key="mock-api-key",
+        api_base_url="https://api.anthropic.com",
+        api_provider="anthropic",
+    )
 
 
 class _Allocation:
