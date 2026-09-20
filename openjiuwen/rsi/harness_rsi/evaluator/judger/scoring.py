@@ -139,7 +139,16 @@ def parse_judge_output(raw: str) -> dict[str, Any]:
         if "```" in outside or _contains_judge_payload(outside):
             raise ValueError("ambiguous judge output: more than one structured payload")
         text = match[1].strip()
-    parsed = json.loads(text, object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    decoder = json.JSONDecoder(object_pairs_hook=_unique_json_object, parse_constant=_reject_json_constant)
+    if not text.startswith(("{", "[")):
+        start = min((i for i, char in enumerate(text) if char in "{["), default=-1)
+        if start < 0:
+            raise ValueError("judge output contains no JSON verdict")
+        parsed, end = decoder.raw_decode(text, start)
+        if _contains_judge_payload(text[end:]):
+            raise ValueError("ambiguous judge output: more than one structured payload")
+    else:
+        parsed = decoder.decode(text)
     if not isinstance(parsed, dict):
         raise ValueError("judge output must be an object")
     return parsed

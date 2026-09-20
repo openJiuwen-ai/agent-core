@@ -55,7 +55,7 @@ class EvaluatorConfig:
     backend: str = "single_harness"
     evaluation_method: str = "script-based"
     judge_model_config_ref: str = ""
-    judge_agent_max_iterations: int = 8
+    judge_agent_max_iterations: int = 20
     judge_timeout_sec: int = 900
     judge_max_retries: int = 2
     judge_success_score: float = 0.8
@@ -75,7 +75,9 @@ class EvaluatorConfig:
             backend=str(data.get("backend", "single_harness")),
             evaluation_method=str(data.get("evaluation_method", "script-based")),
             judge_model_config_ref=str(data.get("judge_model_config_ref", "")),
-            judge_agent_max_iterations=_int_value(data.get("judge_agent_max_iterations"), default=8),
+            judge_agent_max_iterations=_int_value(
+                data.get("judge_agent_max_iterations"), default=cls().judge_agent_max_iterations,
+            ),
             judge_timeout_sec=_int_value(data.get("judge_timeout_sec"), default=900),
             judge_max_retries=_int_value(data.get("judge_max_retries"), default=2),
             judge_success_score=float(data.get("judge_success_score", 0.8)),
