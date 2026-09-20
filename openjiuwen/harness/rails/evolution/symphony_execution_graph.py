@@ -493,7 +493,7 @@ def _normalized_ports(ports: Any) -> list[dict[str, Any]] | None:
         name = raw.get("name")
         port_type = raw.get("type")
         if not _valid_identity_text(name) or not _valid_identity_text(port_type):
-            continue
+            return None
         item: dict[str, Any] = {"name": name, "type": port_type}
         if "required" in raw:
             required = raw.get("required")
