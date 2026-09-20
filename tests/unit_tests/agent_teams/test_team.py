@@ -1728,6 +1728,52 @@ async def test_update_task_assign_spawn_failure_still_succeeds(db, message_bus):
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+async def test_startup_skips_failed_member_and_starts_the_rest(db, message_bus):
+    """startup 逐成员容错：单个成员 spawn 失败（如 junction 路径过长）记日志跳过，
+    不抛出、不阻断其他成员拉起；失败成员回滚 UNSTARTED 供下趟重试。
+
+    覆盖的事故现场：一名成员 junction 确定性失败时，startup() 整体抛出，
+    send_message 在写邮箱前被炸，全团通信瘫痪。"""
+    team_id = "startup_fault_tolerance_team"
+    await db.team.create_team(
+        team_name=team_id,
+        display_name="Startup FT Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name=team_id, member_name="leader1", db=db,
+        messager=message_bus, is_leader=True,
+    )
+    await backend.spawn_member(
+        member_name="dev-1", display_name="Dev 1",
+        agent_card=AgentCard(name="Dev1", description="d1", version="1.0.0"),
+    )
+    await backend.spawn_member(
+        member_name="dev-2", display_name="Dev 2",
+        agent_card=AgentCard(name="Dev2", description="d2", version="1.0.0"),
+    )
+
+    async def flaky_on_created(name: str) -> None:
+        if name == "dev-1":
+            raise OSError(206, "文件名或扩展名太长")
+
+    started = await backend.startup(on_created=flaky_on_created)
+
+    assert started == ["dev-2"]
+    m1 = await db.member.get_member("dev-1", team_id)
+    m2 = await db.member.get_member("dev-2", team_id)
+    assert m1.status == MemberStatus.UNSTARTED.value
+    assert m2.status == MemberStatus.STARTING.value
+
+    # 修复后重试：失败成员能被后续 startup 趟拉起
+    started = await backend.startup(on_created=AsyncMock())
+    assert started == ["dev-1"]
+    m1 = await db.member.get_member("dev-1", team_id)
+    assert m1.status == MemberStatus.STARTING.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_try_transition_member_status_atomic_cas(db):
     """try_transition_member_status uses atomic UPDATE WHERE, only one caller succeeds."""
     team_id = "cas_team"

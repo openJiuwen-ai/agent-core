@@ -4,7 +4,6 @@ import errno
 import os
 import shutil
 import stat
-import subprocess
 import sys
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -15,6 +14,7 @@ from typing import Any, Dict, List, Union
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
+from openjiuwen.core.common.utils.windows_junction import create_windows_junction
 
 try:
     import winerror
@@ -206,7 +206,20 @@ class Workspace:
             os.symlink(target_path, str(link_path), target_is_directory=True)
         except OSError as exc:
             if sys.platform == "win32" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
-                self._create_windows_junction(target_path, str(link_path))
+                try:
+                    self._create_windows_junction(target_path, str(link_path))
+                except OSError as junction_error:
+                    logger.warning(
+                        f"Junction link at {link_path} failed ({junction_error}); "
+                        "falling back to a copied directory (snapshot semantics)"
+                    )
+                    shutil.copytree(
+                        target_path,
+                        str(link_path),
+                        symlinks=False,
+                        copy_function=shutil.copy2,
+                        dirs_exist_ok=False,
+                    )
                 return
             if getattr(exc, "errno", None) not in (errno.EACCES, errno.EPERM):
                 raise
@@ -220,22 +233,8 @@ class Workspace:
 
     @staticmethod
     def _create_windows_junction(target_path: str, link_path: str) -> None:
-        """Create a directory junction using ``mklink /J`` on Windows."""
-        cmd_path = os.path.join(
-            os.environ.get("SystemRoot", r"C:\Windows"),
-            "System32",
-            "cmd.exe",
-        )
-        result = subprocess.run(
-            [cmd_path, "/c", "mklink", "/J", link_path, target_path],
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=False,
-        )
-        if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip()
-            raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
+        """Create a directory junction (mklink, then long-path reparse fallback)."""
+        create_windows_junction(target_path, link_path)
 
     def _remove_directory_link(self, link: Path) -> bool:
         """Remove a directory symlink, junction, or copied fallback directory."""

@@ -519,6 +519,15 @@ class TeamBackend:
         On spawn failure, startup_member rolls back STARTING→UNSTARTED
         and re-raises.
 
+        Per-member fault tolerant: a member that fails to spawn is
+        logged, left rolled back to UNSTARTED (so a later startup pass
+        can retry it), and skipped — it never aborts the loop. Every
+        caller of this funnel (send_message auto-start, interact
+        broadcast, create_task autostart) wants best-effort semantics:
+        the work at hand (a message, a task) must still land for the
+        members that did start, and one broken member must not silence
+        the team's whole communication channel.
+
         Args:
             on_created: Callback that receives a member_name and
                 launches the corresponding agent process.
@@ -529,7 +538,14 @@ class TeamBackend:
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
-            await self.startup_member(member.member_name, on_created)
+            try:
+                await self.startup_member(member.member_name, on_created)
+            except Exception as e:
+                team_logger.error(
+                    "startup: failed to start member {} (left UNSTARTED for retry): {}",
+                    member.member_name, e,
+                )
+                continue
             started.append(member.member_name)
         return started
 
