@@ -474,7 +474,7 @@ class SymphonyFlowEngine:
         return tuple(candidates)
 
     def acknowledge_candidate(self, recipe_id: str, version: int) -> bool:
-        """Acknowledge successful Host Event delivery for one candidate version."""
+        """Acknowledge successful completion for one candidate version."""
 
         current = self.get_recipe(recipe_id)
         if current is None:
@@ -482,6 +482,16 @@ class SymphonyFlowEngine:
         if current.version != version or current.status != "active" or current.grade != "verified":
             return False
         return self.store.acknowledge_candidate(recipe_id, version)
+
+    def release_candidate(self, recipe_id: str, version: int) -> bool:
+        """Release a deferred candidate version so it can be offered again."""
+
+        current = self.get_recipe(recipe_id)
+        if current is None:
+            return False
+        if current.version != version or current.status != "active" or current.grade != "verified":
+            return False
+        return self.store.release_candidate(recipe_id, version)
 
     def review_history(self, package_id: str) -> list[ReviewResult]:
         """评审结果按包存储；v1 返回最近一次（幂等输入 → 幂等评审）。"""

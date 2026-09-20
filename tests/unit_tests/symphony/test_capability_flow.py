@@ -377,6 +377,33 @@ def test_candidate_ack_persists_across_engine_instances(tmp_path: Path) -> None:
     assert restarted.get_candidate(candidate.recipe_id) == candidate
 
 
+def test_released_candidate_is_offered_again_after_restart(tmp_path: Path) -> None:
+    flow_dir = tmp_path / "flow"
+    engine = SymphonyFlowEngine(flow_dir)
+    candidate = asyncio.run(engine.submit(_execution_graph("trace-1")))[0]
+    assert engine.acknowledge_candidate(candidate.recipe_id, candidate.version)
+
+    assert engine.release_candidate(candidate.recipe_id, candidate.version) is True
+    assert engine.release_candidate(candidate.recipe_id, candidate.version) is False
+
+    restarted = SymphonyFlowEngine(flow_dir)
+    assert asyncio.run(restarted.start()) == (candidate,)
+
+
+def test_legacy_delivery_acknowledgement_does_not_hide_candidate(tmp_path: Path) -> None:
+    flow_dir = tmp_path / "flow"
+    engine = SymphonyFlowEngine(flow_dir)
+    candidate = asyncio.run(engine.submit(_execution_graph("trace-1")))[0]
+    legacy_path = flow_dir / "candidate_acknowledgements.json"
+    legacy_path.write_text(
+        json.dumps([f"{candidate.recipe_id}:v{candidate.version}"]),
+        encoding="utf-8",
+    )
+
+    restarted = SymphonyFlowEngine(flow_dir)
+    assert asyncio.run(restarted.start()) == (candidate,)
+
+
 def test_ack_uses_current_verified_state_when_immutable_version_was_candidate(tmp_path: Path) -> None:
     config = SymphonyFlowConfig(
         min_edge_support=1,
@@ -1183,6 +1210,23 @@ def test_llm_review_agent_receives_only_canonical_redacted_package(tmp_path: Pat
     assert "artifact_dir" not in messages[1]["content"]
     assert "tools" not in llm.invoke.await_args.kwargs
     assert llm.invoke.await_args.kwargs == {"temperature": 0.0}
+
+
+def test_llm_review_agent_prompt_does_not_invent_skill_pack_blockers(tmp_path: Path) -> None:
+    engine = _feed_verified_engine(tmp_path)
+    report = asyncio.run(engine.distill())
+    package = CapabilityPackager.build_package(engine.get_recipe(_verified_recipe_id(engine, report)))
+    llm = Mock(invoke=AsyncMock(return_value='{"verdict":"approved"}'))
+    reviewer = LLMPackageReviewAgent(llm)
+
+    verdict = asyncio.run(reviewer.review(package))
+
+    system_prompt = llm.invoke.await_args.args[0][0]["content"]
+    assert verdict == VERDICT_APPROVED
+    assert "Proprietary license is explicitly allowed" in system_prompt
+    assert "credentials, permissions, and runtime configuration outside" in system_prompt
+    assert "timestamps" in system_prompt
+    assert "never infer missing facts" in system_prompt
 
 
 # 4.3.1 约定的执行图外层对象样本：含失败边、分支边与证据引用
