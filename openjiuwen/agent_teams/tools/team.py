@@ -557,6 +557,34 @@ class TeamBackend:
             return []
         return await self.startup(on_created=self._on_member_started)
 
+    async def autostart_member(self, member_name: str) -> bool:
+        """Start one UNSTARTED member using the injected spawn callback.
+
+        Single-member companion to ``autostart_unstarted`` for the
+        assignment path: ``update_task(assignee=...)`` hands work to one
+        specific member, so only that member needs to exist — starting
+        the whole roster would spawn teammates the leader never
+        addressed. An assigned-but-never-started member is otherwise a
+        structural dead end: the assignment event has no subscriber, the
+        member-side stale self-check requires a running kernel, and the
+        leader-side stale-pending sweep only scans unassigned tasks.
+
+        Same guards as ``autostart_unstarted`` (leader-only,
+        callback-gated); the UNSTARTED→STARTING CAS in ``startup_member``
+        makes repeated or concurrent calls idempotent.
+
+        Args:
+            member_name: The member to start when still UNSTARTED.
+
+        Returns:
+            True if this call started the member; False when the member
+            was already started/starting or this backend does not own
+            spawning.
+        """
+        if not self.is_leader or self._on_member_started is None:
+            return False
+        return await self.startup_member(member_name, self._on_member_started)
+
     async def startup_member(
         self,
         member_name: str,

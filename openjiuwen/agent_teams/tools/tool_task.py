@@ -707,6 +707,7 @@ class UpdateTaskTool(TeamTool):
             if not assign_result.ok:
                 return ToolOutput(success=False, error=assign_result.reason)
             updated.append("assignee")
+            await self._autostart_assignee(assignee)
 
         # Set / clear verify-gate reviewers. A leader may (re)assign reviewers
         # at any status; an empty list clears the gate. Reviewers must be real
@@ -772,6 +773,33 @@ class UpdateTaskTool(TeamTool):
                 "updated_fields": updated,
             },
         )
+
+    async def _autostart_assignee(self, assignee: str) -> None:
+        """Bring the assignee's process up now that it owns a task.
+
+        Assignment only writes the board — it never launched anybody.
+        A leader that assigns without a send_message leaves the task
+        with an owner whose agent was never started: the assignment
+        event has no subscriber, the member-side stale self-check needs
+        a running kernel, and the leader-side stale-pending sweep only
+        scans unassigned tasks, so nothing ever notices. Starting the
+        member here is the assignment-path counterpart of create_task's
+        roster-wide autostart.
+
+        Best-effort: the assignment is already committed, so a spawn
+        failure is logged and left to the stale-claim sweep rather than
+        turned into a tool failure that would invite the model to assign
+        a second time.
+        """
+        try:
+            started = await self.agent_team.autostart_member(assignee)
+        except Exception as e:
+            team_logger.error(
+                "update_task failed to auto-start assignee {}: {}", assignee, e, exc_info=True
+            )
+            return
+        if started:
+            team_logger.info(f"Auto-started assignee: {assignee}")
 
     def map_result(self, output: ToolOutput) -> str:
         if not output.success:
