@@ -6,7 +6,6 @@ from typing import Any
 
 from openjiuwen.symphony.flow.codegen import (
     generate_swarmflow_script,
-    swarmflow_identifier,
 )
 from openjiuwen.symphony.flow.models import (
     PACKAGE_SCHEMA_VERSION,
@@ -48,13 +47,14 @@ class CapabilityPackager:
             raise RecipeNotPackableError(f"recipe {recipe.recipe_id} has no combination structure")
         _validate_simple_chain(skill_pack, recipe.recipe_id)
 
-        meta_name = swarmflow_identifier(skill_pack, recipe_id=recipe.recipe_id)
+        meta_name = recipe.name
         package_recipe = _package_recipe(recipe)
         materials = {
             "recipe": package_recipe,
             "swarmflow_script": generate_swarmflow_script(
                 package_recipe["combination_structure"],
                 recipe_id=recipe.recipe_id,
+                name=meta_name,
                 task_description=str(package_recipe["applicability"].get("task_description") or ""),
             ),
             "meta_name": meta_name,
@@ -132,6 +132,7 @@ def _package_recipe(recipe: ExperienceRecipe) -> dict[str, Any]:
     return {
         "schema_version": recipe.schema_version,
         "recipe_id": recipe.recipe_id,
+        "name": recipe.name,
         "version": recipe.version,
         "status": recipe.status,
         "grade": recipe.grade,
