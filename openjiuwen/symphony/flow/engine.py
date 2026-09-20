@@ -18,7 +18,6 @@ from openjiuwen.symphony.flow.distill import (
     normalize_execution_graph,
     qualified_edges,
     recipe_provenance,
-    topological_order,
 )
 from openjiuwen.symphony.flow.models import (
     OUTCOME_SUCCESS,
@@ -268,6 +267,11 @@ class SymphonyFlowEngine:
             skill_pack=result.skill_pack,
             max_examples=max_examples,
             llm_client=self.llm_client,
+            capability_infos={
+                str(node_id): (node.get("metadata") or {})
+                for node_id, node in (result.skill_pack.get("nodes") or {}).items()
+                if isinstance(node, dict)
+            },
         )
         existing = self.store.read_recipe(result.recipe_id)
         version = (existing.version + 1) if existing else 1
@@ -277,6 +281,7 @@ class SymphonyFlowEngine:
         ]
         return ExperienceRecipe(
             recipe_id=result.recipe_id,
+            name=texts["name"],
             version=version,
             status=result.status,
             grade=result.grade,
@@ -517,11 +522,10 @@ def _candidate_from_recipe(recipe: ExperienceRecipe) -> CombinationCandidate:
         for edge in edges
         if isinstance(edge, dict)
     )
-    capability_ids = topological_order(recipe.combination_structure)
     return CombinationCandidate(
         recipe_id=recipe.recipe_id,
         version=recipe.version,
-        name=" → ".join(capability_ids) or recipe.recipe_id,
+        name=recipe.name,
         applicability=summary,
         structure=structure,
         execution_count=int(recipe.quality.get("execution_count") or 0),

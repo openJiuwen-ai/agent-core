@@ -291,7 +291,8 @@ def test_submit_replays_candidate_until_explicit_ack(tmp_path: Path) -> None:
     assert first[0].recipe_id.startswith("recipe_")
     assert first[0].version == 1
     assert first == duplicate
-    assert first[0].name == "web-search → summarize-paper → write-report"
+    assert first[0].name == "write-report"
+    assert "→" not in first[0].name
     assert first[0].applicability
     assert first[0].structure
     assert first[0].execution_count == 1
@@ -578,6 +579,9 @@ def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None
     recipe = engine.get_recipe(recipe_id)
     assert recipe is not None
     package = CapabilityPackager.build_package(recipe)
+    assert package["materials"]["recipe"]["name"] == "write-report"
+    assert package["meta_name"] == "write-report"
+    assert "META = {'name': 'write-report'" in package["materials"]["swarmflow_script"]
     packaged_search = package["materials"]["recipe"]["combination_structure"]["nodes"]["web-search"]["metadata"]
     assert packaged_search == {
         "version": "1.0.0",
@@ -615,6 +619,7 @@ def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None
         "description": "[技能包] 基于 3 个能力协作完成的任务（web-search → summarize-paper → write-report）",
         "skills": ["web-search", "summarize-paper", "write-report"],
     }
+    assert "# write-report" in text
     assert "`web-search`：Search trusted sources." in text
     assert "`web-search.query`（text）：Research question" in text
     assert "当前为线性流程，无可并行步骤。" in text
@@ -1028,6 +1033,7 @@ def test_branching_recipe_is_not_installable_in_v1(tmp_path: Path) -> None:
 def test_narrative_prefers_symphony_llm_invoke(tmp_path: Path) -> None:
     response = json.dumps(
         {
+            "name": "research-report-generation",
             "task_description": "research then write",
             "trigger_conditions": "research request",
             "example_requests": ["write a report"],
@@ -1043,7 +1049,29 @@ def test_narrative_prefers_symphony_llm_invoke(tmp_path: Path) -> None:
 
     llm.invoke.assert_awaited_once()
     assert recipe.provenance["narrative_source"] == "llm"
+    assert recipe.name == "research-report-generation"
     assert recipe.execution_narrative == "search, summarize, and write"
+
+
+def test_narrative_rejects_skill_chain_as_package_name(tmp_path: Path) -> None:
+    response = json.dumps(
+        {
+            "name": "web-search → summarize-paper → write-report",
+            "task_description": "research then write",
+            "trigger_conditions": "research request",
+            "example_requests": ["write a report"],
+            "execution_narrative": "search, summarize, and write",
+        }
+    )
+    engine = SymphonyFlowEngine(
+        tmp_path / "flow",
+        llm_client=Mock(invoke=AsyncMock(return_value=response)),
+    )
+
+    candidate = asyncio.run(engine.submit(_execution_graph("trace-1")))[0]
+
+    assert candidate.name == "write-report"
+    assert "→" not in candidate.name
 
 
 def test_package_redacts_raw_queries_examples_traces_and_credentials(tmp_path: Path) -> None:
