@@ -475,3 +475,82 @@ def test_extract_goal_round_error_requires_thrown_exception() -> None:
         inputs=SimpleNamespace(result={"result_type": "answer", "output": "ok"}),
     )
     assert TaskCompletionRail._extract_goal_round_error(ctx_ok) is None
+
+
+def test_goal_language_zh_normalizes_to_cn() -> None:
+    rail = TaskCompletionRail(goal_language="zh")
+    assert rail._goal_language == "cn"
+
+
+def test_goal_task_query_follows_builder_language() -> None:
+    record = GoalRecord.create(
+        session_id="s1", objective="Help me check the weather in Hangzhou"
+    )
+
+    class _Store:
+        def load(self):
+            return record
+
+    class _Manager:
+        def get_store(self, session_id=None):
+            return _Store()
+
+    rail = TaskCompletionRail(goal_manager=_Manager())
+    inputs = SimpleNamespace(
+        query="original",
+        run_context={
+            "goal_id": record.goal_id,
+            "revision": record.revision,
+            "session_id": record.session_id,
+        },
+    )
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="en")
+        ),
+        inputs=inputs,
+    )
+
+    rail._do_goal_before_iteration(ctx)
+
+    assert "None. This is the first attempt." in inputs.query
+    assert "Prioritize completing the entire objective" in inputs.query
+    assert "无。这是第一次尝试。" not in inputs.query
+    assert rail._goal_language == "en"
+
+
+@pytest.mark.asyncio
+async def test_transcript_assessor_uses_builder_language() -> None:
+    from openjiuwen.harness.prompts.sections.goal import TRANSCRIPT_ASSESSOR_SYSTEM
+
+    record = GoalRecord.create(
+        session_id="s1", objective="Help me check the weather in Hangzhou"
+    )
+    captured: dict[str, object] = {}
+
+    class _Model:
+        async def invoke(self, messages, tools=None, **kwargs):
+            captured["messages"] = messages
+            return SimpleNamespace(
+                content='{"status":"complete","evidence":"ok"}'
+            )
+
+    rail = TaskCompletionRail()
+    ctx = AgentCallbackContext(
+        agent=SimpleNamespace(
+            system_prompt_builder=SimpleNamespace(language="en"),
+            deep_config=SimpleNamespace(model=_Model()),
+        ),
+        inputs=SimpleNamespace(),
+    )
+
+    result = await rail._invoke_transcript_assessor(record, ctx)
+
+    messages = captured["messages"]
+    system = messages[0].content
+    user = messages[1].content
+    assert result == '{"status":"complete","evidence":"ok"}'
+    assert system == TRANSCRIPT_ASSESSOR_SYSTEM["en"]
+    assert "You are a Goal completion assessor." in system
+    assert "你是 Goal 完成度评估器" not in system
+    assert "Prioritize completing the entire objective" in user

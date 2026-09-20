@@ -478,6 +478,13 @@ class DeepAgent(BaseAgent):
         self._react_agent = self._create_react_agent()
         self._queue_pending_rails(config)
 
+    def _goal_prompt_language(
+        self, config: Optional[DeepAgentConfig] = None
+    ) -> str:
+        """Resolve cn/en for GoalManager and the auto TaskCompletionRail."""
+        cfg = config if config is not None else self._deep_config
+        return resolve_language(None if cfg is None else cfg.language)
+
     def _hot_reconfigure(self, config: DeepAgentConfig) -> None:
         """Hot-reconfigure an already-running agent without restarting it."""
         previous_config = self._deep_config
@@ -687,6 +694,10 @@ class DeepAgent(BaseAgent):
         self._react_agent.configure(new_react_config)
         self.system_prompt_builder = prompt_builder
         self._sync_prompt_builder_references()
+        if isinstance(self._task_completion_rail, TaskCompletionRail):
+            self._task_completion_rail.goal_language = language
+        if self.goal_manager is not None:
+            self.goal_manager.language = language
         logger.info("[DeepAgent] System prompt hot reloaded")
 
     def _sync_prompt_builder_references(self) -> None:
@@ -755,7 +766,11 @@ class DeepAgent(BaseAgent):
         # their own TaskCompletionRail via add_rail() or the
         # factory's rails= argument.
         if config.enable_task_loop:
-            self._pending_rails.append(TaskCompletionRail())
+            self._pending_rails.append(
+                TaskCompletionRail(
+                    goal_language=self._goal_prompt_language(config),
+                )
+            )
 
         if isinstance(config.permissions, dict) and config.permissions.get("enabled"):
             ws_root = None
@@ -3589,8 +3604,11 @@ class DeepAgent(BaseAgent):
 
             self._interaction_session = session
             await self.prepare_interaction_task_loop(session)
+            goal_language = self._goal_prompt_language()
             if self._task_completion_rail is None:
-                await self.register_rail(TaskCompletionRail())
+                await self.register_rail(
+                    TaskCompletionRail(goal_language=goal_language)
+                )
 
             from openjiuwen.harness.goal.store import SessionGoalStore
 
@@ -3602,6 +3620,7 @@ class DeepAgent(BaseAgent):
                 cancel_active_round=self._cancel_active_round,
                 emit_event=self._emit_interaction_event,
                 notify_work=self._notify_work,
+                language=goal_language,
             )
             self._interaction_started = True
             self._interaction_forwarder_task = asyncio.create_task(

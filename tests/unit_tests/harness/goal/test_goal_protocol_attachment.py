@@ -72,6 +72,26 @@ async def test_goal_round_upserts_protocol_attachment_not_system_section() -> No
 
 
 @pytest.mark.asyncio
+async def test_goal_round_protocol_follows_builder_english() -> None:
+    manager = PromptAttachmentManager()
+    rail = TaskCompletionRail(goal_manager=object())
+    rail.attachment_manager = manager
+    ctx, _, _ = _make_ctx(
+        run_kind="goal",
+        attachment_manager=manager,
+        builder=_PromptBuilder(language="en"),
+    )
+
+    await rail.before_model_call(ctx)
+
+    items = await manager.collect_for_session("sess1")
+    expected = _expected_protocol_content("en")
+    assert items[0].content == expected
+    assert "Goal Mode Work Rules" in expected
+    assert "Goal 模式工作规则" not in expected
+
+
+@pytest.mark.asyncio
 async def test_normal_round_clears_protocol_attachment() -> None:
     manager = PromptAttachmentManager()
     rail = TaskCompletionRail(goal_manager=object())
@@ -275,6 +295,34 @@ async def test_ensure_initialized_rebinds_goal_manager_after_hot_reconfigure() -
     assert current is not None
     assert current is not original
     assert current._goal_manager is manager
+
+
+def test_queued_task_completion_rail_inherits_agent_language() -> None:
+    from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+    from openjiuwen.harness.factory import create_deep_agent
+
+    model = Model(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="test-key",
+            api_base="http://test-base",
+            verify_ssl=False,
+        ),
+        model_config=ModelRequestConfig(model="test-model"),
+    )
+    agent = create_deep_agent(
+        model=model,
+        auto_create_workspace=False,
+        enable_task_loop=True,
+        language="en",
+    )
+    pending = [
+        rail
+        for rail in agent._pending_rails
+        if isinstance(rail, TaskCompletionRail)
+    ]
+    assert pending
+    assert pending[0]._goal_language == "en"
 
 
 def test_build_goal_reminder_section_removed() -> None:

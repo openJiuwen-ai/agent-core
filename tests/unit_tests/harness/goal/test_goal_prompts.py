@@ -46,6 +46,9 @@ def test_goal_task_query_en() -> None:
 
     assert "<goal_task>" in query
     assert "submit_goal_report" not in query
+    assert "None. This is the first attempt." in query
+    assert "Prioritize completing the entire objective" in query
+    assert "无。这是第一次尝试。" not in query
 
 
 def test_goal_task_query_budget_notice() -> None:
