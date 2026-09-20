@@ -9,7 +9,6 @@ import asyncio
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
-from openjiuwen.core.common.logging import team_logger
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager
 from openjiuwen.agent_teams.organization.events import (
@@ -17,6 +16,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDescriptionRevisedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -49,6 +49,9 @@ from openjiuwen.agent_teams.organization.task_pool import (
 from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
 from openjiuwen.agent_teams.runtime.pool import RuntimeState
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.core.common.logging import team_logger
+
+logger = team_logger
 
 _ORG_OWNER_LIFECYCLE_SECTION = "organization_owner_lifecycle"
 _ORG_COLLABORATION_SECTION = "organization_collaboration"
@@ -293,11 +296,23 @@ class OrganizationRuntimeManager:
                     session_id=session_id,
                 )
             except Exception:
+                logger.error(
+                    "invite Summary Team %s failed for org %s; stopping launched team",
+                    launched.team_id,
+                    organization_id,
+                    exc_info=True,
+                )
                 await self._summary_team_launcher.stop(team_id=launched.team_id, session_id=session_id)
                 raise
             await manager.task_pool.mark_summary_team_ready(
                 team_id=launched.team_id,
                 leader_id=launched.leader_id,
+            )
+            logger.info(
+                "Summary Team ready: org=%s team=%s leader=%s",
+                organization_id,
+                launched.team_id,
+                launched.leader_id,
             )
             return launched.team_id, launched.leader_id
 
@@ -320,7 +335,7 @@ class OrganizationRuntimeManager:
             messager=backend.messager,
             session_id=session_id,
         )
-        await manager.message_service.send_leader_message(
+        notice = await manager.message_service.send_leader_message(
             from_team_id="__organization__",
             from_leader_id="__organization__",
             to_team_id=root_team_id,
@@ -335,6 +350,13 @@ class OrganizationRuntimeManager:
                 "failure_code": OrgTaskFailureCode.SUMMARY_PROVISION_FAILED.value,
             },
         )
+        if not notice.ok:
+            logger.warning(
+                "summary provision failure notice not delivered: summary=%s root=%s reason=%s",
+                summary_task_id,
+                root_team_id,
+                notice.reason,
+            )
 
     async def ensure_control_tools(self, agent: "TeamAgent", *, session_id: str) -> None:
         """Mount organization bootstrap tools on a running team leader."""
@@ -385,6 +407,7 @@ class OrganizationRuntimeManager:
             if existing is not None and existing.owner_team_id not in (None, owner_team_id):
                 raise ValueError(f"organization already belongs to team: {existing.owner_team_id}")
 
+            was_new = existing is None
             owner_leader_id = self._leader_id(owner_agent, owner_backend)
             spec = await manager.initialize(
                 unclaimed_task_policy=unclaimed_task_policy,
@@ -403,7 +426,15 @@ class OrganizationRuntimeManager:
                 manager=manager,
                 session_id=session_id,
             )
-            return (await manager.get_organization()) or spec
+            created = (await manager.get_organization()) or spec
+            if was_new:
+                logger.info(
+                    "organization created: org=%s owner=%s leader=%s",
+                    organization_id,
+                    owner_team_id,
+                    owner_leader_id,
+                )
+            return created
 
     async def invite_team(
         self,
@@ -477,7 +508,15 @@ class OrganizationRuntimeManager:
                     joined_leader_id=target_leader_id,
                 )
             )
-            return (await manager.get_organization()) or organization
+            joined = (await manager.get_organization()) or organization
+            logger.info(
+                "team joined organization: org=%s team=%s leader=%s invited_by=%s",
+                organization_id,
+                target_team_id,
+                target_leader_id,
+                inviter_team_id,
+            )
+            return joined
 
     async def dissolve_organization(
         self,
@@ -555,11 +594,19 @@ class OrganizationRuntimeManager:
                 db=owner_backend.db,
                 session_id=session_id,
             )
-            return {
+            result = {
                 "organization_id": organization_id,
                 "dissolved_team_ids": sorted(member_team_ids),
                 "deleted": deleted,
             }
+            logger.info(
+                "organization dissolved: org=%s owner=%s teams=%s deleted=%s",
+                organization_id,
+                owner_team_id,
+                result["dissolved_team_ids"],
+                deleted,
+            )
+            return result
 
     async def get_organization(self, *, organization_id: str, team_id: str, session_id: str) -> OrganizationSpec | None:
         """Read organization state through an active member's shared database."""
@@ -659,6 +706,13 @@ class OrganizationRuntimeManager:
                 session_id=session_id,
             )
         except Exception:
+            logger.error(
+                "invite expert team %s failed for org %s (group=%s); stopping launched team",
+                launched.team_id,
+                organization_id,
+                group_name,
+                exc_info=True,
+            )
             await self._expert_team_launcher.stop(
                 team_id=launched.team_id,
                 session_id=session_id,
@@ -898,6 +952,12 @@ class OrganizationRuntimeManager:
             # ordinary team-only tools.
             organization_ids = await OrgTaskManager.find_organization_ids_for_team(backend.db, team_id)
             if len(organization_ids) != 1:
+                logger.warning(
+                    "ensure_team_binding failed: team %s maps to %s org(s) %s",
+                    team_id,
+                    len(organization_ids),
+                    organization_ids,
+                )
                 return False
             organization_id = organization_ids[0]
 
@@ -908,6 +968,11 @@ class OrganizationRuntimeManager:
             session_id=session_id,
         )
         if await manager.get_organization() is None:
+            logger.warning(
+                "ensure_team_binding failed: organization %s not found for team %s",
+                organization_id,
+                team_id,
+            )
             return False
         await self._bind_team(agent=agent, backend=backend, manager=manager, session_id=session_id)
         await self._resume_assignable_tasks(
@@ -987,6 +1052,13 @@ class OrganizationRuntimeManager:
                 controller_leader_id = root.aggregation.controller_leader_id
                 if not controller_leader_id:
                     continue
+                logger.info(
+                    "summary resume: re-provisioning execution %s (task=%s root=%s owner=%s)",
+                    execution.execution_id,
+                    execution.summary_task_id,
+                    execution.root_task_id,
+                    team_id,
+                )
                 try:
                     summary_team_id, _ = await self.ensure_summary_team(
                         organization_id=manager.organization_id,
@@ -1001,6 +1073,12 @@ class OrganizationRuntimeManager:
                         raise RuntimeError(bound.reason or "summary execution binding failed")
                 except Exception as exc:
                     reason = f"summary team provisioning failed during recovery: {exc}"
+                    logger.error(
+                        "summary resume: recover failed for execution %s: %s",
+                        execution.execution_id,
+                        exc,
+                        exc_info=True,
+                    )
                     await manager.task_pool.fail_summary_execution(
                         summary_task_id=execution.summary_task_id,
                         failure_reason=reason,
@@ -1023,6 +1101,11 @@ class OrganizationRuntimeManager:
                 and summary_task is not None
                 and summary_task.status in {OrgTaskStatus.DELEGATED, OrgTaskStatus.IN_PROGRESS}
             ):
+                logger.info(
+                    "summary resume: scheduling turn for running summary %s on team %s",
+                    summary_task.task_id,
+                    team_id,
+                )
                 self.schedule_summary_execution(
                     team_id=team_id,
                     session_id=session_id,
@@ -1190,7 +1273,7 @@ class OrganizationRuntimeManager:
 
         async def _on_task_event(message: Any) -> None:
             event = message.get_payload()
-            if isinstance(event, OrgTaskCreatedEvent):
+            if isinstance(event, (OrgTaskCreatedEvent, OrgTaskDescriptionRevisedEvent)):
                 if event.team_id == backend.team_name:
                     return
                 task = await manager.task_pool.get_task(event.task_id)
@@ -1876,7 +1959,14 @@ class OrganizationRuntimeManager:
             self._leader_turn_workers[key] = worker
 
     async def _drain_leader_turns(self, team_id: str, session_id: str) -> None:
-        """Run one background leader turn at a time and retain events while busy."""
+        """Run one background leader turn at a time and retain events while busy.
+
+        A ``PAUSED`` leader gets a dedicated organization turn. A ``RUNNING``
+        leader that is already idle/settled (open stream, no in-flight round)
+        receives the prompt via ``interact`` so the existing stream handles it
+        — no finalize/re-activate reentrancy. Busy ``RUNNING`` leaders keep
+        polling until they pause or settle.
+        """
 
         key = (session_id, team_id)
         try:
@@ -1886,25 +1976,13 @@ class OrganizationRuntimeManager:
                 if entry is None or entry.current_session_id != session_id:
                     self._clear_leader_turn_queue(queue)
                     return
-                pending = queue[0]
-                if (
-                    entry.state is RuntimeState.RUNNING
-                    and isinstance(pending, dict)
-                    and pending.get("_org_relay_source") == "org_root_delivery"
+                if entry.state is RuntimeState.PAUSED:
+                    pass
+                elif entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(
+                    entry
                 ):
-                    # The user-facing Team may remain RUNNING after its leader
-                    # becomes idle. Wake that live stream instead of waiting
-                    # forever for a PAUSED-only background turn.
-                    delivered = await self._team_runtime_manager.interact(
-                        pending["query"], team_name=team_id, session_id=session_id
-                    )
-                    if delivered.ok:
-                        queue.popleft()
-                        message_key = pending.get("_org_message_key")
-                        if message_key is not None:
-                            self._scheduled_leader_messages.discard(message_key)
-                        continue
-                if entry.state is not RuntimeState.PAUSED:
+                    pass
+                else:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
                 inputs = queue.popleft()
@@ -1978,7 +2056,7 @@ class OrganizationRuntimeManager:
                     if not await self._run_leader_turn(team_id, session_id, inputs):
                         turn_failed = True
                         queue.appendleft(original_inputs)
-                        team_logger.warning(
+                        logger.warning(
                             "Organization leader turn was not run for team {} session {}",
                             team_id,
                             session_id,
@@ -1987,7 +2065,7 @@ class OrganizationRuntimeManager:
                 except Exception:
                     turn_failed = True
                     queue.appendleft(original_inputs)
-                    team_logger.warning(
+                    logger.warning(
                         "Organization leader turn failed for team {} session {}", team_id, session_id, exc_info=True
                     )
                     return
@@ -2017,19 +2095,75 @@ class OrganizationRuntimeManager:
                     self._scheduled_summary_executions.discard(summary_key)
         queue.clear()
 
-    async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
-        entry = await self._team_runtime_manager.pool.get(team_id)
-        if entry is None or entry.current_session_id != session_id or entry.state is not RuntimeState.PAUSED:
+    @staticmethod
+    async def _team_is_idle_settled_for_org_wake(entry: Any) -> bool:
+        """Whether a RUNNING team can take an org wake on its open stream.
+
+        Mirrors ``team.idle``: no in-flight DeepAgent round, every member
+        quiescent, and the local task board settled. Missing probes mean
+        "not settled" so drains keep waiting for ``PAUSED`` (safe default).
+        """
+        agent = getattr(entry, "agent", None)
+        if agent is None:
             return False
-        if self._is_summary_team(entry.agent) and self._summary_turn_runner is not None:
-            return await self._summary_turn_runner(team_id, session_id, inputs)
-        if self._leader_turn_runner is not None:
-            return await self._leader_turn_runner(team_id, session_id, inputs)
-        return await self._team_runtime_manager.run_organization_turn(
+        has_in_flight = getattr(agent, "has_in_flight_round", None)
+        if callable(has_in_flight) and has_in_flight():
+            return False
+        state = getattr(agent, "_state", None)
+        registry = getattr(state, "member_registry", None) if state is not None else None
+        if registry is None or not registry.is_idle():
+            return False
+        board_probe = getattr(agent, "is_task_board_settled", None)
+        if not callable(board_probe):
+            return False
+        try:
+            return bool(await board_probe())
+        except Exception:
+            return False
+
+    async def _deliver_org_turn_to_running_leader(
+        self,
+        team_id: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Hand an org prompt to a RUNNING idle leader via the interact path."""
+        query = inputs.get("query") if isinstance(inputs, dict) else None
+        if not str(query or "").strip():
+            return False
+        result = await self._team_runtime_manager.interact(
+            str(query),
             team_name=team_id,
             session_id=session_id,
-            inputs=inputs,
         )
+        if not result:
+            team_logger.warning(
+                "Organization interact wake failed for team {} session {}: {}",
+                team_id,
+                session_id,
+                getattr(result, "reason", None),
+            )
+            return False
+        return True
+
+    async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        if entry is None or entry.current_session_id != session_id:
+            return False
+        if entry.state is RuntimeState.PAUSED:
+            if self._is_summary_team(entry.agent) and self._summary_turn_runner is not None:
+                return await self._summary_turn_runner(team_id, session_id, inputs)
+            if self._leader_turn_runner is not None:
+                return await self._leader_turn_runner(team_id, session_id, inputs)
+            return await self._team_runtime_manager.run_organization_turn(
+                team_name=team_id,
+                session_id=session_id,
+                inputs=inputs,
+            )
+        if entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(entry):
+            # Open-stream delivery: never start a second organization turn.
+            return await self._deliver_org_turn_to_running_leader(team_id, session_id, inputs)
+        return False
 
     async def _resolve_leader(self, team_id: str, session_id: str) -> tuple["TeamAgent", TeamBackend]:
         entry = await self._team_runtime_manager.pool.get(team_id)

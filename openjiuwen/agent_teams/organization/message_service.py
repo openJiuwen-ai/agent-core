@@ -27,6 +27,9 @@ from openjiuwen.agent_teams.organization.schema import (
 from openjiuwen.agent_teams.organization.transport_api import TransportAPI, create_message_id
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.core.common.logging import team_logger
+
+logger = team_logger
 
 
 @dataclass
@@ -86,6 +89,12 @@ class OrgMessageService:
             to_leader_id=to_leader_id,
         )
         if not recipient_leaders:
+            logger.warning(
+                "leader message has no delivery targets: org=%s from=%s to=%s",
+                self.organization_id,
+                from_team_id,
+                to_team_id,
+            )
             return OrgMessageOpResult(ok=False, reason="no delivery targets for leader message")
         async with self._write() as session:
             row = OrgLeaderMessageRecord(
@@ -127,8 +136,26 @@ class OrgMessageService:
                     message_id=message_id,
                 )
                 if not result.success:
+                    logger.warning(
+                        "leader message delivery failed: message=%s to=%s reason=%s",
+                        message_id,
+                        recipient_team_id,
+                        result.reason,
+                    )
                     return OrgMessageOpResult(ok=False, reason=result.reason or "message delivery failed", data=data)
                 delivered.append(recipient_team_id)
+        elif self.messager is None:
+            logger.warning(
+                "leader message persisted but not delivered: message=%s org=%s (messager is None)",
+                message_id,
+                self.organization_id,
+            )
+        elif not self.session_id:
+            logger.warning(
+                "leader message persisted but not delivered: message=%s org=%s (session_id is empty)",
+                message_id,
+                self.organization_id,
+            )
         data["delivered_to"] = delivered
         return OrgMessageOpResult(ok=True, data=data)
 
@@ -269,6 +296,11 @@ class OrgMessageService:
                     metadata = json_loads(message.metadata_json, {})
                     task = await session.get(OrgTaskRecord, metadata["task_id"])
                     if self._requires_description_revision(metadata, task, now):
+                        logger.warning(
+                            "ack_leader_message blocked: revision required before ack (message=%s task=%s)",
+                            message_id,
+                            metadata.get("task_id"),
+                        )
                         return OrgMessageOpResult(ok=False, reason="supplement the description before acknowledging")
                 receipt.recipient_leader_id = leader_id
                 receipt.handled_at = now
