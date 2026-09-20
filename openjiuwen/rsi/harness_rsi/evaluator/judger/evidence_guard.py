@@ -6,6 +6,7 @@ import json
 import logging
 from pathlib import Path
 
+from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import Model
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
@@ -143,7 +144,10 @@ class GuardedJudgeModel(Model):
         """Reduce output headroom only after trying to reclaim tool history."""
         options = dict(kwargs)
         requested = int(options.get("max_tokens") or self.model_config.max_tokens or MIN_OUTPUT_TOKENS)
-        window = int(self.model_config.context_window or REQUEST_BYTES)
+        window = ContextUtils.resolve_context_max(
+            model_name=self.model_config.model_name,
+            fallback_context_window_tokens=self.model_config.context_window,
+        )
         if requested <= 0 or window <= 0:
             raise EvaluationInfrastructureError("Judge context window and output limit must be positive")
         tools = options.get("tools")

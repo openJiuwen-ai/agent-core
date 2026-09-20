@@ -16,8 +16,10 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeBudgetRail
 
 
-def _prepare(messages, options=None, window=None):
-    model = SimpleNamespace(model_config=SimpleNamespace(max_tokens=100000, context_window=window))
+def _prepare(messages, options=None, window=262144, model_name='test'):
+    model = SimpleNamespace(model_config=SimpleNamespace(
+        max_tokens=100000, context_window=window, model_name=model_name,
+    ))
     return GuardedJudgeModel._prepare(model, messages, options or {})
 
 
@@ -41,6 +43,25 @@ def test_explicit_window_and_output_override():
     assert _prepare(small, {'max_tokens': 20000})[1]['max_tokens'] == 20000
     with pytest.raises(EvaluationInfrastructureError, match='complete grading evidence was not truncated'):
         _prepare(rows)
+
+
+@pytest.mark.parametrize('name', ['deepseek-v4-flash', 'deepseek-v4-pro'])
+def test_missing_window_uses_core_model_capacity(name):
+    rows = [{'role': 'user', 'content': 'x' * 260000}]
+    guarded, options = _prepare(rows, window=None, model_name=name)
+    assert guarded == rows
+    assert 'max_tokens' not in options
+    with pytest.raises(EvaluationInfrastructureError):
+        _prepare(rows, window=262144, model_name=name)
+
+
+def test_unknown_model_uses_core_conservative_default():
+    from openjiuwen.core.context_engine.context.context_utils import ContextUtils
+
+    limit = ContextUtils.resolve_context_max(model_name='unknown-test-model')
+    rows = [{'role': 'user', 'content': 'x' * limit}]
+    with pytest.raises(EvaluationInfrastructureError):
+        _prepare(rows, window=None, model_name='unknown-test-model')
 
 
 def test_schemas_and_unicode_count_toward_budget():
@@ -71,7 +92,7 @@ async def test_actual_model_boundary_forwards_adjusted_budget(tmp_path, monkeypa
     config.write_text(json.dumps({
         'model_client_config': {'client_provider': 'OpenAI', 'api_key': 'test',
                                 'api_base': 'https://example.test/v1'},
-        'model_request_config': {'model': 'test', 'max_tokens': 100000},
+        'model_request_config': {'model': 'test', 'max_tokens': 100000, 'context_window': 262144},
     }))
     model = _judge_model(EvaluatorConfig(model_config_ref=str(config)))
     messages = [SystemMessage(content='policy'), UserMessage(content='x' * 200000)]
