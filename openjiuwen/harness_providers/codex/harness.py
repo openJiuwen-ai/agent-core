@@ -7,12 +7,15 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 from typing import Any, Callable, Mapping
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
     CheckpointReason,
+    DynamicToolCallRequest,
+    DynamicToolCallResponse,
     HarnessCapability,
     HarnessCard,
     HarnessContext,
@@ -25,6 +28,7 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
     ToolApprovalDecision,
     ToolApprovalRequest,
+    ToolDefinition,
     TurnError,
     TurnEventKind,
     TurnResult,
@@ -47,8 +51,9 @@ from openjiuwen.harness_providers.codex.options import (
     build_codex_config,
     build_process_env,
     build_thread_options,
+    dynamic_tools_fingerprint,
     load_codex_sdk,
-    start_thread_with_raw_events,
+    start_thread_with_raw_events_and_dynamic_tools,
 )
 from openjiuwen.harness_providers.inputs import harness_input_text
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
@@ -65,7 +70,10 @@ _NO_ACTIVE_TURN_ERROR_MESSAGE = "no active turn to steer"
 _APPROVAL_METHODS = frozenset({"item/commandExecution/requestApproval", "item/fileChange/requestApproval"})
 # App Server request emitted by Codex's experimental ``request_user_input`` tool.
 USER_INPUT_METHOD = "item/tool/requestUserInput"
-_INTERACTIVE_HOST_CAPABILITIES = frozenset({HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT})
+DYNAMIC_TOOL_CALL_METHOD = "item/tool/call"
+_SERVER_REQUEST_HOST_CAPABILITIES = frozenset(
+    {HostCapability.TOOL_APPROVAL, HostCapability.USER_INPUT, HostCapability.DYNAMIC_TOOL_CALL}
+)
 # Provider interaction asking the host to ratify (persist) an auth fallback.
 AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
 # Provider event announcing the active model (session activation / fallback
@@ -112,6 +120,7 @@ class CodexHarness(SerializedTurnHarness):
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
                 HarnessCapability.MCP_TOOLS,
+                HarnessCapability.NATIVE_TOOLS,
             }
         ),
         optional_host_capabilities=frozenset(
@@ -120,6 +129,8 @@ class CodexHarness(SerializedTurnHarness):
                 HostCapability.USER_INPUT,
                 HostCapability.CHECKPOINT_SINK,
                 HostCapability.MCP_SERVERS,
+                HostCapability.NATIVE_TOOL_GATEWAY,
+                HostCapability.DYNAMIC_TOOL_CALL,
                 HostCapability.PROVIDER_INTERACTION,
             }
         ),
@@ -152,6 +163,8 @@ class CodexHarness(SerializedTurnHarness):
         self._active_model: CodexModelConfig | None = self._config.model
         self._fallback_activated = False
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._dynamic_tools: tuple[ToolDefinition, ...] = ()
+        self._dynamic_tools_fingerprint = dynamic_tools_fingerprint(())
 
     @property
     def fallback_activated(self) -> bool:
@@ -167,17 +180,42 @@ class CodexHarness(SerializedTurnHarness):
         if context.resume_policy is ResumePolicy.REQUIRE_RESUME and context.checkpoint is None:
             raise HarnessProtocolError("Codex cannot resume a thread without a checkpoint")
 
+    def _checkpoint_matches_dynamic_tools(self, restored: Mapping[str, Any]) -> bool:
+        """Return whether a checkpoint carries the current tool definitions."""
+        if "dynamic_tools_fingerprint" in restored:
+            restored_fingerprint = restored.get("dynamic_tools_fingerprint")
+            return (
+                isinstance(restored_fingerprint, str)
+                and restored_fingerprint == self._dynamic_tools_fingerprint
+            )
+        return restored.get("dynamic_tools") is not True and not self._dynamic_tools
+
+    def _dynamic_tools_checkpoint_data(self) -> dict[str, Any]:
+        """Render dynamic-tool metadata stored in Codex checkpoints."""
+        return {
+            "dynamic_tools": bool(self._dynamic_tools),
+            "dynamic_tools_fingerprint": self._dynamic_tools_fingerprint,
+        }
+
     async def _open_session(self, context: HarnessContext) -> str | None:
         await asyncio.to_thread(install_skills, self._config.skills, provider="codex",
                                 cwd=context.cwd or self._config.cwd, conflict=self._config.skill_conflict)
         sdk = load_codex_sdk()
         self._sdk = sdk
         self._loop = asyncio.get_running_loop()
+        self._dynamic_tools = await context.tools.definitions() if context.tools is not None else ()
+        self._dynamic_tools_fingerprint = dynamic_tools_fingerprint(self._dynamic_tools)
         restored = self._restored_checkpoint_data(context)
         restored_thread = restored.get("thread_id") if restored else None
         resume_thread_id: str | None = None
         if context.resume_policy is not ResumePolicy.NEW and isinstance(restored_thread, str) and restored_thread:
-            resume_thread_id = restored_thread
+            if not self._checkpoint_matches_dynamic_tools(restored):
+                if context.resume_policy is ResumePolicy.REQUIRE_RESUME:
+                    raise HarnessProtocolError(
+                        "Codex checkpoint dynamic-tool definitions do not match the current host context"
+                    )
+            else:
+                resume_thread_id = restored_thread
         elif context.resume_policy is ResumePolicy.REQUIRE_RESUME:
             raise HarnessProtocolError("Codex checkpoint does not carry a thread id to resume")
         self._active_model = self._config.model
@@ -201,7 +239,11 @@ class CodexHarness(SerializedTurnHarness):
             raise ProviderStartupError(f"Codex startup failed: {type(exc).__name__}", error=error) from exc
         await self._emit_model_changed()
         await self._publish_checkpoint(
-            {"thread_id": self._thread_id, "resumed": resume_thread_id is not None},
+            {
+                "thread_id": self._thread_id,
+                "resumed": resume_thread_id is not None,
+                **self._dynamic_tools_checkpoint_data(),
+            },
             reason=CheckpointReason.SESSION_ACTIVATED,
         )
         return self._thread_id
@@ -232,7 +274,7 @@ class CodexHarness(SerializedTurnHarness):
             system_prompt=context.system_prompt,
         )
         client = sdk.AsyncCodex(config=codex_config)
-        if context.host_capabilities & _INTERACTIVE_HOST_CAPABILITIES:
+        if context.host_capabilities & _SERVER_REQUEST_HOST_CAPABILITIES:
             _install_approval_handler(client, self._approval_handler)
         try:
             if self._config.system_prompt_mode == "append" and context.system_prompt:
@@ -249,8 +291,14 @@ class CodexHarness(SerializedTurnHarness):
                         f"Codex resumed unexpected thread {resumed_id!r}; expected {resume_thread_id!r}"
                     )
                 confirmed_model = str(getattr(thread, "model", "") or "")
-            elif self._config.experimental_raw_events:
-                thread, confirmed_model = await start_thread_with_raw_events(client=client, sdk=sdk, options=options)
+            elif self._config.experimental_raw_events or self._dynamic_tools:
+                thread, confirmed_model = await start_thread_with_raw_events_and_dynamic_tools(
+                    client=client,
+                    sdk=sdk,
+                    options=options,
+                    experimental_raw_events=self._config.experimental_raw_events,
+                    dynamic_tools=self._dynamic_tools,
+                )
             else:
                 thread = await client.thread_start(**options)
                 confirmed_model = str(getattr(thread, "model", "") or "")
@@ -545,7 +593,12 @@ class CodexHarness(SerializedTurnHarness):
         self._fallback_activated = True
         await self._emit_model_changed()
         await self._publish_checkpoint(
-            {"thread_id": self._thread_id, "resumed": True, "fallback": True},
+            {
+                "thread_id": self._thread_id,
+                "resumed": True,
+                "fallback": True,
+                **self._dynamic_tools_checkpoint_data(),
+            },
             reason=CheckpointReason.STATE_CHANGED,
         )
         await self._emit(
@@ -564,9 +617,11 @@ class CodexHarness(SerializedTurnHarness):
     # ------------------------------------------------------------------
 
     def _approval_handler(self, method: str, params: Mapping[str, Any] | None) -> dict[str, Any]:
-        """Answer App Server requests: tool approvals and ``request_user_input``."""
+        """Answer App Server requests for approvals, user input and dynamic tools."""
         if method == USER_INPUT_METHOD:
             return self._handle_user_input_request(params or {})
+        if method == DYNAMIC_TOOL_CALL_METHOD:
+            return self._handle_dynamic_tool_call(params or {})
         if method not in _APPROVAL_METHODS:
             return {}
         loop = self._loop
@@ -598,6 +653,52 @@ class CodexHarness(SerializedTurnHarness):
             except Exception as exc:
                 logger.warning("[codex] user input routing failed: %s", exc)
                 return _EMPTY_USER_INPUT_ANSWER
+
+    def _handle_dynamic_tool_call(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return _dynamic_tool_wire_response("Codex dynamic tool host is unavailable", success=False)
+        future = asyncio.run_coroutine_threadsafe(self._route_dynamic_tool_call(params), loop)
+        while True:
+            try:
+                return future.result(timeout=_USER_INPUT_WAIT_SLICE_S)
+            except TimeoutError:
+                if loop.is_closed():
+                    future.cancel()
+                    return _dynamic_tool_wire_response("Codex dynamic tool host stopped", success=False)
+            except Exception as exc:
+                logger.warning("[codex] dynamic tool routing failed: %s", exc)
+                return _dynamic_tool_wire_response(str(exc) or type(exc).__name__, success=False)
+
+    async def _route_dynamic_tool_call(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        call_id = str(params.get("callId") or params.get("call_id") or "")
+        tool_name = str(params.get("tool") or "")
+        arguments = params.get("arguments")
+        if not call_id or not tool_name or not isinstance(arguments, Mapping):
+            return _dynamic_tool_wire_response("Invalid Codex dynamic tool call", success=False)
+        active = self._active_turn
+        request = DynamicToolCallRequest(
+            request_id=f"codex-tool:{call_id}",
+            call_id=call_id,
+            tool_name=tool_name,
+            arguments=to_json_object(arguments),
+            provider_session_id=self._thread_id,
+            turn_id=(
+                str(params.get("turnId") or params.get("turn_id") or "")
+                or (active.turn_id if active else None)
+            ),
+            provider_data={"method": DYNAMIC_TOOL_CALL_METHOD},
+        )
+        response = await self._request_interaction(request)
+        if not isinstance(response, DynamicToolCallResponse):
+            return _dynamic_tool_wire_response("Dynamic tool call was declined by the host", success=False)
+        if response.status is not InteractionResponseStatus.COMPLETED:
+            message = response.error_message or f"Dynamic tool call ended with status {response.status.value}"
+            return _dynamic_tool_wire_response(message, success=False)
+        if response.is_error:
+            content = response.error_message or response.result
+            return _dynamic_tool_wire_response(content, success=False)
+        return _dynamic_tool_wire_response(response.result, success=True)
 
     async def _route_user_input(self, params: Mapping[str, Any]) -> dict[str, Any]:
         active = self._active_turn
@@ -646,6 +747,24 @@ class CodexHarness(SerializedTurnHarness):
 
 
 _EMPTY_USER_INPUT_ANSWER: dict[str, Any] = {"answers": {}}
+
+
+def _dynamic_tool_wire_response(content: Any, *, success: bool) -> dict[str, Any]:
+    """Render one host tool result in the App Server response shape."""
+    from openai_codex.generated.v2_all import InputTextDynamicToolCallOutputContentItem
+
+    value = json_value_to_builtin(content)
+    if isinstance(value, str):
+        text = value
+    elif value is None:
+        text = ""
+    else:
+        text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    content_item = InputTextDynamicToolCallOutputContentItem(type="inputText", text=text)
+    return {
+        "contentItems": [content_item.model_dump(mode="json", by_alias=True)],
+        "success": success,
+    }
 
 
 def _user_input_questions(params: Mapping[str, Any]) -> list[dict[str, Any]]:

@@ -53,6 +53,8 @@ from openjiuwen.harness_protocol import (
     ToolApprovalDecision,
     ToolApprovalRequest,
     ToolApprovalResponse,
+    ToolGateway,
+    ToolInvocation,
     UnsupportedHarnessCapabilityError,
     UserInputRequest,
     UserInputResponse,
@@ -134,6 +136,7 @@ class HarnessIOAdapter:
         self._output_index = 0
         self._output_text: dict[str, str] = {}
         self._pending: dict[str, _PendingInteraction] = {}
+        self._tool_gateway: ToolGateway | None = None
         self._lifecycle_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
@@ -179,6 +182,9 @@ class HarnessIOAdapter:
             capabilities.add(HostCapability.TOOL_APPROVAL)
         if self._provider_interaction_handler is not None:
             capabilities.add(HostCapability.PROVIDER_INTERACTION)
+        if context.tools is not None:
+            capabilities.update({HostCapability.NATIVE_TOOL_GATEWAY, HostCapability.DYNAMIC_TOOL_CALL})
+        self._tool_gateway = context.tools
         interactions = context.interactions if context.interactions is not None else self
         return dataclasses.replace(
             context,
@@ -325,11 +331,35 @@ class HarnessIOAdapter:
         if isinstance(request, McpElicitationRequest):
             return McpElicitationResponse(request_id=request.request_id, status=InteractionResponseStatus.DECLINED)
         if isinstance(request, DynamicToolCallRequest):
+            gateway = self._tool_gateway
+            if gateway is None:
+                return DynamicToolCallResponse(
+                    request_id=request.request_id,
+                    status=InteractionResponseStatus.DECLINED,
+                    is_error=True,
+                    error_message="no native tool gateway is available",
+                )
+            try:
+                result = await gateway.invoke(
+                    ToolInvocation(
+                        call_id=request.call_id,
+                        name=request.tool_name,
+                        arguments=request.arguments,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - surface host tool failures to the provider
+                logger.exception("native tool %s failed", request.tool_name)
+                return DynamicToolCallResponse(
+                    request_id=request.request_id,
+                    status=InteractionResponseStatus.COMPLETED,
+                    is_error=True,
+                    error_message=str(exc) or type(exc).__name__,
+                )
             return DynamicToolCallResponse(
                 request_id=request.request_id,
-                status=InteractionResponseStatus.DECLINED,
-                is_error=True,
-                error_message="dynamic tool calls are not routed by the harness IO adapter",
+                status=InteractionResponseStatus.COMPLETED,
+                result=result.content,
+                is_error=result.is_error,
             )
         if isinstance(request, ProviderInteractionRequest):
             handler = self._provider_interaction_handler

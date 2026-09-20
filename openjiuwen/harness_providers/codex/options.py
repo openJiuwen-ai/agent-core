@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import os
@@ -12,7 +13,14 @@ import re
 from typing import Any, Mapping
 
 from openjiuwen.core.common.logging import LazyLogger, LogManager
-from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
+from openjiuwen.harness_protocol import (
+    HarnessError,
+    McpServerConfig,
+    McpTransport,
+    ToolDefinition,
+    UnsupportedHarnessCapabilityError,
+    json_value_to_builtin,
+)
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
 
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
@@ -219,17 +227,46 @@ async def append_developer_instructions(client: Any, sdk: Any, config: CodexHarn
     return "\n\n".join(part for part in (existing, system_prompt) if part)
 
 
-async def start_thread_with_raw_events(
+def dynamic_tools_to_wire(definitions: tuple[ToolDefinition, ...]) -> list[dict[str, Any]]:
+    """Render host tools as top-level Codex dynamic function tools."""
+    return [
+        {
+            "type": "function",
+            "name": definition.name,
+            "description": definition.description,
+            "inputSchema": json_value_to_builtin(definition.input_schema),
+        }
+        for definition in definitions
+    ]
+
+
+def dynamic_tools_fingerprint(definitions: tuple[ToolDefinition, ...]) -> str:
+    """Return a stable fingerprint for one Codex dynamic-tool registration."""
+    tools = dynamic_tools_to_wire(definitions)
+    canonical_tools = sorted(
+        tools,
+        key=lambda tool: (
+            str(tool["name"]),
+            json.dumps(tool, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        ),
+    )
+    payload = json.dumps(canonical_tools, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return f"sha256:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+async def start_thread_with_raw_events_and_dynamic_tools(
     *,
     client: Any,
     sdk: Any,
     options: dict[str, Any],
+    experimental_raw_events: bool,
+    dynamic_tools: tuple[ToolDefinition, ...] = (),
 ) -> tuple[Any, str]:
-    """Start a thread with App Server model-response notifications enabled.
+    """Start a thread with raw events and host dynamic tools.
 
-    Newer SDKs may expose ``experimental_raw_events`` directly. The currently
-    supported SDK can still send the App Server field through its low-level
-    JSON-RPC client, so keep that compatibility code isolated here.
+    The Python SDK high-level API can lag the App Server protocol. Send
+    unsupported fields through its low-level JSON-RPC client, while retaining
+    the high-level path when it exposes every requested option.
 
     Returns ``(thread, model)`` where ``model`` is the effective model the App
     Server confirmed on the response (``ThreadStartResponse.model``) — the
@@ -240,14 +277,27 @@ async def start_thread_with_raw_events(
     signature = inspect.signature(thread_start)
     parameters = signature.parameters.values()
     accepts_kwargs = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
-    if "experimental_raw_events" in signature.parameters or accepts_kwargs:
-        response = await thread_start(experimental_raw_events=True, **options)
+    supports_raw_events = "experimental_raw_events" in signature.parameters or accepts_kwargs
+    supports_dynamic_tools = "dynamic_tools" in signature.parameters or accepts_kwargs
+    requested_raw_events_supported = not experimental_raw_events or supports_raw_events
+    requested_dynamic_tools_supported = not dynamic_tools or supports_dynamic_tools
+    if requested_raw_events_supported and requested_dynamic_tools_supported:
+        direct_options = dict(options)
+        if experimental_raw_events:
+            direct_options["experimental_raw_events"] = True
+        if dynamic_tools:
+            direct_options["dynamic_tools"] = dynamic_tools_to_wire(dynamic_tools)
+        response = await thread_start(**direct_options)
         return response, str(getattr(response, "model", "") or "")
 
     ensure_initialized = getattr(client, "_ensure_initialized", None)
     low_level_client = getattr(client, "_client", None)
     async_thread_type = getattr(sdk, "AsyncThread", None)
     if not callable(ensure_initialized) or low_level_client is None or async_thread_type is None:
+        if dynamic_tools:
+            raise UnsupportedHarnessCapabilityError(
+                "the Codex SDK cannot register host dynamic tools through thread/start"
+            )
         logger.warning("[codex] SDK does not expose experimental raw events; falling back to thread_start")
         response = await thread_start(**options)
         return response, str(getattr(response, "model", "") or "")
@@ -268,7 +318,10 @@ async def start_thread_with_raw_events(
             **wire_options,
         )
         request = params.model_dump(by_alias=True, exclude_none=True, mode="json")
-        request["experimentalRawEvents"] = True
+        if experimental_raw_events:
+            request["experimentalRawEvents"] = True
+        if dynamic_tools:
+            request["dynamicTools"] = dynamic_tools_to_wire(dynamic_tools)
         await ensure_initialized()
         started = await low_level_client.thread_start(request)
         return (
@@ -276,6 +329,10 @@ async def start_thread_with_raw_events(
             str(getattr(started, "model", "") or ""),
         )
     except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        if dynamic_tools:
+            raise UnsupportedHarnessCapabilityError(
+                "the Codex SDK failed to register host dynamic tools through thread/start"
+            ) from exc
         logger.warning("[codex] raw-event compatibility path is unavailable (%s); using thread_start", exc)
         response = await thread_start(**options)
         return response, str(getattr(response, "model", "") or "")
@@ -289,6 +346,8 @@ __all__ = [
     "build_thread_options",
     "codex_mcp_config_overrides",
     "codex_model_config_overrides",
+    "dynamic_tools_to_wire",
+    "dynamic_tools_fingerprint",
     "load_codex_sdk",
-    "start_thread_with_raw_events",
+    "start_thread_with_raw_events_and_dynamic_tools",
 ]

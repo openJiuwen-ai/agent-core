@@ -19,14 +19,14 @@ from openjiuwen.harness_protocol import (
     AbortMode,
     DeliveryMode,
     EventBufferConfig,
+    HarnessCapability,
     HarnessCard,
     HarnessContext,
+    HarnessEvent,
     HarnessInput,
     HarnessProtocol,
     HarnessState,
     HarnessStateError,
-    HarnessCapability,
-    HarnessEvent,
     HostCapability,
     InteractionResponseStatus,
     ItemEventKind,
@@ -246,6 +246,18 @@ class _OneShotTeamContextTracker:
         self.commits += 1
 
 
+class _FakeToolGateway:
+    """Minimal native tool gateway used to verify runtime binding."""
+
+    async def definitions(self) -> tuple[Any, ...]:
+        """Return no definitions for this binding-only test."""
+        return ()
+
+    async def invoke(self, invocation: Any) -> Any:
+        """Reject invocation because this test only checks context wiring."""
+        raise AssertionError(f"unexpected invocation: {invocation}")
+
+
 def _context() -> HarnessContext:
     return HarnessContext(
         agent_name="worker",
@@ -301,6 +313,23 @@ async def test_context_factory_start_stop_and_event_pump() -> None:
     assert runtime.session_id == "provider-session"
     chunks = await _all_outputs(runtime)
     assert [(chunk.type, chunk.payload["content"]) for chunk in chunks] == [("llm_output", "ready")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_bound_native_tools_are_injected_into_start_context() -> None:
+    harness = _FakeHarness()
+    runtime = ExternalHarnessMemberRuntime(harness=harness, context=_context())
+    tools = _FakeToolGateway()
+
+    runtime.bind_tools(tools)
+    await runtime.start()
+    await runtime.stop()
+
+    started = harness.start_contexts[0]
+    assert started.tools is tools
+    assert HostCapability.NATIVE_TOOL_GATEWAY in started.host_capabilities
+    assert HostCapability.DYNAMIC_TOOL_CALL in started.host_capabilities
 
 
 @pytest.mark.asyncio
@@ -662,7 +691,13 @@ async def test_auth_fallback_is_ratified_only_when_promotion_persists() -> None:
     rejected = await interactions.handle(_auth_fallback_request())
     assert rejected.status is InteractionResponseStatus.DECLINED
     unknown = await interactions.handle(
-        ProviderInteractionRequest(request_id="x", provider="fake", request_type="other", schema_version="1", payload={})
+        ProviderInteractionRequest(
+            request_id="x",
+            provider="fake",
+            request_type="other",
+            schema_version="1",
+            payload={},
+        )
     )
     assert unknown.status is InteractionResponseStatus.DECLINED
     await runtime.stop()

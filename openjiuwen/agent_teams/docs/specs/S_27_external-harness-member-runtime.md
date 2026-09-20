@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/external/member_runtime.py`、`openjiuwen/agent_teams/external/cli_agent/spawn.py`、`openjiuwen/agent_teams/spawn/external_cli_spawn.py` |
-| 最近一次修订日期 | 2026-09-09 |
+| 最近一次修订日期 | 2026-09-18 |
 | 关联 feature | F_95_dsh-external-harness-adapter.md、F_96_protocol-harness-providers-and-member-migration.md |
 
 ## 范围 / 边界
@@ -27,8 +27,9 @@
    `llm_reasoning` / `tool_call` / `tool_result` / `__interaction__`）由 `HarnessIOAdapter` 决定；
    member runtime 不复制投影逻辑，只叠加 team session、可靠性、观测、fallback 持久化与 MCP 挂载。
 3. **宿主服务在 start 时注入**。`_host_context` 用 `dataclasses.replace` 把成员 child AgentSession 的
-   checkpoint / checkpoint sink、`bind_mcp_servers` 的 MCP、adapter 的 interaction handler 与相应
-   `HostCapability` 合并进 provider `HarnessContext`；context factory 只描述 provider-neutral 字段。
+   checkpoint / checkpoint sink、`bind_mcp_servers` 的 MCP、`bind_tools` 的 Native Tools、adapter 的
+   interaction handler 与相应 `HostCapability` 合并进 provider `HarnessContext`；context factory 只描述
+   provider-neutral 字段，不作为团队 Native Tools 的第二注入入口。
 4. **checkpoint 落在成员自己的 AgentSession**。sink 写 `external_runtime = {backend: <card.name>,
    checkpoint: <envelope>}`；`resume_external_backend=True` 时必须读到同 backend 的 checkpoint，否则
    `HarnessStateError`，且以 `ResumePolicy.REQUIRE_RESUME` 启动；有 checkpoint 但非严格模式时用
@@ -57,6 +58,15 @@
     `COMPLETED`，返回 `False` 或抛异常 → `DECLINED`（provider 随即回退原生端点）；未绑定 promotion
     时直接 `COMPLETED`；其它 request type 一律 `DECLINED`。`ProviderEvent("auth_fallback_activated")`
     只作日志观测，不再触发持久化。
+11. **团队工具按 provider 的进程内通道注入**。Claude 通过 SDK in-process MCP server 注册工具；
+    Codex 仅通过 `bind_tools` 延迟绑定 `ExternalTeamToolGateway`，runtime 启动时写入
+    `HarnessContext.tools`，在
+    `thread/start.dynamicTools` 注册顶层 function tools，并通过 `item/tool/call` server request
+    回调执行。两条通道都在成员 `configure` 后基于真实 `TeamBackend` 调用
+    `create_team_tools`，不经过 `ExternalTeamClient`、外部消息传输或 Gateway WebSocket。
+    Codex gateway 固化父团队 session id，每次 `invoke` 用 `set_session_id` /
+    `reset_session_id` 临时绑定；首次启动和 checkpoint 恢复都由 spawn 路径重新构造 gateway，
+    因而动态表与消息 topic 始终使用当前父团队 session。
 
 ## 接口契约
 
@@ -67,7 +77,7 @@ class ExternalHarnessMemberRuntime:
                  resume_external_backend=False, agent_kind: str | None = None,
                  inject_mcp=False, mcp_server_name="openjiuwen-team") -> None
     # pre-start bindings
-    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_span_bridge(bridge)
+    def bind_team_context_tracker(tracker) / bind_mcp_servers(servers) / bind_tools(tools) / bind_span_bridge(bridge)
     def bind_fallback_promotion(promote)   # promote: () -> Awaitable[bool]; answers the auth_fallback interaction
     def add_teardown_hook(hook)
     def bind_reliability_context(*, session_id, team_backend, leader_name, update_status_cb, messager)
@@ -86,10 +96,11 @@ class ExternalHarnessMemberRuntime:
 返回 `CliRuntimeBase` 子类；返回类型别名 `MemberRuntimeLike`。claude 分支保留
 `ExternalCliAgentSpec` 的 `cli_path` / `add_dirs` / `ssh_transport` / 模型与 fallback 语义，codex
 分支保留 `codex_bin` / `bypass_approvals_and_sandbox` / `turn_idle_*` / `mcp_default_tools_approval_mode`
-并把团队 MCP 作为 stdio `McpServerConfig` 预绑定。
+并在成员 `configure` 后把本地团队工具作为 `ExternalTeamToolGateway` 注入。
 
 `external_cli_spawn` 的绑定顺序：`configure` → `bind_team_context_tracker` →
-`_bind_protocol_member_team_tools`（仅 claude-code 且 `inject_mcp`）→ `bind_reliability_context`
+`_bind_protocol_member_team_tools`（claude-code 绑定 in-process MCP；codex 绑定 Dynamic Tools）→
+`bind_reliability_context`
 → `Runner.run_agent_team(member=True)`；`finally` 调 `runtime.stop()`。
 
 ## 数据结构
@@ -98,6 +109,7 @@ class ExternalHarnessMemberRuntime:
 |---|---|---|
 | `external_runtime` state | 成员 child AgentSession | `{backend, checkpoint}`；`checkpoint` 是 `HarnessCheckpoint` 的 JSON 信封（`checkpoint_to_dict` / `checkpoint_from_dict`） |
 | `_extra_mcp_servers` | runtime 内存 | start 前绑定的 `McpServerConfig` 列表，start 时并入 context |
+| `_bound_tools` | runtime 内存 | 成员 configure 后绑定的本地 `ToolGateway`，start 时并入 context |
 | `_round_seq` / `_current_round_id` | runtime 内存 | 可靠性 `round_id`（单调整数），与协议 `turn_id` 并存 |
 
 ## 与其它 spec 的关系

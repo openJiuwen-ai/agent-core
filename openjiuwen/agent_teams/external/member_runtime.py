@@ -17,7 +17,6 @@ import asyncio
 import dataclasses
 import inspect
 import json
-import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, Sequence, runtime_checkable
 
 from openjiuwen.agent_teams.team_context import TeamContextTracker
@@ -44,6 +43,7 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
     SendReceipt,
     StateChangedEvent,
+    ToolGateway,
     TurnError,
     TurnEventKind,
     TurnLifecycleEvent,
@@ -261,6 +261,7 @@ class ExternalHarnessMemberRuntime:
         self._context_delivery_lock = asyncio.Lock()
         self._lifecycle_lock = asyncio.Lock()
         self._extra_mcp_servers: list[McpServerConfig] = []
+        self._bound_tools: ToolGateway | None = None
         self._reliability_ctx: Any = None
         self._span_bridge: MemberSpanBridge | None = None
         self._promote_fallback_model: PromoteFallbackModel | None = None
@@ -308,6 +309,10 @@ class ExternalHarnessMemberRuntime:
     def bind_mcp_servers(self, servers: Sequence[McpServerConfig]) -> None:
         """Mount additional MCP servers on the next ``start``."""
         self._extra_mcp_servers.extend(servers)
+
+    def bind_tools(self, tools: ToolGateway) -> None:
+        """Mount a native tool gateway on the next start."""
+        self._bound_tools = tools
 
     def bind_span_bridge(self, bridge: MemberSpanBridge | None) -> None:
         """Attach an observability bridge driven by turn lifecycle events."""
@@ -415,6 +420,9 @@ class ExternalHarnessMemberRuntime:
         mcp_servers = tuple(context.mcp_servers) + tuple(self._extra_mcp_servers)
         if mcp_servers:
             capabilities.add(HostCapability.MCP_SERVERS)
+        tools = self._bound_tools
+        if tools is not None:
+            capabilities.update({HostCapability.NATIVE_TOOL_GATEWAY, HostCapability.DYNAMIC_TOOL_CALL})
         return dataclasses.replace(
             context,
             host_capabilities=frozenset(capabilities),
@@ -422,6 +430,7 @@ class ExternalHarnessMemberRuntime:
             checkpoint=checkpoint,
             checkpoint_sink=checkpoint_sink,
             mcp_servers=mcp_servers,
+            tools=tools,
         )
 
     async def stop(self) -> None:

@@ -7,11 +7,16 @@ import asyncio
 
 import pytest
 
+from openjiuwen.agent_teams.context import get_session_id, reset_session_id, set_session_id
 from openjiuwen.agent_teams.external import ExternalTeamClient
 from openjiuwen.agent_teams.external import client as client_module
+from openjiuwen.agent_teams.external.tool_gateway import build_external_team_tool_gateway
 from openjiuwen.agent_teams.messager import hybrid as hybrid_module
+from openjiuwen.agent_teams.messager.base import MessagerTransportConfig, create_messager
 from openjiuwen.agent_teams.schema.status import TaskStatus
 from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
+from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.harness_protocol import ToolInvocation
 
 
 class _FakeWebSocketPublisher:
@@ -138,6 +143,79 @@ async def test_member_scope_tools_follow_teammate_mode(team_db, make_descriptor)
 
     async with ExternalTeamClient(plan_descriptor) as plan_client:
         assert "submit_plan" in plan_client.tools
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_client_can_connect_and_close_in_different_tasks(team_db, make_descriptor):
+    session_before = get_session_id()
+    client = ExternalTeamClient(make_descriptor(member="dev-1", scope="member"))
+
+    await asyncio.create_task(client.connect())
+    assert client.tools
+    assert get_session_id() == session_before
+
+    await asyncio.create_task(client.close())
+    assert client.tools == {}
+    assert get_session_id() == session_before
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_member_tool_gateway_exposes_and_invokes_local_team_tools(team_db):
+    await team_db.task.create_task(
+        task_id="t1",
+        team_name="ext_team",
+        title="Do X",
+        content="details",
+        status=TaskStatus.PENDING.value,
+    )
+    messager = create_messager(MessagerTransportConfig(backend="inprocess", team_name="ext_team"))
+    await messager.start()
+    backend = TeamBackend(
+        team_name="ext_team",
+        member_name="dev-1",
+        is_leader=False,
+        db=team_db,
+        messager=messager,
+    )
+    gateway = build_external_team_tool_gateway(
+        session_id="ext_session",
+        team_backend=backend,
+        role="teammate",
+        teammate_mode="build_mode",
+        dispatch_mode="autonomous",
+        lifecycle="temporary",
+        language="cn",
+    )
+    try:
+        definitions = await gateway.definitions()
+        assert {definition.name for definition in definitions} >= {
+            "view_task",
+            "claim_task",
+            "verify_task",
+            "send_message",
+        }
+
+        wrong_session_token = set_session_id("wrong-codex-callback-session")
+        try:
+            result = await gateway.invoke(
+                ToolInvocation(
+                    call_id="call-1",
+                    name="claim_task",
+                    arguments={"task_id": "t1", "status": "claimed"},
+                )
+            )
+            assert get_session_id() == "wrong-codex-callback-session"
+        finally:
+            reset_session_id(wrong_session_token)
+
+        assert result.is_error is False
+        task = await team_db.task.get_task("t1")
+        assert task.assignee == "dev-1"
+        assert task.status == TaskStatus.IN_PROGRESS.value
+    finally:
+        await messager.stop()
 
 
 @pytest.mark.asyncio

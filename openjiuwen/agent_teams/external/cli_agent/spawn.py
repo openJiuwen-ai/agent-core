@@ -36,16 +36,16 @@ from openjiuwen.agent_teams.team_workspace.models import TeamWorkspaceConfig
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import raise_error
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.harness_protocol import HarnessContext, McpServerConfig, McpTransport
-from openjiuwen.harness_providers.skills import SkillSource
+from openjiuwen.harness_protocol import HarnessContext
 from openjiuwen.harness_providers.claudecode import (
+    DEFAULT_CLAUDE_MAX_BUFFER_SIZE,
     ClaudeCodeHarness,
     ClaudeCodeHarnessConfig,
     ClaudeModelConfig,
-    DEFAULT_CLAUDE_MAX_BUFFER_SIZE,
 )
 from openjiuwen.harness_providers.claudecode.options import strip_parent_claude_env
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig, CodexModelConfig
+from openjiuwen.harness_providers.skills import SkillSource
 
 MemberRuntimeLike = CliRuntimeBase | ExternalHarnessMemberRuntime
 
@@ -115,10 +115,9 @@ def descriptor_from_context(ctx: TeamRuntimeContext) -> TeamJoinDescriptor:
         # team system prompt is injected here at spawn time.
         scope="member",
         language=language,
-        # The CLI's tools (MCP server -> ExternalTeamClient -> create_team_tools)
-        # and its system prompt (rendered at spawn) are separate chains; both
-        # must resolve against the same mode axes or the member gets a prompt
-        # describing tools it does not have.
+        # Tool assembly and system-prompt rendering are separate chains.
+        # They must resolve against the same mode axes or the member gets a
+        # prompt describing tools it does not have.
         dispatch_mode=dispatch_mode,
         teammate_mode=teammate_mode,
         db_config=ctx.db_config,
@@ -375,8 +374,6 @@ async def build_cli_runtime(
             cwd=cwd,
             codex_bin=cli_path or codex_bin,
             inject_mcp=inject_mcp,
-            mcp_server_name=mcp_server_name,
-            mcp_server_command=mcp_server_command,
             mcp_default_tools_approval_mode=mcp_default_tools_approval_mode,
             bypass_approvals_and_sandbox=codex_bypass_approvals_and_sandbox,
             turn_idle_timeout_s=codex_turn_idle_timeout_s,
@@ -746,8 +743,6 @@ async def _build_codex_member_runtime(
     cwd: str | None,
     codex_bin: str | None,
     inject_mcp: bool,
-    mcp_server_name: str,
-    mcp_server_command: tuple[str, ...],
     mcp_default_tools_approval_mode: str | None,
     bypass_approvals_and_sandbox: bool,
     turn_idle_timeout_s: float | None,
@@ -768,21 +763,14 @@ async def _build_codex_member_runtime(
     member_name = ctx.member_name or ""
     env = _with_home_env({**dict(os.environ), **(extra_env or {}), **descriptor.to_env()})
     team_logger.info(
-        "[external-cli] preparing codex member {} cwd={} codex_bin_configured={} inject_mcp={} "
-        "mcp_server_name={} mcp_server_command={} team_join_env_present={}",
+        "[external-cli] preparing codex member {} cwd={} codex_bin_configured={} "
+        "inject_mcp={} team_join_env_present={}",
         member_name,
         cwd,
         codex_bin is not None,
         inject_mcp,
-        mcp_server_name,
-        mcp_server_command,
         "OPENJIUWEN_TEAM_JOIN" in env,
     )
-    if inject_mcp and not mcp_server_command:
-        raise_error(
-            StatusCode.AGENT_TEAM_CONFIG_INVALID,
-            reason="Codex SDK MCP injection requires a non-empty mcp_server_command",
-        )
     observability = await _start_codex_observability(
         member_name=member_name,
         member_agent_id=member_agent_id,
@@ -828,18 +816,19 @@ async def _build_codex_member_runtime(
     harness = CodexHarness(config, notification_observer=observability.observer)
     runtime = ExternalHarnessMemberRuntime(
         harness=harness,
-        context=_member_context(ctx, descriptor, member_agent_id=member_agent_id, system_prompt=system_prompt, cwd=cwd),
+        context=_member_context(
+            ctx,
+            descriptor,
+            member_agent_id=member_agent_id,
+            system_prompt=system_prompt,
+            cwd=cwd,
+        ),
         team_context_tracker=team_context_tracker,
         resume_external_backend=resume_external_backend,
         agent_kind="codex",
         cli_path=codex_bin,
         inject_mcp=inject_mcp,
-        mcp_server_name=mcp_server_name,
     )
-    if inject_mcp:
-        runtime.bind_mcp_servers(
-            [McpServerConfig(name=mcp_server_name, transport=McpTransport.STDIO, command=mcp_server_command)]
-        )
     runtime.bind_span_bridge(observability.span_bridge)
     runtime.bind_fallback_promotion(promote_fallback_model)
     runtime.add_teardown_hook(observability.aclose)

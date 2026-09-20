@@ -16,6 +16,8 @@ import pytest
 from openjiuwen.harness_protocol import (
     DeliveryMode,
     DiagnosticEvent,
+    DynamicToolCallRequest,
+    DynamicToolCallResponse,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
@@ -34,6 +36,9 @@ from openjiuwen.harness_protocol import (
     ResumePolicy,
     ToolApprovalDecision,
     ToolApprovalResponse,
+    ToolDefinition,
+    ToolExecutionResult,
+    ToolInvocation,
     TurnEventKind,
     TurnLifecycleEvent,
     UsageUpdatedEvent,
@@ -47,11 +52,16 @@ from openjiuwen.harness_providers.codex.failure_classifier import (
     classify_codex_error_info,
     classify_turn_error,
 )
-from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
+from openjiuwen.harness_providers.codex.harness import (
+    DYNAMIC_TOOL_CALL_METHOD,
+    USER_INPUT_METHOD,
+    _answers_from_response,
+)
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
     codex_mcp_config_overrides,
     codex_model_config_overrides,
+    start_thread_with_raw_events_and_dynamic_tools,
 )
 from tests.test_logger import logger
 
@@ -163,11 +173,25 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _Fak
         def __init__(self, config: Any = None) -> None:
             super().__init__(state, config)
 
+    class InputTextDynamicToolCallOutputContentItem:
+        def __init__(self, *, type: str, text: str) -> None:
+            self.type = type
+            self.text = text
+
+        def model_dump(self, *, mode: str, by_alias: bool) -> dict[str, str]:
+            _ = mode, by_alias
+            return {"type": self.type, "text": self.text}
+
     sdk.CodexConfig = CodexConfig
     sdk.AsyncCodex = AsyncCodex
     sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all", auto_review="auto_review")
     sdk.Sandbox = SimpleNamespace(full_access="full_access")
+    generated = ModuleType("openai_codex.generated")
+    generated_v2 = ModuleType("openai_codex.generated.v2_all")
+    generated_v2.InputTextDynamicToolCallOutputContentItem = InputTextDynamicToolCallOutputContentItem
     monkeypatch.setitem(sys.modules, "openai_codex", sdk)
+    monkeypatch.setitem(sys.modules, "openai_codex.generated", generated)
+    monkeypatch.setitem(sys.modules, "openai_codex.generated.v2_all", generated_v2)
     monkeypatch.setattr("openjiuwen.harness_providers.codex.options.load_codex_sdk", lambda: sdk)
     monkeypatch.setattr("openjiuwen.harness_providers.codex.harness.load_codex_sdk", lambda: sdk)
     return sdk, state
@@ -197,6 +221,35 @@ def _context(**overrides: Any) -> HarnessContext:
     }
     values.update(overrides)
     return HarnessContext(**values)
+
+
+def _tool_definition(
+    *,
+    name: str = "view_task",
+    description: str = "View a team task.",
+    property_type: str = "string",
+) -> ToolDefinition:
+    return ToolDefinition(
+        name=name,
+        description=description,
+        input_schema={
+            "type": "object",
+            "properties": {"task_id": {"type": property_type}},
+            "required": ["task_id"],
+        },
+    )
+
+
+class _FakeToolGateway:
+    def __init__(self, definitions: tuple[ToolDefinition, ...] | None = None) -> None:
+        self._definitions = definitions if definitions is not None else (_tool_definition(),)
+
+    async def definitions(self) -> tuple[ToolDefinition, ...]:
+        return self._definitions
+
+    async def invoke(self, invocation: ToolInvocation) -> ToolExecutionResult:
+        _ = invocation
+        return ToolExecutionResult(content="unused")
 
 
 async def _turn(harness: HarnessProtocol, turn_id: str) -> list[HarnessEvent]:
@@ -249,6 +302,48 @@ def test_config_validation_and_option_rendering() -> None:
     assert 'mcp_servers.remote.url="https://mcp"' in http
     assert 'mcp_servers.remote.http_headers={ X = "y" }' in http
     assert CodexHarnessProvider().card.name == "codex"
+
+
+@pytest.mark.asyncio
+async def test_thread_start_injects_raw_events_and_dynamic_tools_into_low_level_request() -> None:
+    import openai_codex
+
+    requests: list[dict[str, Any]] = []
+
+    class _LowLevelClient:
+        async def thread_start(self, request: dict[str, Any]) -> Any:
+            requests.append(request)
+            return SimpleNamespace(thread=SimpleNamespace(id="thread-low"), model="m")
+
+    class _HighLevelClient:
+        def __init__(self) -> None:
+            self._client = _LowLevelClient()
+
+        async def _ensure_initialized(self) -> None:
+            return None
+
+        async def thread_start(self, *, model: str | None = None) -> Any:
+            raise AssertionError(f"high-level thread_start must not run: {model}")
+
+    sdk = SimpleNamespace(
+        ApprovalMode=openai_codex.ApprovalMode,
+        Sandbox=openai_codex.Sandbox,
+        AsyncThread=lambda _client, thread_id: SimpleNamespace(id=thread_id),
+    )
+    thread, model = await start_thread_with_raw_events_and_dynamic_tools(
+        client=_HighLevelClient(),
+        sdk=sdk,
+        options={"model": "m"},
+        experimental_raw_events=True,
+        dynamic_tools=await _FakeToolGateway().definitions(),
+    )
+
+    assert thread.id == "thread-low"
+    assert model == "m"
+    assert requests[0]["experimentalRawEvents"] is True
+    assert requests[0]["dynamicTools"][0]["type"] == "function"
+    assert requests[0]["dynamicTools"][0]["name"] == "view_task"
+    assert all(tool["type"] != "namespace" for tool in requests[0]["dynamicTools"])
 
 
 @pytest.mark.asyncio
@@ -320,6 +415,114 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
 
 
 @pytest.mark.asyncio
+async def test_dynamic_tools_are_top_level_functions_and_calls_route_to_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sdk, state = _install_fake_sdk(monkeypatch)
+    requests: list[DynamicToolCallRequest] = []
+
+    class _Handler:
+        async def handle(self, request: Any) -> Any:
+            assert isinstance(request, DynamicToolCallRequest)
+            requests.append(request)
+            return DynamicToolCallResponse(
+                request_id=request.request_id,
+                status=InteractionResponseStatus.COMPLETED,
+                result={"task_id": "task-1", "status": "claimed"},
+            )
+
+        async def cancel(self, request_id: str, *, reason: Any = None) -> None:
+            _ = request_id, reason
+
+    async def _call_tool(handle: _FakeHandle) -> Any:
+        approval_handler = state.clients[0]._client._sync._approval_handler
+        assert approval_handler is not None
+        loop = asyncio.get_running_loop()
+        response = await loop.run_in_executor(
+            None,
+            approval_handler,
+            DYNAMIC_TOOL_CALL_METHOD,
+            {
+                "threadId": handle.thread_id,
+                "turnId": handle.id,
+                "callId": "call-1",
+                "tool": "view_task",
+                "arguments": {"task_id": "task-1"},
+            },
+        )
+        assert response == {
+            "contentItems": [
+                {"type": "inputText", "text": '{"task_id":"task-1","status":"claimed"}'}
+            ],
+            "success": True,
+        }
+        return _notification(
+            "item/completed",
+            **_item(
+                id="call-1",
+                type="dynamicToolCall",
+                tool="view_task",
+                arguments={"task_id": "task-1"},
+                content_items=response["contentItems"],
+                status="completed",
+            ).__dict__,
+        )
+
+    state.scripts.append(
+        [
+            _notification(
+                "item/started",
+                **_item(
+                    id="call-1",
+                    type="dynamicToolCall",
+                    tool="view_task",
+                    arguments={"task_id": "task-1"},
+                ).__dict__,
+            ),
+            _call_tool,
+            _turn_completed("turn-inspect task", _Status.completed),
+        ]
+    )
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(
+        _context(
+            tools=_FakeToolGateway(),
+            interactions=_Handler(),
+            host_capabilities=frozenset(
+                {HostCapability.NATIVE_TOOL_GATEWAY, HostCapability.DYNAMIC_TOOL_CALL}
+            ),
+        )
+    )
+
+    kind, options = state.thread_calls[0]
+    assert kind == "start"
+    assert options["dynamic_tools"] == [
+        {
+            "type": "function",
+            "name": "view_task",
+            "description": "View a team task.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        }
+    ]
+    assert all(tool["type"] != "namespace" for tool in options["dynamic_tools"])
+
+    receipt = await harness.send(HarnessInput(content="inspect task"))
+    events = await _turn(harness, receipt.turn_id)
+    assert _terminal(events).kind is TurnEventKind.FINISHED
+    tool_events = [event.event for event in events if isinstance(event.event, ItemLifecycleEvent)]
+    assert [event.kind.value for event in tool_events] == ["started", "completed"]
+    assert tool_events[1].data["result"] == '{"task_id":"task-1","status":"claimed"}'
+    assert requests[0].call_id == "call-1"
+    assert requests[0].tool_name == "view_task"
+    assert requests[0].arguments == {"task_id": "task-1"}
+    await harness.stop()
+
+
+@pytest.mark.asyncio
 async def test_steer_abort_and_failure_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     sdk, state = _install_fake_sdk(monkeypatch)
 
@@ -372,6 +575,92 @@ async def test_resume_requires_checkpoint_and_uses_thread_resume(monkeypatch: py
     assert state.thread_calls[-1][0] == "resume"
     assert "ephemeral" not in state.thread_calls[-1][1]
     assert resumed.provider_session_id == "thread-1"
+    await resumed.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_or_replaces_thread_when_dynamic_tool_registration_changed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sdk, state = _install_fake_sdk(monkeypatch)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(tools=_FakeToolGateway()))
+    checkpoint = await harness.export_checkpoint()
+    await harness.stop()
+
+    strict = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    with pytest.raises(HarnessProtocolError, match="dynamic-tool definitions"):
+        await strict.start(_context(resume_policy=ResumePolicy.REQUIRE_RESUME, checkpoint=checkpoint))
+
+    flexible = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await flexible.start(_context(resume_policy=ResumePolicy.RESUME_IF_AVAILABLE, checkpoint=checkpoint))
+    assert state.thread_calls[-1][0] == "start"
+    await flexible.stop()
+
+
+@pytest.mark.parametrize(
+    "changed_definitions",
+    [
+        (_tool_definition(name="read_task"),),
+        (_tool_definition(description="Read a team task."),),
+        (_tool_definition(property_type="integer"),),
+        (_tool_definition(), _tool_definition(name="list_tasks")),
+    ],
+)
+@pytest.mark.asyncio
+async def test_resume_detects_dynamic_tool_definition_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    changed_definitions: tuple[ToolDefinition, ...],
+) -> None:
+    _sdk, state = _install_fake_sdk(monkeypatch)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(tools=_FakeToolGateway()))
+    checkpoint = await harness.export_checkpoint()
+    await harness.stop()
+
+    strict = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    with pytest.raises(HarnessProtocolError, match="dynamic-tool definitions"):
+        await strict.start(
+            _context(
+                tools=_FakeToolGateway(changed_definitions),
+                resume_policy=ResumePolicy.REQUIRE_RESUME,
+                checkpoint=checkpoint,
+            )
+        )
+
+    flexible = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await flexible.start(
+        _context(
+            tools=_FakeToolGateway(changed_definitions),
+            resume_policy=ResumePolicy.RESUME_IF_AVAILABLE,
+            checkpoint=checkpoint,
+        )
+    )
+    assert state.thread_calls[-1][0] == "start"
+    await flexible.stop()
+
+
+@pytest.mark.asyncio
+async def test_resume_accepts_reordered_equivalent_dynamic_tool_definitions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _sdk, state = _install_fake_sdk(monkeypatch)
+    first = _tool_definition()
+    second = _tool_definition(name="list_tasks")
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(tools=_FakeToolGateway((first, second))))
+    checkpoint = await harness.export_checkpoint()
+    await harness.stop()
+
+    resumed = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await resumed.start(
+        _context(
+            tools=_FakeToolGateway((second, first)),
+            resume_policy=ResumePolicy.REQUIRE_RESUME,
+            checkpoint=checkpoint,
+        )
+    )
+    assert state.thread_calls[-1][0] == "resume"
     await resumed.stop()
 
 
