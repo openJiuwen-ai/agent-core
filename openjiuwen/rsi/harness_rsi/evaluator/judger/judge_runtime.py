@@ -13,20 +13,21 @@ from openjiuwen.core.foundation.llm import Model, SystemMessage, UserMessage
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 from openjiuwen.harness import create_deep_agent
+from openjiuwen.harness.image_modality_probe import get_cached_image_support
 from openjiuwen.harness.rails._multimodal import build_read_image_multimodal_resolver
 from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
 from openjiuwen.harness.tools.filesystem import GlobTool, GrepTool, ListDirTool, ReadFileTool
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
-from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import MAX_CLOSEOUT_BYTES, inline_evidence
+from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import inline_evidence
 from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
-    TOOL_BYTES,
     GuardedJudgeModel,
     JudgeEvidenceTool,
-    bounded_text,
+    bound_tool_content,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
+from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, is_retryable_model_call_failure
 
 
 class JudgeIterationLimitError(EvaluationInfrastructureError):
@@ -74,7 +75,15 @@ class JudgeBudgetRail(AgentRail):
         if self._closed or self.continuation is None:
             raise EvaluationInfrastructureError("Judge closeout context is unavailable or already consumed")
         self._closed = True
-        return await self.continuation()
+        try:
+            result = await self.continuation()
+            if not str(result or "").strip():
+                raise RetryableModelOutputError("Judge closeout returned an empty response")
+            return result
+        except Exception as exc:
+            if is_retryable_model_call_failure(exc):
+                self._closed = False
+            raise
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         turn = int(ctx.extra.get("judge_turn", 0)) + 1
@@ -98,13 +107,14 @@ class JudgeBudgetRail(AgentRail):
 
     async def after_tool_call(self, ctx: AgentCallbackContext) -> None:
         result = ctx.inputs.tool_result
-        serialized = json.dumps(result.model_dump(mode="json") if hasattr(result, "model_dump") else result,
-                                ensure_ascii=False, default=str)
-        if len(serialized.encode("utf-8")) > TOOL_BYTES:
+        data = result.get("data") if isinstance(result, dict) else getattr(result, "data", None)
+        content = data.get("content") if isinstance(data, dict) else None
+        bounded = bound_tool_content(content)
+        if bounded != content:
             from openjiuwen.harness.tools.base_tool import ToolOutput
-            bounded = bounded_text(serialized)
             original_success = result.get("success", False) if isinstance(result, dict) else result.success
-            result = ToolOutput(success=original_success, data={"content": bounded})
+            original_error = result.get("error") if isinstance(result, dict) else result.error
+            result = ToolOutput(success=original_success, data={**data, "content": bounded}, error=original_error)
             ctx.inputs.tool_result = result
             if ctx.inputs.tool_msg is not None:
                 ctx.inputs.tool_msg.content = bounded
@@ -145,7 +155,8 @@ def build_judge_agent(
 
     async def complete_evidence_verdict() -> str:
         payload = await asyncio.to_thread(
-            inline_evidence, workspace, max_bytes=MAX_CLOSEOUT_BYTES, required=True,
+            inline_evidence, workspace, max_bytes=model.context_budget(), required=True,
+            include_images=True,
         )
         if payload is None:
             raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
@@ -200,7 +211,15 @@ async def run_judge_agent(
         Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
 
 
-async def _invoke_complete_evidence(model: Model, payload: str) -> str:
+async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:
+    if isinstance(payload, list):
+        declared = getattr(model.model_client_config, "supports_vision", None)
+        supported = declared if isinstance(declared, bool) else get_cached_image_support(model)
+        if supported is not True:
+            raise EvaluationInfrastructureError(
+                "Judge image evidence requires a vision-capable model with confirmed image support; "
+                "no evidence omitted and no score produced"
+            )
     policy = await asyncio.to_thread(Path(__file__).with_name("judge_prompt.md").read_text, encoding="utf-8")
     policy = "All grading evidence is supplied inline. Evaluate it directly.\nEvaluation policy:" + policy.split(
         "Evaluation policy:", 1,

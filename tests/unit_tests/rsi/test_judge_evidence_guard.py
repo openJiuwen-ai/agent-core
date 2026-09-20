@@ -153,3 +153,28 @@ async def test_native_tool_message_is_bounded(tmp_path):
     await JudgeBudgetRail(8, tmp_path / 'tools.jsonl').after_tool_call(SimpleNamespace(inputs=inputs))
     assert len(msg.content.encode()) <= TOOL_BYTES
     assert inputs.tool_result.success
+
+
+@pytest.mark.asyncio
+async def test_pagination_survives_rail_and_model_boundary_losslessly(tmp_path):
+    text = ('\\\"\u4e2d\n' * 20000)
+    (tmp_path / 'escaped.txt').write_text(text, encoding='utf-8', newline='')
+    tool = JudgeEvidenceTool(tmp_path, 'paging')
+    offset = 0
+    parts = []
+    while True:
+        result = await tool.invoke({'path': 'escaped.txt', 'byte_offset': offset})
+        message = ToolMessage(content=result.data['content'], tool_call_id='page')
+        before = message.content
+        inputs = SimpleNamespace(tool_result=result, tool_msg=message,
+                                 tool_name='read_evidence', tool_args={'path': 'escaped.txt'})
+        await JudgeBudgetRail(20, tmp_path / 'events.jsonl').after_tool_call(SimpleNamespace(inputs=inputs))
+        guarded = guard_messages([message])
+        assert guarded[0].content == before
+        page = json.loads(guarded[0].content)
+        parts.append(page['content'])
+        if not page['truncated']:
+            break
+        assert page['next_byte_offset'] > offset
+        offset = page['next_byte_offset']
+    assert ''.join(parts) == text

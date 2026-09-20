@@ -154,7 +154,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 raw = await run_model_call_with_retries(
                     invoke,
                     operation_name="llm evaluator",
-                    max_retries=0 if attempt else self._config.judge_max_retries,
+                    max_retries=self._config.judge_max_retries,
                 )
             except JudgeIterationLimitError:
                 if attempt:

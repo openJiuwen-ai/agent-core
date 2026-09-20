@@ -46,6 +46,19 @@ def _summary(value):
     return value
 
 
+def bound_tool_content(content):
+    """Preserve source paging envelopes; previews never advertise file offsets."""
+    if not isinstance(content, str) or len(content.encode("utf-8")) <= TOOL_BYTES:
+        return content
+    return _json({
+        "truncated": True,
+        "preview": content[:1000],
+        "instruction": "Tool output preview only, not a file page. Re-read the original file with "
+                       "read_evidence using its path and JSON pointer or byte_offset=0. "
+                       "Do not derive file offsets from this preview or infer missing evidence.",
+    })
+
+
 class JudgeEvidenceTool(Tool):
     """Read only within the frozen judge workspace, including JSON Pointer pages."""
 
@@ -117,12 +130,12 @@ def guard_messages(messages, tools=None, *, limit=REQUEST_BYTES, reserve=16384):
         return _request_bound(rows, schemas) + reserve
 
     for row in rows:
-        if row.get("role") == "tool" and len(_json(row.get("content")).encode("utf-8")) > TOOL_BYTES:
-            row["content"] = bounded_text(str(row.get("content", "")))
+        if row.get("role") == "tool":
+            row["content"] = bound_tool_content(row.get("content", ""))
     for row in rows:
         if size() <= limit:
             break
-        if row.get("role") == "tool":
+        if row.get("role") == "tool" and isinstance(row.get("content"), str):
             row["content"] = ("Evidence evicted for context budget. Re-read the original tool path with "
                               "read_evidence and a precise JSON pointer or byte_offset. Do not infer absence.")
     if size() > limit:
@@ -140,14 +153,18 @@ def guard_messages(messages, tools=None, *, limit=REQUEST_BYTES, reserve=16384):
 class GuardedJudgeModel(Model):
     """Guard the actual model boundary, not the pre-rail message preview."""
 
+    def context_budget(self):
+        """Share model capacity with the evidence assembler."""
+        return ContextUtils.resolve_context_max(
+            model_name=self.model_config.model_name,
+            fallback_context_window_tokens=self.model_config.context_window,
+        )
+
     def _prepare(self, messages, kwargs):
         """Reduce output headroom only after trying to reclaim tool history."""
         options = dict(kwargs)
         requested = int(options.get("max_tokens") or self.model_config.max_tokens or MIN_OUTPUT_TOKENS)
-        window = ContextUtils.resolve_context_max(
-            model_name=self.model_config.model_name,
-            fallback_context_window_tokens=self.model_config.context_window,
-        )
+        window = GuardedJudgeModel.context_budget(self)
         if requested <= 0 or window <= 0:
             raise EvaluationInfrastructureError("Judge context window and output limit must be positive")
         tools = options.get("tools")
