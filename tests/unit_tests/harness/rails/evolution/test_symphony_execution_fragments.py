@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
@@ -166,8 +168,15 @@ def test_serialized_tool_output_requires_success_without_an_error() -> None:
     ]
 
 
-def test_authoritative_truncated_skill_output_preserves_success() -> None:
-    truncated_output = '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "...<truncated 16270 chars>",
+        "...<OTel attribute truncated: 16270 chars omitted>",
+    ],
+)
+def test_authoritative_truncated_skill_output_preserves_success(suffix: str) -> None:
+    truncated_output = f'{{"success": true, "data": {{"skill_content": "large{suffix}'
     fragments = _fragments(
         (
             0,
@@ -214,6 +223,40 @@ def test_authoritative_truncated_skill_output_preserves_success() -> None:
     assert [(fragment.capability_type, fragment.capability_name) for fragment in fragments] == [
         ("skill", "travel-guide-generator"),
     ]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "...<OTel attribute truncated: 0 chars omitted>",
+        "...<OTel attribute truncated: -1 chars omitted>",
+        "...<OTel attribute truncated: 12 chars>",
+        "...<OTel attribute truncated: 12 chars omitted> trailing",
+    ],
+)
+def test_invalid_otel_truncation_marker_does_not_preserve_skill_success(suffix: str) -> None:
+    fragments = _fragments(
+        (
+            0,
+            _trajectory(
+                _span("agent.main", 1),
+                _span(
+                    "tool.skill_tool",
+                    2,
+                    parent_span_id=1,
+                    attributes={
+                        semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                        semconv.GEN_AI_TOOL_CALL_ARGUMENTS: {"skill_name": "untrusted"},
+                        semconv.GEN_AI_TOOL_CALL_RESULT: f'{{"success": true, "data": "large{suffix}',
+                        semconv.OJ_TOOL_AUTHORITATIVE: True,
+                    },
+                    status=1,
+                ),
+            ),
+        )
+    )
+
+    assert not [fragment for fragment in fragments if fragment.capability_type == "skill"]
 
 
 def test_skill_read_accepts_observability_args_kwargs_input_envelope() -> None:
