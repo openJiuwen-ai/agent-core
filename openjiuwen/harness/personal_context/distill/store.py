@@ -27,7 +27,7 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     with tempfile.NamedTemporaryFile(
@@ -71,7 +71,7 @@ def begin_job(
         "created_at_ms": now,
         "finished_at_ms": None,
     }
-    _atomic_write_json(_jobs_dir(home) / f"{job_id}.json", payload)
+    atomic_write_json(_jobs_dir(home) / f"{job_id}.json", payload)
     return job_id
 
 
@@ -99,10 +99,10 @@ def finish_job(
             "finished_at_ms": now,
         }
     )
-    _atomic_write_json(path, payload)
+    atomic_write_json(path, payload)
 
     if status == "success" and covered_through_ms is not None:
-        _atomic_write_json(
+        atomic_write_json(
             _cursor_path(home),
             {
                 "covered_through_ms": int(covered_through_ms),
@@ -117,6 +117,12 @@ def get_cursor_ms(home: str) -> int:
     if not payload:
         return 0
     return int(payload.get("covered_through_ms") or 0)
+
+
+def clear_distill_cursor(home: str) -> None:
+    path = _cursor_path(home)
+    if path.is_file():
+        path.unlink()
 
 
 def get_job(home: str, job_id: str) -> dict[str, Any] | None:

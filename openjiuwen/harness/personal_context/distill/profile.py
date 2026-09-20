@@ -3,15 +3,22 @@
 from __future__ import annotations
 
 import json
+import time
+import uuid
 from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.personal_context.distill.merge import merge_markdown
+from openjiuwen.harness.personal_context.distill.store import (
+    atomic_write_json,
+    clear_distill_cursor,
+)
 
 PERSONA_FILENAME = "persona.md"
 WORK_FILENAME = "work.md"
 META_FILENAME = "meta.json"
 CURRENT_FILENAME = "current.json"
+OWNER_FILENAME = "owner.md"
 
 _MAX_PERSONA_CHARS = 12000
 _MAX_WORK_CHARS = 12000
@@ -43,7 +50,19 @@ def _clip(text: str, limit: int) -> str:
     return clipped + "\n\n…（已截断）\n"
 
 
-def _read_current_job_id(home: str) -> str | None:
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _version_files_complete(root: Path) -> bool:
+    return (
+        (root / PERSONA_FILENAME).is_file()
+        and (root / WORK_FILENAME).is_file()
+        and (root / META_FILENAME).is_file()
+    )
+
+
+def _read_current_pointer(home: str) -> dict[str, Any] | None:
     path = current_json_path(home)
     if not path.is_file():
         return None
@@ -54,6 +73,16 @@ def _read_current_job_id(home: str) -> str | None:
     if not isinstance(raw, dict):
         return None
     job_id = str(raw.get("job_id") or "").strip()
+    if not job_id:
+        return None
+    return raw
+
+
+def _read_current_job_id(home: str) -> str | None:
+    pointer = _read_current_pointer(home)
+    if not pointer:
+        return None
+    job_id = str(pointer.get("job_id") or "").strip()
     return job_id or None
 
 
@@ -101,3 +130,90 @@ def publish_distilled(
         encoding="utf-8",
     )
     return root
+
+
+def activate_profile_version(
+    home: str,
+    job_id: str,
+    *,
+    source: str = "distill",
+) -> dict[str, Any]:
+    """Validate versions/<job_id>/ then atomically write current.json."""
+    key = str(job_id or "").strip()
+    if not key:
+        raise ValueError("job_id is required")
+    root = version_dir(home, key)
+    if not _version_files_complete(root):
+        raise ValueError(f"incomplete profile version: {key}")
+    pointer = {
+        "job_id": key,
+        "published_at_ms": _now_ms(),
+        "source": str(source or "distill"),
+    }
+    atomic_write_json(current_json_path(home), pointer)
+    return pointer
+
+
+def resolve_current_profile(home: str) -> dict[str, Any] | None:
+    """Resolve the active profile via current.json; return None if missing/incomplete."""
+    pointer = _read_current_pointer(home)
+    if not pointer:
+        return None
+    job_id = str(pointer.get("job_id") or "").strip()
+    if not job_id:
+        return None
+    root = version_dir(home, job_id)
+    if not _version_files_complete(root):
+        return None
+    try:
+        meta_raw = json.loads((root / META_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(meta_raw, dict):
+        return None
+    return {
+        "job_id": job_id,
+        "persona_md": load_text(root / PERSONA_FILENAME),
+        "work_md": load_text(root / WORK_FILENAME),
+        "meta": meta_raw,
+        "source": pointer.get("source"),
+        "published_at_ms": pointer.get("published_at_ms"),
+    }
+
+
+def save_distilled_profile(
+    home: str,
+    *,
+    persona_md: str,
+    work_md: str,
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Write a new version from manual edit and activate it; does not touch Distill cursor."""
+    job_id = uuid.uuid4().hex
+    now = _now_ms()
+    payload = dict(meta or {})
+    payload["job_id"] = job_id
+    payload["source"] = "manual_edit"
+    payload["updated_at_ms"] = now
+    publish_distilled(
+        home,
+        job_id,
+        persona_md=persona_md,
+        work_md=work_md,
+        meta=payload,
+        merge_with_existing=False,
+    )
+    activate_profile_version(home, job_id, source="manual_edit")
+    resolved = resolve_current_profile(home)
+    if resolved is None:
+        raise RuntimeError("manual profile save failed to resolve")
+    return resolved
+
+
+def delete_distilled_profile(home: str) -> dict[str, Any]:
+    """Remove current.json; keep owner.md and versions; clear Distill cursor."""
+    path = current_json_path(home)
+    if path.is_file():
+        path.unlink()
+    clear_distill_cursor(home)
+    return {"deleted": True, "cursor_ms": 0}

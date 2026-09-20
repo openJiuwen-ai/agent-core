@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -42,7 +43,7 @@ class _FailingAnalyzer:
 
 
 @pytest.mark.asyncio
-async def test_run_distill_job_success_writes_version_not_current(tmp_path: Path):
+async def test_run_distill_job_success_writes_version_and_activates_current(tmp_path: Path):
     home = str(tmp_path)
     llm = _FakeLlm()
     result = await run_distill_job(
@@ -61,7 +62,10 @@ async def test_run_distill_job_success_writes_version_not_current(tmp_path: Path
     assert (root / "persona.md").is_file()
     assert (root / "work.md").is_file()
     assert (root / "meta.json").is_file()
-    assert not current_json_path(home).exists()
+    assert current_json_path(home).is_file()
+    pointer = json.loads(current_json_path(home).read_text(encoding="utf-8"))
+    assert pointer["job_id"] == result.job_id
+    assert pointer["source"] == "distill"
     assert get_cursor_ms(home) == FIXTURE_END_MS
     job = get_job(home, result.job_id)
     assert job is not None
@@ -84,6 +88,44 @@ async def test_run_distill_job_empty_window_success_advances_cursor(tmp_path: Pa
     assert result.distilled_dir is None
     assert not (tmp_path / "im" / "profiles").exists()
     assert get_cursor_ms(home) == 1000
+
+
+@pytest.mark.asyncio
+async def test_run_distill_job_activate_failure_does_not_advance_cursor(
+    tmp_path: Path,
+    monkeypatch,
+):
+    home = str(tmp_path)
+    await run_distill_job(
+        home,
+        window_end_ms=500,
+        force_full_window=True,
+        corpus=FixtureCorpus([]),
+        llm=_FakeLlm(),
+    )
+    assert get_cursor_ms(home) == 500
+
+    def _boom(home_arg, job_id, *, source="distill"):
+        raise RuntimeError("activate failed")
+
+    monkeypatch.setattr(
+        "openjiuwen.harness.personal_context.distill.runner.activate_profile_version",
+        _boom,
+    )
+    result = await run_distill_job(
+        home,
+        window_end_ms=FIXTURE_END_MS,
+        force_full_window=True,
+        corpus=FixtureCorpus(default_fixture_messages()),
+        analyzer=LlmAnalyzer(_FakeLlm()),
+    )
+    assert result.status == "failed"
+    assert result.error is not None
+    assert "activate failed" in result.error
+    assert get_cursor_ms(home) == 500
+    assert not current_json_path(home).exists()
+    version_root = tmp_path / "im" / "profiles" / "versions" / result.job_id
+    assert version_root.is_dir()
 
 
 @pytest.mark.asyncio
