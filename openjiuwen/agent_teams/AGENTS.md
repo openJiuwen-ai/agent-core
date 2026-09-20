@@ -310,7 +310,10 @@ provider session/Turn 协议合并。
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
 leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
-调用里传启动细节。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
+调用里传启动细节。claude / codex 条目可声明 `builtin_models`（订阅等 CLI 自身登录提供的模型与
+effort 目录）：声明后 leader 可在 spawn 时挑内置模型，并用 `set_member_model` 在运行中切换模型 /
+effort（落库到 `options.builtin_model`，经 `HarnessModelControl.set_model` 下一 turn 生效）；
+未声明则行为不变。见 [[F_113_external-harness-builtin-model-selection]]。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
 `ExternalHarnessMemberRuntime`）与 adapter 型 gemini / openclaw / hermes / generic
 （`CliRuntimeBase` 子进程 runtime）。spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 backend
 注入团队 MCP server——claude 走 SDK 进程内 MCP（`_bind_protocol_member_team_tools` 在 `configure`

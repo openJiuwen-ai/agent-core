@@ -19,8 +19,8 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/tools/` |
-| 最近一次修订日期 | 2026-09-16 |
-| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | F_10_temporary-leader-clean-team-stream-end.md、F_13_human-agent-send-message.md、F_24_agent-time-awareness.md、F_38_team-teammate-worktree-isolation-agenttool.md、F_55_create-task-atomic-graph-and-depended-by-contract.md、F_57_tool-variants-and-templated-descriptions.md、F_59_condition-named-task-state-machine-with-verify-gate.md、F_62_scheduled-dispatch-runtime-and-review-voting.md、F_64_message-channel-policy-and-content-size-guard.md、F_75_fork-context-inheritance.md、F_76_leader-progressive-policy-disclosure.md、F_82_reassign-before-a-task-starts.md、F_109_send-message-recipient-parameter-split.md、F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -135,6 +135,15 @@ mutate the session directly; checkpoint lifecycle writes stay behind the
     比缺失的提示词更糟。属性级门控同样保留 `invoke` 内的防御性检查：MCP
     客户端直接调 `invoke`、不校验 schema，被省略的属性必须在那里被拒，且
     要拒在写成员行之前。
+    `spawn_external_cli` 的 `builtin_model` / `effort` 是同一模式（F_113）：
+    信号是 `builtin_models_enabled()`（某个声明的 CLI kind 带
+    `builtin_models` 目录），同时门控这两个属性、描述槽
+    `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 与 leader 工具
+    `set_member_model` 的注册。`builtin_model` 与 `model_name` 互斥（前者跑
+    CLI 自身登录，后者跑 pool 端点），`effort` 必须伴随 `builtin_model`，名字与
+    强度只接受目录中声明的值。`set_member_model` 先落库再推活成员，返回的
+    `applied_live` 告诉 leader 是下一 turn 生效还是下次启动生效；`model_ref`
+    非空的成员（pool 端点或已持久化的认证 fallback）一律拒绝。
 13. **每个 `TeamTool.invoke` 必须返回 `ToolOutput`，永不抛**。工具内部
     `try / except` 捕获后端异常，落 `team_logger.error`，转成
     `ToolOutput(success=False, error=...)` 返回；不允许把 `Exception`

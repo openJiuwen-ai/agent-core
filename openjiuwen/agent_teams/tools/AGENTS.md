@@ -9,7 +9,7 @@
 | `tool_base.py` | `TeamTool` ABC |
 | `tool_permissions.py` | 权限集合（`LEADER_*`、`MEMBER_*`、`MEMBER_TOOLS_BY_DISPATCH`、`SHARED_TOOLS`、`HUMAN_AGENT_TOOLS`）、`_MEMBER_NAME_PATTERN` |
 | `tool_team.py` | `BuildTeamTool`、`CleanTeamTool` |
-| `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
+| `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`SetMemberModelTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
 | `tool_task.py` | `TaskCreateTool` / `ScheduledTaskCreateTool`（各自独立，共享模块级纯函数 `_task_node_schema` / `_validate_task_batch`）、`ViewTaskToolV2`、`UpdateTaskTool`、`SubmitPlanTool`、`ClaimTaskTool`、`MemberCompleteTaskTool` |
 | `tool_message.py` | `_SendMessageBase` → `SendMessageTool`（点对点、多播、广播）/ `ReportToLeaderTool`（scheduled 成员：仅 leader + user） |
 | `tool_factory.py` | `create_team_tools` 工厂、`_wrap_invoke_with_logging` |
@@ -24,7 +24,7 @@
 | `message_manager.py` | `TeamMessageManager` —— 点对点 + 广播发送、已读状态查询 |
 | `database/` | `TeamDatabase` + 建立在共享 `DbSessions` 上的按表 DAO（读写 session 分离 —— 见下文 *数据库并发*）。静态表 + 按 session 的动态表的 SQL 层。测试跑在 sqlite `:memory:` 的 `connection_string` 上（快、无文件） |
 | `models.py` | `Team`、`TeamMember` 静态表 + 按 session 动态生成的 `TeamTask*` / `TeamMessage*` 工厂 |
-| `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列 |
+| `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberBuiltinModel` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_builtin_model/set_member_builtin_model/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列。`builtin_model` 是外部 CLI 成员在自身登录上跑的内置模型与 effort，`promote_member_fallback_model` 提升 fallback 时一并清除（F_113） |
 | `structured_output_tool.py` | `StructuredOutputTool`（`input_params=schema_json`，捕获 `captured`）+ `StructuredOutputFinishRail`（一旦捕获就强制结束本轮）。给任何无原生 `response_format` 的 agent 用的通用结构化输出工具；被 swarmflow worker/session 与 tiny agent（`tiny_agent.py`）复用 |
 | `locales/` | i18n 字符串（`cn.py`、`en.py`）与 Markdown 描述文件（`descs/<lang>/<domain>/<tool>.md`，领域目录见下文「Markdown 描述文件」） |
 
@@ -110,7 +110,8 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 | `checkpoint` | ✓ | ✓ | 为本成员当前上下文存一个命名快照，供 `spawn_teammate(fork="<name>")` 继承；仅 `fork_enabled()`（`TeamAgentSpec.enable_fork`）时接线，`invoke` 内保留同源兜底。外部成员（`external/client.py` / `sdk_mcp.py`）另行 `exclude_tools` 排除——它们没有 `DeepAgent`，快照无从取起 |
 | `spawn_human_agent` | ✓ | | 拉起一个 HITT 人类成员；schema 仅 `member_name`/`display_name`/`desc`（无 `model_name`/`prompt`）；仅 `hitt_enabled()` 时接线 |
 | `spawn_bridge_agent` | ✓ | | 拉起一个到远程 agent 的桥接；`desc` 兼作 connect briefing；可选 `mailbox_inject_mode`/`protocol`/`adapter_config`/`model_name`；仅 `bridge_enabled()` 时接线 |
-| `spawn_external_cli` | ✓ | | 拉起一个第三方 CLI teammate；需要 `cli_agent`（在 `TeamAgentSpec.external_cli_agents` 声明的一个 kind）+ `desc`；仅 `external_cli_kinds()` 非空时接线 |
+| `spawn_external_cli` | ✓ | | 拉起一个第三方 CLI teammate；需要 `cli_agent`（在 `TeamAgentSpec.external_cli_agents` 声明的一个 kind）+ `desc`；仅 `external_cli_kinds()` 非空时接线。`builtin_model` / `effort` 是**属性级门控**（gate `builtin_models_enabled()`，同时填 `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 两个槽）：从 kind 声明的 `builtin_models` 目录里挑订阅内置模型与推理强度，与 `model_name` 互斥，持久化进 `options.builtin_model`。见 F_113 |
+| `set_member_model` | ✓ | | 运行中切换外部 CLI 成员的内置模型 / effort（`member_name` + `model?` + `effort?`）；仅 `builtin_models_enabled()` 时接线。经 `TeamBackend.set_member_model` 先落库、再由 `set_member_model_fn`（`TeamAgent._apply_member_model`）推给活成员，下一 turn 生效；成员不在跑则下次启动生效（结果带 `applied_live`）。`model_ref` 非空的成员（pool 端点 / 已提升的认证 fallback）拒绝。见 F_113 |
 | `shutdown_member` | ✓ | | `force=True` 跳过正常关停序列 |
 | `approve_plan` | ✓（仅 plan_mode） | | 仅 `teammate_mode == "plan_mode"` 时接线 |
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
@@ -423,7 +424,8 @@ descs/<lang>/
 ├── fragments/    共享片段（不按领域分——跨领域复用，且 slot 名是独立命名空间，建索引时跳过）
 ├── team/         build_team · clean_team
 ├── member/       spawn_teammate · spawn_human_agent · spawn_bridge_agent · spawn_external_cli
-│                 · shutdown_member · list_members · checkpoint · approve_plan · approve_tool
+│                 · set_member_model · shutdown_member · list_members · checkpoint · approve_plan
+│                 · approve_tool
 ├── task/         create_task · create_task_scheduled · view_task · update_task · claim_task
 │                 · member_complete_task · member_complete_task_scheduled
 │                 · verify_task · verify_task_scheduled
@@ -439,6 +441,8 @@ descs/<lang>/
 `test_tool_message.py` 断言，改常量必须同步改片段）、
 `create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
 `fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）、
+`builtin_model_param_rows` / `builtin_model_usage`（**capability 槽**，`spawn_external_cli` 专用，
+gate `builtin_models_enabled()`，F_113）、
 `update_task_verify_gate`（**capability 槽**，`update_task` 专用，gate `dispatch_mode == "scheduled"`，F_76）、
 `build_team_verify_gate`（**capability 槽**，`build_team` 专用，gate 同上，F_76；首个位于正文中间的
 `##` 节级 capability 槽——间距归一化就是为它加的）。
