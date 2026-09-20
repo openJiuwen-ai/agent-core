@@ -47,8 +47,9 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
 2. **Capabilities are truthful.** A card declares only what the SDK can do
    end to end; unsupported commands raise `UnsupportedHarnessCapabilityError`.
    DSH keeps an empty capability set; Claude Code / Codex declare STEER,
-   GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS; the DeepAgent
-   harness declares STEER and FORCE_ABORT.
+   GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS,
+   MODEL_SELECTION, MODEL_DISCOVERY; the DeepAgent harness declares STEER and
+   FORCE_ABORT.
 3. **Vendor SDKs stay optional.** Config / provider / package imports never
    import a vendor SDK; `_open_session` loads it lazily and a missing SDK
    surfaces as `HarnessError`. Startup failures raise `ProviderStartupError`
@@ -108,6 +109,22 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `skill_conflict` defaults to skip; replace stages a complete bundle before
    renaming the existing directory. Never remove copied skills at stop.
    Manifests carrying `tools` / `rails` / `subagents` are still rejected.
+10. **Model control is base-class owned.** `SerializedTurnHarness` implements
+    `HarnessModelControl`: `list_models` / `set_model` gate on the card,
+    `set_model` applies under `_command_lock` while idle and otherwise merges
+    into a pending selection that the supervisor applies after STARTED and
+    before `_execute_turn` (failure → WARNING `DiagnosticEvent`, turn keeps
+    running). Providers only implement `_list_models` / `_apply_model_selection`
+    and must keep the selection across reconnects: Claude Code / Codex fold it
+    into `_active_model` and `_primary_model` (the endpoint a declined auth
+    fallback returns to). Claude switches with `set_model()` and hot-applies
+    effort through the private `apply_flag_settings` control request
+    (`apply_claude_flag_settings`, reconnect when the SDK lacks it); Codex
+    passes `model=` / `effort=` on the next `thread.turn()` only, because the
+    App Server keeps turn overrides sticky. Both announce
+    `ProviderEvent("session/model_changed", {model, effort})`. A Codex model
+    without `provider` / `api_base` stays on the official endpoint and keeps
+    the approval reviewer; only `CodexModelConfig.is_external` bypasses it.
 
 ## Change requirements
 

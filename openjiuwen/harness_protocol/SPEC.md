@@ -7,8 +7,8 @@
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_protocol` |
 | 协议版本 | `1.0` |
-| 最近一次修订日期 | 2026-08-20 |
-| 关联 feature | `F_94_external-harness-protocol.md` |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | `F_94_external-harness-protocol.md`、`F_113_external-harness-builtin-model-selection.md` |
 
 ## 范围与边界
 
@@ -77,6 +77,23 @@ Provider 暴露静态 Card，并通过 `create(config)` 校验 provider-owned �
 | `abort(mode)` | graceful/force abort；能力 gated |
 | `pause()` / `resume()` | warm/cold paused-turn continuation；能力 gated |
 | `export_checkpoint()` | 返回最新 `HarnessCheckpoint` 快照；不替代主动保存 |
+
+### HarnessModelControl（可选）
+
+模型控制是与 `HarnessProtocol` 并列的独立可选 Protocol，不是它的成员——往 runtime_checkable
+Protocol 加必需方法会让既有三方实现不再结构一致。宿主先查 `card.supports(...)` 再调用；未声明对应
+capability 的实现抛 `UnsupportedHarnessCapabilityError`。
+
+| 成员 | capability | 语义 |
+|---|---|---|
+| `list_models()` | `MODEL_DISCOVERY` | 返回 `tuple[ModelOption, ...]`。已启动读活会话；未启动按 provider 配置做一次临时握手。不发模型请求 |
+| `set_model(selection)` | `MODEL_SELECTION` | 切换后续 Turn 的模型和/或推理强度。IDLE 时立即应用；有 Turn 运行时暂存（多次调用按字段合并），在下一个 Turn 开始前应用；**运行中的 Turn 不换模型**；本 cycle 内 provider 重连后保持。未启动或已停止时抛 `HarnessStateError` |
+
+- `ModelSelection(model, effort)`：`None` 表示该字段保持不变，至少设一个。
+- `ModelOption(model_id, display_name, description, efforts, default_effort, is_default, extensions)`：
+  `efforts` 为空表示不可调；`default_effort` 必须属于 `efforts`；`extensions` 保留厂商目录字段。
+- effort 是 provider 词汇（字符串），协议层不枚举。延后应用失败时，实现应发 WARNING
+  `DiagnosticEvent`，而不是静默丢弃。
 
 ### Delivery
 

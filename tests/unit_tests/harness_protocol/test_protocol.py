@@ -45,7 +45,10 @@ from openjiuwen.harness_protocol import (
     HarnessInteractionHandler,
     HarnessInteractionRequest,
     HarnessInteractionResponse,
+    HarnessModelControl,
     HostCapability,
+    ModelOption,
+    ModelSelection,
     InteractionCancelReason,
     InteractionResponseStatus,
     McpServerConfig,
@@ -921,3 +924,35 @@ def test_public_protocol_uses_turn_and_step_terminology() -> None:
 
     for source in public_sources:
         assert re.search(r"\bIteration\b", source.read_text(encoding="utf-8")) is None, source
+
+
+def test_model_selection_and_option_values_are_validated_and_frozen() -> None:
+    assert ModelSelection(effort="low").model is None
+    with pytest.raises(ValueError, match="must set a model, an effort, or both"):
+        ModelSelection()
+    with pytest.raises(ValueError):
+        ModelSelection(model=" ")
+
+    option = ModelOption(model_id="sonnet", efforts=["low", "high"], default_effort="high", extensions={"a": [1]})
+    assert option.efforts == ("low", "high")
+    assert option.extensions["a"] == (1,)
+    with pytest.raises(FrozenInstanceError):
+        option.model_id = "haiku"  # type: ignore[misc]
+    with pytest.raises(ValueError, match="default_effort"):
+        ModelOption(model_id="sonnet", efforts=("low",), default_effort="max")
+    with pytest.raises(ValueError):
+        ModelOption(model_id="")
+
+
+def test_model_control_is_an_optional_protocol_beside_harness_protocol() -> None:
+    class _Control:
+        async def list_models(self) -> tuple[ModelOption, ...]:
+            return ()
+
+        async def set_model(self, selection: ModelSelection) -> None:
+            _ = selection
+
+    assert isinstance(_Control(), HarnessModelControl)
+    assert not isinstance(object(), HarnessModelControl)
+    assert HarnessCapability.MODEL_SELECTION.value == "model_selection"
+    assert HarnessCapability.MODEL_DISCOVERY.value == "model_discovery"

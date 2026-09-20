@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from collections import deque
 from typing import Any, Callable, Mapping
@@ -21,6 +22,8 @@ from openjiuwen.harness_protocol import (
     HarnessProtocolError,
     HostCapability,
     InteractionResponseStatus,
+    ModelOption,
+    ModelSelection,
     ProviderEvent,
     ResumePolicy,
     ToolApprovalDecision,
@@ -43,9 +46,11 @@ from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConf
 from openjiuwen.harness_providers.claudecode.failure_classifier import classify_claude_exception
 from openjiuwen.harness_providers.claudecode.mapping import PROVIDER_NAME, ClaudeTurnAccumulator, MappedClaudeEvent
 from openjiuwen.harness_providers.claudecode.options import (
+    apply_claude_flag_settings,
     build_claude_options,
     build_claude_session_id,
     build_process_env,
+    claude_model_options,
     claude_request_log_settings_env,
     load_claude_sdk,
     mcp_servers_to_sdk,
@@ -59,6 +64,8 @@ ADAPTER_VERSION = "0.1.0"
 ASK_USER_TOOL_NAME = "AskUserQuestion"
 # Provider interaction asking the host to ratify (persist) an auth fallback.
 AUTH_FALLBACK_REQUEST_TYPE = "auth_fallback"
+# Provider event announcing the model / effort the session now runs on.
+MODEL_CHANGED_EVENT = "session/model_changed"
 _INTERACTIVE_HOST_CAPABILITIES = frozenset({HostCapability.USER_INPUT, HostCapability.TOOL_APPROVAL})
 
 TransportFactory = Callable[[Any], Any]
@@ -106,6 +113,8 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
                 HarnessCapability.MCP_TOOLS,
+                HarnessCapability.MODEL_SELECTION,
+                HarnessCapability.MODEL_DISCOVERY,
             }
         ),
         optional_host_capabilities=frozenset(
@@ -140,6 +149,9 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         self._client: Any = None
         self._stderr_tail = _StderrTail()
         self._active_model: ClaudeModelConfig | None = self._config.model
+        # The native endpoint with any runtime model selection applied; the
+        # endpoint a declined fallback goes back to.
+        self._primary_model: ClaudeModelConfig | None = self._config.model
         self._fallback_activated = False
         self._claude_session_id: str | None = None
         self._request_observer: ClaudeRequestObserver | None = None
@@ -179,6 +191,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             resume, session_id = candidate, None
         self._claude_session_id = resume or session_id
         self._active_model = self._config.model
+        self._primary_model = self._config.model
         self._fallback_activated = False
         self._client = await self._connect(context, model=self._active_model, resume=resume, session_id=session_id)
         await self._publish_checkpoint(
@@ -401,6 +414,69 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         await client.interrupt()
 
     # ------------------------------------------------------------------
+    # Model control
+    # ------------------------------------------------------------------
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        client = self._client
+        if client is not None:
+            return claude_model_options(await client.get_server_info())
+        return await self._probe_models()
+
+    async def _probe_models(self) -> tuple[ModelOption, ...]:
+        """Read the catalog from a throwaway CLI handshake; sends no model request."""
+        sdk = self._sdk or load_claude_sdk()
+        context = self._context
+        options = build_claude_options(
+            sdk=sdk,
+            config=self._config,
+            model=self._primary_model,
+            cwd=(context.cwd if context is not None else None) or self._config.cwd,
+            env=build_process_env(self._config, context.env if context is not None else {}),
+            system_prompt="",
+            session_id=None,
+            resume=None,
+            mcp_servers={},
+            can_use_tool=None,
+            stderr=None,
+        )
+        transport = self._transport_factory(options) if self._transport_factory is not None else None
+        client = sdk.ClaudeSDKClient(options=options, transport=transport)
+        await client.connect()
+        try:
+            return claude_model_options(await client.get_server_info())
+        finally:
+            try:
+                await client.disconnect()
+            except Exception as exc:
+                logger.debug("[claude-code] disconnect after model probe failed: %s", exc)
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        updated = _with_selection(self._active_model, selection)
+        client = self._client
+        if client is not None:
+            if selection.model is not None:
+                await client.set_model(selection.model)
+            applied = selection.effort is None or await apply_claude_flag_settings(
+                client, {"effortLevel": selection.effort}
+            )
+            if not applied:
+                # This SDK cannot hot-apply effort; the next turn reconnects the
+                # same session with ``--effort`` from the updated config.
+                await self._disconnect_client()
+        self._active_model = updated
+        if not self._fallback_activated:
+            self._primary_model = updated
+        await self._emit(
+            ProviderEvent(
+                provider=PROVIDER_NAME,
+                event_type=MODEL_CHANGED_EVENT,
+                schema_version="1",
+                payload={"model": updated.model, "effort": updated.effort},
+            )
+        )
+
+    # ------------------------------------------------------------------
     # Authentication fallback
     # ------------------------------------------------------------------
 
@@ -501,14 +577,14 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         try:
             self._client = await self._connect(
                 context,
-                model=self._config.model,
+                model=self._primary_model,
                 resume=self._claude_session_id,
                 session_id=None,
             )
         except ProviderStartupError as exc:
             logger.warning("[claude-code] restoring the native endpoint failed: %s", exc)
             return
-        self._active_model = self._config.model
+        self._active_model = self._primary_model
         self._fallback_activated = False
 
     # ------------------------------------------------------------------
@@ -573,6 +649,12 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         return sdk.PermissionResultAllow()
 
 
+def _with_selection(model: ClaudeModelConfig | None, selection: ModelSelection) -> ClaudeModelConfig:
+    """Return ``model`` with the fields ``selection`` sets replaced."""
+    changes = {name: value for name, value in (("model", selection.model), ("effort", selection.effort)) if value}
+    return dataclasses.replace(model or ClaudeModelConfig(), **changes)
+
+
 def _questions(tool_input: Mapping[str, Any]) -> list[dict[str, Any]]:
     raw = tool_input.get("questions")
     if not isinstance(raw, list):
@@ -622,4 +704,4 @@ def _answers_from_response(content: Any, questions: list[dict[str, Any]]) -> dic
     return {"answer": str(content)}
 
 
-__all__ = ["ADAPTER_VERSION", "ASK_USER_TOOL_NAME", "ClaudeCodeHarness", "TransportFactory"]
+__all__ = ["ADAPTER_VERSION", "ASK_USER_TOOL_NAME", "MODEL_CHANGED_EVENT", "ClaudeCodeHarness", "TransportFactory"]

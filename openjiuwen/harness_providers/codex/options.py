@@ -12,7 +12,13 @@ import re
 from typing import Any, Mapping
 
 from openjiuwen.core.common.logging import LazyLogger, LogManager
-from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
+from openjiuwen.harness_protocol import (
+    HarnessError,
+    McpServerConfig,
+    McpTransport,
+    ModelOption,
+    UnsupportedHarnessCapabilityError,
+)
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
 
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
@@ -179,6 +185,8 @@ def build_thread_options(
 ) -> dict[str, Any]:
     """Build thread start/resume options, including the reasoning summary."""
     options: dict[str, Any] = {"ephemeral": False, "config": dict(config.thread_config)}
+    if model is not None and model.effort:
+        options["config"]["model_reasoning_effort"] = model.effort
     if cwd:
         options["cwd"] = cwd
     if system_prompt:
@@ -193,12 +201,51 @@ def build_thread_options(
     # be redirected to an external provider, so any auto-review call against an
     # external endpoint is guaranteed to fail. Bypass the reviewer whenever an
     # external model is configured: ``deny_all`` never asks for approval and
-    # ``full_access`` lets tool calls run under the host's own policy.
-    bypass = config.bypass_approvals_and_sandbox or model is not None
+    # ``full_access`` lets tool calls run under the host's own policy. Picking
+    # one of Codex's built-in models keeps the official endpoint, where the
+    # reviewer works, so it does not bypass.
+    bypass = config.bypass_approvals_and_sandbox or (model is not None and model.is_external)
     if bypass:
         options["approval_mode"] = sdk.ApprovalMode.deny_all
         options["sandbox"] = sdk.Sandbox.full_access
     return options
+
+
+def codex_model_options(response: Any) -> tuple[ModelOption, ...]:
+    """Map a Codex ``model/list`` response to protocol model options.
+
+    Args:
+        response: ``ModelListResponse`` from ``AsyncCodex.models()``.
+
+    Returns:
+        One option per listed model, hidden models excluded.
+    """
+    result: list[ModelOption] = []
+    for model in getattr(response, "data", None) or ():
+        if getattr(model, "hidden", False):
+            continue
+        efforts = tuple(
+            _enum_value(getattr(item, "reasoning_effort", None))
+            for item in getattr(model, "supported_reasoning_efforts", None) or ()
+        )
+        efforts = tuple(item for item in efforts if item)
+        default_effort = _enum_value(getattr(model, "default_reasoning_effort", None)) or None
+        result.append(
+            ModelOption(
+                model_id=str(model.id),
+                display_name=str(getattr(model, "display_name", "") or ""),
+                description=str(getattr(model, "description", "") or ""),
+                efforts=efforts,
+                default_effort=default_effort if default_effort in efforts or not efforts else None,
+                is_default=bool(getattr(model, "is_default", False)),
+            )
+        )
+    return tuple(result)
+
+
+def _enum_value(value: Any) -> str:
+    """Return the wire string of an SDK enum member (or plain string)."""
+    return str(getattr(value, "value", value) or "")
 
 
 async def append_developer_instructions(client: Any, sdk: Any, config: CodexHarnessConfig,
@@ -289,6 +336,7 @@ __all__ = [
     "build_thread_options",
     "codex_mcp_config_overrides",
     "codex_model_config_overrides",
+    "codex_model_options",
     "load_codex_sdk",
     "start_thread_with_raw_events",
 ]

@@ -16,6 +16,7 @@ import pytest
 from openjiuwen.harness_protocol import (
     DeliveryMode,
     DiagnosticEvent,
+    HarnessCapability,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
@@ -27,6 +28,7 @@ from openjiuwen.harness_protocol import (
     ItemLifecycleEvent,
     McpServerConfig,
     McpTransport,
+    ModelSelection,
     OutputEvent,
     OutputOperation,
     ProviderEvent,
@@ -50,6 +52,7 @@ from openjiuwen.harness_providers.codex.failure_classifier import (
 from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
+    build_thread_options,
     codex_mcp_config_overrides,
     codex_model_config_overrides,
 )
@@ -74,6 +77,8 @@ class _FakeSdkState:
         # SDK handle exists (the STARTED-to-turn/start window).
         self.turn_gate = asyncio.Event()
         self.turn_gate.set()
+        self.turn_overrides: list[dict[str, str | None]] = []
+        self.model_list: Any = SimpleNamespace(data=[])
 
 
 class _FakeHandle:
@@ -121,7 +126,8 @@ class _FakeThread:
         self.model = model
         self.handles: list[_FakeHandle] = []
 
-    async def turn(self, prompt: str) -> _FakeHandle:
+    async def turn(self, prompt: str, *, model: str | None = None, effort: str | None = None) -> _FakeHandle:
+        self.state.turn_overrides.append({"model": model, "effort": effort})
         await self.state.turn_gate.wait()
         handle = _FakeHandle(self.state, self.id, prompt)
         self.handles.append(handle)
@@ -145,6 +151,10 @@ class _FakeCodex:
         self.state.thread_calls.append(("resume", options))
         return _FakeThread(self.state, thread_id, model=_thread_model(options))
         return _FakeThread(self.state, thread_id)
+
+    async def models(self, *, include_hidden: bool = False) -> Any:
+        _ = include_hidden
+        return self.state.model_list
 
     async def close(self) -> None:
         self.closed = True
@@ -910,4 +920,118 @@ async def test_generic_final_error_does_not_replace_retrying_auth_failure(
     assert _terminal(events).kind is TurnEventKind.FINISHED
     assert harness.fallback_activated
     assert [call[0] for call in state.thread_calls] == ["start", "resume"]
+    await harness.stop()
+
+
+class _Effort(Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+def _codex_catalog() -> Any:
+    def effort(value: _Effort) -> Any:
+        return SimpleNamespace(reasoning_effort=value, description=value.value)
+
+    return SimpleNamespace(
+        data=[
+            SimpleNamespace(
+                id="gpt-5.6-sol", display_name="Sol", description="default", hidden=False, is_default=True,
+                default_reasoning_effort=_Effort.low,
+                supported_reasoning_efforts=[effort(_Effort.low), effort(_Effort.high)],
+            ),
+            SimpleNamespace(
+                id="gpt-5.5", display_name="5.5", description="", hidden=False, is_default=False,
+                default_reasoning_effort=_Effort.medium, supported_reasoning_efforts=[effort(_Effort.medium)],
+            ),
+            SimpleNamespace(
+                id="internal", display_name="", description="", hidden=True, is_default=False,
+                default_reasoning_effort=_Effort.low, supported_reasoning_efforts=[],
+            ),
+        ]
+    )
+
+
+async def _next_model_changed(cursor: Any, model: str) -> ProviderEvent:
+    """Skip earlier announcements (session activation) up to the one naming ``model``."""
+    while True:
+        envelope = await asyncio.wait_for(anext(cursor), timeout=2)
+        payload = envelope.event
+        if not isinstance(payload, ProviderEvent) or payload.event_type != "session/model_changed":
+            continue
+        if payload.payload.get("model") == model:
+            return payload
+
+
+def test_builtin_model_keeps_the_reviewer_and_effort_reaches_thread_config() -> None:
+    sdk = SimpleNamespace(
+        ApprovalMode=SimpleNamespace(deny_all="deny_all"),
+        Sandbox=SimpleNamespace(full_access="full_access"),
+    )
+    config = CodexHarnessConfig()
+    builtin = build_thread_options(
+        sdk=sdk, config=config, model=CodexModelConfig(model="gpt-5.5", effort="high"), cwd=None, system_prompt=""
+    )
+    assert builtin["model"] == "gpt-5.5"
+    assert builtin["config"]["model_reasoning_effort"] == "high"
+    assert "approval_mode" not in builtin, "a built-in model stays on the official endpoint"
+    assert codex_model_config_overrides(CodexModelConfig(model="gpt-5.5")) == ()
+
+    external = build_thread_options(
+        sdk=sdk, config=config, model=CodexModelConfig(model="m", provider="jiuwen"), cwd=None, system_prompt=""
+    )
+    assert external["approval_mode"] == "deny_all"
+    assert "model_reasoning_effort" not in external["config"]
+    card = CodexHarnessProvider().card
+    assert card.supports(HarnessCapability.MODEL_SELECTION)
+    assert card.supports(HarnessCapability.MODEL_DISCOVERY)
+
+
+@pytest.mark.asyncio
+async def test_list_models_maps_the_catalog_live_or_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    state.model_list = _codex_catalog()
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+
+    probed = await harness.list_models()
+    assert [option.model_id for option in probed] == ["gpt-5.6-sol", "gpt-5.5"], "hidden models are excluded"
+    assert probed[0].is_default and probed[0].efforts == ("low", "high") and probed[0].default_effort == "low"
+    assert probed[1].efforts == ("medium",) and probed[1].default_effort == "medium"
+    assert state.clients[0].closed and state.thread_calls == [], "the probe starts no thread"
+
+    await harness.start(_context())
+    assert await harness.list_models() == probed
+    assert len(state.clients) == 2
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_model_rides_the_next_turn_and_survives_reconnects(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    for turn_id in ("turn-one", "turn-two", "turn-three"):
+        state.scripts.append([_turn_completed(turn_id, _Status.completed)])
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    cursor = harness.events()
+
+    await harness.set_model(ModelSelection(model="gpt-5.5", effort="high"))
+    event = await _next_model_changed(cursor, "gpt-5.5")
+    assert dict(event.payload) == {"model": "gpt-5.5", "effort": "high"}
+    await cursor.aclose()
+
+    first = await harness.send(HarnessInput(content="one"))
+    await _turn(harness, first.turn_id)
+    second = await harness.send(HarnessInput(content="two"))
+    await _turn(harness, second.turn_id)
+    # The App Server keeps a turn override for the following turns, so it
+    # rides only the first turn after the switch.
+    assert state.turn_overrides[:2] == [{"model": "gpt-5.5", "effort": "high"}, {"model": None, "effort": None}]
+
+    await harness._disconnect_client()
+    third = await harness.send(HarnessInput(content="three"))
+    await _turn(harness, third.turn_id)
+    kind, options = state.thread_calls[-1]
+    assert kind == "resume"
+    assert options["model"] == "gpt-5.5"
+    assert options["config"]["model_reasoning_effort"] == "high"
     await harness.stop()

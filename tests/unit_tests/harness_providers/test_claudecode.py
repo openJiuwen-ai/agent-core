@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 
 import pytest
 
 from openjiuwen.harness_protocol import (
+    HarnessCapability,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
@@ -22,6 +23,7 @@ from openjiuwen.harness_protocol import (
     InteractionCancelReason,
     InteractionResponseStatus,
     ItemLifecycleEvent,
+    ModelSelection,
     OutputEvent,
     OutputOperation,
     ProviderEvent,
@@ -44,7 +46,8 @@ from openjiuwen.harness_providers.claudecode.failure_classifier import (
     classify_result_message,
     merge_pending_error,
 )
-from openjiuwen.harness_providers.claudecode.options import build_claude_session_id
+from openjiuwen.harness_providers.claudecode.harness import MODEL_CHANGED_EVENT
+from openjiuwen.harness_providers.claudecode.options import build_claude_options, build_claude_session_id
 from tests.test_logger import logger
 
 
@@ -63,6 +66,9 @@ class _FakeSdkState:
         self.clients: list["_FakeClient"] = []
         self.scripts: list[list[Any]] = []
         self.connect_error: Exception | None = None
+        self.server_info: dict[str, Any] | None = {"models": []}
+        # ``False`` drops the private control channel, like an older SDK build.
+        self.control_channel = True
 
 
 class _FakeClient:
@@ -76,7 +82,21 @@ class _FakeClient:
         self.disconnected = False
         self.release = asyncio.Event()
         self.release.set()
+        self.models_set: list[str | None] = []
+        self.control_requests: list[dict[str, Any]] = []
+        if state.control_channel:
+            self._query = SimpleNamespace(_send_control_request=self._send_control_request)
         state.clients.append(self)
+
+    async def _send_control_request(self, request: dict[str, Any]) -> dict[str, Any]:
+        self.control_requests.append(request)
+        return {}
+
+    async def set_model(self, model: str | None = None) -> None:
+        self.models_set.append(model)
+
+    async def get_server_info(self) -> dict[str, Any] | None:
+        return self.state.server_info
 
     async def connect(self) -> None:
         if self.state.connect_error is not None:
@@ -764,3 +784,111 @@ async def test_pending_assistant_detail_is_merged_into_the_terminal_error(monkey
     assert "HTTP 400" in merged.message
     assert merged.category == "request_rejected"
     logger.info("claude pending assistant detail merges into the terminal error")
+
+
+_CLAUDE_CATALOG = {
+    "models": [
+        {"value": "default", "displayName": "Default", "supportedEffortLevels": ["low", "high"], "pid": 1},
+        {"value": "sonnet", "displayName": "Sonnet", "resolvedModel": "claude-sonnet-5",
+         "supportedEffortLevels": ["low", "medium", "high"]},
+        {"value": "haiku", "displayName": "Haiku", "description": "Fastest"},
+    ]
+}
+
+
+async def _next_provider_event(cursor: Any, event_type: str) -> ProviderEvent:
+    while True:
+        envelope = await asyncio.wait_for(anext(cursor), timeout=2)
+        payload = envelope.event
+        if isinstance(payload, ProviderEvent) and payload.event_type == event_type:
+            return payload
+
+
+def test_builtin_model_and_effort_flow_to_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    config = ClaudeCodeHarnessConfig.from_mapping({"model": {"model": "haiku", "effort": "low"}})
+    options = build_claude_options(
+        sdk=sdk,
+        config=config,
+        model=config.model,
+        cwd=None,
+        env={},
+        system_prompt="",
+        session_id=None,
+        resume=None,
+        mcp_servers={},
+        can_use_tool=None,
+        stderr=None,
+    )
+    assert options.model == "haiku"
+    assert options.effort == "low"
+    # A built-in model on the CLI login injects no endpoint settings.
+    assert options.settings is None
+    with pytest.raises(ValueError):
+        ClaudeModelConfig(effort="")
+    card = ClaudeCodeHarnessProvider().card
+    assert card.supports(HarnessCapability.MODEL_SELECTION)
+    assert card.supports(HarnessCapability.MODEL_DISCOVERY)
+
+
+@pytest.mark.asyncio
+async def test_list_models_reads_the_live_catalog_or_probes_without_starting(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    state.server_info = _CLAUDE_CATALOG
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+
+    probed = await harness.list_models()
+    assert [option.model_id for option in probed] == ["default", "sonnet", "haiku"]
+    assert probed[0].is_default and not probed[1].is_default
+    assert probed[1].efforts == ("low", "medium", "high")
+    assert probed[1].extensions["resolvedModel"] == "claude-sonnet-5"
+    assert "pid" not in probed[0].extensions
+    assert probed[2].efforts == () and probed[2].description == "Fastest"
+    # The probe used a throwaway client and closed it; nothing was queried.
+    assert state.clients[0].disconnected and state.clients[0].queries == []
+
+    await harness.start(_context())
+    live = await harness.list_models()
+    assert live == probed
+    assert len(state.clients) == 2, "a started harness reads its own session"
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_model_switches_the_live_session_and_announces_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    cursor = harness.events()
+
+    await harness.set_model(ModelSelection(model="haiku", effort="low"))
+
+    client = state.clients[0]
+    assert client.models_set == ["haiku"]
+    assert client.control_requests == [{"subtype": "apply_flag_settings", "settings": {"effortLevel": "low"}}]
+    event = await _next_provider_event(cursor, MODEL_CHANGED_EVENT)
+    assert dict(event.payload) == {"model": "haiku", "effort": "low"}
+    await cursor.aclose()
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_effort_without_control_channel_reconnects_with_the_new_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.control_channel = False
+    state.scripts.append([_result(sdk)])
+    harness = ClaudeCodeHarness(
+        ClaudeCodeHarnessConfig(inherit_process_env=False, model=ClaudeModelConfig(model="sonnet"))
+    )
+    await harness.start(_context())
+
+    await harness.set_model(ModelSelection(effort="high"))
+    assert state.clients[0].disconnected, "an SDK without the control channel drops the client"
+
+    receipt = await harness.send(HarnessInput(content="go"))
+    assert _terminal(await _turn(harness, receipt.turn_id)).kind is TurnEventKind.FINISHED
+    reconnected = state.clients[1]
+    assert reconnected.options.model == "sonnet"
+    assert reconnected.options.effort == "high"
+    assert reconnected.options.resume == harness.provider_session_id
+    await harness.stop()

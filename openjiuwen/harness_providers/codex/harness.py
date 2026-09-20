@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 from typing import Any, Mapping
 
 from openjiuwen.harness_protocol import (
@@ -21,6 +22,8 @@ from openjiuwen.harness_protocol import (
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
+    ModelOption,
+    ModelSelection,
     ProviderEvent,
     ResumePolicy,
     ToolApprovalDecision,
@@ -48,6 +51,7 @@ from openjiuwen.harness_providers.codex.options import (
     build_codex_config,
     build_process_env,
     build_thread_options,
+    codex_model_options,
     load_codex_sdk,
     start_thread_with_raw_events,
 )
@@ -111,6 +115,8 @@ class CodexHarness(SerializedTurnHarness):
                 HarnessCapability.PERSISTENT_SESSION,
                 HarnessCapability.CHECKPOINT,
                 HarnessCapability.MCP_TOOLS,
+                HarnessCapability.MODEL_SELECTION,
+                HarnessCapability.MODEL_DISCOVERY,
             }
         ),
         optional_host_capabilities=frozenset(
@@ -143,6 +149,12 @@ class CodexHarness(SerializedTurnHarness):
         self._active_handle: Any = None
         self._pending_steers: list[str] = []
         self._active_model: CodexModelConfig | None = self._config.model
+        # The native endpoint with any runtime model selection applied; the
+        # endpoint a declined fallback goes back to.
+        self._primary_model: CodexModelConfig | None = self._config.model
+        # Model / effort overrides the next ``thread.turn()`` carries; the App
+        # Server keeps them for the following turns of the thread.
+        self._turn_overrides: dict[str, str] = {}
         self._fallback_activated = False
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -175,6 +187,8 @@ class CodexHarness(SerializedTurnHarness):
         elif context.resume_policy is ResumePolicy.REQUIRE_RESUME:
             raise HarnessProtocolError("Codex checkpoint does not carry a thread id to resume")
         self._active_model = self._config.model
+        self._primary_model = self._config.model
+        self._turn_overrides = {}
         self._fallback_activated = False
         try:
             await self._connect(context, model=self._active_model, resume_thread_id=resume_thread_id)
@@ -405,7 +419,8 @@ class CodexHarness(SerializedTurnHarness):
         thread = self._thread
         if thread is None:
             raise HarnessProtocolError("Codex thread disappeared during an active cycle")
-        handle = await thread.turn(text)
+        handle = await thread.turn(text, **self._turn_overrides)
+        self._turn_overrides = {}
         self._active_handle = handle
         if turn.abort_requested:
             await self._interrupt_handle(handle)
@@ -527,18 +542,63 @@ class CodexHarness(SerializedTurnHarness):
         ``model_name`` — and ``model/rerouted`` notifications update it when
         the server re-routes mid-session.
         """
+        configured = self._active_model
         model = self._confirmed_model
         if not model:
-            configured = self._active_model
             model = configured.model if configured is not None else ""
+        payload = {"model": model} if model else {}
+        if configured is not None and configured.effort:
+            payload["effort"] = configured.effort
         await self._emit(
             ProviderEvent(
                 provider=PROVIDER_NAME,
                 event_type=_MODEL_CHANGED_EVENT,
                 schema_version="1",
-                payload={"model": model} if model else {},
+                payload=payload,
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Model control
+    # ------------------------------------------------------------------
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        client = self._client
+        if client is not None:
+            return codex_model_options(await client.models())
+        return await self._probe_models()
+
+    async def _probe_models(self) -> tuple[ModelOption, ...]:
+        """Read ``model/list`` from a throwaway App Server; starts no thread."""
+        sdk = self._sdk or load_codex_sdk()
+        context = self._context
+        codex_config = build_codex_config(
+            sdk=sdk,
+            config=self._config,
+            model=self._primary_model,
+            cwd=(context.cwd if context is not None else None) or self._config.cwd,
+            env=build_process_env(self._config, context.env if context is not None else {}),
+            mcp_servers=(),
+        )
+        client = sdk.AsyncCodex(config=codex_config)
+        try:
+            return codex_model_options(await client.models())
+        finally:
+            with contextlib.suppress(Exception):
+                await client.close()
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        updated = _with_selection(self._active_model, selection)
+        overrides = {name: value for name, value in (("model", selection.model), ("effort", selection.effort)) if value}
+        self._turn_overrides = {**self._turn_overrides, **overrides}
+        self._active_model = updated
+        if not self._fallback_activated:
+            self._primary_model = updated
+        # The App Server confirms a model on thread start/resume only; the
+        # selection is what the next turn runs on.
+        if selection.model is not None:
+            self._confirmed_model = selection.model
+        await self._emit_model_changed()
 
     async def _maybe_activate_fallback(
         self,
@@ -569,11 +629,11 @@ class CodexHarness(SerializedTurnHarness):
             logger.warning("[codex] host declined the authentication fallback; restoring the native endpoint")
             await self._disconnect_client()
             try:
-                await self._connect(context, model=self._config.model, resume_thread_id=thread_id)
+                await self._connect(context, model=self._primary_model, resume_thread_id=thread_id)
             except Exception as exc:
                 logger.warning("[codex] restoring the native endpoint failed: %s", exc)
                 return False
-            self._active_model = self._config.model
+            self._active_model = self._primary_model
             self._fallback_activated = False
             await self._emit_model_changed()
             return False
@@ -787,6 +847,12 @@ def _is_no_active_turn_to_steer(exc: Exception) -> bool:
         and isinstance(message, str)
         and _NO_ACTIVE_TURN_ERROR_MESSAGE in message.lower()
     )
+
+
+def _with_selection(model: CodexModelConfig | None, selection: ModelSelection) -> CodexModelConfig:
+    """Return ``model`` with the fields ``selection`` sets replaced."""
+    changes = {name: value for name, value in (("model", selection.model), ("effort", selection.effort)) if value}
+    return dataclasses.replace(model or CodexModelConfig(), **changes)
 
 
 __all__ = ["ADAPTER_VERSION", "USER_INPUT_METHOD", "CodexHarness"]

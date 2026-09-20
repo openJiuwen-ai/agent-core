@@ -87,6 +87,8 @@ from openjiuwen.harness_protocol.models import (
     HostCapability,
     JsonObject,
     JsonValue,
+    ModelOption,
+    ModelSelection,
     ResumePolicy,
     SendReceipt,
     freeze_json_object,
@@ -94,6 +96,7 @@ from openjiuwen.harness_protocol.models import (
     json_value_to_builtin,
 )
 from openjiuwen.harness_protocol.protocol import (
+    HarnessModelControl,
     HarnessProtocol,
     HarnessProvider,
 )
@@ -148,6 +151,7 @@ __all__ = [
     "HarnessContext",
     "HarnessError",
     "HarnessInput",
+    "HarnessModelControl",
     "HarnessProtocol",
     "HarnessProtocolError",
     "HarnessProvider",
@@ -176,6 +180,8 @@ __all__ = [
     "ItemLifecycleEvent",
     "JsonObject",
     "JsonValue",
+    "ModelOption",
+    "ModelSelection",
     "McpServerConfig",
     "McpElicitationRequest",
     "McpElicitationResponse",

@@ -16,6 +16,8 @@ from openjiuwen.harness_protocol.models import (
     HarnessContext,
     HarnessInput,
     JsonObject,
+    ModelOption,
+    ModelSelection,
     SendReceipt,
 )
 from openjiuwen.harness_protocol.state import HarnessState
@@ -124,6 +126,36 @@ class HarnessProtocol(Protocol):
 
 
 @runtime_checkable
+class HarnessModelControl(Protocol):
+    """Optional model control a harness may implement next to ``HarnessProtocol``.
+
+    It is a separate Protocol so existing ``HarnessProtocol`` implementations
+    stay conformant. Hosts check ``card.supports(MODEL_DISCOVERY)`` /
+    ``card.supports(MODEL_SELECTION)`` before calling; an implementation that
+    does not declare the capability raises ``UnsupportedHarnessCapabilityError``.
+    """
+
+    async def list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the models the provider currently offers.
+
+        Works on a started harness (reads the live session) and on an
+        unstarted one (performs a short handshake from provider configuration
+        without issuing a model request). Requires ``MODEL_DISCOVERY``.
+        """
+        ...
+
+    async def set_model(self, selection: ModelSelection) -> None:
+        """Switch model and/or reasoning effort for the following turns.
+
+        Applied immediately while no turn runs, otherwise before the next turn
+        starts; a running turn keeps its model. The selection survives provider
+        reconnects within the cycle. Requires ``MODEL_SELECTION`` and a started
+        harness.
+        """
+        ...
+
+
+@runtime_checkable
 class HarnessProvider(Protocol):
     """Factory SPI used to discover and construct third-party harnesses."""
 
@@ -137,4 +169,4 @@ class HarnessProvider(Protocol):
         ...
 
 
-__all__ = ["HarnessProtocol", "HarnessProvider"]
+__all__ = ["HarnessModelControl", "HarnessProtocol", "HarnessProvider"]

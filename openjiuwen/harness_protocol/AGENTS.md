@@ -8,8 +8,10 @@ remain in `openjiuwen/agent_teams/external/cli_agent`.
 
 ## Scope
 
-- `protocol.py`: behavioral Harness and provider factory Protocols.
-- `models.py`: lifecycle commands, context, capability card, and JSON types.
+- `protocol.py`: behavioral Harness, optional model-control, and provider
+  factory Protocols.
+- `models.py`: lifecycle commands, context, capability card, model
+  selection/options, and JSON types.
 - `events.py`: ordered observation-plane event envelope and payloads.
 - `results.py`: normalized terminal result, usage, and failure types.
 - `interactions.py`: awaited provider-request/host-response control plane.
@@ -101,6 +103,12 @@ boundary. Do not introduce Round aliases for these concepts.
     turn event; an unobservable request is still reported from its reply with
     `input_observed=False`. Input `message_id` values stay stable while the
     message remains in the conversation.
+17. Model control is the optional `HarnessModelControl` Protocol, never new
+    members on `HarnessProtocol`. `list_models` (MODEL_DISCOVERY) works on a
+    started or unstarted harness and issues no model request; `set_model`
+    (MODEL_SELECTION) applies at once while idle, otherwise before the next
+    turn, never mid-turn, and survives reconnects within the cycle. Effort
+    values are provider vocabulary; the protocol does not enumerate them.
 
 ## Compatibility
 

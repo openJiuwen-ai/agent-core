@@ -27,15 +27,19 @@ class ClaudeModelConfig:
     """Model endpoint used by the Claude CLI.
 
     ``api_base`` / ``api_key`` are injected through the CLI ``--settings``
-    flag-settings layer so they win over the user's ``settings.json``.
+    flag-settings layer so they win over the user's ``settings.json``. Without
+    them the CLI runs on its own login (for example a subscription), where
+    ``model`` may be a built-in alias such as ``"sonnet"`` or ``"haiku"``.
+    ``effort`` is the CLI ``--effort`` level (``low`` ... ``max``).
     """
 
     model: str | None = None
     api_base: str | None = None
     api_key: str | None = field(default=None, repr=False)
+    effort: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("model", "api_base", "api_key"):
+        for name in ("model", "api_base", "api_key", "effort"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"Claude model {name} must be a non-empty string when provided")

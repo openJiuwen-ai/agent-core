@@ -22,15 +22,22 @@ _APPROVAL_MODES = ("auto", "prompt", "writes", "approve")
 
 @dataclass(frozen=True, slots=True)
 class CodexModelConfig:
-    """External model endpoint rendered as Codex ``model_provider`` overrides."""
+    """Model selection for the Codex thread, optionally on an external endpoint.
+
+    ``provider`` / ``api_base`` / ``api_key`` render Codex ``model_provider``
+    overrides for an external endpoint. Without them Codex runs on its own
+    login (for example a ChatGPT subscription) and ``model`` picks one of its
+    built-in models. ``effort`` is the Codex ``model_reasoning_effort``.
+    """
 
     model: str | None = None
     provider: str | None = None
     api_base: str | None = None
     api_key: str | None = field(default=None, repr=False)
+    effort: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("model", "provider", "api_base", "api_key"):
+        for name in ("model", "provider", "api_base", "api_key", "effort"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"Codex model {name} must be a non-empty string when provided")
@@ -47,6 +54,11 @@ class CodexModelConfig:
         if unknown:
             raise ValueError(f"unknown Codex model config fields: {', '.join(unknown)}")
         return cls(**dict(config))  # type: ignore[arg-type]
+
+    @property
+    def is_external(self) -> bool:
+        """Return whether this targets an endpoint other than Codex's own login."""
+        return self.provider is not None or self.api_base is not None
 
 
 @dataclass(frozen=True, slots=True)

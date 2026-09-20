@@ -47,6 +47,13 @@ contain turns from multiple agents. The single-agent harness API therefore uses
   snapshot export.
 - `HarnessProvider`: provider-owned configuration validation and
   construction of an unstarted harness.
+- `HarnessModelControl`: an optional Protocol next to `HarnessProtocol`.
+  `list_models()` probes the provider catalog (`ModelOption`: id, efforts,
+  default effort, vendor extensions) on a started or unstarted harness;
+  `set_model(ModelSelection)` switches model and/or reasoning effort for the
+  following turns. Gated by `HarnessCapability.MODEL_DISCOVERY` /
+  `MODEL_SELECTION`; separate so existing `HarnessProtocol` implementations
+  stay conformant.
 - `HarnessCard`: static identity, protocol version, and optional
   harness capabilities, compatible protocol versions, and required/optional
   host capabilities.
@@ -182,6 +189,9 @@ class MyHarness:
     before the turn's terminal event; caused items list its `request_id` in
     `causation_ids`. A request the provider could not observe is still reported
     from its reply with `input_observed=False`.
+17. `set_model` never changes the model of a running turn: it applies at once
+    while idle, otherwise before the next turn starts, and survives provider
+    reconnects within the cycle. `list_models` issues no model request.
 
 ## Documents
 

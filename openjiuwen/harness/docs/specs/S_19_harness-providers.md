@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
-| 最近一次修订日期 | 2026-09-17 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、agent_teams F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -72,6 +72,17 @@
    配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` 非空时
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
    只放 `extra_system_prompt`。
+10. **模型控制由骨架承担**（F_113）：`SerializedTurnHarness` 实现 `HarnessModelControl`——`list_models`
+    / `set_model` 先按 card 门控；`set_model` 在 `_command_lock` 内判空闲则立即经
+    `_apply_model_selection` 应用，否则按字段合并进暂存选择，由 supervisor 在 STARTED 之后、
+    `_execute_turn` 之前应用，失败发 WARNING `DiagnosticEvent` 且 Turn 照常执行。Claude Code / Codex
+    声明 `MODEL_SELECTION` / `MODEL_DISCOVERY`，把选择并入 `_active_model` 与 `_primary_model`（认证
+    fallback 被拒后回退的原生端点），所以重连不丢选择；Claude 用 `set_model()` +
+    `apply_flag_settings {"effortLevel"}`（SDK 缺该通道则断开、下个 Turn 以新 `--effort` resume），Codex
+    只在下一次 `thread.turn(model=, effort=)` 携带覆盖（App Server 粘性）。探测：Claude 读 `initialize`
+    的 `models`，Codex 调 `model/list`（过滤 hidden），未启动时用临时 client，只握手不请求模型。
+    Codex 仅 `CodexModelConfig.is_external`（有 `provider` 或 `api_base`）时强制
+    `deny_all + full_access`；官方内置模型保留 auto-review reviewer。
 
 ## 接口契约
 
@@ -105,6 +116,9 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 `turn_idle_retries` / `max_will_retry_count` / `mcp_*` / `client_*` / `experimental_raw_events` /
 `event_buffer_capacity`）、`DshHarnessConfig`（镜像 `DeepSeekHarnessConfig` + `launch_args_override` /
 `system_prompt_env_var` / `event_buffer_capacity`）。`from_mapping` 拒绝未知字段。
+模型配置：`ClaudeModelConfig`（`model` / `api_base` / `api_key` / `effort`）、`CodexModelConfig`（`model` /
+`provider` / `api_base` / `api_key` / `effort`，`is_external` = 有 `provider` 或 `api_base`）；不带端点的
+`model` 即 CLI 自身登录（订阅）上的内置模型。
 
 ## 数据结构
 

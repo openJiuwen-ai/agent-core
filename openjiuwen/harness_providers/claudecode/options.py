@@ -11,8 +11,15 @@ import uuid
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Callable, Mapping
 
-from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
+from openjiuwen.harness_protocol import (
+    HarnessError,
+    McpServerConfig,
+    McpTransport,
+    ModelOption,
+    UnsupportedHarnessCapabilityError,
+)
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
+from openjiuwen.harness_providers.jsonsafe import to_json_safe
 from openjiuwen.harness_providers.telemetry.otlp_receiver import OTEL_RESOURCE_SOURCE_ID
 
 if TYPE_CHECKING:
@@ -23,6 +30,12 @@ _ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 _CLAUDE_OTEL_EXPORT_INTERVAL_MS = "1000"
 _OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
+# Catalog value of the model the CLI picks when none is configured.
+_CLAUDE_DEFAULT_MODEL_VALUE = "default"
+# Vendor catalog fields kept on ``ModelOption.extensions``.
+_CLAUDE_MODEL_EXTENSION_KEYS = frozenset(
+    {"resolvedModel", "supportsEffort", "supportsAdaptiveThinking", "supportsFastMode", "supportsAutoMode"}
+)
 
 
 def load_claude_sdk() -> Any:
@@ -171,6 +184,68 @@ def claude_request_log_settings_env(env: Mapping[str, str]) -> dict[str, str]:
     return {_OTEL_RESOURCE_ATTRIBUTES_ENV: value} if value else {}
 
 
+def claude_model_options(server_info: Mapping[str, Any] | None) -> tuple[ModelOption, ...]:
+    """Map the CLI ``initialize`` model catalog to protocol model options.
+
+    The CLI lists its login's models on the ``initialize`` response (entries
+    like ``{"value": "sonnet", "supportedEffortLevels": [...]}``); the entry
+    whose ``value`` is ``"default"`` is the model the CLI uses when none is set.
+
+    Args:
+        server_info: ``ClaudeSDKClient.get_server_info()`` of a connected client.
+
+    Returns:
+        One option per catalog entry, in CLI order.
+    """
+    raw = server_info.get("models") if server_info else None
+    if not isinstance(raw, list):
+        return ()
+    result: list[ModelOption] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("value")
+        if not isinstance(value, str) or not value:
+            continue
+        efforts = entry.get("supportedEffortLevels")
+        extensions = {key: to_json_safe(item) for key, item in entry.items() if key in _CLAUDE_MODEL_EXTENSION_KEYS}
+        result.append(
+            ModelOption(
+                model_id=value,
+                display_name=str(entry.get("displayName") or ""),
+                description=str(entry.get("description") or ""),
+                efforts=tuple(str(item) for item in efforts if item) if isinstance(efforts, list) else (),
+                is_default=value == _CLAUDE_DEFAULT_MODEL_VALUE,
+                extensions=extensions,
+            )
+        )
+    return tuple(result)
+
+
+async def apply_claude_flag_settings(client: Any, settings: Mapping[str, Any]) -> bool:
+    """Push flag settings into a live CLI session through ``apply_flag_settings``.
+
+    The SDK wraps ``set_model`` but not effort; the CLI control protocol's
+    ``apply_flag_settings`` request hot-applies ``effortLevel`` without a
+    restart. The SDK exposes no public method for it, so the private query
+    seam stays isolated here.
+
+    Args:
+        client: A connected ``ClaudeSDKClient``.
+        settings: Flag settings to apply, e.g. ``{"effortLevel": "low"}``.
+
+    Returns:
+        False when this SDK build does not expose the control channel; the
+        caller then falls back to reconnecting with the new options.
+    """
+    query = getattr(client, "_query", None)
+    send = getattr(query, "_send_control_request", None)
+    if not callable(send):
+        return False
+    await send({"subtype": "apply_flag_settings", "settings": dict(settings)})
+    return True
+
+
 def mcp_servers_to_sdk(servers: tuple[McpServerConfig, ...]) -> dict[str, Any]:
     """Translate protocol MCP server configs into Claude SDK server configs."""
     result: dict[str, Any] = {}
@@ -230,6 +305,7 @@ def build_claude_options(
         env=dict(env),
         mcp_servers=mcp_servers,
         model=model.model if model is not None else None,
+        effort=model.effort if model is not None else None,
         permission_mode=config.permission_mode,
         resume=resume,
         session_id=session_id,
@@ -244,6 +320,8 @@ def build_claude_options(
 
 
 __all__ = [
+    "apply_claude_flag_settings",
+    "claude_model_options",
     "claude_request_log_env",
     "claude_request_log_settings_env",
     "build_claude_options",
