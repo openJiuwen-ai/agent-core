@@ -76,6 +76,10 @@ reviewer 可用，不该被关掉。
   `<builtin_model_catalog>` JSON），描述散文走 capability 槽 `builtin_model_param_rows` /
   `builtin_model_usage`，与 schema 同源门控；与 `model_name` 互斥；`effort` 须伴随 `builtin_model`；
   省略 effort 取 `default_effort`。
+- **两个模型参数长得像，报错必须指路**（实测：leader 拿订阅模型名去填 `model_name`，只拿到
+  「unavailable or incompatible」这一句，没有任何线索）。`_model_name_failure` 因此分三档：名字在该
+  kind 的内置目录里 → 直接让它改用 `builtin_model`；名字两边都没有 → 同时列出 pool 可分配的名字与
+  内置目录；该 kind 没声明目录 → 只讲 pool，不提一个它调不到的参数（与 schema 门控同一条原则）。
 - 新 leader 工具 `set_member_model(member_name, model?, effort?)`：仅当某 kind 声明了目录时接线。
   `TeamBackend.set_member_model` **先落库再推活成员**：经 `set_member_model_fn`（`TeamAgent`
   `_apply_member_model` → `SpawnManager.lookup_inprocess_agent` → `ExternalHarnessMemberRuntime.set_model_selection`）。
