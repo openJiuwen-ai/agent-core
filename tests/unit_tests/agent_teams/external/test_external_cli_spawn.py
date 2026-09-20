@@ -18,9 +18,10 @@ from openjiuwen.agent_teams.external.runtime import ExternalCliRuntime, Reinvoke
 from openjiuwen.harness_providers.claudecode import ClaudeCodeHarness
 from openjiuwen.harness_providers.codex import CodexHarness
 from openjiuwen.agent_teams.messager.base import MessagerTransportConfig
-from openjiuwen.agent_teams.schema.team import TeamRole, TeamRuntimeContext, TeamSpec
+from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig, TeamRole, TeamRuntimeContext, TeamSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType
 from openjiuwen.core.common.exception.errors import BaseError
+from openjiuwen.harness_protocol import ModelSelection
 from tests.test_logger import logger
 
 # A streaming stand-in CLI: read a line from stdin, echo it, then emit the
@@ -342,3 +343,51 @@ async def test_build_cli_runtime_codex_rejects_full_command_override():
             )
     finally:
         reset_session_id(token)
+
+
+_POOL_FALLBACK = ExternalCliModelConfig(provider="jiuwen", model="pool-model", api_base="https://pool", api_key="k")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+async def test_builtin_model_reaches_the_provider_and_keeps_the_auth_fallback(cli_agent: str):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent=cli_agent),
+            inject_mcp=False,
+            external_model_config=ExternalCliModelConfig(model="small", effort="low"),
+            fallback_external_model_config=_POOL_FALLBACK,
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    config = runtime.harness._config
+    assert (config.model.model, config.model.effort) == ("small", "low")
+    assert config.model.api_base is None
+    # A built-in model runs on the CLI's own login, which the fallback guards.
+    assert config.fallback_model is not None and config.fallback_model.model == "pool-model"
+    # Picking the model and effort does not change the harness until it runs.
+    assert await runtime.set_model_selection(ModelSelection(effort="high")) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+@pytest.mark.parametrize("cli_agent", ["claude", "codex"])
+async def test_member_on_an_endpoint_takes_no_auth_fallback(cli_agent: str):
+    token = set_session_id("sess-1")
+    try:
+        runtime = await build_cli_runtime(
+            _ctx(member="dev-1", cli_agent=cli_agent),
+            inject_mcp=False,
+            external_model_config=ExternalCliModelConfig(provider="jiuwen", model="m", api_base="https://gw"),
+            fallback_external_model_config=_POOL_FALLBACK,
+            member_agent_id="ext_team_dev-1",
+        )
+    finally:
+        reset_session_id(token)
+
+    assert runtime.harness._config.fallback_model is None
+    logger.info("%s member on an endpoint runs without an auth fallback", cli_agent)
