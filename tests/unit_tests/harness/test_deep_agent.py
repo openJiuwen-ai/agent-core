@@ -1101,6 +1101,55 @@ async def test_hot_reconfigure_preserves_task_tool_from_subagent_rail() -> None:
     assert agent.ability_manager.get("task_tool") is not None
 
 
+def test_hot_reconfigure_materializes_general_purpose_subagent() -> None:
+    """``add_general_purpose_agent`` must survive the hot-reconfigure path.
+
+    Regression: the flag was only consumed by the factory create path, so
+    ``configure()`` replaced the config wholesale and silently dropped the
+    general-purpose subagent. Consumers that rebuild the config on reload
+    (e.g. jiuwenswarm ``agent.reload_config``) lost GP until process restart.
+    """
+    subagent = SubAgentConfig(
+        agent_card=AgentCard(name="browser_agent", description="browser subagent"),
+        system_prompt="browser prompt",
+        model=_create_dummy_model(),
+    )
+    agent = create_deep_agent(
+        model=_create_dummy_model(),
+        subagents=[subagent],
+        auto_create_workspace=False,
+        enable_task_loop=False,
+    )
+    agent.set_react_agent(FakeReactAgent(), initialized=False)
+
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            subagents=[subagent],
+            rails=[],
+            enable_task_loop=False,
+            add_general_purpose_agent=True,
+        )
+    )
+
+    names = [spec.agent_card.name for spec in agent._deep_config.subagents]
+    assert names.count("general-purpose") == 1
+    assert "browser_agent" in names
+
+    # Idempotent: reconfiguring again with the flag keeps a single GP entry.
+    agent.configure(
+        DeepAgentConfig(
+            model=_create_dummy_model(),
+            subagents=list(agent._deep_config.subagents),
+            rails=[],
+            enable_task_loop=False,
+            add_general_purpose_agent=True,
+        )
+    )
+    names_after = [spec.agent_card.name for spec in agent._deep_config.subagents]
+    assert names_after.count("general-purpose") == 1
+
+
 def test_create_deep_agent_auto_add_skill_rail(tmp_path) -> None:
     """Test that SkillUseRail is auto-added when skills parameter is provided."""
     skills = ["name", "test_skill", "description", "test"]

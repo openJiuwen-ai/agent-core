@@ -282,6 +282,7 @@ class DeepAgent(BaseAgent):
         """Apply configuration and rebuild the internal ReActAgent."""
 
         self._filter_disabled_tools(config)
+        self._ensure_general_purpose_subagent(config)
         if self._deep_config is None:
             self._initial_configure(config)
         else:
@@ -289,6 +290,33 @@ class DeepAgent(BaseAgent):
 
         self._initialized = False
         return self
+
+    @staticmethod
+    def _ensure_general_purpose_subagent(config: DeepAgentConfig) -> None:
+        """Materialize ``add_general_purpose_agent`` into ``config.subagents``.
+
+        The flag used to be consumed only by the factory's create path, so
+        ``DeepAgent.configure`` (hot reload) replaced the config wholesale and
+        silently dropped the general-purpose subagent. Normalizing at the
+        configure entry makes the initial and hot paths share one semantic;
+        the inject helper is idempotent (skips when GP is already present).
+        """
+        if not config.add_general_purpose_agent:
+            return
+
+        from openjiuwen.harness.factory import _inject_general_purpose_subagent
+
+        config.subagents = _inject_general_purpose_subagent(
+            config.subagents,
+            add_general_purpose_agent=True,
+            resolved_language=resolve_language(config.language),
+            rails=config.rails,
+            system_prompt=config.system_prompt,
+            tools=config.tools,
+            mcps=config.mcps,
+            model=config.model,
+            skills=config.skills,
+        )
 
     @staticmethod
     def _filter_disabled_tools(config: DeepAgentConfig) -> None:
