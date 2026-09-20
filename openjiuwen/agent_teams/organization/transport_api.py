@@ -5,14 +5,14 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass
 
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.organization.events import OrgEvent, OrgEventMessage, OrgTopic
+from openjiuwen.core.common.logging import team_logger
 
-logger = logging.getLogger(__name__)
+logger = team_logger
 
 
 def create_message_id() -> str:

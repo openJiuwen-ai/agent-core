@@ -20,8 +20,11 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
+
+logger = team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
@@ -1066,6 +1069,13 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
             return ToolOutput(success=True, data=bound.task.brief())
         except Exception as exc:
             reason = f"summary team provisioning failed: {exc}"
+            logger.error(
+                "summary provision failed for %s (root=%s): %s",
+                result.task.task_id,
+                root_task_id,
+                exc,
+                exc_info=True,
+            )
             await self.manager.fail_summary_execution(
                 summary_task_id=result.task.task_id,
                 failure_reason=reason,
