@@ -746,7 +746,7 @@ async def test_pipeline_failure_sets_completion_exception_and_cleans_sandbox(tmp
 
     completion = asyncio.get_running_loop().create_future()
     invalid = _batch(_item())
-    await queue.put(("batch", "../escape", "run-1", invalid, completion))
+    await queue.put(("batch", "", "run-1", invalid, completion))
     with pytest.raises(Exception):
         await asyncio.wait_for(completion, timeout=2)
     assert not list((tmp_path / "workspace" / "sandboxes").rglob("*"))

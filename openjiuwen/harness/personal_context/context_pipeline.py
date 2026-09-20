@@ -43,6 +43,9 @@ from openjiuwen.harness.personal_context.path_safety import (
 )
 from openjiuwen.harness.personal_context.path_safety import (
     is_reparse_point,
+    service_storage_segment,
+    service_storage_segment_is_safe,
+    validate_service_id,
 )
 from openjiuwen.harness.personal_context.path_safety import (
     portable_context_segment_is_safe as _portable_context_segment_is_safe,
@@ -287,6 +290,11 @@ def _publish_error(message: str = "context publication failed") -> BaseError:
 
 
 def _safe_segment(value: object, *, name: str) -> str:
+    if name == "service_id":
+        try:
+            return validate_service_id(value)
+        except ValueError as exc:
+            raise _publish_error(str(exc)) from exc
     text = str(value)
     if not text or text in {".", ".."} or not _SAFE_SEGMENT.fullmatch(text):
         raise _publish_error(f"unsafe {name}")
@@ -8465,7 +8473,7 @@ class ContextPipelineService:
             raise _publish_error("run briefing could not be written") from exc
 
     def _run_sandbox_path(self, service_id: str, run_id: str) -> Path:
-        safe_service = _safe_segment(service_id, name="service_id")
+        safe_service = service_storage_segment(_safe_segment(service_id, name="service_id"))
         safe_run = _safe_segment(run_id, name="run_id")
         _assert_path_chain_no_symlinks(self._sandboxes_root)
         root = self._sandboxes_root.resolve()
@@ -8591,13 +8599,15 @@ class ContextPipelineService:
             for service_root in list(self._sandboxes_root.iterdir()):
                 if service_root.is_symlink() or not service_root.is_dir():
                     raise _publish_error("sandbox root contains an uncontrolled entry")
-                service_id = _safe_segment(service_root.name, name="service_id")
+                if not service_storage_segment_is_safe(service_root.name):
+                    raise _publish_error("sandbox root contains an uncontrolled service path")
                 for run_root in list(service_root.iterdir()):
                     if run_root.is_symlink() or not run_root.is_dir():
                         raise _publish_error("service sandbox contains an uncontrolled entry")
                     if _LEGACY_AGENT_BASELINE_SEGMENT.fullmatch(run_root.name) is None:
-                        run_id = _safe_segment(run_root.name, name="run_id")
-                        if self._run_sandbox_path(service_id, run_id) != run_root:
+                        _safe_segment(run_root.name, name="run_id")
+                        relative = run_root.resolve().relative_to(self._sandboxes_root.resolve())
+                        if relative.parts != (service_root.name, run_root.name):
                             raise _publish_error("stale run path is not controlled")
                     _assert_no_symlinks(run_root)
                     _make_tree_writable(run_root)

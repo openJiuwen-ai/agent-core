@@ -57,6 +57,7 @@ from openjiuwen.harness.personal_context.fetch.rss_feed import RssFeedFetchServi
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
 from openjiuwen.harness.personal_context.models import FetchBatch, PersonalContextStatus
+from openjiuwen.harness.personal_context.path_safety import service_storage_segment, validate_service_id
 from openjiuwen.harness.personal_context.source_metadata import read_source_detail
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
@@ -67,7 +68,6 @@ _PIPELINE_CANCEL_GRACE_SECONDS = 5.0
 _STOP_FINALIZE_TIMEOUT_SECONDS = 30.0
 _CURSOR_SCHEMA_VERSION = 1
 _MAX_CURSOR_BYTES = 512 * 1024
-_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _AUTHORIZATION_FAILED = "Feishu authorization failed"
 _AUTHORIZATION_STATUS_UNAVAILABLE = "Feishu authorization status is unavailable"
 _CONFIG_INIT_TIMEOUT_SECONDS = 30.0 * 60.0
@@ -101,10 +101,10 @@ def _fetch_error(message: str, *, cause: BaseException | None = None) -> BaseErr
 
 
 def _safe_service_id(value: object) -> str:
-    text = str(value)
-    if not _SAFE_SEGMENT.fullmatch(text):
-        raise _state_error("invalid fetch service id")
-    return text
+    try:
+        return validate_service_id(value)
+    except ValueError as exc:
+        raise _state_error(str(exc)) from exc
 
 
 def _redact_text(value: object, *, limit: int = 512) -> str:
@@ -1735,7 +1735,7 @@ class PersonalContext:
             return groups[0] if service_id is not None else {"services": groups}
 
     def _run_history_path(self, service_id: str) -> Path:
-        path = self._home / "state" / "run-history" / f"{_safe_service_id(service_id)}.json"
+        path = self._home / "state" / "run-history" / f"{service_storage_segment(_safe_service_id(service_id))}.json"
         _assert_no_symlink_chain(path)
         return path
 
@@ -2227,7 +2227,7 @@ class PersonalContext:
         """Remove one cursor and return its unmodified bytes for Host rollback."""
 
         safe_id = _safe_service_id(service_id)
-        path = self._home / "state" / "cursors" / f"{safe_id}.json"
+        path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         try:
             with path.open("rb") as handle:
@@ -2259,7 +2259,7 @@ class PersonalContext:
 
     def _delete_fetch_cursor_without_backup(self, service_id: str) -> None:
         safe_id = _safe_service_id(service_id)
-        path = self._home / "state" / "cursors" / f"{safe_id}.json"
+        path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         try:
             initial = path.stat(follow_symlinks=False)
@@ -2299,7 +2299,7 @@ class PersonalContext:
         if payload is None:
             self._delete_fetch_cursor_without_backup(safe_id)
             return
-        path = self._home / "state" / "cursors" / f"{safe_id}.json"
+        path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         if not isinstance(payload, bytes):
             raise _file_error("cursor restore payload must be bytes or null")
@@ -2335,7 +2335,7 @@ class PersonalContext:
     def _read_cursor(self, service_id: str) -> dict[str, object] | None:
         safe_id = _safe_service_id(service_id)
         config = self._service_config(safe_id)
-        path = self._home / "state" / "cursors" / f"{safe_id}.json"
+        path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         if not path.exists():
             return None
@@ -2387,7 +2387,7 @@ class PersonalContext:
             raise _file_error("cursor payload is not JSON serializable", cause=exc) from exc
         if len(encoded) > _MAX_CURSOR_BYTES:
             raise _file_error("cursor payload is too large")
-        path = self._home / "state" / "cursors" / f"{safe_id}.json"
+        path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         temporary: Path | None = None
         try:

@@ -244,8 +244,8 @@ def test_cursor_transaction_rejects_symlink_without_touching_target(
         assert str(outside) not in str(error)
 
 
-@pytest.mark.parametrize("service_id", ["../escape", "nested/service", ".."])
-def test_cursor_transaction_rejects_unsafe_service_id(
+@pytest.mark.parametrize("service_id", ["", "   ", "a" * 501])
+def test_cursor_transaction_rejects_invalid_service_id(
     tmp_path: Path,
     service_id: str,
 ) -> None:
