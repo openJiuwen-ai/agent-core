@@ -50,6 +50,10 @@ from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
     apply_message_transforms,
     model_requires_reasoning_content,
 )
+from openjiuwen.core.foundation.llm.utils.provider_error import (
+    format_provider_exception,
+    summarize_provider_error_text,
+)
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.runner.callback import trigger
@@ -247,7 +251,7 @@ def _apply_openrouter_prompt_cache_control(
 
 
 def _format_exception_detail(exc: BaseException) -> str:
-    return f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    return format_provider_exception(exc)
 
 
 def _first_text(*values: Any) -> Optional[str]:
@@ -550,7 +554,10 @@ class OpenAIModelClient(BaseModelClient):
             async with http_client.stream("POST", url, headers=headers, json=body) as response:
                 if response.status_code != 200:
                     error_text = (await response.aread()).decode("utf-8", errors="replace")
-                    raise ValueError(f"API returned error {response.status_code}: {error_text}")
+                    raise ValueError(
+                        f"API returned error {response.status_code}: "
+                        f"{summarize_provider_error_text(error_text, status_code=response.status_code)}"
+                    )
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" in content_type:
                     async for raw_line in response.aiter_lines():
@@ -857,9 +864,14 @@ class OpenAIModelClient(BaseModelClient):
                 if async_client is not None and not self._use_shared_client():
                     await async_client.close()
 
+        detail = (
+            format_provider_exception(last_error, include_exc_type=False)
+            if isinstance(last_error, BaseException)
+            else "unknown error"
+        )
         raise build_error(
             StatusCode.MODEL_CALL_FAILED,
-            error_msg=f"OpenAI-compatible KV cache {action} failed: {last_error}",
+            error_msg=f"OpenAI-compatible KV cache {action} failed: {detail}",
         )
 
     def _build_request_params(
@@ -1485,7 +1497,7 @@ class OpenAIModelClient(BaseModelClient):
             messages=messages,
             tools=tools,
             is_stream=is_stream,
-            exception=f"{type(error).__name__}: {error}",
+            exception=format_provider_exception(error),
         )
 
     async def invoke(
@@ -2064,7 +2076,10 @@ class OpenAIModelClient(BaseModelClient):
     def _raise_dashscope_model_error(operation: str, exc: Exception):
         if isinstance(exc, ModelError):
             raise exc
-        error_msg = f"Unexpected error during DashScope {operation}: {str(exc)}"
+        error_msg = (
+            f"Unexpected error during DashScope {operation}: "
+            f"{format_provider_exception(exc, include_exc_type=False)}"
+        )
         logger.error(error_msg, exc_info=True)
         raise ModelError(
             StatusCode.MODEL_CALL_FAILED,

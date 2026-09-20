@@ -28,6 +28,7 @@ from openjiuwen.core.foundation.llm.utils.responses_utils import (
     build_request_body,
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
+from openjiuwen.core.foundation.llm.utils.provider_error import format_provider_exception
 from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.schema.config import ProviderType
 from openjiuwen.core.foundation.llm.schema.generation_response import (
@@ -553,7 +554,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             is_stream=is_stream,
             error=error,
             error_message=(
-                f"{type(error).__name__}: {error}" if not str(error).strip() else None
+                format_provider_exception(error) if not str(error).strip() else None
             ),
         )
         llm_logger.error(
@@ -564,7 +565,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             messages=messages,
             tools=tools,
             is_stream=is_stream,
-            exception=f"{type(error).__name__}: {error}",
+            exception=format_provider_exception(error),
         )
 
     @staticmethod
@@ -579,5 +580,14 @@ class OpenAIAccountModelClient(BaseModelClient):
     @staticmethod
     def _wrap_model_error(error: Exception, operation: str) -> Exception:
         if isinstance(error, OpenAIAccountAuthError):
-            return build_error(StatusCode.MODEL_SERVICE_CONFIG_ERROR, error_msg=f"OpenAI account auth error: {error}")
-        return build_error(StatusCode.MODEL_CALL_FAILED, error_msg=f"OpenAI account API {operation} error: {error}")
+            return build_error(
+                StatusCode.MODEL_SERVICE_CONFIG_ERROR,
+                error_msg=f"OpenAI account auth error: {format_provider_exception(error, include_exc_type=False)}",
+            )
+        return build_error(
+            StatusCode.MODEL_CALL_FAILED,
+            error_msg=(
+                f"OpenAI account API {operation} error: "
+                f"{format_provider_exception(error, include_exc_type=False)}"
+            ),
+        )

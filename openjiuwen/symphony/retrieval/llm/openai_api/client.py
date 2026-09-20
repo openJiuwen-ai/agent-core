@@ -4,6 +4,8 @@ import json
 import logging
 from typing import Any, Iterable, Mapping, Sequence
 
+from openjiuwen.core.foundation.llm.utils.provider_error import format_provider_exception
+
 from ..base import (
     GenerationConfig,
     LLMClientCapabilities,
@@ -89,7 +91,10 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
         try:
             stream = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise LLMRequestError(f"OpenAI-compatible streaming request failed: {exc}") from exc
+            raise LLMRequestError(
+                "OpenAI-compatible streaming request failed: "
+                f"{format_provider_exception(exc, include_exc_type=False)}"
+            ) from exc
         chunks: list[str] = []
         usage: dict[str, Any] | None = None
         try:
@@ -152,7 +157,10 @@ class OpenAICompatibleClient(ProgressiveLLMClient):
         try:
             response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            raise LLMRequestError(f"OpenAI-compatible completion request failed: {exc}") from exc
+            raise LLMRequestError(
+                "OpenAI-compatible completion request failed: "
+                f"{format_provider_exception(exc, include_exc_type=False)}"
+            ) from exc
         results = self._extract_completion_contents(response)
         if self._log_io:
             self._emit_io("LLM RESPONSE", {"model": model, "stream": False, "choices": results})
