@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from openjiuwen.harness.personal_context.distill.analyzer import AnalyzerPort, LlmAnalyzer
 from openjiuwen.harness.personal_context.distill.corpus import CorpusPort
 from openjiuwen.harness.personal_context.distill.llm import LlmPort
-from openjiuwen.harness.personal_context.distill.profile import publish_distilled
+from openjiuwen.harness.personal_context.distill.profile import (
+    activate_profile_version,
+    publish_distilled,
+)
 from openjiuwen.harness.personal_context.distill.store import begin_job, finish_job, get_cursor_ms
 
 
@@ -38,8 +41,9 @@ async def run_distill_job(
     """
     Run one distill cycle under PersonalContext ``home``.
 
-    Writes ``im/profiles/versions/<job_id>/`` on success with messages.
-    Does not write or switch ``current.json`` (OJ-09).
+    On non-empty success: writes ``im/profiles/versions/<job_id>/``,
+    atomically switches ``current.json``, then advances Distill cursor.
+    Empty window advances cursor without writing profiles.
     """
     cursor_ms = 0 if force_full_window else get_cursor_ms(home)
     floor_ms = 0 if learning_since_ms is None else int(learning_since_ms)
@@ -104,6 +108,7 @@ async def run_distill_job(
             },
             merge_with_existing=True,
         )
+        activate_profile_version(home, job_id, source="distill")
         finish_job(
             home,
             job_id,
