@@ -286,10 +286,8 @@ class ReadWriteLockManager:
                 cls._schedule_idle_lock(lock_file, loop.time() + remaining)
                 continue
 
-            # Close and evict cached idle entries before attempting deletion.
-            # The close runs inside the state lock so that evict-and-close is
-            # atomic with cache removal: a lease acquired afterwards always
-            # builds a fresh lock instead of reaching a closed connection.
+            # Close and evict cached idle entries before attempting deletion
+            entry_to_close: _RwLockEntry | None = None
             async with cls._get_state_lock():
                 entry = cls._locks.get(lock_file)
                 if entry is not None:
@@ -297,10 +295,13 @@ class ReadWriteLockManager:
                         cls._locks.pop(lock_file, None)
                         cls._idle_lru.pop(lock_file, None)
                         entry.lock.evict_singleton()
-                        await entry.lock.close()
+                        entry_to_close = entry
                     else:
                         cls._schedule_idle_lock(lock_file, loop.time())
                         continue
+
+            if entry_to_close is not None:
+                await entry_to_close.lock.close()
 
             if await cls._try_delete_database(lock_file):
                 deleted_count += 1
@@ -336,6 +337,7 @@ class ReadWriteLockManager:
 
     @classmethod
     async def _release_lease(cls, lock_file: pathlib.Path, entry: _RwLockEntry) -> None:
+        overflow: list[_RwLockEntry] = []
         async with cls._get_state_lock():
             entry.lease_count -= 1
             if entry.lease_count:
@@ -348,10 +350,7 @@ class ReadWriteLockManager:
                     continue
                 cls._locks.pop(oldest_file, None)
                 oldest_entry.lock.evict_singleton()
-                # Closed inside the state lock: cache removal, singleton
-                # eviction and connection close complete atomically, so a
-                # lease acquired afterwards cannot reach a closed connection.
-                await oldest_entry.lock.close()
+                overflow.append(oldest_entry)
 
         # Keep idle entries cached with live SQLite connections; idle cleanup
         # closes them after _idle_ttl. This avoids connection churn during burst
@@ -364,6 +363,9 @@ class ReadWriteLockManager:
             lock_file,
             asyncio.get_running_loop().time() + cls._idle_ttl,
         )
+
+        for oldest_entry in overflow:
+            await oldest_entry.lock.close()
 
     @classmethod
     @asynccontextmanager
