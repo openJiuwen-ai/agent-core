@@ -27,7 +27,9 @@ from openjiuwen.extensions.observability import semconv
 _COMPOSE_TOOL_NAME = "symphony_compose_graph"
 _SKILL_TOOL_NAME = "skill_tool"
 _SUBAGENT_DISPATCH_TOOLS = frozenset({"task_tool", "subagent_spawn", "sessions_spawn"})
-_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
+_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(
+    r"\.\.\.(?:<truncated [1-9]\d* chars>|<OTel attribute truncated: [1-9]\d* chars omitted>)$"
+)
 _TRUNCATED_JSON_SUCCESS_PREFIX = re.compile(
     r'^\s*\{\s*"success"\s*:\s*true(?:\s*,|\s*\})',
     re.IGNORECASE,
@@ -823,7 +825,7 @@ def _authoritative_truncated_success(
         return False
     stripped = value.strip()
     if (
-        _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped) is None
+        _match_observability_truncated_suffix(stripped) is None
         or _TRUNCATED_JSON_SUCCESS_PREFIX.match(stripped) is None
     ):
         return False
@@ -831,6 +833,12 @@ def _authoritative_truncated_success(
         return False
     code = str(span_status(span).get("code") or "").upper()
     return code in {"1", "OK", "STATUS_CODE_OK"}
+
+
+def _match_observability_truncated_suffix(value: str) -> re.Match[str] | None:
+    """Match one complete, known observability truncation suffix."""
+
+    return _OBSERVABILITY_TRUNCATED_SUFFIX.search(value)
 
 
 __all__ = ["SymphonyExecutionFragment", "project_symphony_execution_fragments"]
