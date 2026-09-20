@@ -25,6 +25,10 @@ from openjiuwen.harness.execution_subject import (
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.tools.subagent.type_aliases import (
+    canonicalize_subagent_type,
+    subagent_type_allowed,
+)
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -185,10 +189,7 @@ class TaskTool(Tool):
             )
 
         normalized_type = str(subagent_type).strip()
-        if (
-            self._allowed_subagent_types is not None
-            and normalized_type not in self._allowed_subagent_types
-        ):
+        if not subagent_type_allowed(normalized_type, self._allowed_subagent_types):
             raise build_error(
                 StatusCode.TOOL_TASK_TOOL_INVOKED,
                 reason=(
@@ -196,6 +197,7 @@ class TaskTool(Tool):
                     "task_tool"
                 ),
             )
+        create_type = canonicalize_subagent_type(normalized_type)
 
         browser_capabilities: Optional[List[str]] = None
         if str(subagent_type) == "browser_agent":
@@ -237,13 +239,13 @@ class TaskTool(Tool):
             try:
                 if browser_capabilities is None:
                     subagent = self.parent_agent.create_subagent(
-                        subagent_type,
+                        create_type,
                         sub_session_id,
                         **create_kwargs,
                     )
                 else:
                     subagent = self.parent_agent.create_subagent(
-                        subagent_type,
+                        create_type,
                         sub_session_id,
                         browser_capabilities=browser_capabilities,
                         **create_kwargs,

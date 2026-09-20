@@ -13,6 +13,10 @@ from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_ca
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
 from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
+from openjiuwen.harness.tools.subagent.type_aliases import (
+    canonicalize_subagent_type,
+    subagent_type_allowed,
+)
 from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 
 if TYPE_CHECKING:
@@ -146,10 +150,7 @@ class SubagentSpawnTool(Tool):
         _validate_spawn_payload(payload)
 
         normalized_type = str(subagent_type).strip()
-        if (
-            self._allowed_subagent_types is not None
-            and normalized_type not in self._allowed_subagent_types
-        ):
+        if not subagent_type_allowed(normalized_type, self._allowed_subagent_types):
             raise build_error(
                 StatusCode.TOOL_SESSION_TOOL_INVOKED,
                 reason=(
@@ -157,11 +158,12 @@ class SubagentSpawnTool(Tool):
                     "subagent_spawn"
                 ),
             )
+        create_type = canonicalize_subagent_type(normalized_type)
 
         control = get_subagent_control(self._parent_agent, kwargs.get("session"))
-        browser_capabilities = _parse_browser_capabilities(payload, normalized_type)
+        browser_capabilities = _parse_browser_capabilities(payload, create_type)
         result = await control.spawn(
-            normalized_type,
+            create_type,
             str(task_description),
             display_name=str(display_name),
             role=str(role),

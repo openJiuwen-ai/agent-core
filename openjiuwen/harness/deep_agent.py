@@ -1355,13 +1355,16 @@ class DeepAgent(BaseAgent):
             return None
 
         from openjiuwen.harness.schema.config import SubAgentConfig
+        from openjiuwen.harness.tools.subagent.type_aliases import canonicalize_subagent_type
 
+        wanted = canonicalize_subagent_type(subagent_type)
         for spec in self._deep_config.subagents or []:
-            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
-                return spec
+            if isinstance(spec, SubAgentConfig):
+                if canonicalize_subagent_type(spec.agent_card.name) == wanted:
+                    return spec
             if isinstance(spec, DeepAgent):
                 card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == subagent_type:
+                if canonicalize_subagent_type(getattr(card, "name", None) or "") == wanted:
                     return spec
 
         return None
