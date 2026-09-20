@@ -285,6 +285,31 @@ def test_model_request_becomes_inference_with_window_commit(exporter: InMemorySp
     assert not [operation for operation in delta["delta"] if operation.get("op") == "remove"]
 
 
+def test_every_host_input_of_a_turn_reads_as_the_user_speaking(exporter: InMemorySpanExporter) -> None:
+    recorder = _recorder()
+    stream = _Stream(recorder)
+    recorder.record_input("turn-1", "list the files")
+    stream.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=100.0)
+    # A steer folded into the running turn is the user speaking as well.
+    recorder.record_input("turn-1", "also count them")
+    history = (
+        _text_message("reminder", MessageRole.USER, "<reminder>be careful</reminder>"),
+        _text_message("user-1", MessageRole.USER, "<inbound>list the files</inbound>"),
+        _text_message("user-2", MessageRole.USER, "<inbound>also count them</inbound>"),
+    )
+    stream.emit(_request("req-1", started_at=100.5, ended_at=101.0, history=history), timestamp=101.0)
+    stream.emit(_completed("done"), timestamp=102.0)
+
+    window = json.loads(_by_kind(exporter, "event")[0].attributes[OJ_TRAJECTORY_PAYLOAD])["messages"]
+    logger.info("committed window: {}", window)
+    assert [message["origin"] for message in window] == [
+        "harness_internal",
+        "harness_internal",
+        "external_user",
+        "external_user",
+    ]
+
+
 def test_multi_block_text_messages_are_stated_as_one_body(exporter: InMemorySpanExporter) -> None:
     recorder = _recorder()
     stream = _Stream(recorder)

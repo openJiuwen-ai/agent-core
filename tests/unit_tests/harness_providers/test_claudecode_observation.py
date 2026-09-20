@@ -168,7 +168,16 @@ _SYSTEM = [
     {"type": "text", "text": "You are Claude Code.", "cache_control": {"type": "ephemeral"}},
 ]
 _TOOLS = [{"name": "Bash", "description": "run", "input_schema": {"type": "object"}}]
-_USER = {"role": "user", "content": [{"type": "text", "text": "list files"}]}
+# One Claude Code user turn: the CLI's own reminder, a control payload and
+# what the host actually said.
+_USER = {
+    "role": "user",
+    "content": [
+        {"type": "text", "text": "<system-reminder>be careful</system-reminder>"},
+        {"type": "tool_addition", "tool": {"type": "tool_reference", "name": "Bash"}},
+        {"type": "text", "text": "list files"},
+    ],
+}
 _FIRST_REPLY = [{"type": "tool_use", "id": "tool-1", "name": "Bash", "input": {"command": "ls"}}]
 _TOOL_RESULT = {
     "role": "user",
@@ -342,13 +351,21 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
     assert first.usage.total_tokens == 54
     assert [block.kind for block in first.output_message.content] == ["tool_call"]
     assert first.output_message.content[0].data["call_id"] == "tool-1"
+    # Each block of a user turn is its own statement; the CLI's control payload
+    # states nothing its notice text does not.
+    assert [message.role for message in first.input_messages] == [MessageRole.USER, MessageRole.USER]
+    assert [block.content for message in first.input_messages for block in message.content] == [
+        "<system-reminder>be careful</system-reminder>",
+        "list files",
+    ]
     assert [message.role for message in second.input_messages] == [
+        MessageRole.USER,
         MessageRole.USER,
         MessageRole.ASSISTANT,
         MessageRole.USER,
     ]
     # The earlier reply keeps its message id inside the next request's history.
-    assert second.input_messages[1].message_id == "msg-1"
+    assert second.input_messages[2].message_id == "msg-1"
     assert second.input_messages[0].message_id == first.input_messages[0].message_id
     tool_started = next(event for event in events if _kinds([event]) == ["tool:tool-1:started"])
     assert "msg-1" in tool_started.causation_ids

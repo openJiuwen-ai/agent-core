@@ -84,6 +84,10 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   | `assistant_response` / `user_prompt` 日志 | 未用：与响应体、宿主输入重复 |
   | `mcp_server_connection` / `plugin_loaded` / `hook_*` 日志 | 未用：启动与 hook 诊断，轨迹无消费方 |
 
+- 一次 user turn 里，CLI 注入的提醒 / 环境说明 / 工具上新通知与宿主真正说的话是并列的独立块，因此按块
+  拆成独立消息（assistant turn 不拆，推理、回答、工具调用是一次回复）。否则它们会被并成一段正文，宿主
+  输入所在的那行会以 CLI 提醒开头。`tool_addition` 之类控制块不入对话（同一条通知的文本已经说明），
+  CLI 已脱敏的 thinking（`<REDACTED>`）也不单独成行。
 - 系统提示里第一块是 Claude Code 自己的 `x-anthropic-billing-header`（含每次请求变化的 id）。它是请求
   元数据而非指令，移到 `data.claude-code.billing_header`，否则系统提示每步都像被改写。
 - 工具定义的 `input_schema` 归一为 `parameters`；采样参数取自请求体（max_tokens / temperature /
@@ -119,8 +123,10 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 | tool `ItemLifecycleEvent` | `execute_tool {name}`；`causation_ids` 命中已记录请求时写 `openjiuwen.inference.id` / step number / `openjiuwen.tool.authoritative` |
 | 终止事件 | 补结束未完成 tool（ERROR），写 turn 输出与状态 |
 
-宿主输入所在的那条 user 消息标为 `external_user`（按宿主发出的文本匹配最后一条含它的 user 消息），
-其余为 `harness_internal`，这样视图里能区分用户消息与上下文。
+宿主发进本轮的每条输入（含中途 steer 进来的）所在的 user 消息标为 `external_user`（按文本匹配最后一条
+含它的 user 消息），其余为 `harness_internal`。视图据此区分"用户说的"与"agent loop 注入的上下文"：
+后者包括 CLI 的 system-reminder、环境说明、工具上新通知、token 预算提示，以及团队邮箱投递的
+`<team-inbound>`（它作为本轮输入时标为用户）。
 
 一条消息被 provider 拆成多个文本块时（注入的 reminder + 正文），记录器把它们合成一段正文：读者读到的
 是一条消息，保留拆分会让任何以文本呈现的视图显示成 JSON 数组；含非文本块（图片、文档）的消息保留分块。

@@ -74,6 +74,11 @@ _DATA_NAMESPACE = "claude-code"
 _DRAIN_INTERVAL_S = 0.25
 _DEFAULT_WAIT_S = 5.0
 _OMITTED_KEYS = frozenset({"cache_control"})
+# Content the CLI redacts before logging a body: a block that states nothing.
+_REDACTED_CONTENT = "<REDACTED>"
+# Control payloads the CLI attaches to a user turn beside the text that already
+# describes them (the tool-availability notice repeats every added tool).
+_CONTROL_BLOCK_TYPES = frozenset({"tool_addition", "tool_removal"})
 # Claude Code puts its own billing/telemetry header in the first system block.
 # It is request metadata rather than instructions, and it carries per-request
 # ids that would otherwise make the system prompt read as rewritten every time.
@@ -679,6 +684,14 @@ class ClaudeRequestObserver:
         )
 
     def _conversation(self, messages: Any) -> list[TurnMessage]:
+        """Convert the request's conversation into protocol messages.
+
+        A user turn of Claude Code carries independent blocks: the CLI's own
+        reminders and notices beside what the host actually said. They are
+        separate statements to a reader, so each becomes its own message; an
+        assistant turn stays whole, because its reasoning, answer and tool
+        calls are one reply.
+        """
         result: list[TurnMessage] = []
         if not isinstance(messages, list):
             return result
@@ -687,11 +700,19 @@ class ClaudeRequestObserver:
                 continue
             role = str(message.get("role") or "user")
             content = message.get("content")
-            identity = _identity(role, content)
-            message_id = self._output_ids_by_identity.get(identity) or f"claude-context:{identity}"
-            message_role = MessageRole.ASSISTANT if role == "assistant" else MessageRole.USER
-            result.append(_message(message_id, message_role, content))
+            if role == "assistant":
+                result.append(_message(self._message_id(role, content), MessageRole.ASSISTANT, content))
+                continue
+            for block in _content_list(content):
+                if not isinstance(block, dict) or block.get("type") in _CONTROL_BLOCK_TYPES:
+                    continue
+                result.append(_message(self._message_id(role, [block]), MessageRole.USER, [block]))
         return result
+
+    def _message_id(self, role: str, content: Any) -> str:
+        """Return the stable id of one conversation message."""
+        identity = _identity(role, content)
+        return self._output_ids_by_identity.get(identity) or f"claude-context:{identity}"
 
 
 def _content_list(content: Any) -> list[Any]:
@@ -716,7 +737,12 @@ def _content_block(block_id: str, block: dict[str, Any]) -> ContentBlock | None:
     if block_type == "text":
         return ContentBlock(block_id=block_id, kind="text", content=str(block.get("text") or ""))
     if block_type == "thinking":
-        return ContentBlock(block_id=block_id, kind="reasoning", content=str(block.get("thinking") or ""))
+        thinking = str(block.get("thinking") or "")
+        if not thinking or thinking == _REDACTED_CONTENT:
+            # The CLI redacts thinking before logging it; an empty reasoning
+            # block would only add a row saying nothing.
+            return None
+        return ContentBlock(block_id=block_id, kind="reasoning", content=thinking)
     if block_type == "redacted_thinking":
         return None
     if block_type in ("tool_use", "server_tool_use", "mcp_tool_use"):

@@ -179,7 +179,7 @@ class HarnessTrajectoryRecorder:
         self._handler = OtelCallbackHandler(config, tracer=tracer)
         self._turns: dict[str, _TurnRecord] = {}
         self._pending_inputs: dict[str, str] = {}
-        self._turn_inputs: dict[str, str] = {}
+        self._turn_inputs: dict[str, list[str]] = {}
         self._pending_identities: dict[str, tuple[str, int]] = {}
         self._active_turn_id: str | None = None
 
@@ -221,15 +221,17 @@ class HarnessTrajectoryRecorder:
     # ------------------------------------------------------------------
 
     def record_input(self, turn_id: str, text: str) -> None:
-        """Remember the input text that opens ``turn_id``.
+        """Remember an input the host sent into ``turn_id``.
 
-        Inputs steered into a turn that already started are not recorded
-        again; the turn span states the input that started it.
+        The turn span states the input that opened the turn; every input,
+        including one steered into a running turn, is also remembered so the
+        message carrying it reads as the user's rather than as context.
         """
-        if not text or turn_id in self._turns:
+        if not text:
             return
-        self._pending_inputs[turn_id] = text
-        self._turn_inputs[turn_id] = text
+        if turn_id not in self._turns:
+            self._pending_inputs.setdefault(turn_id, text)
+        self._turn_inputs.setdefault(turn_id, []).append(text)
 
     def record_turn_identity(self, protocol_turn_id: str, *, turn_id: str, turn_number: int) -> None:
         """Assign the host's trajectory turn identity to a protocol turn.
@@ -438,7 +440,7 @@ class HarnessTrajectoryRecorder:
         inference_id = f"{span.get_span_context().span_id:016x}"
         span.set_attribute(OJ_INFERENCE_ID, inference_id)
         try:
-            request_messages = _request_messages(event, self._turn_inputs.get(envelope.turn_id or ""))
+            request_messages = _request_messages(event, self._turn_inputs.get(envelope.turn_id or "", []))
             if request_messages:
                 self._handler.record_request_input(span, request_messages)
             tool_definitions = json_value_to_builtin(event.tool_definitions)
@@ -595,13 +597,13 @@ def _usage_attributes(event: ModelRequestEvent) -> dict[str, AttributeValue]:
     return {key: value for key, value in pairs if value is not None}
 
 
-def _request_messages(event: ModelRequestEvent, host_input: str | None) -> list[dict[str, Any]]:
+def _request_messages(event: ModelRequestEvent, host_inputs: list[str]) -> list[dict[str, Any]]:
     """Return the request as framework-shaped message dicts, system slot first.
 
-    ``host_input`` is the text the host sent into the turn. A provider states
-    its conversation without saying which message carries it, so the last user
-    message that contains it is marked as the external user's, the way an
-    in-process agent marks the input it was given.
+    ``host_inputs`` are the texts the host sent into the turn. A provider
+    states its conversation without saying which message carries them, so the
+    last user message containing each one is marked as the external user's,
+    the way an in-process agent marks the input it was given.
     """
     messages: list[dict[str, Any]] = []
     system_parts = [_content_part(block) for block in event.system_instructions]
@@ -609,12 +611,13 @@ def _request_messages(event: ModelRequestEvent, host_input: str | None) -> list[
         messages.append({"role": "system", "content": _message_content(system_parts)})
     for message in event.input_messages:
         messages.extend(_message_dicts(message))
-    _mark_host_input(messages, host_input)
+    for host_input in host_inputs:
+        _mark_host_input(messages, host_input)
     return messages
 
 
-def _mark_host_input(messages: list[dict[str, Any]], host_input: str | None) -> None:
-    text = (host_input or "").strip()
+def _mark_host_input(messages: list[dict[str, Any]], host_input: str) -> None:
+    text = host_input.strip()
     if not text:
         return
     for message in reversed(messages):
