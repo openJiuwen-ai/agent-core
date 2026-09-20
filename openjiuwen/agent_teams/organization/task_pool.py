@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -77,8 +76,9 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.tools.database import TeamDatabase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.core.common.logging import team_logger
 
-logger = logging.getLogger(__name__)
+logger = team_logger
 
 _FAILABLE_TASK_STATUSES = frozenset(
     {
@@ -1325,8 +1325,16 @@ class OrgTaskManager:
             if row.parent_task_id is None and row.task_type != "organization.summary":
                 aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(row.aggregation_json, {}))
                 if not aggregation.controller_team_id:
+                    logger.warning(
+                        "complete_task blocked: root %s has no aggregation mode selected",
+                        task_id,
+                    )
                     return OrgTaskOpResult(ok=False, reason="root task leader must select aggregation mode first")
                 if aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM:
+                    logger.warning(
+                        "complete_task blocked: SUMMARY_TEAM root %s cannot be completed directly",
+                        task_id,
+                    )
                     return OrgTaskOpResult(
                         ok=False,
                         reason="SUMMARY_TEAM root tasks can only be completed by their Summary Task",
@@ -1339,6 +1347,12 @@ class OrgTaskManager:
             child_rows = (await session.execute(child_stmt)).scalars().all()
             blocked_reason = await self._parent_complete_blocked_reason(session, child_rows)
             if blocked_reason is not None:
+                logger.warning(
+                    "complete_task blocked: task=%s team=%s reason=%s",
+                    task_id,
+                    team_id,
+                    blocked_reason,
+                )
                 return OrgTaskOpResult(ok=False, reason=blocked_reason)
             if row.parent_task_id is None and row.task_type != "organization.summary":
                 if row.status != OrgTaskStatus.IN_PROGRESS.value:
@@ -1364,8 +1378,14 @@ class OrgTaskManager:
                 if execution is not None:
                     root = await session.get(OrgTaskRecord, row.root_task_id)
                     if root is None:
+                        logger.warning("complete_task failed: summary %s root missing", task_id)
                         return OrgTaskOpResult(ok=False, reason="summary execution root task is missing")
                     if execution.status != OrgSummaryExecutionStatus.RUNNING.value:
+                        logger.warning(
+                            "complete_task blocked: summary %s sources not ready (status=%s)",
+                            task_id,
+                            execution.status,
+                        )
                         return OrgTaskOpResult(ok=False, reason="summary sources are not ready")
                     root.status = OrgTaskStatus.COMPLETED.value
                     root.output_context_json = row.output_context_json
@@ -1419,6 +1439,13 @@ class OrgTaskManager:
         if review_event is not None:
             await self._publish_event(review_event)
         await self.activate_ready_summary_tasks()
+        logger.info(
+            "task completed: org=%s task=%s team=%s root_cascade=%s",
+            self.organization_id,
+            task_id,
+            team_id,
+            completed_root_task_id,
+        )
         return OrgTaskOpResult(ok=True, task=task)
 
     async def fail_task(
@@ -1471,6 +1498,14 @@ class OrgTaskManager:
                 failure_code=code.value,
                 failure_reason=reason,
             )
+        )
+        logger.warning(
+            "task failed: org=%s task=%s team=%s code=%s reason=%s",
+            self.organization_id,
+            task_id,
+            team_id,
+            code.value,
+            reason,
         )
         return OrgTaskOpResult(ok=True, task=task)
 
@@ -1650,6 +1685,13 @@ class OrgTaskManager:
         )
         if status is OrgTaskReviewStatus.ACCEPTED:
             await self.activate_ready_summary_tasks()
+        logger.info(
+            "task reviewed: org=%s task=%s reviewer=%s status=%s",
+            self.organization_id,
+            task_id,
+            reviewer_team_id,
+            review.review_status.value,
+        )
         return OrgTaskOpResult(ok=True, task=self._to_task(task_row), data={"review": review.model_dump()})
 
     async def can_complete_parent_task(self, *, parent_task_id: str, team_id: str) -> bool:
@@ -1919,6 +1961,13 @@ class OrgTaskManager:
                 summary_task_id=summary_task_id,
             )
         )
+        logger.info(
+            "summary execution created: summary=%s root=%s sources=%s team=%s",
+            summary_task_id,
+            root_task_id,
+            source_task_ids,
+            summary_team_id,
+        )
         return OrgTaskOpResult(ok=True, task=self._to_task(summary))
 
     async def set_root_aggregation_mode(
@@ -1966,6 +2015,10 @@ class OrgTaskManager:
                     )
                 ).first()
                 if child is not None:
+                    logger.warning(
+                        "set_root_aggregation_mode blocked: root %s already has children",
+                        task_id,
+                    )
                     return OrgTaskOpResult(
                         ok=False,
                         reason="aggregation mode must be selected before starting root-task decomposition",
@@ -1988,6 +2041,10 @@ class OrgTaskManager:
                     )
                 ).first()
                 if active_root is not None:
+                    logger.warning(
+                        "set_root_aggregation_mode blocked: SUMMARY_TEAM concurrency with active root %s",
+                        active_root[0],
+                    )
                     return OrgTaskOpResult(
                         ok=False,
                         reason=(
@@ -2002,6 +2059,13 @@ class OrgTaskManager:
             root.aggregation_json = _json_dumps(aggregation.model_dump())
             root.updated_at = now
             await session.commit()
+        logger.info(
+            "root aggregation mode selected: org=%s root=%s mode=%s controller=%s",
+            self.organization_id,
+            task_id,
+            mode.value,
+            team_id,
+        )
         return OrgTaskOpResult(ok=True, task=self._to_task(root))
 
     async def bind_summary_execution(self, *, summary_task_id: str, summary_team_id: str) -> OrgTaskOpResult:
@@ -2023,8 +2087,10 @@ class OrgTaskManager:
             )
             summary = await session.get(OrgTaskRecord, summary_task_id)
             if execution is None or summary is None:
+                logger.warning("bind_summary_execution failed: summary=%s not found", summary_task_id)
                 return OrgTaskOpResult(ok=False, reason="summary execution not found")
             if execution.status == OrgSummaryExecutionStatus.FAILED.value:
+                logger.warning("bind_summary_execution rejected: summary=%s already FAILED", summary_task_id)
                 return OrgTaskOpResult(ok=False, reason="summary execution provisioning failed")
             execution.summary_team_id = summary_team_id
             execution.status = OrgSummaryExecutionStatus.WAITING_SOURCES.value
@@ -2041,6 +2107,12 @@ class OrgTaskManager:
                 root.updated_at = now
             await session.commit()
         await self.activate_ready_summary_tasks()
+        logger.info(
+            "summary execution bound: summary=%s team=%s execution=%s",
+            summary_task_id,
+            summary_team_id,
+            execution.execution_id,
+        )
         return OrgTaskOpResult(ok=True, task=self._to_task(summary), data={"execution_id": execution.execution_id})
 
     async def fail_summary_execution(self, *, summary_task_id: str, failure_reason: str) -> OrgTaskOpResult:
@@ -2062,6 +2134,7 @@ class OrgTaskManager:
             )
             summary = await session.get(OrgTaskRecord, summary_task_id)
             if execution is None or summary is None:
+                logger.warning("fail_summary_execution: summary=%s not found", summary_task_id)
                 return OrgTaskOpResult(ok=False, reason="summary execution not found")
             execution.status = OrgSummaryExecutionStatus.FAILED.value
             execution.updated_at = now
@@ -2071,6 +2144,12 @@ class OrgTaskManager:
             summary.failed_at = now
             summary.updated_at = now
             await session.commit()
+        logger.warning(
+            "summary provision failed: summary=%s execution=%s reason=%s",
+            summary_task_id,
+            execution.execution_id,
+            failure_reason,
+        )
         await self._publish_event(
             OrgTaskFailedEvent(
                 organization_id=self.organization_id,
@@ -2233,6 +2312,12 @@ class OrgTaskManager:
                 execution.updated_at = summary.updated_at
                 ready.append(self._to_task(summary))
             await session.commit()
+        if ready:
+            logger.info(
+                "activated %s summary task(s): %s",
+                len(ready),
+                [task.task_id for task in ready],
+            )
         for task in ready:
             await self._publish_task_created(task)
             await self._publish_task_delegated(task, task.created_by.team_id or "", task.assignment.team_id or "")

@@ -6,16 +6,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.organization.schema import OrgTaskStatus, OrgUnclaimedPhase
 from openjiuwen.agent_teams.tools.database.engine import get_current_time
+from openjiuwen.core.common.logging import team_logger
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.manager import TeamOrganizationManager
 
-logger = logging.getLogger(__name__)
+logger = team_logger
 
 
 class OrgUnclaimedTaskService:
@@ -63,6 +63,17 @@ class OrgUnclaimedTaskService:
         metadata = message["metadata"]
         kind = metadata.get("unclaimed_kind")
         if kind not in {"revision", "revised", "expired"}:
+            logger.warning(
+                "unclaimed message %s has unknown kind %r; acking to stop rescans",
+                message.get("message_id"),
+                kind,
+            )
+            await self.manager.message_service.ack_leader_message(
+                message_id=message["message_id"],
+                team_id=message["to_team_id"],
+                leader_id=message["to_leader_id"] or "",
+                handling_result="unknown unclaimed_kind",
+            )
             return False
         task = await self.manager.task_pool.get_task(metadata["task_id"])
         state = task.unclaimed if task else None
