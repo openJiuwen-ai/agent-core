@@ -17,10 +17,12 @@ from typing import (
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliModelConfig,
     TeamRole,
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_builtin_model,
     get_member_fallback_model_ref,
     get_member_model_ref,
 )
@@ -419,6 +421,10 @@ class SpawnManager:
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
 
         permissions_override = get_member_permissions_override(teammate)
+        builtin = get_member_builtin_model(teammate)
+        builtin_model = (
+            ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
+        )
 
         # Team-level B-class values come from ``team_info``: they are
         # written to the DB when ``build_team`` succeeds and are carried
@@ -442,6 +448,7 @@ class SpawnManager:
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
             fallback_member_model=fallback_member_model,
+            builtin_model=builtin_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,

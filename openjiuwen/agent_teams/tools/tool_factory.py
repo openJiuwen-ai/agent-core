@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.tools.tool_member import (
     ApproveToolCallTool,
     CheckpointTool,
     ListCheckpointsTool,
+    SetMemberModelTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
@@ -220,6 +221,7 @@ def create_team_tools(
             model_config_allocator=model_config_allocator,
         ),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
+        "set_member_model": SetMemberModelTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
         # Task management
@@ -287,6 +289,9 @@ def create_team_tools(
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
+    # Switching a member's built-in model needs a declared catalog to pick from.
+    if not agent_team.builtin_models_enabled():
+        allowed = allowed - {"set_member_model"}
     # Context inheritance (F_75). One flag gates the whole capability:
     # ``checkpoint`` / ``list_checkpoints`` disappear here, and
     # ``SpawnTeammateTool`` reads the same ``fork_enabled()`` above to drop

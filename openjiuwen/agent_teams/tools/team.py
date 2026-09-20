@@ -23,6 +23,7 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
+    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
@@ -51,6 +52,7 @@ from openjiuwen.agent_teams.schema.team import (
     BridgeMailboxInjectMode,
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    MemberModelSwitchResult,
     MemberOpResult,
     MemberRosterEntry,
     TeamCompletionSnapshot,
@@ -374,6 +376,9 @@ class TeamBackend:
         self._snapshot_length: Callable[[], int] | None = None
         self._store_checkpoint_fn: Callable[..., dict | None] | None = None
         self._checkpoint_list_fn: Callable[[], dict] | None = None
+        # Leader-side hook switching a live external-CLI member's model; set by
+        # the hosting TeamAgent (see ``set_member_model_fn``).
+        self._member_model_fn: Callable[[str, "MemberBuiltinModel"], Awaitable[bool]] | None = None
 
         team_logger.info(f"AgentTeam manager initialized for {team_name}, member={member_name}")
 
@@ -449,6 +454,15 @@ class TeamBackend:
         are passed through so the authoritative namespace can store them.
         """
         self._store_checkpoint_fn = fn
+
+    def set_member_model_fn(self, fn: Callable[[str, "MemberBuiltinModel"], Awaitable[bool]]) -> None:
+        """Register the hook that switches a running external-CLI member's model.
+
+        ``fn(member_name, builtin_model)`` returns True when the member was
+        running and switched now, False when it is not running (the persisted
+        selection then applies at its next start).
+        """
+        self._member_model_fn = fn
 
     def set_checkpoint_list_fn(self, fn) -> None:
         """Register the callback returning the authoritative checkpoint mapping."""
@@ -659,6 +673,7 @@ class TeamBackend:
         role: TeamRole = TeamRole.TEAMMATE,
         isolation: Optional[str] = None,
         cli_agent: Optional[str] = None,
+        builtin_model: Optional["MemberBuiltinModel"] = None,
         permissions_override: Optional[dict[str, str]] = None,
     ) -> MemberOpResult:
         """Create a team member record in the database.
@@ -689,6 +704,9 @@ class TeamBackend:
             cli_agent: External CLI backend name for external members.
                 Persisted so stopped or cold-recovered teams can rebuild
                 member runtime routing without relying on process memory.
+            builtin_model: Built-in CLI model (and effort) an external CLI
+                member runs on its own login; persisted so restarts and
+                cold recovery launch the CLI on the same model.
             permissions_override: Flat ``{tool_name: level_string}`` dict
                 from ``spawn_teammate.permissions``.  Only tightening
                 rules are valid (see ``narrow_permissions``).  Persisted
@@ -715,6 +733,7 @@ class TeamBackend:
         options = build_member_options(
             model_ref=allocation.to_db_ref() if allocation is not None else None,
             fallback_model_ref=(fallback_allocation.to_db_ref() if fallback_allocation is not None else None),
+            builtin_model=builtin_model,
             cli_agent=cli_agent,
             worktree_isolation=isolation,
             permissions_override=permissions_override,
@@ -2727,6 +2746,115 @@ class TeamBackend:
         """Return the set of ``cli_agent`` kinds declared in the spec."""
         return frozenset(self._external_cli_configs)
 
+    def builtin_models_enabled(self) -> bool:
+        """Return whether any declared CLI kind offers built-in models to pick."""
+        return any(config.builtin_models for config in self._external_cli_configs.values())
+
+    def resolve_builtin_model(
+        self,
+        cli_agent: str,
+        model: str,
+        effort: str | None,
+    ) -> tuple["MemberBuiltinModel | None", str]:
+        """Validate a built-in model choice against the kind's declared catalog.
+
+        Args:
+            cli_agent: The member's CLI kind.
+            model: The chosen built-in model name.
+            effort: The chosen effort; ``None`` takes the model's default.
+
+        Returns:
+            ``(selection, "")`` on success, ``(None, reason)`` otherwise.
+        """
+        from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
+
+        config = self._external_cli_configs.get(cli_agent)
+        if config is None or not config.builtin_models:
+            return None, f"cli_agent '{cli_agent}' declares no builtin_models"
+        declared = config.find_builtin_model(model)
+        if declared is None:
+            names = ", ".join(item.name for item in config.builtin_models)
+            return None, f"builtin model '{model}' is not declared for cli_agent '{cli_agent}' (declared: {names})"
+        if effort is not None and effort not in declared.efforts:
+            allowed = ", ".join(declared.efforts) or "none"
+            return None, f"effort '{effort}' is not supported by builtin model '{model}' (supported: {allowed})"
+        return MemberBuiltinModel(model=model, effort=effort or declared.default_effort), ""
+
+    async def set_member_model(
+        self,
+        member_name: str,
+        *,
+        model: str | None,
+        effort: str | None,
+    ) -> MemberModelSwitchResult:
+        """Switch an external-CLI member's built-in model and/or effort.
+
+        The choice is persisted first, so restarts and cold recovery keep it,
+        then pushed to the running member through the hosting agent's hook.
+        Only members on the CLI's own login qualify: a member on a pool
+        endpoint (including a promoted auth fallback) cannot take a built-in
+        model without changing endpoints.
+
+        Args:
+            member_name: The external-CLI member to switch.
+            model: New built-in model; ``None`` keeps the current one.
+            effort: New effort; ``None`` keeps the current effort, or takes
+                the new model's default when ``model`` changes.
+
+        Returns:
+            The persisted selection and whether the running member switched now.
+        """
+        from openjiuwen.agent_teams.tools.member_options import (
+            get_member_builtin_model,
+            get_member_cli_agent,
+            get_member_model_ref,
+        )
+
+        if not self.is_leader:
+            return MemberModelSwitchResult(ok=False, reason="Only the leader can switch a member's model")
+        if model is None and effort is None:
+            return MemberModelSwitchResult(ok=False, reason="'model' or 'effort' is required")
+        row = await self.db.member.get_member(member_name, self.team_name)
+        if row is None:
+            return MemberModelSwitchResult(ok=False, reason=f"Member '{member_name}' not found")
+        cli_agent = get_member_cli_agent(row)
+        if cli_agent is None:
+            return MemberModelSwitchResult(ok=False, reason=f"Member '{member_name}' is not an external CLI member")
+        if get_member_model_ref(row) is not None:
+            return MemberModelSwitchResult(
+                ok=False,
+                reason=f"Member '{member_name}' runs on a team model pool endpoint; "
+                "built-in models apply only to members on the CLI's own login",
+            )
+        current = get_member_builtin_model(row)
+        target_model = model or (current.model if current is not None else None)
+        if target_model is None:
+            return MemberModelSwitchResult(
+                ok=False,
+                reason=f"Member '{member_name}' has no built-in model yet; 'model' is required",
+            )
+        # Changing only the effort keeps the current model; changing the model
+        # without an effort takes that model's declared default.
+        target_effort = effort if effort is not None or model is not None else current.effort
+        selection, reason = self.resolve_builtin_model(cli_agent, target_model, target_effort)
+        if selection is None:
+            return MemberModelSwitchResult(ok=False, reason=reason)
+        if not await self.db.member.update_member_builtin_model(member_name, self.team_name, selection):
+            return MemberModelSwitchResult(ok=False, reason=f"Failed to persist the model of '{member_name}'")
+        applied_live = False
+        if self._member_model_fn is not None:
+            try:
+                applied_live = await self._member_model_fn(member_name, selection)
+            except Exception as exc:
+                # Persisted already: the member picks it up on its next start.
+                team_logger.warning("Live model switch for member %s failed: %s", member_name, exc)
+        return MemberModelSwitchResult(
+            ok=True,
+            model=selection.model,
+            effort=selection.effort,
+            applied_live=applied_live,
+        )
+
     async def spawn_external_cli_agent(
         self,
         *,
@@ -2738,6 +2866,7 @@ class TeamBackend:
         model_name: Optional[str] = None,
         allocation: Optional["Allocation"] = None,
         fallback_allocation: Optional["Allocation"] = None,
+        builtin_model: Optional["MemberBuiltinModel"] = None,
     ) -> MemberOpResult:
         """Register an external-CLI teammate dynamically.
 
@@ -2764,6 +2893,9 @@ class TeamBackend:
                 refreshes propagate without re-spawning.
             fallback_allocation: Required fallback allocation used only when
                 the native CLI reports an authentication failure.
+            builtin_model: Built-in CLI model (and effort) resolved through
+                ``resolve_builtin_model``; mutually exclusive with
+                ``allocation`` because it runs on the CLI's own login.
 
         Returns:
             ``MemberOpResult`` — failure if the backend name is unknown, its
@@ -2821,6 +2953,7 @@ class TeamBackend:
             cli_agent=cli_agent,
             allocation=allocation,
             fallback_allocation=fallback_allocation,
+            builtin_model=builtin_model,
         )
         if not result.ok:
             self._external_cli_specs.pop(member_name, None)

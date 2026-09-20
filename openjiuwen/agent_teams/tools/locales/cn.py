@@ -204,6 +204,24 @@ STRINGS: dict[str, str] = {
         "仅对运行时明确报告的认证失败生效。只有团队模型池中不存在兼容模型时才能传 null，"
         "此时仍可使用其自身默认模型，但不启用自动回退"
     ),
+    "spawn_external_cli.builtin_model": (
+        "可选。从下方目录中该 cli_agent 的条目里选择一个内置模型，使用 CLI 自身登录（如订阅）运行，"
+        "按成员工作量选择；与 model_name 互斥。省略时由 CLI 使用其自身默认模型"
+    ),
+    "spawn_external_cli.effort": (
+        "可选。推理强度，必须是所选 builtin_model 的 efforts 之一；需同时指定 builtin_model，"
+        "省略时取该模型的 default_effort"
+    ),
+    # ===== set_member_model ====================================================
+    # set_member_model._desc lives in descs/cn/member/set_member_model.md
+    "set_member_model.member_name": "要切换模型的外部 CLI 成员 member_name（语义化 slug，不是显示名）",
+    "set_member_model.model": (
+        "可选。新的内置模型，必须来自下方目录中该成员 cli_agent 的条目；省略时保持当前模型，只调整 effort"
+    ),
+    "set_member_model.effort": (
+        "可选。新的推理强度，必须是所选模型的 efforts 之一；指定了 model 而省略时取其 default_effort，"
+        "未指定 model 而省略时保持不变"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/cn/member/shutdown_member.md
     "shutdown_member.member_name": "要请求关闭的成员 member_name（语义化 slug，不是显示名）",

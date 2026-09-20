@@ -512,10 +512,25 @@ def _member_context(
     )
 
 
+def _is_native_endpoint(config: ExternalCliModelConfig | None) -> bool:
+    """Return whether the member runs on the CLI's own login.
+
+    Only such a member takes the auth fallback: one already on an endpoint
+    (pool allocation or static endpoint config) has nothing to fall back from.
+    A built-in model choice carries neither ``api_base`` nor ``provider``.
+    """
+    return config is None or (config.api_base is None and config.provider is None)
+
+
 def _claude_model(config: ExternalCliModelConfig | None) -> ClaudeModelConfig | None:
     if config is None:
         return None
-    return ClaudeModelConfig(model=config.model, api_base=config.api_base, api_key=config.api_key)
+    return ClaudeModelConfig(
+        model=config.model,
+        api_base=config.api_base,
+        api_key=config.api_key,
+        effort=config.effort,
+    )
 
 
 def _codex_model(config: ExternalCliModelConfig | None) -> CodexModelConfig | None:
@@ -526,6 +541,7 @@ def _codex_model(config: ExternalCliModelConfig | None) -> CodexModelConfig | No
         provider=config.provider,
         api_base=config.api_base,
         api_key=config.api_key,
+        effort=config.effort,
     )
 
 
@@ -574,7 +590,7 @@ async def _build_claude_member_runtime(
         ssh_transport is not None,
     )
     fallback_model = None
-    if external_model_config is None and fallback_external_model_config is not None:
+    if _is_native_endpoint(external_model_config) and fallback_external_model_config is not None:
         fallback_model = _claude_model(fallback_external_model_config)
     config = ClaudeCodeHarnessConfig(
         skills=skills,
@@ -664,7 +680,7 @@ async def _build_codex_member_runtime(
             reason="Codex SDK MCP injection requires a non-empty mcp_server_command",
         )
     fallback_model = None
-    if external_model_config is None and fallback_external_model_config is not None:
+    if _is_native_endpoint(external_model_config) and fallback_external_model_config is not None:
         fallback_model = _codex_model(fallback_external_model_config)
     config_kwargs: dict[str, Any] = {
         "skills": skills,

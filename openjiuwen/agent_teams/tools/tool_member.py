@@ -11,6 +11,7 @@ from openjiuwen.agent_teams.tools.locales import Translator
 from openjiuwen.agent_teams.tools.team import TeamBackend
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.agent_teams.tools.tool_permissions import _MEMBER_NAME_PATTERN
+from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.schema.team import MemberOpResult
+    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
 
 
 def _is_anthropic_provider(provider: str) -> bool:
@@ -37,6 +39,33 @@ def _provider_filter_for_cli(cli_agent: str) -> Callable[[str], bool] | None:
 def _model_api_protocol(provider: str) -> str:
     """Return the external CLI protocol label for a model provider."""
     return "Anthropic" if _is_anthropic_provider(provider) else "OpenAI"
+
+
+def _builtin_model_catalog(team: TeamBackend) -> str:
+    """Render the built-in models each CLI kind declares, for the model to pick from."""
+    catalog: dict[str, list[dict[str, Any]]] = {}
+    for cli_agent in sorted(team.external_cli_kinds()):
+        config = team.external_cli_config(cli_agent)
+        if config is None or not config.builtin_models:
+            continue
+        catalog[cli_agent] = [
+            {
+                "name": model.name,
+                "description": model.description,
+                "efforts": model.efforts,
+                "default_effort": model.default_effort,
+            }
+            for model in config.builtin_models
+        ]
+    return f"<builtin_model_catalog>{json.dumps(catalog, ensure_ascii=False)}</builtin_model_catalog>"
+
+
+def _optional_text(value: Any) -> str | None:
+    """Return a stripped non-empty string, or ``None`` for absent/blank input."""
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 # ========== Member Management ==========
@@ -657,6 +686,10 @@ class SpawnExternalCliTool(_SpawnToolBase):
     (see ``create_team_tools``).
     """
 
+    # Description slots that talk about the built-in model parameters; dropped
+    # together with the parameters when no CLI kind declares builtin_models.
+    _BUILTIN_MODEL_SLOTS = frozenset({"builtin_model_param_rows", "builtin_model_usage"})
+
     def __init__(
         self,
         team: TeamBackend,
@@ -664,7 +697,12 @@ class SpawnExternalCliTool(_SpawnToolBase):
         *,
         model_config_allocator: Callable[[str | None], "Allocation | None"] | None = None,
     ):
-        super().__init__(team, t, "spawn_external_cli")
+        super().__init__(
+            team,
+            t,
+            "spawn_external_cli",
+            omit_slots=None if team.builtin_models_enabled() else self._BUILTIN_MODEL_SLOTS,
+        )
         self._allocate_model_config = model_config_allocator
         fallback_description = t("spawn_external_cli", "fallback_model_name")
         fallback_description = f"{fallback_description}\n\n{self._model_catalog_context()}"
@@ -696,6 +734,15 @@ class SpawnExternalCliTool(_SpawnToolBase):
             },
             "required": ["member_name", "display_name", "prompt", "cli_agent", "fallback_model_name"],
         }
+        # Built-in model choice is an attribute-level capability: the two
+        # properties exist only when some declared CLI kind offers a catalog.
+        if team.builtin_models_enabled():
+            properties = self.card.input_params["properties"]
+            properties["builtin_model"] = {
+                "type": "string",
+                "description": f"{t('spawn_external_cli', 'builtin_model')}\n\n{_builtin_model_catalog(team)}",
+            }
+            properties["effort"] = {"type": "string", "description": t("spawn_external_cli", "effort")}
 
     def _compatible_pool_entries(self, cli_agent: str) -> list["ModelPoolEntry"]:
         """Return protocol-compatible pool entries for one CLI kind."""
@@ -793,6 +840,9 @@ class SpawnExternalCliTool(_SpawnToolBase):
             }
         )
         preferred_current_model = self._preferred_current_model(cli_agent, compatible_entries)
+        builtin_model, builtin_error = self._resolve_builtin_model(inputs, cli_agent=cli_agent, model_name=model_name)
+        if builtin_error:
+            return self._fail(builtin_error)
         if model_name:
             if self._allocate_model_config is None:
                 return self._fail("spawn_external_cli requires a team model pool when 'model_name' is specified")
@@ -841,6 +891,7 @@ class SpawnExternalCliTool(_SpawnToolBase):
             model_name=model_name,
             allocation=allocation,
             fallback_allocation=fallback_allocation,
+            builtin_model=builtin_model,
         )
         return self._from_result(
             result,
@@ -849,6 +900,33 @@ class SpawnExternalCliTool(_SpawnToolBase):
             role_type="external_cli",
             cli_agent=cli_agent,
         )
+
+    def _resolve_builtin_model(
+        self,
+        inputs: dict[str, Any],
+        *,
+        cli_agent: str,
+        model_name: str | None,
+    ) -> tuple["MemberBuiltinModel | None", str]:
+        """Validate the optional built-in model choice.
+
+        MCP clients do not validate against the schema, so arguments the gate
+        removed are rejected here instead of being silently ignored.
+        """
+        builtin_name = _optional_text(inputs.get("builtin_model"))
+        effort = _optional_text(inputs.get("effort"))
+        if builtin_name is None and effort is None:
+            return None, ""
+        if not self.team.builtin_models_enabled():
+            return None, "builtin_model / effort are unavailable: no CLI kind declares builtin_models"
+        if builtin_name is None:
+            return None, "'effort' requires 'builtin_model'"
+        if model_name:
+            return None, (
+                "'builtin_model' and 'model_name' are mutually exclusive: a built-in model runs on the CLI's "
+                "own login, 'model_name' on a team model pool endpoint"
+            )
+        return self.team.resolve_builtin_model(cli_agent, builtin_name, effort)
 
 
 class ShutdownMemberTool(TeamTool):
@@ -891,6 +969,68 @@ class ShutdownMemberTool(TeamTool):
         if not output.success:
             return output.error or "Failed to shutdown member"
         return f"Member shutdown: member_name={output.data['member_name']}"
+
+
+class SetMemberModelTool(TeamTool):
+    """Switch an external-CLI member's built-in model and/or reasoning effort.
+
+    Only wired when some declared CLI kind offers ``builtin_models``. The
+    choice is persisted, so it also survives restarts; a running member
+    switches before its next turn.
+    """
+
+    def __init__(self, team: TeamBackend, t: Translator):
+        super().__init__(
+            ToolCard(
+                id="team.set_member_model",
+                name="set_member_model",
+                description=t("set_member_model"),
+            )
+        )
+        self.team = team
+        self.card.input_params = {
+            "type": "object",
+            "properties": {
+                "member_name": {"type": "string", "description": t("set_member_model", "member_name")},
+                "model": {
+                    "type": "string",
+                    "description": f"{t('set_member_model', 'model')}\n\n{_builtin_model_catalog(team)}",
+                },
+                "effort": {"type": "string", "description": t("set_member_model", "effort")},
+            },
+            "required": ["member_name"],
+        }
+
+    async def invoke(self, inputs: dict[str, Any], **kwargs) -> ToolOutput:
+        member_name = _optional_text(inputs.get("member_name"))
+        if member_name is None:
+            return ToolOutput(success=False, error="'member_name' is required")
+        try:
+            result = await self.team.set_member_model(
+                member_name,
+                model=_optional_text(inputs.get("model")),
+                effort=_optional_text(inputs.get("effort")),
+            )
+        except Exception as e:
+            team_logger.error("set_member_model failed for {}: {}", member_name, e)
+            return ToolOutput(success=False, error=f"Internal error: {e}")
+        return ToolOutput(
+            success=result.ok,
+            data={
+                "member_name": member_name,
+                "model": result.model,
+                "effort": result.effort,
+                "applied_live": result.applied_live,
+            },
+            error=None if result.ok else result.reason,
+        )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        if not output.success:
+            return output.error or "Failed to set member model"
+        d = output.data
+        timing = "applies before its next turn" if d["applied_live"] else "applies when the member next starts"
+        return f"Member model set: member_name={d['member_name']}, model={d['model']}, effort={d['effort']} ({timing})"
 
 
 class ApprovePlanTool(TeamTool):

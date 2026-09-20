@@ -23,8 +23,10 @@ from openjiuwen.agent_teams.tools.database.engine import (
     retry_on_locked,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    MemberBuiltinModel,
     MemberWorktreeOptions,
     promote_member_fallback_model,
+    set_member_builtin_model,
     set_member_worktree_options,
 )
 from openjiuwen.agent_teams.tools.models import TeamMember
@@ -90,7 +92,7 @@ class MemberDao:
                 ``role=TeamRole.HUMAN_AGENT.value`` explicitly.
             options: JSON object for extensible member configuration.
                 Current shape: ``{"model_ref": {...},
-                "fallback_model_ref": {...}, "cli_agent": "...",
+                "fallback_model_ref": {...}, "builtin_model": {...}, "cli_agent": "...",
                 "worktree": {...}, "permissions_override": {...}}``.
         """
         async with self._sessions.write() as session:
@@ -561,6 +563,28 @@ class MemberDao:
                 isolation=isolation,
                 worktree_path=worktree_path,
             )
+            await session.commit()
+            return True
+
+    async def update_member_builtin_model(
+        self,
+        member_name: str,
+        team_name: str,
+        builtin_model: MemberBuiltinModel | None,
+    ) -> bool:
+        """Persist the built-in CLI model an external-CLI member runs on."""
+        async with self._sessions.write() as session:
+            result = await session.execute(
+                select(TeamMember).where(
+                    TeamMember.member_name == member_name,
+                    TeamMember.team_name == team_name,
+                )
+            )
+            member = result.scalar_one_or_none()
+            if member is None:
+                team_logger.error("Member %s not found in team %s", member_name, team_name)
+                return False
+            member.options = set_member_builtin_model(member.options, builtin_model)
             await session.commit()
             return True
 

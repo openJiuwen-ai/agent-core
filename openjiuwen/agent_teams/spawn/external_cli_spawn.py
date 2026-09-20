@@ -383,7 +383,17 @@ async def external_cli_spawn(
     # spec config when no pool allocation or no provider match exists.
     external_model_config = cli_cfg.external_model_config if cli_cfg is not None else None
     fallback_external_model_config = None
-    if ctx.member_model is not None:
+    if ctx.builtin_model is not None:
+        # A built-in model runs on the CLI's own login: it replaces both the
+        # pool endpoint and the static endpoint config.
+        team_logger.info(
+            "[external-cli] member {} using built-in model: model={} effort={}",
+            ctx.member_name,
+            ctx.builtin_model.model,
+            ctx.builtin_model.effort,
+        )
+        external_model_config = ctx.builtin_model
+    elif ctx.member_model is not None:
         pool_model_config = _team_model_config_to_external(ctx.member_model)
         if pool_model_config is not None:
             team_logger.info(

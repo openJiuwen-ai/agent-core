@@ -31,13 +31,16 @@ from openjiuwen.harness_protocol import (
     DiagnosticEvent,
     HarnessCheckpoint,
     HarnessContext,
+    HarnessCapability,
     HarnessEvent,
+    HarnessModelControl,
     HarnessProtocol,
     HarnessState,
     HarnessStateError,
     HostCapability,
     InteractionResponseStatus,
     McpServerConfig,
+    ModelSelection,
     ProviderEvent,
     ProviderInteractionRequest,
     ProviderInteractionResponse,
@@ -48,6 +51,7 @@ from openjiuwen.harness_protocol import (
     TurnEventKind,
     TurnLifecycleEvent,
     TurnResult,
+    UnsupportedHarnessCapabilityError,
     json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import ProviderStartupError
@@ -474,6 +478,22 @@ class ExternalHarnessMemberRuntime:
 
     async def resume(self, *, query: Any | None = None) -> None:
         await self._adapter.resume(query=query)
+
+    async def set_model_selection(self, selection: ModelSelection) -> bool:
+        """Switch the running harness to ``selection`` before its next turn.
+
+        Returns:
+            True when the harness switched (or queued the switch for the next
+            turn); False when it is not running, so the selection only takes
+            effect through the persisted member options at the next start.
+        """
+        harness = self._harness
+        if not harness.card.supports(HarnessCapability.MODEL_SELECTION):
+            raise UnsupportedHarnessCapabilityError(f"{harness.card.name} does not support model selection")
+        if not isinstance(harness, HarnessModelControl) or harness.state is HarnessState.TERMINATED:
+            return False
+        await harness.set_model(selection)
+        return True
 
     async def subscribe(
         self,

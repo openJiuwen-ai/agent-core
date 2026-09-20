@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.pool import ModelPoolEntry
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.tiny_agent import TinyAgent
+    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
     from openjiuwen.harness.execution_subject import ExecutionSubject
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
@@ -587,6 +588,7 @@ class TeamAgent(BaseAgent):
             if team_backend is not None:
                 team_backend.set_store_checkpoint_fn(self.set_checkpoint)
                 team_backend.set_checkpoint_list_fn(lambda: self._named_checkpoints)
+                team_backend.set_member_model_fn(self._apply_member_model)
 
     def _setup_agent(
         self,
@@ -1623,6 +1625,24 @@ class TeamAgent(BaseAgent):
     async def _stop_teammate_runtime(self, member_name: str) -> None:
         """Remove a failed teammate's stale runtime handle."""
         await self._spawn_manager.cleanup_teammate(member_name)
+
+    async def _apply_member_model(self, member_name: str, builtin_model: "MemberBuiltinModel") -> bool:
+        """Switch a running external-CLI member to a built-in model.
+
+        Returns:
+            True when the member runs in this process and switched; False when
+            it is not running here, so the persisted choice applies at its next
+            start.
+        """
+        from openjiuwen.agent_teams.external.member_runtime import ExternalHarnessMemberRuntime
+        from openjiuwen.harness_protocol import ModelSelection
+
+        agent = self._spawn_manager.lookup_inprocess_agent(member_name)
+        runtime = agent.resources.harness if agent is not None else None
+        if not isinstance(runtime, ExternalHarnessMemberRuntime):
+            return False
+        selection = ModelSelection(model=builtin_model.model, effort=builtin_model.effort)
+        return await runtime.set_model_selection(selection)
 
     async def auto_start_all(self) -> list[str]:
         """Start all UNSTARTED members via TeamBackend.startup.

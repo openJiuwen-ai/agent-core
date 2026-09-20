@@ -44,6 +44,24 @@ class MemberOpResult:
 
 
 @dataclass(frozen=True, slots=True)
+class MemberModelSwitchResult:
+    """Outcome of switching an external-CLI member's built-in model.
+
+    ``applied_live`` tells whether the running member switched now; when
+    False the persisted selection takes effect at the member's next start.
+    """
+
+    ok: bool
+    reason: str = ""
+    model: str | None = None
+    effort: str | None = None
+    applied_live: bool = False
+
+    def __bool__(self) -> bool:
+        return self.ok
+
+
+@dataclass(frozen=True, slots=True)
 class TeamCompletionSnapshot:
     """Counts captured the moment a team satisfies all completion conditions.
 
@@ -278,6 +296,37 @@ class ExternalCliModelConfig(BaseModel):
     api_key: str | None = Field(default=None, min_length=1)
     """API key injected into the target CLI subprocess environment."""
 
+    effort: str | None = Field(default=None, min_length=1)
+    """Reasoning effort passed to the target CLI runtime (e.g. ``"low"`` / ``"high"``)."""
+
+
+class ExternalCliBuiltinModel(BaseModel):
+    """One model the CLI offers on its own login (e.g. a subscription).
+
+    Declared on ``ExternalCliAgentSpec.builtin_models``; the leader may only
+    pick models and efforts listed here. ``HarnessModelControl.list_models``
+    of the matching provider reports what a login actually offers and can be
+    used to author this catalog.
+    """
+
+    name: str = Field(min_length=1)
+    """Model id or alias the CLI accepts (``"sonnet"``, ``"gpt-5.5"``)."""
+
+    description: str = ""
+    """When the leader should pick this model; shown in the tool catalog."""
+
+    efforts: list[str] = Field(default_factory=list)
+    """Selectable reasoning efforts; empty when the model has none."""
+
+    default_effort: str | None = None
+    """Effort used when the leader picks the model without one; ``None`` keeps the CLI default."""
+
+    @model_validator(mode="after")
+    def _validate_default_effort(self) -> "ExternalCliBuiltinModel":
+        if self.default_effort is not None and self.default_effort not in self.efforts:
+            raise ValueError(f"builtin model '{self.name}' default_effort must be one of its efforts")
+        return self
+
 
 class ExternalCliAgentSpec(BaseModel):
     """Static launch config for one kind of external CLI agent.
@@ -412,6 +461,15 @@ class ExternalCliAgentSpec(BaseModel):
     ``model_config`` setting.
     """
 
+    builtin_models: list[ExternalCliBuiltinModel] = Field(default_factory=list)
+    """Models the CLI offers on its own login that the leader may pick.
+
+    Non-empty enables ``spawn_external_cli(builtin_model=..., effort=...)`` and
+    the ``set_member_model`` tool for members of this kind; empty keeps the
+    member on ``model_config`` / the pool / the CLI default. Only valid for
+    ``cli_agent`` ``"claude"`` / ``"codex"``.
+    """
+
     ssh_transport: SshTransportConfig | None = None
     """Optional ssh endpoint used to launch this CLI on a remote host.
 
@@ -458,7 +516,16 @@ class ExternalCliAgentSpec(BaseModel):
             raise ValueError("claude_max_buffer_size is only valid when cli_agent='claude'")
         if self.cli_agent not in {"claude", "codex"} and self.external_model_config is not None:
             raise ValueError("model_config is only valid when cli_agent is 'claude' or 'codex'")
+        if self.cli_agent not in {"claude", "codex"} and self.builtin_models:
+            raise ValueError("builtin_models is only valid when cli_agent is 'claude' or 'codex'")
+        names = [model.name for model in self.builtin_models]
+        if len(names) != len(set(names)):
+            raise ValueError("builtin_models names must be unique")
         return self
+
+    def find_builtin_model(self, name: str) -> ExternalCliBuiltinModel | None:
+        """Return the declared built-in model called ``name``, if any."""
+        return next((model for model in self.builtin_models if model.name == name), None)
 
 
 class TeamSpec(BaseModel):
@@ -579,6 +646,12 @@ class TeamRuntimeContext(BaseModel):
     """TeamModelConfig assigned to this member by the allocator."""
     fallback_member_model: Optional[TeamModelConfig] = None
     """TeamModelConfig reserved for native external-CLI authentication fallback."""
+    builtin_model: Optional[ExternalCliModelConfig] = None
+    """Built-in model (and effort) an external-CLI member runs on its own login.
+
+    Set from ``TeamMember.options.builtin_model``; carries no endpoint, and
+    takes precedence over the pool allocation and the static ``model_config``.
+    """
     worktree_path: Optional[str] = None
     """Absolute cwd override for a teammate running in an isolated worktree."""
     fork_source: Optional[str] = None
