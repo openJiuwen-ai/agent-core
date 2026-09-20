@@ -97,7 +97,7 @@ def _package_recipe(recipe: ExperienceRecipe) -> dict[str, Any]:
         metadata = metadata if isinstance(metadata, dict) else {}
         safe_metadata = {
             key: sanitize_distilled_text(metadata.get(key))
-            for key in ("version", "content_hash", "capability_type", "description")
+            for key in ("version", "capability_type", "description")
             if metadata.get(key) is not None
         }
         safe_metadata["inputs"] = _package_capability_ports(metadata.get("inputs"))

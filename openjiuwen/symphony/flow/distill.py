@@ -71,7 +71,6 @@ def normalize_execution_graph(
             "metadata": {
                 "capability_type": capability_type,
                 "version": str(metadata.get("version") or ""),
-                "content_hash": str(metadata.get("content_hash") or ""),
                 "description": str(metadata.get("description") or ""),
                 "inputs": inputs,
                 "outputs": outputs,
@@ -434,7 +433,7 @@ def distill_group(
         for node_id, node in (record.graph.get("nodes") or {}).items():
             current = node_metadata.setdefault(node_id, {})
             metadata = node.get("metadata") or {}
-            for key in ("capability_type", "version", "content_hash", "description"):
+            for key in ("capability_type", "version", "description"):
                 value = str(metadata.get(key) or "")
                 if value and not current.get(key):
                     current[key] = value
