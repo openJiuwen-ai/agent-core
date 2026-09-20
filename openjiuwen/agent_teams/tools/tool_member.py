@@ -845,14 +845,26 @@ class SpawnExternalCliTool(_SpawnToolBase):
             return self._fail(builtin_error)
         if model_name:
             if self._allocate_model_config is None:
-                return self._fail("spawn_external_cli requires a team model pool when 'model_name' is specified")
+                return self._fail(
+                    self._model_name_failure(
+                        cli_agent=cli_agent,
+                        model_name=model_name,
+                        compatible=compatible_model_names,
+                        cause="cannot be resolved without a team model pool",
+                    )
+                )
             if provider_filter is not None:
                 allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
             else:
                 allocation = self._allocate_model_config(model_name)
             if allocation is None:
                 return self._fail(
-                    f"model_name '{model_name}' is unavailable or incompatible with cli_agent '{cli_agent}'"
+                    self._model_name_failure(
+                        cli_agent=cli_agent,
+                        model_name=model_name,
+                        compatible=compatible_model_names,
+                        cause="is unavailable or incompatible",
+                    )
                 )
         if fallback_model_name is None:
             if compatible_model_names:
@@ -900,6 +912,36 @@ class SpawnExternalCliTool(_SpawnToolBase):
             role_type="external_cli",
             cli_agent=cli_agent,
         )
+
+    def _model_name_failure(
+        self,
+        *,
+        cli_agent: str,
+        model_name: str,
+        compatible: list[str],
+        cause: str,
+    ) -> str:
+        """Explain a rejected ``model_name`` and point at the built-in catalog.
+
+        A model the CLI offers on its own login (``"sonnet"``) is a natural
+        value to put in ``model_name``, but that field only resolves team
+        model pool endpoints — so the redirect belongs in the error itself.
+        """
+        config = self.team.external_cli_config(cli_agent)
+        builtin_names = [item.name for item in config.builtin_models] if config is not None else []
+        if model_name in builtin_names:
+            return (
+                f"model_name '{model_name}' is a built-in model of cli_agent '{cli_agent}', not a team model pool "
+                "endpoint; pass it as 'builtin_model' instead (optionally with 'effort')"
+            )
+        message = f"model_name '{model_name}' {cause} for cli_agent '{cli_agent}'"
+        if compatible:
+            message += f"; the team model pool offers: {', '.join(compatible)}"
+        else:
+            message += "; the team model pool has no compatible model"
+        if builtin_names:
+            message += f". Built-in models of this cli_agent, via 'builtin_model': {', '.join(builtin_names)}"
+        return message
 
     def _resolve_builtin_model(
         self,
