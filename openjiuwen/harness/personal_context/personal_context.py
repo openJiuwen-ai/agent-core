@@ -9,7 +9,6 @@ database, transport, child process, or additional runtime class here.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import functools
 import hashlib
@@ -19,8 +18,9 @@ import re
 import stat
 import tempfile
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
-from datetime import UTC, datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, TypeVar, cast
 from urllib.parse import urlsplit, urlunsplit
@@ -44,7 +44,10 @@ from openjiuwen.harness.personal_context.fetch.feishu import (
     FeishuFetchService,
     _lark_cli_auth_status,
     _lark_cli_begin_authorization,
+    _lark_cli_begin_config_init,
     _lark_cli_finish_authorization,
+    _lark_cli_finish_config_init,
+    _safe_cli_output,
     supported_read_scopes,
 )
 from openjiuwen.harness.personal_context.fetch.gitcode import GitCodeFetchService
@@ -67,6 +70,7 @@ _MAX_CURSOR_BYTES = 512 * 1024
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _AUTHORIZATION_FAILED = "Feishu authorization failed"
 _AUTHORIZATION_STATUS_UNAVAILABLE = "Feishu authorization status is unavailable"
+_CONFIG_INIT_TIMEOUT_SECONDS = 30.0 * 60.0
 
 _PROVIDER_TYPES: dict[str, type[ContextFetchService]] = {
     "local_files": LocalFilesFetchService,
@@ -270,6 +274,21 @@ def _authorization_expiry_monotonic(expires_at: str, *, now: float) -> float:
     except (TypeError, ValueError):
         remaining = 600.0
     return now + max(1.0, remaining)
+
+
+def _authorization_failure_text(prefix: str, exc: BaseException) -> str:
+    """Append the underlying reason only when it comes from our own sanitized error chain.
+
+    ``BaseError`` messages originate from ``_cli_error_message``/``_safe_cli_output``
+    (already URL/secret-redacted); arbitrary exception text may embed local paths or
+    tokens, so it stays hidden behind the stable prefix.
+    """
+
+    if isinstance(exc, BaseError):
+        detail = _safe_cli_output(exc.message or str(exc))
+        if detail:
+            return f"{prefix}: {detail}"
+    return prefix
 
 
 def _authorization_result(
@@ -497,8 +516,9 @@ class PersonalContext:
                 if task is not None and task.done():
                     if authorization_error is None and not task.cancelled():
                         with contextlib.suppress(asyncio.CancelledError):
-                            if task.exception() is not None:
-                                authorization_error = _AUTHORIZATION_FAILED
+                            task_exception = task.exception()
+                            if task_exception is not None:
+                                authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, task_exception)
                 if task is not None and not task.done():
                     return _authorization_result(
                         required_scopes=required_scopes,
@@ -516,9 +536,9 @@ class PersonalContext:
                         error=authorization_error,
                     )
                 try:
-                    _ready, granted_scopes = await _lark_cli_auth_status(required_scopes)
-                except Exception:
-                    authorization_error = _AUTHORIZATION_STATUS_UNAVAILABLE
+                    _ready, granted_scopes, _configured = await _lark_cli_auth_status(required_scopes)
+                except Exception as exc:
+                    authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
                     granted_scopes = set()
                 return _authorization_result(
                     required_scopes=required_scopes,
@@ -560,15 +580,53 @@ class PersonalContext:
                     task = None
                     challenge = None
                 try:
-                    _ready, granted_scopes = await _lark_cli_auth_status(required_scopes)
-                except Exception:
-                    self._authorization_error = _AUTHORIZATION_STATUS_UNAVAILABLE
+                    _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
+                except Exception as exc:
+                    self._authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=set(),
                         task=None,
                         challenge=None,
                         error=self._authorization_error,
+                    )
+                if not configured:
+                    # First use on this machine: lark-cli has no app configuration yet.
+                    # Spawn `config init --new` and hand its verification URL to the
+                    # frontend through the same challenge channel as the device flow;
+                    # after the user finishes, the state falls back to not_authorized
+                    # and the next click runs the regular device-flow login.
+                    try:
+                        init_process, init_url = await _lark_cli_begin_config_init()
+                    except Exception as exc:
+                        self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+                        return _authorization_result(
+                            required_scopes=required_scopes,
+                            granted_scopes=set(),
+                            task=None,
+                            challenge=None,
+                            error=self._authorization_error,
+                        )
+                    init_expires_at = (
+                        datetime.now(UTC) + timedelta(seconds=_CONFIG_INIT_TIMEOUT_SECONDS)
+                    ).isoformat().replace("+00:00", "Z")
+                    init_task = asyncio.create_task(
+                        self._finish_config_init(init_process, timeout_seconds=_CONFIG_INIT_TIMEOUT_SECONDS),
+                        name="personal-context-feishu-config-init",
+                    )
+                    self._authorization_task = init_task
+                    self._authorization_challenge = {
+                        "verification_url": init_url,
+                        "expires_at": init_expires_at,
+                        "expires_monotonic": now + _CONFIG_INIT_TIMEOUT_SECONDS,
+                    }
+                    self._authorization_error = None
+                    return _authorization_result(
+                        required_scopes=required_scopes,
+                        granted_scopes=set(),
+                        task=init_task,
+                        challenge=self._authorization_challenge,
+                        error=None,
                     )
                 if not reauthorize and set(required_scopes).issubset(granted_scopes):
                     self._authorization_error = None
@@ -581,8 +639,8 @@ class PersonalContext:
                     )
                 try:
                     device_code, verification_url, expires_at = await _lark_cli_begin_authorization(required_scopes)
-                except Exception:
-                    self._authorization_error = _AUTHORIZATION_FAILED
+                except Exception as exc:
+                    self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=granted_scopes,
@@ -617,9 +675,30 @@ class PersonalContext:
         authorization_error: str | None = None
         try:
             await _lark_cli_finish_authorization(device_code, timeout_seconds=timeout_seconds)
-        except Exception:
+        except Exception as exc:
             update_error = True
-            authorization_error = _AUTHORIZATION_FAILED
+            authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+        else:
+            update_error = True
+        finally:
+            async with self._authorization_lock:
+                if self._authorization_task is current_task:
+                    self._authorization_task = None
+                    self._authorization_challenge = None
+                    if update_error:
+                        self._authorization_error = authorization_error
+
+    async def _finish_config_init(self, process: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
+        """Settle the one-time lark-cli ``config init`` handshake like an authorization round."""
+
+        current_task = asyncio.current_task()
+        update_error = False
+        authorization_error: str | None = None
+        try:
+            await _lark_cli_finish_config_init(process, timeout_seconds=timeout_seconds)
+        except Exception as exc:
+            update_error = True
+            authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
         else:
             update_error = True
         finally:
