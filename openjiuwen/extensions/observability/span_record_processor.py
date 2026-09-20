@@ -14,6 +14,7 @@ from opentelemetry.sdk.trace import ReadableSpan, SpanProcessor
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.extensions.observability.otlp_codec import (
+    capture_recording_span_snapshot,
     encode_recording_span_snapshot_to_otlp_json,
     encode_span_to_otlp_json,
 )
@@ -103,6 +104,58 @@ class OtlpSpanSnapshotConsumer(Protocol):
         """Accept one recording-span snapshot without blocking."""
 
 
+class OtlpSpanSnapshotSourceConsumer(Protocol):
+    """Optional deferred-encoding capability of a live-snapshot consumer."""
+
+    def consume_snapshot_source(self, source: OtlpSpanSnapshotSource) -> None:
+        """Accept a snapshot whose bytes will be encoded only when needed."""
+
+
+@dataclass(frozen=True, slots=True)
+class OtlpSpanSnapshotSource:
+    """One deferred-encoding snapshot of a still-recording span.
+
+    ``publish_snapshot`` runs on the traced thread, which for streaming model
+    callbacks is the caller's own event loop. A consumer that coalesces live
+    snapshots discards most of them, so encoding every snapshot eagerly spends
+    event-loop time on bytes nobody reads. This source instead carries only the
+    cheap container copy taken at publish time plus the routing hints, and
+    materialises the OTLP JSON on first access, i.e. on whichever thread finally
+    needs the bytes.
+    """
+
+    snapshot_span: ReadableSpan
+    trace_id: str
+    span_id: str
+    parent_span_id: str | None
+    name: str
+    start_time_unix_nano: int
+    observed_time_unix_nano: int
+    record_revision: int
+    update_kind: str
+    session_id: str | None
+    request_id: str | None
+    run_id: str | None
+    agent_mode: str | None
+    schema_version: str = "1"
+    lifecycle: str = "running"
+    execution_subject_id: str | None = None
+    execution_subject_display_name: str | None = None
+    execution_subject_kind: str | None = None
+    execution_subject_parent_id: str | None = None
+    execution_subject_session_id: str | None = None
+    _raw_json: bytes | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def raw_json(self) -> bytes:
+        """Return the OTLP JSON bytes, encoding them on first access."""
+        cached = self._raw_json
+        if cached is None:
+            cached = encode_recording_span_snapshot_to_otlp_json(self.snapshot_span)
+            object.__setattr__(self, "_raw_json", cached)
+        return cached
+
+
 @dataclass(slots=True)
 class _ConsumerRegistration:
     """Identity registration plus the callbacks already leased to it."""
@@ -118,7 +171,15 @@ def _accepts_snapshots(registration: _ConsumerRegistration) -> bool:
     """Report whether a live registration can take in-flight span snapshots."""
     if not registration.accepting:
         return False
-    return callable(getattr(registration.consumer, "consume_snapshot", None))
+    consumer = registration.consumer
+    return callable(getattr(consumer, "consume_snapshot", None)) or callable(
+        getattr(consumer, "consume_snapshot_source", None)
+    )
+
+
+def _accepts_snapshot_sources(registration: _ConsumerRegistration) -> bool:
+    """Report whether a registration can encode its snapshots itself."""
+    return callable(getattr(registration.consumer, "consume_snapshot_source", None))
 
 
 def _attribute_text(attributes: Any, *keys: str) -> str | None:
@@ -248,11 +309,26 @@ class SpanRecordProcessor(SpanProcessor):
         self.publish_snapshot(span, "started")
 
     def publish_snapshot(self, span: Any, update_kind: str) -> None:
-        """Publish one full current snapshot of a still-recording span."""
+        """Publish one full current snapshot of a still-recording span.
+
+        Consumers able to encode their own snapshots receive a deferred source,
+        so the publishing thread never pays for OTLP bytes a coalescing consumer
+        would discard; every other consumer keeps receiving ready-made bytes.
+        """
         registrations = self._acquire_snapshot_leases()
         if not registrations:
             return
 
+        deferred = tuple(
+            registration
+            for registration in registrations
+            if _accepts_snapshot_sources(registration)
+        )
+        eager = tuple(
+            registration
+            for registration in registrations
+            if not _accepts_snapshot_sources(registration)
+        )
         try:
             identity = self._span_identity(span)
             with self._lock:
@@ -262,10 +338,23 @@ class SpanRecordProcessor(SpanProcessor):
                     return
                 revision = self._span_revisions.get(identity, 0) + 1
                 self._span_revisions[identity] = revision
-            record = self._build_snapshot_record(
-                span,
-                update_kind=update_kind,
-                record_revision=revision,
+            source = (
+                self._build_snapshot_source(
+                    span,
+                    update_kind=update_kind,
+                    record_revision=revision,
+                )
+                if deferred
+                else None
+            )
+            record = (
+                self._build_snapshot_record(
+                    span,
+                    update_kind=update_kind,
+                    record_revision=revision,
+                )
+                if eager
+                else None
             )
         except BaseException as exc:
             for registration in registrations:
@@ -275,7 +364,15 @@ class SpanRecordProcessor(SpanProcessor):
                 return
             raise
 
-        self._deliver_snapshot(registrations, record)
+        try:
+            if source is not None:
+                self._deliver_snapshot_source(deferred, source)
+        except BaseException:
+            for registration in eager:
+                self._release_lease(registration)
+            raise
+        if record is not None:
+            self._deliver_snapshot(eager, record)
 
     def on_end(self, span: ReadableSpan) -> None:
         """Deliver one immutable record without affecting the business path."""
@@ -344,6 +441,34 @@ class SpanRecordProcessor(SpanProcessor):
             except Exception as exc:
                 logger.warning(
                     "span_record_processor: snapshot consumer {} failed - {}",
+                    type(registration.consumer).__name__,
+                    exc,
+                )
+            except BaseException:
+                for pending_registration in registrations[index + 1:]:
+                    self._release_lease(pending_registration)
+                raise
+            finally:
+                self._callback_local.current_registration = previous_registration
+                self._release_lease(registration)
+
+    def _deliver_snapshot_source(
+        self,
+        registrations: tuple[_ConsumerRegistration, ...],
+        source: OtlpSpanSnapshotSource,
+    ) -> None:
+        for index, registration in enumerate(registrations):
+            previous_registration = getattr(
+                self._callback_local,
+                "current_registration",
+                None,
+            )
+            self._callback_local.current_registration = registration
+            try:
+                registration.consumer.consume_snapshot_source(source)
+            except Exception as exc:
+                logger.warning(
+                    "span_record_processor: snapshot source consumer {} failed - {}",
                     type(registration.consumer).__name__,
                     exc,
                 )
@@ -486,6 +611,59 @@ class SpanRecordProcessor(SpanProcessor):
         )
 
     @staticmethod
+    def _build_snapshot_source(
+        span: Any,
+        *,
+        update_kind: str,
+        record_revision: int,
+    ) -> OtlpSpanSnapshotSource:
+        """Capture a recording span without serialising it."""
+        trace_id, span_id = SpanRecordProcessor._span_identity(span)
+        parent = getattr(span, "parent", None)
+        parent_span_id = _hex_id(getattr(parent, "span_id", None), 16) or None
+        start_time = getattr(span, "start_time", None)
+        if start_time is None:
+            raise ValueError("span snapshot requires a start timestamp")
+
+        attributes = getattr(span, "attributes", None) or {}
+        return OtlpSpanSnapshotSource(
+            snapshot_span=capture_recording_span_snapshot(span),
+            trace_id=trace_id,
+            span_id=span_id,
+            parent_span_id=parent_span_id,
+            name=str(getattr(span, "name", "")),
+            start_time_unix_nano=int(start_time),
+            observed_time_unix_nano=time.time_ns(),
+            record_revision=record_revision,
+            update_kind=str(update_kind),
+            session_id=_attribute_text(
+                attributes,
+                GEN_AI_CONVERSATION_ID,
+                OJ_SESSION_ID,
+                LANGFUSE_SESSION_ID,
+                AT_SESSION_ID,
+            ),
+            request_id=_attribute_text(attributes, OJ_REQUEST_ID),
+            run_id=_attribute_text(attributes, OJ_RUN_ID),
+            agent_mode=_agent_mode(attributes),
+            schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
+            execution_subject_display_name=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_DISPLAY_NAME,
+            ),
+            execution_subject_kind=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_KIND),
+            execution_subject_parent_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_PARENT_ID,
+            ),
+            execution_subject_session_id=_attribute_text(
+                attributes,
+                OJ_EXECUTION_SUBJECT_SESSION_ID,
+            ),
+        )
+
+    @staticmethod
     def _build_snapshot_record(
         span: Any,
         *,
@@ -557,5 +735,7 @@ __all__ = [
     "OtlpSpanRecordConsumer",
     "OtlpSpanSnapshotConsumer",
     "OtlpSpanSnapshotRecord",
+    "OtlpSpanSnapshotSource",
+    "OtlpSpanSnapshotSourceConsumer",
     "SpanRecordProcessor",
 ]
