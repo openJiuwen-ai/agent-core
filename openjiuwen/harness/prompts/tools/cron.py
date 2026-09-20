@@ -11,7 +11,7 @@ DESCRIPTION: Dict[str, str] = {
         "定时任务管理：查询/创建/修改/删除/立即执行全部通过本工具 action 完成。"
         "任务由系统统一存储管理，禁止用 shell、文件操作、数据库或任何其他工具增删改定时任务，"
         "这条规则没有例外。\n"
-        "action：list 查询全部；add 创建；update 修改（传 job_id，只改传入字段，未传字段保持不变）；"
+        "action：list 查询全部；add 创建；update 修改（传 jobId，只改传入字段，未传字段保持不变）；"
         "remove 删除；run 立即执行一次。\n"
         "【何时创建】用户明确要求定时/周期执行，或表达中出现频率线索"
         "（'每天''每周''每隔X分钟/小时''每天早上9点''下午3点提醒我'）时直接创建，"
@@ -53,7 +53,7 @@ DESCRIPTION: Dict[str, str] = {
         "tool's action interface. Tasks are stored and managed by the system; NEVER create, "
         "modify, or delete them with shell, file operations, databases, or any other tool. "
         "This rule is absolute.\n"
-        "action: list to query all; add to create; update to modify (pass job_id; only "
+        "action: list to query all; add to create; update to modify (pass jobId; only "
         "provided fields change, unspecified fields are preserved); remove to delete; "
         "run to trigger once now.\n"
         "[When to create] Create directly when the user explicitly asks for scheduling, or when "
@@ -106,7 +106,7 @@ FIELD_DESCRIPTIONS: Dict[str, Dict[str, str]] = {
         "cn": "要执行的 cron 操作",
         "en": "Cron action to execute",
     },
-    "job_id": {
+    "jobId": {
         "cn": "update/remove/run 操作的任务 ID",
         "en": "Job id used by update/remove/run",
     },
@@ -190,9 +190,9 @@ def get_cron_input_params(language: str = "cn") -> Dict[str, Any]:
                 "enum": ["list", "add", "update", "remove", "run"],
                 "description": _desc("action", language),
             },
-            "job_id": {
+            "jobId": {
                 "type": "string",
-                "description": _desc("job_id", language),
+                "description": _desc("jobId", language),
             },
             "name": {
                 "type": "string",
@@ -213,7 +213,9 @@ def get_cron_input_params(language: str = "cn") -> Dict[str, Any]:
             "timezone": {
                 "type": "string",
                 "description": _desc("timezone", language),
-                "default": "Asia/Shanghai",
+                # 不设 default：pydantic 会把 default 填进 update 的扁平
+                # patch，静默覆盖用户自选时区（如 America/New_York 被改成
+                # Asia/Shanghai）。未传时落 None，由分发层 None 过滤剔除。
             },
             "targets": {
                 "type": "string",

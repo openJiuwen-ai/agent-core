@@ -143,7 +143,15 @@ async def _dispatch_cron_action(
             raise ValueError("jobId is required")
         patch_input = dict(patch or {})
         if not patch_input:
-            patch_input = flat_kwargs
+            # 扁平参数路径：LLM 未传的字段经 pydantic schema 格式化后以 None
+            # （及 timezone 默认值）出现在 flat_kwargs 里。直接透传会让后端把
+            # "键存在但值为 None" 误判为更新意图，清空 name/description 等字段。
+            # 只保留 LLM 显式传值的键。
+            patch_input = {
+                key: value
+                for key, value in flat_kwargs.items()
+                if value is not None
+            }
         return await backend.update_job(target_job_id, patch_input, context=context)
     if action_name == "remove":
         if not target_job_id:

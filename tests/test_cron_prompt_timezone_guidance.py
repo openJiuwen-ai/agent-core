@@ -10,6 +10,7 @@ from openjiuwen.harness.tools import (
     CronToolContext,
     create_cron_tools,
 )
+from openjiuwen.harness.tools.cron import _dispatch_cron_action
 
 
 class _DummyCronBackend:
@@ -148,7 +149,7 @@ class CronPromptTimezoneGuidanceTests(unittest.TestCase):
             set(schema["properties"].keys()),
             {
                 "action",
-                "job_id",
+                "jobId",
                 "name",
                 "description",
                 "cron_expr",
@@ -187,6 +188,87 @@ class CronPromptTimezoneGuidanceTests(unittest.TestCase):
         )
 
         self.assertEqual([tool.card.name for tool in tools], ["cron"])
+
+
+class CronDispatchJobIdParamTests(unittest.IsolatedAsyncioTestCase):
+    """The tool schema now declares ``jobId`` (matching the dispatcher's named
+    param), so remove/update/run receive the job id directly. Historical note:
+    the schema previously said ``job_id`` (snake_case), which landed in
+    **kwargs and was silently dropped, making remove/update/run raise
+    "jobId is required" until the model self-corrected on retry."""
+
+    async def test_remove_accepts_camel_case_job_id(self):
+        deleted: list[str] = []
+
+        class _Backend(_DummyCronBackend):
+            async def delete_job(self, job_id: str):
+                deleted.append(job_id)
+                return True
+
+        result = await _dispatch_cron_action(
+            _Backend(), action="remove", jobId="abc-123"
+        )
+
+        self.assertEqual(result, {"deleted": True})
+        self.assertEqual(deleted, ["abc-123"])
+
+    async def test_remove_accepts_legacy_id(self):
+        deleted: list[str] = []
+
+        class _Backend(_DummyCronBackend):
+            async def delete_job(self, job_id: str):
+                deleted.append(job_id)
+                return True
+
+        result = await _dispatch_cron_action(
+            _Backend(), action="remove", id="abc-123"
+        )
+
+        self.assertEqual(result, {"deleted": True})
+        self.assertEqual(deleted, ["abc-123"])
+
+    async def test_remove_without_any_job_id_still_raises(self):
+        with self.assertRaisesRegex(ValueError, "jobId is required"):
+            await _dispatch_cron_action(_DummyCronBackend(), action="remove")
+
+    async def test_update_accepts_job_id_without_leaking_into_patch(self):
+        calls: list[tuple[str, dict]] = []
+
+        class _Backend(_DummyCronBackend):
+            async def update_job(self, job_id, patch, *, context=None):
+                calls.append((job_id, dict(patch)))
+                return {"job_id": job_id, "patch": patch}
+
+        await _dispatch_cron_action(
+            _Backend(), action="update", jobId="j1", enabled=False
+        )
+
+        self.assertEqual(calls, [("j1", {"enabled": False})])
+
+    async def test_run_accepts_job_id(self):
+        ran: list[str] = []
+
+        class _Backend(_DummyCronBackend):
+            async def run_now(self, job_id: str):
+                ran.append(job_id)
+                return "run-1"
+
+        result = await _dispatch_cron_action(
+            _Backend(), action="run", jobId="j1"
+        )
+
+        self.assertEqual(result, {"run_id": "run-1"})
+        self.assertEqual(ran, ["j1"])
+
+    def test_schema_declares_job_id_param_as_jobId(self):
+        """Schema-compliant param must hit the dispatcher's named argument.
+
+        Guards the original bug: schema used to declare ``job_id`` while the
+        dispatcher only accepted ``jobId``, so schema-compliant calls broke.
+        """
+        schema = get_cron_input_params("cn")
+        self.assertIn("jobId", schema["properties"])
+        self.assertNotIn("job_id", schema["properties"])
 
 
 if __name__ == "__main__":
