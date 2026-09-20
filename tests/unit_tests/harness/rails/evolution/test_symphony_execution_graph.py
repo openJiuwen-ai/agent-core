@@ -498,20 +498,21 @@ def test_multiple_ports_do_not_block_a_valid_execution_edge() -> None:
 
 
 @pytest.mark.parametrize(
-    ("source_ports", "target_ports"),
+    ("source_ports", "target_ports", "expected_edges"),
     [
-        ((), ("document_uri",)),
-        (("report_uri",), ()),
-        (("report_uri", "summary"), ("document_uri",)),
-        (("report_uri",), ("document_uri", "context")),
-        (("report_uri", "report_uri"), ("document_uri",)),
-        (("report_uri",), ("document_uri", "document_uri")),
-        (("",), ("document_uri",)),
+        ((), ("document_uri",), 1),
+        (("report_uri",), (), 1),
+        (("report_uri", "summary"), ("document_uri",), 1),
+        (("report_uri",), ("document_uri", "context"), 1),
+        (("report_uri", "report_uri"), ("document_uri",), 1),
+        (("report_uri",), ("document_uri", "document_uri"), 1),
+        (("",), ("document_uri",), 0),
     ],
 )
-def test_ports_are_not_part_of_execution_identity(
+def test_ports_are_normalized_without_changing_endpoint_matching(
     source_ports: tuple[str, ...],
     target_ports: tuple[str, ...],
+    expected_edges: int,
 ) -> None:
     source = _fragment(1, "skill", "source")
     target = _fragment(2, "tool", "target")
@@ -526,7 +527,7 @@ def test_ports_are_not_part_of_execution_identity(
         ],
     )
 
-    assert len(_edges(result)) == 1
+    assert len(_edges(result)) == expected_edges
 
 
 @pytest.mark.parametrize(
