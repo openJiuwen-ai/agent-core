@@ -104,7 +104,10 @@ def test_sdd_canonical_json_contract_is_accepted_without_persisting_query(tmp_pa
                 "id": "execution-1",
                 "type": "execution_graph",
                 "directed": True,
-                "nodes": {"extract": {"label": "skill"}, "summarize": {"label": "skill"}},
+                "nodes": {
+                    "extract": {"label": "skill", "metadata": _skill_metadata()},
+                    "summarize": {"label": "skill", "metadata": _skill_metadata()},
+                },
                 "edges": [
                     {
                         "source": "extract",
@@ -586,6 +589,33 @@ def test_deleted_observation_fields_are_rejected(legacy_field: str) -> None:
         GraphEvolutionInput.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"capability_type": "skill", "version": "1.0.0", "content_hash": "not-allowed"},
+        {"capability_type": "skill", "version": ""},
+        {"capability_type": "tool", "version": "1.0.0"},
+        {
+            "capability_type": "skill",
+            "version": "1.0.0",
+            "inputs": [{"name": "query", "type": "string", "secret": True}],
+        },
+        {
+            "capability_type": "skill",
+            "version": "1.0.0",
+            "outputs": [{"name": "result", "type": "text", "required": "yes"}],
+        },
+        {"capability_type": "skill", "version": "1.0.0", "description": "bad\ntext"},
+    ],
+)
+def test_execution_node_metadata_rejects_unsupported_or_invalid_values(metadata: dict) -> None:
+    payload = _evidence("invalid-metadata", "session-1", static_revision="static-v1").model_dump(mode="json")
+    payload["execution_graph"]["nodes"]["extract"]["metadata"] = metadata
+
+    with pytest.raises(ValueError):
+        GraphEvolutionInput.model_validate(payload)
+
+
 def _publish_static(
     root: Path,
     version: str,
@@ -703,7 +733,10 @@ def _evidence(
         execution_graph=EvolutionGraph(
             id=f"execution-{evidence_id}",
             type="execution_graph",
-            nodes={"extract": {"label": "skill"}, "summarize": {"label": "skill"}},
+            nodes={
+                "extract": {"label": "skill", "metadata": _skill_metadata()},
+                "summarize": {"label": "skill", "metadata": _skill_metadata()},
+            },
             edges=(
                 EvolutionGraphEdge(
                     source="extract",
@@ -716,6 +749,10 @@ def _evidence(
             ),
         ),
     )
+
+
+def _skill_metadata() -> dict[str, str]:
+    return {"capability_type": "skill", "version": "1.0.0"}
 
 
 def _only_edge(overlay: dict) -> dict:
