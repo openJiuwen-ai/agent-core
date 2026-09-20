@@ -212,7 +212,6 @@ def test_ingest_and_distill_end_to_end(tmp_path: Path) -> None:
     assert search_metadata == {
         "capability_type": "skill",
         "version": "1.0.0",
-        "content_hash": "hash-search",
         "description": "Search trusted sources.",
         "inputs": [
             {
@@ -582,7 +581,6 @@ def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None
     packaged_search = package["materials"]["recipe"]["combination_structure"]["nodes"]["web-search"]["metadata"]
     assert packaged_search == {
         "version": "1.0.0",
-        "content_hash": "hash-search",
         "capability_type": "skill",
         "description": "Search trusted sources.",
         "inputs": [

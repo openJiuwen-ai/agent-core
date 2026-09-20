@@ -55,7 +55,6 @@ class CapabilityIdentity:
     capability_type: CapabilityType
     capability_name: str
     version: str = ""
-    content_hash: str = ""
     description: str = ""
     inputs: tuple[Mapping[str, Any], ...] = ()
     outputs: tuple[Mapping[str, Any], ...] = ()
@@ -456,7 +455,6 @@ def _valid_identity(
         and _valid_identity_text(capability_id)
         and _valid_identity_text(capability_name)
         and _valid_identity_text(identity.version)
-        and _optional_identity_text(identity.content_hash)
         and _optional_identity_text(identity.description)
         and _normalized_ports(identity.inputs) is not None
         and _normalized_ports(identity.outputs) is not None
@@ -470,8 +468,6 @@ def _identity_metadata(identity: CapabilityIdentity) -> dict[str, Any]:
         "capability_type": identity.capability_type,
         "version": identity.version,
     }
-    if identity.content_hash:
-        metadata["content_hash"] = identity.content_hash
     if identity.description:
         metadata["description"] = " ".join(identity.description.split())
     inputs = _normalized_ports(identity.inputs)
@@ -881,14 +877,13 @@ def _validate_graph_nodes(nodes: Mapping[str, Any], *, execution: bool) -> None:
 def _validate_execution_node_metadata(value: Any, *, label: str) -> None:
     if not isinstance(value, Mapping):
         raise ValueError("execution node metadata must be an object")
-    allowed = {"capability_type", "version", "content_hash", "description", "inputs", "outputs"}
+    allowed = {"capability_type", "version", "description", "inputs", "outputs"}
     if not set(value).issubset(allowed):
         raise ValueError("execution node metadata contains unsupported fields")
     if value.get("capability_type") != label or not _valid_identity_text(value.get("version")):
         raise ValueError("execution node identity metadata is invalid")
-    for key in ("content_hash", "description"):
-        if not _optional_identity_text(value.get(key, "")):
-            raise ValueError("execution node text metadata is invalid")
+    if not _optional_identity_text(value.get("description", "")):
+        raise ValueError("execution node text metadata is invalid")
     for key in ("inputs", "outputs"):
         ports = value.get(key, [])
         if not isinstance(ports, list):

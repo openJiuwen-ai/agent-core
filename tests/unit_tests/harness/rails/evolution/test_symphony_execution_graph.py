@@ -151,7 +151,6 @@ def _identity(
     capability_name: str,
     *,
     version: str = "1.0.0",
-    content_hash: str | None = None,
     description: str = "Reusable capability",
     input_ports: tuple[str, ...] = ("default_input",),
     output_ports: tuple[str, ...] = ("default_output",),
@@ -161,7 +160,6 @@ def _identity(
         capability_type=capability_type,  # type: ignore[arg-type]
         capability_name=capability_name,
         version=version,
-        content_hash=content_hash or "",
         description=description,
         inputs=tuple(
             {"name": name, "type": "text", "required": True, "description": f"Input {name}"} for name in input_ports
