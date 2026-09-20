@@ -35,7 +35,7 @@ from openjiuwen.symphony.flow.models import (
 from openjiuwen.symphony.flow.narrative import distill_texts
 from openjiuwen.symphony.flow.packager import CapabilityPackager
 from openjiuwen.symphony.flow.privacy import sanitize_distilled_text
-from openjiuwen.symphony.flow.render import render_package
+from openjiuwen.symphony.flow.render import SkillArtifactAdapter, render_package
 from openjiuwen.symphony.flow.review import PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
 from openjiuwen.symphony.orchestration.config import SymphonyFlowConfig
@@ -64,7 +64,7 @@ class SymphonyFlowEngine:
         store: FlowStore | None = None,
         packager: CapabilityPackager | None = None,
         gate: PackageReviewGate | None = None,
-        skill_adapter: Any | None = None,
+        skill_adapter: SkillArtifactAdapter | None = None,
     ) -> None:
         self.config = config or SymphonyFlowConfig()
         self.llm_client = llm_client

@@ -54,6 +54,11 @@ class CapabilityIdentity:
     capability_id: str
     capability_type: CapabilityType
     capability_name: str
+    version: str = ""
+    content_hash: str = ""
+    description: str = ""
+    inputs: tuple[Mapping[str, Any], ...] = ()
+    outputs: tuple[Mapping[str, Any], ...] = ()
 
 
 @runtime_checkable
@@ -142,6 +147,7 @@ def build_symphony_execution_graph(
     nodes = {
         capability_id: {
             "label": identity.capability_type,
+            "metadata": _identity_metadata(identity),
         }
         for capability_id, identity in sorted(endpoint_identities.items())
     }
@@ -449,7 +455,62 @@ def _valid_identity(
         and capability_type in _CAPABILITY_TYPES
         and _valid_identity_text(capability_id)
         and _valid_identity_text(capability_name)
+        and _valid_identity_text(identity.version)
+        and _optional_identity_text(identity.content_hash)
+        and _optional_identity_text(identity.description)
+        and _normalized_ports(identity.inputs) is not None
+        and _normalized_ports(identity.outputs) is not None
     )
+
+
+def _identity_metadata(identity: CapabilityIdentity) -> dict[str, Any]:
+    """Project the allow-listed immutable capability contract into JGF."""
+
+    metadata: dict[str, Any] = {
+        "capability_type": identity.capability_type,
+        "version": identity.version,
+    }
+    if identity.content_hash:
+        metadata["content_hash"] = identity.content_hash
+    if identity.description:
+        metadata["description"] = " ".join(identity.description.split())
+    inputs = _normalized_ports(identity.inputs)
+    outputs = _normalized_ports(identity.outputs)
+    if inputs:
+        metadata["inputs"] = inputs
+    if outputs:
+        metadata["outputs"] = outputs
+    return metadata
+
+
+def _normalized_ports(ports: Any) -> list[dict[str, Any]] | None:
+    if not isinstance(ports, tuple):
+        return None
+    normalized: list[dict[str, Any]] = []
+    for raw in ports:
+        if not isinstance(raw, Mapping):
+            return None
+        name = raw.get("name")
+        port_type = raw.get("type")
+        if not _valid_identity_text(name) or not _valid_identity_text(port_type):
+            continue
+        item: dict[str, Any] = {"name": name, "type": port_type}
+        if "required" in raw:
+            required = raw.get("required")
+            if not isinstance(required, bool):
+                return None
+            item["required"] = required
+        description = raw.get("description", "")
+        if description:
+            if not _valid_identity_text(description):
+                return None
+            item["description"] = " ".join(description.split())
+        normalized.append(item)
+    return normalized
+
+
+def _optional_identity_text(value: Any) -> bool:
+    return value == "" or _valid_identity_text(value)
 
 
 def _valid_identity_text(value: Any) -> bool:
@@ -812,8 +873,29 @@ def _validate_graph_nodes(nodes: Mapping[str, Any], *, execution: bool) -> None:
             continue
         if node.get("label") not in _CAPABILITY_TYPES:
             raise ValueError("execution node label must be a capability type")
-        if set(node) != {"label"}:
-            raise ValueError("execution nodes may only contain label")
+        if set(node) != {"label", "metadata"}:
+            raise ValueError("execution nodes must contain label and metadata")
+        _validate_execution_node_metadata(node["metadata"], label=str(node["label"]))
+
+
+def _validate_execution_node_metadata(value: Any, *, label: str) -> None:
+    if not isinstance(value, Mapping):
+        raise ValueError("execution node metadata must be an object")
+    allowed = {"capability_type", "version", "content_hash", "description", "inputs", "outputs"}
+    if not set(value).issubset(allowed):
+        raise ValueError("execution node metadata contains unsupported fields")
+    if value.get("capability_type") != label or not _valid_identity_text(value.get("version")):
+        raise ValueError("execution node identity metadata is invalid")
+    for key in ("content_hash", "description"):
+        if not _optional_identity_text(value.get(key, "")):
+            raise ValueError("execution node text metadata is invalid")
+    for key in ("inputs", "outputs"):
+        ports = value.get(key, [])
+        if not isinstance(ports, list):
+            raise ValueError("execution node ports must be arrays")
+        normalized = _normalized_ports(tuple(ports))
+        if normalized is None or normalized != ports:
+            raise ValueError("execution node ports are invalid")
 
 
 def _validate_graph_edge(edge: Any, nodes: Mapping[str, Any]) -> Mapping[str, Any]:

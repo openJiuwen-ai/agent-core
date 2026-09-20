@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+import yaml
 
 from openjiuwen.symphony.flow import (
     RECIPE_GRADE_VERIFIED,
@@ -22,6 +23,10 @@ from openjiuwen.symphony.flow import (
     CapabilityPackager,
     LLMPackageReviewAgent,
     PackageReviewGate,
+    SkillAdapter,
+    SkillArtifactAdapter,
+    SkillPackAdapter,
+    SkillPackNotInstallableError,
     SymphonyFlowEngine,
     render_package,
 )
@@ -78,15 +83,52 @@ def _execution_graph(
             "nodes": {
                 "skill:web-search": {
                     "label": "skill",
-                    "metadata": {"version": "1.0.0"},
+                    "metadata": {
+                        "version": "1.0.0",
+                        "content_hash": "hash-search",
+                        "description": "Search trusted sources.",
+                        "credential": "must-not-flow",
+                        "inputs": [
+                            {
+                                "name": "query",
+                                "type": "text",
+                                "required": True,
+                                "description": "Research question",
+                                "default": "private query",
+                            }
+                        ],
+                        "outputs": [
+                            {
+                                "name": "sources",
+                                "type": "document-list",
+                                "description": "Collected sources",
+                            }
+                        ],
+                    },
                 },
                 "skill:summarize-paper": {
                     "label": "skill",
-                    "metadata": {"version": "1.0.0"},
+                    "metadata": {
+                        "version": "1.0.0",
+                        "description": "Summarize research material.",
+                        "inputs": [],
+                        "outputs": [{"name": "summary", "type": "text"}],
+                    },
                 },
                 "skill:write-report": {
                     "label": "skill",
-                    "metadata": {"version": "1.0.0"},
+                    "metadata": {
+                        "version": "1.0.0",
+                        "description": "Write the final report.",
+                        "inputs": [],
+                        "outputs": [
+                            {
+                                "name": "report",
+                                "type": "document",
+                                "description": "Final research report",
+                            }
+                        ],
+                    },
                 },
             },
             "edges": edges,
@@ -166,6 +208,28 @@ def test_ingest_and_distill_end_to_end(tmp_path: Path) -> None:
     assert recipe.quality["success_count"] == 5
     assert recipe.quality["pack_success_rate"] == 1.0
     assert set(recipe.provenance["evidence_trace_ids"]) == {f"trace-{index}" for index in range(1, 6)}
+    search_metadata = recipe.combination_structure["nodes"]["web-search"]["metadata"]
+    assert search_metadata == {
+        "capability_type": "skill",
+        "version": "1.0.0",
+        "content_hash": "hash-search",
+        "description": "Search trusted sources.",
+        "inputs": [
+            {
+                "name": "query",
+                "type": "text",
+                "required": True,
+                "description": "Research question",
+            }
+        ],
+        "outputs": [
+            {
+                "name": "sources",
+                "type": "document-list",
+                "description": "Collected sources",
+            }
+        ],
+    }
 
     # 绕行子结构：单边 {web-search → summarize-paper}，证据不足以 active
     bypass_ids = [recipe_id_ for recipe_id_ in report.recipes_saved if recipe_id_ != recipe_id]
@@ -505,6 +569,101 @@ def test_review_and_prepare_install_approved(tmp_path: Path) -> None:
 
     # 完整性校验
     assert CapabilityPackager.verify_package_integrity(package)
+
+
+def test_skillpack_adapter_renders_complete_sdd0010_root(tmp_path: Path) -> None:
+    engine = _feed_verified_engine(tmp_path)
+    engine.gate = PackageReviewGate(review_agent=_ApprovingReviewAgent())
+    report = asyncio.run(engine.distill())
+    recipe_id = _verified_recipe_id(engine, report)
+    recipe = engine.get_recipe(recipe_id)
+    assert recipe is not None
+    package = CapabilityPackager.build_package(recipe)
+    packaged_search = package["materials"]["recipe"]["combination_structure"]["nodes"]["web-search"]["metadata"]
+    assert packaged_search == {
+        "version": "1.0.0",
+        "content_hash": "hash-search",
+        "capability_type": "skill",
+        "description": "Search trusted sources.",
+        "inputs": [
+            {
+                "name": "query",
+                "type": "text",
+                "required": True,
+                "description": "Research question",
+            }
+        ],
+        "outputs": [
+            {
+                "name": "sources",
+                "type": "document-list",
+                "description": "Collected sources",
+            }
+        ],
+    }
+    artifact_dir = tmp_path / "skillpack"
+
+    outputs = SkillPackAdapter.render(package, artifact_dir)
+
+    assert isinstance(SkillPackAdapter(), SkillArtifactAdapter)
+    assert isinstance(SkillAdapter(), SkillArtifactAdapter)
+    assert outputs == [artifact_dir / "SKILL.md"]
+    assert [path.name for path in artifact_dir.iterdir()] == ["SKILL.md"]
+    text = outputs[0].read_text(encoding="utf-8")
+    frontmatter = yaml.safe_load(text.split("---", 2)[1])
+    assert frontmatter == {
+        "name": package["meta_name"],
+        "kind": "skillpack",
+        "description": "[技能包] 基于 3 个能力协作完成的任务（web-search → summarize-paper → write-report）",
+        "skills": ["web-search", "summarize-paper", "write-report"],
+    }
+    assert "`web-search`：Search trusted sources." in text
+    assert "`web-search.query`（text）：Research question" in text
+    assert "当前为线性流程，无可并行步骤。" in text
+    assert "将 `web-search` 的完整输出作为上下文输入" in text
+    assert "结果汇合：以 `write-report` 的输出作为最终结果" in text
+    assert "`report`：Final research report" in text
+    assert '"type": "skillpack_workflow"' in text
+    assert '"relation": "can_feed"' in text
+    assert "1.0.0" not in text
+    assert "hash-search" not in text
+
+
+def test_dependency_review_still_rejects_missing_member_version(tmp_path: Path) -> None:
+    engine = _feed_verified_engine(tmp_path)
+    report = asyncio.run(engine.distill())
+    recipe = engine.get_recipe(_verified_recipe_id(engine, report))
+    assert recipe is not None
+    package = CapabilityPackager.build_package(recipe)
+    nodes = package["materials"]["recipe"]["combination_structure"]["nodes"]
+    nodes["web-search"]["metadata"]["version"] = ""
+    package["integrity"] = content_hash(package["materials"])
+
+    review = PackageReviewGate().review_static(package)
+
+    dependency_check = next(check for check in review.checks if check.check == "dependencies")
+    assert dependency_check.result == "fail"
+    assert dependency_check.reasons == ["capability web-search missing version"]
+
+
+def test_skillpack_adapter_rejects_non_skill_and_non_chain_packages(tmp_path: Path) -> None:
+    engine = _feed_verified_engine(tmp_path)
+    report = asyncio.run(engine.distill())
+    recipe = engine.get_recipe(_verified_recipe_id(engine, report))
+    assert recipe is not None
+    package = CapabilityPackager.build_package(recipe)
+    nodes = package["materials"]["recipe"]["combination_structure"]["nodes"]
+    nodes["web-search"]["metadata"]["capability_type"] = "tool"
+
+    with pytest.raises(SkillPackNotInstallableError, match="not a Skill"):
+        SkillPackAdapter.render(package, tmp_path / "non-skill")
+
+    nodes["web-search"]["metadata"]["capability_type"] = "skill"
+    package["materials"]["recipe"]["combination_structure"]["edges"].append(
+        {"source": "web-search", "target": "write-report", "relation": "can_feed"}
+    )
+    with pytest.raises(SkillPackNotInstallableError, match="simple Skill chain"):
+        SkillPackAdapter.render(package, tmp_path / "branch")
 
 
 def test_approved_preparation_replaces_tampered_cached_artifact(tmp_path: Path) -> None:
