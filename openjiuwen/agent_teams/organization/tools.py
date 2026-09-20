@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.organization.schema import (
@@ -26,6 +27,8 @@ from openjiuwen.harness.tools.base_tool import ToolOutput
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
+
+logger = logging.getLogger(__name__)
 
 
 _ORG_TASK_POOL_NEXT_ACTION = (
@@ -923,7 +926,14 @@ class OrgViewPendingReviewsTool(_OrgLeaderTool):
 class OrgReviewTaskTool(_OrgLeaderTool):
     """Accept or reject a completed child task result."""
 
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        runtime_manager: "OrganizationRuntimeManager | None" = None,
+        session_id: str = "",
+    ) -> None:
         super().__init__(
             name="org_review_task",
             description="Review a completed child task created by this team.",
@@ -931,6 +941,8 @@ class OrgReviewTaskTool(_OrgLeaderTool):
             team_id=team_id,
             leader_id=leader_id,
         )
+        self.runtime_manager = runtime_manager
+        self.session_id = session_id
         self.card.input_params = {
             "type": "object",
             "properties": {
@@ -963,6 +975,21 @@ class OrgReviewTaskTool(_OrgLeaderTool):
         )
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
+        publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+        if review_status is OrgTaskReviewStatus.ACCEPTED and callable(publish_progress):
+            task = await self.manager.get_task(inputs.get("task_id", ""))
+            if task is not None and task.root_task_id:
+                root = await self.manager.get_task(task.root_task_id)
+                if root is not None and root.assignment.team_id:
+                    await publish_progress(
+                        self.session_id,
+                        root.assignment.team_id,
+                        {
+                            "phase": "source_accepted",
+                            "root_task_id": root.task_id,
+                            "source_task_id": task.task_id,
+                        },
+                    )
         return ToolOutput(success=True, data=result.data)
 
 
@@ -1017,6 +1044,13 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
             return ToolOutput(success=False, error="only the claimed root task leader can create its summary execution")
         if root.aggregation is None or root.aggregation.mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
             return ToolOutput(success=False, error="root task is not configured for SUMMARY_TEAM aggregation")
+        publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+        if callable(publish_progress):
+            await publish_progress(
+                self.session_id,
+                self.team_id,
+                {"phase": "summary_execution_creating", "root_task_id": root_task_id},
+            )
         result = await self.manager.create_summary_execution(
             root_task_id=root_task_id,
             task_id=inputs.get("task_id"),
@@ -1063,7 +1097,26 @@ class OrgCreateSummaryExecutionTool(_OrgLeaderTool):
                         execution_id=execution.execution_id,
                         root_task_id=execution.root_task_id,
                     )
-            return ToolOutput(success=True, data=bound.task.brief())
+            if callable(publish_progress):
+                await publish_progress(
+                    self.session_id,
+                    self.team_id,
+                    {
+                        "phase": "summary_execution_delegated",
+                        "root_task_id": root_task_id,
+                        "summary_task_id": bound.task.task_id,
+                    },
+                )
+            return ToolOutput(
+                success=True,
+                data={
+                    **bound.task.brief(),
+                    "next_action": (
+                        "Summary Team is responsible for final delivery. End this turn instead of polling; "
+                        "you may send a focused message to its leader if clarification is needed."
+                    ),
+                },
+            )
         except Exception as exc:
             reason = f"summary team provisioning failed: {exc}"
             await self.manager.fail_summary_execution(
@@ -1121,7 +1174,15 @@ class OrgSummaryGetInputsTool(_OrgLeaderTool):
 class OrgSummaryCompleteTool(_OrgLeaderTool):
     """Complete only the calling Summary Team's assigned Summary Task."""
 
-    def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
+    def __init__(
+        self,
+        manager: OrgTaskManager,
+        team_id: str,
+        leader_id: str,
+        message_service: "OrgMessageService | None" = None,
+        runtime_manager: "OrganizationRuntimeManager | None" = None,
+        session_id: str = "",
+    ) -> None:
         """Create the restricted final-delivery tool for a Summary Team leader."""
         super().__init__(
             name="org_summary_complete",
@@ -1129,15 +1190,22 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
+            message_service=message_service,
         )
+        self.runtime_manager = runtime_manager
+        self.session_id = session_id
         self.card.input_params = {
             "type": "object",
             "properties": {
                 "summary_task_id": {"type": "string"},
-                "output_context": {"type": "object"},
+                "output_context": {
+                    "type": "object",
+                    "properties": {"description": {"type": "string", "minLength": 1}},
+                    "required": ["description"],
+                },
                 "output_abstract": {"type": "string"},
             },
-            "required": ["summary_task_id"],
+            "required": ["summary_task_id", "output_context", "output_abstract"],
         }
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
@@ -1147,6 +1215,11 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
         task = await self.manager.get_task(task_id)
         if task is None or task.task_type != "organization.summary" or task.assignment.team_id != self.team_id:
             return ToolOutput(success=False, error="summary task is not assigned to this Summary Team")
+        context = inputs.get("output_context")
+        if not isinstance(context, dict) or not str(context.get("description") or "").strip():
+            return ToolOutput(success=False, error="output_context.description must contain the final report")
+        if not str(inputs.get("output_abstract") or "").strip():
+            return ToolOutput(success=False, error="output_abstract is required")
         if task.status is OrgTaskStatus.DELEGATED:
             started = await self.manager.start_task(task_id=task_id, team_id=self.team_id)
             if not started.ok:
@@ -1154,21 +1227,72 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
         result = await self.manager.complete_task(
             task_id=task_id,
             team_id=self.team_id,
-            output_context=OrgTaskOutputContext.model_validate(inputs["output_context"])
-            if inputs.get("output_context")
-            else None,
+            output_context=OrgTaskOutputContext.model_validate(context),
             output_abstract=inputs.get("output_abstract"),
         )
         if not result.ok or result.task is None:
             return ToolOutput(success=False, error=result.reason)
+        execution = await self.manager.get_summary_execution(summary_task_id=task_id)
+        root = await self.manager.get_task(task.root_task_id)
+        if execution is not None and root is not None and root.assignment.team_id:
+            if self.message_service is not None:
+                try:
+                    metadata = {
+                        "kind": "summary_completed",
+                        "execution_id": execution.execution_id,
+                        "root_task_id": root.task_id,
+                        "summary_task_id": task_id,
+                    }
+                    notice = await self.message_service.send_leader_message(
+                        from_team_id=self.team_id,
+                        from_leader_id=self.leader_id,
+                        to_team_id=root.assignment.team_id,
+                        content=(
+                            f"Summary Task {task_id} completed root task {root.task_id}. "
+                            "The final report is in the root task output_context.description."
+                        ),
+                        metadata=metadata,
+                    )
+                    if not notice.ok:
+                        logger.warning("Summary completion notice was not delivered: %s", notice.reason)
+                    if self.runtime_manager is not None and notice.data is not None:
+                        self.runtime_manager.schedule_summary_completion_delivery(
+                            team_id=root.assignment.team_id,
+                            session_id=self.session_id,
+                            message_id=notice.data["message_id"],
+                            organization_id=self.manager.organization_id,
+                            metadata=metadata,
+                        )
+                except Exception:
+                    logger.exception("Failed to notify Root Leader of summary completion")
+            if self.runtime_manager is not None:
+                try:
+                    publish_progress = getattr(self.runtime_manager, "publish_organization_progress", None)
+                    if callable(publish_progress):
+                        await publish_progress(
+                            self.session_id,
+                            root.assignment.team_id,
+                            {
+                                "phase": "summary_completed",
+                                "root_task_id": root.task_id,
+                                "summary_task_id": task_id,
+                            },
+                        )
+                except Exception:
+                    logger.exception("Failed to publish completed summary progress to the host")
         return ToolOutput(success=True, data=result.task.brief())
 
 
-def create_summary_leader_tools(*, manager: OrgTaskManager, team_id: str, leader_id: str) -> list[TeamTool]:
+def create_summary_leader_tools(
+    *, manager: OrgTaskManager, team_id: str, leader_id: str,
+    message_service: "OrgMessageService | None" = None,
+    runtime_manager: "OrganizationRuntimeManager | None" = None,
+    session_id: str = "",
+) -> list[TeamTool]:
     """Return the only organization tools available to an internal Summary Team leader."""
     return [
         OrgSummaryGetInputsTool(manager, team_id, leader_id),
-        OrgSummaryCompleteTool(manager, team_id, leader_id),
+        OrgSummaryCompleteTool(manager, team_id, leader_id, message_service, runtime_manager, session_id),
     ]
 
 
@@ -1193,7 +1317,7 @@ def create_org_leader_tools(
         OrgAckLeaderMessageTool(manager, team_id, leader_id, message_service),
         OrgViewChildTasksTool(manager, team_id, leader_id),
         OrgViewPendingReviewsTool(manager, team_id, leader_id),
-        OrgReviewTaskTool(manager, team_id, leader_id),
+        OrgReviewTaskTool(manager, team_id, leader_id, runtime_manager, session_id or ""),
         *(
             [OrgCreateSummaryExecutionTool(manager, team_id, leader_id, runtime_manager, session_id)]
             if runtime_manager is not None and session_id is not None
