@@ -1138,12 +1138,11 @@ class OrganizationRuntimeManager:
             if parent is None or parent.status in _PARENT_RESUME_TERMINAL_STATUSES:
                 continue
             aggregation = parent.aggregation
-            if (
-                parent.parent_task_id is None
-                and aggregation is not None
-                and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
-                and aggregation.summary_task_id
-            ):
+            is_root = parent.parent_task_id is None
+            is_summary_aggregation = (
+                aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+            )
+            if is_root and is_summary_aggregation and aggregation.summary_task_id:
                 # A Summary Execution already owns final delivery for this root.
                 continue
             if not await manager.task_pool.can_complete_parent_task(
@@ -1925,12 +1924,15 @@ class OrganizationRuntimeManager:
                     if summary_key is not None and task_manager is not None:
                         summary_task = await task_manager.get_task(summary_key[2])
                         execution = await task_manager.get_summary_execution(summary_task_id=summary_key[2])
-                        if (
-                            summary_task is None
-                            or summary_task.status not in {OrgTaskStatus.DELEGATED, OrgTaskStatus.IN_PROGRESS}
-                            or execution is None
-                            or execution.status != OrgSummaryExecutionStatus.RUNNING.value
-                        ):
+                        summary_task_active = summary_task is not None and summary_task.status in {
+                            OrgTaskStatus.DELEGATED,
+                            OrgTaskStatus.IN_PROGRESS,
+                        }
+                        execution_running = (
+                            execution is not None
+                            and execution.status == OrgSummaryExecutionStatus.RUNNING.value
+                        )
+                        if not summary_task_active or not execution_running:
                             continue
                         if summary_task.status is OrgTaskStatus.DELEGATED:
                             started = await task_manager.start_task(task_id=summary_task.task_id, team_id=team_id)
