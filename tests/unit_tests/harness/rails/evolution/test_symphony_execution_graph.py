@@ -152,14 +152,21 @@ def _identity(
     *,
     version: str = "1.0.0",
     content_hash: str | None = None,
+    description: str = "Reusable capability",
     input_ports: tuple[str, ...] = ("default_input",),
     output_ports: tuple[str, ...] = ("default_output",),
 ) -> CapabilityIdentity:
-    del version, content_hash, input_ports, output_ports
     return CapabilityIdentity(
         capability_id=capability_id,
         capability_type=capability_type,  # type: ignore[arg-type]
         capability_name=capability_name,
+        version=version,
+        content_hash=content_hash or "",
+        description=description,
+        inputs=tuple(
+            {"name": name, "type": "text", "required": True, "description": f"Input {name}"} for name in input_ports
+        ),
+        outputs=tuple({"name": name, "type": "text", "description": f"Output {name}"} for name in output_ports),
     )
 
 
@@ -229,7 +236,29 @@ def test_builds_required_jgf_and_keeps_only_supported_example_edges() -> None:
     assert _edges(result)[0]["metadata"] == {"success": False}
     assert _edges(result)[1]["metadata"]["success"] is True
     assert set(result["graph"]["nodes"]) == {"skill-2", "skill-3", "skill-5"}
-    assert result["graph"]["nodes"]["skill-2"] == {"label": "skill"}
+    assert result["graph"]["nodes"]["skill-2"] == {
+        "label": "skill",
+        "metadata": {
+            "capability_type": "skill",
+            "version": "1.0.0",
+            "description": "Reusable capability",
+            "inputs": [
+                {
+                    "name": "default_input",
+                    "type": "text",
+                    "required": True,
+                    "description": "Input default_input",
+                }
+            ],
+            "outputs": [
+                {
+                    "name": "artifact_uri",
+                    "type": "text",
+                    "description": "Output artifact_uri",
+                }
+            ],
+        },
+    }
 
 
 def test_failed_and_partial_outcomes_require_outer_reason_while_success_omits_it() -> None:
@@ -299,6 +328,7 @@ def test_same_name_across_types_resolves_by_type() -> None:
         ("capability_id", ""),
         ("capability_type", "plugin"),
         ("capability_name", ""),
+        ("version", ""),
     ],
 )
 def test_missing_or_invalid_identity_field_drops_related_edge(field: str, value: str) -> None:

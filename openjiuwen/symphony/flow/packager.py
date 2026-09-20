@@ -95,13 +95,16 @@ def _package_recipe(recipe: ExperienceRecipe) -> dict[str, Any]:
     for node_id, node in (nodes or {}).items():
         metadata = node.get("metadata") if isinstance(node, dict) else {}
         metadata = metadata if isinstance(metadata, dict) else {}
+        safe_metadata = {
+            key: sanitize_distilled_text(metadata.get(key))
+            for key in ("version", "content_hash", "capability_type", "description")
+            if metadata.get(key) is not None
+        }
+        safe_metadata["inputs"] = _package_capability_ports(metadata.get("inputs"))
+        safe_metadata["outputs"] = _package_capability_ports(metadata.get("outputs"))
         safe_nodes[str(node_id)] = {
             "label": "capability",
-            "metadata": {
-                key: sanitize_distilled_text(metadata.get(key))
-                for key in ("version", "content_hash", "capability_type")
-                if metadata.get(key) is not None
-            },
+            "metadata": safe_metadata,
         }
     safe_structure = {
         "type": str(structure.get("type") or "skill_pack"),
@@ -150,6 +153,27 @@ def _package_recipe(recipe: ExperienceRecipe) -> dict[str, Any]:
         "quality": {key: recipe.quality[key] for key in quality_keys if key in recipe.quality},
         "provenance": {key: recipe.provenance[key] for key in provenance_keys if key in recipe.provenance},
     }
+
+
+def _package_capability_ports(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    ports: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        name = sanitize_distilled_text(raw.get("name"))
+        port_type = sanitize_distilled_text(raw.get("type"))
+        if not name or not port_type:
+            continue
+        item: dict[str, Any] = {"name": name, "type": port_type}
+        if isinstance(raw.get("required"), bool):
+            item["required"] = raw["required"]
+        description = sanitize_distilled_text(raw.get("description"))
+        if description:
+            item["description"] = description
+        ports.append(item)
+    return ports
 
 
 def _validate_simple_chain(skill_pack: dict[str, Any], recipe_id: str) -> None:
