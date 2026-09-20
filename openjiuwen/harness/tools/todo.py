@@ -20,6 +20,20 @@ from openjiuwen.harness.schema.task import (
     TodoStatus,
 )
 
+# Session-state key holding the current todo generation token. The host
+# (agent adapter) bumps it at the start of each fresh (non-resume) user turn;
+# these tools stamp newly created/updated items with it so broadcast layers can
+# filter entries from superseded generations (request isolation).
+#
+# Cross-repo contract: agent-core only reads/stamps/filters — it never bumps
+# the token, because only the host knows the fresh-turn boundary (a resume
+# replay must keep the original generation's todos visible). Host-side closure
+# (bump + broadcast filtering + tests) lives in jiuwenswarm: see
+# agents/harness/common/tools/todo_resume.py, server/runtime/agent_adapter/
+# stale_todo_cleanup_helpers.py and tests/unit_tests/agentserver/rails/
+# test_todo_updated_stale_filter.py.
+TODO_GENERATION_TOKEN_SESSION_KEY = "todo_generation_token"
+
 
 class TodoLockManager:
     """Manages operation locks for todo tools, keyed by session_id.
@@ -192,10 +206,26 @@ class TodoTool(Tool):
         """Clean up resources for a session (call when session ends).
 
         Args:
-            session_id: The session ID to clean up.
+            session_id: The session ID to clean up resources for.
         """
         self._lock_manager.cleanup_session(session_id)
         self._created_in_invoke.discard(session_id)
+
+    @staticmethod
+    def _session_generation_token(session: Any) -> Optional[str]:
+        """Read the current todo generation token from the session, if any.
+
+        Fail-open: sessions without ``get_state`` (or with a non-string value)
+        yield None, and unstamped/None tokens are never filtered anywhere.
+        """
+        getter = getattr(session, "get_state", None)
+        if not callable(getter):
+            return None
+        try:
+            value = getter(TODO_GENERATION_TOKEN_SESSION_KEY)
+        except Exception:
+            return None
+        return value if isinstance(value, str) and value else None
 
 
 class TodoCreateTool(TodoTool):
@@ -241,7 +271,10 @@ class TodoCreateTool(TodoTool):
         try:
             tasks_input = inputs.get("tasks")
             if tasks_input and isinstance(tasks_input, list):
-                results["message"] = await self._create_from_list(session_id, tasks_input)
+                generation_token = self._session_generation_token(session)
+                results["message"] = await self._create_from_list(
+                    session_id, tasks_input, generation_token=generation_token
+                )
                 return results
 
             raise build_error(
@@ -304,7 +337,13 @@ class TodoCreateTool(TodoTool):
             ),
         )
 
-    async def _create_from_list(self, session_id: str, tasks_data: List[Dict[str, Any]]) -> str:
+    async def _create_from_list(
+        self,
+        session_id: str,
+        tasks_data: List[Dict[str, Any]],
+        *,
+        generation_token: Optional[str] = None,
+    ) -> str:
         """Create todo items from a JSON array of task objects."""
         if not tasks_data:
             raise build_error(
@@ -342,6 +381,7 @@ class TodoCreateTool(TodoTool):
                     description=description,
                     status=status,
                     selected_model_id=task_data.get("selected_model_id"),
+                    generation_token=generation_token,
                 )
             )
 
@@ -396,6 +436,14 @@ class TodoListTool(TodoTool):
                 t for t in tasks
                 if t.status not in (TodoStatus.CANCELLED, TodoStatus.COMPLETED)
             ]
+            # 请求隔离：过滤已被新一轮请求取代的旧代条目，让 LLM 视图与
+            # 前端广播（todo.updated / task.update）一致。未打标条目放行。
+            generation_token = self._session_generation_token(session)
+            if generation_token:
+                active_tasks = [
+                    t for t in active_tasks
+                    if not t.generation_token or t.generation_token == generation_token
+                ]
             simplified = [
                 {
                     "id": t.id,
@@ -521,6 +569,7 @@ class TodoModifyTool(TodoTool):
                 )
 
             current_todos = await self.load_todos(session_id)
+            generation_token = self._session_generation_token(session)
 
             if action == "delete":
                 ids = inputs.get("ids")
@@ -540,22 +589,32 @@ class TodoModifyTool(TodoTool):
                 results["message"] = await self._cancel_todos(session_id, ids, current_todos)
             elif action == "update":
                 todos_data = inputs.get("todos")
-                results["message"] = await self._update_todos(session_id, todos_data, current_todos)
+                results["message"] = await self._update_todos(
+                    session_id, todos_data, current_todos, generation_token=generation_token
+                )
             elif action == "append":
                 todos_data = inputs.get("todos")
-                results["message"] = await self._append_todos(session_id, todos_data, current_todos)
+                results["message"] = await self._append_todos(
+                    session_id, todos_data, current_todos, generation_token=generation_token
+                )
             elif action == "insert_after":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
                 target_id = todo_data["target_id"]
                 insert_todos = todo_data["items"]
-                results["message"] = await self._insert_after_todos(session_id, target_id, insert_todos, current_todos)
+                results["message"] = await self._insert_after_todos(
+                    session_id, target_id, insert_todos, current_todos,
+                    generation_token=generation_token,
+                )
             elif action == "insert_before":
                 todo_data = inputs.get("todo_data")
                 self._validate_todo_data_structure(todo_data)
                 target_id = todo_data["target_id"]
                 insert_todos = todo_data["items"]
-                results["message"] = await self._insert_before_todos(session_id, target_id, insert_todos, current_todos)
+                results["message"] = await self._insert_before_todos(
+                    session_id, target_id, insert_todos, current_todos,
+                    generation_token=generation_token,
+                )
             else:
                 raise build_error(
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
@@ -628,8 +687,23 @@ class TodoModifyTool(TodoTool):
             )
         return target_index
 
-    def _validate_single_in_progress(self, todos_data: List[TodoItem]):
-        in_progress_count = sum(1 for todo in todos_data if todo.status == TodoStatus.IN_PROGRESS)
+    def _validate_single_in_progress(
+        self,
+        todos_data: List[TodoItem],
+        generation_token: Optional[str] = None,
+    ):
+        # Superseded-generation leftovers stay on disk with their old
+        # in_progress status (P1 filters at the broadcast/view layer instead
+        # of cancelling on disk) and must not consume the single in_progress
+        # slot of the current generation. Mirror the TodoListTool view filter
+        # semantics; when no token is present keep the legacy behavior.
+        visible_todos = todos_data
+        if generation_token:
+            visible_todos = [
+                todo for todo in todos_data
+                if not todo.generation_token or todo.generation_token == generation_token
+            ]
+        in_progress_count = sum(1 for todo in visible_todos if todo.status == TodoStatus.IN_PROGRESS)
         if in_progress_count > 1:
             raise build_error(
                 StatusCode.TOOL_TODOS_VALIDATION_INVALID,
@@ -655,7 +729,9 @@ class TodoModifyTool(TodoTool):
                 reason=f"Todo data validation error: {'; '.join(validation_errors)}"
             )
 
-    def _convert_to_todo_item(self, todo_data: Dict) -> TodoItem:
+    def _convert_to_todo_item(
+        self, todo_data: Dict, generation_token: Optional[str] = None
+    ) -> TodoItem:
         return TodoItem(
             id=str(todo_data.get("id") or "").strip() or str(_uuid.uuid4()),
             content=todo_data["content"],
@@ -663,6 +739,7 @@ class TodoModifyTool(TodoTool):
             description=todo_data.get("description", ""),
             status=TodoStatus(todo_data["status"]),
             selected_model_id=todo_data.get("selected_model_id"),
+            generation_token=generation_token,
         )
 
     async def _delete_todos(self, session_id: str, ids: List[str], current_todos: List[TodoItem]) -> str:
@@ -692,7 +769,14 @@ class TodoModifyTool(TodoTool):
         await self.save_todos(session_id, current_todos)
         return f"Successfully cancelled {cancelled_count} task(s) (IDs: {', '.join(cancelled_ids)})"
 
-    async def _update_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
+    async def _update_todos(
+        self,
+        session_id: str,
+        todos_data: List[Dict],
+        current_todos: List[TodoItem],
+        *,
+        generation_token: Optional[str] = None,
+    ) -> str:
         todo_map = {todo.id: todo for todo in current_todos}
         updated_count = 0
         errors: list[str] = []
@@ -715,8 +799,12 @@ class TodoModifyTool(TodoTool):
                 current_todo.status = TodoStatus(todo_data["status"])
             if "selected_model_id" in todo_data:
                 current_todo.selected_model_id = todo_data["selected_model_id"]
+            # 本轮触碰即归本轮：update 重打 generation_token，延续旧机制
+            # "复活/改写的条目对当前轮可见"的语义（token 为空时保留原标记）。
+            if generation_token:
+                current_todo.generation_token = generation_token
             updated_count += 1
-        self._validate_single_in_progress(current_todos)
+        self._validate_single_in_progress(current_todos, generation_token)
         await self.save_todos(session_id, current_todos)
         if errors:
             result_msg = f"Updated {updated_count} task(s). {len(errors)} item(s) failed: {'; '.join(errors)}"
@@ -724,7 +812,14 @@ class TodoModifyTool(TodoTool):
             result_msg = f"Successfully updated {updated_count} task(s)"
         return result_msg
 
-    async def _append_todos(self, session_id: str, todos_data: List[Dict], current_todos: List[TodoItem]) -> str:
+    async def _append_todos(
+        self,
+        session_id: str,
+        todos_data: List[Dict],
+        current_todos: List[TodoItem],
+        *,
+        generation_token: Optional[str] = None,
+    ) -> str:
         todo_ids = {todo.id for todo in current_todos}
         for todo_data in todos_data:
             self._validate_single_todo_item(todo_data)
@@ -734,14 +829,23 @@ class TodoModifyTool(TodoTool):
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                     reason=f"Batch append failed: Task with ID '{todo_id}' is duplicated"
                 )
-            current_todos.append(self._convert_to_todo_item(todo_data))
+            current_todos.append(
+                self._convert_to_todo_item(todo_data, generation_token)
+            )
             todo_ids.add(todo_id)
-        self._validate_single_in_progress(current_todos)
+        self._validate_single_in_progress(current_todos, generation_token)
         await self.save_todos(session_id, current_todos)
         return f"Successfully appended {len(todos_data)} task(s)"
 
-    async def _insert_after_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
-                                   current_todos: List[TodoItem]) -> str:
+    async def _insert_after_todos(
+        self,
+        session_id: str,
+        target_id: str,
+        insert_todos_data: List[Dict],
+        current_todos: List[TodoItem],
+        *,
+        generation_token: Optional[str] = None,
+    ) -> str:
         target_index = self._validate_target_task_status(
             target_id, current_todos, [TodoStatus.IN_PROGRESS, TodoStatus.PENDING]
         )
@@ -754,17 +858,26 @@ class TodoModifyTool(TodoTool):
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                     reason=f"Insert failed: Task with ID '{todo_id}' already exists"
                 )
-            insert_todos.append(self._convert_to_todo_item(todo_data))
+            insert_todos.append(
+                self._convert_to_todo_item(todo_data, generation_token)
+            )
             existing_ids.add(todo_id)
         updated_todos = (
             current_todos[:target_index + 1] + insert_todos + current_todos[target_index + 1:]
         )
-        self._validate_single_in_progress(updated_todos)
+        self._validate_single_in_progress(updated_todos, generation_token)
         await self.save_todos(session_id, updated_todos)
         return f"Successfully inserted {len(insert_todos)} task(s) after target task, id: '{target_id}'"
 
-    async def _insert_before_todos(self, session_id: str, target_id: str, insert_todos_data: List[Dict],
-                                    current_todos: List[TodoItem]) -> str:
+    async def _insert_before_todos(
+        self,
+        session_id: str,
+        target_id: str,
+        insert_todos_data: List[Dict],
+        current_todos: List[TodoItem],
+        *,
+        generation_token: Optional[str] = None,
+    ) -> str:
         target_index = self._validate_target_task_status(
             target_id, current_todos, [TodoStatus.PENDING]
         )
@@ -777,12 +890,14 @@ class TodoModifyTool(TodoTool):
                     StatusCode.TOOL_TODOS_VALIDATION_INVALID,
                     reason=f"Insert failed: Task with ID '{todo_id}' already exists"
                 )
-            insert_todos.append(self._convert_to_todo_item(todo_data))
+            insert_todos.append(
+                self._convert_to_todo_item(todo_data, generation_token)
+            )
             existing_ids.add(todo_id)
         updated_todos = (
             current_todos[:target_index] + insert_todos + current_todos[target_index:]
         )
-        self._validate_single_in_progress(updated_todos)
+        self._validate_single_in_progress(updated_todos, generation_token)
         await self.save_todos(session_id, updated_todos)
         return f"Successfully inserted {len(insert_todos)} task(s) before target task, id: '{target_id}'"
 

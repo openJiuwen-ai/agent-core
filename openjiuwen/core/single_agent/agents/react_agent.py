@@ -19,7 +19,9 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 
 from pydantic import Field, BaseModel
 
+from openjiuwen.core.common.constants.constant import RESUME_SIGNAL
 from openjiuwen.core.common.exception.errors import BaseError, Termination
+from openjiuwen.core.runner.callback.errors import AbortError
 from openjiuwen.core.single_agent.schema.steering import SteeringInput
 from openjiuwen.core.common.logging import logger
 try:
@@ -2185,6 +2187,33 @@ class ReActAgent(BaseAgent):
                 start_iteration = 0
                 if interruption_state is not None:
                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
+
+                    # Protocol-level resume signal (P2): emit an explicit marker
+                    # chunk so downstream host adapters can clear HITL stream
+                    # suppression precisely on this frame instead of sniffing
+                    # the first non-noise chunk. Best-effort only; the chunk
+                    # carries no user-visible payload. Host adapters must
+                    # recognize RESUME_SIGNAL and drop it from user-visible
+                    # output; the companion consumption test lives in
+                    # jiuwenswarm (test_hitl_resume_signal_protocol.py).
+                    if session is not None:
+                        try:
+                            await session.write_stream(OutputSchema(
+                                type=RESUME_SIGNAL,
+                                index=0,
+                                payload={
+                                    "source": "tool_interrupt" if is_tool_interruption else "workflow_interrupt",
+                                },
+                            ))
+                        except AbortError:
+                            # AbortError is the callback framework's control-flow
+                            # exception (the only one trigger() lets through);
+                            # swallowing it here would silently break HITL abort
+                            # semantics for any future write_stream rail.
+                            raise
+                        except Exception:
+                            logger.debug("emit resume signal failed", exc_info=True)
+
                     if is_tool_interruption:
                         # Permission/confirm cards: plain text is not an
                         # approval and must not re-emit the same ASK.
