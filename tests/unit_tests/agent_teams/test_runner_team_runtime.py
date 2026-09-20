@@ -1035,6 +1035,156 @@ def test_team_agent_recover_from_session_restores_session_id():
     assert agent.session_id == session_id
 
 
+def test_team_agent_recover_from_session_rides_current_model_config():
+    """冷恢复的模型选择跟随当前 runtime spec，不吃 checkpoint 冻结的旧值：
+    建团后换模型/模型改名下线时，恢复的团队应打新模型而不是旧 endpoint。
+    逐成员按 role 键覆盖（live spec 没声明模型的成员保留旧值兜底），
+    团队级 model_pool 整体换新。"""
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+    from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
+    from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec as _DeepAgentSpec
+    from openjiuwen.agent_teams.schema.team import ModelPoolEntry
+    from openjiuwen.core.foundation.llm import ModelClientConfig
+    from openjiuwen.harness.schema.deep_agent_spec import TeamModelConfig
+
+    session_id = f"recover_model_{uuid.uuid4().hex}"
+    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
+    write_team_namespace(
+        session,
+        "persistent_team",
+        {
+            "spec": {
+                "team_name": "persistent_team",
+                "agents": {
+                    "leader": {
+                        "model": {
+                            "model_client_config": {
+                                "model": "old-model",
+                                "api_key": "k",
+                                "api_base": "http://old",
+                                "client_provider": "openai",
+                            }
+                        }
+                    },
+                    "teammate": {
+                        "model": {
+                            "model_client_config": {
+                                "model": "old-member-model",
+                                "api_key": "k",
+                                "api_base": "http://old",
+                                "client_provider": "openai",
+                            }
+                        }
+                    },
+                },
+                "model_pool": [
+                    {
+                        "model_name": "old-pool-model",
+                        "api_key": "k",
+                        "api_base_url": "http://old",
+                        "api_provider": "openai",
+                    }
+                ],
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": "persistent_team",
+                    "display_name": "persistent_team",
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+
+    def _model(name: str) -> TeamModelConfig:
+        return TeamModelConfig(
+            model_client_config=ModelClientConfig(
+                model=name, api_key="k", api_base="http://new", client_provider="openai"
+            )
+        )
+
+    fresh_spec = TeamAgentSpec(
+        team_name="persistent_team",
+        agents={
+            # teammate 故意缺席：验证"live spec 未声明的成员保留旧模型"兜底
+            "leader": _DeepAgentSpec(model=_model("new-model")),
+        },
+        model_pool=[
+            ModelPoolEntry(
+                model_name="new-pool-model",
+                api_key="k",
+                api_base_url="http://new",
+                api_provider="openai",
+            )
+        ],
+    )
+
+    captured: dict = {}
+    original_configure = TeamAgent.configure
+
+    def spy_configure(self, spec, context, *args, **kwargs):
+        captured["spec"] = spec
+        return original_configure(self, spec, context, *args, **kwargs)
+
+    with patch.object(TeamAgent, "configure", spy_configure):
+        TeamAgent.recover_from_session(session, "persistent_team", runtime_spec=fresh_spec)
+
+    recovered = captured["spec"]
+    leader_model = recovered.agents["leader"].model.model_client_config
+    assert leader_model.model == "new-model"
+    assert leader_model.api_base == "http://new"
+    # live spec 未声明 teammate 模型：保留持久化值兜底
+    assert recovered.agents["teammate"].model.model_client_config.model == "old-member-model"
+    # 团队级 pool 整体换成当前配置
+    assert [entry.model_name for entry in recovered.model_pool] == ["new-pool-model"]
+
+
+def test_team_agent_recover_from_session_drops_retired_element_types():
+    """冷恢复重放的持久化 spec 可含已退役的 provider 类型（如平台版本删了
+    swarm.user_todos）：恢复路径剥掉未注册条目降级为"缺席"，而不是让整个
+    团队重建在 Unknown tool type 上抛出异常导致链路执行失败。新建路径保持 fail-fast 不受影响。"""
+    from openjiuwen.agent_teams.runtime.metadata import write_team_namespace
+
+    session_id = f"recover_retired_{uuid.uuid4().hex}"
+    session = create_agent_team_session(session_id=session_id, team_id="persistent_team")
+    write_team_namespace(
+        session,
+        "persistent_team",
+        {
+            "spec": {
+                "team_name": "persistent_team",
+                "agents": {
+                    "leader": {
+                        "tools": [{"type": "swarm.user_todos", "params": {}}],
+                        "rails": [{"type": "swarm.retired_rail", "params": {}}],
+                    },
+                },
+            },
+            "context": {
+                "role": "leader",
+                "member_name": "leader",
+                "desc": "leader",
+                "team_spec": {
+                    "team_name": "persistent_team",
+                    "display_name": "persistent_team",
+                    "leader_member_name": "leader",
+                },
+                "messager_config": {},
+                "db_config": {},
+            },
+        },
+    )
+
+    agent = TeamAgent.recover_from_session(session, "persistent_team")
+
+    assert agent.session_id == session_id
+
+
 def test_team_agent_recover_from_session_builds_leader_member_handle():
     """A cold-recovered leader gets its TeamMember handle via configure().
 

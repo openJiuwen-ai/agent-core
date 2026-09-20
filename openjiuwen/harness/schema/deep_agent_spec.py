@@ -328,6 +328,61 @@ class BuiltinToolSpec(BaseModel):
         return factory(dict(self.params), context)
 
 
+def drop_unregistered_elements(spec: "DeepAgentSpec") -> dict[str, list[str]]:
+    """Strip tool/rail entries whose provider type is not registered.
+
+    Persisted specs can outlive their providers: a platform build may
+    retire an element type (e.g. a removed ``swarm.*`` tool) between the
+    session that checkpointed the spec and the one recovering it.
+    ``build()`` stays fail-fast for fresh construction — an unknown type
+    there is a configuration error worth raising. Recovery is different:
+    the user cannot edit a checkpoint, so a retired type must degrade to
+    "absent" rather than kill the whole rebuild.
+
+    Only registry-resolved entries are inspected (``BuiltinToolSpec`` /
+    ``RailSpec``); class-based ``ToolCard`` entries are left untouched.
+    Sub-agent specs are sanitized recursively on the same rule.
+
+    Callers must ensure platform providers are already registered (the
+    recovery path runs after the platform's assembly/register step);
+    built-in elements are ensured here.
+
+    Args:
+        spec: The deserialized spec to sanitize in place.
+
+    Returns:
+        ``{"tools": [...], "rails": [...]}`` with the dropped type names,
+        for the caller to log.
+    """
+    from openjiuwen.harness.manifest import ensure_builtin_elements_registered
+
+    ensure_builtin_elements_registered()
+    dropped: dict[str, list[str]] = {"tools": [], "rails": []}
+
+    def _sanitize(target: "DeepAgentSpec | SubAgentSpec") -> None:
+        if target.tools:
+            kept: list[Any] = []
+            for entry in target.tools:
+                if isinstance(entry, BuiltinToolSpec) and entry.type not in _TOOL_PROVIDER_REGISTRY:
+                    dropped["tools"].append(entry.type)
+                    continue
+                kept.append(entry)
+            target.tools = kept
+        if target.rails:
+            kept_rails: list[RailSpec] = []
+            for rail in target.rails:
+                if rail.type not in _RAIL_PROVIDER_REGISTRY:
+                    dropped["rails"].append(rail.type)
+                    continue
+                kept_rails.append(rail)
+            target.rails = kept_rails
+        for sub in getattr(target, "subagents", None) or []:
+            _sanitize(sub)
+
+    _sanitize(spec)
+    return dropped
+
+
 # ---------------------------------------------------------------------------
 # SubAgentSpec
 # ---------------------------------------------------------------------------
@@ -659,4 +714,5 @@ __all__ = [
     "register_rail_provider",
     "register_subagent_provider",
     "register_tool_provider",
+    "drop_unregistered_elements",
 ]
