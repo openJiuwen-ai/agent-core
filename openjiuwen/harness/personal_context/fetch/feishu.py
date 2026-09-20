@@ -590,7 +590,8 @@ async def _read_config_init_url(process: asyncio.subprocess.Process) -> str:
             raise _fetch_error(detail or "lark-cli config init exited without a verification URL")
         buffer += chunk.decode("utf-8", errors="replace")
         if len(buffer) > _CLI_OUTPUT_BYTES:
-            buffer = buffer[-_CLI_OUTPUT_BYTES // 2 :]
+            tail_bytes = _CLI_OUTPUT_BYTES // 2
+            buffer = buffer[-tail_bytes:]
         url = _extract_config_init_url(buffer)
         if url is not None:
             return url
