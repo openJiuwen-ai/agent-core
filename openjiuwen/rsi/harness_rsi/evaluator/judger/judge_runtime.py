@@ -176,6 +176,7 @@ async def run_judge_agent(
     payload = await asyncio.to_thread(inline_evidence, workspace) if budget is not None else None
     if payload is not None:
         model = _judge_model(config)
+
         async def invoke_direct() -> str:
             return await _invoke_complete_evidence(model, payload)
 

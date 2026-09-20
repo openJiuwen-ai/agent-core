@@ -117,6 +117,9 @@ async def test_json_pointer_and_path_boundary(tmp_path):
     tool = JudgeEvidenceTool(tmp_path, 'test')
     result = await tool.invoke({'path': 'large.json', 'pointer': '/a~1b/states'})
     assert json.loads(result.data['content'])['content'] == '137'
+    result = await tool.invoke({'path': 'large.json', 'pointer': '/a~1b/rows', 'item_offset': 10})
+    page = json.loads(json.loads(result.data['content'])['content'])
+    assert page == {'count': 50000, 'offset': 10, 'items': list(range(10, 20))}
     for path in ['../outside.json', str(tmp_path.parent / 'outside.json')]:
         assert not (await tool.invoke({'path': path})).success
 

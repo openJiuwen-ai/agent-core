@@ -6,7 +6,6 @@ from copy import deepcopy
 
 import pytest
 
-from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_runtime
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.factory import load_member_optimizer_model
@@ -42,12 +41,11 @@ def test_role_loaders_share_output_budget(tmp_path, monkeypatch, nested, limit):
     assert built.model_config.max_tokens == 100000
     assert built.model_config.temperature == 0.5
 
-    monkeypatch.setattr(TeamModelConfig, "build", lambda self: self)
     monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: kwargs)
     judge = judge_runtime.build_judge_agent(
         EvaluatorConfig(judge_model_config_ref=str(path)), tmp_path, tmp_path / "tools.jsonl",
     )
-    assert judge["model"].model_request_config.max_tokens == 100000
+    assert judge["model"].model_config.max_tokens == 100000
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 

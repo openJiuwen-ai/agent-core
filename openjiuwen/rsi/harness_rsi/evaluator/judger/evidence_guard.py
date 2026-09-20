@@ -83,8 +83,9 @@ class JudgeEvidenceTool(Tool):
             if isinstance(value, dict):
                 value = {k: _summary(v) for k, v in value.items()}
             elif isinstance(value, list):
+                page = value[item_offset:item_offset + 10]
                 value = {"count": len(value), "offset": item_offset,
-                         "items": value[item_offset:item_offset + 10]}
+                         "items": page}
             text = _json(value)
         return ToolOutput(success=True, data={"content": bounded_text(text, offset)})
 
