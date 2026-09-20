@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDescriptionRevisedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -1143,7 +1144,7 @@ class OrganizationRuntimeManager:
 
         async def _on_task_event(message: Any) -> None:
             event = message.get_payload()
-            if isinstance(event, OrgTaskCreatedEvent):
+            if isinstance(event, (OrgTaskCreatedEvent, OrgTaskDescriptionRevisedEvent)):
                 if event.team_id == backend.team_name:
                     return
                 task = await manager.task_pool.get_task(event.task_id)
@@ -1749,7 +1750,14 @@ class OrganizationRuntimeManager:
             self._leader_turn_workers[key] = worker
 
     async def _drain_leader_turns(self, team_id: str, session_id: str) -> None:
-        """Run one background leader turn at a time and retain events while busy."""
+        """Run one background leader turn at a time and retain events while busy.
+
+        A ``PAUSED`` leader gets a dedicated organization turn. A ``RUNNING``
+        leader that is already idle/settled (open stream, no in-flight round)
+        receives the prompt via ``interact`` so the existing stream handles it
+        — no finalize/re-activate reentrancy. Busy ``RUNNING`` leaders keep
+        polling until they pause or settle.
+        """
 
         key = (session_id, team_id)
         try:
@@ -1759,7 +1767,13 @@ class OrganizationRuntimeManager:
                 if entry is None or entry.current_session_id != session_id:
                     self._clear_leader_turn_queue(queue)
                     return
-                if entry.state is not RuntimeState.PAUSED:
+                if entry.state is RuntimeState.PAUSED:
+                    pass
+                elif entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(
+                    entry
+                ):
+                    pass
+                else:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
                     continue
                 inputs = queue.popleft()
@@ -1848,17 +1862,73 @@ class OrganizationRuntimeManager:
                     self._scheduled_summary_executions.discard(summary_key)
         queue.clear()
 
-    async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
-        entry = await self._team_runtime_manager.pool.get(team_id)
-        if entry is None or entry.current_session_id != session_id or entry.state is not RuntimeState.PAUSED:
+    @staticmethod
+    async def _team_is_idle_settled_for_org_wake(entry: Any) -> bool:
+        """Whether a RUNNING team can take an org wake on its open stream.
+
+        Mirrors ``team.idle``: no in-flight DeepAgent round, every member
+        quiescent, and the local task board settled. Missing probes mean
+        "not settled" so drains keep waiting for ``PAUSED`` (safe default).
+        """
+        agent = getattr(entry, "agent", None)
+        if agent is None:
             return False
-        if self._leader_turn_runner is not None:
-            return await self._leader_turn_runner(team_id, session_id, inputs)
-        return await self._team_runtime_manager.run_organization_turn(
+        has_in_flight = getattr(agent, "has_in_flight_round", None)
+        if callable(has_in_flight) and has_in_flight():
+            return False
+        state = getattr(agent, "_state", None)
+        registry = getattr(state, "member_registry", None) if state is not None else None
+        if registry is None or not registry.is_idle():
+            return False
+        board_probe = getattr(agent, "is_task_board_settled", None)
+        if not callable(board_probe):
+            return False
+        try:
+            return bool(await board_probe())
+        except Exception:
+            return False
+
+    async def _deliver_org_turn_to_running_leader(
+        self,
+        team_id: str,
+        session_id: str,
+        inputs: object,
+    ) -> bool:
+        """Hand an org prompt to a RUNNING idle leader via the interact path."""
+        query = inputs.get("query") if isinstance(inputs, dict) else None
+        if not str(query or "").strip():
+            return False
+        result = await self._team_runtime_manager.interact(
+            str(query),
             team_name=team_id,
             session_id=session_id,
-            inputs=inputs,
         )
+        if not result:
+            team_logger.warning(
+                "Organization interact wake failed for team {} session {}: {}",
+                team_id,
+                session_id,
+                getattr(result, "reason", None),
+            )
+            return False
+        return True
+
+    async def _run_leader_turn(self, team_id: str, session_id: str, inputs: object) -> bool:
+        entry = await self._team_runtime_manager.pool.get(team_id)
+        if entry is None or entry.current_session_id != session_id:
+            return False
+        if entry.state is RuntimeState.PAUSED:
+            if self._leader_turn_runner is not None:
+                return await self._leader_turn_runner(team_id, session_id, inputs)
+            return await self._team_runtime_manager.run_organization_turn(
+                team_name=team_id,
+                session_id=session_id,
+                inputs=inputs,
+            )
+        if entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(entry):
+            # Open-stream delivery: never start a second organization turn.
+            return await self._deliver_org_turn_to_running_leader(team_id, session_id, inputs)
+        return False
 
     async def _resolve_leader(self, team_id: str, session_id: str) -> tuple["TeamAgent", TeamBackend]:
         entry = await self._team_runtime_manager.pool.get(team_id)

@@ -17,6 +17,7 @@ from openjiuwen.agent_teams.organization.events import (
     OrgTaskClaimedEvent,
     OrgTaskCompletedEvent,
     OrgTaskCreatedEvent,
+    OrgTaskDescriptionRevisedEvent,
     OrgTaskDelegatedEvent,
     OrgTaskFailedEvent,
     OrgTaskReviewedEvent,
@@ -3483,6 +3484,45 @@ async def test_created_task_only_wakes_capability_matched_team(active_organizati
 
 
 @pytest.mark.asyncio
+async def test_description_revised_wakes_capability_matched_team(active_organization_runtime):
+    runtime, agents, session_id = active_organization_runtime
+    agents["team-b"].spec.metadata["capabilities"] = ["legal", "compliance"]
+    org_id = "org-revised-claim-wake"
+    manager, _ = await _seed_two_team_org(runtime, agents, session_id, org_id)
+    await manager.create_task(
+        task_id="legal-open",
+        title="Legal",
+        description="Need a clearer scope before claim.",
+        required_capabilities=["legal", "compliance"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id=org_id,
+        ),
+    )
+
+    turns = _capture_org_turns(runtime)
+    await _emit_team_task_event(
+        agents,
+        session_id,
+        org_id,
+        OrgTaskDescriptionRevisedEvent(
+            organization_id=org_id,
+            team_id="team-a",
+            task_id="legal-open",
+            request_id="org-revision-1",
+            description_revision=1,
+            deadline_at=1,
+        ),
+        team_id="team-b",
+    )
+
+    assert turns[0]["team_name"] == "team-b"
+    assert "legal-open" in turns[0]["inputs"]["query"]
+    assert "MUST call org_claim_task" in turns[0]["inputs"]["query"]
+
+
+@pytest.mark.asyncio
 async def test_completed_task_rewakes_team_for_matching_open_task(active_organization_runtime):
     runtime, agents, session_id = active_organization_runtime
     agents["team-b"].spec.metadata["capabilities"] = ["testing", "unit-test", "api-test"]
@@ -3646,3 +3686,52 @@ async def test_drain_leader_turns_waits_until_running_team_pauses(active_organiz
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
     assert len(sleep_calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_delivers_via_interact_when_running_idle(
+    active_organization_runtime, monkeypatch
+):
+    """Idle RUNNING leaders get org wakes on the open stream, not a new turn."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    sleep_calls: list[float] = []
+    interact_calls: list[tuple[object, str, str]] = []
+    turns: list[dict] = []
+
+    async def record_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    async def fake_interact(payload, *, team_name: str, session_id: str):
+        interact_calls.append((payload, team_name, session_id))
+        from openjiuwen.agent_teams.interaction.payload import DeliverResult
+
+        return DeliverResult.success(None)
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    async def settled(_entry) -> bool:
+        return True
+
+    monkeypatch.setattr(asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(
+        org_runtime,
+        "_team_is_idle_settled_for_org_wake",
+        settled,
+    )
+    org_runtime._team_runtime_manager.interact = fake_interact
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([{"query": "unclaimed revision wake"}])
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert interact_calls == [("unclaimed revision wake", "team-a", session_id)]
+    assert turns == []
+    assert sleep_calls == []
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
