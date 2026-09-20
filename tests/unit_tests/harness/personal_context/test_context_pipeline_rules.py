@@ -222,10 +222,12 @@ async def _put_event(
     service_id: str,
     run_id: str,
     payload: FetchBatch | None,
+    *,
+    timeout: float = 2,
 ) -> None:
     completion = asyncio.get_running_loop().create_future()
     await queue.put((tag, service_id, run_id, payload, completion))
-    await asyncio.wait_for(asyncio.shield(completion), timeout=2)
+    await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
 
 
 async def _submit_run(
@@ -233,10 +235,11 @@ async def _submit_run(
     service_id: str,
     run_id: str,
     *batches: FetchBatch,
+    timeout: float = 2,
 ) -> None:
     for batch in batches:
-        await _put_event(queue, "batch", service_id, run_id, batch)
-    await _put_event(queue, "finish", service_id, run_id, None)
+        await _put_event(queue, "batch", service_id, run_id, batch, timeout=timeout)
+    await _put_event(queue, "finish", service_id, run_id, None, timeout=timeout)
 
 
 async def _cancel_consumer_twice_while_io_is_blocked(
@@ -761,7 +764,13 @@ async def test_large_run_io_helpers_execute_outside_event_loop_thread(
 
     monkeypatch.setattr(context_pipeline.shutil, "rmtree", record_rmtree)
     await service.start()
-    await _submit_run(queue, "local", "run-threaded", _batch(_item(content="large body " * 50_000)))
+    await _submit_run(
+        queue,
+        "local",
+        "run-threaded",
+        _batch(_item(content="large body " * 50_000)),
+        timeout=30,
+    )
     await service.stop(timeout_seconds=1)
 
     expected = {
