@@ -5,10 +5,11 @@ from datetime import UTC, datetime, timedelta
 
 from openjiuwen.harness.personal_context.fetch.cursor_selection import (
     compact_cursor,
+    quarantined_candidate_diagnostics,
     record_completed_candidates,
+    record_failed_candidates,
     select_latest_candidates,
 )
-
 
 _BASE = datetime(2026, 8, 1, tzinfo=UTC)
 
@@ -104,6 +105,78 @@ def test_recording_is_discrete_deduplicated_and_does_not_mutate_input() -> None:
     selection = updated["_selection"]
     assert isinstance(selection, dict)
     assert len(selection["completed"]) == 2
+
+
+def test_failed_revision_is_quarantined_until_a_manual_retry() -> None:
+    candidate = _candidate(1)
+    cursor = record_failed_candidates(
+        None,
+        (
+            {
+                **candidate,
+                "item_ref": "notes/broken.pdf",
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            },
+        ),
+        failed_at="2026-09-21T12:00:00Z",
+    )
+
+    assert select_latest_candidates((candidate,), cursor, 20) == ()
+    assert select_latest_candidates((candidate,), cursor, 20, retry_quarantined=True) == (candidate,)
+    quarantined_count, item_errors = quarantined_candidate_diagnostics(cursor)
+    assert quarantined_count == 1
+    assert item_errors == (
+        {
+            "item_ref": "notes/broken.pdf",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+            "failed_at": "2026-09-21T12:00:00Z",
+        },
+    )
+
+
+def test_changed_revision_retries_and_success_clears_the_resource_quarantine() -> None:
+    failed = _candidate(1, revision="revision-1")
+    changed = _candidate(1, revision="revision-2")
+    cursor = record_failed_candidates(
+        None,
+        (
+            {
+                **failed,
+                "item_ref": "notes/broken.pdf",
+                "code": 154002,
+                "message": "文件读取或解析失败",
+            },
+        ),
+        failed_at="2026-09-21T12:00:00Z",
+    )
+
+    assert select_latest_candidates((changed,), cursor, 20) == (changed,)
+
+    cursor = record_completed_candidates(cursor, (changed,))
+    quarantined_count, item_errors = quarantined_candidate_diagnostics(cursor)
+    assert quarantined_count == 0
+    assert item_errors == ()
+
+
+def test_quarantine_keeps_all_tokens_but_only_twenty_public_diagnostics() -> None:
+    failures = tuple(
+        {
+            **_candidate(index),
+            "item_ref": f"notes/broken-{index}.pdf",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+        }
+        for index in range(25)
+    )
+
+    cursor = record_failed_candidates(None, failures, failed_at="2026-09-21T12:00:00Z")
+
+    quarantined_count, item_errors = quarantined_candidate_diagnostics(cursor)
+    assert quarantined_count == 25
+    assert len(item_errors) == 20
+    assert select_latest_candidates(tuple(_candidate(index) for index in range(25)), cursor, 25) == ()
 
 
 def test_compaction_keeps_complete_newest_time_groups_and_monotonic_cutoff() -> None:

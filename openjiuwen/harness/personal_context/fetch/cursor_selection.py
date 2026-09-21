@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from typing import Mapping, cast
 
 _SELECTION_KEY = "_selection"
 _RECEIPT_FIELDS = ("resource_lane", "stable_id", "revision_id", "candidate_time")
+_FAILURE_FIELDS = ("token", "item_ref", "code", "message", "failed_at")
+_FAILURE_TOKEN = re.compile(r"^[A-Za-z0-9_-]{32}$")
+_FAILURE_EXAMPLE_LIMIT = 20
 
 
 def _normalized_time(value: object) -> str:
@@ -51,13 +57,75 @@ def _resource_key(candidate: Mapping[str, object]) -> tuple[str, str]:
     return str(candidate["resource_lane"]), str(candidate["stable_id"])
 
 
+def _digest_token_part(*values: str) -> bytes:
+    payload = "\0".join(values).encode("utf-8")
+    return hashlib.sha256(payload).digest()[:12]
+
+
+def _failure_token(candidate: Mapping[str, object]) -> str:
+    lane, stable_id, revision_id = _version_key(candidate)
+    payload = _digest_token_part(lane, stable_id) + _digest_token_part(revision_id)
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _failure_resource_prefix(candidate: Mapping[str, object]) -> str:
+    lane, stable_id = _resource_key(candidate)
+    return base64.urlsafe_b64encode(_digest_token_part(lane, stable_id)).decode("ascii").rstrip("=")
+
+
+def _failed_selection_copy(value: object) -> dict[str, object]:
+    if value is None:
+        return {"version": 1, "tokens": [], "examples": []}
+    if not isinstance(value, Mapping) or set(value) != {"version", "tokens", "examples"}:
+        raise ValueError("cursor failed selection has an invalid shape")
+    if value.get("version") != 1:
+        raise ValueError("cursor failed selection has an unsupported version")
+    raw_tokens = value.get("tokens")
+    raw_examples = value.get("examples")
+    if not isinstance(raw_tokens, list) or not isinstance(raw_examples, list):
+        raise ValueError("cursor failed selection tokens and examples must be lists")
+    tokens: list[str] = []
+    for token in raw_tokens:
+        if not isinstance(token, str) or not _FAILURE_TOKEN.fullmatch(token):
+            raise ValueError("cursor contains an invalid failure token")
+        tokens.append(token)
+    if len(tokens) != len(set(tokens)):
+        raise ValueError("cursor contains duplicate failure tokens")
+    token_set = set(tokens)
+    examples: list[dict[str, object]] = []
+    if len(raw_examples) > _FAILURE_EXAMPLE_LIMIT:
+        raise ValueError("cursor contains too many failure examples")
+    for raw_example in raw_examples:
+        if not isinstance(raw_example, Mapping) or set(raw_example) != set(_FAILURE_FIELDS):
+            raise ValueError("cursor contains an invalid failure example")
+        example = deepcopy(dict(raw_example))
+        token = example["token"]
+        code = example["code"]
+        if not isinstance(token, str) or token not in token_set:
+            raise ValueError("cursor failure example does not match a token")
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise ValueError("cursor failure code must be an integer")
+        for field_name in ("item_ref", "message"):
+            field_value = example[field_name]
+            if not isinstance(field_value, str) or not field_value.strip() or len(field_value) > 256:
+                raise ValueError(f"cursor failure {field_name} must be a bounded non-empty string")
+        example["failed_at"] = _normalized_time(example["failed_at"])
+        examples.append(example)
+    return {"version": 1, "tokens": sorted(tokens), "examples": examples}
+
+
 def _selection_copy(cursor: Mapping[str, object] | None) -> dict[str, object]:
     raw = cursor.get(_SELECTION_KEY) if cursor is not None else None
     if raw is None:
-        return {"completed": [], "latest_seen_time": None, "earliest_considered": None}
+        return {
+            "completed": [],
+            "latest_seen_time": None,
+            "earliest_considered": None,
+            "failed": _failed_selection_copy(None),
+        }
     if not isinstance(raw, Mapping):
         raise ValueError("cursor _selection must be an object")
-    unknown = set(raw) - {"completed", "latest_seen_time", "earliest_considered"}
+    unknown = set(raw) - {"completed", "latest_seen_time", "earliest_considered", "failed"}
     if unknown:
         raise ValueError("cursor _selection contains unknown fields")
     raw_completed = raw.get("completed", [])
@@ -74,6 +142,7 @@ def _selection_copy(cursor: Mapping[str, object] | None) -> dict[str, object]:
         "completed": completed,
         "latest_seen_time": _normalized_time(latest) if latest is not None else None,
         "earliest_considered": _normalized_time(earliest) if earliest is not None else None,
+        "failed": _failed_selection_copy(raw.get("failed")),
     }
 
 
@@ -133,6 +202,8 @@ def select_latest_candidates(
     candidates: tuple[dict[str, object], ...],
     cursor: dict[str, object] | None,
     limit: int,
+    *,
+    retry_quarantined: bool = False,
 ) -> tuple[dict[str, object], ...]:
     """Select new changes first, then the newest unfinished historical holes."""
 
@@ -143,6 +214,9 @@ def select_latest_candidates(
     selection = _selection_copy(cursor)
     completed_receipts = cast(list[dict[str, str]], selection["completed"])
     completed_keys = {_version_key(receipt) for receipt in completed_receipts}
+    failed_selection = cast(dict[str, object], selection["failed"])
+    failed_tokens = set(cast(list[str], failed_selection["tokens"]))
+    failed_resource_prefixes = {token[:16] for token in failed_tokens}
     known_revisions: dict[tuple[str, str], set[str]] = {}
     for receipt in completed_receipts:
         known_revisions.setdefault(_resource_key(receipt), set()).add(str(receipt["revision_id"]))
@@ -163,19 +237,32 @@ def select_latest_candidates(
     for key, candidate in deduplicated.items():
         if key in completed_keys:
             continue
+        failure_token = _failure_token(candidate)
+        quarantined = failure_token in failed_tokens
+        if quarantined and not retry_quarantined:
+            continue
         resource_key = _resource_key(candidate)
         revisions = known_revisions.get(resource_key, set())
         changed_revision = bool(revisions) and str(candidate["revision_id"]) not in revisions
+        changed_failed_revision = (
+            _failure_resource_prefix(candidate) in failed_resource_prefixes and not quarantined
+        )
         if (
             earliest is not None
             and _time_sort_value(candidate["candidate_time"]) < _time_sort_value(earliest)
             and not changed_revision
+            and not changed_failed_revision
         ):
             continue
         newly_visible = latest_seen is None or _time_sort_value(candidate["candidate_time"]) > _time_sort_value(
             latest_seen
         )
-        pending.append((0 if changed_revision or newly_visible else 1, candidate))
+        pending.append(
+            (
+                0 if changed_revision or changed_failed_revision or newly_visible or quarantined else 1,
+                candidate,
+            )
+        )
 
     pending.sort(
         key=lambda item: (
@@ -202,11 +289,21 @@ def record_completed_candidates(
     updated = deepcopy(cursor) if cursor is not None else {}
     selection = _selection_copy(updated)
     receipts = cast(list[dict[str, str]], selection["completed"])
+    failed_selection = cast(dict[str, object], selection["failed"])
+    failed_tokens = set(cast(list[str], failed_selection["tokens"]))
+    failure_examples = cast(list[dict[str, object]], failed_selection["examples"])
     earliest = selection["earliest_considered"]
     by_key = {_version_key(receipt): receipt for receipt in receipts}
     latest = selection["latest_seen_time"]
     for raw_candidate in completed:
         candidate = _candidate_copy(raw_candidate)
+        resource_prefix = _failure_resource_prefix(candidate)
+        failed_tokens = {token for token in failed_tokens if not token.startswith(resource_prefix)}
+        failure_examples = [
+            example
+            for example in failure_examples
+            if not str(example["token"]).startswith(resource_prefix)
+        ]
         candidate_time = str(candidate["candidate_time"])
         if earliest is not None and _time_sort_value(candidate_time) < _time_sort_value(earliest):
             continue
@@ -219,8 +316,90 @@ def record_completed_candidates(
             latest = candidate_time
     selection["completed"] = sorted(by_key.values(), key=_receipt_sort_key)
     selection["latest_seen_time"] = latest
+    failed_selection["tokens"] = sorted(failed_tokens)
+    failed_selection["examples"] = failure_examples
+    selection["failed"] = failed_selection
     updated[_SELECTION_KEY] = selection
     return updated
+
+
+def record_failed_candidates(
+    cursor: dict[str, object] | None,
+    failures: tuple[dict[str, object], ...],
+    *,
+    failed_at: str,
+) -> dict[str, object]:
+    """Return a copied cursor with opaque failed-version quarantine receipts."""
+
+    if cursor is not None and not isinstance(cursor, dict):
+        raise ValueError("cursor must be an object or null")
+    if not isinstance(failures, tuple):
+        raise ValueError("failed candidates must be a tuple")
+    normalized_failed_at = _normalized_time(failed_at)
+    updated = deepcopy(cursor) if cursor is not None else {}
+    selection = _selection_copy(updated)
+    failed_selection = cast(dict[str, object], selection["failed"])
+    tokens = set(cast(list[str], failed_selection["tokens"]))
+    examples = {
+        str(example["token"]): example
+        for example in cast(list[dict[str, object]], failed_selection["examples"])
+    }
+    latest = selection["latest_seen_time"]
+    for raw_failure in failures:
+        candidate = _candidate_copy(raw_failure)
+        item_ref = raw_failure.get("item_ref")
+        code = raw_failure.get("code")
+        message = raw_failure.get("message")
+        if not isinstance(item_ref, str) or not item_ref.strip() or len(item_ref) > 256:
+            raise ValueError("failed candidate item_ref must be a bounded non-empty string")
+        if isinstance(code, bool) or not isinstance(code, int):
+            raise ValueError("failed candidate code must be an integer")
+        if not isinstance(message, str) or not message.strip() or len(message) > 256:
+            raise ValueError("failed candidate message must be a bounded non-empty string")
+        resource_prefix = _failure_resource_prefix(candidate)
+        tokens = {token for token in tokens if not token.startswith(resource_prefix)}
+        examples = {
+            token: example
+            for token, example in examples.items()
+            if not token.startswith(resource_prefix)
+        }
+        token = _failure_token(candidate)
+        tokens.add(token)
+        examples[token] = {
+            "token": token,
+            "item_ref": item_ref,
+            "code": code,
+            "message": message,
+            "failed_at": normalized_failed_at,
+        }
+        candidate_time = str(candidate["candidate_time"])
+        if latest is None or _time_sort_value(candidate_time) > _time_sort_value(latest):
+            latest = candidate_time
+    failed_selection["tokens"] = sorted(tokens)
+    failed_selection["examples"] = sorted(
+        examples.values(),
+        key=lambda example: (-_time_sort_value(example["failed_at"]), str(example["token"])),
+    )[:_FAILURE_EXAMPLE_LIMIT]
+    selection["failed"] = failed_selection
+    selection["latest_seen_time"] = latest
+    updated[_SELECTION_KEY] = selection
+    return updated
+
+
+def quarantined_candidate_diagnostics(
+    cursor: dict[str, object] | None,
+) -> tuple[int, tuple[dict[str, object], ...]]:
+    """Return the quarantine count and bounded credential-free public examples."""
+
+    selection = _selection_copy(cursor)
+    failed_selection = cast(dict[str, object], selection["failed"])
+    tokens = cast(list[str], failed_selection["tokens"])
+    examples = cast(list[dict[str, object]], failed_selection["examples"])
+    public_examples = tuple(
+        {field_name: deepcopy(example[field_name]) for field_name in _FAILURE_FIELDS if field_name != "token"}
+        for example in examples
+    )
+    return len(tokens), public_examples
 
 
 def compact_cursor(

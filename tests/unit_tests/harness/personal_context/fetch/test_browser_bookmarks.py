@@ -414,10 +414,68 @@ def test_browser_bookmarks_page_fetch_failure_is_warning_upsert(tmp_path: Path, 
         home=tmp_path / "home",
     )
 
-    item = _items(asyncio.run(_batches(service)))[0]
+    batches = asyncio.run(_batches(service))
+    item = _items(batches)[0]
     assert item.operation == "upsert"
     assert item.metadata["page_fetch_status"] == "warning"
     assert item.metadata["page_fetch_error"] == "timeout"
+    assert batches[0].success_offsets == (0,)
+    assert batches[0].failures == ()
+
+
+def test_browser_bookmarks_isolates_item_construction_failure_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(
+        path,
+        [
+            _bookmark("1", "Broken", "https://example.com/broken", date_added="13200000000000002"),
+            _bookmark("2", "Good", "https://example.com/good", date_added="13200000000000001"),
+        ],
+    )
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+    candidates = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    original = browser_bookmarks._bookmark_item
+
+    def build_item(bookmark, *, profile, page):
+        if bookmark["title"] == "Broken":
+            raise ValueError("secret item payload")
+        return original(bookmark, profile=profile, page=page)
+
+    monkeypatch.setattr(browser_bookmarks, "_bookmark_item", build_item)
+
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.title for item in batch.items] == ["Good"]
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": candidates[0]["stable_id"],
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+def test_browser_bookmarks_rejects_corrupt_candidate_instead_of_quarantining(tmp_path: Path) -> None:
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])
+    service = BrowserBookmarksFetchService(_config(path), home=tmp_path / "home")
+
+    with pytest.raises(BaseError):
+        asyncio.run(
+            service.fetch(
+                run_id="run-1",
+                cursor=None,
+                candidates=({"stable_id": "broken"},),
+            ).__anext__()
+        )
 
 
 def test_browser_bookmarks_unsafe_url_is_not_fetched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

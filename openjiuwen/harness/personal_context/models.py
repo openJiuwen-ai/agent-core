@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping
 
@@ -13,13 +14,25 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _PersonalContextState = Literal["CREATED", "CONFIGURED", "STARTING", "RUNNING", "STOPPING", "STOPPED", "FAILED"]
 _FetchState = Literal["STOPPED", "STARTING", "RUNNING", "STOPPING", "FAILED"]
-_FETCH_RUN_STATES = {"idle", "running", "stopping", "succeeded", "failed", "cancelled"}
+_FETCH_RUN_STATES = {
+    "idle",
+    "running",
+    "stopping",
+    "succeeded",
+    "partial_succeeded",
+    "failed",
+    "cancelled",
+}
 _FETCH_RUN_PROGRESS_FIELDS = {
     "service_id",
     "run_state",
     "progress_percent",
     "total_items",
     "completed_items",
+    "failed_items",
+    "quarantined_items",
+    "item_errors",
+    "omitted_item_errors",
     "last_error",
 }
 
@@ -74,6 +87,12 @@ class PersonalContextStatus(BaseModel):
         ):
             if copied.get(field_name) is not None:
                 copied[field_name] = _copy_mapping(copied[field_name], field_name=field_name)
+        for progress in copied.get("fetch_run_progress", {}).values():
+            if isinstance(progress, dict):
+                progress.setdefault("failed_items", 0)
+                progress.setdefault("quarantined_items", 0)
+                progress.setdefault("item_errors", [])
+                progress.setdefault("omitted_item_errors", 0)
         return copied
 
     @field_validator("fetch_service_errors")
@@ -98,7 +117,14 @@ class PersonalContextStatus(BaseModel):
             if run_state not in _FETCH_RUN_STATES:
                 raise ValueError("fetch run progress has an invalid run_state")
             numeric: dict[str, int] = {}
-            for field_name in ("progress_percent", "total_items", "completed_items"):
+            for field_name in (
+                "progress_percent",
+                "total_items",
+                "completed_items",
+                "failed_items",
+                "quarantined_items",
+                "omitted_item_errors",
+            ):
                 field_value = progress[field_name]
                 if isinstance(field_value, bool) or not isinstance(field_value, int):
                     raise ValueError(f"fetch run progress {field_name} must be an integer")
@@ -106,25 +132,76 @@ class PersonalContextStatus(BaseModel):
             percent = numeric["progress_percent"]
             total = numeric["total_items"]
             completed = numeric["completed_items"]
-            if not 0 <= percent <= 100 or total < 0 or not 0 <= completed <= total:
+            failed = numeric["failed_items"]
+            quarantined = numeric["quarantined_items"]
+            omitted = numeric["omitted_item_errors"]
+            if (
+                not 0 <= percent <= 100
+                or total < 0
+                or completed < 0
+                or failed < 0
+                or completed + failed > total
+                or quarantined < 0
+                or omitted < 0
+            ):
                 raise ValueError("fetch run progress counts are out of range")
+            item_errors = progress["item_errors"]
+            if not isinstance(item_errors, (list, tuple)) or len(item_errors) > 20:
+                raise ValueError("fetch run progress item_errors must be a bounded list")
+            for item_error in item_errors:
+                if not isinstance(item_error, Mapping) or set(item_error) != {
+                    "item_ref",
+                    "code",
+                    "message",
+                    "failed_at",
+                }:
+                    raise ValueError("fetch run progress item_error has an invalid shape")
+                code = item_error["code"]
+                if isinstance(code, bool) or not isinstance(code, int):
+                    raise ValueError("fetch run progress item_error code must be an integer")
+                for field_name in ("item_ref", "message"):
+                    field_value = item_error[field_name]
+                    if not isinstance(field_value, str) or not field_value.strip() or len(field_value) > 256:
+                        raise ValueError(
+                            f"fetch run progress item_error {field_name} must be a bounded non-empty string"
+                        )
+                failed_at = item_error["failed_at"]
+                if not isinstance(failed_at, str) or len(failed_at) > 64:
+                    raise ValueError("fetch run progress item_error failed_at must be RFC 3339")
+                try:
+                    parsed_failed_at = datetime.fromisoformat(failed_at.replace("Z", "+00:00"))
+                except ValueError as exc:
+                    raise ValueError("fetch run progress item_error failed_at must be RFC 3339") from exc
+                if parsed_failed_at.tzinfo is None:
+                    raise ValueError("fetch run progress item_error failed_at must include a timezone")
+            if len(item_errors) + omitted != quarantined:
+                raise ValueError("fetch run progress quarantined diagnostics are inconsistent")
             if run_state == "succeeded":
-                if completed != total:
+                if completed != total or failed != 0:
                     raise ValueError("succeeded fetch run progress requires all items completed")
                 if percent != 100:
                     raise ValueError("succeeded fetch run progress must be 100 percent")
-            elif percent == 100:
-                raise ValueError("only succeeded fetch run progress may be 100 percent")
+            elif run_state == "partial_succeeded":
+                if completed == 0 or failed == 0 or completed + failed != total:
+                    raise ValueError("partial fetch run progress requires completed and failed items")
+                if percent != 100:
+                    raise ValueError("partial fetch run progress must be 100 percent")
             if run_state == "idle":
-                has_progress = percent != 0 or total != 0 or completed != 0
+                has_progress = percent != 0 or total != 0 or completed != 0 or failed != 0
                 if has_progress:
                     raise ValueError("idle fetch run progress must be empty")
             last_error = progress["last_error"]
             if run_state == "failed":
-                if not isinstance(last_error, str) or not last_error.strip() or len(last_error) > 512:
-                    raise ValueError("failed fetch run progress requires a bounded last_error")
+                all_items_failed = total > 0 and completed == 0 and failed == total and percent == 100
+                if all_items_failed:
+                    if last_error is not None:
+                        raise ValueError("item failure progress must not contain last_error")
+                elif not isinstance(last_error, str) or not last_error.strip() or len(last_error) > 512:
+                    raise ValueError("system failure progress requires a bounded last_error")
             elif last_error is not None:
                 raise ValueError("only failed fetch run progress may contain last_error")
+            if percent == 100 and run_state not in {"succeeded", "partial_succeeded", "failed"}:
+                raise ValueError("only terminal fetch run progress may be 100 percent")
         return value
 
     @field_validator("last_error")
@@ -216,6 +293,10 @@ class FetchBatch(BaseModel):
 
     batch_id: str = Field(min_length=1)
     items: tuple[RawChangeItem, ...] = Field(default_factory=tuple, max_length=20)
+    attempted_count: int = Field(default=0, ge=0, le=20, strict=True)
+    success_offsets: tuple[int, ...] = ()
+    skipped_offsets: tuple[int, ...] = ()
+    failures: tuple[dict[str, object], ...] = ()
     next_cursor: dict[str, object] | None = None
     materialized_source_path: str | None = None
     materialized_revision: str | None = None
@@ -226,8 +307,24 @@ class FetchBatch(BaseModel):
         if not isinstance(value, Mapping):
             return value
         copied = deepcopy(dict(value))
+        outcome_fields = {"attempted_count", "success_offsets", "skipped_offsets", "failures"}
+        if not outcome_fields.intersection(copied):
+            item_count = len(copied.get("items") or ())
+            copied.update(
+                attempted_count=item_count,
+                success_offsets=tuple(range(item_count)),
+                skipped_offsets=(),
+                failures=(),
+            )
         if copied.get("next_cursor") is not None:
             copied["next_cursor"] = _copy_mapping(copied["next_cursor"], field_name="next_cursor")
+        if copied.get("failures") is not None:
+            raw_failures = copied["failures"]
+            if isinstance(raw_failures, (str, bytes)) or not isinstance(raw_failures, (list, tuple)):
+                raise ValueError("failures must be a list or tuple")
+            copied["failures"] = tuple(
+                _copy_mapping(failure, field_name="failure") for failure in raw_failures
+            )
         return copied
 
     @field_validator("batch_id")
@@ -268,4 +365,40 @@ class FetchBatch(BaseModel):
     def validate_materialized_pair(self) -> "FetchBatch":
         if (self.materialized_source_path is None) != (self.materialized_revision is None):
             raise ValueError("materialized source path and revision must be provided together")
+        for field_name, offsets in (
+            ("success_offsets", self.success_offsets),
+            ("skipped_offsets", self.skipped_offsets),
+        ):
+            if any(isinstance(offset, bool) or not isinstance(offset, int) for offset in offsets):
+                raise ValueError(f"{field_name} must contain integers")
+            if tuple(sorted(set(offsets))) != offsets:
+                raise ValueError(f"{field_name} must be strictly increasing")
+        failure_offsets: list[int] = []
+        for failure in self.failures:
+            if set(failure) != {"offset", "item_ref", "code", "message"}:
+                raise ValueError("failure must contain offset, item_ref, code, and message")
+            offset = failure["offset"]
+            code = failure["code"]
+            item_ref = failure["item_ref"]
+            message = failure["message"]
+            if isinstance(offset, bool) or not isinstance(offset, int):
+                raise ValueError("failure offset must be an integer")
+            if isinstance(code, bool) or not isinstance(code, int):
+                raise ValueError("failure code must be an integer")
+            if not isinstance(item_ref, str) or not item_ref.strip() or len(item_ref) > 256:
+                raise ValueError("failure item_ref must be a bounded non-empty string")
+            if not isinstance(message, str) or not message.strip() or len(message) > 256:
+                raise ValueError("failure message must be a bounded non-empty string")
+            failure_offsets.append(offset)
+        if len(set(failure_offsets)) != len(failure_offsets):
+            raise ValueError("failure offsets must be unique")
+        if len(self.items) != len(self.success_offsets):
+            raise ValueError("items must match success_offsets")
+        success = set(self.success_offsets)
+        skipped = set(self.skipped_offsets)
+        failed = set(failure_offsets)
+        if success & skipped or success & failed or skipped & failed:
+            raise ValueError("candidate outcome offsets must be disjoint")
+        if success | skipped | failed != set(range(self.attempted_count)):
+            raise ValueError("candidate outcomes must cover attempted_count")
         return self

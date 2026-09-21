@@ -56,6 +56,7 @@ class RssFeedFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -78,7 +79,9 @@ class RssFeedFetchService(ContextFetchService):
             )
             del feed_type, feed_title
             max_items = self._config.max_items_per_run or _DEFAULT_MAX_ITEMS
-            return select_latest_candidates(tuple(candidates), cursor, max_items)
+            return select_latest_candidates(
+                tuple(candidates), cursor, max_items, retry_quarantined=include_failed
+            )
         except asyncio.CancelledError:
             raise
         except BaseError:
@@ -100,10 +103,31 @@ class RssFeedFetchService(ContextFetchService):
                 yield FetchBatch(batch_id="batch-0", items=(), next_cursor=next_cursor)
                 return
             for index in range(0, len(candidates), _BATCH_SIZE):
-                items = tuple(_change_item(candidate) for candidate in candidates[slice(index, index + _BATCH_SIZE)])
+                chunk = candidates[slice(index, index + _BATCH_SIZE)]
+                items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
+                for offset, candidate in enumerate(chunk):
+                    item_ref = _validated_candidate_item_ref(candidate)
+                    try:
+                        items.append(_change_item(candidate))
+                    except (TypeError, ValueError):
+                        failures.append(
+                            {
+                                "offset": offset,
+                                "item_ref": item_ref,
+                                "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                "message": "条目读取或解析失败",
+                            }
+                        )
+                        continue
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
-                    items=items,
+                    items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                 )
         except asyncio.CancelledError:
@@ -393,6 +417,25 @@ def _change_item(candidate: Mapping[str, object]) -> RawChangeItem:
         metadata=metadata,
         raw_snapshot=candidate.get("raw_snapshot"),
     )
+
+
+def _validated_candidate_item_ref(candidate: Mapping[str, object]) -> str:
+    for field_name in (
+        "stable_id",
+        "revision_id",
+        "candidate_time",
+        "resource_lane",
+        "locator",
+        "content",
+        "feed_url",
+    ):
+        _required_text(candidate, field_name)
+    item_ref = _required_text(candidate, "stable_id")
+    if len(item_ref) > 256:
+        raise _fetch_error("RSS candidate stable ID is too long")
+    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", item_ref):
+        return item_ref
+    return f"rss:{hashlib.sha256(item_ref.encode('utf-8')).hexdigest()[:24]}"
 
 
 def _first_child(element: Element | None, name: str) -> Element | None:

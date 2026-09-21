@@ -36,8 +36,10 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
     retry_reason_from_http_status,
+    root_provider_error,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
@@ -1065,6 +1067,65 @@ async def _download_wiki_file(argv: list[str], *, sandbox_root: Path) -> tuple[s
         raise _coerce_lark_cli_error(exc) from None
 
 
+def _validated_candidate_item_ref(candidate: Mapping[str, object]) -> str:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("Feishu candidate is invalid")
+    item_ref = str(candidate["stable_id"])
+    if len(item_ref) > 256:
+        raise _fetch_error("Feishu candidate stable ID is too long")
+    kind = candidate.get("kind")
+    if kind == "doc":
+        if not isinstance(candidate.get("document_id"), str) or not isinstance(candidate.get("metadata"), Mapping):
+            raise _fetch_error("Feishu document candidate is invalid")
+    elif kind in {"task", "calendar"}:
+        if not isinstance(candidate.get("identifier"), str) or not isinstance(candidate.get("payload"), Mapping):
+            raise _fetch_error("Feishu list candidate is invalid")
+    elif kind == "wiki":
+        if not isinstance(candidate.get("node"), Mapping):
+            raise _fetch_error("Feishu Wiki candidate is invalid")
+    else:
+        raise _fetch_error("Feishu candidate kind is invalid")
+    return item_ref
+
+
+def _cli_status_codes(value: object) -> set[int]:
+    statuses: set[int] = set()
+    if isinstance(value, Mapping):
+        for key, nested in value.items():
+            if key in {"status", "status_code"}:
+                if isinstance(nested, int) and not isinstance(nested, bool):
+                    statuses.add(nested)
+                elif isinstance(nested, str) and nested.strip().isdigit():
+                    statuses.add(int(nested.strip()))
+            statuses.update(_cli_status_codes(nested))
+    elif isinstance(value, (list, tuple)):
+        for nested in value:
+            statuses.update(_cli_status_codes(nested))
+    return statuses
+
+
+def _is_feishu_candidate_read_error(exc: BaseException) -> bool:
+    if is_candidate_read_error(exc):
+        return True
+    root = root_provider_error(exc)
+    if not isinstance(root, subprocess.CalledProcessError):
+        return False
+    statuses: set[int] = set()
+    for raw_output in (root.output, root.stderr):
+        text = _decoded_process_output(raw_output).strip()
+        if not text:
+            continue
+        try:
+            statuses.update(_cli_status_codes(json.loads(text)))
+        except json.JSONDecodeError:
+            continue
+    if statuses & {401, 403}:
+        return False
+    return bool(statuses & {404, 408, 410, 429} or any(500 <= status <= 599 for status in statuses))
+
+
 class FeishuFetchService(ContextFetchService):
     """Fetch Feishu docs, tasks, calendar events or Wiki nodes."""
 
@@ -1074,6 +1135,7 @@ class FeishuFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -1089,6 +1151,7 @@ class FeishuFetchService(ContextFetchService):
                 tuple(candidates),
                 cursor,
                 self._config.max_items_per_run or _DEFAULT_MAX_ITEMS,
+                retry_quarantined=include_failed,
             )
         except asyncio.CancelledError:
             raise
@@ -1112,10 +1175,33 @@ class FeishuFetchService(ContextFetchService):
                 return
             for index in range(0, len(candidates), _BATCH_SIZE):
                 end = index + _BATCH_SIZE
-                items = [await self._read_candidate(candidate) for candidate in candidates[index:end]]
+                chunk = candidates[index:end]
+                items: list[RawChangeItem] = []
+                success_offsets: list[int] = []
+                failures: list[dict[str, object]] = []
+                for offset, candidate in enumerate(chunk):
+                    item_ref = _validated_candidate_item_ref(candidate)
+                    try:
+                        items.append(await self._read_candidate(candidate))
+                    except BaseError as exc:
+                        if not _is_feishu_candidate_read_error(exc):
+                            raise
+                        failures.append(
+                            {
+                                "offset": offset,
+                                "item_ref": item_ref,
+                                "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+                                "message": "条目读取或解析失败",
+                            }
+                        )
+                        continue
+                    success_offsets.append(offset)
                 yield FetchBatch(
                     batch_id=f"batch-{index // _BATCH_SIZE}",
                     items=tuple(items),
+                    attempted_count=len(chunk),
+                    success_offsets=tuple(success_offsets),
+                    failures=tuple(failures),
                     next_cursor=next_cursor,
                 )
         except asyncio.CancelledError:

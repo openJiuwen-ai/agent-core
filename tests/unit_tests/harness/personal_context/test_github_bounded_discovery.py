@@ -917,9 +917,15 @@ async def test_pull_discovery_retains_only_lane_limit_between_pages(
         *,
         cursor: dict[str, object] | None,
         limit: int,
+        include_failed: bool = False,
     ) -> None:
         before_lengths.append(len(candidates))
-        original_bounded(candidates, cursor=cursor, limit=limit)
+        original_bounded(
+            candidates,
+            cursor=cursor,
+            limit=limit,
+            include_failed=include_failed,
+        )
         after_lengths.append(len(candidates))
 
     monkeypatch.setattr(github_module, "_bounded_lane_candidates", tracking_bounded)

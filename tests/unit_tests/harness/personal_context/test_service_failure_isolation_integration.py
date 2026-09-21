@@ -23,14 +23,24 @@ async def test_failed_service_does_not_stop_healthy_real_pipeline_publication(
 
     class ControlledLocalFiles(LocalFilesFetchService):
         async def prepare_run(
-            self, *, run_id: str, run_started_at: datetime, cursor: dict[str, object] | None
+            self,
+            *,
+            run_id: str,
+            run_started_at: datetime,
+            cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
             if self._config.service_id == "failed":
                 await healthy_started.wait()
                 raise RuntimeError("injected service failure before healthy publication")
             healthy_started.set()
             await release_healthy.wait()
-            return await super().prepare_run(run_id=run_id, run_started_at=run_started_at, cursor=cursor)
+            return await super().prepare_run(
+                run_id=run_id,
+                run_started_at=run_started_at,
+                cursor=cursor,
+                include_failed=include_failed,
+            )
 
     source_root = tmp_path / "input"
     source_root.mkdir()

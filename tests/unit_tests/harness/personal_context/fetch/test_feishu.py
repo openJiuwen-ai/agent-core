@@ -13,6 +13,7 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import feishu as feishu_module
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.feishu import (
@@ -82,6 +83,85 @@ def _items(batches: list[FetchBatch]) -> list[RawChangeItem]:
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_candidate(index: int) -> dict[str, object]:
+    return {
+        "stable_id": f"feishu:doc:{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "docs",
+        "locator": f"feishu://doc/{index}",
+        "kind": "doc",
+        "document_id": str(index),
+        "metadata": {"title": f"Doc {index}"},
+    }
+
+
+def _fetch_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"feishu:doc:{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Doc {index}",
+        content=f"Body {index}",
+        original_ref=f"feishu://doc/{index}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_fetch_isolates_one_candidate_timeout_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FeishuFetchService(feishu_config(), home=tmp_path)
+
+    async def read(candidate):
+        if candidate["stable_id"] == "feishu:doc:0":
+            raise feishu_module._fetch_error("Feishu document read failed", TimeoutError("private timeout"))
+        return _fetch_item(1)
+
+    monkeypatch.setattr(service, "_read_candidate", read)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(_fetch_candidate(0), _fetch_candidate(1)),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert batch.items == (_fetch_item(1),)
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "feishu:doc:0",
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_feishu_fetch_does_not_quarantine_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = FeishuFetchService(feishu_config(), home=tmp_path)
+
+    async def denied(_candidate):
+        payload = b'{"error":{"status":403,"code":"missing_scope"}}'
+        cause = subprocess.CalledProcessError(1, ["lark-cli"], output=payload, stderr=b"")
+        raise feishu_module._fetch_error("Feishu document read failed", cause)
+
+    monkeypatch.setattr(service, "_read_candidate", denied)
+
+    with pytest.raises(BaseError):
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate(0),),
+        ).__anext__()
 
 
 def _fake_cli(monkeypatch: pytest.MonkeyPatch, responses: dict[tuple[str, ...], list[object]]) -> list[list[str]]:

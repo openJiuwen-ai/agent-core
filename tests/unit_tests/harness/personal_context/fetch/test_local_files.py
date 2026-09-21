@@ -196,11 +196,64 @@ def test_local_files_does_not_retry_permission_error(tmp_path: Path, monkeypatch
     monkeypatch.setattr(local_files, "_materialize_candidate", denied)
     monkeypatch.setattr(retry_module, "_sleep", _no_retry_sleep)
 
-    with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(service))
+    candidates = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
 
     assert calls == 1
-    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+    assert batch.items == ()
+    assert batch.success_offsets == ()
+    assert batch.failures[0]["offset"] == 0
+    assert batch.failures[0]["code"] == StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code
+
+
+def test_local_files_emits_success_skip_failure_and_continues_one_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    for name, content in (
+        ("good.md", "good"),
+        ("blank.txt", "   \n"),
+        ("broken.pdf", "pdf"),
+        ("tail.txt", "tail"),
+    ):
+        (root / name).write_text(content, encoding="utf-8")
+    service = LocalFilesFetchService(_config(root), home=tmp_path / "home")
+    prepared = asyncio.run(
+        service.prepare_run(run_id="run-1", run_started_at=datetime.now(UTC), cursor=None)
+    )
+    by_name = {str(candidate["relative_path"]): candidate for candidate in prepared}
+    candidates = tuple(by_name[name] for name in ("good.md", "blank.txt", "broken.pdf", "tail.txt"))
+    original = local_files._materialize_candidate
+    attempted: list[str] = []
+
+    def materialize(candidate):
+        name = str(candidate["relative_path"])
+        attempted.append(name)
+        if name == "broken.pdf":
+            raise local_files._file_error("local PDF extraction failed", ValueError("broken"))
+        return original(candidate)
+
+    monkeypatch.setattr(local_files, "_materialize_candidate", materialize)
+
+    batch = asyncio.run(service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__())
+
+    assert attempted == ["good.md", "blank.txt", "broken.pdf", "tail.txt"]
+    assert batch.attempted_count == 4
+    assert batch.success_offsets == (0, 3)
+    assert batch.skipped_offsets == (1,)
+    assert [item.title for item in batch.items] == ["good.md", "tail.txt"]
+    assert batch.failures == (
+        {
+            "offset": 2,
+            "item_ref": "broken.pdf",
+            "code": 154002,
+            "message": "文件读取或解析失败",
+        },
+    )
 
 
 def test_local_files_marks_concurrent_read_change_as_retryable() -> None:
@@ -449,7 +502,7 @@ def test_local_files_touch_reselects_file_but_keeps_content_revision(tmp_path: P
     assert second[0].items[0].revision_id == original_revision
 
 
-def test_local_files_rejects_text_larger_than_one_mib_before_reading(tmp_path: Path, monkeypatch):
+def test_local_files_quarantines_text_larger_than_one_mib_before_reading(tmp_path: Path, monkeypatch):
     root = tmp_path / "source"
     root.mkdir()
     target = root / "large.txt"
@@ -463,9 +516,9 @@ def test_local_files_rejects_text_larger_than_one_mib_before_reading(tmp_path: P
         raise AssertionError("oversized file must be rejected before read_bytes")
 
     monkeypatch.setattr(Path, "read_bytes", unexpected_read)
-    with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))
-    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+    batches = asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))
+    assert batches[0].items == ()
+    assert batches[0].failures[0]["code"] == StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code
     assert read_called is False
 
 
@@ -538,26 +591,26 @@ def test_local_files_replaced_external_symlink_is_ignored(tmp_path: Path):
     assert changed == []
 
 
-def test_local_files_read_change_fails_entire_run_with_file_error(tmp_path: Path, monkeypatch):
+def test_local_files_read_change_is_a_single_item_failure(tmp_path: Path, monkeypatch):
     root = tmp_path / "source"
     root.mkdir()
     target = root / "note.md"
     target.write_text("before", encoding="utf-8")
     original_read = local_files._read_checked
 
-    def changing_read(path: Path, *, extension: str, collect: bool):
-        content = original_read(path, extension=extension, collect=collect)
+    def changing_read(path: Path, *, extension: str):
+        content = original_read(path, extension=extension)
         if path == target:
             path.write_text("after", encoding="utf-8")
         return content
 
     monkeypatch.setattr(local_files, "_read_checked", changing_read)
-    with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))
-    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+    batch = asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))[0]
+    assert batch.items == ()
+    assert batch.failures[0]["code"] == StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code
 
 
-def test_local_files_pdf_failure_is_wrapped_as_file_error(tmp_path: Path, monkeypatch):
+def test_local_files_pdf_failure_is_a_single_item_failure(tmp_path: Path, monkeypatch):
     root = tmp_path / "source"
     root.mkdir()
     (root / "broken.pdf").write_bytes(b"broken")
@@ -566,9 +619,9 @@ def test_local_files_pdf_failure_is_wrapped_as_file_error(tmp_path: Path, monkey
         raise ValueError("invalid pdf")
 
     monkeypatch.setattr(local_files.pdfplumber, "open", fail)
-    with pytest.raises(BaseError) as caught:
-        asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))
-    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR
+    batch = asyncio.run(_batches(LocalFilesFetchService(_config(root), home=tmp_path / "home")))[0]
+    assert batch.items == ()
+    assert batch.failures[0]["code"] == StatusCode.CONTEXT_PROACTIVE_FILE_EXECUTION_ERROR.code
 
 
 def test_local_files_no_change_emits_empty_batch_without_creating_home_state(tmp_path: Path):

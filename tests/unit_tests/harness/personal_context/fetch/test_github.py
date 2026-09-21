@@ -18,9 +18,11 @@ import pytest
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.fetch import github as github_module
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.github import GitHubFetchService
+from openjiuwen.harness.personal_context.models import RawChangeItem
 
 
 def github_config(
@@ -156,6 +158,87 @@ def branch_response(head: str, candidate_time: str = "2026-01-01T00:00:00Z") -> 
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_item(index: int) -> RawChangeItem:
+    return RawChangeItem(
+        logical_id=f"github:item:{index}",
+        revision_id=f"revision-{index}",
+        operation="upsert",
+        title=f"Item {index}",
+        content=f"Body {index}",
+        original_ref=f"https://github.com/acme/demo/items/{index}",
+    )
+
+
+def _fetch_candidate(tmp_path: Path, index: int, *, code: bool = False) -> dict[str, object]:
+    candidate: dict[str, object] = {
+        "stable_id": f"github:item:{index}",
+        "revision_id": f"revision-{index}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "code" if code else "issue",
+        "locator": f"https://github.com/acme/demo/items/{index}",
+        "item": _fetch_item(index),
+    }
+    if code:
+        candidate.update(
+            owner="acme",
+            repo="demo",
+            head_sha="a" * 40,
+            materialized_source_path=str((tmp_path / "candidate").resolve()),
+        )
+    return candidate
+
+
+@pytest.mark.asyncio
+async def test_github_fetch_isolates_one_code_materialization_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitHubFetchService(github_config(tmp_path), home=tmp_path)
+
+    async def fail(*_args):
+        raise github_module._fetch_error("GitHub code materialization failed", TimeoutError("private"))
+
+    monkeypatch.setattr(service, "_materialize_code", fail)
+    candidates = (_fetch_candidate(tmp_path, 0, code=True), _fetch_candidate(tmp_path, 1))
+
+    batch = await service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert batch.items == (_fetch_item(1),)
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "github:item:0",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
+
+
+@pytest.mark.asyncio
+async def test_github_fetch_does_not_quarantine_authorization_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GitHubFetchService(github_config(tmp_path), home=tmp_path)
+
+    async def denied(*_args):
+        cause = aiohttp.ClientResponseError(
+            request_info=SimpleNamespace(real_url="https://api.github.com/fake"),
+            history=(),
+            status=403,
+        )
+        raise github_module._fetch_error("GitHub archive download failed", cause)
+
+    monkeypatch.setattr(service, "_materialize_code", denied)
+
+    with pytest.raises(BaseError):
+        await service.fetch(
+            run_id="run-1",
+            cursor=None,
+            candidates=(_fetch_candidate(tmp_path, 0, code=True),),
+        ).__anext__()
 
 
 @pytest.mark.asyncio

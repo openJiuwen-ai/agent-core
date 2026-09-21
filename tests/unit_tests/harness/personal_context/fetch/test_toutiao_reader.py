@@ -13,6 +13,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
+from openjiuwen.harness.personal_context.fetch import toutiao_reader
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.status_codes import StatusCode
@@ -123,6 +124,54 @@ def _set_responses(monkeypatch: pytest.MonkeyPatch, responses: dict[str, list[Re
 
 async def _no_retry_sleep(_delay: float) -> None:
     return None
+
+
+def _fetch_candidate(article_id: str) -> dict[str, object]:
+    article = _article(article_id, 10)
+    return {
+        "stable_id": article_id,
+        "revision_id": f"revision-{article_id}",
+        "candidate_time": "2026-09-21T12:00:00Z",
+        "resource_lane": "article",
+        "locator": article["article_url"],
+        "article": article,
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_fetch_isolates_one_article_timeout_and_continues(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    async def bootstrap(*_args, **_kwargs):
+        return None
+
+    async def body(_session, article, *, referer):
+        del referer
+        if article["item_id"] == "broken":
+            raise toutiao_reader._fetch_error("Toutiao request failed", TimeoutError("private"))
+        return "body", None, article["publish_time"], False, False
+
+    monkeypatch.setattr(toutiao_reader, "_bootstrap_profile", bootstrap)
+    monkeypatch.setattr(toutiao_reader, "_fetch_article_body", body)
+
+    batch = await service.fetch(
+        run_id="run-1",
+        cursor=None,
+        candidates=(_fetch_candidate("broken"), _fetch_candidate("good")),
+    ).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["toutiao_reader:article:good"]
+    assert batch.failures[0] == {
+        "offset": 0,
+        "item_ref": "broken",
+        "code": 154003,
+        "message": "条目读取或解析失败",
+    }
 
 
 async def _batches(

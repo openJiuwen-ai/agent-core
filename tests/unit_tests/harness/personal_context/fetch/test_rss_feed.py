@@ -10,6 +10,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
+from openjiuwen.harness.personal_context.fetch import rss_feed
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
 from openjiuwen.harness.personal_context.fetch.rss_feed import RssFeedFetchService
 from openjiuwen.harness.personal_context.status_codes import StatusCode
@@ -207,6 +208,62 @@ async def test_rss_feed_parses_rss_and_sanitizes_content(tmp_path: Path, monkeyp
     assert items[0].metadata["author"] == "作者甲"
     assert len(_Session.calls) == 1
     assert all(url == FEED_URL for url, _kwargs in _Session.calls)
+
+
+@pytest.mark.asyncio
+async def test_rss_feed_isolates_one_item_conversion_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_responses(monkeypatch, [_Response(RSS_FIXTURE)])
+    service = RssFeedFetchService(_config(max_items=25), home=tmp_path)
+    candidates = await service.prepare_run(
+        run_id="run-1",
+        run_started_at=datetime(2026, 8, 30, tzinfo=UTC),
+        cursor=None,
+    )
+    original = rss_feed._change_item
+
+    def convert(candidate):
+        if candidate["stable_id"] == "guid-new":
+            raise ValueError("private feed payload")
+        return original(candidate)
+
+    monkeypatch.setattr(rss_feed, "_change_item", convert)
+
+    batch = await service.fetch(run_id="run-1", cursor=None, candidates=candidates).__anext__()
+
+    assert batch.attempted_count == 2
+    assert batch.success_offsets == (1,)
+    assert [item.logical_id for item in batch.items] == ["rss_feed:entry:guid-old"]
+    assert batch.failures == (
+        {
+            "offset": 0,
+            "item_ref": "guid-new",
+            "code": 154003,
+            "message": "条目读取或解析失败",
+        },
+    )
+
+
+def test_rss_feed_failure_item_ref_does_not_expose_url_credentials() -> None:
+    secret_id = "https://user:password@example.test/item?token=top-secret#fragment"
+    candidate = {
+        "stable_id": secret_id,
+        "revision_id": "revision",
+        "candidate_time": "2026-08-29T00:00:00Z",
+        "resource_lane": "entry",
+        "locator": "https://example.test/item",
+        "content": "content",
+        "feed_url": FEED_URL,
+    }
+
+    item_ref = rss_feed._validated_candidate_item_ref(candidate)
+
+    assert item_ref.startswith("rss:")
+    assert "user" not in item_ref
+    assert "password" not in item_ref
+    assert "top-secret" not in item_ref
 
 
 @pytest.mark.asyncio

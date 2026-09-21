@@ -39,7 +39,12 @@ from openjiuwen.harness.personal_context.context_graph import (
 from openjiuwen.harness.personal_context.context_pipeline import ContextPipelineService
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
 from openjiuwen.harness.personal_context.fetch.browser_bookmarks import BrowserBookmarksFetchService
-from openjiuwen.harness.personal_context.fetch.cursor_selection import compact_cursor, record_completed_candidates
+from openjiuwen.harness.personal_context.fetch.cursor_selection import (
+    compact_cursor,
+    quarantined_candidate_diagnostics,
+    record_completed_candidates,
+    record_failed_candidates,
+)
 from openjiuwen.harness.personal_context.fetch.feishu import (
     FeishuFetchService,
     _lark_cli_auth_status,
@@ -144,13 +149,23 @@ def _fetch_run_status(
     run_state: str,
     total_items: int = 0,
     completed_items: int = 0,
+    failed_items: int = 0,
+    quarantined_items: int = 0,
+    item_errors: tuple[dict[str, object], ...] | list[dict[str, object]] = (),
+    omitted_item_errors: int = 0,
     last_error: str | None = None,
     phase: str = "processing",
     progress_percent: int | None = None,
 ) -> dict[str, object]:
     if progress_percent is not None:
         percent = min(100, max(0, progress_percent))
-    elif run_state == "succeeded":
+    elif run_state in {"succeeded", "partial_succeeded"} or (
+        run_state == "failed"
+        and last_error is None
+        and total_items > 0
+        and completed_items == 0
+        and failed_items == total_items
+    ):
         percent = 100
     elif phase == "organizing":
         percent = 25
@@ -159,7 +174,7 @@ def _fetch_run_status(
     elif phase == "committing":
         percent = 97
     elif total_items > 0:
-        percent = 5 + min(15, completed_items * 15 // total_items)
+        percent = 5 + min(15, (completed_items + failed_items) * 15 // total_items)
     else:
         percent = 0
     return {
@@ -168,6 +183,10 @@ def _fetch_run_status(
         "progress_percent": percent,
         "total_items": total_items,
         "completed_items": completed_items,
+        "failed_items": failed_items,
+        "quarantined_items": quarantined_items,
+        "item_errors": deepcopy(list(item_errors)),
+        "omitted_item_errors": omitted_item_errors,
         "last_error": last_error,
     }
 
@@ -179,6 +198,10 @@ def _terminal_fetch_run_status(
     run_state: str,
     total_items: int,
     completed_items: int,
+    failed_items: int | None = None,
+    quarantined_items: int | None = None,
+    item_errors: tuple[dict[str, object], ...] | list[dict[str, object]] | None = None,
+    omitted_item_errors: int | None = None,
     last_error: str | None = None,
 ) -> dict[str, object]:
     """Build a terminal snapshot without losing the last real phase progress."""
@@ -188,6 +211,24 @@ def _terminal_fetch_run_status(
         run_state=run_state,
         total_items=total_items,
         completed_items=completed_items,
+        failed_items=(
+            cast(int, current.get("failed_items", 0)) if failed_items is None else failed_items
+        ),
+        quarantined_items=(
+            cast(int, current.get("quarantined_items", 0))
+            if quarantined_items is None
+            else quarantined_items
+        ),
+        item_errors=(
+            cast(list[dict[str, object]], current.get("item_errors", []))
+            if item_errors is None
+            else item_errors
+        ),
+        omitted_item_errors=(
+            cast(int, current.get("omitted_item_errors", 0))
+            if omitted_item_errors is None
+            else omitted_item_errors
+        ),
         last_error=last_error,
         progress_percent=cast(int, current.get("progress_percent", 0)),
     )
@@ -427,16 +468,26 @@ class PersonalContext:
                 service.service_id: await self._run_query(self._read_run_history, service.service_id)
                 for service in config.fetch_services
             }
+            cursors = {
+                service.service_id: await self._run_query(self._read_cursor_for_config, service)
+                for service in config.fetch_services
+            }
             await self._cancel_authorization(clear_error=True)
             self._fetch_run_history = history
             self._fetch_run_identity = {}
             self._config = config
             self._fetch_states = {service.service_id: "STOPPED" for service in config.fetch_services}
             self._fetch_errors = {}
-            self._fetch_run_progress = {
-                service.service_id: _fetch_run_status(service.service_id, run_state="idle")
-                for service in config.fetch_services
-            }
+            self._fetch_run_progress = {}
+            for service in config.fetch_services:
+                quarantined_items, item_errors = quarantined_candidate_diagnostics(cursors[service.service_id])
+                self._fetch_run_progress[service.service_id] = _fetch_run_status(
+                    service.service_id,
+                    run_state="idle",
+                    quarantined_items=quarantined_items,
+                    item_errors=item_errors,
+                    omitted_item_errors=quarantined_items - len(item_errors),
+                )
             self._fetch_providers = {}
             self._fetch_tasks = {}
             self._fetch_stop_events = {}
@@ -838,6 +889,10 @@ class PersonalContext:
                 run_state="running",
                 total_items=cast(int, progress["total_items"]),
                 completed_items=cast(int, progress["completed_items"]),
+                failed_items=cast(int, progress.get("failed_items", 0)),
+                quarantined_items=cast(int, progress.get("quarantined_items", 0)),
+                item_errors=cast(list[dict[str, object]], progress.get("item_errors", [])),
+                omitted_item_errors=cast(int, progress.get("omitted_item_errors", 0)),
                 phase=phase,
                 progress_percent=clamped_percent,
             )
@@ -998,6 +1053,8 @@ class PersonalContext:
             raise _state_error("service must be PersonalContextFetchServiceConfig")
         safe_id = _safe_service_id(service.service_id)
         history = await self._run_query(self._read_run_history, safe_id)
+        cursor = await self._run_query(self._read_cursor_for_config, service)
+        quarantined_items, item_errors = quarantined_candidate_diagnostics(cursor)
         async with self._state_lock:
             config = self._config
             if config is None:
@@ -1013,6 +1070,9 @@ class PersonalContext:
             self._fetch_run_progress[safe_id] = _fetch_run_status(
                 safe_id,
                 run_state="idle",
+                quarantined_items=quarantined_items,
+                item_errors=item_errors,
+                omitted_item_errors=quarantined_items - len(item_errors),
             )
             self._fetch_run_history[safe_id] = history
             pipeline = self._pipeline_service
@@ -1254,13 +1314,17 @@ class PersonalContext:
                 return
             stop_event = self._active_fetch_run_stop_events[safe_id]
             progress = self._fetch_run_progress.get(safe_id, {})
-            if progress.get("run_state") in {"succeeded", "failed", "cancelled"}:
+            if progress.get("run_state") in {"succeeded", "partial_succeeded", "failed", "cancelled"}:
                 return
             self._fetch_run_progress[safe_id] = _fetch_run_status(
                 safe_id,
                 run_state="stopping",
                 total_items=cast(int, progress.get("total_items", 0)),
                 completed_items=cast(int, progress.get("completed_items", 0)),
+                failed_items=cast(int, progress.get("failed_items", 0)),
+                quarantined_items=cast(int, progress.get("quarantined_items", 0)),
+                item_errors=cast(list[dict[str, object]], progress.get("item_errors", [])),
+                omitted_item_errors=cast(int, progress.get("omitted_item_errors", 0)),
                 progress_percent=cast(int, progress.get("progress_percent", 0)),
             )
             self._fetch_states[safe_id] = "STOPPING"
@@ -1297,6 +1361,10 @@ class PersonalContext:
                     run_state="failed",
                     total_items=cast(int, progress.get("total_items", 0)),
                     completed_items=cast(int, progress.get("completed_items", 0)),
+                    failed_items=cast(int, progress.get("failed_items", 0)),
+                    quarantined_items=cast(int, progress.get("quarantined_items", 0)),
+                    item_errors=cast(list[dict[str, object]], progress.get("item_errors", [])),
+                    omitted_item_errors=cast(int, progress.get("omitted_item_errors", 0)),
                     last_error=_redact_text(timeout_error),
                     progress_percent=cast(int, progress.get("progress_percent", 0)),
                 )
@@ -1326,6 +1394,10 @@ class PersonalContext:
                         run_state="cancelled",
                         total_items=cast(int, progress.get("total_items", 0)),
                         completed_items=cast(int, progress.get("completed_items", 0)),
+                        failed_items=cast(int, progress.get("failed_items", 0)),
+                        quarantined_items=cast(int, progress.get("quarantined_items", 0)),
+                        item_errors=cast(list[dict[str, object]], progress.get("item_errors", [])),
+                        omitted_item_errors=cast(int, progress.get("omitted_item_errors", 0)),
                         progress_percent=cast(int, progress.get("progress_percent", 0)),
                     )
                 if self._fetch_states.get(safe_id) == "STOPPING":
@@ -1647,9 +1719,22 @@ class PersonalContext:
         stop_event = asyncio.Event()
         run_id = uuid4().hex
         self._fetch_run_identity[service_id] = {"run_id": run_id, "started_at": _utc_now(), "finished_at": None}
-        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
+        previous_progress = self._fetch_run_progress.get(service_id, {})
+        self._fetch_run_progress[service_id] = _fetch_run_status(
+            service_id,
+            run_state="running",
+            quarantined_items=cast(int, previous_progress.get("quarantined_items", 0)),
+            item_errors=cast(list[dict[str, object]], previous_progress.get("item_errors", [])),
+            omitted_item_errors=cast(int, previous_progress.get("omitted_item_errors", 0)),
+        )
         task = asyncio.create_task(
-            self._run_fetch_once(service_id, provider, stop_event=stop_event, run_id=run_id),
+            self._run_fetch_once(
+                service_id,
+                provider,
+                stop_event=stop_event,
+                run_id=run_id,
+                retry_quarantined=trigger == "manual",
+            ),
             name=f"personal-context-fetch-{trigger}-run-{service_id}",
         )
         self._active_fetch_run_tasks[service_id] = task
@@ -1789,11 +1874,16 @@ class PersonalContext:
         if not path.exists():
             return []
         try:
-            if path.stat().st_size > 32 * 1024:
+            if path.stat().st_size > 128 * 1024:
                 raise ValueError("history exceeds size limit")
             data = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or set(data) != {"schema_version", "runs"} or data["schema_version"] != 1:
+            if (
+                not isinstance(data, dict)
+                or set(data) != {"schema_version", "runs"}
+                or data["schema_version"] not in {1, 2}
+            ):
                 raise ValueError("invalid history schema")
+            schema_version = data["schema_version"]
             records = data["runs"]
             if not isinstance(records, list) or len(records) > 5:
                 raise ValueError("invalid history retention")
@@ -1801,6 +1891,11 @@ class PersonalContext:
             progress_fields = set(_fetch_run_status(service_id, run_state="idle"))
             required_fields = progress_fields | {"run_id", "started_at", "finished_at"}
             for record in records:
+                if isinstance(record, dict) and schema_version == 1:
+                    record.setdefault("failed_items", 0)
+                    record.setdefault("quarantined_items", 0)
+                    record.setdefault("item_errors", [])
+                    record.setdefault("omitted_item_errors", 0)
                 if not isinstance(record, dict) or set(record) not in (
                     required_fields,
                     required_fields | {"actual_profile"},
@@ -1816,7 +1911,7 @@ class PersonalContext:
                 PersonalContextStatus.validate_fetch_run_progress(
                     {service_id: {key: record[key] for key in progress_fields}}
                 )
-                if record["run_state"] not in {"succeeded", "failed", "cancelled"}:
+                if record["run_state"] not in {"succeeded", "partial_succeeded", "failed", "cancelled"}:
                     raise ValueError("history must be terminal")
                 identifier = record["run_id"]
                 if (
@@ -1839,7 +1934,9 @@ class PersonalContext:
         temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps({"schema_version": 1, "runs": records}, ensure_ascii=False).encode("utf-8")
+            encoded = json.dumps({"schema_version": 2, "runs": records}, ensure_ascii=False).encode("utf-8")
+            if len(encoded) > 128 * 1024:
+                raise ValueError("history exceeds size limit")
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
                 temporary = Path(handle.name)
                 handle.write(encoded)
@@ -1872,24 +1969,49 @@ class PersonalContext:
         *,
         stop_event: asyncio.Event | None = None,
         run_id: str | None = None,
+        retry_quarantined: bool = False,
     ) -> None:
         run_id = run_id or uuid4().hex
         identity = self._fetch_run_identity.get(service_id)
         if identity is None or identity["run_id"] != run_id:
             identity = {"run_id": run_id, "started_at": _utc_now(), "finished_at": None}
             self._fetch_run_identity[service_id] = identity
-        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
+        previous_progress = self._fetch_run_progress.get(service_id, {})
+        self._fetch_run_progress[service_id] = _fetch_run_status(
+            service_id,
+            run_state="running",
+            quarantined_items=cast(int, previous_progress.get("quarantined_items", 0)),
+            item_errors=cast(list[dict[str, object]], previous_progress.get("item_errors", [])),
+            omitted_item_errors=cast(int, previous_progress.get("omitted_item_errors", 0)),
+        )
         try:
-            await self._execute_fetch_once(service_id, provider, stop_event=stop_event, run_id=run_id)
+            await self._execute_fetch_once(
+                service_id,
+                provider,
+                stop_event=stop_event,
+                run_id=run_id,
+                retry_quarantined=retry_quarantined,
+            )
         except asyncio.CancelledError:
             if self._fetch_run_progress[service_id]["run_state"] in {"running", "stopping"}:
-                self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="cancelled")
+                current = self._fetch_run_progress[service_id]
+                self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
+                    service_id,
+                    current,
+                    run_state="cancelled",
+                    total_items=cast(int, current.get("total_items", 0)),
+                    completed_items=cast(int, current.get("completed_items", 0)),
+                )
             raise
         except Exception:
             if self._fetch_run_progress[service_id]["run_state"] in {"running", "stopping"}:
-                self._fetch_run_progress[service_id] = _fetch_run_status(
+                current = self._fetch_run_progress[service_id]
+                self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                     service_id,
+                    current,
                     run_state="failed",
+                    total_items=cast(int, current.get("total_items", 0)),
+                    completed_items=cast(int, current.get("completed_items", 0)),
                     last_error="fetch run failed before processing",
                 )
             raise
@@ -1905,7 +2027,13 @@ class PersonalContext:
             return
         progress = self._fetch_run_progress[service_id]
         if progress["run_state"] in {"running", "stopping"}:
-            progress = _fetch_run_status(service_id, run_state="cancelled")
+            progress = _terminal_fetch_run_status(
+                service_id,
+                progress,
+                run_state="cancelled",
+                total_items=cast(int, progress.get("total_items", 0)),
+                completed_items=cast(int, progress.get("completed_items", 0)),
+            )
             self._fetch_run_progress[service_id] = progress
         identity["finished_at"] = _utc_now()
         record = {**progress, **identity}
@@ -1932,6 +2060,7 @@ class PersonalContext:
         *,
         stop_event: asyncio.Event | None = None,
         run_id: str,
+        retry_quarantined: bool = False,
     ) -> None:
         config = self._service_config(service_id)
         old_cursor = self._read_cursor(service_id)
@@ -1939,14 +2068,24 @@ class PersonalContext:
         last_cursor = dict(old_cursor) if old_cursor is not None else None
         saw_batch = False
         pipeline_work_enqueued = asyncio.Event()
-        item_count = 0
+        attempted_items = 0
         completed_items = 0
+        failed_items = 0
         total_items = 0
         prepared_candidates: tuple[dict[str, object], ...] = ()
         completed_batches: list[FetchBatch] = []
-        completed_candidate_count = 0
+        completed_candidates: list[dict[str, object]] = []
+        failed_candidates: list[dict[str, object]] = []
+        failed_at = _utc_now()
         commit_completed = False
-        self._fetch_run_progress[service_id] = _fetch_run_status(service_id, run_state="running")
+        quarantined_items, item_errors = quarantined_candidate_diagnostics(old_cursor)
+        self._fetch_run_progress[service_id] = _fetch_run_status(
+            service_id,
+            run_state="running",
+            quarantined_items=quarantined_items,
+            item_errors=item_errors,
+            omitted_item_errors=quarantined_items - len(item_errors),
+        )
 
         def ensure_run_active() -> None:
             if (service_id, run_id) in self._invalidated_fetch_runs:
@@ -1962,24 +2101,35 @@ class PersonalContext:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await provider.abort_run(run_id=run_id)
 
-        async def commit_provider_and_cursor(
+        def build_committed_cursor(
             cursor: dict[str, object] | None,
-            candidates: tuple[dict[str, object], ...],
-        ) -> None:
+            successful_or_skipped: tuple[dict[str, object], ...],
+            failures: tuple[dict[str, object], ...],
+        ) -> dict[str, object]:
+            committed_cursor = record_completed_candidates(cursor, successful_or_skipped)
+            if failures:
+                committed_cursor = record_failed_candidates(
+                    committed_cursor,
+                    failures,
+                    failed_at=failed_at,
+                )
+            normalized_cursor, _encoded = self._serialize_cursor(service_id, committed_cursor)
+            if normalized_cursor is None:
+                raise _file_error("cursor payload must be an object")
+            return normalized_cursor
+
+        async def commit_provider_and_cursor(committed_cursor: dict[str, object]) -> dict[str, object]:
             ensure_run_active()
-            committed_cursor = record_completed_candidates(cursor, candidates)
             await provider.commit_run(run_id=run_id)
             ensure_run_active()
             self._write_cursor(service_id, committed_cursor)
+            return committed_cursor
 
-        async def wait_for_commit_point(
-            cursor: dict[str, object] | None,
-            candidates: tuple[dict[str, object], ...],
-        ) -> bool:
+        async def wait_for_commit_point(committed_cursor: dict[str, object]) -> tuple[bool, dict[str, object]]:
             """Commit provider and cursor despite caller cancellation."""
 
             commit_task = asyncio.create_task(
-                commit_provider_and_cursor(cursor, candidates),
+                commit_provider_and_cursor(committed_cursor),
                 name=f"personal-context-fetch-commit-{service_id}",
             )
             cancellation_seen = False
@@ -1990,14 +2140,14 @@ class PersonalContext:
                     if commit_task.cancelled():
                         raise
                     cancellation_seen = True
-            commit_task.result()
-            return cancellation_seen
+            return cancellation_seen, commit_task.result()
 
         try:
             prepared = await provider.prepare_run(
                 run_id=run_id,
                 run_started_at=run_started_at,
                 cursor=old_cursor,
+                include_failed=retry_quarantined,
             )
             ensure_run_active()
             candidates = _copy_run_candidates(prepared)
@@ -2009,6 +2159,9 @@ class PersonalContext:
                 service_id,
                 run_state="running",
                 total_items=total_items,
+                quarantined_items=quarantined_items,
+                item_errors=item_errors,
+                omitted_item_errors=quarantined_items - len(item_errors),
             )
             batches = provider.fetch(
                 run_id=run_id,
@@ -2020,37 +2173,71 @@ class PersonalContext:
                 if not isinstance(batch, FetchBatch):
                     raise _fetch_error("provider yielded an invalid batch")
                 saw_batch = True
-                item_count += len(batch.items)
-                if config.max_items_per_run is not None and item_count > config.max_items_per_run:
+                batch_start = attempted_items
+                batch_end = batch_start + batch.attempted_count
+                if config.max_items_per_run is not None and batch_end > config.max_items_per_run:
                     raise _fetch_error("fetch service exceeded max_items_per_run")
-                if item_count > total_items:
+                if batch_end > total_items:
                     raise _fetch_error("provider yielded more items than its prepared candidates")
+                batch_candidates = prepared_candidates[batch_start:batch_end]
+                if len(batch_candidates) != batch.attempted_count:
+                    raise _fetch_error("provider batch does not match its prepared candidates")
+                batch_completed_candidates = [
+                    batch_candidates[offset] for offset in (*batch.success_offsets, *batch.skipped_offsets)
+                ]
+                batch_failed_candidates: list[dict[str, object]] = []
+                for failure in batch.failures:
+                    offset = cast(int, failure["offset"])
+                    batch_failed_candidates.append(
+                        {
+                            **batch_candidates[offset],
+                            "item_ref": failure["item_ref"],
+                            "code": failure["code"],
+                            "message": failure["message"],
+                        }
+                    )
                 # Providers emit an empty batch to advance a no-change cursor.
                 # It still participates in commit_run, but must not wake the
                 # Processing/Filesystem Agent pipeline with no work.
                 if batch.items:
                     await self._submit_batch(service_id, run_id, batch, enqueued=pipeline_work_enqueued)
                     ensure_run_active()
-                    completed_items += len(batch.items)
-                    self._fetch_run_progress[service_id] = _fetch_run_status(
-                        service_id,
-                        run_state="running",
-                        total_items=total_items,
-                        completed_items=completed_items,
-                    )
+                attempted_items = batch_end
+                completed_candidates.extend(batch_completed_candidates)
+                failed_candidates.extend(batch_failed_candidates)
+                completed_items += len(batch.success_offsets) + len(batch.skipped_offsets)
+                failed_items += len(batch.failures)
                 last_cursor = dict(batch.next_cursor) if batch.next_cursor is not None else None
                 completed_batches.append(batch)
-                completed_candidate_count = item_count
+                self._fetch_run_progress[service_id] = _fetch_run_status(
+                    service_id,
+                    run_state="running",
+                    total_items=total_items,
+                    completed_items=completed_items,
+                    failed_items=failed_items,
+                    quarantined_items=quarantined_items,
+                    item_errors=item_errors,
+                    omitted_item_errors=quarantined_items - len(item_errors),
+                )
             if not saw_batch and total_items > 0:
                 raise _fetch_error("provider produced no batch")
-            if item_count != total_items:
+            if attempted_items != total_items:
                 raise _fetch_error("provider did not yield every prepared candidate")
+            committed_cursor = build_committed_cursor(
+                last_cursor,
+                tuple(completed_candidates),
+                tuple(failed_candidates),
+            )
             if pipeline_work_enqueued.is_set():
                 self._fetch_run_progress[service_id] = _fetch_run_status(
                     service_id,
                     run_state="running",
                     total_items=total_items,
                     completed_items=completed_items,
+                    failed_items=failed_items,
+                    quarantined_items=quarantined_items,
+                    item_errors=item_errors,
+                    omitted_item_errors=quarantined_items - len(item_errors),
                     phase="organizing",
                 )
                 await self._finish_pipeline_run(service_id, run_id)
@@ -2060,13 +2247,15 @@ class PersonalContext:
                 run_state="running",
                 total_items=total_items,
                 completed_items=completed_items,
+                failed_items=failed_items,
+                quarantined_items=quarantined_items,
+                item_errors=item_errors,
+                omitted_item_errors=quarantined_items - len(item_errors),
                 phase="committing",
             )
-            cancelled_at_commit = await wait_for_commit_point(
-                last_cursor,
-                prepared_candidates,
-            )
+            cancelled_at_commit, committed_cursor = await wait_for_commit_point(committed_cursor)
             commit_completed = True
+            quarantined_items, item_errors = quarantined_candidate_diagnostics(committed_cursor)
             if cancelled_at_commit:
                 self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                     service_id,
@@ -2074,15 +2263,26 @@ class PersonalContext:
                     run_state="cancelled",
                     total_items=total_items,
                     completed_items=completed_items,
+                    failed_items=failed_items,
+                    quarantined_items=quarantined_items,
+                    item_errors=item_errors,
+                    omitted_item_errors=quarantined_items - len(item_errors),
                 )
                 if stop_event is not None and stop_event.is_set():
                     return
                 raise asyncio.CancelledError
+            terminal_state = "succeeded"
+            if failed_items:
+                terminal_state = "partial_succeeded" if completed_items else "failed"
             self._fetch_run_progress[service_id] = _fetch_run_status(
                 service_id,
-                run_state="succeeded",
+                run_state=terminal_state,
                 total_items=total_items,
                 completed_items=completed_items,
+                failed_items=failed_items,
+                quarantined_items=quarantined_items,
+                item_errors=item_errors,
+                omitted_item_errors=quarantined_items - len(item_errors),
             )
         except asyncio.CancelledError:
             if (service_id, run_id) in self._invalidated_fetch_runs:
@@ -2111,18 +2311,25 @@ class PersonalContext:
                 if not completed_batches:
                     await abort_run(discard_new_source_metadata=True)
                 else:
+                    committed_cursor = build_committed_cursor(
+                        last_cursor,
+                        tuple(completed_candidates),
+                        tuple(failed_candidates),
+                    )
                     if pipeline_work_enqueued.is_set():
                         await self._retain_pipeline_run(service_id, run_id)
-                    await wait_for_commit_point(
-                        last_cursor,
-                        prepared_candidates[:completed_candidate_count],
-                    )
+                    _cancelled_during_commit, committed_cursor = await wait_for_commit_point(committed_cursor)
+                    quarantined_items, item_errors = quarantined_candidate_diagnostics(committed_cursor)
                 self._fetch_run_progress[service_id] = _terminal_fetch_run_status(
                     service_id,
                     self._fetch_run_progress.get(service_id, {}),
                     run_state="cancelled",
                     total_items=total_items,
                     completed_items=completed_items,
+                    failed_items=failed_items,
+                    quarantined_items=quarantined_items,
+                    item_errors=item_errors,
+                    omitted_item_errors=quarantined_items - len(item_errors),
                 )
                 return
             except asyncio.CancelledError:
@@ -2380,6 +2587,13 @@ class PersonalContext:
     def _read_cursor(self, service_id: str) -> dict[str, object] | None:
         safe_id = _safe_service_id(service_id)
         config = self._service_config(safe_id)
+        return self._read_cursor_for_config(config)
+
+    def _read_cursor_for_config(
+        self,
+        config: PersonalContextFetchServiceConfig,
+    ) -> dict[str, object] | None:
+        safe_id = _safe_service_id(config.service_id)
         path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         if not path.exists():
@@ -2406,7 +2620,11 @@ class PersonalContext:
             raise _file_error("cursor payload must be an object or null")
         return dict(cursor)
 
-    def _write_cursor(self, service_id: str, cursor: dict[str, object] | None) -> None:
+    def _serialize_cursor(
+        self,
+        service_id: str,
+        cursor: dict[str, object] | None,
+    ) -> tuple[dict[str, object] | None, bytes]:
         safe_id = _safe_service_id(service_id)
         config = self._service_config(safe_id)
         if cursor is not None:
@@ -2432,6 +2650,11 @@ class PersonalContext:
             raise _file_error("cursor payload is not JSON serializable", cause=exc) from exc
         if len(encoded) > _MAX_CURSOR_BYTES:
             raise _file_error("cursor payload is too large")
+        return cast(dict[str, object] | None, cursor_payload), encoded
+
+    def _write_cursor(self, service_id: str, cursor: dict[str, object] | None) -> None:
+        safe_id = _safe_service_id(service_id)
+        _cursor_payload, encoded = self._serialize_cursor(safe_id, cursor)
         path = self._home / "state" / "cursors" / f"{service_storage_segment(safe_id)}.json"
         _assert_no_symlink_chain(path)
         temporary: Path | None = None

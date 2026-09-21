@@ -27,6 +27,7 @@ from openjiuwen.harness.personal_context.fetch.cursor_selection import (
 from openjiuwen.harness.personal_context.fetch.retry import (
     classify_payload_error,
     classify_transport_error,
+    is_candidate_read_error,
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
@@ -45,6 +46,30 @@ _REQUEST_TIMEOUT_SECONDS = 30
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36"
 
 
+def _validated_article_candidate(candidate: Mapping[str, object]) -> tuple[dict[str, object], str]:
+    for field_name in ("stable_id", "revision_id", "candidate_time", "resource_lane", "locator"):
+        value = candidate.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise _fetch_error("Toutiao candidate is invalid")
+    raw_article = candidate.get("article")
+    if not isinstance(raw_article, Mapping):
+        raise _fetch_error("Toutiao candidate has no article metadata")
+    article = dict(raw_article)
+    article_id = _article_id(article)
+    if not article_id or article_id != candidate["stable_id"] or len(article_id) > 256:
+        raise _fetch_error("Toutiao candidate has no stable ID")
+    return article, article_id
+
+
+def _article_failure(offset: int, article_id: str) -> dict[str, object]:
+    return {
+        "offset": offset,
+        "item_ref": article_id,
+        "code": StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR.code,
+        "message": "条目读取或解析失败",
+    }
+
+
 class ToutiaoReaderFetchService(ContextFetchService):
     """Read public articles from one Toutiao profile without login or persistent cookies."""
 
@@ -54,6 +79,7 @@ class ToutiaoReaderFetchService(ContextFetchService):
         run_id: str,
         run_started_at: datetime,
         cursor: dict[str, object] | None,
+        include_failed: bool = False,
     ) -> tuple[dict[str, object], ...]:
         del run_id
         try:
@@ -76,7 +102,9 @@ class ToutiaoReaderFetchService(ContextFetchService):
                     for article in articles
                 )
                 filtered = tuple(candidate for candidate in candidates if candidate is not None)
-                return select_latest_candidates(filtered, cursor, max_items)
+                return select_latest_candidates(
+                    filtered, cursor, max_items, retry_quarantined=include_failed
+                )
 
             async with aiohttp.ClientSession(
                 timeout=timeout,
@@ -126,38 +154,48 @@ class ToutiaoReaderFetchService(ContextFetchService):
                     return
                 for index in range(0, len(candidates), _BATCH_SIZE):
                     items: list[RawChangeItem] = []
+                    success_offsets: list[int] = []
+                    failures: list[dict[str, object]] = []
                     end = index + _BATCH_SIZE
-                    for candidate in candidates[index:end]:
-                        raw_article = candidate.get("article")
-                        if not isinstance(raw_article, Mapping):
-                            raise _fetch_error("Toutiao candidate has no article metadata")
-                        article = dict(raw_article)
-                        article_id = _article_id(article)
-                        if not article_id or article_id != candidate.get("stable_id"):
-                            raise _fetch_error("Toutiao candidate has no stable ID")
-                        (
-                            article_body,
-                            raw_snapshot,
-                            updated_value,
-                            content_truncated,
-                            content_fallback,
-                        ) = await _fetch_article_body(session, article, referer=profile_referer)
-                        items.append(
-                            _change_item(
-                                article,
-                                article_id=article_id,
-                                profile_token=token,
-                                source_url=source_url,
-                                body=article_body,
-                                raw_snapshot=raw_snapshot,
-                                updated_value=updated_value,
-                                content_truncated=content_truncated,
-                                content_fallback=content_fallback,
+                    chunk = candidates[index:end]
+                    for offset, candidate in enumerate(chunk):
+                        article, article_id = _validated_article_candidate(candidate)
+                        try:
+                            (
+                                article_body,
+                                raw_snapshot,
+                                updated_value,
+                                content_truncated,
+                                content_fallback,
+                            ) = await _fetch_article_body(session, article, referer=profile_referer)
+                            items.append(
+                                _change_item(
+                                    article,
+                                    article_id=article_id,
+                                    profile_token=token,
+                                    source_url=source_url,
+                                    body=article_body,
+                                    raw_snapshot=raw_snapshot,
+                                    updated_value=updated_value,
+                                    content_truncated=content_truncated,
+                                    content_fallback=content_fallback,
+                                )
                             )
-                        )
+                        except BaseError as exc:
+                            if not is_candidate_read_error(exc):
+                                raise
+                            failures.append(_article_failure(offset, article_id))
+                            continue
+                        except (TypeError, ValueError):
+                            failures.append(_article_failure(offset, article_id))
+                            continue
+                        success_offsets.append(offset)
                     yield FetchBatch(
                         batch_id=f"batch-{index // _BATCH_SIZE}",
                         items=tuple(items),
+                        attempted_count=len(chunk),
+                        success_offsets=tuple(success_offsets),
+                        failures=tuple(failures),
                         next_cursor=next_cursor,
                     )
         except asyncio.CancelledError:

@@ -51,8 +51,9 @@ def test_context_fetch_service_is_abstract_and_default_lifecycle_is_side_effect_
             run_id: str,
             run_started_at: datetime,
             cursor: dict[str, object] | None,
+            include_failed: bool = False,
         ) -> tuple[dict[str, object], ...]:
-            del run_id, run_started_at, cursor
+            del run_id, run_started_at, cursor, include_failed
             return ()
 
     home = tmp_path / "home"
