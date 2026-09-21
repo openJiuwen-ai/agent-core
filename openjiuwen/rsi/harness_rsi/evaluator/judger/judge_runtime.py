@@ -155,7 +155,7 @@ def build_judge_agent(
 
     async def complete_evidence_verdict() -> str:
         payload = await asyncio.to_thread(
-            inline_evidence, workspace, max_bytes=model.context_budget(), required=True,
+            inline_evidence, workspace, max_bytes=None, required=True,
             include_images=True,
         )
         if payload is None:

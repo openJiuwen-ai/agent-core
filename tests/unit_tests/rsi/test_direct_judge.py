@@ -126,6 +126,24 @@ async def test_missing_closeout_payload_never_calls_model(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_agent_closeout_sends_large_complete_evidence_without_capacity_estimate(tmp_path, monkeypatch):
+    content = "\\" * 300000
+    (tmp_path / "answer.txt").write_text(content, encoding="utf-8")
+    (tmp_path / "request.json").write_text('{"evidence_files":["answer.txt"]}', encoding="utf-8")
+    model = AsyncMock()
+    model.context_budget.side_effect = AssertionError("capacity must not be used as a byte limit")
+    verdict = AsyncMock(return_value='{"status":"completed"}')
+    monkeypatch.setattr(judge_runtime, "_judge_model", lambda _: model)
+    monkeypatch.setattr(judge_runtime, "_invoke_complete_evidence", verdict)
+    monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: object())
+    budget = judge_runtime.JudgeBudgetRail(20, tmp_path / "tools.jsonl")
+    judge_runtime.build_judge_agent(EvaluatorConfig(), tmp_path, tmp_path / "tools.jsonl", budget=budget)
+    assert await budget.closeout("") == '{"status":"completed"}'
+    payload = verdict.call_args.args[1]
+    assert json.loads(payload)["evidence_files"]["answer.txt"] == content
+
+
+@pytest.mark.asyncio
 async def test_direct_call_and_one_recovery(tmp_path, monkeypatch):
     (tmp_path / "request.json").write_text('{"response":"42","evidence_files":[]}', encoding="utf-8")
     model = AsyncMock()

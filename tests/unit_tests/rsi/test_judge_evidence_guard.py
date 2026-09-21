@@ -5,7 +5,6 @@ from types import SimpleNamespace
 import pytest
 
 from openjiuwen.core.foundation.llm import ToolMessage
-from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     TOOL_BYTES,
     GuardedJudgeModel,
@@ -41,8 +40,7 @@ def test_explicit_window_and_output_override():
     assert _prepare(rows, window=1048576)[1] == {}
     small = [{'role': 'user', 'content': 'x' * 190000}]
     assert 'max_tokens' not in _prepare(small, {'max_tokens': 20000})[1]
-    with pytest.raises(EvaluationInfrastructureError, match='complete grading evidence was not truncated'):
-        _prepare(rows)
+    assert _prepare(rows)[0] == rows
 
 
 @pytest.mark.parametrize('name', ['deepseek-v4-flash', 'deepseek-v4-pro'])
@@ -51,8 +49,7 @@ def test_missing_window_uses_core_model_capacity(name):
     guarded, options = _prepare(rows, window=None, model_name=name)
     assert guarded == rows
     assert 'max_tokens' not in options
-    with pytest.raises(EvaluationInfrastructureError):
-        _prepare(rows, window=262144, model_name=name)
+    assert _prepare(rows, window=262144, model_name=name)[0] == rows
 
 
 def test_unknown_model_uses_core_conservative_default():
@@ -60,8 +57,7 @@ def test_unknown_model_uses_core_conservative_default():
 
     limit = ContextUtils.resolve_context_max(model_name='unknown-test-model')
     rows = [{'role': 'user', 'content': 'x' * limit}]
-    with pytest.raises(EvaluationInfrastructureError):
-        _prepare(rows, window=None, model_name='unknown-test-model')
+    assert _prepare(rows, window=None, model_name='unknown-test-model')[0] == rows
 
 
 def test_schemas_and_unicode_count_toward_budget():
@@ -95,7 +91,7 @@ async def test_actual_model_boundary_forwards_adjusted_budget(tmp_path, monkeypa
         'model_request_config': {'model': 'test', 'max_tokens': 100000, 'context_window': 262144},
     }))
     model = _judge_model(EvaluatorConfig(model_config_ref=str(config)))
-    messages = [SystemMessage(content='policy'), UserMessage(content='x' * 200000)]
+    messages = [SystemMessage(content='policy'), UserMessage(content='x' * 500000)]
     seen = []
 
     async def invoke(_self, rows, **kwargs):
@@ -128,8 +124,8 @@ def test_byte_cap_and_immutable_input():
     assert guarded[:2] == rows[:2]
     assert len(rows[2]['content']) == 5000000
     assert len(guarded[2]['content']) < 15000
-    with pytest.raises(EvaluationInfrastructureError):
-        guard_messages([{'role': 'user', 'content': 'x' * 300000}])
+    large = [{'role': 'user', 'content': 'x' * 300000}]
+    assert guard_messages(large, limit=1) == large
 
 
 @pytest.mark.asyncio

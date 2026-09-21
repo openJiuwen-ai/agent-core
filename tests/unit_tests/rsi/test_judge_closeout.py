@@ -72,7 +72,8 @@ async def test_native_unread_artifact_is_completed_before_closeout(tmp_path, mon
         payload = json.loads(messages[1].content)
         assert payload["evidence_files"]["artifacts/evidence.jsonl"] == '{"step": 1}\n{"step": 2}\n'
         assert payload["evidence_files"]["artifacts/answer.txt"] == "VERIFIED_EVIDENCE = 1729\n"
-        assert payload["evidence_files"]["artifacts/scratch.txt"] == "scratch\n" * 12000
+        expected_scratch = "x" * MAX_CLOSEOUT_BYTES if outcome == "too_large" else "scratch\n" * 12000
+        assert payload["evidence_files"]["artifacts/scratch.txt"] == expected_scratch
         if outcome == "timeout":
             raise TimeoutError("closeout timeout")
         if outcome == "cancel":
@@ -88,14 +89,14 @@ async def test_native_unread_artifact_is_completed_before_closeout(tmp_path, mon
         "execution_result": CaseExecutionResult("Max iterations reached without completion", "passed"),
         "output_dir": str(tmp_path),
     }
-    if outcome in {"recovered", "format_recovered", "valid_zero"}:
+    if outcome in {"recovered", "format_recovered", "valid_zero", "too_large"}:
         result = await judger.judge(**arguments)
         assert result.metadata["parsed"]["overall_score"] == (0 if outcome == "valid_zero" else .5)
     else:
         with pytest.raises(asyncio.CancelledError if outcome == "cancel" else EvaluationInfrastructureError):
             await judger.judge(**arguments)
         assert not list(tmp_path.rglob("assessment.json"))
-    assert len(calls) == (1 if outcome in {"too_large", "non_text", "unreadable", "valid_zero"} else 2)
+    assert len(calls) == (1 if outcome in {"non_text", "unreadable", "valid_zero"} else 2)
 
 
 @pytest.mark.asyncio

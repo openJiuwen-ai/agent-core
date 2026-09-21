@@ -16,7 +16,7 @@ IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
 
 
 def inline_evidence(
-    workspace: Path, *, max_bytes: int = MAX_INLINE_BYTES, required: bool = False,
+    workspace: Path, *, max_bytes: int | None = MAX_INLINE_BYTES, required: bool = False,
     include_images: bool = False,
 ) -> str | list | None:
     """Return complete text, or defer to the reader; never clip evidence."""
@@ -28,13 +28,13 @@ def inline_evidence(
         return None
 
 
-def _inline_evidence(workspace: Path, max_bytes: int, include_images: bool = False) -> str | list:
+def _inline_evidence(workspace: Path, max_bytes: int | None, include_images: bool = False) -> str | list:
     """Read the complete snapshot or explain why it cannot be inlined."""
     root = _io_path(workspace).resolve()
     request_path = root / "request.json"
     try:
         size = request_path.stat().st_size
-        if size > max_bytes:
+        if max_bytes is not None and size > max_bytes:
             raise EvaluationInfrastructureError(f"evidence exceeds {max_bytes} bytes at request.json ({size} bytes)")
         request = json.loads(request_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -52,7 +52,7 @@ def _inline_evidence(workspace: Path, max_bytes: int, include_images: bool = Fal
             if not path.is_file():
                 raise EvaluationInfrastructureError(f"evidence file missing or not a regular file: {name}")
             size += path.stat().st_size
-            if size > max_bytes:
+            if max_bytes is not None and size > max_bytes:
                 raise EvaluationInfrastructureError(f"evidence exceeds {max_bytes} bytes at {name} ({size} bytes)")
             if mime:
                 from PIL import Image
@@ -79,6 +79,6 @@ def _inline_evidence(workspace: Path, max_bytes: int, include_images: bool = Fal
     content = [{"type": "text", "text": payload}, *images] if images else payload
     serialized = json.dumps(content, ensure_ascii=False) if images else payload
     payload_bytes = len(serialized.encode("utf-8"))
-    if payload_bytes > max_bytes:
+    if max_bytes is not None and payload_bytes > max_bytes:
         raise EvaluationInfrastructureError(f"serialized evidence exceeds {max_bytes} bytes ({payload_bytes} bytes)")
     return content

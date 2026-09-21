@@ -1,5 +1,5 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Judge-only evidence paging and final-request size protection."""
+"""Judge-only evidence paging without local request capacity rejection."""
 import asyncio
 import copy
 import json
@@ -9,7 +9,6 @@ from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.foundation.llm import Model, ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
-from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import with_rsi_output_budget
 
 TOOL_BYTES = 12000
@@ -111,37 +110,18 @@ class JudgeEvidenceTool(Tool):
         yield await self.invoke(inputs, **kwargs)
 
 
-def _request_bound(rows, schemas):
-    # UTF-8 bytes deliberately overestimate text tokens; include serialization and framing.
-    return len(_json(rows).encode("utf-8")) + len(_json(schemas).encode("utf-8")) + 4096
-
-
 def guard_messages(messages, tools=None, *, limit=REQUEST_BYTES, reserve=16384):
-    """Use UTF-8 bytes as a conservative token bound, including tool schemas."""
+    """Page tool output without guessing provider capacity from byte counts.
+
+    Budget arguments remain accepted for compatibility but do not reject requests.
+    """
     rows = [{"role": "user", "content": messages}] if isinstance(messages, str) else [
         m.model_dump(mode="json", exclude_none=True) if hasattr(m, "model_dump") else copy.deepcopy(m)
         for m in messages
     ]
-    schemas = [t.model_dump(mode="json") if hasattr(t, "model_dump") else t for t in (tools or [])]
-
-    def size():
-        return _request_bound(rows, schemas) + reserve
-
     for row in rows:
         if row.get("role") == "tool":
             row["content"] = bound_tool_content(row.get("content", ""))
-    for row in rows:
-        if size() <= limit:
-            break
-        if row.get("role") == "tool" and isinstance(row.get("content"), str):
-            row["content"] = ("Evidence evicted for context budget. Re-read the original tool path with "
-                              "read_evidence and a precise JSON pointer or byte_offset. Do not infer absence.")
-    if size() > limit:
-        raise EvaluationInfrastructureError(
-            "Judge request exceeds context budget after evidence reduction: "
-            f"input_token_upper_bound={size() - reserve}, output_reserve={reserve}, "
-            f"context_budget={limit}; complete grading evidence was not truncated"
-        )
     if not isinstance(messages, str):
         return [original.model_copy(update={"content": row.get("content")})
                 if hasattr(original, "model_copy") else row for original, row in zip(messages, rows)]
@@ -169,11 +149,8 @@ class GuardedJudgeModel(Model):
         options = dict(kwargs)
         options.pop("max_tokens", None)
         options.pop("max_completion_tokens", None)
-        window = GuardedJudgeModel.context_budget(self)
-        if window <= 0:
-            raise EvaluationInfrastructureError("Judge context window must be positive")
         tools = options.get("tools")
-        guarded = guard_messages(messages, tools, limit=window, reserve=0)
+        guarded = guard_messages(messages, tools)
         return guarded, options
 
     async def invoke(self, messages, **kwargs):
