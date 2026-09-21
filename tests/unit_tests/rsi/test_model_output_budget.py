@@ -85,11 +85,10 @@ def test_per_request_remaining_context_and_no_mutation(name):
     result = BudgetedRsiModel._budget_options(model, "a" * 10000, options)
     assert "max_tokens" not in result
     assert options["max_tokens"] == model.model_config.max_tokens == 393216
-    with pytest.raises(ValueError, match="no positive output budget"):
-        BudgetedRsiModel._budget_options(model, "a" * 20000, options)
+    assert BudgetedRsiModel._budget_options(model, "a" * 20000, options) == {}
 
 
-def test_unknown_output_capacity_still_checks_input_budget():
+def test_unknown_output_capacity_does_not_reject_input_locally():
     from types import SimpleNamespace
 
     from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
@@ -98,5 +97,46 @@ def test_unknown_output_capacity_still_checks_input_budget():
         max_tokens=None, model_name="custom-gateway-model", context_window=20000,
     ))
     assert BudgetedRsiModel._budget_options(model, "hello", {}) == {}
-    with pytest.raises(ValueError, match="no positive output budget"):
-        BudgetedRsiModel._budget_options(model, "a" * 20000, {})
+    assert BudgetedRsiModel._budget_options(model, "a" * 20000, {}) == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_large_input_reaches_provider_unchanged(monkeypatch, streaming):
+    from openjiuwen.core.foundation.llm import Model, ModelClientConfig, ModelRequestConfig
+    from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
+
+    messages = [{"role": "user", "content": "evidence" * 10000}]
+    tools = [{"type": "function", "function": {"name": "read", "description": "schema" * 10000}}]
+    original = deepcopy((messages, tools))
+    seen = []
+    provider_error = RuntimeError("provider context limit")
+
+    async def invoke(self, **kwargs):
+        seen.append(kwargs)
+        raise provider_error
+
+    async def stream(self, **kwargs):
+        seen.append(kwargs)
+        yield "first chunk"
+        raise provider_error
+
+    monkeypatch.setattr(Model, "invoke", invoke)
+    monkeypatch.setattr(Model, "stream", stream)
+    model = BudgetedRsiModel(
+        model_client_config=ModelClientConfig(
+            client_provider="OpenAI", api_key="test", api_base="https://example.test/v1",
+        ),
+        model_config=ModelRequestConfig(model="custom", context_window=100),
+    )
+    chunks = []
+    with pytest.raises(RuntimeError) as caught:
+        if streaming:
+            async for chunk in model.stream(messages, tools=tools, max_tokens=10, max_completion_tokens=10):
+                chunks.append(chunk)
+        else:
+            await model.invoke(messages, tools=tools, max_tokens=10, max_completion_tokens=10)
+    assert chunks == (["first chunk"] if streaming else [])
+    assert caught.value is provider_error
+    assert seen == [{"messages": messages, "tools": tools}]
+    assert (messages, tools) == original
