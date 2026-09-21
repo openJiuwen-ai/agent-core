@@ -1206,7 +1206,12 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
                 "summary_task_id": {"type": "string"},
                 "output_context": {
                     "type": "object",
-                    "properties": {"description": {"type": "string", "minLength": 1}},
+                    "properties": {
+                        "description": {"type": "string", "minLength": 1},
+                        "result_uri": {"type": "string"},
+                        "result_hash": {"type": "string"},
+                        "result_type": {"type": "string"},
+                    },
                     "required": ["description"],
                 },
                 "output_abstract": {"type": "string"},
@@ -1224,6 +1229,26 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
         context = inputs.get("output_context")
         if not isinstance(context, dict) or not str(context.get("description") or "").strip():
             return ToolOutput(success=False, error="output_context.description must contain the final report")
+        result_uri = str(context.get("result_uri") or "").strip()
+        if result_uri:
+            from pathlib import Path
+
+            from openjiuwen.agent_teams.organization.workspace import (
+                get_organization_workspace_manager,
+            )
+
+            workspace = get_organization_workspace_manager(self.manager.organization_id, self.session_id)
+            try:
+                relative = workspace.relative_path(result_uri)
+            except ValueError as exc:
+                return ToolOutput(success=False, error=str(exc))
+            if not relative.startswith("summary/"):
+                return ToolOutput(
+                    success=False,
+                    error="Summary Team final result_uri must be under the Organization summary/ directory",
+                )
+            if not (Path(workspace.workspace_path) / relative).is_file():
+                return ToolOutput(success=False, error=f"summary result file does not exist: {result_uri}")
         if not str(inputs.get("output_abstract") or "").strip():
             return ToolOutput(success=False, error="output_abstract is required")
         if task.status is OrgTaskStatus.DELEGATED:
@@ -1290,7 +1315,10 @@ class OrgSummaryCompleteTool(_OrgLeaderTool):
 
 
 def create_summary_leader_tools(
-    *, manager: OrgTaskManager, team_id: str, leader_id: str,
+    *,
+    manager: OrgTaskManager,
+    team_id: str,
+    leader_id: str,
     message_service: "OrgMessageService | None" = None,
     runtime_manager: "OrganizationRuntimeManager | None" = None,
     session_id: str = "",

@@ -24,8 +24,6 @@ if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
-    from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
-    from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -126,6 +124,7 @@ class TeamBackend:
         leader_prompt: str = "",
         org_task_manager: "OrgTaskManager | None" = None,
         org_message_service: "OrgMessageService | None" = None,
+        organization_workspace_manager: Any | None = None,
     ):
         """Initialize agent team manager.
 
@@ -266,6 +265,7 @@ class TeamBackend:
         )
         self.org_task_manager = org_task_manager
         self.org_message_service = org_message_service
+        self.organization_workspace_manager = organization_workspace_manager
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.
@@ -321,8 +321,8 @@ class TeamBackend:
         # and whether ``spawn_teammate`` exposes the fork properties at all,
         # so everything below stays dormant when fork is off.
         self._enable_fork: bool = enable_fork
-        self._pending_forks: dict[str, dict] = {}    # member_name → {fork, since, source}
-        self._checkpoints: dict[str, dict] = {}      # name → {count, description, created_by}
+        self._pending_forks: dict[str, dict] = {}  # member_name → {fork, since, source}
+        self._checkpoints: dict[str, dict] = {}  # name → {count, description, created_by}
         self._snapshot_length: Callable[[], int] | None = None
         self._store_checkpoint_fn: Callable[..., dict | None] | None = None
         self._checkpoint_list_fn: Callable[[], dict] | None = None
@@ -385,18 +385,22 @@ class TeamBackend:
             "fork_mode": fork_mode,
         }
         team_logger.debug(
-            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s "
-            "fork_mode=%s team_name=%s pending_keys=%s",
-            member, fork_value, fork_source, fork_mode,
-            self.team_name, list(self._pending_forks.keys()),
+            "[fork] mark_fork_on_spawn: member=%s fork=%s source=%s fork_mode=%s team_name=%s pending_keys=%s",
+            member,
+            fork_value,
+            fork_source,
+            fork_mode,
+            self.team_name,
+            list(self._pending_forks.keys()),
         )
 
     def consume_fork_on_spawn(self, member: str) -> dict | None:
         result = self._pending_forks.pop(member, None)
         team_logger.debug(
-            "[fork] consume_fork_on_spawn: member=%s result=%s "
-            "remaining_pending=%s team_name=%s",
-            member, result, list(self._pending_forks.keys()),
+            "[fork] consume_fork_on_spawn: member=%s result=%s remaining_pending=%s team_name=%s",
+            member,
+            result,
+            list(self._pending_forks.keys()),
             self.team_name,
         )
         return result
@@ -406,7 +410,8 @@ class TeamBackend:
             result = self._snapshot_length()
             team_logger.debug(
                 "[fork] snapshot_context_length: member=%s len=%d",
-                self.member_name, result,
+                self.member_name,
+                result,
             )
             return result
         team_logger.debug(
@@ -431,9 +436,10 @@ class TeamBackend:
         an actionable error message.
         """
         team_logger.debug(
-            "[fork] store_checkpoint: member=%s name=%s count=%d "
-            "has_store_fn=%s",
-            self.member_name, name, count,
+            "[fork] store_checkpoint: member=%s name=%s count=%d has_store_fn=%s",
+            self.member_name,
+            name,
+            count,
             self._store_checkpoint_fn is not None,
         )
         created_by = created_by or self.member_name
@@ -495,7 +501,8 @@ class TeamBackend:
         except Exception as exc:  # noqa: BLE001 - best-effort, never break the tool call
             team_logger.warning(
                 "[checkpoint] failed to publish checkpoint_created event '%s': %s",
-                name, exc,
+                name,
+                exc,
             )
 
     # ------------------------------------------------------------------
@@ -586,9 +593,7 @@ class TeamBackend:
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
 
         if not await self.db.team.team_exists(self.team_name):
-            return MemberOpResult.fail(
-                f"Team {self.team_name} does not exist; call build_team first"
-            )
+            return MemberOpResult.fail(f"Team {self.team_name} does not exist; call build_team first")
 
         from openjiuwen.agent_teams.tools.member_options import build_member_options
 
@@ -693,7 +698,10 @@ class TeamBackend:
             True if the member was started, False otherwise.
         """
         transitioned = await self.db.member.try_transition_member_status(
-            member_name, self.team_name, MemberStatus.UNSTARTED, MemberStatus.STARTING,
+            member_name,
+            self.team_name,
+            MemberStatus.UNSTARTED,
+            MemberStatus.STARTING,
         )
         if not transitioned:
             return False
@@ -702,7 +710,10 @@ class TeamBackend:
             await self._spawn_and_publish(member_name, on_created)
         except Exception:
             await self.db.member.try_transition_member_status(
-                member_name, self.team_name, MemberStatus.STARTING, MemberStatus.UNSTARTED,
+                member_name,
+                self.team_name,
+                MemberStatus.STARTING,
+                MemberStatus.UNSTARTED,
             )
             raise
 
@@ -791,13 +802,15 @@ class TeamBackend:
         # DB message (protocol=json): carries detailed approval data for
         # teammate to read when resuming from interrupt.  This is the
         # fallback delivery path if the pub-sub event is lost.
-        approval_payload = json.dumps({
-            "type": "tool_approval_result",
-            "tool_call_id": tool_call_id,
-            "approved": approved,
-            "feedback": feedback or "",
-            "auto_confirm": auto_confirm,
-        })
+        approval_payload = json.dumps(
+            {
+                "type": "tool_approval_result",
+                "tool_call_id": tool_call_id,
+                "approved": approved,
+                "feedback": feedback or "",
+                "auto_confirm": auto_confirm,
+            }
+        )
         await self.message_manager.send_message(
             content=approval_payload,
             to_member_name=member_name,
@@ -895,8 +908,12 @@ class TeamBackend:
             if active_tasks:
                 task_ids = ", ".join(t.task_id for t in active_tasks)
                 return MemberOpResult.fail(
-                    t("team.shutdown_human_active_tasks",
-                      member_name=member_name, count=str(len(active_tasks)), task_ids=task_ids)
+                    t(
+                        "team.shutdown_human_active_tasks",
+                        member_name=member_name,
+                        count=str(len(active_tasks)),
+                        task_ids=task_ids,
+                    )
                 )
 
         # Validate state transition
@@ -1501,9 +1518,8 @@ class TeamBackend:
         self._enable_hitt = effective_enable_hitt
         effective_enable_bridge = self._spec_enable_bridge if enable_bridge is None else enable_bridge
         self._enable_bridge = effective_enable_bridge
-        effective_task_verification = (
-            self._spec_enable_task_verification
-            and (enable_task_verification if enable_task_verification is not None else True)
+        effective_task_verification = self._spec_enable_task_verification and (
+            enable_task_verification if enable_task_verification is not None else True
         )
         self._enable_task_verification = effective_task_verification
 
@@ -1777,8 +1793,7 @@ class TeamBackend:
         if not await self.is_human_agent(member_name):
             names = await self.human_agent_names()
             raise KeyError(
-                f"'{member_name}' is not a registered human-agent member; "
-                f"registered members: {sorted(names)}"
+                f"'{member_name}' is not a registered human-agent member; registered members: {sorted(names)}"
             )
         if callback is None:
             self._human_agent_inbound_callbacks.pop(member_name, None)

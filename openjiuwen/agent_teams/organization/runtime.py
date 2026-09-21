@@ -113,17 +113,21 @@ _ORG_SUMMARY_TEAM_PROMPT = {
         "## Summary Team 固定职责\n"
         "你只负责组织根任务的最终汇总。收到 `organization.summary` 任务时，必须先调用 "
         "`org_summary_get_inputs` 读取该任务绑定的、已验收来源及其输出；仅基于这些来源形成最终结论。"
-        "不得创建 Organization 子任务、重新认领任务、审核或修改来源任务。将可交付给用户的最终内容写入 "
-        "`org_summary_complete` 的 output_context.description，并提供 output_abstract。"
+        "不得创建 Organization 子任务、重新认领任务、审核或修改来源任务。中间产物放在 Summary Team "
+        "工作空间，最终文件写入 Organization 工作空间的 summary/ 目录。将可交付给用户的最终内容写入 "
+        "`org_summary_complete` 的 output_context.description，并在有最终文件时提供 result_uri，同时提供 "
+        "output_abstract。"
     ),
     "en": (
         "## Summary Team fixed responsibility\n"
         "You only produce the final aggregation for an organization root task. For an "
         "`organization.summary` task, first call `org_summary_get_inputs` to read its bound, "
         "accepted sources and their outputs, then derive the final result only from those sources. "
-        "Do not create Organization child tasks, re-claim tasks, or review or modify source tasks. Complete the "
-        "Summary Task via `org_summary_complete`, putting the user-facing deliverable "
-        "in output_context.description and a concise output_abstract."
+        "Do not create Organization child tasks, re-claim tasks, or review or modify source tasks. Keep "
+        "intermediate artifacts in the Summary Team workspace and write final files under the Organization "
+        "workspace summary/ directory. Complete the Summary Task via `org_summary_complete`, putting the "
+        "user-facing deliverable in output_context.description, the final path in result_uri when present, "
+        "and a concise output_abstract."
     ),
 }
 
@@ -219,9 +223,7 @@ class OrganizationRuntimeManager:
 
         self._organization_progress_publisher = publisher
 
-    async def publish_organization_progress(
-        self, session_id: str, root_team_id: str, progress: dict[str, Any]
-    ) -> None:
+    async def publish_organization_progress(self, session_id: str, root_team_id: str, progress: dict[str, Any]) -> None:
         """Forward a factual organization milestone without exposing model reasoning."""
 
         if self._organization_progress_publisher is not None:
@@ -573,6 +575,13 @@ class OrganizationRuntimeManager:
                     continue
                 backend.org_task_manager = None
                 backend.org_message_service = None
+                self._unbind_organization_workspace(entry.agent, backend)
+                spawn_manager = getattr(entry.agent, "spawn_manager", None)
+                for handle in getattr(spawn_manager, "spawned_handles", {}).values():
+                    teammate = getattr(handle, "agent_ref", None)
+                    teammate_backend = getattr(teammate, "team_backend", None)
+                    if teammate is not None and teammate_backend is not None:
+                        self._unbind_organization_workspace(teammate, teammate_backend)
                 self._set_owner_lifecycle_prompt(entry.agent, is_owner=False)
                 harness = getattr(entry.agent, "harness", None)
                 remove_tool = getattr(harness, "remove_tool", None)
@@ -595,6 +604,11 @@ class OrganizationRuntimeManager:
                 db=owner_backend.db,
                 session_id=session_id,
             )
+            from openjiuwen.agent_teams.organization.workspace import (
+                remove_organization_workspace_manager,
+            )
+
+            remove_organization_workspace_manager(organization_id, session_id)
             result = {
                 "organization_id": organization_id,
                 "dissolved_team_ids": sorted(member_team_ids),
@@ -729,6 +743,36 @@ class OrganizationRuntimeManager:
     async def _bind_team(self, *, agent: "TeamAgent", backend: TeamBackend, manager: Any, session_id: str) -> None:
         backend.org_task_manager = manager.task_pool
         backend.org_message_service = manager.message_service
+        from openjiuwen.agent_teams.organization.workspace import (
+            get_organization_workspace_manager,
+        )
+
+        workspace_manager = get_organization_workspace_manager(manager.organization_id, session_id)
+        await workspace_manager.initialize()
+        workspace_manager.ensure_team_directory(backend.team_name)
+        self._bind_organization_workspace(
+            agent=agent,
+            backend=backend,
+            workspace_manager=workspace_manager,
+            organization_id=manager.organization_id,
+            session_id=session_id,
+        )
+        # Phase one supports one process.  Teammates spawned before their team
+        # joins the organization therefore need the mount immediately; members
+        # spawned later inherit the metadata above through AgentConfigurator.
+        spawn_manager = getattr(agent, "spawn_manager", None)
+        for handle in getattr(spawn_manager, "spawned_handles", {}).values():
+            teammate = getattr(handle, "agent_ref", None)
+            teammate_backend = getattr(teammate, "team_backend", None)
+            if teammate is None or teammate_backend is None:
+                continue
+            self._bind_organization_workspace(
+                agent=teammate,
+                backend=teammate_backend,
+                workspace_manager=workspace_manager,
+                organization_id=manager.organization_id,
+                session_id=session_id,
+            )
         self._team_organizations[(session_id, backend.team_name)] = manager.organization_id
         organization = await manager.get_organization()
         self._set_owner_lifecycle_prompt(
@@ -784,6 +828,62 @@ class OrganizationRuntimeManager:
             capabilities=set(self._capabilities(agent)),
         )
         await self._ensure_unclaimed_service(manager, session_id)
+
+    def _bind_organization_workspace(
+        self,
+        *,
+        agent: "TeamAgent",
+        backend: TeamBackend,
+        workspace_manager: Any,
+        organization_id: str,
+        session_id: str,
+    ) -> None:
+        """Attach the shared workspace to one local Team member."""
+
+        backend.organization_workspace_manager = workspace_manager
+        spec = getattr(agent, "spec", None)
+        if spec is not None:
+            metadata = dict(getattr(spec, "metadata", None) or {})
+            metadata.update(
+                {
+                    "organization_id": organization_id,
+                    "organization_session_id": session_id,
+                }
+            )
+            spec.metadata = metadata
+        harness = getattr(agent, "harness", None)
+        member_workspace = getattr(harness, "workspace", None)
+        workspace_root = getattr(member_workspace, "root_path", None)
+        if workspace_root:
+            workspace_manager.mount_into_workspace(workspace_root)
+        mounted_key = (organization_id, session_id)
+        add_rail = getattr(harness, "add_rail", None)
+        if callable(add_rail) and getattr(backend, "_organization_workspace_rail_key", None) != mounted_key:
+            from openjiuwen.agent_teams.organization.workspace_rail import (
+                OrganizationWorkspaceRail,
+            )
+
+            add_rail(
+                OrganizationWorkspaceRail(
+                    workspace_manager,
+                    team_id=backend.team_name,
+                    member_name=agent.member_name or backend.member_name,
+                    summary_team=self._is_summary_team(agent),
+                )
+            )
+            backend._organization_workspace_rail_key = mounted_key
+
+    @staticmethod
+    def _unbind_organization_workspace(agent: "TeamAgent", backend: TeamBackend) -> None:
+        """Unmount the shared workspace from one local Team member."""
+
+        workspace_manager = getattr(backend, "organization_workspace_manager", None)
+        harness = getattr(agent, "harness", None)
+        member_workspace = getattr(harness, "workspace", None)
+        workspace_root = getattr(member_workspace, "root_path", None)
+        if workspace_manager is not None and workspace_root:
+            workspace_manager.unmount_from_workspace(workspace_root)
+        backend.organization_workspace_manager = None
 
     async def _ensure_unclaimed_service(self, manager: Any, session_id: str) -> None:
         key = (session_id, manager.organization_id)
@@ -1223,9 +1323,7 @@ class OrganizationRuntimeManager:
                 continue
             aggregation = parent.aggregation
             is_root = parent.parent_task_id is None
-            is_summary_aggregation = (
-                aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
-            )
+            is_summary_aggregation = aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
             if is_root and is_summary_aggregation and aggregation.summary_task_id:
                 # A Summary Execution already owns final delivery for this root.
                 continue
@@ -1997,9 +2095,7 @@ class OrganizationRuntimeManager:
                     return
                 if entry.state is RuntimeState.PAUSED:
                     pass
-                elif entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(
-                    entry
-                ):
+                elif entry.state is RuntimeState.RUNNING and await self._team_is_idle_settled_for_org_wake(entry):
                     pass
                 else:
                     await asyncio.sleep(_LEADER_TURN_PAUSE_POLL_INTERVAL_SECONDS)
@@ -2032,8 +2128,7 @@ class OrganizationRuntimeManager:
                             OrgTaskStatus.IN_PROGRESS,
                         }
                         execution_running = (
-                            execution is not None
-                            and execution.status == OrgSummaryExecutionStatus.RUNNING.value
+                            execution is not None and execution.status == OrgSummaryExecutionStatus.RUNNING.value
                         )
                         if not summary_task_active or not execution_running:
                             continue

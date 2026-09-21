@@ -39,6 +39,10 @@ from openjiuwen.agent_teams.organization.transport_api import (
     TransportAPI,
     TransportResult,
 )
+from openjiuwen.agent_teams.organization.workspace import (
+    OrganizationWorkspaceConfig,
+    OrganizationWorkspaceManager,
+)
 
 __all__ = [
     "OrgUnclaimedPhase",
@@ -54,6 +58,8 @@ __all__ = [
     "OrgLeaderHandle",
     "OrganizationSpec",
     "OrganizationRuntimeManager",
+    "OrganizationWorkspaceConfig",
+    "OrganizationWorkspaceManager",
     "OrgMessageOpResult",
     "OrgMessageService",
     "OrgTask",
