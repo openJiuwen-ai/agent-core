@@ -349,8 +349,8 @@ class ExternalCliAgentSpec(BaseModel):
 
     skills: list[str | dict[str, Any]] = Field(default_factory=list)
     """Portable skill directories or manifest SkillSpec mappings for local CLI members."""
-    skill_conflict: Literal["skip", "replace"] = "skip"
-    """Keep or replace project skills with the same name."""
+    skill_conflict: Literal["skip", "replace", "append"] = "skip"
+    """Keep, replace, or add a uniquely named copy of an existing project skill."""
 
     system_prompt_mode: Literal["append", "replace"] | None = None
     """Prompt policy for Claude/Codex; None keeps each provider's default."""
@@ -528,6 +528,15 @@ class ExternalCliAgentSpec(BaseModel):
         return next((model for model in self.builtin_models if model.name == name), None)
 
 
+class ExternalCliMemberSpec(TeamMemberSpec):
+    """Predefined teammate backed by one existing external CLI config."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    role_type: Literal[TeamRole.EXTERNAL_CLI] = TeamRole.EXTERNAL_CLI
+    external_cli: ExternalCliAgentSpec
+
+
 class TeamSpec(BaseModel):
     """Definition of a team and its goal."""
 
@@ -686,6 +695,7 @@ __all__ = [
     "BridgeMailboxInjectMode",
     "BridgeMemberSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliMemberSpec",
     "ExternalCliModelConfig",
     "MemberOpResult",
     "MemberSpecBase",

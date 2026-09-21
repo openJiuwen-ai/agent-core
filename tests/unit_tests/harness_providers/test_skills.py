@@ -3,8 +3,8 @@
 
 """Portable skill bundle copying and collision behavior."""
 
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -21,7 +21,10 @@ def bundle(root: Path, name: str = "example", text: str = "instructions") -> Pat
     return root
 
 
-@pytest.mark.parametrize("provider,relative", [("claudecode", ".claude/skills"), ("codex", ".agents/skills"), ("dsh", ".dsh/skills")])
+@pytest.mark.parametrize(
+    "provider,relative",
+    [("claudecode", ".claude/skills"), ("codex", ".agents/skills"), ("dsh", ".dsh/skills")],
+)
 def test_complete_bundle_and_conflict_policies(tmp_path, provider, relative):
     source = bundle(tmp_path / "source")
     project = tmp_path / "project"
@@ -38,6 +41,14 @@ def test_complete_bundle_and_conflict_policies(tmp_path, provider, relative):
     install_skills((SkillSource(str(source)),), conflict="replace", **args)
     assert "updated" in (target / "SKILL.md").read_text()
     assert not (target / "stale").exists()
+    second = project / relative / "example-2"
+    third = project / relative / "example-3"
+    assert install_skills((SkillSource(str(source)),), conflict="append", **args) == (second,)
+    assert install_skills((SkillSource(str(source)),), conflict="append", **args) == (third,)
+    assert "name: example-2" in (second / "SKILL.md").read_text()
+    assert "name: example-3" in (third / "SKILL.md").read_text()
+    assert (second / ".hidden").read_bytes() == b"\x00\x01resource"
+    assert (target / "SKILL.md").read_text() == (source / "SKILL.md").read_text()
     assert not list(project.glob(".openjiuwen-skill-*"))
 
 
@@ -89,6 +100,35 @@ def test_concurrent_skip_copies_one_complete_skill(tmp_path):
         results = list(pool.map(lambda _: copy(), range(2)))
     assert sum(len(result) for result in results) == 1
     assert (tmp_path / ".agents/skills/example/scripts/run.sh").is_file()
+
+
+def test_concurrent_append_keeps_both_copies(tmp_path):
+    source = bundle(tmp_path / "source")
+
+    def copy():
+        return install_skills(
+            (SkillSource(str(source)),), provider="codex", cwd=str(tmp_path), conflict="append",
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: copy(), range(2)))
+
+    assert {path.name for result in results for path in result} == {"example", "example-2"}
+    assert (tmp_path / ".agents/skills/example-2/scripts/run.sh").is_file()
+
+
+def test_missing_cwd_uses_current_directory(tmp_path, monkeypatch):
+    source = bundle(tmp_path / "source")
+    current = tmp_path / "current"
+    current.mkdir()
+    monkeypatch.chdir(current)
+
+    assert install_skills((SkillSource(str(source)),), provider="codex", cwd=None, conflict="append") == (
+        current / ".agents/skills/example",
+    )
+    assert install_skills((SkillSource(str(source)),), provider="codex", cwd=None, conflict="append") == (
+        current / ".agents/skills/example-2",
+    )
 
 
 def test_invalid_configuration_and_skill_name(tmp_path):

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+
 import pytest
 
 pytestmark = pytest.mark.level0
@@ -73,6 +74,104 @@ def test_agent_template_manifest_uses_name_and_description(tmp_path: Path) -> No
     assert spec.agent_card.id == "workplace-slim-coach"
     assert spec.agent_card.name == "workplace-slim-coach"
     assert spec.agent_card.description == "A personal weight-loss coach for busy office workers."
+
+
+def test_agent_template_manifest_parses_external_runtime_paths(tmp_path: Path) -> None:
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    package_dir = tmp_path / "external"
+    persona_dir = package_dir / "persona"
+    sdk_dir = package_dir / "sdk"
+    persona_dir.mkdir(parents=True)
+    sdk_dir.mkdir()
+    (persona_dir / "identity.md").write_text("# External", encoding="utf-8")
+    wheel = sdk_dir / "provider.whl"
+    wheel.write_bytes(b"wheel")
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "agent_template",
+                "name": "external",
+                "description": "External expert",
+                "persona": {"dir": "./persona"},
+                "runtime": {
+                    "provider_name": "codex",
+                    "provider_version": "0.1.0",
+                    "sdk_paths": ["./sdk/provider.whl"],
+                    "config": {"skill_conflict": "replace"},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    spec = load_agent_template_package(manifest)
+
+    assert spec.runtime is not None
+    assert spec.runtime.provider_name == "codex"
+    assert spec.runtime.sdk_paths == [str(wheel.resolve())]
+    assert spec.runtime.config == {"skill_conflict": "replace"}
+
+
+def test_agent_template_manifest_rejects_runtime_path_escape(tmp_path: Path) -> None:
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    package_dir = tmp_path / "external"
+    persona_dir = package_dir / "persona"
+    persona_dir.mkdir(parents=True)
+    (persona_dir / "identity.md").write_text("# External", encoding="utf-8")
+    outside = tmp_path / "provider.whl"
+    outside.write_bytes(b"wheel")
+    manifest = package_dir / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "package_type": "agent_template",
+                "name": "external",
+                "description": "External expert",
+                "persona": {"dir": "./persona"},
+                "runtime": {
+                    "provider_name": "codex",
+                    "provider_version": "0.1.0",
+                    "sdk_paths": ["../provider.whl"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="escapes package root"):
+        load_agent_template_package(manifest)
+
+
+def test_agent_template_manifest_validates_skill_directories(tmp_path: Path) -> None:
+    from openjiuwen.harness.resources import load_agent_template_package
+
+    package_dir = tmp_path / "agent"
+    persona_dir = package_dir / "persona"
+    skill_dir = package_dir / "skills" / "review"
+    persona_dir.mkdir(parents=True)
+    skill_dir.mkdir(parents=True)
+    (persona_dir / "identity.md").write_text("# Agent", encoding="utf-8")
+    manifest = package_dir / "manifest.json"
+    payload = {
+        "package_type": "agent_template",
+        "name": "agent",
+        "description": "Agent with skills",
+        "persona": {"dir": "./persona"},
+        "skills": [{"dir": "./skills/review"}],
+    }
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(FileNotFoundError, match="SKILL.md"):
+        load_agent_template_package(manifest)
+
+    (skill_dir / "SKILL.md").write_text("# Review", encoding="utf-8")
+    payload["skills"] *= 2
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="duplicate skill directory"):
+        load_agent_template_package(manifest)
 
 
 def test_legacy_yaml_tool_aliases_remap_to_rails(tmp_path: Path) -> None:

@@ -52,6 +52,7 @@ from openjiuwen.agent_teams.schema.team import (
     BridgeMailboxInjectMode,
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    ExternalCliMemberSpec,
     MemberModelSwitchResult,
     MemberOpResult,
     MemberRosterEntry,
@@ -343,7 +344,11 @@ class TeamBackend:
         # A member listed here is driven by an external backend instead of a
         # local DeepAgent. Runtime recovery restores this process-local index
         # from ``TeamMember.options["cli_agent"]``.
-        self._external_cli_specs: dict[str, str] = {}
+        self._external_cli_specs: dict[str, str] = {
+            m.member_name: m.external_cli.cli_agent
+            for m in self.predefined_members
+            if isinstance(m, ExternalCliMemberSpec)
+        }
         # Static per-CLI launch configs from the spec, keyed by cli_agent
         # name. The non-empty key set is the capability ceiling: spawning an
         # external-CLI member requires a matching config here. The spawn path
@@ -2088,6 +2093,11 @@ class TeamBackend:
                 description=member_spec.desc,
             )
             allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
+            cli_agent = (
+                member_spec.external_cli.cli_agent
+                if isinstance(member_spec, ExternalCliMemberSpec)
+                else None
+            )
             await self.spawn_member(
                 member_name=member_spec.member_name,
                 display_name=member_spec.display_name,
@@ -2099,6 +2109,7 @@ class TeamBackend:
                 mode=self.teammate_mode,
                 allocation=allocation,
                 role=member_spec.role_type,
+                cli_agent=cli_agent,
             )
         if skipped_bridge_specs:
             team_logger.warning(

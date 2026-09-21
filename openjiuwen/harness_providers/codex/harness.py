@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
-from typing import Any, Mapping
+from typing import Any, Mapping, Callable
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,

@@ -160,13 +160,14 @@ assembly hook 仅替换 prefix 文本，保留其它 sections（新 prefix 仍�
 
 三方 provider 接受 manifest.skills；每个 SkillSpec.dir 可指向单个含 SKILL.md 的 bundle 或包含多个
 bundle 的 library。包路径按现有 manifest loader 解析为绝对路径，内存配置也建议传绝对源路径。
-同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（默认）或 replace。
+同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（Provider 默认）、replace 或 append。
 
 start 在 SDK 启动前复制完整目录到 cwd/.claude/skills（claudecode）、cwd/.agents/skills（codex）、
 cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
 名称取 SKILL.md front matter.name，缺省取目录名；同名按不区分大小写比较，同时识别已有目录里的
 声明名。enabled_skills 非空时筛选声明名；mode 仍被解析校验，但原生 CLI 决定加载/调用方式，
 不仿造 DeepAgent 的 auto_list 工具。skip 保留已有目录全部内容，replace 完整替换（清除旧文件），
+append 新增带序号的独立目录和技能名；专家团 manifest 装配的外部成员默认使用 append。
 多源重名按声明顺序处理。临时完整副本切换失败会恢复原目录。复制结果跨 stop 保留。
 
 复制保留普通文件、子目录、隐藏资源和可执行位；内部链接物化成文件，越界/循环链接拒绝。

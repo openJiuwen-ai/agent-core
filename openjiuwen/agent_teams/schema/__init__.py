@@ -27,6 +27,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import (
 )
 from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliMemberSpec,
     TeamLifecycle,
     TeamMemberSpec,
     TeamRole,
@@ -52,6 +53,7 @@ __all__ = [
     "register_storage",
     "register_transport",
     "TeamLifecycle",
+    "ExternalCliMemberSpec",
     "TeamMemberSpec",
     "TeamRole",
     "TeamRuntimeContext",

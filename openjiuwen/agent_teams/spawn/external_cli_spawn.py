@@ -18,7 +18,6 @@ import contextvars
 import os
 from typing import TYPE_CHECKING, Any, Optional
 
-from openjiuwen.harness_providers.skills import normalize_skills
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
@@ -28,10 +27,15 @@ from openjiuwen.agent_teams.schema.status import MemberStatus
 from openjiuwen.agent_teams.schema.team import ExternalCliModelConfig
 from openjiuwen.agent_teams.spawn.inprocess_handle import InProcessSpawnHandle
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.harness_providers.skills import install_skills, normalize_skills
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.agent.team_agent import TeamAgent
-    from openjiuwen.agent_teams.schema.team import TeamAgentSpec, TeamRuntimeContext
+    from openjiuwen.agent_teams.schema.team import (
+        ExternalCliAgentSpec,
+        TeamAgentSpec,
+        TeamRuntimeContext,
+    )
     from openjiuwen.agent_teams.team_context import TeamContextTracker
     from openjiuwen.agent_teams.tools.team import TeamBackend
 
@@ -77,6 +81,23 @@ def _team_model_config_to_external(
         model=model or None,
         api_base=str(getattr(client_config, "api_base", "") or "") or None,
         api_key=str(getattr(client_config, "api_key", "") or "") or None,
+    )
+
+
+def _external_cli_config_for_member(
+    spec: "TeamAgentSpec",
+    member_name: str | None,
+    cli_agent: str | None,
+) -> "ExternalCliAgentSpec | None":
+    """Prefer a predefined member's config, then the dynamic kind config."""
+    from openjiuwen.agent_teams.schema.team import ExternalCliMemberSpec
+
+    for member in spec.predefined_members:
+        if isinstance(member, ExternalCliMemberSpec) and member.member_name == member_name:
+            return member.external_cli
+    return next(
+        (entry for entry in spec.external_cli_agents if entry.cli_agent == cli_agent),
+        None,
     )
 
 
@@ -382,11 +403,7 @@ async def external_cli_spawn(
     )
 
     # Resolve the static launch config declared on the spec for this CLI kind.
-    cli_cfg = None
-    for entry in spec.external_cli_agents:
-        if entry.cli_agent == ctx.cli_agent:
-            cli_cfg = entry
-            break
+    cli_cfg = _external_cli_config_for_member(spec, member_name, ctx.cli_agent)
 
     # When the pool allocator assigned a model to this member, convert it to
     # an ExternalCliModelConfig, filtering by provider compatibility: Claude
@@ -444,6 +461,18 @@ async def external_cli_spawn(
             configured_cwd=cli_cfg.cwd,
             team_name=team_name,
         )
+        skills = normalize_skills(cli_cfg.skills, cli_cfg.skill_conflict)
+        project_dir = _build_context_project_dir(spec)
+        if skills and project_dir:
+            local_cli = cli_cfg.ssh_transport is None and ctx.cli_agent in {"claude", "codex"}
+            if local_cli and not _same_path(project_dir, cwd):
+                await asyncio.to_thread(
+                    install_skills,
+                    skills,
+                    provider="claudecode" if ctx.cli_agent == "claude" else "codex",
+                    cwd=project_dir,
+                    conflict=cli_cfg.skill_conflict,
+                )
         runtime = await build_cli_runtime(
             ctx,
             cwd=cwd,
@@ -451,7 +480,7 @@ async def external_cli_spawn(
             command_override=tuple(cli_cfg.command) if cli_cfg.command else None,
             cli_path=cli_cfg.cli_path,
             system_prompt_mode=cli_cfg.system_prompt_mode,
-            skills=normalize_skills(cli_cfg.skills, cli_cfg.skill_conflict),
+            skills=skills,
             skill_conflict=cli_cfg.skill_conflict,
             codex_bin=cli_cfg.codex_bin,
             inject_mcp=cli_cfg.inject_mcp,
