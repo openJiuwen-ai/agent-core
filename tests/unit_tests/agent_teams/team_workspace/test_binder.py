@@ -440,25 +440,6 @@ def test_setup_migrates_legacy_root_dir_into_members() -> None:
 
 
 @pytest.mark.level0
-def test_setup_migrates_pre_rename_members_layer() -> None:
-    """A dir left under the pre-rename members/ layer is migrated into
-    jiuwen_team_members/ on the next setup (probe order: current layer,
-    members/, root)."""
-    home = apaths.get_agent_teams_home()
-    old = home / "members" / "teamA#worker"
-    old.mkdir(parents=True)
-    (old / "artifact.txt").write_text("kept", encoding="utf-8")
-
-    root = MemberWorkspaceBinder().setup(_binding("teamA", "worker", MEMBER_MODE_DYNAMIC))
-
-    new = home / "jiuwen_team_members" / "teamA#worker"
-    assert new.is_dir(), "dir migrated into jiuwen_team_members/"
-    assert not old.exists(), "pre-rename members/ dir gone"
-    assert (new / "artifact.txt").read_text(encoding="utf-8") == "kept"
-    assert is_dir_link(root)
-
-
-@pytest.mark.level0
 def test_setup_migrates_legacy_predefined_and_fixes_all_teams_links() -> None:
     """Migrating a predefined shared dir re-links EVERY team that referenced
     it, not just the team triggering the migration — a predefined dir is

@@ -70,22 +70,11 @@ def test_member_real_dir_probes_legacy_root_when_only_there() -> None:
 
 
 @pytest.mark.level0
-def test_member_real_dir_prefers_current_over_older_layouts() -> None:
-    """When several layouts hold the dir, the current one wins: current >
-    pre-rename members/ > root. The migrated location is authoritative."""
+def test_member_real_dir_prefers_current_over_legacy_root() -> None:
+    """When both positions exist, the current layout wins — the migrated
+    location is authoritative."""
     home = apaths.get_agent_teams_home()
     (home / "jiuwen_team_members" / "shared").mkdir(parents=True)
-    (home / "members" / "shared").mkdir(parents=True)
     (home / "shared").mkdir(parents=True)
     got = member_real_dir("teamA", "shared", MEMBER_MODE_PREDEFINED)
     assert got == home / "jiuwen_team_members" / "shared"
-
-
-@pytest.mark.level0
-def test_member_real_dir_probes_pre_rename_members_layer() -> None:
-    """A dir left under the pre-rename members/ layer (no current-layout or
-    root copy) resolves in place — it gets migrated on the next setup."""
-    home = apaths.get_agent_teams_home()
-    (home / "members" / "shared").mkdir(parents=True)
-    got = member_real_dir("teamA", "shared", MEMBER_MODE_PREDEFINED)
-    assert got == home / "members" / "shared"

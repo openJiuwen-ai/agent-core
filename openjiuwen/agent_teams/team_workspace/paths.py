@@ -13,11 +13,10 @@ Pure functions for where a member's *real* directory lives on disk:
 ``jiuwen_team_members/`` is a dedicated subdirectory of ``.agent_teams/`` so
 member real dirs no longer sit mixed with team dirs at the root (the
 ``jiuwen_`` prefix keeps the name clear of any realistic team name).
-Directories left by older layouts — directly at the ``.agent_teams/`` root or
-under the short-lived pre-rename ``members/`` layer — are still resolved
-(probe order: current layout, ``members/``, root); the binder migrates them
-into ``jiuwen_team_members/`` on the next spawn (best effort); probing first
-means a dir that fails to migrate keeps working in place.
+Directories created by the original layout directly at the ``.agent_teams/``
+root are still resolved (probe order: current layout, root) — the binder
+migrates them into ``jiuwen_team_members/`` on the next spawn (best effort);
+probing first means a dir that fails to migrate keeps working in place.
 
 The link inside the team is *always* ``team_member_workspace_dir``
 (``workspaces/<member>_workspace``), so A/B code keeps using that path
@@ -40,9 +39,6 @@ MEMBER_MODE_DYNAMIC = "dynamic"
 
 MEMBERS_DIR_NAME = "jiuwen_team_members"
 """Name of the dedicated member real-dir subdirectory under ``.agent_teams/``."""
-
-# Pre-rename layout names, still resolved for best-effort migration.
-LEGACY_MEMBERS_DIR_NAME = "members"
 
 
 def members_home() -> Path:
@@ -75,15 +71,17 @@ def _probe_member_dir(dir_name: str) -> Path:
     """Return the first existing real dir for ``dir_name``, else the current path.
 
     Probe order: ``jiuwen_team_members/<dir_name>`` first (the current
-    layout), then the pre-rename ``members/`` layer, then the ``.agent_teams/``
-    root (the original layout). When none exists the current-layout path is
-    returned — that is where a new directory will be created.
+    layout), then the ``.agent_teams/`` root (the original layout). When
+    neither exists the current-layout path is returned — that is where a
+    new directory will be created.
     """
-    for base in (members_home(), get_agent_teams_home() / LEGACY_MEMBERS_DIR_NAME, get_agent_teams_home()):
-        candidate = base / dir_name
-        if candidate.is_dir():
-            return candidate
-    return members_home() / dir_name
+    members_dir = members_home() / dir_name
+    if members_dir.is_dir():
+        return members_dir
+    legacy = get_agent_teams_home() / dir_name
+    if legacy.is_dir():
+        return legacy
+    return members_dir
 
 
 def member_real_dir(
@@ -118,7 +116,6 @@ def member_real_dir(
 
 
 __all__ = [
-    "LEGACY_MEMBERS_DIR_NAME",
     "MEMBERS_DIR_NAME",
     "MEMBER_MODE_DYNAMIC",
     "MEMBER_MODE_LEADER",

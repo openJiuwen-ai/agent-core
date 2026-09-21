@@ -44,11 +44,10 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 
 > 2026-09-21：真实目录下沉到 `.agent_teams/jiuwen_team_members/` 子目录（不再与 team 目录
 > 混排根级；`jiuwen_` 前缀避开任何现实的 team 名）。`member_real_dir` 对 predefined/dynamic
-> 是 probe-first：先 `jiuwen_team_members/<name>`、再 pre-rename `members/<name>`、再根级
-> `<name>`（原始布局遗留）、都没有则返回 `jiuwen_team_members/<name>` 作新建目标。旧布局
-> 遗留目录在下一次 `Binder.setup` 时尽力迁移（跨进程锁 + 锁内二次探测 + 全 team link 重建，
-> 失败留原地照常工作）。`members` / `jiuwen_team_members` 均为保留 team 目录名
-> （`RESERVED_TEAM_DIR_NAMES`）。
+> 是 probe-first：先 `jiuwen_team_members/<name>`、再根级 `<name>`（原始布局遗留）、
+> 都没有则返回 `jiuwen_team_members/<name>` 作新建目标。根级遗留目录在下一次
+> `Binder.setup` 时尽力迁移（跨进程锁 + 锁内二次探测 + 全 team link 重建，
+> 失败留原地照常工作）。
 
 - link 成功 → team 内路径是 link，透明映射到 team 外。
 - link 失败 → 真实目录建在 team 内，team 内路径就是真实目录。

@@ -10,16 +10,15 @@ Creates the on-disk member workspace at spawn time (never at ``build_team``):
 - dynamic:    ``jiuwen_team_members/<team>#<member>/`` (prefix on) or
               ``jiuwen_team_members/<member>/`` (prefix off) + link + refcount
 
-Real directories left by older layouts (directly under ``.agent_teams/``, or
-under the pre-rename ``members/`` layer) are migrated into
-``jiuwen_team_members/`` on the next ``setup`` — best effort under a
-cross-process lock: the directory is renamed, then every in-team link pointing
-at the old location is re-created against the new one (a predefined dir is
-shared across teams, so *all* teams' links are fixed, not just the spawning
-team's). A rename that fails (e.g. a Windows handle holds a file inside the
-dir) logs and keeps the legacy location — probing in ``member_real_dir``
-resolves it in place, so correctness never depends on the migration
-succeeding.
+Real directories left by the original layout (directly under
+``.agent_teams/``) are migrated into ``jiuwen_team_members/`` on the next
+``setup`` — best effort under a cross-process lock: the directory is
+renamed, then every in-team link pointing at the old location is re-created
+against the new one (a predefined dir is shared across teams, so *all*
+teams' links are fixed, not just the spawning team's). A rename that fails
+(e.g. a Windows handle holds a file inside the dir) logs and keeps the legacy
+location — probing in ``member_real_dir`` resolves it in place, so
+correctness never depends on the migration succeeding.
 
 ``setup`` is idempotent — an existing directory or link is left as-is, so
 spawn and session recovery converge on the same path. It always returns the
@@ -385,21 +384,6 @@ class MemberWorkspaceBinder:
         remove_dir_link(link)
 
 
-def _strip_extended_path_prefix(path: str) -> str:
-    """Drop the Windows ``\\\\?\\`` extended-length prefix from a link target.
-
-    ``os.readlink`` on a junction returns the target with the prefix; the
-    comparison against a plain path only matches after stripping it.
-    """
-    prefix = "\\\\?\\"
-    return path[len(prefix):] if path.startswith(prefix) else path
-
-
-def _same_location(left: Path | str, right: Path | str) -> bool:
-    """Case-insensitive location equality for link-target comparison."""
-    return os.path.normcase(str(left)) == os.path.normcase(str(right))
-
-
 def _fix_links_to_real_dir(old_dir: Path, new_dir: Path) -> None:
     """Re-create every in-team link that pointed at ``old_dir``.
 
@@ -427,10 +411,15 @@ def _fix_links_to_real_dir(old_dir: Path, new_dir: Path) -> None:
             continue
         for link in entries:
             try:
-                target = _strip_extended_path_prefix(os.readlink(link))
+                # os.readlink on a Windows junction returns the target with
+                # the extended-length ``\\?\`` prefix; strip it so the plain
+                # path comparison matches.
+                target = os.readlink(link)
+                if target.startswith("\\\\?\\"):
+                    target = target[4:]
             except OSError:
                 continue  # not a link, or unreadable
-            if not _same_location(target, old_dir):
+            if os.path.normcase(target) != os.path.normcase(str(old_dir)):
                 continue
             try:
                 if remove_dir_link(link):
