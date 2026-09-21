@@ -190,6 +190,14 @@ class SharedOtlpReceiver:
         """The OTLP/HTTP endpoint the CLI subprocesses should export to."""
         return self.endpoint
 
+    @property
+    def base_url(self) -> str | None:
+        """The receiver's origin, for a CLI that names the signal path itself."""
+        endpoint = self.endpoint
+        if not endpoint:
+            return None
+        return endpoint.rsplit("/v1/", maxsplit=1)[0]
+
     def _fanout(self, events: list[dict[str, Any]]) -> None:
         """Broadcast decoded events to every subscriber callback."""
         for event in events:

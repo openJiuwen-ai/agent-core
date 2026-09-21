@@ -141,6 +141,7 @@ class CodexHarness(SerializedTurnHarness):
         super().__init__(event_buffer_capacity=self._config.event_buffer_capacity)
         self._request_observer: CodexRequestObserver | None = None
         self._rollout_env: dict[str, str] = {}
+        self._observation_overrides: tuple[str, ...] = ()
         self._sdk: Any = None
         self._client: Any = None
         self._thread: Any = None
@@ -219,12 +220,15 @@ class CodexHarness(SerializedTurnHarness):
     async def _attach_request_observer(self, context: HarnessContext) -> None:
         """Observe model requests when the host consumes them."""
         self._rollout_env = {}
+        self._observation_overrides = ()
         if HostCapability.MODEL_REQUEST_OBSERVATION not in context.host_capabilities:
             self._request_observer = None
             return
         observer = CodexRequestObserver(wait_s=float(self._config.request_observation_wait_s))
         self._request_observer = observer
-        self._rollout_env = await observer.attach()
+        attachment = await observer.attach()
+        self._rollout_env = attachment.env
+        self._observation_overrides = attachment.config_overrides
 
     async def _connect(
         self,
@@ -243,6 +247,7 @@ class CodexHarness(SerializedTurnHarness):
             env={**build_process_env(self._config, context.env), **self._rollout_env},
             mcp_servers=context.mcp_servers,
             enable_user_input=HostCapability.USER_INPUT in context.host_capabilities,
+            extra_config_overrides=self._observation_overrides,
         )
         options = build_thread_options(
             sdk=sdk,
@@ -295,6 +300,7 @@ class CodexHarness(SerializedTurnHarness):
             observer = self._request_observer
             self._request_observer = None
             self._rollout_env = {}
+            self._observation_overrides = ()
             if observer is not None:
                 await observer.close()
 

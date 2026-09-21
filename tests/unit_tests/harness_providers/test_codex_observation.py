@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -365,3 +366,209 @@ async def test_hosts_without_model_request_observation_get_no_request_events(mon
 def test_raw_param_reads_camel_and_snake_case() -> None:
     assert observation_module._raw_param({"responseId": "r"}, "responseId") == "r"
     assert observation_module._raw_param(SimpleNamespace(response_id="r"), "responseId") == "r"
+
+
+def _telemetry(source_id: str, name: str, **attributes: Any) -> dict[str, Any]:
+    """One CLI telemetry event as the loopback receiver decodes it."""
+    return {
+        "signal": "log",
+        "name": "",
+        "attributes": {"event.name": name, **attributes},
+        "resource_attributes": {"env": source_id, "service.name": "codex-app-server"},
+    }
+
+
+def _deliver_telemetry(harness: CodexHarness, *events: dict[str, Any]) -> Callable[[Any], Any]:
+    """Script step pushing telemetry at the observer the way the receiver does."""
+
+    async def deliver(_handle: Any) -> None:
+        observer = harness._request_observer
+        assert observer is not None
+        for event in events:
+            observer._on_receiver_event(event)
+        # The receiver hands events over through the loop, as a real one does.
+        await asyncio.sleep(0)
+        return None
+
+    return deliver
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Codex answers its own tool search, and a code cell that invokes nothing,
+    # without reporting a thread item: the call lives only in one response and
+    # its result in the next request.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    _install_reader(monkeypatch)
+    search_call = {
+        "type": "tool_search_call",
+        "id": "tsc-1",
+        "call_id": "call-search",
+        "name": "tool_search_call",
+        "arguments": {"query": "send_message", "limit": 5},
+    }
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False, cwd="/w"))
+    state.scripts.append(
+        [
+            _record("codex_turn_started"),
+            _record(
+                "inference_started",
+                inference_call_id="inf-1",
+                resolved_payloads={"request_payload": {"input": [_USER_INPUT]}},
+            ),
+            _record(
+                "inference_completed",
+                inference_call_id="inf-1",
+                response_id="resp-1",
+                resolved_payloads={"response_payload": {"output_items": [search_call]}},
+            ),
+            lambda _handle: _deliver_telemetry(
+                harness,
+                _telemetry(
+                    harness._request_observer._source_id,
+                    "codex.tool_result",
+                    call_id="call-search",
+                    tool_name="tool_search",
+                    tool_namespace="functions",
+                    duration_ms=12,
+                    success="true",
+                    output_truncated=False,
+                ),
+                _telemetry(
+                    harness._request_observer._source_id,
+                    "codex.conversation_starts",
+                    provider_name="OpenAI",
+                    context_window=1000000,
+                    approval_policy="never",
+                ),
+            )(_handle),
+            _record(
+                "inference_started",
+                inference_call_id="inf-2",
+                resolved_payloads={
+                    "request_payload": {
+                        "previous_response_id": "resp-1",
+                        "input": [
+                            {"type": "tool_search_output", "id": "tso-1", "call_id": "call-search", "output": "found 1"},
+                        ],
+                    },
+                },
+            ),
+            _record(
+                "inference_completed",
+                inference_call_id="inf-2",
+                response_id="resp-2",
+                resolved_payloads={"response_payload": {"output_items": []}},
+            ),
+            _record("codex_turn_ended"),
+            _turn_completed("turn-hi", _Status.completed),
+        ]
+    )
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="list files"))
+    events = await _turn(harness, receipt.turn_id)
+    logger.info("codex observation kinds: {}", _kinds(events))
+
+    # The call is reported between the request that made it and the one that
+    # read its result.
+    assert _kinds(events) == [
+        "turn:started",
+        "request:inf-1",
+        "tool:call-search:started",
+        "tool:call-search:completed",
+        "request:inf-2",
+        "turn:finished",
+    ]
+    started, completed = [
+        event.event for event in events if isinstance(event.event, ItemLifecycleEvent)
+    ]
+    assert "inf-1" in [event for event in events if event.event is started][0].causation_ids
+    # The CLI's own report of the call wins over what the conversation implies.
+    assert started.data["name"] == "tool_search"
+    assert started.data["announced"] is False
+    assert completed.data["duration_ms"] == 12
+    assert completed.data["is_error"] is False
+    assert completed.data["result"] == "found 1"
+    # Session settings the CLI resolved to travel with the request.
+    second = [event.event for event in events if isinstance(event.event, ModelRequestEvent)][1]
+    assert second.data["codex"]["context_window"] == 1000000
+    assert second.data["codex"]["approval_policy"] == "never"
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_announced_tool_call_gets_no_stand_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The App Server named this one, so the observation must not double it.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    _install_reader(monkeypatch)
+    state.scripts.append(
+        [
+            _record("codex_turn_started"),
+            _record(
+                "inference_started",
+                inference_call_id="inf-1",
+                resolved_payloads={"request_payload": {"input": [_USER_INPUT]}},
+            ),
+            _notification("item/started", **_command()),
+            _record(
+                "inference_completed",
+                inference_call_id="inf-1",
+                response_id="resp-1",
+                resolved_payloads={"response_payload": {"output_items": [_SHELL_CALL]}},
+            ),
+            _notification("item/completed", **_command(aggregated_output="a.py", status="completed", error=None)),
+            _record(
+                "inference_started",
+                inference_call_id="inf-2",
+                resolved_payloads={
+                    "request_payload": {
+                        "previous_response_id": "resp-1",
+                        "input": [{"type": "function_call_output", "id": "fco-1", "call_id": "cmd-1", "output": "a.py"}],
+                    },
+                },
+            ),
+            _record(
+                "inference_completed",
+                inference_call_id="inf-2",
+                response_id="resp-2",
+                resolved_payloads={"response_payload": {"output_items": []}},
+            ),
+            _record("codex_turn_ended"),
+            _turn_completed("turn-hi", _Status.completed),
+        ]
+    )
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False, cwd="/w"))
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="list files"))
+    events = await _turn(harness, receipt.turn_id)
+
+    assert _kinds(events).count("tool:cmd-1:started") == 1
+    assert not [event for event in events if _kinds([event]) == ["tool:call-search:started"]]
+    await harness.stop()
+
+
+def test_telemetry_reads_only_what_the_agent_did() -> None:
+    from openjiuwen.harness_providers.codex.observation import _telemetry_observation
+
+    facts = _telemetry_observation(
+        "codex.tool_result",
+        {
+            "call_id": "call-1",
+            "tool_name": "exec",
+            "arguments": '{"cmd":"ls"}',
+            "duration_ms": "51",
+            "success": "true",
+            "user.email": "someone@example.com",
+            "user.account_id": "acct-1",
+        },
+    )
+    assert facts.arguments == {"cmd": "ls"}
+    assert facts.duration_ms == 51 and facts.success is True
+    # The signed-in account is not part of what the agent did.
+    assert "someone@example.com" not in str(facts)
+    assert _telemetry_observation("codex.tool_result", {"tool_name": "exec"}) is None
+    assert _telemetry_observation("codex.startup_phase", {"model": "gpt-5"}) is None

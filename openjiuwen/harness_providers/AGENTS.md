@@ -63,14 +63,28 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    reliability layer maps this one-to-one.
 5. **Provider-private seams do not leak.** `ClaudeCodeHarness(transport_factory=...)`
    is the only constructor-only hook, for hosts that own the SDK transport (ssh).
-   Vendor observation channels (Claude request-body logs through the shared
-   loopback receiver, Codex rollout trace and raw response notifications) stay
-   inside the provider: they switch on only when the host declares
-   `MODEL_REQUEST_OBSERVATION` and surface as `ModelRequestEvent`s. Tool items a
-   request caused are held until that request is reported and cite it in
+   Vendor observation channels stay inside the provider: they switch on only
+   when the host declares `MODEL_REQUEST_OBSERVATION` and surface as
+   `ModelRequestEvent`s. Each provider runs two, split the same way — one
+   carries the **content**, the other the **facts**, and where the CLI states
+   a fact that statement wins over one derived from the stream. Claude Code:
+   request-body logs plus its tool/request telemetry, both through the shared
+   loopback receiver. Codex: the rollout trace (`CODEX_ROLLOUT_TRACE_ROOT`) for
+   bodies, because its telemetry carries none, plus that telemetry's OTLP *log*
+   events for tool arguments/output/duration/success/truncation, approval
+   decisions and the session's resolved settings. Codex's endpoint is used
+   verbatim, so it is given the receiver's `/v1/logs` path, `otel.environment`
+   carries the per-member source id, and its trace exporter stays off (hundreds
+   of internal spans per turn, no observation of its own). Tool items a request
+   caused are held until that request is reported and cite it in
    `causation_ids`; a request whose vendor record does not arrive within
    `request_observation_wait_s` is reported from its reply
-   (`input_observed=False`). Hosts record trajectories with
+   (`input_observed=False`). A tool call the vendor never announces as an item
+   (Codex answers its own tool search, and a code cell that invokes nothing) is
+   reported from the response that made it and the request that read its
+   result, between those two requests. Codex states no per-request TTFT
+   (`codex.turn_ttft` is one turn-level number) and no cost, so neither is
+   reported rather than derived. Hosts record trajectories with
    `HarnessTrajectoryRecorder`, never by reading vendor data. The recorder
    marks the user messages carrying a turn's host inputs as the external
    user's and remembers those message ids: whose a message is does not change

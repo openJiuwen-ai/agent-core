@@ -87,6 +87,32 @@ def codex_model_config_overrides(model: CodexModelConfig) -> tuple[str, ...]:
     return tuple(overrides)
 
 
+def codex_otel_config_overrides(*, endpoint: str, source_id: str) -> tuple[str, ...]:
+    """Point the CLI's telemetry events at the loopback receiver.
+
+    Codex reports its facts -- tool results and decisions, per-response token
+    counts, the session's resolved settings -- as OTLP *log* events. Only that
+    signal is switched on: its trace exporter emits hundreds of internal spans
+    per turn that carry no observation of its own.
+
+    The endpoint is used verbatim (the CLI appends no ``/v1/<signal>`` path of
+    its own), and ``otel.environment`` lands in the resource as ``env``, which
+    is how one member claims its own events out of the shared receiver.
+
+    Args:
+        endpoint: Base URL of the loopback receiver.
+        source_id: This session's identity, echoed back in the resource.
+    """
+    url = json.dumps(endpoint.rstrip("/") + "/v1/logs")
+    exporter = f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
+    return (
+        f"otel.environment={json.dumps(source_id)}",
+        f"otel.exporter={exporter}",
+        "otel.trace_exporter=none",
+        "otel.metrics_exporter=none",
+    )
+
+
 def codex_mcp_config_overrides(
     server: McpServerConfig,
     *,
@@ -139,6 +165,7 @@ def build_codex_config(
     env: Mapping[str, str],
     mcp_servers: tuple[McpServerConfig, ...],
     enable_user_input: bool = False,
+    extra_config_overrides: tuple[str, ...] = (),
 ) -> Any:
     """Build ``CodexConfig`` for one harness session.
 
@@ -146,6 +173,8 @@ def build_codex_config(
         enable_user_input: Give the model Codex's experimental
             ``request_user_input`` tool; it is off in the CLI's default mode,
             so a host that declares ``USER_INPUT`` must switch it on here.
+        extra_config_overrides: Provider-private overrides for this session,
+            such as the telemetry channel's exporter settings.
     """
     process_env = dict(env)
     overrides: tuple[str, ...] = ()
@@ -163,6 +192,7 @@ def build_codex_config(
             required=config.mcp_required,
             default_tools_approval_mode=config.mcp_default_tools_approval_mode,
         )
+    overrides += extra_config_overrides
     overrides += config.config_overrides
     return sdk.CodexConfig(
         codex_bin=config.codex_bin,
@@ -336,6 +366,7 @@ __all__ = [
     "build_thread_options",
     "codex_mcp_config_overrides",
     "codex_model_config_overrides",
+    "codex_otel_config_overrides",
     "codex_model_options",
     "load_codex_sdk",
     "start_thread_with_raw_events",
