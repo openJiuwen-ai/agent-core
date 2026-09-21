@@ -858,7 +858,7 @@ class OrganizationRuntimeManager:
             workspace_manager.mount_into_workspace(workspace_root)
         mounted_key = (organization_id, session_id)
         add_rail = getattr(harness, "add_rail", None)
-        if callable(add_rail) and getattr(backend, "_organization_workspace_rail_key", None) != mounted_key:
+        if callable(add_rail) and backend.organization_workspace_rail_key != mounted_key:
             from openjiuwen.agent_teams.organization.workspace_rail import (
                 OrganizationWorkspaceRail,
             )
@@ -871,7 +871,7 @@ class OrganizationRuntimeManager:
                     summary_team=self._is_summary_team(agent),
                 )
             )
-            backend._organization_workspace_rail_key = mounted_key
+            backend.organization_workspace_rail_key = mounted_key
 
     @staticmethod
     def _unbind_organization_workspace(agent: "TeamAgent", backend: TeamBackend) -> None:

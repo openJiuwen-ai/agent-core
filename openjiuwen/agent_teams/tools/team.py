@@ -266,6 +266,7 @@ class TeamBackend:
         self.org_task_manager = org_task_manager
         self.org_message_service = org_message_service
         self.organization_workspace_manager = organization_workspace_manager
+        self.organization_workspace_rail_key: tuple[str, str] | None = None
         # Per-human-agent callback fired by the leader's dispatcher when
         # a team-side message reaches the avatar — see
         # ``register_human_agent_inbound`` for the registration surface.
