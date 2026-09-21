@@ -7,11 +7,21 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Dict, Optional
 
 from openjiuwen.harness.prompts.sections import SectionName
+from openjiuwen.harness.subagent_runtime.config import (
+    TURN_TIMEOUT_S_DEFAULT,
+    WAIT_TIMEOUT_MS_DEFAULT,
+    WAIT_TIMEOUT_MS_MAX,
+)
+
+_WAIT_DEFAULT_MS = int(WAIT_TIMEOUT_MS_DEFAULT)
+_WAIT_DEFAULT_MIN = int(WAIT_TIMEOUT_MS_DEFAULT // 60_000)
+_TURN_CAP_MIN = int(TURN_TIMEOUT_S_DEFAULT // 60)
+_WAIT_MAX_MS = int(WAIT_TIMEOUT_MS_MAX)
 
 if TYPE_CHECKING:
     from openjiuwen.harness.prompts.builder import PromptSection
 
-SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
+SUBAGENT_SYSTEM_PROMPT_CN = f"""## 常驻子代理工具
 （subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume）
 
 ### 何时委派
@@ -31,7 +41,7 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
 ### 调用约束
 
 - subagent_spawn 立即返回 subagent_id，**不含**最终 output。
-- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms 1800000（30 分钟），简单查询 120000，超长任务可到 3600000。一轮任务本身也是 30 分钟硬顶，把 wait 调得比这更长不会让子代理跑得更久。
+- **同一 turn 内 spawn 后必须 subagent_wait** 收集结果；默认 timeout_ms {_WAIT_DEFAULT_MS}（{_WAIT_DEFAULT_MIN} 分钟），简单查询 120000，超长任务可到 {_WAIT_MAX_MS}。一轮任务本身也是 {_TURN_CAP_MIN} 分钟硬顶，把 wait 调得比这更长不会让子代理跑得更久。
 - 本轮结束后实例仍保留（status=idle）；同一 subagent_type 不要重复 spawn。
 - 追问同一实例用 subagent_send_input，不要为相同意图重复 spawn。
 - status=idle 表示实例仍存活，可直接 subagent_send_input，**不要**调用 subagent_resume。
@@ -43,7 +53,7 @@ SUBAGENT_SYSTEM_PROMPT_CN = """## 常驻子代理工具
 - 按 can_send_input / needs_resume 决定用 send_input 还是 resume。
 """
 
-SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
+SUBAGENT_SYSTEM_PROMPT_EN = f"""## Persistent subagent tools
 (subagent_spawn / subagent_wait / subagent_list / subagent_send_input / subagent_close / subagent_resume)
 
 ### When to delegate
@@ -63,7 +73,7 @@ SUBAGENT_SYSTEM_PROMPT_EN = """## Persistent subagent tools
 ### Usage constraints
 
 - subagent_spawn returns subagent_id immediately and does **not** include the final output.
-- **Call subagent_wait in the same turn after spawn**; default timeout_ms 1800000 (30 min), 120000 for quick tasks, up to 3600000 for very long work. A subagent turn is also capped at 30 min; a longer wait does not extend that cap.
+- **Call subagent_wait in the same turn after spawn**; default timeout_ms {_WAIT_DEFAULT_MS} ({_WAIT_DEFAULT_MIN} min), 120000 for quick tasks, up to {_WAIT_MAX_MS} for very long work. A subagent turn is also capped at {_TURN_CAP_MIN} min; a longer wait does not extend that cap.
 - Instances stay alive after one turn completes (status=idle); do not respawn the same sticky type.
 - Follow up on the same instance with subagent_send_input instead of respawning the same intent.
 - status=idle means the instance is live—call subagent_send_input directly, **not** subagent_resume.

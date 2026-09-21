@@ -50,6 +50,7 @@ class MockAgent:
     delay_s: float = 0.0
     stream_error: BaseException | None = None
     prepare_error: BaseException | None = None
+    cancel_stream_once: bool = False
     stream_calls: int = 0
     active_streams: int = 0
     max_active_streams: int = 0
@@ -82,6 +83,9 @@ class MockAgent:
         try:
             if self.delay_s:
                 await asyncio.sleep(self.delay_s)
+            if self.cancel_stream_once:
+                self.cancel_stream_once = False
+                raise asyncio.CancelledError()
             if self.stream_error is not None:
                 yield {
                     "type": "answer",
@@ -213,6 +217,32 @@ async def test_stream_error_sets_errored_and_worker_survives() -> None:
     await instance.enqueue(UserInputOp(query="retry", task_id="t2"))
     await asyncio.sleep(0.05)
     assert instance.agent_status().kind == SubagentStatusKind.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_inner_cancelled_error_keeps_worker_alive() -> None:
+    agent = MockAgent(cancel_stream_once=True)
+    instance, _, _ = _make_instance(agent=agent)
+    await instance.start_worker()
+
+    await instance.enqueue(UserInputOp(query="cancel", task_id="t1"))
+    await asyncio.sleep(0.05)
+
+    status = instance.agent_status()
+    assert status.kind == SubagentStatusKind.ERRORED
+    assert status.error_code == "CANCELLED"
+    assert instance._worker_task is not None
+    assert not instance._worker_task.done()
+    final = await asyncio.wait_for(
+        instance.subscribe_status().wait_for_final(),
+        timeout=0.5,
+    )
+    assert final.kind == SubagentStatusKind.ERRORED
+
+    await instance.enqueue(UserInputOp(query="retry", task_id="t2"))
+    await asyncio.sleep(0.05)
+    assert instance.agent_status().kind == SubagentStatusKind.COMPLETED
+    await instance.shutdown("manual")
 
 
 @pytest.mark.asyncio

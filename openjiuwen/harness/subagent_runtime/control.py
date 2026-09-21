@@ -44,6 +44,7 @@ from openjiuwen.harness.subagent_runtime.output_file import (
 from openjiuwen.harness.subagent_runtime.persistence import (
     DEFAULT_SNAPSHOT_PAGE_SIZE,
     MAX_ACTIVITIES_PER_INSTANCE,
+    MAX_TURNS_PER_INSTANCE,
     max_persisted_records,
     merge_subagent_bucket,
     read_subagent_bucket,
@@ -130,7 +131,7 @@ class SubagentControl:
         self._registry = SubagentRegistry(self._config)
         self._semaphore = asyncio.Semaphore(self._config.max_concurrent_running)
         self._closed_records: dict[str, SubagentRecord] = {}
-        self._turns: dict[str, list[SubagentTurn]] = {}
+        self._turns: dict[str, deque[SubagentTurn]] = {}
         self._turn_seq: dict[str, int] = {}
         self._activities: dict[str, deque[SubagentActivity]] = {}
         self._activity_seq: dict[str, int] = {}
@@ -570,7 +571,7 @@ class SubagentControl:
                 if not items:
                     continue
                 items.sort(key=lambda item: item.seq)
-                self._turns[sid] = items
+                self._turns[sid] = deque(items, maxlen=MAX_TURNS_PER_INSTANCE)
                 self._turn_seq[sid] = max(item.seq for item in items)
 
         activities = bucket.get("activities") or {}
@@ -944,7 +945,15 @@ class SubagentControl:
             created_at_ms=time.time() * 1000,
             output_file=output_file,
         )
-        self._turns.setdefault(subagent_id, []).append(turn)
+        self._turns_bucket(subagent_id).append(turn)
+
+    def _turns_bucket(self, subagent_id: str) -> deque[SubagentTurn]:
+        bucket = self._turns.get(subagent_id)
+        if isinstance(bucket, deque) and bucket.maxlen == MAX_TURNS_PER_INSTANCE:
+            return bucket
+        bounded = deque(bucket or (), maxlen=MAX_TURNS_PER_INSTANCE)
+        self._turns[subagent_id] = bounded
+        return bounded
 
     def _trim_closed_records(self) -> None:
         limit = max(self._config.max_subagents * 2, 1)
@@ -956,7 +965,11 @@ class SubagentControl:
             key=lambda record: record.closed_at_ms or record.updated_at_ms,
         )[:excess]
         for record in oldest:
-            self._closed_records.pop(record.subagent_id, None)
+            sid = record.subagent_id
+            self._closed_records.pop(sid, None)
+            self._turns.pop(sid, None)
+            self._turn_seq.pop(sid, None)
+            self._activities.pop(sid, None)
 
     @staticmethod
     def _closed_record_to_payload(

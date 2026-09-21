@@ -1049,3 +1049,70 @@ async def test_wait_write_failure_still_returns_results(tmp_path: Path) -> None:
 
         assert waited.results[spawned.subagent_id] == "analysis done"
         assert spawned.subagent_id not in waited.output_files
+
+
+@pytest.mark.asyncio
+async def test_in_memory_turns_are_capped() -> None:
+    from openjiuwen.harness.subagent_runtime.models import SubagentMetadata
+    from openjiuwen.harness.subagent_runtime.persistence import MAX_TURNS_PER_INSTANCE
+
+    async with _patched_control() as control:
+        metadata = SubagentMetadata(
+            subagent_id="sid-cap",
+            subagent_type="explore",
+            display_name="Explorer",
+            role="researcher",
+            parent_session_id="parent",
+            created_at=0.0,
+            last_used_at=0.0,
+        )
+        instance = SimpleNamespace(last_task_id="", last_output="answer")
+        for index in range(MAX_TURNS_PER_INSTANCE + 7):
+            instance.last_task_id = f"task-{index}"
+            control._append_turn(
+                "sid-cap",
+                metadata,
+                instance,
+                SubagentStatus.completed("answer"),
+            )
+        assert len(control._turns["sid-cap"]) == MAX_TURNS_PER_INSTANCE
+        assert control._turns["sid-cap"][0].task_id == "task-7"
+
+
+@pytest.mark.asyncio
+async def test_trim_closed_records_drops_in_memory_turns() -> None:
+    from openjiuwen.harness.subagent_runtime.models import SubagentRecord, SubagentTurn
+
+    config = SubagentRuntimeConfig(max_subagents=1)
+    async with _patched_control(config=config) as control:
+        for index in range(3):
+            sid = f"closed-{index}"
+            control._closed_records[sid] = SubagentRecord(
+                subagent_id=sid,
+                subagent_type="explore",
+                display_name="Explorer",
+                role="researcher",
+                task_description="t",
+                created_at_ms=float(index),
+                updated_at_ms=float(index),
+                closed_at_ms=float(index),
+                closed_reason="manual",
+            )
+            control._turns[sid] = control._turns_bucket(sid)
+            control._turns[sid].append(
+                SubagentTurn(
+                    subagent_id=sid,
+                    task_id=f"task-{index}",
+                    seq=1,
+                    prompt="p",
+                    answer="a",
+                    closed_reason="completed",
+                    created_at_ms=float(index),
+                )
+            )
+        control._trim_closed_records()
+        assert "closed-0" not in control._closed_records
+        assert "closed-0" not in control._turns
+        assert "closed-1" in control._closed_records
+        assert "closed-2" in control._closed_records
+

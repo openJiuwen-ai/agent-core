@@ -35,6 +35,35 @@ def test_subagent_runtime_config_defaults() -> None:
     assert config.enable_lru_eviction is True
 
 
+def test_prompts_bind_wait_timeout_constants() -> None:
+    from openjiuwen.harness.prompts.sections.subagent_tools import (
+        SUBAGENT_SYSTEM_PROMPT_CN,
+        SUBAGENT_SYSTEM_PROMPT_EN,
+    )
+    from openjiuwen.harness.prompts.tools.subagent_tools import (
+        SUBAGENT_WAIT_DESCRIPTION,
+        get_subagent_wait_input_params,
+    )
+
+    default_ms = str(int(WAIT_TIMEOUT_MS_DEFAULT))
+    default_min = str(int(WAIT_TIMEOUT_MS_DEFAULT // 60_000))
+    max_ms = str(int(WAIT_TIMEOUT_MS_MAX))
+    texts = (
+        SUBAGENT_SYSTEM_PROMPT_CN,
+        SUBAGENT_SYSTEM_PROMPT_EN,
+        SUBAGENT_WAIT_DESCRIPTION["cn"],
+        SUBAGENT_WAIT_DESCRIPTION["en"],
+        get_subagent_wait_input_params()["properties"]["timeout_ms"]["description"],
+    )
+    for text in texts:
+        assert default_ms in text
+        assert default_min in text
+        assert max_ms in text
+        assert "1800000" not in text
+        assert "30 分钟" not in text
+        assert "30 min" not in text
+
+
 def test_subagent_runtime_config_is_frozen() -> None:
     config = SubagentRuntimeConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):

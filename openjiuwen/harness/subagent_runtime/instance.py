@@ -174,15 +174,26 @@ class SubagentInstance:
             await self._on_status_changed(status)
 
     async def _worker_main(self) -> None:
-        while True:
-            op = await self._ops.get()
-            try:
-                if isinstance(op, ShutdownOp):
-                    await self._handle_shutdown(op.reason)
-                    return
-                await self._handle_user_input(op)
-            finally:
-                self._ops.task_done()
+        try:
+            while True:
+                op = await self._ops.get()
+                try:
+                    if isinstance(op, ShutdownOp):
+                        await self._handle_shutdown(op.reason)
+                        return
+                    await self._handle_user_input(op)
+                finally:
+                    self._ops.task_done()
+        finally:
+            await self._close_worker_if_needed("worker_exited")
+
+    async def _close_worker_if_needed(self, reason: str) -> None:
+        if self._closed:
+            return
+        cleanup = asyncio.create_task(self._handle_shutdown(reason))
+        while not cleanup.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(cleanup)
 
     async def _handle_user_input(self, op: UserInputOp) -> None:
         # Claim the turn before waiting for the shared concurrency slot. During
@@ -190,6 +201,7 @@ class SubagentInstance:
         # yet, so both signals alone would incorrectly report the instance idle.
         self._turn_claimed = True
         self.current_task_id = op.task_id
+        propagate_cancel = False
         try:
             async with self._running_semaphore:
                 self._interrupt_requested = False
@@ -202,8 +214,8 @@ class SubagentInstance:
                         await self._current_run
                 except asyncio.TimeoutError:
                     await self._on_turn_timeout()
-                except asyncio.CancelledError as exc:
-                    await self._on_turn_cancelled(exc)
+                except asyncio.CancelledError:
+                    propagate_cancel = await self._on_turn_cancelled()
                 except Exception as exc:
                     logger.warning(
                         "[SubagentInstance] turn failed: subagent_id=%s error=%s",
@@ -217,6 +229,8 @@ class SubagentInstance:
                     self._current_run = None
         finally:
             self._turn_claimed = False
+        if propagate_cancel:
+            raise asyncio.CancelledError()
 
     async def _on_turn_timeout(self) -> None:
         if not self.status.current().is_final():
@@ -224,18 +238,28 @@ class SubagentInstance:
                 SubagentStatus.errored("turn timeout", code="TIMEOUT"),
             )
 
-    async def _on_turn_cancelled(self, exc: asyncio.CancelledError) -> None:
-        if not self.status.current().is_final():
-            await self._set_status(SubagentStatus.interrupted())
+    async def _on_turn_cancelled(self) -> bool:
+        await self._settle_cancelled_turn()
+        current = asyncio.current_task()
+        worker_cancelling = current is not None and current.cancelling() > 0
+        if worker_cancelling:
+            run = self._current_run
+            if run is not None and not run.done():
+                run.cancel()
+            return True
+        return False
 
+    async def _settle_cancelled_turn(self) -> None:
+        status = self.status.current()
+        if status.is_final() or status.kind is SubagentStatusKind.INTERRUPTED:
+            return
         if self._interrupt_requested:
             self._interrupt_requested = False
+            await self._set_status(SubagentStatus.interrupted())
             return
-
-        run = self._current_run
-        if run is not None and not run.done():
-            run.cancel()
-        raise exc
+        await self._set_status(
+            SubagentStatus.errored("turn cancelled", code="CANCELLED"),
+        )
 
     def _build_stream_inputs(self, op: UserInputOp) -> dict[str, str]:
         inputs: dict[str, str] = {
@@ -253,6 +277,7 @@ class SubagentInstance:
         owner_root = self._register_observability_owner()
         try:
             with execution_subject_scope(self.execution_subject):
+                cancelled = False
                 try:
                     await session.pre_run()
                     await prepare_subagent_task_resources(self._agent)
@@ -281,11 +306,16 @@ class SubagentInstance:
                         SubagentStatus.errored(str(exc), code=exc.status.name),
                     )
                     raise
+                except asyncio.CancelledError:
+                    await self._settle_cancelled_turn()
+                    cancelled = True
                 except Exception as exc:
                     await self._set_status(SubagentStatus.errored(str(exc)))
                     raise
                 finally:
                     await self._finalize_turn(session, succeeded=succeeded)
+                if cancelled:
+                    raise asyncio.CancelledError()
         finally:
             self._unregister_observability_owner(owner_root)
 
@@ -336,8 +366,13 @@ class SubagentInstance:
         task = asyncio.create_task(
             self._finalize_turn_inner(session, succeeded=succeeded),
         )
-        with contextlib.suppress(asyncio.CancelledError):
-            await asyncio.shield(task)
+        current = asyncio.current_task()
+        was_cancelling = current is not None and current.cancelling() > 0
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.shield(task)
+        if was_cancelling:
+            raise asyncio.CancelledError()
 
     async def _finalize_turn_inner(self, session: Any, *, succeeded: bool) -> None:
         await cleanup_subagent_task_resources(self._agent)
@@ -353,6 +388,8 @@ class SubagentInstance:
             self._interrupt_requested = True
             run.cancel()
             await asyncio.wait({run})
-        await self._set_status(SubagentStatus.closed(reason))
-        await self.status.close()
-        self._closed = True
+        try:
+            await self._set_status(SubagentStatus.closed(reason))
+            await self.status.close()
+        finally:
+            self._closed = True
