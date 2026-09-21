@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.agent_teams.organization.schema import (
@@ -30,9 +29,6 @@ logger = team_logger
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.organization.message_service import OrgMessageService
     from openjiuwen.agent_teams.organization.runtime import OrganizationRuntimeManager
-
-logger = logging.getLogger(__name__)
-
 
 _ORG_TASK_POOL_NEXT_ACTION = (
     "Organization task-pool tools are now available to this leader on the next model call. "
