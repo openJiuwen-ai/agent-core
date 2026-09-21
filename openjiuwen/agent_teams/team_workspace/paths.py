@@ -6,9 +6,16 @@
 Pure functions for where a member's *real* directory lives on disk:
 
 - leader:     ``<team>/workspaces/<member>_workspace/`` (inside the team, no link)
-- predefined: ``{openjiuwen_home}/<member>_workspace/``  (shared across teams)
-- dynamic:    ``.agent_teams/<team>#<member>/`` (prefix on) or
-              ``.agent_teams/<member>/`` (prefix off)
+- predefined: ``{agent_teams_home}/members/<member>/``  (shared across teams)
+- dynamic:    ``members/<team>#<member>/`` (prefix on) or
+              ``members/<member>/`` (prefix off)
+
+``members/`` is a dedicated subdirectory of ``.agent_teams/`` so member real
+dirs no longer sit mixed with team dirs at the root. Directories created by
+older versions at the ``.agent_teams/`` root are still resolved (probe order:
+``members/`` first, root second) — the binder migrates them into ``members/``
+on the next spawn (best effort); probing first means a dir that fails to
+migrate keeps working in place.
 
 The link inside the team is *always* ``team_member_workspace_dir``
 (``workspaces/<member>_workspace``), so A/B code keeps using that path
@@ -29,6 +36,17 @@ MEMBER_MODE_LEADER = "leader"
 MEMBER_MODE_PREDEFINED = "predefined"
 MEMBER_MODE_DYNAMIC = "dynamic"
 
+MEMBERS_DIR_NAME = "members"
+"""Name of the dedicated member real-dir subdirectory under ``.agent_teams/``."""
+
+
+def members_home() -> Path:
+    """Return the root directory holding member real dirs.
+
+    Layout: ``{agent_teams_home}/members/``
+    """
+    return get_agent_teams_home() / MEMBERS_DIR_NAME
+
 
 def member_dir_name(
     team_name: str,
@@ -36,7 +54,7 @@ def member_dir_name(
     *,
     member_workspace_prefix: bool = True,
 ) -> str:
-    """Return the dynamic real-directory name under ``.agent_teams/``.
+    """Return the dynamic real-directory name under ``members/``.
 
     ``member_workspace_prefix=True`` isolates the directory per team
     (``team#member``); ``False`` shares the plain ``member`` shape. Only
@@ -46,6 +64,24 @@ def member_dir_name(
     if member_workspace_prefix:
         return f"{team_name}#{member_name}"
     return member_name
+
+
+def _probe_member_dir(dir_name: str) -> Path:
+    """Return the first existing real dir for ``dir_name``, else the members/ path.
+
+    Probe order: ``members/<dir_name>`` first (the current layout), then the
+    ``.agent_teams/`` root (the pre-``members/`` legacy layout). When neither
+    exists the ``members/`` path is returned — that is where a new directory
+    will be created. Callers that must not fall back to the legacy position
+    (e.g. creation) handle the returned path explicitly.
+    """
+    members_dir = members_home() / dir_name
+    if members_dir.is_dir():
+        return members_dir
+    legacy = get_agent_teams_home() / dir_name
+    if legacy.is_dir():
+        return legacy
+    return members_dir
 
 
 def member_real_dir(
@@ -58,24 +94,32 @@ def member_real_dir(
     """Return the member's real (team-external or in-team) directory.
 
     - leader:     ``team_member_workspace_dir`` (in-team, no link)
-    - predefined: ``.agent_teams/<member>`` (shared across teams, same level as dynamic)
-    - dynamic:    ``.agent_teams/<member_dir_name>``
+    - predefined: ``members/<member>`` (shared across teams, same level as dynamic)
+    - dynamic:    ``members/<member_dir_name>``
+
+    For predefined/dynamic the result probes ``members/`` first, then the
+    legacy root position, so a directory left at the root by an older version
+    is resolved in place (the binder migrates it on the next spawn).
     """
     if mode == MEMBER_MODE_LEADER:
         return team_member_workspace_dir(team_name, member_name)
     if mode == MEMBER_MODE_PREDEFINED:
-        return get_agent_teams_home() / member_name
-    return get_agent_teams_home() / member_dir_name(
-        team_name,
-        member_name,
-        member_workspace_prefix=member_workspace_prefix,
+        return _probe_member_dir(member_name)
+    return _probe_member_dir(
+        member_dir_name(
+            team_name,
+            member_name,
+            member_workspace_prefix=member_workspace_prefix,
+        )
     )
 
 
 __all__ = [
+    "MEMBERS_DIR_NAME",
     "MEMBER_MODE_DYNAMIC",
     "MEMBER_MODE_LEADER",
     "MEMBER_MODE_PREDEFINED",
     "member_dir_name",
     "member_real_dir",
+    "members_home",
 ]

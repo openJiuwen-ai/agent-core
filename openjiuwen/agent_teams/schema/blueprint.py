@@ -921,7 +921,18 @@ class TeamAgentSpec(BaseModel):
         the default leader name so the leader itself is allowed to use
         it, but a teammate must not — otherwise two members would share
         a name in the roster.
+
+        The team's own name is checked against the reserved
+        ``.agent_teams/`` root directory names: a team named ``members``
+        would collide with the member real-dir subtree.
         """
+        from openjiuwen.agent_teams.constants import is_reserved_team_dir_name
+
+        if is_reserved_team_dir_name(self.team_name):
+            raise ValueError(
+                f"team_name '{self.team_name}' collides with a reserved "
+                f".agent_teams/ root directory name; pick a different team name"
+            )
         # Leader may keep the default ``team_leader`` but cannot claim
         # the user/human_agent identities.
         leader_forbidden = RESERVED_MEMBER_NAMES - {DEFAULT_LEADER_MEMBER_NAME}
