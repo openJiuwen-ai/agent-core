@@ -23,6 +23,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.sys_operation import SysOperationCard, OperationMode, LocalWorkConfig
 from openjiuwen.core.sys_operation.local._async_read_write_lock import (
     HybridAsyncReadWriteLock,
+    _ManagedAsyncReadWriteLock,
     _ManagedReadWriteLock,
 )
 from openjiuwen.core.sys_operation.local.fs_operation import FsOperation
@@ -989,6 +990,21 @@ async def test_idle_lock_cache_bounded_with_hot_path_reuse(work_dir, monkeypatch
     async with FsOperation._file_lock(hot_path, "write", timeout=1.0):
         assert ReadWriteLockManager.get_lock(hot_path) is locks[2]
     assert not locks[2]._closed
+
+
+@pytest.mark.asyncio
+async def test_managed_async_lock_acquire_write_without_fork_attr_error(work_dir):
+    """Custom __init__ must still satisfy filelock 3.21+ fork/closed checks."""
+    lock_file = Path(work_dir) / "fork_fields.lock.db"
+    lock = _ManagedAsyncReadWriteLock(lock_file, is_singleton=False)
+    try:
+        assert lock._fork_invalidated is False
+        assert lock._creator_pid == os.getpid()
+        proxy = await lock.acquire_write(timeout=1, blocking=True)
+        await lock.release()
+        assert proxy is not None
+    finally:
+        await lock.close()
 
 
 @pytest.mark.asyncio
