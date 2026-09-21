@@ -19,6 +19,11 @@ if TYPE_CHECKING:
 
 INTERRUPTION_KEY = "__react_agent_interruption__"
 RESUME_USER_INPUT_KEY = "_resume_user_input"
+# Argument key carrying the user's answer back into the delegating tool when a
+# sub-agent interrupt is resumed. Underscore-prefixed so it cannot collide with
+# a model-supplied argument. Written by ToolInterruptHandler, read by TaskTool;
+# both sides import this name so the contract cannot drift.
+SUB_AGENT_RESUME_INPUT_KEY = "_sub_agent_resume_input"
 INTERRUPT_AUTO_CONFIRM_KEY = "__interrupt_auto_confirm__"
 RESUME_START_ITERATION_KEY = "_resume_start_iteration"
 # ctx.extra key holding ``{tool_call_id: {interrupt_owner: InterruptAnswer}}`` during a resume.
@@ -52,6 +57,28 @@ class InterruptAnswer(BaseModel):
     request: InterruptRequest
     carried: bool = False
     unaddressed: bool = False
+
+
+def is_interrupt_envelope(result: Any) -> bool:
+    """Return True when ``result`` is the dict an agent returns when it pauses.
+
+    The envelope is the shape produced by ``build_interrupt_result``: it carries
+    ``result_type == "interrupt"`` together with the ids of the pending
+    interrupts. A tool that wraps an agent hands this dict back verbatim, so it
+    reaches the caller as an ordinary tool result and has to be told apart from
+    a real one.
+
+    A ``(tool_result, tool_message)`` tuple is accepted as well and inspected by
+    its first element, so call sites holding either form can share one check.
+    """
+    if isinstance(result, tuple) and len(result) >= 1:
+        result = result[0]
+
+    return (
+            isinstance(result, dict)
+            and result.get("result_type") == "interrupt"
+            and "interrupt_ids" in result
+    )
 
 
 class BaseInterruptionState(BaseModel):

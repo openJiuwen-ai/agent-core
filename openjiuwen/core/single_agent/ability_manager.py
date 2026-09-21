@@ -60,6 +60,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
     INTERRUPT_AUTO_CONFIRM_KEY,
     RESUME_INTERRUPT_ANSWERS_KEY,
     InterruptAnswer,
+    is_interrupt_envelope,
 )
 from openjiuwen.core.single_agent.kv_cache import kv_cache_child_session
 
@@ -1721,7 +1722,7 @@ class AbilityManager:
         session: Session,
         tag=None,
         callback_context: AgentCallbackContext | None = None,
-    ) -> Tuple[Any, ToolMessage]:
+    ) -> Tuple[Any, Optional[ToolMessage]]:
         """Execute with the owning agent's environment, never the caller's."""
         from openjiuwen.core.sys_operation.execution_environment import execution_environment_scope
 
@@ -1738,7 +1739,7 @@ class AbilityManager:
             session: Session,
             tag=None,
             callback_context: Optional[AgentCallbackContext] = None,
-    ) -> Tuple[Any, ToolMessage]:
+    ) -> Tuple[Any, Optional[ToolMessage]]:
         tool_name = tool_call.name
 
         mcp_tool_scope = self._resolve_mcp_tool_scope(tool_name)
@@ -1790,6 +1791,15 @@ class AbilityManager:
                     and getattr(tool, "accepts_tool_callback_context", False)
                 ):
                     invoke_kwargs["_tool_callback_context"] = callback_context
+                # A tool that delegates to an agent derives the sub-session from
+                # this id, so a replay carrying an answer back to a paused
+                # subagent reaches the session the first call created. Opt-in
+                # for the same reason as above: ordinary and third-party tools
+                # keep their existing invocation contract. The attribute must be
+                # literally True, so an object that answers every getattr -- a
+                # test double or a proxy -- is not handed a kwarg it cannot take.
+                if getattr(tool, "accepts_tool_call_id", False) is True:
+                    invoke_kwargs["tool_call_id"] = tool_call.id
                 with anyio.fail_after(call_timeout):
                     result = await tool.invoke(tool_args, **invoke_kwargs)
             except TimeoutError as e:
@@ -1901,6 +1911,9 @@ class AbilityManager:
                 ) from e
             finally:
                 reset_usage_delegation(delegation_token)
+            # A paused agent's envelope is a pending question: see the check below.
+            if is_interrupt_envelope(result):
+                return result, None
             return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
@@ -1922,10 +1935,13 @@ class AbilityManager:
             # Global hard limit: even exempt tools (None) get a ceiling.
             if call_timeout is None:
                 call_timeout = MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT
+            fallback_kwargs: Dict[str, Any] = {"session": session}
+            if getattr(tool, "accepts_tool_call_id", False) is True:
+                fallback_kwargs["tool_call_id"] = tool_call.id
             try:
                 call_timeout = self._resolve_invocation_timeout(tool, tool_args, call_timeout)
                 with anyio.fail_after(call_timeout):
-                    result = await tool.invoke(tool_args, session=session)
+                    result = await tool.invoke(tool_args, **fallback_kwargs)
             except TimeoutError as e:
                 error_msg = f"Tool '{tool_name}' timed out after {call_timeout}s"
                 logger.warning(error_msg)
@@ -1944,6 +1960,14 @@ class AbilityManager:
                     tool_call,
                     error_msg,
                 ) from e
+
+        # An interrupt envelope is a pending question, not a result: emit no
+        # ToolMessage for it, as an interrupted workflow and a
+        # ToolInterruptException already do above. The answer arrives on
+        # resume under this same tool_call_id, so writing the envelope now
+        # would leave two messages sharing one id, the first the question.
+        if is_interrupt_envelope(result):
+            return result, None
 
         # Build ToolMessage for successful execution.
         tool_message = ToolMessage(

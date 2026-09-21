@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import os
 import uuid
 from dataclasses import replace
@@ -266,6 +267,47 @@ def _bind_inner_react_max_iterations(
     else:
         logger.info("[DeepAgent] inner ReAct max_iterations=%s (configured)", resolved)
     return resolved
+
+
+def _sub_agent_card_for_session(card: AgentCard, subsession_id: str) -> AgentCard:
+    """Return ``card`` with an id that is reproducible for this sub-session.
+
+    A sub-agent's persisted state is namespaced under ``session.agent_id()``,
+    which for this path is the agent card's id. That includes the
+    ``ToolInterruptionState`` parked when the sub-agent stops to ask the user
+    something, and the conversation itself.
+
+    A spec's card is minted with a fresh ``uuid4`` every time the parent agent
+    is built, so a delegation that pauses for an answer and is resumed once the
+    parent has been rebuilt looks for its parked state under an id nothing was
+    ever written to. Finding none, the sub-agent treats the answer as a new
+    request and starts over with no history, which loses the work already done
+    and never asks the question again.
+
+    Deriving the id from the sub-session id keeps it distinct per delegation --
+    the only thing the random id was there to guarantee -- while making it
+    reproducible for the rebuild that resumes one. Callers that derive further
+    ids from it, such as the sys_operation registration, already resolve
+    get-or-create and so tolerate the repeat.
+
+    A card whose id was set explicitly is already reproducible and keeps it,
+    because its owner may namespace state under that id on purpose.
+
+    Args:
+        card: The spec's card, left unmodified.
+        subsession_id: Session id of the delegation this card is built for.
+
+    Returns:
+        ``card`` itself when its id was set explicitly. Otherwise a copy of
+        ``card`` whose id is a 32-character hex token derived from the
+        sub-session id and the card name.
+    """
+    if "id" in card.model_fields_set:
+        return card
+    digest = hashlib.sha256(
+        f"{subsession_id}\x00{card.name}".encode("utf-8", errors="ignore")
+    ).hexdigest()[:32]
+    return card.model_copy(update={"id": digest})
 
 
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
@@ -1682,7 +1724,7 @@ class DeepAgent(BaseAgent):
 
         create_kwargs = {
             "model": spec.model or self._deep_config.model,
-            "card": spec.agent_card,
+            "card": _sub_agent_card_for_session(spec.agent_card, subsession_id),
             "system_prompt": spec.system_prompt,
             "tools": spec.tools,
             "mcps": spec.mcps,
