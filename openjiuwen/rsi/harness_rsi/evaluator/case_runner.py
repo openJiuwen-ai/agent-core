@@ -4,10 +4,13 @@
 
 from __future__ import annotations
 
+import getpass
 import hashlib
 import json
 import os
+import re
 import shutil
+import stat
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,6 +37,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.trajectory_paths import (
 from openjiuwen.rsi.harness_rsi.schema import EvaluationCaseTraceRef
 from openjiuwen.rsi.usage import model_usage_stage
 
+_RUNTIME_HOME_ROOT_BASE_NAME = "ach_team_runtime"
 _MAX_ROLE_TRAJECTORY_FILE_BYTES = 2_000_000
 _ROLE_TRAJECTORY_TAIL_BYTES = 64_000
 _MAX_ROLE_TRACE_MESSAGES = 256
@@ -464,13 +468,64 @@ def _execution_workspace_dir(execution_result: CaseExecutionResult, case_dir: Pa
     return case_dir / "workspace"
 
 
+def _runtime_home_root_name() -> str:
+    """Return the per-user name of the shared runtime-home parent directory."""
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return f"{_RUNTIME_HOME_ROOT_BASE_NAME}-{getuid()}"
+    # Windows has no getuid; fall back to the login name, sanitized for path use.
+    # getuser() raises where neither the environment nor the password database
+    # names an account, which would abort the case run rather than place its
+    # runtime home; one shared name is what this module used before the
+    # per-user suffix.
+    try:
+        user = getpass.getuser()
+    except (ImportError, KeyError, OSError):
+        user = ""
+    return f"{_RUNTIME_HOME_ROOT_BASE_NAME}-{re.sub(r'[^A-Za-z0-9_.-]', '_', user or 'unknown')}"
+
+
+def _runtime_home_root() -> Path:
+    """Create or reuse the parent directory holding case runtime homes.
+
+    The per-case directory below is already unique, but its parent was a
+    fixed name directly under the shared temporary directory, which every
+    account on the machine can write to. Whichever account runs first
+    creates that parent, owns it, and leaves it at the default 0755; every
+    later account then fails to create its case directory inside it.
+    """
+    root = Path(tempfile.gettempdir()) / _runtime_home_root_name()
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    # The name is predictable, so another account can create it first, as a
+    # symlink or as its own directory; chmod and writes would follow it. Once
+    # this entry is our own directory, the sticky temp root keeps it ours.
+    entry = root.lstat()
+    getuid = getattr(os, "getuid", None)
+    if not stat.S_ISDIR(entry.st_mode) or (getuid is not None and entry.st_uid != getuid()):
+        raise PermissionError(
+            f"The case runtime home root {root} must be a directory owned by this account, "
+            "not a symlink or another account's directory; remove it to let it be recreated"
+        )
+    # Owner-only: the runtime homes are per-user now, and the temp root is
+    # world-readable.
+    try:
+        root.chmod(0o700)
+    except OSError as exc:
+        logger.warning(
+            "Failed to restrict the case runtime home root, root={}, error={}",
+            root,
+            exc,
+        )
+    return root
+
+
 def _runtime_home_dir(case_dir: Path, session_id: str) -> Path:
     """Return the case-scoped runtime home for agent_teams scratch state."""
     if not _needs_short_runtime_home(case_dir):
         return case_dir
     key = f"{case_dir.resolve()}::{session_id}"
     digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / "ach_team_runtime" / digest
+    return _runtime_home_root() / digest
 
 
 def _prepare_case_dir(case_dir: Path) -> None:
