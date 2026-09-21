@@ -8,6 +8,8 @@ from __future__ import annotations
 import json
 import threading
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from copy import deepcopy
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -927,6 +929,40 @@ def pop_current_llm_span() -> Span | None:
 # are assumed not to occur (tool calls are sequential within an agent
 # loop iteration); if that ever changes, switch to tool_id.
 _tool_span_map: ContextVar[dict[str, list[Span]]] = ContextVar("_otel_tool_span_map", default={})
+
+
+# A tool executed on behalf of an agent that records its own trajectory (an
+# external harness member reaching a local tool through this process) must not
+# also be recorded here: the span would land in the lane of whichever agent
+# happens to own this context, which is not the caller.
+_suppressed_tool_names: ContextVar[frozenset[str]] = ContextVar(
+    "_otel_suppressed_tool_names",
+    default=frozenset(),
+)
+
+
+@contextmanager
+def suppressed_tool_spans(tool_name: str) -> Iterator[None]:
+    """Run ``tool_name`` without recording a tool span for it in this context.
+
+    For a tool call the caller records itself, in a lane of its own. Only the
+    caller knows that; nothing about the execution says so. The suppression
+    names the one tool it covers, so work the call goes on to dispatch keeps
+    being recorded.
+
+    Args:
+        tool_name: The tool whose span this context does not record.
+    """
+    token = _suppressed_tool_names.set(_suppressed_tool_names.get() | {tool_name})
+    try:
+        yield
+    finally:
+        _suppressed_tool_names.reset(token)
+
+
+def tool_spans_suppressed(tool_name: str) -> bool:
+    """Return whether this context records a span for ``tool_name``."""
+    return tool_name in _suppressed_tool_names.get()
 
 
 def push_tool_span(tool_name: str, span: Span) -> None:

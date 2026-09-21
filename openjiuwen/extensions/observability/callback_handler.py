@@ -150,6 +150,7 @@ from openjiuwen.extensions.observability.span_context import (
     pop_tool_span,
     push_tool_span,
     set_current_session_id,
+    tool_spans_suppressed,
 )
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.schema.message import (
@@ -755,6 +756,11 @@ class OtelCallbackHandler:
             inputs = kwargs.get("inputs")
 
             authoritative = self._matching_authoritative_tool_span(tool_name, tool_id)
+            if authoritative is None and tool_spans_suppressed(tool_name):
+                # The caller records this call in its own lane; a span here
+                # would state it a second time, under whichever agent owns
+                # this context rather than under the one that called it.
+                return
             if authoritative is not None:
                 if tool_id is not None:
                     authoritative.set_attribute(OJ_TOOL_RESOURCE_ID, str(tool_id))
@@ -801,6 +807,10 @@ class OtelCallbackHandler:
                 authoritative.set_attribute(GEN_AI_TOOL_CALL_RESULT, redacted)
                 publish_span_snapshot(authoritative, "output")
                 return result
+            if tool_spans_suppressed(tool_name):
+                # Nothing was pushed for this call, and tool spans are keyed by
+                # name: popping here would end a span belonging to another call.
+                return result
             span = pop_tool_span(tool_name)
             if span is None:
                 return result
@@ -839,6 +849,10 @@ class OtelCallbackHandler:
             exc = kwargs.get("error") or kwargs.get("exception")
             tool_id = kwargs.get("tool_id")
             if self._matching_authoritative_tool_span(tool_name, tool_id) is not None:
+                return
+            if tool_spans_suppressed(tool_name):
+                # Nothing was pushed for this call, and tool spans are keyed by
+                # name: popping here would end a span belonging to another call.
                 return
             span = pop_tool_span(tool_name)
             if span is None:

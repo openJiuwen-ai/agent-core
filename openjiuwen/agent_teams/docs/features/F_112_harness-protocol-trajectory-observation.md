@@ -128,6 +128,14 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 后者包括 CLI 的 system-reminder、环境说明、工具上新通知、token 预算提示，以及团队邮箱投递的
 `<team-inbound>`（它作为本轮输入时标为用户）。
 
+**这个归属是消息的属性，不随轮次失效**：记录器记住已认定为 `external_user` 的 message id，之后每次提交
+窗口都照此标注。只按"本轮输入"匹配是不够的——本轮结束后旧消息会被重新标成 `harness_internal`，窗口
+diff 变成一条 `replace`，读者会看到同一条消息先以 user、后以 context 出现两次。
+
+三方 harness **不模拟 native rail 的"插入 context message"**：`member_runtime` 把待发的团队上下文
+前置到下一次输入的文本里（`_prepend_context`），由 CLI 当作一条用户消息收下；provider 再按块拆开，
+`<team-context>` 于是成为窗口里独立的一条消息。哪一块是宿主的输入，只由 `origin` 说明。
+
 一条消息被 provider 拆成多个文本块时（注入的 reminder + 正文），记录器把它们合成一段正文：读者读到的
 是一条消息，保留拆分会让任何以文本呈现的视图显示成 JSON 数组；含非文本块（图片、文档）的消息保留分块。
 
@@ -146,7 +154,11 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   构造 recorder（observability 未初始化时为 `None`）。
 - `RuntimeReliabilityContext(trajectory_recorder=...)` 取代 `span_bridge`。
 - `cli_agent/spawn.py` 不再注入任何 OTel / rollout 配置；`sdk_mcp.py` 去掉 `tool_execution_context`，
-  team MCP 工具只由协议 tool item 产生 span。
+  team MCP 工具只由协议 tool item 产生 span。Claude 的 MCP 服务端跑在团队进程内，直接 `invoke` 本地
+  TeamTool，全局 tool 回调因此也会被触发——那条 span 没有 authoritative 归属，会挂到 team 根 span 上并
+  盖上当前上下文所有者（leader）的身份。所以 `sdk_mcp` 在 `invoke` 外围套 `suppressed_tool_spans(name)`：
+  调用方自己记，这里不再记第二遍。Codex 走独立进程的 `openjiuwen-team-mcp`（经 `ExternalTeamClient`
+  回到团队），不进本进程的回调总线，不受影响。
 
 ## 拒绝的方案
 

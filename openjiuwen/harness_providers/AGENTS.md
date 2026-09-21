@@ -71,7 +71,11 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    `causation_ids`; a request whose vendor record does not arrive within
    `request_observation_wait_s` is reported from its reply
    (`input_observed=False`). Hosts record trajectories with
-   `HarnessTrajectoryRecorder`, never by reading vendor data.
+   `HarnessTrajectoryRecorder`, never by reading vendor data. The recorder
+   marks the user messages carrying a turn's host inputs as the external
+   user's and remembers those message ids: whose a message is does not change
+   when its turn ends, and restating it as the harness's own would replace it
+   in the next window and read as the same message twice.
 6. **User input is an interaction.** Claude `AskUserQuestion`, Codex
    `request_user_input` (App Server request `item/tool/requestUserInput`,
    parsed from the raw `_approval_handler` params because the SDK has no

@@ -13,6 +13,7 @@ from openjiuwen.agent_teams.team_workspace.tools import WorkspaceMetaTool
 from openjiuwen.agent_teams.tools.locales import make_translator
 from openjiuwen.agent_teams.tools.team_tools import create_team_tools
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.extensions.observability.span_context import suppressed_tool_spans
 
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
@@ -132,11 +133,16 @@ def _wrap_team_tool(
         if tool is None:
             return text_content(f"Unknown tool: {name}")
         try:
-            result = await tool.invoke(
-                arguments,
-                member_name=team_backend.member_name,
-                display_name=team_backend.member_name,
-            )
+            # The member called this tool and its own harness records the call
+            # in the member's lane. This server runs inside the team process,
+            # so without this the global tool callback would record it a second
+            # time, in the lane of whoever owns this context — the leader.
+            with suppressed_tool_spans(name):
+                result = await tool.invoke(
+                    arguments,
+                    member_name=team_backend.member_name,
+                    display_name=team_backend.member_name,
+                )
         except Exception as exc:  # noqa: BLE001 - keep tool failures in-band
             team_logger.exception("claude sdk team tool {} failed", name)
             return text_content(f"Internal error: {exc}")

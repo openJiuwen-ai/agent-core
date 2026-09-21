@@ -182,6 +182,10 @@ class HarnessTrajectoryRecorder:
         self._turn_inputs: dict[str, list[str]] = {}
         self._pending_identities: dict[str, tuple[str, int]] = {}
         self._active_turn_id: str | None = None
+        # Messages recognized as the external user's. Whose a message is does
+        # not change when the turn that carried it ends, and a conversation
+        # outlives its turns.
+        self._external_user_message_ids: set[str] = set()
 
     @classmethod
     def create(
@@ -440,7 +444,11 @@ class HarnessTrajectoryRecorder:
         inference_id = f"{span.get_span_context().span_id:016x}"
         span.set_attribute(OJ_INFERENCE_ID, inference_id)
         try:
-            request_messages = _request_messages(event, self._turn_inputs.get(envelope.turn_id or "", []))
+            request_messages = _request_messages(
+                event,
+                self._turn_inputs.get(envelope.turn_id or "", []),
+                self._external_user_message_ids,
+            )
             if request_messages:
                 self._handler.record_request_input(span, request_messages)
             tool_definitions = json_value_to_builtin(event.tool_definitions)
@@ -597,13 +605,26 @@ def _usage_attributes(event: ModelRequestEvent) -> dict[str, AttributeValue]:
     return {key: value for key, value in pairs if value is not None}
 
 
-def _request_messages(event: ModelRequestEvent, host_inputs: list[str]) -> list[dict[str, Any]]:
+def _request_messages(
+    event: ModelRequestEvent,
+    host_inputs: list[str],
+    external_user_ids: set[str],
+) -> list[dict[str, Any]]:
     """Return the request as framework-shaped message dicts, system slot first.
 
     ``host_inputs`` are the texts the host sent into the turn. A provider
     states its conversation without saying which message carries them, so the
     last user message containing each one is marked as the external user's,
     the way an in-process agent marks the input it was given.
+
+    Args:
+        event: The model request being recorded.
+        host_inputs: Texts the host sent into the turn this request belongs to.
+        external_user_ids: Ids already recognized as the external user's, added
+            to here. Whose message it is never changes, while a turn's inputs
+            are only known for that turn; without this the same message would
+            be restated as the harness's own once the next turn opened, and a
+            reader would see it twice.
     """
     messages: list[dict[str, Any]] = []
     system_parts = [_content_part(block) for block in event.system_instructions]
@@ -612,11 +633,15 @@ def _request_messages(event: ModelRequestEvent, host_inputs: list[str]) -> list[
     for message in event.input_messages:
         messages.extend(_message_dicts(message))
     for host_input in host_inputs:
-        _mark_host_input(messages, host_input)
+        _mark_host_input(messages, host_input, external_user_ids)
+    for message in messages:
+        message_id = message.get("message_id")
+        if isinstance(message_id, str) and message_id in external_user_ids:
+            _set_external_user_origin(message)
     return messages
 
 
-def _mark_host_input(messages: list[dict[str, Any]], host_input: str) -> None:
+def _mark_host_input(messages: list[dict[str, Any]], host_input: str, external_user_ids: set[str]) -> None:
     text = host_input.strip()
     if not text:
         return
@@ -625,10 +650,18 @@ def _mark_host_input(messages: list[dict[str, Any]], host_input: str) -> None:
             continue
         content = message.get("content")
         if isinstance(content, str) and text in content:
-            metadata = dict(message.get("metadata") or {})
-            metadata[OPENJIUWEN_MESSAGE_ORIGIN_METADATA] = OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER
-            message["metadata"] = metadata
+            _set_external_user_origin(message)
+            message_id = message.get("message_id")
+            if isinstance(message_id, str) and message_id:
+                external_user_ids.add(message_id)
             return
+
+
+def _set_external_user_origin(message: dict[str, Any]) -> None:
+    """State that ``message`` carries what the external user sent."""
+    metadata = dict(message.get("metadata") or {})
+    metadata[OPENJIUWEN_MESSAGE_ORIGIN_METADATA] = OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER
+    message["metadata"] = metadata
 
 
 def _message_dicts(message: TurnMessage) -> list[dict[str, Any]]:

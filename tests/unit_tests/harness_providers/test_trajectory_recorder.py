@@ -310,6 +310,34 @@ def test_every_host_input_of_a_turn_reads_as_the_user_speaking(exporter: InMemor
     ]
 
 
+def test_a_host_input_keeps_reading_as_the_user_after_its_turn_ends(exporter: InMemorySpanExporter) -> None:
+    recorder = _recorder()
+    stream = _Stream(recorder)
+    recorder.record_input("turn-1", "list the files")
+    stream.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=100.0)
+    first_input = _text_message("user-1", MessageRole.USER, "<inbound>list the files</inbound>")
+    stream.emit(_request("req-1", started_at=100.5, ended_at=101.0, history=(first_input,)), timestamp=101.0)
+    stream.emit(_completed("done"), timestamp=102.0)
+
+    recorder.record_input("turn-2", "now count them")
+    stream.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=103.0, turn_id="turn-2")
+    second_input = _text_message("user-2", MessageRole.USER, "<inbound>now count them</inbound>")
+    stream.emit(
+        _request("req-2", started_at=103.5, ended_at=104.0, history=(first_input, second_input)),
+        timestamp=104.0,
+        turn_id="turn-2",
+    )
+    stream.emit(_completed("done"), timestamp=105.0, turn_id="turn-2")
+
+    commits = [span for span in exporter.get_finished_spans() if span.attributes.get(OJ_TRAJECTORY_EVENT_KIND)]
+    delta = json.loads(commits[1].attributes[OJ_TRAJECTORY_PAYLOAD])["delta"]
+    logger.info("second turn commit delta: {}", delta)
+    # The first turn's input is the same message it always was. Restating it as
+    # the harness's own would replace it, and a reader would see it twice.
+    assert [operation["op"] for operation in delta] == ["insert"]
+    assert delta[0]["message"]["origin"] == "external_user"
+
+
 def test_multi_block_text_messages_are_stated_as_one_body(exporter: InMemorySpanExporter) -> None:
     recorder = _recorder()
     stream = _Stream(recorder)
