@@ -25,7 +25,7 @@ from openjiuwen.core.foundation.llm.model import Model
 
 from .config import TTSEConfig
 from .prompts import DREAM_MERGE_SYSTEM, dream_merge_prompt
-from .stores import TTSERecordStore
+from .stores import TTSERecordStore, format_ts, parse_ts
 from .tip_parse import is_valid_tip_shape, tip_purge_reason
 
 
@@ -45,8 +45,11 @@ class DreamState:
     non_followup_count: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
+        last_dream_at: Any = 0
+        if self.last_dream_at > 0:
+            last_dream_at = format_ts(self.last_dream_at)
         return {
-            "last_dream_at": self.last_dream_at,
+            "last_dream_at": last_dream_at,
             "last_pruned": self.last_pruned,
             "last_merged_clusters": self.last_merged_clusters,
             "last_purged_tips": self.last_purged_tips,
@@ -56,8 +59,15 @@ class DreamState:
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "DreamState":
         data = data or {}
+        raw_last = data.get("last_dream_at")
+        parsed = parse_ts(raw_last)
+        if parsed is None:
+            # Legacy empty / missing / unparsable → never dreamed.
+            last_dream_at = 0.0
+        else:
+            last_dream_at = float(parsed)
         return cls(
-            last_dream_at=float(data.get("last_dream_at") or 0.0),
+            last_dream_at=last_dream_at,
             last_pruned=int(data.get("last_pruned") or 0),
             last_merged_clusters=int(data.get("last_merged_clusters") or 0),
             last_purged_tips=int(data.get("last_purged_tips") or 0),
@@ -173,12 +183,8 @@ def _display_ts(record: Dict[str, Any]) -> float:
     value = record.get("last_injected_at")
     if value is None:
         value = record.get("created_at")
-    if value is None:
-        return 0.0
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    parsed = parse_ts(value)
+    return parsed if parsed is not None else 0.0
 
 
 async def prune_stale(
@@ -589,7 +595,7 @@ async def run_dream_pass(
         store.stats(),
         len(capability_names or set()),
         path,
-        dream_state.last_dream_at,
+        format_ts(dream_state.last_dream_at) if dream_state.last_dream_at > 0 else dream_state.last_dream_at,
     )
     result = DreamResult()
     names = capability_names or set()

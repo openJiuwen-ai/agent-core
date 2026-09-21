@@ -19,10 +19,11 @@ from openjiuwen.agent_evolving.ttse.dream import (
     parse_merge_verdict,
     prune_stale,
     run_dream_pass,
+    save_dream_state,
     should_run_dream,
 )
 from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip, tip_purge_reason
-from openjiuwen.agent_evolving.ttse.stores import _new_record
+from openjiuwen.agent_evolving.ttse.stores import _new_record, format_ts, parse_ts
 
 
 class ScriptedLLM:
@@ -151,7 +152,9 @@ async def test_store_new_record_has_metadata(tmp_path):
     await store.add_fact("a fact")
     rec = store.facts[0]
     assert rec["count"] == 1
-    assert rec["created_at"] is not None
+    assert isinstance(rec["created_at"], str)
+    assert parse_ts(rec["created_at"]) is not None
+    assert rec["created_at"] == format_ts(parse_ts(rec["created_at"]))
     assert rec["last_injected_at"] is None
     assert rec["inject_hits"] == 0
 
@@ -165,8 +168,41 @@ async def test_legacy_bank_migration_sets_last_injected(tmp_path):
     store = TTSERecordStore(TTSEConfig(store_path=str(path)))
     rec = store.facts[0]
     assert rec["count"] == 2
-    assert rec["last_injected_at"] is not None
-    assert rec["created_at"] is not None
+    assert isinstance(rec["last_injected_at"], str)
+    assert isinstance(rec["created_at"], str)
+    assert parse_ts(rec["last_injected_at"]) is not None
+    assert parse_ts(rec["created_at"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_legacy_float_timestamps_normalized_on_load(tmp_path):
+    path = tmp_path / "bank.json"
+    epoch = 1_700_000_000.0
+    path.write_text(
+        json.dumps(
+            {
+                "facts": [
+                    {
+                        "text": "float clock",
+                        "count": 1,
+                        "created_at": epoch,
+                        "updated_at": epoch,
+                        "last_injected_at": epoch,
+                        "inject_hits": 1,
+                    }
+                ],
+                "tips": [],
+                "retired": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store = TTSERecordStore(TTSEConfig(store_path=str(path)))
+    rec = store.facts[0]
+    assert rec["created_at"] == format_ts(epoch)
+    assert rec["updated_at"] == format_ts(epoch)
+    assert rec["last_injected_at"] == format_ts(epoch)
+    assert parse_ts(rec["created_at"]) == pytest.approx(epoch, abs=1)
 
 
 @pytest.mark.asyncio
@@ -175,14 +211,26 @@ async def test_prune_stale_ttl(tmp_path):
     store = TTSERecordStore(cfg)
     now = time.time()
     old = _new_record("old fact", now=now - 91 * 86400)
-    old["last_injected_at"] = now - 91 * 86400
+    old["last_injected_at"] = format_ts(now - 91 * 86400)
     fresh = _new_record("fresh fact", now=now - 10 * 86400)
-    fresh["last_injected_at"] = now - 10 * 86400
+    fresh["last_injected_at"] = format_ts(now - 10 * 86400)
     store.facts = [old, fresh]
     pf, pt = await prune_stale(store, cfg, now=now)
     assert pf == 1 and pt == 0
     assert store.facts_texts() == ["fresh fact"]
     assert store.retired == []
+
+
+@pytest.mark.asyncio
+async def test_prune_accepts_legacy_float_last_injected(tmp_path):
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"), dream_ttl_days=90)
+    store = TTSERecordStore(cfg)
+    now = time.time()
+    old = _new_record("old fact", now=now - 91 * 86400)
+    old["last_injected_at"] = now - 91 * 86400  # legacy float still in memory
+    store.facts = [old]
+    pf, pt = await prune_stale(store, cfg, now=now)
+    assert pf == 1 and pt == 0
 
 
 @pytest.mark.asyncio
@@ -218,7 +266,8 @@ async def test_mark_injected_flush_persists_for_new_store(tmp_path):
     reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
     rec = reloaded.facts[0]
     assert rec["inject_hits"] == 1
-    assert rec["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(rec["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert rec["last_injected_at"] == format_ts(now)
 
     pf, pt = await prune_stale(reloaded, TTSEConfig(store_path=str(path), dream_ttl_days=90), now=now)
     assert pf == 0 and pt == 0
@@ -246,7 +295,8 @@ async def test_mark_injected_auto_flush_at_min_hits(tmp_path):
     await task
     reloaded = TTSERecordStore(TTSEConfig(store_path=str(path)))
     assert reloaded.facts[0]["inject_hits"] == 2
-    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(reloaded.facts[0]["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert reloaded.facts[0]["last_injected_at"] == format_ts(now)
 
 
 @pytest.mark.asyncio
@@ -262,7 +312,7 @@ async def test_reload_overlay_prevents_ttl_prune_of_injected_rule(tmp_path):
     now = time.time()
     stale_ts = now - 95 * 86400
     rec = _new_record("high value", now=stale_ts)
-    rec["last_injected_at"] = stale_ts
+    rec["last_injected_at"] = format_ts(stale_ts)
     store.facts = [rec]
     await store.save()
 
@@ -290,7 +340,8 @@ async def test_reload_overlay_prevents_ttl_prune_of_injected_rule(tmp_path):
     assert pf == 0 and pt == 0
     kept = store.facts[0]
     assert kept["text"] == "high value"
-    assert kept["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(kept["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert kept["last_injected_at"] == format_ts(now)
     assert kept["inject_hits"] >= 1
     store.cancel_inject_persist()
 
@@ -321,7 +372,8 @@ async def test_flush_overlays_concurrent_disk_write(tmp_path):
     assert texts == {"rule a", "rule b"}
     rec_a = next(r for r in reloaded.facts if r["text"] == "rule a")
     assert rec_a["inject_hits"] == 1
-    assert rec_a["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(rec_a["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert rec_a["last_injected_at"] == format_ts(now)
 
 
 @pytest.mark.asyncio
@@ -580,6 +632,27 @@ def test_dream_state_legacy_json_defaults_count_to_zero(tmp_path):
     assert state.non_followup_count == 0
 
 
+def test_dream_state_roundtrip_uses_display_timestamp(tmp_path):
+    path = str(tmp_path / "dream-state.json")
+    now = time.time()
+    state = DreamState(last_dream_at=now, last_pruned=2)
+    save_dream_state(path, state)
+    raw = json.loads((tmp_path / "dream-state.json").read_text(encoding="utf-8"))
+    assert raw["last_dream_at"] == format_ts(now)
+    assert isinstance(raw["last_dream_at"], str)
+    loaded = load_dream_state(path)
+    assert loaded.last_dream_at == pytest.approx(now, abs=1)
+    assert loaded.last_pruned == 2
+
+
+def test_dream_state_reads_display_timestamp_string(tmp_path):
+    path = tmp_path / "dream-state.json"
+    stamp = "2026-09-21 11:15:00"
+    path.write_text(json.dumps({"last_dream_at": stamp}), encoding="utf-8")
+    state = load_dream_state(str(path))
+    assert state.last_dream_at == pytest.approx(parse_ts(stamp), abs=1)
+
+
 def test_should_run_dream_min_hours():
     cfg = TTSEConfig(dream_enabled=True, dream_min_hours=24)
     state = DreamState(last_dream_at=time.time() - 3600)
@@ -625,7 +698,7 @@ async def test_dream_without_embedding_still_prunes(tmp_path):
     store = TTSERecordStore(cfg)  # no embedding
     now = time.time()
     stale = _new_record("stale", now=now - 100 * 86400)
-    stale["last_injected_at"] = now - 100 * 86400
+    stale["last_injected_at"] = format_ts(now - 100 * 86400)
     store.facts = [stale]
     result, _ = await run_dream_pass(
         store,

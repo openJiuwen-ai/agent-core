@@ -42,7 +42,13 @@ from openjiuwen.harness.rails.evolution import (
     configure_ttse_evolution_runtime,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.agent_evolving.ttse.stores import reset_shared_stores, shared_store, _new_record
+from openjiuwen.agent_evolving.ttse.stores import (
+    reset_shared_stores,
+    shared_store,
+    _new_record,
+    format_ts,
+    parse_ts,
+)
 from openjiuwen.agent_evolving.ttse.catalog import project_catalog
 from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
@@ -449,7 +455,8 @@ def test_inject_debounce_reschedules_after_event_loop_replaced(tmp_path):
     _run(on_second_loop())
     reloaded = TTSERecordStore(TTSEConfig(store_path=path))
     assert reloaded.facts[0]["inject_hits"] == 2
-    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(reloaded.facts[0]["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert reloaded.facts[0]["last_injected_at"] == format_ts(now)
     reset_shared_stores()
 
 
@@ -1941,10 +1948,10 @@ async def test_run_dream_projects_catalog_after_prune(tmp_path):
     rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
     now = time.time()
     stale = _new_record("stale slides fact", now=now - 91 * 86400)
-    stale["last_injected_at"] = now - 91 * 86400
+    stale["last_injected_at"] = format_ts(now - 91 * 86400)
     stale["category"] = "documents-office-and-records"
     keep = _new_record("keep devops fact", now=now - 10 * 86400)
-    keep["last_injected_at"] = now - 10 * 86400
+    keep["last_injected_at"] = format_ts(now - 10 * 86400)
     keep["category"] = "software-engineering-devops"
     rail._ttse_store.facts = [stale, keep]
     await rail._ttse_store.save()
