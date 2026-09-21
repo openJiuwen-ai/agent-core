@@ -77,7 +77,11 @@ def get_or_create_team_span(team_name: str, tracer) -> Span | None:
     span.set_attribute(AT_TEAM_ID, team_name)
     if session_id:
         span.set_attribute(GEN_AI_CONVERSATION_ID, session_id)
-    set_root_span(span)
+    # Registered under the session, not only in this task's ContextVar: an
+    # in-process teammate runs in a task of its own and looks the root up by
+    # the session its callback carries. Left unregistered, that lookup finds
+    # nothing and the teammate's whole round goes unrecorded.
+    set_root_span(span, session_id=session_id or None)
     team_logger.info(
         "otel: get_or_create_team_span CREATE new team span team_name={} "
         "trace_id={:032x} span_id={:016x}",
