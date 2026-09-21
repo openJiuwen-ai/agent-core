@@ -67,6 +67,19 @@ class CandidateScore:
 
 #: Every normalisation this side implements. Mirrors `EvolveNormalize` in
 #: `packages/schema`; the golden fixture is what keeps the two honest.
+#: Where a task counts as solved when the card does not say.
+DEFAULT_SOLVED_THRESHOLD = 0.999
+
+
+def solved_threshold(scorecard: Mapping[str, Any]) -> float:
+    """The score at which a task counts as solved: `solvedThreshold`, else 0.999.
+
+    Read in two places that must agree — the probe refuses a seed that already
+    scores this, and the search stops once a candidate does — so it is read here.
+    """
+    return float(scorecard.get("solvedThreshold") or DEFAULT_SOLVED_THRESHOLD)
+
+
 KNOWN_NORMALIZE = frozenset({"clamp", "identity", "reciprocal", "relative_to_baseline"})
 
 
