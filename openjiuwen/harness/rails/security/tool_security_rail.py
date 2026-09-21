@@ -21,6 +21,8 @@ from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmPayload,
 )
 
+from openjiuwen.core.common.exception.codes import StatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.permission_engine.host import (
@@ -34,6 +36,7 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionResult,
 )
 from openjiuwen.harness.security.permission_engine.models import PermissionsSection
+from openjiuwen.harness.security.permission_engine.prompt_texts import PermissionPromptTexts
 from openjiuwen.harness.security.patterns import (
     merge_permission_allow_rule_into_permissions,
     write_permissions_section_to_agent_config_yaml,
@@ -83,6 +86,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         super().__init__(tool_names=tool_names)
         self._static_config = cast(dict[str, Any], config or {})
         self._host = host or ToolPermissionHost()
+        # Checked here: a bad value found while rendering an ASK would leave the call undecided.
+        self._prompt_texts = getattr(self._host, "prompt_texts", None)
+        if not isinstance(self._prompt_texts, PermissionPromptTexts):
+            raise build_error(
+                StatusCode.DEEPAGENT_CONFIG_PARAM_ERROR,
+                error_msg=(
+                    "ToolPermissionHost.prompt_texts must be a PermissionPromptTexts, "
+                    f"got {type(self._prompt_texts).__name__}"
+                ),
+            )
         if engine is not None:
             self._engine = engine
         else:
@@ -843,7 +856,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
         presentation = build_permission_ask_presentation(
-            tool_name, tool_args, result, permission_config=self._engine.config,
+            tool_name,
+            tool_args,
+            result,
+            permission_config=self._engine.config,
+            texts=self._prompt_texts,
         )
         hint = self._build_always_allow_hint(tool_call)
         return render_ask_presentation_message(presentation, always_allow_hint=hint)
@@ -860,7 +877,11 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name if tool_call else ""
         tool_args = self.parse_tool_args(tool_call)
         presentation = build_permission_ask_presentation(
-            tool_name, tool_args, result, permission_config=self._engine.config,
+            tool_name,
+            tool_args,
+            result,
+            permission_config=self._engine.config,
+            texts=self._prompt_texts,
         )
         return {
             "ask_category": presentation.category,
@@ -876,6 +897,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
         tool_name = tool_call.name or ""
         tool_args = self.parse_tool_args(tool_call)
         auto_confirm_key = self._get_auto_confirm_key(tool_call)
+        texts = self._prompt_texts
 
         path_hint = ""
         for key in ("path", "file_path", "target_file", "file", "old_path", "new_path"):
@@ -899,22 +921,16 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
             shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{shell_key}`` 类调用；'
-                    f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
-                )
+                return texts.remember_command.format(command_key=shell_key)
             if auto_confirm_key:
-                return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。'
+                return texts.remember_command_session_only.format(
+                    command_key=auto_confirm_key,
                 )
             return ""
 
         if auto_confirm_key:
-            path_desc = f"在 ``{path_hint}`` 下" if path_hint else ""
-            return (
-                f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{tool_name}`` 类工具{path_desc}的调用；'
-                f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
-            )
+            path_scope = texts.path_scope.format(path_hint=path_hint) if path_hint else ""
+            return texts.remember_tool.format(tool_name=tool_name, path_scope=path_scope)
         return ""
 
 
