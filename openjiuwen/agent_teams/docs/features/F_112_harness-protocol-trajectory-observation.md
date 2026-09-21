@@ -68,7 +68,9 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   并删除 body 目录。
 - 配对：`api_response_body` 是组装后的完整消息，`id` 即 SDK `AssistantMessage.message_id`；请求体按
   时间取响应之前最近的一条，并要求其历史里包含上一次主对话回复（排除子 agent / 侧路查询交错的请求）。
-  历史消息 id 用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），命中过往回复时沿用 `msg_` id。
+  历史消息 id **一律**用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），不沿用回复的 `msg_` id：
+  id 只能由消息自身决定。观察者是每个 harness 会话一个，成员中途重启就会换新，若 id 依赖"这个观察者记得
+  哪条回复"，重启后窗口里每条消息的 id 都会变，读者会看到整段历史被重述一遍。
 - **OTel 说得出的事实一律以 OTel 为准**，SDK 消息流只提供 OTel 不记录的东西（工具入参与结果正文，
   OTel 只记大小）。实测各信号的用途：
 
@@ -88,6 +90,11 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   拆成独立消息（assistant turn 不拆，推理、回答、工具调用是一次回复）。否则它们会被并成一段正文，宿主
   输入所在的那行会以 CLI 提醒开头。`tool_addition` 之类控制块不入对话（同一条通知的文本已经说明），
   CLI 已脱敏的 thinking（`<REDACTED>`）也不单独成行。
+
+- **思考内容拿不到，只能给出思考量**：Claude Code 发请求时带 `thinking: {type: adaptive, display: omitted}`，
+  于是 API 返回的 thinking 块内容本身就是 `<REDACTED>`——文本不曾到达 CLI，SDK 流里同样没有。
+  `usage.output_tokens_details.thinking_tokens` 是唯一的实据，映射为 `TurnUsage.reasoning_output_tokens`，
+  这样"思考发生过、用了多少"仍然可见。所以三方 Claude 成员的 lane 没有 reasoning 记录，不是漏采。
 - 系统提示里第一块是 Claude Code 自己的 `x-anthropic-billing-header`（含每次请求变化的 id）。它是请求
   元数据而非指令，移到 `data.claude-code.billing_header`，否则系统提示每步都像被改写。
 - 工具定义的 `input_schema` 归一为 `parameters`；采样参数取自请求体（max_tokens / temperature /
@@ -130,7 +137,14 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
 
 **这个归属是消息的属性，不随轮次失效**：记录器记住已认定为 `external_user` 的 message id，之后每次提交
 窗口都照此标注。只按"本轮输入"匹配是不够的——本轮结束后旧消息会被重新标成 `harness_internal`，窗口
-diff 变成一条 `replace`，读者会看到同一条消息先以 user、后以 context 出现两次。
+diff 变成一条 `replace`，读者会看到同一条消息先以 user、后以 context 出现两次。**成员中途重启**时记录器
+是新的、会话还在继续，所以新记录器首次记录前从该 subject 已提交的窗口
+（`current_context_window_messages`）恢复这份记忆，否则整段历史会被重述一遍。
+
+**并非每条投递都是"有人在说话"**：宿主也会投递常驻状态与框架通知。`inbound_render.is_runtime_context_only`
+按标签判定——`<team-inbound>`（含裸文本）是有人在说，纯 `<team-context>` / `<team-event>` 是上下文，
+`member_runtime` 据此决定 `record_input(..., external_user=)`。无法识别的一律算"有人在说"：漏掉用户的一轮
+比把上下文显示成用户更糟。另外 `send()` 只把**前置团队上下文之前**的原始文本记为输入，上下文随行但不是谁说的话。
 
 三方 harness **不模拟 native rail 的"插入 context message"**：`member_runtime` 把待发的团队上下文
 前置到下一次输入的文本里（`_prepend_context`），由 CLI 当作一条用户消息收下；provider 再按块拆开，

@@ -75,7 +75,13 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    marks the user messages carrying a turn's host inputs as the external
    user's and remembers those message ids: whose a message is does not change
    when its turn ends, and restating it as the harness's own would replace it
-   in the next window and read as the same message twice.
+   in the next window and read as the same message twice. A host states with
+   `record_input(..., external_user=)` which of its inputs are somebody
+   speaking, since a host also delivers standing context and runtime notices.
+   Provenance and conversation message ids both survive a member restart: the
+   recorder recovers the ids it had recognized from the subject's committed
+   window, and a provider derives a conversation message's id from the message
+   alone, never from what the observer happens to have seen.
 6. **User input is an interaction.** Claude `AskUserQuestion`, Codex
    `request_user_input` (App Server request `item/tool/requestUserInput`,
    parsed from the raw `_approval_handler` params because the SDK has no

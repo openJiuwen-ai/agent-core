@@ -252,7 +252,12 @@ def _result(sdk: ModuleType, **overrides: Any) -> Any:
         "session_id": "sess",
         "stop_reason": "end_turn",
         "total_cost_usd": 0.0025,
-        "usage": {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 2},
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "cache_read_input_tokens": 2,
+            "output_tokens_details": {"thinking_tokens": 3},
+        },
         "result": "Hello world",
         "structured_output": None,
         "errors": None,
@@ -369,6 +374,8 @@ async def test_full_turn_maps_messages_to_protocol_events(monkeypatch: pytest.Mo
     assert result.final_output == "Hello world"
     # GenAI states the whole prompt as input; the cache hit is a breakdown of it.
     assert result.usage.input_tokens == 12 and result.usage.cached_input_tokens == 2
+    # Claude Code omits the thinking text, so the count is all a reader gets.
+    assert result.usage.reasoning_output_tokens == 3
     assert result.cost.micros == 2500
     assert [message.role.value for message in result.messages] == ["assistant", "tool"]
     assert client.queries == ["hi"]

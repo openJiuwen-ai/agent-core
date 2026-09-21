@@ -628,8 +628,8 @@ class _RecordingTrajectoryRecorder:
         self.calls: list[tuple[str, Any]] = []
         self.observed = asyncio.Event()
 
-    def record_input(self, turn_id: str, text: str) -> None:
-        self.calls.append(("input", (turn_id, text)))
+    def record_input(self, turn_id: str, text: str, *, external_user: bool = True) -> None:
+        self.calls.append(("input", (turn_id, text, external_user)))
 
     def record_turn_identity(self, protocol_turn_id: str, *, turn_id: str, turn_number: int) -> None:
         self.calls.append(("identity", (protocol_turn_id, turn_id, turn_number)))
@@ -671,7 +671,7 @@ async def test_trajectory_recorder_receives_inputs_member_turns_and_every_event(
     logger.info("recorder calls: {}", recorder.calls)
     assert HostCapability.MODEL_REQUEST_OBSERVATION in harness.start_contexts[0].host_capabilities
     assert recorder.calls == [
-        ("input", ("turn-1", "list the files")),
+        ("input", ("turn-1", "list the files", True)),
         ("identity", ("turn-1", member_turn["turn_id"], 1)),
         ("observe", "TurnLifecycleEvent"),
         ("observe", "ItemLifecycleEvent"),

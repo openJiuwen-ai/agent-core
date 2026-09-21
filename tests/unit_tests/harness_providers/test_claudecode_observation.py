@@ -364,8 +364,9 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
         MessageRole.ASSISTANT,
         MessageRole.USER,
     ]
-    # The earlier reply keeps its message id inside the next request's history.
-    assert second.input_messages[2].message_id == "msg-1"
+    # Every conversation message is identified by the message alone, so a
+    # restarted observer keeps naming them the same way.
+    assert second.input_messages[2].message_id.startswith("claude-context:")
     assert second.input_messages[0].message_id == first.input_messages[0].message_id
     tool_started = next(event for event in events if _kinds([event]) == ["tool:tool-1:started"])
     assert "msg-1" in tool_started.causation_ids

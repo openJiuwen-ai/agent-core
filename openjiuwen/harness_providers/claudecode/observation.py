@@ -182,7 +182,6 @@ class ClaudeRequestObserver:
         self._lock = asyncio.Lock()
         self._requests: list[_BodyEvent] = []
         self._responses: dict[str, tuple[_BodyEvent, dict[str, Any]]] = {}
-        self._output_ids_by_identity: dict[str, str] = {}
         self._last_output_identity = ""
         self._emit: EmitFn | None = None
         self._drain_task: asyncio.Task[None] | None = None
@@ -621,9 +620,7 @@ class ClaudeRequestObserver:
             tool_definitions = _tool_definitions(tools) if isinstance(tools, list) else None
             request_parameters = _request_parameters(request)
         output = _message(snapshot.message_id, MessageRole.ASSISTANT, response.get("content"))
-        identity = _identity("assistant", response.get("content"))
-        self._output_ids_by_identity[identity] = snapshot.message_id
-        self._last_output_identity = identity
+        self._last_output_identity = _identity("assistant", response.get("content"))
         native = self._spans.pop(str(response_event.attributes.get("request_id") or ""), None)
         if native is not None and native.start_ns > 0 and native.end_ns >= native.start_ns:
             started_at = native.start_ns / 1e9
@@ -709,10 +706,17 @@ class ClaudeRequestObserver:
                 result.append(_message(self._message_id(role, [block]), MessageRole.USER, [block]))
         return result
 
-    def _message_id(self, role: str, content: Any) -> str:
-        """Return the stable id of one conversation message."""
-        identity = _identity(role, content)
-        return self._output_ids_by_identity.get(identity) or f"claude-context:{identity}"
+    @staticmethod
+    def _message_id(role: str, content: Any) -> str:
+        """Return the stable id of one conversation message.
+
+        The id is derived from the message alone, never from what this
+        observer happens to have seen. A member that restarts mid-conversation
+        gets a fresh observer while the conversation carries on: an id that
+        depended on a remembered reply would change for every message already
+        in the window, and a reader would see the whole history restated.
+        """
+        return f"claude-context:{_identity(role, content)}"
 
 
 def _content_list(content: Any) -> list[Any]:

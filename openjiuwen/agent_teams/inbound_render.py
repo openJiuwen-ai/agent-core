@@ -293,6 +293,29 @@ def snapshot_kind_of(text: str) -> str | None:
     return next((kind for kind in SNAPSHOT_EVENT_KINDS if stripped.startswith(_OPEN_TAG % kind)), None)
 
 
+def is_runtime_context_only(text: str) -> bool:
+    """Return whether ``text`` is only what the runtime is telling the member.
+
+    A member's input is either what somebody said (``<team-inbound>``, or a
+    bare instruction handed straight to it) or standing state and framework
+    notices the runtime raises on its own (``<team-context>`` /
+    ``<team-event>``). Only the former is somebody speaking, which is what a
+    trajectory shows as the user's turn; the rest is context, however it was
+    delivered. Anything unrecognized counts as somebody speaking, because
+    losing a user's turn is worse than showing context as one.
+
+    Args:
+        text: One input, as it was handed to the member.
+
+    Returns:
+        True when the input carries runtime context and nothing said.
+    """
+    stripped = text.strip()
+    if not stripped or "<team-inbound" in stripped:
+        return False
+    return stripped.startswith("<team-context>") or stripped.startswith("<team-event")
+
+
 def drop_superseded_snapshots(parts: list[str]) -> list[str]:
     """Return ``parts`` without the snapshot inputs a later one supersedes.
 
@@ -329,6 +352,7 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
+    "is_runtime_context_only",
     "render_controller_input",
     "render_event",
     "render_inbound",

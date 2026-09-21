@@ -338,6 +338,44 @@ def test_a_host_input_keeps_reading_as_the_user_after_its_turn_ends(exporter: In
     assert delta[0]["message"]["origin"] == "external_user"
 
 
+def test_a_restarted_member_keeps_what_the_user_had_said(exporter: InMemorySpanExporter) -> None:
+    first = _recorder()
+    stream = _Stream(first)
+    first.record_input("turn-1", "list the files")
+    stream.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=100.0)
+    spoken = _text_message("user-1", MessageRole.USER, "<inbound>list the files</inbound>")
+    stream.emit(_request("req-1", started_at=100.5, ended_at=101.0, history=(spoken,)), timestamp=101.0)
+    stream.emit(_completed("done"), timestamp=102.0)
+    first.close()
+
+    # The member restarts: a new recorder on the same subject continues the
+    # conversation the committed window already describes.
+    restarted = HarnessTrajectoryRecorder.create(
+        subject=first.subject,
+        agent_name="coder",
+        agent_mode="team",
+    )
+    assert restarted is not None
+    resumed = _Stream(restarted)
+    restarted.record_input("turn-2", "now count them")
+    resumed.emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), timestamp=103.0, turn_id="turn-2")
+    later = _text_message("user-2", MessageRole.USER, "<inbound>now count them</inbound>")
+    resumed.emit(
+        _request("req-2", started_at=103.5, ended_at=104.0, history=(spoken, later)),
+        timestamp=104.0,
+        turn_id="turn-2",
+    )
+    resumed.emit(_completed("done"), timestamp=105.0, turn_id="turn-2")
+
+    commits = [span for span in exporter.get_finished_spans() if span.attributes.get(OJ_TRAJECTORY_EVENT_KIND)]
+    delta = json.loads(commits[1].attributes[OJ_TRAJECTORY_PAYLOAD])["delta"]
+    logger.info("delta after the restart: {}", delta)
+    # Restating the earlier message as the harness's own would replace it, and
+    # a reader would see the whole history again as context.
+    assert [operation["op"] for operation in delta] == ["insert"]
+    assert delta[0]["message"]["origin"] == "external_user"
+
+
 def test_multi_block_text_messages_are_stated_as_one_body(exporter: InMemorySpanExporter) -> None:
     recorder = _recorder()
     stream = _Stream(recorder)

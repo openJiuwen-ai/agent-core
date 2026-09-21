@@ -80,7 +80,7 @@ class ClaudeTurnAccumulator:
         # cost is reported per session and has to be differenced.
         self._cost_baseline_usd = max(0.0, cost_baseline_usd)
         self.session_cost_usd = self._cost_baseline_usd
-        self._raw_usage: dict[str, int] = {}
+        self._raw_usage: dict[str, Any] = {}
         self._num_turns = 0
         self._last_result: Any = None
 
@@ -477,6 +477,7 @@ def claude_turn_usage(usage: Any) -> TurnUsage | None:
     output_tokens = _non_negative(usage.get("output_tokens"))
     cache_read = _non_negative(usage.get("cache_read_input_tokens"))
     cache_write = _non_negative(usage.get("cache_creation_input_tokens"))
+    reasoning_tokens = _thinking_tokens(usage)
     if uncached_tokens is None and output_tokens is None and cache_read is None:
         return None
     input_tokens = None
@@ -492,12 +493,26 @@ def claude_turn_usage(usage: Any) -> TurnUsage | None:
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cache_read,
+        reasoning_output_tokens=reasoning_tokens,
         total_tokens=total,
         provider_data=provider_data,
     )
 
 
-def _add_raw_usage(total: dict[str, int], usage: Any) -> None:
+def _thinking_tokens(usage: Mapping[str, Any]) -> int | None:
+    """Return the thinking tokens of one Claude usage report.
+
+    Claude Code asks the API to omit the thinking text, so a reply states
+    that it thought and how much but never what it thought. The count is the
+    only thing a reader can be shown.
+    """
+    details = usage.get("output_tokens_details")
+    if not isinstance(details, Mapping):
+        return None
+    return _non_negative(details.get("thinking_tokens"))
+
+
+def _add_raw_usage(total: dict[str, Any], usage: Any) -> None:
     """Add one cycle's raw Claude counters into ``total``.
 
     Summing the raw counters, rather than the normalized usage, keeps one
@@ -509,6 +524,10 @@ def _add_raw_usage(total: dict[str, int], usage: Any) -> None:
         counted = _non_negative(usage.get(key))
         if counted is not None:
             total[key] = total.get(key, 0) + counted
+    thinking = _thinking_tokens(usage)
+    if thinking is not None:
+        details = total.setdefault("output_tokens_details", {})
+        details["thinking_tokens"] = details.get("thinking_tokens", 0) + thinking
 
 
 def _monetary(total_cost_usd: Any) -> MonetaryAmount | None:

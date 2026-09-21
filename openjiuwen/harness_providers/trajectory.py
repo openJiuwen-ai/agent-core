@@ -88,7 +88,10 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TURN_NUMBER,
     TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
-from openjiuwen.extensions.observability.span_context import next_execution_subject_request_number
+from openjiuwen.extensions.observability.span_context import (
+    current_context_window_messages,
+    next_execution_subject_request_number,
+)
 from openjiuwen.extensions.observability.tool_outcome import TOOL_REPORTED_FAILURE
 from openjiuwen.extensions.observability.trajectory_events import emit_context_window_commit
 from openjiuwen.harness.execution_subject import ExecutionSubject
@@ -186,6 +189,7 @@ class HarnessTrajectoryRecorder:
         # not change when the turn that carried it ends, and a conversation
         # outlives its turns.
         self._external_user_message_ids: set[str] = set()
+        self._external_user_ids_recovered = False
 
     @classmethod
     def create(
@@ -224,18 +228,51 @@ class HarnessTrajectoryRecorder:
     # Host inputs
     # ------------------------------------------------------------------
 
-    def record_input(self, turn_id: str, text: str) -> None:
+    def record_input(self, turn_id: str, text: str, *, external_user: bool = True) -> None:
         """Remember an input the host sent into ``turn_id``.
 
-        The turn span states the input that opened the turn; every input,
-        including one steered into a running turn, is also remembered so the
-        message carrying it reads as the user's rather than as context.
+        The turn span states the input that opened the turn; an input that is
+        the external user speaking is also remembered, so the message carrying
+        it reads as the user's rather than as context.
+
+        Args:
+            turn_id: The protocol turn the input was sent into.
+            text: The input as the host delivered it.
+            external_user: Whether this input is somebody speaking to the
+                agent. A host also delivers standing context and runtime
+                notices, which open a turn just the same but are not the
+                user's words.
         """
         if not text:
             return
         if turn_id not in self._turns:
             self._pending_inputs.setdefault(turn_id, text)
-        self._turn_inputs.setdefault(turn_id, []).append(text)
+        if external_user:
+            self._turn_inputs.setdefault(turn_id, []).append(text)
+
+    def _remembered_external_user_ids(self) -> set[str]:
+        """Return the ids known to be the external user's, recovering once.
+
+        A member that restarts mid-conversation gets a new recorder while the
+        conversation, and the window committed for it, carry on. Without
+        recovering what the earlier recorder had recognized, every message the
+        user had spoken would be restated as the harness's own and a reader
+        would see the whole history again, this time as context.
+        """
+        if self._external_user_ids_recovered:
+            return self._external_user_message_ids
+        self._external_user_ids_recovered = True
+        committed = current_context_window_messages(
+            session_id=self._subject.session_id,
+            subject_id=self._subject.subject_id,
+        )
+        for message in committed or ():
+            message_id = message.get("message_id")
+            if not isinstance(message_id, str) or not message_id:
+                continue
+            if message.get("origin") == OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER:
+                self._external_user_message_ids.add(message_id)
+        return self._external_user_message_ids
 
     def record_turn_identity(self, protocol_turn_id: str, *, turn_id: str, turn_number: int) -> None:
         """Assign the host's trajectory turn identity to a protocol turn.
@@ -447,7 +484,7 @@ class HarnessTrajectoryRecorder:
             request_messages = _request_messages(
                 event,
                 self._turn_inputs.get(envelope.turn_id or "", []),
-                self._external_user_message_ids,
+                self._remembered_external_user_ids(),
             )
             if request_messages:
                 self._handler.record_request_input(span, request_messages)
