@@ -608,6 +608,12 @@ async def test_ask_user_question_routes_to_the_host_and_resume_uses_checkpoint(m
     await harness.start(_context(interactions=handler, host_capabilities=frozenset({HostCapability.USER_INPUT})))
     client = state.clients[0]
     assert client.options.permission_mode == "default"
+    # The CLI only routes permission prompts to ``can_use_tool`` when it was
+    # launched with the stdio prompt tool, which the transport reads off its
+    # own options; the client's own options must not carry it, since the SDK
+    # rejects having both.
+    assert state.transports[0].options.permission_prompt_tool_name == "stdio"
+    assert getattr(client.options, "permission_prompt_tool_name", None) is None
     receipt = await harness.send(HarnessInput(content="pick"))
     terminal = _terminal(await _turn(harness, receipt.turn_id))
     assert terminal.result.final_output == "teal it is"

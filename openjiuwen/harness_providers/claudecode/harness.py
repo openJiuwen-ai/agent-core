@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import dataclasses
 import uuid
 from collections import deque
@@ -262,10 +263,19 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         # delivery receipts the SDK parser drops. Supplying a transport also
         # skips the SDK's resume materialization, which is a no-op for this
         # provider: it only runs for options that carry a ``session_store``.
+        # The SDK routes permission prompts to ``can_use_tool`` by rewriting the
+        # options it hands its own transport; a transport built here has to
+        # carry that rewrite itself, or the CLI launches without
+        # ``--permission-prompt-tool`` and every approval stalls. It stays off
+        # the client's own options, which reject having both.
+        transport_options = options
+        if getattr(options, "can_use_tool", None) is not None:
+            transport_options = copy.copy(options)
+            transport_options.permission_prompt_tool_name = "stdio"
         inner = (
-            self._transport_factory(options)
+            self._transport_factory(transport_options)
             if self._transport_factory is not None
-            else build_claude_subprocess_transport(options, _empty_prompt())
+            else build_claude_subprocess_transport(transport_options, _empty_prompt())
         )
         client = self._sdk.ClaudeSDKClient(options=options, transport=LifecycleTap(inner, tracker))
         try:
