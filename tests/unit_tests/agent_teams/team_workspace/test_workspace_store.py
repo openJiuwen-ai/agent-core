@@ -55,6 +55,36 @@ class TestMemberWrite:
         assert body == "be careful"
         assert meta["kind"] == "prompt"
 
+    def test_reseeding_the_same_body_keeps_its_timestamp(self, store, tmp_path):
+        """A member is re-seeded on every spawn, and spawns repeat on restart.
+
+        Moving ``updated_at`` for an identical body would read as a hand-evolve
+        and the member would be told its own working agreement again after
+        every restart.
+        """
+        first = store.write_member_prompt("T", "w1", "be careful")
+        target = team_member_workspace_dir("T", "w1") / "prompts" / "identity" / "member_prompt.md"
+        before = target.read_text(encoding="utf-8")
+
+        again = store.write_member_prompt("T", "w1", "be careful")
+
+        assert again is not None and first is not None
+        assert again.updated_at == first.updated_at
+        assert target.read_text(encoding="utf-8") == before
+
+    def test_a_changed_body_moves_the_timestamp(self, store, tmp_path):
+        first = store.write_member_prompt("T", "w1", "be careful")
+        second = store.write_member_prompt("T", "w1", "be quick")
+        assert first is not None and second is not None
+        assert second.updated_at >= first.updated_at
+        assert second.baseline_sha256 == body_sha256("be quick")
+
+    def test_reseeding_an_unchanged_card_keeps_its_timestamp(self, store, tmp_path):
+        first = store.write_card("T", "leader", "the desc")
+        again = store.write_card("T", "leader", "the desc")
+        assert first is not None and again is not None
+        assert again.updated_at == first.updated_at
+
     def test_empty_value_skips_write(self, store, tmp_path):
         store.write_card("T", "leader", None)
         store.write_member_prompt("T", "leader", "")
