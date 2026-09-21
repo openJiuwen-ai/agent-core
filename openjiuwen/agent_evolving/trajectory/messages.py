@@ -98,17 +98,41 @@ def _normalize_message(message: Mapping[str, Any]) -> dict[str, Any]:
     return result
 
 
+_PROMPT_ATTACHMENT_HISTORY_METADATA_KEY = "_openjiuwen_prompt_attachment_history"
+
+
+def _is_prompt_attachment_user(message: Mapping[str, Any]) -> bool:
+    """Return True for PromptAttachmentManager ``UserMessage`` scaffolding.
+
+    Attachments are persisted as ``role=user`` with a ``<system-reminder>``
+    body (and optional history metadata). They must not be treated as the
+    invoke-local task entry when trimming prior-round prompt history.
+    """
+    metadata = message.get("metadata")
+    if isinstance(metadata, Mapping) and metadata.get(_PROMPT_ATTACHMENT_HISTORY_METADATA_KEY):
+        return True
+    content = message.get("content")
+    return isinstance(content, str) and "<system-reminder>" in content
+
+
 def _trim_prompt_to_last_user(prompt: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    """Keep the current-invoke entry: last ``user`` message through the end.
+    """Keep the current-invoke entry: last real ``user`` message through the end.
 
     LLM spans may store the full request prompt (prior session rounds included).
     Callers such as TTSE pass ``invoke_local=True`` so a missing-window fallback
     does not re-import that history. This is a slice, not text-overlap merge.
+
+    Prompt-attachment ``user`` messages (``<system-reminder>``) are skipped when
+    choosing the cut point so the real task query is kept; those attachments
+    that follow the real user remain in the returned slice.
     """
     last_user: int | None = None
     for index, message in enumerate(prompt):
-        if message.get("role") == "user":
-            last_user = index
+        if message.get("role") != "user":
+            continue
+        if _is_prompt_attachment_user(message):
+            continue
+        last_user = index
     if last_user is None:
         return []
     return list(prompt[last_user:])
@@ -264,14 +288,17 @@ def project_trajectory_messages(
     conversation, not part of it.
 
     ``invoke_local=True`` (TTSE detect/induce) slices a missing-window prompt
-    or a committed window to the last ``user`` message. Later spans in the same
+    or a committed window to the last real ``user`` message (skipping
+    ``<system-reminder>`` prompt-attachment users). Later spans in the same
     projection do not re-append that prompt; they only add completions/tools.
     This does not compare prompt text to merge overlap.
 
     Args:
         trajectory: Canonical trajectory including its v2 event spans.
         fields: Semantic message fields to keep besides ``role``.
-        invoke_local: If True, keep only the current-invoke user turn.
+        invoke_local: If True, keep only the current-invoke real user turn
+            (skipping ``<system-reminder>`` attachment users when choosing
+            the cut point).
 
     Returns:
         The messages, and the issues found while projecting them.
