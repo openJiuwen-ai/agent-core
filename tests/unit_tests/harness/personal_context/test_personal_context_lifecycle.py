@@ -313,6 +313,65 @@ async def test_authorize_feishu_returns_authorized_when_lark_cli_scope_is_ready(
 
 
 @pytest.mark.asyncio
+async def test_reauthorize_feishu_starts_and_reuses_challenge_when_scopes_are_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(
+        monkeypatch,
+        granted_scopes=set(_ALL_FEISHU_READ_SCOPES),
+    )
+    finish_release = asyncio.Event()
+
+    async def wait_for_authorization(
+        _device_code: str,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        del timeout_seconds
+        await finish_release.wait()
+
+    begin.return_value = (
+        "device-secret",
+        "https://open.feishu.cn/authorize",
+        "2099-09-15T12:00:00Z",
+    )
+    finish.side_effect = wait_for_authorization
+
+    first = await personal_context.authorize_provider("feishu", reauthorize=True)
+    second = await personal_context.authorize_provider("feishu", reauthorize=True)
+    await asyncio.sleep(0)
+
+    assert first == second
+    assert first["state"] == "authorizing"
+    assert first["verification_url"] == "https://open.feishu.cn/authorize"
+    status.assert_awaited_once()
+    begin.assert_awaited_once()
+    finish.assert_awaited_once()
+
+    finish_release.set()
+    task = personal_context._authorization_task
+    assert task is not None
+    await asyncio.wait_for(asyncio.shield(task), timeout=1.0)
+
+
+@pytest.mark.asyncio
+async def test_reauthorize_feishu_requires_boolean(
+    tmp_path: Path,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+
+    with pytest.raises(PersonalContext.Error, match="reauthorize must be a boolean"):
+        await personal_context.authorize_provider(  # type: ignore[arg-type]
+            "feishu",
+            reauthorize="true",
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("granted_scopes", "authorization_error", "expected_state", "expected_error"),
     [

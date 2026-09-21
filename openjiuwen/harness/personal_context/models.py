@@ -108,13 +108,17 @@ class PersonalContextStatus(BaseModel):
             completed = numeric["completed_items"]
             if not 0 <= percent <= 100 or total < 0 or not 0 <= completed <= total:
                 raise ValueError("fetch run progress counts are out of range")
-            expected_percent = 0 if total == 0 else min(99, completed * 100 // total)
             if run_state == "succeeded":
                 if completed != total:
                     raise ValueError("succeeded fetch run progress requires all items completed")
-                expected_percent = 100
-            if percent != expected_percent:
-                raise ValueError("fetch run progress percent does not match its counts and state")
+                if percent != 100:
+                    raise ValueError("succeeded fetch run progress must be 100 percent")
+            elif percent == 100:
+                raise ValueError("only succeeded fetch run progress may be 100 percent")
+            if run_state == "idle":
+                has_progress = percent != 0 or total != 0 or completed != 0
+                if has_progress:
+                    raise ValueError("idle fetch run progress must be empty")
             last_error = progress["last_error"]
             if run_state == "failed":
                 if not isinstance(last_error, str) or not last_error.strip() or len(last_error) > 512:

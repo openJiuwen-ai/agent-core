@@ -590,6 +590,13 @@ class TeamBackend:
         auto_confirm: bool = False,
     ) -> bool:
         """Approve or reject one interrupted teammate tool call."""
+        if not isinstance(tool_call_id, str) or not tool_call_id:
+            team_logger.error(
+                "Refusing approve_tool with empty tool_call_id for member {}",
+                member_name,
+            )
+            return False
+
         member_data = await self.db.member.get_member(member_name, self.team_name)
         if member_data is None:
             team_logger.error(f"Member {member_name} not found in team {self.team_name}")
@@ -637,14 +644,14 @@ class TeamBackend:
                 tool_call_id,
                 e,
             )
-
-        team_logger.info(
-            "Tool approval event sent to member {} for tool_call_id={}, approved={}, auto_confirm={}",
-            member_name,
-            tool_call_id,
-            approved,
-            auto_confirm,
-        )
+        else:
+            team_logger.info(
+                "Tool approval event sent to member {} for tool_call_id={}, approved={}, auto_confirm={}",
+                member_name,
+                tool_call_id,
+                approved,
+                auto_confirm,
+            )
         return True
 
     async def shutdown_member(self, member_name: str, force: bool = False) -> MemberOpResult:

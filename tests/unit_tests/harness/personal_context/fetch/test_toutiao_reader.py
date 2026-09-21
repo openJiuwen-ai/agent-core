@@ -534,7 +534,7 @@ async def test_toutiao_uses_latest_published_or_updated_time_for_ranges(
 
 
 @pytest.mark.asyncio
-async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
+async def test_toutiao_missing_time_is_skipped_but_allows_all(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -552,8 +552,7 @@ async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
         _config(time_range={"mode": "recent", "recent_days": 3}),
         home=tmp_path,
     )
-    with pytest.raises(BaseError):
-        await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None)
+    assert await filtered.prepare_run(run_id="filtered", run_started_at=datetime.now(UTC), cursor=None) == ()
 
     _set_responses(
         monkeypatch,
@@ -565,6 +564,80 @@ async def test_toutiao_missing_time_fails_filtered_run_but_allows_all(
     all_time = ToutiaoReaderFetchService(_config(), home=tmp_path)
     candidates = await all_time.prepare_run(run_id="all", run_started_at=datetime.now(UTC), cursor=None)
     assert candidates[0]["candidate_time"] == "1970-01-01T00:00:00Z"
+
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [article, _article("kept", int(datetime.now(UTC).timestamp()))]})],
+        },
+    )
+    mixed = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+    kept = await mixed.prepare_run(run_id="mixed", run_started_at=datetime.now(UTC), cursor=None)
+    assert [candidate["stable_id"] for candidate in kept] == ["kept"]
+
+
+@pytest.mark.asyncio
+async def test_toutiao_relative_time_labels_are_resolved_against_run_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    fresh = {"item_id": "fresh", "title": "Fresh", "behot_time": "1天内"}
+    hours = {"item_id": "hours", "title": "Hours", "behot_time": "3小时前"}
+    yesterday = {"item_id": "yesterday", "title": "Yesterday", "behot_time": "昨天"}
+    stale = {"item_id": "stale", "title": "Stale", "behot_time": "30天前"}
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [fresh, hours, yesterday, stale]})],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 7}),
+        home=tmp_path,
+    )
+    candidates = await service.prepare_run(run_id="relative", run_started_at=run_started_at, cursor=None)
+    resolved = {candidate["stable_id"]: candidate["candidate_time"] for candidate in candidates}
+    assert resolved == {
+        "fresh": "2026-09-15T12:00:00Z",
+        "hours": "2026-09-15T09:00:00Z",
+        "yesterday": "2026-09-14T12:00:00Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_toutiao_absolute_time_wins_over_relative_label(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 15, 12, tzinfo=UTC)
+    published = int((run_started_at - timedelta(days=2)).timestamp())
+    article = _article("precise", published)
+    article["behot_time"] = "1天内"
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [Response({"data": [article]})],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 7}),
+        home=tmp_path,
+    )
+    candidates = await service.prepare_run(run_id="precise", run_started_at=run_started_at, cursor=None)
+    assert candidates[0]["candidate_time"] == datetime.fromtimestamp(published, tz=UTC).isoformat().replace(
+        "+00:00", "Z"
+    )
 
 
 @pytest.mark.asyncio

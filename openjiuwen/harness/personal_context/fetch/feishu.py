@@ -14,11 +14,14 @@ import contextlib
 import errno
 import hashlib
 import json
+import logging
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import AsyncIterator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -39,11 +42,16 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
+_LOGGER = logging.getLogger(__name__)
+
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 100
 _MAX_PAGES = 100
 _CLI_TIMEOUT_SECONDS = 30.0
 _CLI_OUTPUT_BYTES = 4 * 1024 * 1024
+_LARK_CLI_INSTALL_SPEC = "@larksuite/cli@1.0.94"
+_LARK_CLI_INSTALL_TIMEOUT = 300.0
+_LARK_CLI_INSTALL_COOLDOWN = 300.0
 _MAX_CONTENT_CHARS = 2_000_000
 _MAX_RAW_BYTES = 2 * 1024 * 1024
 _MAX_WIKI_PATH_PARTS = 100
@@ -269,12 +277,81 @@ def _coerce_lark_cli_error(exc: Exception) -> BaseError:
     return _fetch_error("lark-cli read failed", exc)
 
 
+_lark_cli_install_guard = threading.Lock()
+_lark_cli_install_attempted = False
+_lark_cli_install_last_error = ""
+_lark_cli_install_last_attempt = 0.0
+
+
+async def _ensure_lark_cli_installed() -> None:
+    """Install the pinned ``lark-cli`` binary via npm when it is missing from PATH.
+
+    The install is attempted at most once per process and is gated by a cooldown so a
+    transient npm failure does not re-trigger a global install on every fetch interval.
+    """
+
+    global _lark_cli_install_attempted, _lark_cli_install_last_error, _lark_cli_install_last_attempt
+    with _lark_cli_install_guard:
+        if _lark_cli_install_attempted:
+            if time.monotonic() - _lark_cli_install_last_attempt >= _LARK_CLI_INSTALL_COOLDOWN:
+                _lark_cli_install_attempted = False
+            else:
+                if _lark_cli_install_last_error:
+                    raise _fetch_error(
+                        f"lark-cli is not installed; automatic install failed: {_lark_cli_install_last_error}"
+                    )
+                return
+        _lark_cli_install_attempted = True
+        _lark_cli_install_last_attempt = time.monotonic()
+        _lark_cli_install_last_error = ""
+
+    if shutil.which("lark-cli") is not None:
+        return
+    npm_binary = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm_binary is None:
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = "npm is not installed in the deployment environment"
+        raise _fetch_error("npm is not installed; cannot auto-install lark-cli")
+    kwargs: dict[str, object] = {
+        "stdout": asyncio.subprocess.PIPE,
+        "stderr": asyncio.subprocess.PIPE,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process: asyncio.subprocess.Process | None = None
+    try:
+        process = await asyncio.create_subprocess_exec(npm_binary, "install", "-g", _LARK_CLI_INSTALL_SPEC, **kwargs)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=_LARK_CLI_INSTALL_TIMEOUT)
+    except asyncio.CancelledError:
+        if process is not None:
+            with contextlib.suppress(Exception):
+                process.kill()
+        raise
+    except asyncio.TimeoutError as exc:
+        if process is not None:
+            with contextlib.suppress(Exception):
+                process.kill()
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = "npm install timed out"
+        raise _fetch_error("lark-cli auto-install timed out") from exc
+    if process is None or process.returncode != 0:
+        stdout_text = bytes(stdout or b"").decode("utf-8", errors="replace")
+        stderr_text = bytes(stderr or b"").decode("utf-8", errors="replace")
+        detail = _safe_cli_output(stderr_text or stdout_text or "npm install failed")
+        with _lark_cli_install_guard:
+            _lark_cli_install_last_error = detail
+        raise _fetch_error(f"lark-cli auto-install failed: {detail}")
+
+
 async def _run_lark_cli_once(
     argv: list[str], *, timeout_seconds: float = _CLI_TIMEOUT_SECONDS, cwd: Path | None = None
 ) -> tuple[str, str]:
     binary = shutil.which("lark-cli")
     if binary is None:
-        raise FileNotFoundError("lark-cli is not installed in the deployment environment")
+        await _ensure_lark_cli_installed()
+        binary = shutil.which("lark-cli")
+        if binary is None:
+            raise FileNotFoundError("lark-cli is not installed in the deployment environment")
     kwargs: dict[str, object] = {
         "stdout": asyncio.subprocess.PIPE,
         "stderr": asyncio.subprocess.PIPE,
@@ -577,6 +654,20 @@ def _title(item: Mapping[str, object], fallback: str) -> str:
     return _string(item, "title", "name", "summary", "subject", "title_highlighted") or fallback
 
 
+def _search_hit_title(value: Mapping[str, object]) -> str | None:
+    """Read the title of a document search hit.
+
+    A hit carries its title only in ``title_highlighted``; the ``title`` key does not exist
+    on it. When the search ran with a ``query`` the value wraps the matched terms in markup,
+    which must not leak into the item title.
+    """
+
+    title = _string(value, "title_highlighted", "title", "name")
+    if title is None:
+        return None
+    return re.sub(r"</?[A-Za-z][^>]*>", "", title).strip() or None
+
+
 def _original_ref(item: Mapping[str, object], fallback: str) -> str:
     return _string(item, "url", "link", "html_url", "web_url", "html_link") or fallback
 
@@ -727,8 +818,17 @@ def _candidate(
 ) -> dict[str, object] | None:
     candidate_time = _resource_time(metadata, resource)
     if candidate_time is None:
+        # A single time-less entry must not abort the whole run: dropping one resource
+        # is better than losing the batch. The warning keeps the skip visible instead
+        # of a silent empty run. Unfiltered runs keep an explicit "unknown, assume
+        # oldest" marker.
         if time_range.get("mode") != "all":
-            raise _fetch_error(f"Feishu {resource} candidate has no usable time")
+            _LOGGER.warning(
+                "Feishu %s candidate %s has no usable time; skipping it",
+                resource,
+                stable_id,
+            )
+            return None
         candidate_time = _EPOCH
     if not candidate_in_time_range(candidate_time, time_range, run_started_at):
         return None
@@ -996,20 +1096,32 @@ class FeishuFetchService(ContextFetchService):
                 args.extend(["--query", query])
             found = []
             for value in await _paged_lark_cli(args, name="document search"):
+                # A search hit only carries the highlighted title/summary at the top level;
+                # ``token``, ``url`` and the timestamps live in ``result_meta``. Reading the
+                # hit itself yields no usable time and falls back to a hashed identity.
+                raw_metadata = value.get("result_meta")
+                metadata = raw_metadata if isinstance(raw_metadata, Mapping) else value
+                # The document endpoint rejects everything but docx ("Unsupported document
+                # type 'file'. Only docx is supported."), so drop the other entity types at
+                # discovery instead of failing the whole run when they are read.
+                doc_type = _string(metadata, "doc_types")
+                if doc_type is not None and doc_type.casefold() != "docx":
+                    continue
                 content = value.get("content") or value.get("summary") or value.get("description")
                 found.append(
                     {
                         "document_id": _stable_identifier(
-                            value,
+                            metadata,
                             "document_id",
                             "doc_id",
                             "token",
                             "id",
                             fallback="doc",
                         ),
-                        "metadata": value,
+                        "metadata": dict(metadata),
                         "payload": value if content is not None else None,
                         "content": content,
+                        "title": _search_hit_title(value),
                     }
                 )
         result: list[dict[str, object]] = []
@@ -1038,6 +1150,7 @@ class FeishuFetchService(ContextFetchService):
                     "metadata": dict(discovered_metadata),
                     "payload": discovered.get("payload"),
                     "content": content,
+                    "title": discovered.get("title"),
                     "query": source.get("query"),
                 },
             )
@@ -1107,11 +1220,14 @@ class FeishuFetchService(ContextFetchService):
                 )
                 fetched_metadata, content = _content_from_payload(payload)
                 metadata = fetched_metadata
+            # A search hit's own title is the only place its name survives: the document
+            # fetch replaces ``metadata`` with the fetched body, which carries no title.
+            title = str(candidate.get("title") or "").strip() or _title(metadata, f"Feishu doc {document_id}")
             return _make_upsert(
                 logical_id=logical_id,
                 resource="docs",
                 payload=payload,
-                title=_title(metadata, f"Feishu doc {document_id}"),
+                title=title,
                 content=content,
                 original_ref=locator,
                 revision_id=revision_id,

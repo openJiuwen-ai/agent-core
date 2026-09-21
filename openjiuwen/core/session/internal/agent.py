@@ -63,6 +63,14 @@ class AgentSession(BaseSession):
     def stream_writer_manager(self) -> StreamWriterManager:
         return self._stream_writer_manager
 
+    def replace_stream_writer_manager(
+        self, stream_writer_manager: StreamWriterManager
+    ) -> None:
+        """Install a fresh stream manager after the previous emitter was closed."""
+        self._stream_writer_manager = stream_writer_manager
+        if self._tracer is not None:
+            self._tracer.init(self._stream_writer_manager)
+
     def session_id(self) -> str:
         return self._session_id
 

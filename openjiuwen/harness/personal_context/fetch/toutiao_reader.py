@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import html
 import json
+import logging
 import math
 import re
 import time
@@ -30,6 +31,8 @@ from openjiuwen.harness.personal_context.fetch.retry import (
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
+
+_LOGGER = logging.getLogger(__name__)
 
 _BATCH_SIZE = 20
 _DEFAULT_MAX_ITEMS = 20
@@ -236,10 +239,18 @@ def _candidate(
     article_id = _article_id(article)
     if not article_id:
         raise _fetch_error("Toutiao article has no stable ID")
-    timestamp = _effective_timestamp(article)
+    timestamp = _effective_timestamp(article, now=run_started_at)
     if timestamp <= 0:
+        # A single time-less card must not abort the whole run: the feed occasionally
+        # omits every time field, and dropping one article is better than losing the
+        # batch. The warning keeps the skip visible instead of a silent empty run.
+        # Unfiltered runs keep an explicit "unknown, assume oldest" marker.
         if time_range.get("mode") != "all":
-            raise _fetch_error("Toutiao article has no usable published or updated time")
+            _LOGGER.warning(
+                "Toutiao article %s has no usable published or updated time; skipping it",
+                article_id,
+            )
+            return None
         candidate_time = "1970-01-01T00:00:00Z"
     else:
         candidate_time = datetime.fromtimestamp(timestamp, tz=UTC).isoformat().replace("+00:00", "Z")
@@ -471,8 +482,9 @@ def _updated_value(article: Mapping[str, object]) -> object | None:
     return None
 
 
-def _effective_timestamp(article: Mapping[str, object]) -> float:
-    values: list[float] = []
+def _effective_timestamp(article: Mapping[str, object], *, now: datetime) -> float:
+    absolute: list[float] = []
+    relative: list[float] = []
     for key in (
         "publish_time",
         "publishTime",
@@ -486,10 +498,20 @@ def _effective_timestamp(article: Mapping[str, object]) -> float:
         "updated_time",
         "update_time",
     ):
-        timestamp = _timestamp_number(article.get(key))
+        value = article.get(key)
+        timestamp = _timestamp_number(value)
         if timestamp > 0:
-            values.append(timestamp)
-    return max(values, default=0.0)
+            absolute.append(timestamp)
+            continue
+        # ``behot_time`` carries a relative label (``1天内``) on newer feed payloads
+        # instead of an epoch. Prefer any absolute field when one exists, and only fall
+        # back to the approximation when the label is the sole time information.
+        timestamp = _relative_timestamp(value, now=now)
+        if timestamp > 0:
+            relative.append(timestamp)
+    if absolute:
+        return max(absolute)
+    return max(relative, default=0.0)
 
 
 def _timestamp_number(value: object) -> float:
@@ -518,6 +540,35 @@ def _timestamp_number(value: object) -> float:
             break
         result /= 1000
     return result if math.isfinite(result) and 0 <= result < 100_000_000_000 else 0.0
+
+
+_RELATIVE_TIME_PATTERN = re.compile(r"(\d+)\s*(秒|分钟|小时|天|周)(以前|前|内)")
+_RELATIVE_UNIT_SECONDS = {"秒": 1.0, "分钟": 60.0, "小时": 3600.0, "天": 86_400.0, "周": 604_800.0}
+_RELATIVE_FIXED_AGE_SECONDS = {"刚刚": 0.0, "昨天": 86_400.0, "前天": 172_800.0}
+
+
+def _relative_timestamp(value: object, *, now: datetime) -> float:
+    """Resolve a relative Toutiao time label (``1天内``, ``3小时前``, ``昨天``) to an epoch.
+
+    The label is relative to the moment the feed was read, so the run start time is the
+    anchor. ``N天内`` only gives an upper bound; it is anchored to the newest edge so a
+    genuinely recent article is never dropped by a recent-days filter.
+    """
+
+    if not isinstance(value, str):
+        return 0.0
+    text = value.strip()
+    age = _RELATIVE_FIXED_AGE_SECONDS.get(text)
+    if age is None:
+        matched = _RELATIVE_TIME_PATTERN.fullmatch(text)
+        if matched is None:
+            return 0.0
+        if matched.group(3) == "内":
+            age = 0.0
+        else:
+            age = float(matched.group(1)) * _RELATIVE_UNIT_SECONDS[matched.group(2)]
+    anchor = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    return anchor.timestamp() - age
 
 
 def _is_allowed_host(host: str, suffix: str) -> bool:

@@ -32,6 +32,7 @@ from openjiuwen.agent_teams.debate import (
     normalize_debate_meta,
     parse_debate_coordination_meta,
 )
+from openjiuwen.agent_teams.harness.interrupt_resume import build_approval_interactive_input
 from openjiuwen.agent_teams.i18n import STRINGS, reply_hint_for, t
 from openjiuwen.agent_teams.inbound_render import (
     INBOUND_TYPE_BROADCAST,
@@ -270,13 +271,30 @@ class MessageHandler(BaseCoordinationHandler):
                         # all other messages are deferred until the interrupt clears.
                         approval_data = self._try_parse_approval_payload(msg)
                         if approval_data is not None:
+                            interactive_input = build_approval_interactive_input(
+                                approval_data.get("tool_call_id"),
+                                approved=approval_data.get("approved"),
+                                feedback=approval_data.get("feedback") or "",
+                                auto_confirm=bool(approval_data.get("auto_confirm", False)),
+                            )
+                            if interactive_input is None:
+                                team_logger.error(
+                                    "[{}] dropping invalid approval message {} "
+                                    "(missing tool_call_id)",
+                                    member_name,
+                                    msg.message_id,
+                                )
+                                await self._infra.message_manager.mark_message_read(
+                                    msg.message_id, member_name
+                                )
+                                continue
                             team_logger.info(
                                 "[{}] admitting approval message {} to resume interrupt",
                                 member_name,
                                 msg.message_id,
                             )
                             await self._infra.message_manager.mark_message_read(msg.message_id, member_name)
-                            await self._round.resume_interrupt(approval_data)
+                            await self._round.resume_interrupt(interactive_input)
                             continue
                         team_logger.info(
                             "[{}] deferring mailbox message {} until pending interrupt is resolved",

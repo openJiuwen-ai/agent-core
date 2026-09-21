@@ -123,13 +123,15 @@ class TodoTool(Tool):
         async with self._lock_manager.operation(session_id):
             file_path = self._get_file_path(session_id)
             abs_path = os.path.abspath(file_path)
-            if not os.path.isfile(abs_path):
+            # 存在性检查统一交给 fs.read_file（与 write_file 一致走 SysOperation）：
+            # 沙箱模式下文件落在沙箱内，本地 os.path 预检查查不到会误报 not found。
+            try:
+                read_res = await self.fs.read_file(abs_path, mode="text")
+            except Exception as e:
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,
-                    reason=f"Todo file not found: {abs_path}"
-                )
-
-            read_res = await self.fs.read_file(abs_path, mode="text")
+                    reason=f"Todo file not found or read_file failed: {abs_path}, error: {e}"
+                ) from e
             if read_res.code != 0:
                 raise build_error(
                     StatusCode.TOOL_TODOS_LOAD_FAILED,

@@ -350,10 +350,26 @@ def _extract_task_tool_agent_lines(
     return lines
 
 
+def normalize_tool_name_list(names: Iterable[str] | None) -> list[str]:
+    """Strip, drop empty/non-str names, and dedupe while preserving first-seen order."""
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in names or []:
+        if not isinstance(name, str):
+            continue
+        normalized = name.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
 def build_tools_content(
         ability_manager,
         language: str = "cn",
         hidden_tools: Optional[Iterable[str]] = None,
+        allowed_tools: Optional[Iterable[str]] = None,
 ) -> Optional[str]:
     """Build tools list content string.
 
@@ -363,6 +379,12 @@ def build_tools_content(
         hidden_tools: Extra tool names to omit from the tools prompt section.
             Merged with the built-in cron_* hide set. Callers supply this list
             explicitly (product adapters / config); it is not read from rails.
+        allowed_tools: When set, only these tool names are rendered. Used by
+            progressive/fixed-schema mode so deferred MCP registrations do not
+            rewrite the system tools section mid-task (prefix-cache stability).
+            Iteration order is preserved for leftover bullets that are not covered
+            by the hardcoded preferred/group layout, so ability_manager registration
+            order cannot reshuffle ``tools_search`` / ``invoke_tool`` / etc.
 
     Returns:
         Formatted tools content string, or None if no tools available.
@@ -370,9 +392,17 @@ def build_tools_content(
     if ability_manager is None:
         return None
 
+    allowed: Optional[set[str]] = None
+    allowed_order: Optional[list[str]] = None
+    if allowed_tools is not None:
+        allowed_order = normalize_tool_name_list(allowed_tools)
+        allowed = set(allowed_order)
+
     tool_descriptions = {}
     for ability in ability_manager.list():
         if isinstance(ability, ToolCard) and ability.name and ability.description:
+            if allowed is not None and ability.name not in allowed:
+                continue
             tool_descriptions[ability.name] = ability.description
 
     if not tool_descriptions:
@@ -619,9 +649,21 @@ def build_tools_content(
             if agent_lines:
                 lines.extend(["", "Available agent types:", *agent_lines])
 
-    for name, desc in tool_descriptions.items():
-        if name in rendered_names or name in hidden:
-            continue
+    if allowed_order is not None:
+        leftover_names = [
+            name
+            for name in allowed_order
+            if name in tool_descriptions and name not in rendered_names and name not in hidden
+        ]
+    else:
+        leftover_names = [
+            name
+            for name in tool_descriptions
+            if name not in rendered_names and name not in hidden
+        ]
+
+    for name in leftover_names:
+        desc = tool_descriptions[name]
         compact_desc = desc.strip().splitlines()[0]
         lines.append(f"- {name}: {summary_overrides.get(name, compact_desc)}")
 
@@ -632,6 +674,7 @@ def build_tools_section(
         ability_manager,
         language: str = "cn",
         hidden_tools: Optional[Iterable[str]] = None,
+        allowed_tools: Optional[Iterable[str]] = None,
 ) -> Optional["PromptSection"]:
     """Build an independent PromptSection for tools (P:30).
 
@@ -640,6 +683,8 @@ def build_tools_section(
         language: 'cn' or 'en'.
         hidden_tools: Extra tool names to omit from the tools prompt section.
             Callers supply this list explicitly.
+        allowed_tools: Optional allowlist; membership filters deferred tools and
+            list order stabilizes leftover bullets — see ``build_tools_content``.
 
     Returns:
         A PromptSection instance, or None if no tools available.
@@ -647,7 +692,10 @@ def build_tools_section(
     from openjiuwen.harness.prompts.builder import PromptSection
 
     content = build_tools_content(
-        ability_manager, language, hidden_tools=hidden_tools
+        ability_manager,
+        language,
+        hidden_tools=hidden_tools,
+        allowed_tools=allowed_tools,
     )
     if not content:
         return None

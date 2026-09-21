@@ -15,7 +15,12 @@ from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.config import PersonalContextFetchServiceConfig
 from openjiuwen.harness.personal_context.fetch import retry as retry_module
 from openjiuwen.harness.personal_context.fetch.cursor_selection import record_completed_candidates
-from openjiuwen.harness.personal_context.fetch.feishu import FeishuFetchService, _fetch_wiki_content
+from openjiuwen.harness.personal_context.fetch.feishu import (
+    FeishuFetchService,
+    _ensure_lark_cli_installed,
+    _fetch_wiki_content,
+    _search_hit_title,
+)
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 
 
@@ -320,6 +325,367 @@ async def test_search_docs_follows_cli_page_token_without_openapi(tmp_path, monk
     assert {item.logical_id for item in items} == {"feishu:doc:doc-1", "feishu:doc:doc-2"}
     search_calls = [argv for argv in calls if argv[:2] == ["docs", "+search"]]
     assert any("--page-token" in argv for argv in search_calls)
+
+
+@pytest.mark.asyncio
+async def test_search_docs_read_nested_result_meta_and_skip_unreadable_types(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real search hit nests ``token``/``url``/timestamps inside ``result_meta``.
+
+    Reading the hit itself yields no usable time, which used to fail the whole run. The
+    document endpoint only accepts docx, so other entity types are dropped at discovery
+    instead of failing once they are read.
+    """
+
+    responses: dict[tuple[str, ...], list[object]] = {
+        ("auth", "status"): [
+            {
+                "identities": {
+                    "user": {
+                        "available": True,
+                        "tokenStatus": "valid",
+                        "scope": "docs:document.content:read search:docs:read",
+                    }
+                }
+            }
+        ],
+        ("docs", "+search"): [
+            {
+                "ok": True,
+                "data": {
+                    "items": [
+                        {
+                            "entity_type": "WIKI",
+                            "result_meta": {
+                                "doc_types": "DOCX",
+                                "token": "docx-token",
+                                "url": "https://example.feishu.cn/wiki/docx-token",
+                                "create_time": 1788872159,
+                                "update_time": 1788872187,
+                                "update_time_iso": "2026-09-08T20:56:27+08:00",
+                            },
+                            "summary_highlighted": "",
+                            "title_highlighted": "设计文档",
+                        },
+                        {
+                            "entity_type": "WIKI",
+                            "result_meta": {
+                                "doc_types": "FILE",
+                                "token": "file-token",
+                                "url": "https://example.feishu.cn/wiki/file-token",
+                                "create_time": 1788872159,
+                                "update_time": 1788872187,
+                            },
+                            "title_highlighted": "multica概述介绍.html",
+                        },
+                    ],
+                    "page_token": "",
+                },
+            }
+        ],
+        ("docs", "+fetch"): [
+            {
+                "ok": True,
+                "data": {
+                    "document": {
+                        "document_id": "docx-token",
+                        "revision_id": "rev-1",
+                        "content": "正文",
+                    }
+                },
+            }
+        ],
+    }
+    _fake_cli(monkeypatch, responses)
+    service = FeishuFetchService(
+        feishu_config(time_range={"mode": "recent", "recent_days": 3}),
+        home=tmp_path,
+    )
+
+    items = _items(await _batches(service, run_started_at=datetime(2026, 9, 10, tzinfo=UTC)))
+
+    assert [item.logical_id for item in items] == ["feishu:doc:docx-token"]
+    assert items[0].original_ref == "https://example.feishu.cn/wiki/docx-token"
+    assert "正文" in (items[0].content or "")
+    # The hit's name lives only in ``title_highlighted``; the fetched body carries none.
+    assert items[0].title == "设计文档"
+
+
+@pytest.fixture(autouse=False)
+def reset_lark_cli_install_state() -> None:
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    with _feishu_module._lark_cli_install_guard:
+        _feishu_module._lark_cli_install_attempted = False
+        _feishu_module._lark_cli_install_last_error = ""
+        _feishu_module._lark_cli_install_last_attempt = 0.0
+
+
+class _MockProcess:
+    """Minimal process mock that returns a ``returncode``."""
+
+    def __init__(self, returncode: int, stdout: bytes = b"", stderr: bytes = b"") -> None:
+        self.returncode = returncode
+        self._stdout = stdout
+        self._stderr = stderr
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return self._stdout, self._stderr
+
+    def kill(self) -> None:
+        pass
+
+
+@pytest.mark.asyncio
+async def test_auto_install_lark_cli_when_missing_and_npm_succeeds(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_ensure_lark_cli_installed`` installs lark-cli via npm when it is missing."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    which_lark_results: list[str | None] = [None, "/usr/bin/lark-cli"]
+    which_npm_results: list[str | None] = ["/usr/bin/npm"]
+
+    def _mock_which(name: str) -> str | None:
+        if name == "lark-cli":
+            return which_lark_results.pop(0) if which_lark_results else None
+        if name in ("npm", "npm.cmd"):
+            return which_npm_results.pop(0) if which_npm_results else None
+        return None
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", _mock_which)
+
+    async def _mock_subprocess(*args: object, **kwargs: object) -> _MockProcess:
+        return _MockProcess(returncode=0)
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _mock_subprocess)
+
+    await _ensure_lark_cli_installed()
+
+    with _feishu_module._lark_cli_install_guard:
+        assert _feishu_module._lark_cli_install_attempted
+
+
+@pytest.mark.asyncio
+async def test_auto_install_lark_cli_npm_not_found(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raises when npm itself is not on PATH."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", lambda name: None)
+
+    with pytest.raises(BaseError, match="npm is not installed"):
+        await _ensure_lark_cli_installed()
+
+    with _feishu_module._lark_cli_install_guard:
+        assert _feishu_module._lark_cli_install_attempted
+        assert "npm is not installed" in _feishu_module._lark_cli_install_last_error
+
+
+@pytest.mark.asyncio
+async def test_auto_install_lark_cli_npm_fails(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raises with npm stderr when install fails."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    which_lark_results: list[str | None] = [None]
+    which_npm_results: list[str | None] = ["/usr/bin/npm"]
+
+    def _mock_which(name: str) -> str | None:
+        if name == "lark-cli":
+            return which_lark_results.pop(0) if which_lark_results else None
+        if name in ("npm", "npm.cmd"):
+            return which_npm_results.pop(0) if which_npm_results else None
+        return None
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", _mock_which)
+
+    async def _mock_subprocess(*args: object, **kwargs: object) -> _MockProcess:
+        return _MockProcess(returncode=1, stderr=b"npm ERR! network timeout")
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _mock_subprocess)
+
+    with pytest.raises(BaseError, match="auto-install"):
+        await _ensure_lark_cli_installed()
+
+    with _feishu_module._lark_cli_install_guard:
+        assert _feishu_module._lark_cli_install_attempted
+        assert _feishu_module._lark_cli_install_last_error
+
+
+@pytest.mark.asyncio
+async def test_auto_install_skipped_when_lark_cli_present(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No install attempted when lark-cli is already on PATH."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    monkeypatch.setattr(
+        _feishu_module.shutil,
+        "which",
+        lambda name: "/usr/bin/lark-cli" if name == "lark-cli" else None,
+    )
+
+    install_called = False
+
+    async def _fail_if_called(*args: object, **kwargs: object) -> _MockProcess:
+        nonlocal install_called
+        install_called = True
+        return _MockProcess(returncode=0)
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _fail_if_called)
+
+    await _ensure_lark_cli_installed()
+    assert not install_called
+
+
+@pytest.mark.asyncio
+async def test_auto_install_cooldown_suppresses_repeated_install_after_failure(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a failed install, a second call within the cooldown re-raises the stored error."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    which_lark_results: list[str | None] = [None, None]
+    which_npm_results: list[str | None] = ["/usr/bin/npm", "/usr/bin/npm"]
+
+    def _mock_which(name: str) -> str | None:
+        if name == "lark-cli":
+            return which_lark_results.pop(0) if which_lark_results else None
+        if name in ("npm", "npm.cmd"):
+            return which_npm_results.pop(0) if which_npm_results else None
+        return None
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", _mock_which)
+
+    install_count = 0
+
+    async def _mock_subprocess(*args: object, **kwargs: object) -> _MockProcess:
+        nonlocal install_count
+        install_count += 1
+        return _MockProcess(returncode=1, stderr=b"npm ERR! network")
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _mock_subprocess)
+
+    with pytest.raises(BaseError, match="auto-install failed"):
+        await _ensure_lark_cli_installed()
+    assert install_count == 1
+
+    with pytest.raises(BaseError, match="automatic install failed"):
+        await _ensure_lark_cli_installed()
+    assert install_count == 1
+
+
+@pytest.mark.asyncio
+async def test_auto_install_lark_cli_times_out(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A timed-out npm install is reported as an auto-install failure, not a CLI timeout."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    which_lark_results: list[str | None] = [None]
+    which_npm_results: list[str | None] = ["/usr/bin/npm"]
+
+    def _mock_which(name: str) -> str | None:
+        if name == "lark-cli":
+            return which_lark_results.pop(0) if which_lark_results else None
+        if name in ("npm", "npm.cmd"):
+            return which_npm_results.pop(0) if which_npm_results else None
+        return None
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", _mock_which)
+
+    class _TimedOutProcess:
+        returncode = 1
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            raise TimeoutError
+
+        def kill(self) -> None:
+            pass
+
+    async def _mock_subprocess(*args: object, **kwargs: object) -> _TimedOutProcess:
+        return _TimedOutProcess()
+
+    monkeypatch.setattr(
+        _feishu_module.asyncio,
+        "create_subprocess_exec",
+        _mock_subprocess,
+    )
+
+    with pytest.raises(BaseError, match="auto-install timed out"):
+        await _ensure_lark_cli_installed()
+
+    with _feishu_module._lark_cli_install_guard:
+        assert _feishu_module._lark_cli_install_last_error == "npm install timed out"
+
+
+@pytest.mark.asyncio
+async def test_run_lark_cli_json_invokes_auto_install(
+    reset_lark_cli_install_state: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_run_lark_cli_json`` triggers auto-install when lark-cli is missing, then proceeds."""
+
+    import openjiuwen.harness.personal_context.fetch.feishu as _feishu_module
+
+    which_counter: dict[str, int] = {}
+
+    def _mock_which(name: str) -> str | None:
+        which_counter[name] = which_counter.get(name, 0) + 1
+        if name == "lark-cli":
+            if which_counter[name] == 1:
+                return None
+            return "/usr/bin/lark-cli"
+        if name in ("npm", "npm.cmd"):
+            return "/usr/bin/npm"
+        return None
+
+    monkeypatch.setattr(_feishu_module.shutil, "which", _mock_which)
+
+    async def _mock_subprocess(binary: str, *args: object, **kwargs: object) -> _MockProcess:
+        if binary.endswith("lark-cli"):
+            return _MockProcess(returncode=0, stdout=b'{"ok": true}')
+        return _MockProcess(returncode=0)
+
+    monkeypatch.setattr(_feishu_module.asyncio, "create_subprocess_exec", _mock_subprocess)
+
+    result = await _feishu_module._run_lark_cli_json(["auth", "status"])
+    assert result == {"ok": True}
+    assert which_counter["lark-cli"] >= 2
+
+
+def test_search_hit_title_strips_markup() -> None:
+    result = _search_hit_title({"title_highlighted": "设计<em>文档</em>"})
+    assert result == "设计文档"
+
+    result = _search_hit_title({"title_highlighted": "<em>Hello</em> World"})
+    assert result == "Hello World"
+
+    result = _search_hit_title({"title_highlighted": "No markup"})
+    assert result == "No markup"
+
+    result = _search_hit_title({"summary": "test"})
+    assert result is None
+
+    result = _search_hit_title({})
+    assert result is None
 
 
 @pytest.mark.asyncio
@@ -860,7 +1226,7 @@ async def test_wiki_uses_node_update_time_before_fetching_content(
 
 
 @pytest.mark.asyncio
-async def test_filtered_resource_with_missing_time_fails_whole_run(
+async def test_filtered_resource_with_missing_time_is_skipped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -884,8 +1250,7 @@ async def test_filtered_resource_with_missing_time_fails_whole_run(
         home=tmp_path,
     )
 
-    with pytest.raises(BaseError, match="time"):
-        await _batches(service, run_started_at=datetime(2026, 8, 25, tzinfo=UTC))
+    assert _items(await _batches(service, run_started_at=datetime(2026, 8, 25, tzinfo=UTC))) == []
 
 
 @pytest.mark.asyncio

@@ -768,19 +768,19 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
                 return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{shell_key}`` 类调用；'
+                    f'\n\n> 选择「本会话内允许」可在本会话内自动放行 ``{shell_key}`` 类调用；'
                     f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
                 )
             if auto_confirm_key:
                 return (
-                    f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。'
+                    f'\n\n> 选择「本会话内允许」可在本会话内自动放行 ``{auto_confirm_key}`` 类调用。'
                 )
             return ""
 
         if auto_confirm_key:
             path_desc = f"在 ``{path_hint}`` 下" if path_hint else ""
             return (
-                f'\n\n> 选择「会话内记住」可在本会话内自动放行 ``{tool_name}`` 类工具{path_desc}的调用；'
+                f'\n\n> 选择「本会话内允许」可在本会话内自动放行 ``{tool_name}`` 类工具{path_desc}的调用；'
                 f'选择「永久记住」可将此规则写回磁盘，所有会话均自动放行。'
             )
         return ""

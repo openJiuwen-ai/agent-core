@@ -226,6 +226,14 @@ class Session:
         from openjiuwen.core.runner.runner import Runner
         await Runner.callback_framework.unregister_event(event=self._session_id + "write_stream")
 
+    def is_stream_emitter_closed(self) -> bool:
+        return self._inner.stream_writer_manager().stream_emitter().is_closed()
+
+    def replace_stream_writer_manager(
+        self, stream_writer_manager: StreamWriterManager
+    ) -> None:
+        self._inner.replace_stream_writer_manager(stream_writer_manager)
+
     async def post_run(self):
         if self._post_run_done:
             return self

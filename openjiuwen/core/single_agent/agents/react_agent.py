@@ -61,6 +61,9 @@ from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
 from openjiuwen.core.single_agent.ability_manager import AbilityManager, illegal_tool_call_reason
 from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.interrupt.resume_guard import (
+    should_abandon_unmatched_confirm_resume,
+)
 from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
     RESUME_START_ITERATION_KEY,
@@ -2148,13 +2151,35 @@ class ReActAgent(BaseAgent):
                 start_iteration = 0
                 if interruption_state is not None:
                     is_tool_interruption = isinstance(interruption_state, ToolInterruptionState)
-                    
                     if is_tool_interruption:
-                        # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
-                        await self._handle_resume(
-                            interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
-                        )
-                        start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
+                        # Permission/confirm cards: plain text is not an
+                        # approval and must not re-emit the same ASK.
+                        # InteractiveInput (including empty / wrong id) still
+                        # goes through handle_resume so the card can be retried.
+                        # Ask-user / SkillTurbo / other tool interrupts keep
+                        # the existing resume path.
+                        if should_abandon_unmatched_confirm_resume(
+                            user_input, interruption_state
+                        ):
+                            logger.info(
+                                "[ReActAgent] reject unmatched resume for confirm-payload "
+                                "interrupt; abandon leftover confirm and treat input as new query"
+                            )
+                            await self._hitl_handler.abandon_unmatched_confirm_interrupt(
+                                interruption_state, session, context
+                            )
+                            await self._admit_user_message(
+                                ctx,
+                                context,
+                                self._extract_user_parts(ctx, user_input),
+                                source="query",
+                            )
+                        else:
+                            # Tool Interrupt: not write UserMessage, recovery input is passed to Rail via ctx.extra
+                            await self._handle_resume(
+                                interruption_state, user_input, ctx, context, session, invoke_inputs=invoke_inputs
+                            )
+                            start_iteration = ctx.extra.pop(RESUME_START_ITERATION_KEY, 0)
                     else:
                         # Workflow Interrupt
                         await self._admit_user_message(
