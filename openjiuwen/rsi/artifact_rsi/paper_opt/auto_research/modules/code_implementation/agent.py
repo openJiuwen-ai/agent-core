@@ -762,11 +762,10 @@ class CodeImplementationAgent:
                 GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
                 OpenJiuwenReferenceRail(),
                 DesignReferenceRail(design_root=design_root),
-                # DeepAgent's task-loop mode deliberately sets the inner
-                # ReAct limit to sys.maxsize.  The pipeline's configured
-                # max_iterations must therefore be applied to the outer loop
-                # explicitly, otherwise a stuck tool/model session can run
-                # until the Provider's much larger watchdog fires.
+                # Inner ReAct stays unbounded when max_iterations is omitted.
+                # The pipeline's configured cap is applied to the outer loop
+                # via TaskCompletionRail, otherwise a stuck tool/model session
+                # can run until the Provider's much larger watchdog fires.
                 TaskCompletionRail(max_rounds=max_iterations),
             ]
         )
@@ -782,7 +781,6 @@ class CodeImplementationAgent:
             system_prompt=self._render_system_prompt(),
             rails=rails,
             enable_task_loop=True,
-            max_iterations=max_iterations,
             tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
             workspace=str(agent_workspace),
             # Code implementation can legitimately take longer than the

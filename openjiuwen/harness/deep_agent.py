@@ -7,7 +7,6 @@ import asyncio
 import copy
 import dataclasses
 import os
-import sys
 import uuid
 from contextlib import AbstractAsyncContextManager, aclosing, suppress
 import warnings
@@ -70,7 +69,10 @@ from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.rails.task_completion_rail import (
     TaskCompletionRail,
 )
-from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
+    resolve_inner_react_max_iterations,
+)
 from openjiuwen.harness.schema.stop_condition import (
     NoProgressAnswerEvaluator,
     StopConditionEvaluator,
@@ -241,6 +243,20 @@ _DEFAULT_DIRECT_TOOL_NAMES = frozenset(
 _ROUND_BOUNDARY = object()
 
 FreshInputContextFactory = Callable[[], AbstractAsyncContextManager[None]]
+
+
+def _bind_inner_react_max_iterations(
+    react_config: ReActAgentConfig,
+    max_iterations: Optional[int],
+) -> int:
+    """Apply the inner ReAct cap and log the resolved value once."""
+    resolved = resolve_inner_react_max_iterations(max_iterations)
+    react_config.max_iterations = resolved
+    if max_iterations is None:
+        logger.info("[DeepAgent] inner ReAct max_iterations=unbounded (default)")
+    else:
+        logger.info("[DeepAgent] inner ReAct max_iterations=%s (configured)", resolved)
+    return resolved
 
 
 def _render_identity_prompt(prompt_builder: SystemPromptBuilder, language: str) -> str:
@@ -581,9 +597,7 @@ class DeepAgent(BaseAgent):
                     if hasattr(client_cfg.client_provider, "value")
                     else client_cfg.client_provider
                 )
-        new_react_config.max_iterations = (
-            sys.maxsize if config.enable_task_loop else config.max_iterations
-        )
+        _bind_inner_react_max_iterations(new_react_config, config.max_iterations)
         if config.context_engine_config is not None:
             new_react_config.context_engine_config = config.context_engine_config
         if config.kv_cache_affinity_config is not None:
@@ -1106,11 +1120,7 @@ class DeepAgent(BaseAgent):
         )
 
         react_config = ReActAgentConfig()
-        react_config.max_iterations = (
-            sys.maxsize
-            if cfg.enable_task_loop
-            else cfg.max_iterations
-        )
+        _bind_inner_react_max_iterations(react_config, cfg.max_iterations)
         if cfg.context_engine_config is not None:
             react_config.context_engine_config = cfg.context_engine_config
         if cfg.kv_cache_affinity_config is not None:
