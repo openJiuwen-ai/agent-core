@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/tools/`（130 文件）、`openjiuwen/harness/schema/task.py`、`openjiuwen/core/foundation/tool/base.py`（`Tool.render_for_llm`） |
-| 最近一次修订日期 | 2026-09-16 |
+| 最近一次修订日期 | 2026-09-21 |
 | 关联 feature | `F_04_tool-result-llm-rendering.md` |
 
 ## 范围 / 边界
@@ -186,6 +186,10 @@ class WorktreeLifecyclePolicy(str, Enum): ...
 
 错误 / 返回语义：
 
+- `SubagentResumeTool` 恢复实例但不投递任务；返回 `idle` 时在 `message` 中明确说明
+  本次调用未执行新任务。用户只要求恢复时保持待命，有后续输入才调用 `send_input` + `wait`，
+  不因 `idle` / `turn_outcome=completed` 立即关闭。`restored=false` 表示实例已存活，
+  不应通过 `close` + `resume` 重试；运行中实例不附加空闲待命提示。
 - 可恢复的工具错误一律以 `ToolOutput(success=False, error=...)` 返回，不抛裸异常。
   `ToolInterruptException` 属于用户交互控制流，所有工具包装层必须原样传播，具体契约见
   `S_04`。经包装层进入中断状态的 deferred 工具在 resume 时重新执行原 wrapper call，

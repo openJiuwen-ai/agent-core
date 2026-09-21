@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagent_runtime/`（18 文件） |
-| 最近一次修订日期 | 2026-09-17 |
+| 最近一次修订日期 | 2026-09-21 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -83,7 +83,7 @@ class SubagentControl:
     def subscribe_status(self, subagent_id: str) -> StatusReceiver
     def list_live(self) -> list[SubagentMetadata]
     def capacity(self) -> dict[str, int]
-    async def send_input(self, subagent_id: str, ...) -> None
+    async def send_input(self, subagent_id: str, query: str, *, interrupt: bool = False) -> str
     async def resume(self, subagent_id: str) -> ResumeResult
     async def close(self, subagent_id: str, reason: str = "manual") -> SubagentStatus
     async def cancel_all(self, reason: str = "parent_ended") -> list[str]
@@ -115,8 +115,10 @@ class SubagentStatusKind(str, Enum):
 - `spawn` 超容量 → 抛 `SubagentCapacityInvalid`（`raise_subagent_capacity_invalid`）。
 - `wait` 对已关闭 / 不存在的子代理 → `WaitResult` 带对应状态（不抛）。
 - `get_status` 未知 id → `SubagentStatus(NOT_FOUND)`。
-- `close` 返回关闭后的 `SubagentStatus`；幂等。
-- `send_input` 目标非运行中 → 抛（`UserInputOp` 校验）。
+- `close` 返回关闭前的 `SubagentStatus`；目标为 `RUNNING` 时拒绝，目标不存在时抛错。
+- `send_input` 向存活实例投递输入并返回新 `task_id`；实例已关闭或不存在时抛错，须先恢复。
+- `resume` 不投递任务；恢复后的无活动实例以内部 `COMPLETED` 对外呈现 `idle`，
+  不代表执行了新请求。对存活实例重复调用返回 `restored=false`；有活动任务时保留其状态。
 
 ## 数据结构
 
