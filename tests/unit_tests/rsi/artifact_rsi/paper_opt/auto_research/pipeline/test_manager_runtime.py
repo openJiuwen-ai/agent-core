@@ -17,14 +17,18 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.manager.schemas import (
     CodeHandoff,
+    ExecutionHandoff,
     OriginalTask,
     PersistedManagerState,
+    ReflectionHandoff,
     SubagentReport,
     SubtaskContract,
     TaskState,
+    VariantHandoff,
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.pipeline.subagents import (
     _code_retry_block,
+    _execution_repair_block,
     _extract_bash_command,
     _parse_failed_bash_commands,
 )
@@ -274,3 +278,131 @@ def test_code_retry_block_returns_empty_when_prior_succeeded():
     state = _state_with_prior_report(run_id)
     state.reports[-1] = state.reports[-1].model_copy(update={"outcome": "succeeded"})
     assert _code_retry_block(_contract(), state) == ""
+
+
+def _execution_state(
+    run_id: str,
+    *,
+    outcome: str,
+    process_status: str,
+    summary: str,
+    metrics: dict | None = None,
+    reflection_summary: str = "",
+) -> PersistedManagerState:
+    state = PersistedManagerState(
+        original_task=OriginalTask(topic="improve the paper"),
+        task_state=TaskState(
+            run_id=run_id,
+            latest_execution_status="failed" if process_status == "failed" else "completed",
+        ),
+    )
+    state.reports.append(
+        SubagentReport(
+            report_id="experiment_execution:1:1",
+            module="experiment_execution",
+            mode="run",
+            round_index=1,
+            attempt=1,
+            outcome=outcome,
+            retryable=outcome == "failed",
+            summary=summary,
+            handoff=ExecutionHandoff(
+                status=outcome,
+                process_status=process_status,
+                sanity="ok" if process_status == "completed" else "unknown",
+                variants=[
+                    VariantHandoff(
+                        name="proposed",
+                        passed=process_status == "completed",
+                        metrics=metrics or {},
+                    )
+                ],
+            ),
+        )
+    )
+    if reflection_summary:
+        state.reports.append(
+            SubagentReport(
+                report_id="reflection:1:1",
+                module="reflection",
+                mode="run",
+                round_index=1,
+                attempt=1,
+                outcome="succeeded",
+                retryable=False,
+                summary=reflection_summary,
+                handoff=ReflectionHandoff(
+                    verdict="contradicted",
+                    validity="valid",
+                    recommendation="repair_code",
+                    summary=reflection_summary,
+                ),
+            )
+        )
+    return state
+
+
+def test_execution_repair_uses_crash_overlay_when_process_failed():
+    state = _execution_state(
+        "run-exec-crash",
+        outcome="failed",
+        process_status="failed",
+        summary="dataset download timed out",
+    )
+    contract = SubtaskContract(
+        module="code_implementation",
+        mode="run",
+        goal="repair the runner",
+        acceptance_criteria=["full run completes"],
+        repair_instruction="fix the download path",
+    )
+
+    block = _execution_repair_block(contract, state)
+
+    assert "## Repair the failed full execution" in block
+    assert "dataset download timed out" in block
+    assert "Repair the evaluation metrics" not in block
+
+
+def test_execution_repair_uses_metrics_overlay_when_process_completed():
+    state = _execution_state(
+        "run-exec-metrics",
+        outcome="succeeded",
+        process_status="completed",
+        summary="proposed scored 0.12 against baseline 0.81",
+        metrics={"accuracy": 0.12},
+        reflection_summary="accuracy looks inverted; harness may not call the proposed method",
+    )
+    contract = SubtaskContract(
+        module="code_implementation",
+        mode="run",
+        goal="repair the metrics",
+        acceptance_criteria=["proposed beats or matches the baseline"],
+        repair_instruction="the proposed method is not actually running",
+    )
+
+    block = _execution_repair_block(contract, state)
+
+    assert "## Repair the evaluation metrics" in block
+    assert "Do not treat this as a crashed process." in block
+    assert "the proposed method is not actually running" in block
+    assert "accuracy looks inverted" in block
+    assert "Repair the failed full execution" not in block
+
+
+def test_execution_repair_is_empty_when_completed_run_has_no_repair_instruction():
+    state = _execution_state(
+        "run-exec-ok",
+        outcome="succeeded",
+        process_status="completed",
+        summary="run finished",
+        metrics={"accuracy": 0.81},
+    )
+    contract = SubtaskContract(
+        module="code_implementation",
+        mode="run",
+        goal="implement the experiment",
+        acceptance_criteria=["produces a metrics.json"],
+    )
+
+    assert _execution_repair_block(contract, state) == ""

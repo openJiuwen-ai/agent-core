@@ -382,6 +382,7 @@ def _compact_handoff(handoff: dict[str, Any], *, plan_metrics: list[str]) -> dic
         "suggested_followup_queries",
         "metrics",
         "baselines",
+        "lint_issues",
     ):
         _shrink_text_list(handoff, list_key, keep=_KEEP_LIST_ITEMS, item_chars=160)
     return handoff
@@ -428,6 +429,7 @@ def _minimal_handoff(handoff: Any) -> dict[str, Any] | None:
         "design_path": handoff.get("design_path"),
         "report_path": handoff.get("report_path"),
         "readiness": handoff.get("readiness"),
+        "lint_issues": list(handoff.get("lint_issues") or []),
         "variant_names": names,
         "variant_count": handoff.get("variant_count", len(names)),
     }

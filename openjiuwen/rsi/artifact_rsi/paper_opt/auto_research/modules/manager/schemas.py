@@ -368,6 +368,7 @@ class ReflectionHandoff(BaseModel):
 class ReportHandoff(BaseModel):
     kind: Literal["reporting"] = "reporting"
     report_path: str = ""
+    lint_issues: list[str] = Field(default_factory=list)
 
 
 Handoff = Annotated[

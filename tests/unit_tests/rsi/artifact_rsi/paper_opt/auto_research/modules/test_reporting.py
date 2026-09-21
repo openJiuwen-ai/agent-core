@@ -122,3 +122,56 @@ def test_pdf_present_takes_priority_over_tex():
     assert output.status == "compiled"
     assert output.paper_pdf_path is not None
     assert output.paper_pdf_path.endswith(".pdf")
+
+
+def test_compiled_output_exposes_lint_issues_as_a_list():
+    run_id = "rsi-test-lint-issues"
+    _write_minimal_sections(run_id)
+    paper_tex_path(run_id).write_text("\\documentclass{article}\\begin{document}x\\end{document}", encoding="utf-8")
+
+    output = _verify(run_id, toolchain_available=False)
+
+    assert output.status == "compiled"
+    assert output.lint_issues
+    assert any("no LaTeX toolchain found" in issue for issue in output.lint_issues)
+
+
+def test_failed_output_exposes_lint_issues_as_a_list():
+    run_id = "rsi-test-lint-failed"
+    _write_minimal_sections(run_id)
+
+    output = _verify(run_id, toolchain_available=False)
+
+    assert output.status == "failed"
+    assert output.lint_issues
+    assert any("no compiled PDF" in issue for issue in output.lint_issues)
+
+
+def test_task_query_inlines_manager_contract_brief():
+    query = ReportingAgent._build_task_query(
+        {"design": "the living design"},
+        "",
+        contract_brief="# Manager subtask contract\n\n## Goal\n\ncompare against the baseline",
+    )
+
+    assert "## Manager subtask contract" in query
+    assert "compare against the baseline" in query
+    assert "## Evidence: design" in query
+
+
+def test_task_query_omits_contract_section_when_brief_is_empty():
+    query = ReportingAgent._build_task_query({"design": "the living design"}, "")
+
+    assert "## Manager subtask contract" not in query
+
+
+def test_task_query_keeps_repair_instruction_and_contract_brief():
+    query = ReportingAgent._build_task_query(
+        {"design": "the living design"},
+        "abstract is 40 words short",
+        contract_brief="## Goal\n\nfinish the paper",
+    )
+
+    assert "abstract is 40 words short" in query
+    assert "## Manager subtask contract" in query
+    assert "finish the paper" in query

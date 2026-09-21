@@ -57,6 +57,9 @@ class ReportingInput(BaseModel):
     # a manager slip-up in populating that field must not silently turn a
     # retry into an accidental full wipe or vice versa.
     attempt: int = 1
+    # Manager SubtaskContract inlined by the host (goal, acceptance
+    # criteria, constraints). Empty when the caller is not the manager.
+    contract_brief: str = ""
 
 
 class ReportingOutput(BaseModel):
@@ -73,6 +76,9 @@ class ReportingOutput(BaseModel):
     # never silently ship a partial or non-compiling artifact without saying
     # so here.
     notes: str | None = None
+    # Same issues as ``notes``, kept as a list so the manager handoff can
+    # show lint/compile problems without parsing the joined string.
+    lint_issues: list[str] = Field(default_factory=list)
 
 
 class FigureNode(BaseModel):

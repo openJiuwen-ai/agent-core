@@ -559,6 +559,64 @@ def _compact_metrics_block(handoff: Any, limit: int) -> str:
     return _clip_repair_text("\n".join(chunks), limit)
 
 
+def _execution_process_failed(prior: SubagentReport, state: PersistedManagerState) -> bool:
+    handoff = getattr(prior, "handoff", None)
+    return (
+        prior.outcome == "failed"
+        or state.task_state.latest_execution_status == "failed"
+        or getattr(handoff, "process_status", "") == "failed"
+        or getattr(handoff, "failure_class", "") == "infrastructure"
+    )
+
+
+def _reflection_repair_excerpt(state: PersistedManagerState) -> str:
+    prior = next(
+        (item for item in reversed(state.reports) if item.module == "reflection"),
+        None,
+    )
+    handoff = getattr(prior, "handoff", None) if prior is not None else None
+    if handoff is None:
+        return ""
+    bits: list[str] = []
+    for key in ("verdict", "validity", "recommendation"):
+        value = str(getattr(handoff, key, "") or "").strip()
+        if value:
+            bits.append(f"{key}={value}")
+    summary = str(getattr(handoff, "summary", "") or "").strip()
+    header = "; ".join(bits)
+    if header and summary:
+        return _clip_repair_text(f"{header}\n{summary}", _REPAIR_SUMMARY_CHARS)
+    return _clip_repair_text(header or summary, _REPAIR_SUMMARY_CHARS)
+
+
+def _metrics_repair_block(
+    contract: SubtaskContract,
+    prior: SubagentReport,
+    state: PersistedManagerState,
+) -> str:
+    handoff = getattr(prior, "handoff", None)
+    parts = [
+        "## Repair the evaluation metrics",
+        "",
+        "The previous full run completed. Diagnose the metrics or harness issue from the "
+        "structured result and reflection. Do not treat this as a crashed process.",
+        "",
+        f"Repair instruction from the manager:\n{contract.repair_instruction or '(none)'}",
+        "",
+        f"Execution summary:\n{prior.summary or '(none)'}",
+    ]
+    structured = _clip_repair_text(_structured_failure_summary(handoff), _REPAIR_SUMMARY_CHARS)
+    if structured:
+        parts.extend(["", structured])
+    metrics_block = _compact_metrics_block(handoff, _REPAIR_METRICS_CHARS)
+    if metrics_block:
+        parts.extend(["", "Metrics:", metrics_block])
+    reflection_text = _reflection_repair_excerpt(state)
+    if reflection_text:
+        parts.extend(["", "Latest reflection:", reflection_text])
+    return "\n".join(parts) + "\n\n"
+
+
 def _execution_repair_block(contract: SubtaskContract, state: PersistedManagerState) -> str:
     prior = next(
         (item for item in reversed(state.reports) if item.module == "experiment_execution"),
@@ -567,14 +625,11 @@ def _execution_repair_block(contract: SubtaskContract, state: PersistedManagerSt
     if prior is None:
         return ""
     handoff = getattr(prior, "handoff", None)
-    process_failed = (
-        prior.outcome == "failed"
-        or state.task_state.latest_execution_status == "failed"
-        or getattr(handoff, "process_status", "") == "failed"
-        or getattr(handoff, "failure_class", "") == "infrastructure"
-    )
+    process_failed = _execution_process_failed(prior, state)
     if not process_failed and not contract.repair_instruction.strip():
         return ""
+    if not process_failed:
+        return _metrics_repair_block(contract, prior, state)
 
     header_bits = [f"Execution summary:\n{prior.summary or '(none)'}"]
     structured = _clip_repair_text(_structured_failure_summary(handoff), _REPAIR_SUMMARY_CHARS)
@@ -1037,6 +1092,7 @@ class ExperimentDesignAdapter:
                         ),
                         run_id=state.task_state.run_id,
                         session_epoch=state.task_state.design_session_epoch,
+                        contract_brief=_contract_brief(contract),
                     )
                 )
             elif contract.mode == "update":
@@ -1050,6 +1106,7 @@ class ExperimentDesignAdapter:
                         run_id=state.task_state.run_id,
                         feedback=feedback,
                         session_epoch=state.task_state.design_session_epoch,
+                        contract_brief=_contract_brief(contract),
                     )
                 )
             elif contract.mode == "revise_research":
@@ -1060,6 +1117,7 @@ class ExperimentDesignAdapter:
                         additional_research_paths=extra,
                         reason=contract.repair_instruction or contract.goal,
                         session_epoch=state.task_state.design_session_epoch,
+                        contract_brief=_contract_brief(contract),
                     )
                 )
             else:
@@ -1931,6 +1989,7 @@ class ReportingAdapter:
                     reflection=state.latest_reflection,
                     previous_context=state.original_task.previous_context,
                     repair_instruction=contract.repair_instruction,
+                    contract_brief=_contract_brief(contract),
                     attempt=attempt,
                 )
             )
@@ -1965,7 +2024,10 @@ class ReportingAdapter:
             artifact_paths=[rel_path] if rel_path else [],
             duration_ms=int((time.monotonic() - started) * 1000),
             related_report_ids=contract.related_report_ids,
-            handoff=ReportHandoff(report_path=rel_path or ""),
+            handoff=ReportHandoff(
+                report_path=rel_path or "",
+                lint_issues=list(getattr(output, "lint_issues", None) or []),
+            ),
         )
 
 

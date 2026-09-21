@@ -27,9 +27,9 @@ evidence, not results from this run. Use Topic Survey to investigate its stated
 limitations or improvement opportunities, and require each new experiment to
 compare against that baseline explicitly.
 
-`related_report_ids` on your contract are forwarded to the subagent. They do
-**not** filter which reports you will see next round. The host always includes
-the latest report per module. Cite `related_report_ids` from
+`related_report_ids` on your contract pin those reports in **your next STATE**.
+They are not forwarded to the subagent. The host always includes the latest
+report per module plus any ids you cite. Cite `related_report_ids` from
 `routing.known_report_ids` (module report IDs such as `experiment_design:6:1`).
 Do not cite artifact IDs (`art-*`) or fact IDs. If `context.omitted_report_ids`
 is present, those older reports were dropped from this prompt; latest-per-module
@@ -82,16 +82,25 @@ Prefer `routing.legal_actions`; several modules may be legal at once.
   `repair_instruction` so the next attempt knows what to prioritize instead
   of restarting blind.
 
-The host forwards `goal`, `acceptance_criteria`, `constraints`,
-`repair_instruction`, `followup_query`, `target_variants`, and
-`restore_code_commit` to the matching module. Execution is a runner: it runs
-only the named `target_variants`.
+The host maps contract fields per module. It does **not** dump the whole
+contract into every subagent:
+- `topic_survey` — `goal` and `followup_query` are appended to the topic.
+  Acceptance criteria and constraints are not forwarded.
+- `experiment_design` — the host inlines the contract brief into the design
+  query (create, update, and revise_research).
+- `code_implementation` — full brief plus host repair blocks.
+  `restore_code_commit` is a git checkout, not a coding retry.
+- `experiment_execution` — runner: only `target_variants`. Goal and
+  acceptance criteria already live in the generated code and design.
+- `reflection` — full brief as extra host instructions.
+- `reporting` — `goal`, `acceptance_criteria`, and `constraints`, plus
+  `repair_instruction` on a retry.
 
 Put repair notes in `repair_instruction`. Put extra survey focus in
-`followup_query`. Cite `related_report_ids` of the reports the subagent should
-use from `routing.known_report_ids` (for example the latest execution report
-when repairing code). Do not use artifact or fact IDs. To revert
-code, set `restore_code_commit` to a SHA from `routing.execution_history` on a
+`followup_query`. Cite `related_report_ids` so **you** still see those
+reports next round (for example the latest execution when deciding a code
+repair). Do not use artifact or fact IDs. To revert code, set
+`restore_code_commit` to a SHA from `routing.execution_history` on a
 `code_implementation` contract.
 
 ## State changes
