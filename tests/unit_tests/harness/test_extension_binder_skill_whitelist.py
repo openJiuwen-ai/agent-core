@@ -8,7 +8,7 @@ from the skill's directory name: doing so flips the rail from "no filter"
 to "only the bound skill", which hides every skill the agent already
 exposes (e.g. pre-installed workspace skills) for the rest of the session.
 Only a manifest that explicitly declares ``enabled_skills`` narrows the
-allow-list. Leaf bookkeeping (``_bound_leaf_dirs``) lets sibling leaves
+allow-list. Leaf bookkeeping (``bound_leaf_dirs``) lets sibling leaves
 under one root share the mount, and ``_unbind`` keeps the root until its
 last bound leaf is removed.
 """

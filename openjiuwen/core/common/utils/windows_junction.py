@@ -31,7 +31,23 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _GENERIC_WRITE = 0x40000000
 _OPEN_EXISTING = 3
 _FILE_SHARE_ALL = 0x1 | 0x2 | 0x4
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+
+# Win32 extended-length prefix lifts the classic 248-char directory limit;
+# the NT-native prefix is what the reparse buffer stores as substitute name
+# (matching what ``mklink /J`` writes). Neither maps to a stdlib helper, so
+# they live here next to the one place that builds such paths.
+_EXTENDED_LENGTH_PREFIX = "\\\\?\\"
+_NT_NATIVE_PREFIX = "\\??\\"
+
+
+def _extended_length_path(path: str) -> str:
+    """Build a ``\\\\?\\``-prefixed path for the Win32 extended-length API."""
+    return _EXTENDED_LENGTH_PREFIX + os.path.normpath(path)
+
+
+def _nt_native_path(path: str) -> str:
+    """Build the NT-native ``\\??\\`` form stored in a mount-point reparse buffer."""
+    return _NT_NATIVE_PREFIX + os.path.normpath(path)
 
 
 def _create_junction_via_mklink(target_path: str, link_path: str) -> None:
@@ -59,7 +75,7 @@ def _create_junction_via_reparse(target_path: str, link_path: str) -> None:
     """
     target_abs = os.path.abspath(target_path)
     link_abs = os.path.abspath(link_path)
-    ext_link = "\\\\?\\" + link_abs
+    ext_link = _extended_length_path(link_abs)
     if not ctypes.windll.kernel32.CreateDirectoryW(ext_link, None):
         err = ctypes.GetLastError()
         raise OSError(err, f"CreateDirectoryW failed for junction link {link_abs}")
@@ -72,11 +88,13 @@ def _create_junction_via_reparse(target_path: str, link_path: str) -> None:
         _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
         None,
     )
-    if handle in (None, 0, _INVALID_HANDLE_VALUE):
+    # INVALID_HANDLE_VALUE is (HANDLE)-1; computed inline so the module
+    # carries no ctypes-derived module-level binding.
+    if handle in (None, 0, ctypes.c_void_p(-1).value):
         err = ctypes.GetLastError()
         raise OSError(err, f"CreateFileW failed for junction link {link_abs}")
     try:
-        sub_bytes = ("\\??\\" + target_abs).encode("utf-16-le")
+        sub_bytes = _nt_native_path(target_abs).encode("utf-16-le")
         print_bytes = target_abs.encode("utf-16-le")
         print_offset = len(sub_bytes) + 2
         data_length = 8 + len(sub_bytes) + 2 + len(print_bytes) + 2

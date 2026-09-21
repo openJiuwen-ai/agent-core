@@ -225,8 +225,8 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
     ones. Only a manifest that explicitly declares ``enabled_skills``
     (``SkillSpec.enabled_skills``) narrows the rail's allow-list.
 
-    Leaf bookkeeping lives on the rail instance as ``_bound_leaf_dirs``
-    (resolved leaf directory strings) so sibling leaves under an
+    Leaf bookkeeping lives on the rail instance as the ``bound_leaf_dirs``
+    property (resolved leaf directory strings) so sibling leaves under an
     already-mounted root merge into the shared mount instead of raising,
     and ``_unbind`` can keep the root until its last bound leaf is removed.
     """
@@ -247,7 +247,7 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
 
     previous_dirs = _skill_values(target.skills_dir)
     current_dirs = {str(Path(item).expanduser().resolve()) for item in previous_dirs}
-    bound_leaves = set(getattr(target, "_bound_leaf_dirs", None) or ())
+    bound_leaves = target.bound_leaf_dirs
 
     if mount_root in current_dirs:
         # Parent-dir mounts are one-shot. Leaf dirs under the same parent are
@@ -267,7 +267,7 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
         target.enabled_skills = (target.enabled_skills or set()) | set(explicit_names)
     if is_leaf:
         bound_leaves.add(str(directory))
-        target._bound_leaf_dirs = bound_leaves
+        target.bound_leaf_dirs = bound_leaves
     target.enable_cache = False
     target.clear_skills()
     try:
@@ -275,7 +275,7 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
     except Exception:
         target.skills_dir = previous_dirs
         target.enabled_skills = previous_enabled
-        target._bound_leaf_dirs = previous_bound_leaves
+        target.bound_leaf_dirs = previous_bound_leaves
         target.enable_cache = False
         target.clear_skills()
         raise
@@ -423,9 +423,9 @@ async def _unbind(agent: DeepAgent, ref: ResourceRef) -> None:
             if is_leaf:
                 if rail.enabled_skills is not None:
                     rail.enabled_skills.discard(path.name)
-                bound_leaves = set(getattr(rail, "_bound_leaf_dirs", None) or ())
+                bound_leaves = rail.bound_leaf_dirs
                 bound_leaves.discard(str(path))
-                rail._bound_leaf_dirs = bound_leaves
+                rail.bound_leaf_dirs = bound_leaves
                 siblings_remain = any(
                     str(Path(item).parent) == root for item in bound_leaves
                 )
