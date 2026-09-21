@@ -464,7 +464,8 @@ class CodexHarness(SerializedTurnHarness):
         for event in mapped:
             await self._emit(event.payload, turn=turn, item_id=event.item_id)
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        _ = message_id
         text = harness_input_text(content)
         handle = self._active_handle
         if handle is None:

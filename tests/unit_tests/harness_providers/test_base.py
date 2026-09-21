@@ -70,6 +70,7 @@ class _ScriptedHarness(SerializedTurnHarness):
         self.opened = 0
         self.closed = 0
         self.steered: list[str] = []
+        self.steered_message_ids: list[str] = []
         self.interrupted: list[AbortMode] = []
         self.release = asyncio.Event()
         self.release.set()
@@ -115,8 +116,9 @@ class _ScriptedHarness(SerializedTurnHarness):
             duration_ms=timing.duration_ms(),
         )
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
         self.steered.append(str(content.content))
+        self.steered_message_ids.append(message_id)
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         self.interrupted.append(mode)
@@ -231,6 +233,9 @@ async def test_steer_targets_the_active_turn_and_fails_when_idle() -> None:
     assert steer.turn_id == receipt.turn_id
     assert steer.accepted_mode is DeliveryMode.STEER
     assert harness.steered == ["also"]
+    # The hook sees the very id the receipt reports, so a provider can label
+    # its outbound message with it.
+    assert harness.steered_message_ids == [steer.message_id]
     harness.release.set()
     events = await _collect_turn(harness, receipt.turn_id)
     assert _terminal(events).kind is TurnEventKind.FINISHED

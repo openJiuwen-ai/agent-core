@@ -480,8 +480,8 @@ class DeepAgentHarness(SerializedTurnHarness):
             **common,
         )
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        _ = turn
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        _ = turn, message_id
         agent = self._agent
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")

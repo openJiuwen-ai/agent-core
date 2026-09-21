@@ -88,6 +88,9 @@ class ClaudeCodeHarnessConfig:
     # How long a reply waits for the CLI's request logs before its model
     # request is reported from the SDK message alone.
     request_observation_wait_s: float = 5.0
+    # How long a turn waits, after a result, for a delivery receipt on a
+    # message the CLI has not acknowledged at all.
+    lifecycle_ack_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
@@ -127,6 +130,10 @@ class ClaudeCodeHarnessConfig:
             raise TypeError("Claude request_observation_wait_s must be a number")
         if self.request_observation_wait_s < 0:
             raise ValueError("Claude request_observation_wait_s must not be negative")
+        if isinstance(self.lifecycle_ack_timeout_s, bool) or not isinstance(self.lifecycle_ack_timeout_s, (int, float)):
+            raise TypeError("Claude lifecycle_ack_timeout_s must be a number")
+        if self.lifecycle_ack_timeout_s <= 0:
+            raise ValueError("Claude lifecycle_ack_timeout_s must be positive")
         if self.model is not None and not isinstance(self.model, ClaudeModelConfig):
             raise TypeError("Claude model must be a ClaudeModelConfig")
         if self.fallback_model is not None and not isinstance(self.fallback_model, ClaudeModelConfig):

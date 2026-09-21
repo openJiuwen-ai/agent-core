@@ -49,6 +49,23 @@ def load_claude_sdk() -> Any:
     return claude_agent_sdk
 
 
+def build_claude_subprocess_transport(options: Any, prompt: Any) -> Any:
+    """Build the SDK's own subprocess transport for ``options``.
+
+    The SDK builds this transport itself unless one is supplied; the provider
+    builds it here so it can be wrapped before the SDK ever sees it.
+
+    Args:
+        options: The SDK options the transport turns into a CLI command.
+        prompt: The streaming prompt the transport writes on connect; an empty
+            stream leaves the session open for ``query()`` to write into.
+    """
+    load_claude_sdk()
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    return SubprocessCLITransport(prompt=prompt, options=options)
+
+
 def build_claude_session_id(*, host_session_id: str | None, agent_name: str) -> str | None:
     """Build a stable Claude UUID from the host session and agent identity."""
     if not host_session_id:

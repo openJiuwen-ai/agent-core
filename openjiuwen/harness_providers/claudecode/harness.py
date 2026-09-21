@@ -9,12 +9,15 @@ import asyncio
 import dataclasses
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
 from typing import Any, Callable, Mapping
 
 from openjiuwen.harness_protocol import (
     PROTOCOL_VERSION,
     AbortMode,
     CheckpointReason,
+    DiagnosticEvent,
+    DiagnosticLevel,
     HarnessCapability,
     HarnessCard,
     HarnessContext,
@@ -44,11 +47,13 @@ from openjiuwen.harness_providers.base import (
 )
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
 from openjiuwen.harness_providers.claudecode.failure_classifier import classify_claude_exception
+from openjiuwen.harness_providers.claudecode.lifecycle import SETTLED_SUBTYPE, LifecycleTap, TurnCycleTracker
 from openjiuwen.harness_providers.claudecode.mapping import PROVIDER_NAME, ClaudeTurnAccumulator, MappedClaudeEvent
 from openjiuwen.harness_providers.claudecode.options import (
     apply_claude_flag_settings,
     build_claude_options,
     build_claude_session_id,
+    build_claude_subprocess_transport,
     build_process_env,
     claude_model_options,
     claude_request_log_settings_env,
@@ -96,9 +101,10 @@ class _StderrTail:
 class ClaudeCodeHarness(SerializedTurnHarness):
     """Adapt one Claude Code SDK client session to protocol v1.
 
-    One external Turn is one ``query()`` followed by ``receive_response()``
-    up to and including the ``ResultMessage``.  Steering re-enters
-    ``query()`` on the active session; abort maps to ``interrupt()``.
+    One external Turn is one submitted message plus every message steered into
+    it, and it ends when the CLI has answered them all -- see
+    ``claudecode.lifecycle``.  Steering re-enters ``query()`` on the active
+    session; abort maps to ``interrupt()``.
     """
 
     card = HarnessCard(
@@ -156,6 +162,9 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         self._claude_session_id: str | None = None
         self._request_observer: ClaudeRequestObserver | None = None
         self._request_log_env: dict[str, str] = {}
+        self._cycle_tracker: TurnCycleTracker | None = None
+        # The CLI reports cost per session; a turn reports what it added.
+        self._session_cost_usd = 0.0
 
     @property
     def fallback_activated(self) -> bool:
@@ -248,8 +257,17 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             # asked for user-input / approval routing, so permission requests
             # must reach the callback.
             options.permission_mode = "default"
-        transport = self._transport_factory(options) if self._transport_factory is not None else None
-        client = self._sdk.ClaudeSDKClient(options=options, transport=transport)
+        tracker = TurnCycleTracker(ack_timeout_s=float(self._config.lifecycle_ack_timeout_s))
+        # The transport is built here, not by the SDK, so the tap can read the
+        # delivery receipts the SDK parser drops. Supplying a transport also
+        # skips the SDK's resume materialization, which is a no-op for this
+        # provider: it only runs for options that carry a ``session_store``.
+        inner = (
+            self._transport_factory(options)
+            if self._transport_factory is not None
+            else build_claude_subprocess_transport(options, _empty_prompt())
+        )
+        client = self._sdk.ClaudeSDKClient(options=options, transport=LifecycleTap(inner, tracker))
         try:
             await client.connect()
         except Exception as exc:
@@ -266,6 +284,9 @@ class ClaudeCodeHarness(SerializedTurnHarness):
                     provider_data=error.provider_data,
                 ),
             ) from exc
+        self._cycle_tracker = tracker
+        # A reconnected CLI counts its session cost from zero again.
+        self._session_cost_usd = 0.0
         return client
 
     async def _close_session(self) -> None:
@@ -282,6 +303,7 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         """Drop the SDK client; the next turn reconnects the same session."""
         client = self._client
         self._client = None
+        self._cycle_tracker = None
         if client is None:
             return
         try:
@@ -290,6 +312,14 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             logger.debug("[claude-code] disconnect failed during teardown: %s", exc)
 
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        try:
+            return await self._observed_turn(turn)
+        finally:
+            tracker = self._cycle_tracker
+            if tracker is not None:
+                tracker.end_turn()
+
+    async def _observed_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         observer = self._request_observer
         if observer is None:
             return await self._run_turn(turn)
@@ -310,6 +340,51 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             except Exception:
                 logger.debug("[claude-code] model request observation did not settle", exc_info=True)
 
+    async def _submit(self, client: Any, *, message_id: str, text: str) -> None:
+        """Write one user message to the CLI, labelled with ``message_id``.
+
+        The CLI echoes the label back as the ``command_uuid`` of its delivery
+        receipts, which is what ties a receipt to the message it answers. A
+        plain string would make the SDK mint the frame itself, without a label.
+
+        Args:
+            client: The connected SDK client.
+            message_id: The protocol message id the host was handed.
+            text: The message body.
+        """
+
+        async def stream() -> AsyncIterator[dict[str, Any]]:
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": text},
+                "parent_tool_use_id": None,
+                "uuid": message_id,
+            }
+
+        await client.query(stream())
+
+    def _turn_settled(self, message: Any) -> bool:
+        """Return whether ``message`` is the tap's end-of-turn sentinel."""
+        return isinstance(message, self._sdk.SystemMessage) and getattr(message, "subtype", None) == SETTLED_SUBTYPE
+
+    async def _report_cycle_diagnostics(self, turn: PendingTurn) -> None:
+        """Report messages the CLI left unanswered when the turn settled.
+
+        An abort leaves the running message unanswered by design, and the host
+        asked for that, so it is not reported back as a fault.
+        """
+        tracker = self._cycle_tracker
+        if tracker is None:
+            return
+        reported_all = tracker.drain_diagnostics()
+        if turn.abort_requested:
+            return
+        for reported in reported_all:
+            await self._emit(
+                DiagnosticEvent(level=DiagnosticLevel.WARNING, message=f"Claude Code {reported}"),
+                turn=turn,
+            )
+
     async def _publish(self, message: Any, accumulator: ClaudeTurnAccumulator, turn: PendingTurn) -> None:
         """Emit the events one SDK message maps to, through the observer when present."""
         mapped: list[MappedClaudeEvent] = accumulator.consume(message)
@@ -322,7 +397,11 @@ class ClaudeCodeHarness(SerializedTurnHarness):
 
     async def _run_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         timing = TurnTiming()
-        accumulator = ClaudeTurnAccumulator(turn_id=turn.turn_id, sdk=self._sdk)
+        accumulator = ClaudeTurnAccumulator(
+            turn_id=turn.turn_id,
+            sdk=self._sdk,
+            cost_baseline_usd=self._session_cost_usd,
+        )
         text = harness_input_text(turn.content)
         # A failed rollback leaves no usable client. Retry only when a new
         # accepted input arrives; never replay a failed turn in the background.
@@ -350,29 +429,40 @@ class ClaudeCodeHarness(SerializedTurnHarness):
             if client is None:
                 raise HarnessProtocolError("Claude Code client disappeared during an active cycle")
             try:
-                await client.query(text)
-                async for message in client.receive_response():
-                    await self._publish(message, accumulator, turn)
-                    if isinstance(message, self._sdk.ResultMessage):
-                        kind, result = accumulator.build_terminal_result(message, turn=turn, timing=timing)
-                        if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(
-                            result.error, accumulator, turn
-                        ):
-                            break
-                        return kind, result
-                else:
-                    error = TurnError(
-                        message="Claude Code ended the response stream without a result",
-                        code="CLAUDE_MISSING_RESULT",
-                        category="sdk_error",
-                    )
-                    # An empty stream is the signature of a message channel that
-                    # already died (transport error, CLI exit): ``query`` writes
-                    # to a still-open stdin while ``receive_response`` drains a
-                    # closed stream and yields nothing. The client cannot
-                    # recover in place, so drop it; the next turn reconnects.
-                    await self._disconnect_client()
-                    return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
+                tracker = self._cycle_tracker
+                if tracker is not None:
+                    tracker.begin_turn(turn.turn_id)
+                await self._submit(client, message_id=turn.message_id, text=text)
+                # The stream runs to the tap's settled sentinel, not to the
+                # first result: a steered message the CLI answers as a new
+                # cycle carries a result of its own, and its output belongs to
+                # this turn.
+                retry = False
+                async for message in client.receive_messages():
+                    if not self._turn_settled(message):
+                        await self._publish(message, accumulator, turn)
+                        continue
+                    await self._report_cycle_diagnostics(turn)
+                    if not accumulator.has_result:
+                        break
+                    kind, result = accumulator.build_terminal_result(turn=turn, timing=timing)
+                    self._session_cost_usd = accumulator.session_cost_usd
+                    if kind is TurnEventKind.FAILED and await self._maybe_activate_fallback(
+                        result.error, accumulator, turn
+                    ):
+                        retry = True
+                        break
+                    return kind, result
+                if retry:
+                    continue
+                error = _incomplete_turn_error(settled=accumulator.has_result)
+                # A stream that ends before the turn does is the signature of a
+                # message channel that already died (transport error, CLI
+                # exit): ``query`` writes to a still-open stdin while the
+                # reader drains a closed stream. The client cannot recover in
+                # place, so drop it; the next turn reconnects.
+                await self._disconnect_client()
+                return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
             except Exception as exc:
                 if turn.abort_requested:
                     return TurnEventKind.ABORTED, interrupted_result(
@@ -399,12 +489,12 @@ class ClaudeCodeHarness(SerializedTurnHarness):
         )
         return TurnEventKind.FAILED, accumulator.build_failed_result(error, timing=timing)
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
         _ = turn
         client = self._client
         if client is None:
             raise HarnessProtocolError("Claude Code client disappeared during an active cycle")
-        await client.query(harness_input_text(content))
+        await self._submit(client, message_id=message_id, text=harness_input_text(content))
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         _ = turn, mode
@@ -673,6 +763,27 @@ def _render_questions(questions: list[dict[str, Any]]) -> str:
         labels = [str(item.get("label")) for item in items if isinstance(item, Mapping)]
         lines.append(f"{text} (options: {', '.join(labels)})" if labels else text)
     return "\n".join(lines) or "The agent is asking for your input."
+
+
+async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
+    """Provide the streaming prompt a transport keeps its session open with."""
+    return
+    yield {}  # type: ignore[unreachable]
+
+
+def _incomplete_turn_error(*, settled: bool) -> TurnError:
+    """Describe a message stream that ended before the turn did."""
+    if settled:
+        return TurnError(
+            message="Claude Code ended the message stream before the turn finished",
+            code="CLAUDE_INCOMPLETE_TURN",
+            category="sdk_error",
+        )
+    return TurnError(
+        message="Claude Code ended the response stream without a result",
+        code="CLAUDE_MISSING_RESULT",
+        category="sdk_error",
+    )
 
 
 def _first_choices(questions: list[dict[str, Any]]) -> tuple[str, ...]:

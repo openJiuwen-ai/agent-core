@@ -196,9 +196,14 @@ class SerializedTurnHarness(ABC):
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         """Run one accepted input to its terminal result, emitting observations."""
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        """Inject ``content`` into the active turn when STEER is declared."""
-        _ = turn, content
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        """Inject ``content`` into the active turn when STEER is declared.
+
+        ``message_id`` is the id the receipt reports back to the host, so a
+        provider that can label its outbound message keeps one identity from
+        the receipt through to its own transport.
+        """
+        _ = turn, content, message_id
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support steering")
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
@@ -342,9 +347,12 @@ class SerializedTurnHarness(ABC):
                 active = self._active_turn
                 if active is None or self._state is not HarnessState.RUNNING:
                     raise HarnessStateError("there is no active turn to steer")
-            await self._steer(active, content)
+            # The id is minted before the hook runs: a provider that labels its
+            # outbound message needs the very id the receipt will report.
+            message_id = f"message-{uuid.uuid4().hex}"
+            await self._steer(active, content, message_id=message_id)
             return SendReceipt(
-                message_id=f"message-{uuid.uuid4().hex}",
+                message_id=message_id,
                 turn_id=active.turn_id,
                 accepted_mode=DeliveryMode.STEER,
             )

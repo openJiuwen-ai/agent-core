@@ -20,7 +20,11 @@
 1. **骨架唯一**：provider 继承 `SerializedTurnHarness`，只实现 `_open_session` / `_close_session` /
    `_execute_turn`（+ `_steer` / `_interrupt_turn`）。每个已接受输入恰好一个 STARTED 与一个 terminal
    `TurnLifecycleEvent`；stop 时排队中的 Turn 以 `HARNESS_STOP` ABORTED 收口；terminal 后队列为空才
-   进入 IDLE。
+   进入 IDLE。`_steer` 收到回执将要上报的 `message_id`，便于 provider 给出站消息打上同一个标识。
+   **一个 Turn 覆盖它投递的每一条消息**：steer 被厂商折叠进当前周期、或另起一个周期作答，都算同一个
+   Turn，不能在 SDK 给出的第一个 terminal 处收口——否则第二个周期的产出会漏进下一个 Turn。Claude Code
+   据 CLI 的 `command_lifecycle` 投递回执判定（`claudecode/lifecycle.py`），细节见
+   `harness_providers/AGENTS.md` 不变量 11。
 2. **能力声明真实**：
 
    | provider | card | capabilities | optional host capabilities |

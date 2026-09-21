@@ -47,6 +47,7 @@ from openjiuwen.harness_providers.claudecode.failure_classifier import (
     merge_pending_error,
 )
 from openjiuwen.harness_providers.claudecode.harness import MODEL_CHANGED_EVENT
+from openjiuwen.harness_providers.claudecode.lifecycle import SETTLED_SUBTYPE
 from openjiuwen.harness_providers.claudecode.options import build_claude_options, build_claude_session_id
 from tests.test_logger import logger
 
@@ -63,7 +64,9 @@ class _Block:
 
 class _FakeSdkState:
     def __init__(self) -> None:
+        self.sdk: Any = None
         self.clients: list["_FakeClient"] = []
+        self.transports: list["_FakeTransport"] = []
         self.scripts: list[list[Any]] = []
         self.connect_error: Exception | None = None
         self.server_info: dict[str, Any] | None = {"models": []}
@@ -77,6 +80,7 @@ class _FakeClient:
         self.options = options
         self.transport = transport
         self.queries: list[str] = []
+        self.submitted: list[dict[str, Any]] = []
         self.interrupts = 0
         self.connected = False
         self.disconnected = False
@@ -106,22 +110,61 @@ class _FakeClient:
     async def disconnect(self) -> None:
         self.disconnected = True
 
-    async def query(self, prompt: str, session_id: str = "default") -> None:
+    async def query(self, prompt: Any, session_id: str = "default") -> None:
         _ = session_id
-        self.queries.append(prompt)
+        if isinstance(prompt, str):
+            self.queries.append(prompt)
+            return
+        async for frame in prompt:
+            self.submitted.append(frame)
+            self.queries.append(frame["message"]["content"])
 
     async def interrupt(self) -> None:
         self.interrupts += 1
         self.release.set()
 
-    async def receive_response(self):
+    async def receive_messages(self):
         script = self.state.scripts.pop(0)
+        answered = False
         for message in script:
             if callable(message):
                 message = await message(self)
                 if message is None:
                     continue
+            answered = answered or isinstance(message, self.state.sdk.ResultMessage)
             yield message
+        if answered:
+            # Stand in for the transport tap, which ends a turn once the CLI
+            # has answered every message the turn handed it.
+            yield self.state.sdk.SystemMessage(subtype=SETTLED_SUBTYPE, data={})
+
+
+class _FakeTransport:
+    """Stand-in for the SDK subprocess transport the provider now builds."""
+
+    def __init__(self, state: _FakeSdkState, prompt: Any, options: Any) -> None:
+        self.prompt = prompt
+        self.options = options
+        state.transports.append(self)
+
+    async def connect(self) -> None:
+        return None
+
+    async def write(self, data: str) -> None:
+        return None
+
+    async def read_messages(self):
+        return
+        yield {}  # type: ignore[unreachable]
+
+    async def close(self) -> None:
+        return None
+
+    async def end_input(self) -> None:
+        return None
+
+    def is_ready(self) -> bool:
+        return True
 
 
 def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _FakeSdkState]:
@@ -184,6 +227,18 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _Fak
         if name not in {"state", "sdk"}:
             setattr(sdk, name, value)
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", sdk)
+    # The provider builds the transport itself now, so the fake SDK has to
+    # offer one. A dotted name present in ``sys.modules`` is imported without
+    # its parent packages, so only the leaf module is registered.
+    transport_module = ModuleType("claude_agent_sdk._internal.transport.subprocess_cli")
+
+    class SubprocessCLITransport(_FakeTransport):
+        def __init__(self, *, prompt: Any, options: Any) -> None:
+            super().__init__(state, prompt, options)
+
+    transport_module.SubprocessCLITransport = SubprocessCLITransport  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk._internal.transport.subprocess_cli", transport_module)
+    state.sdk = sdk
     return sdk, state
 
 
@@ -347,6 +402,84 @@ async def test_steer_and_abort_use_the_sdk_client(monkeypatch: pytest.MonkeyPatc
     assert client.queries == ["long task", "also this"]
     assert client.interrupts == 1
     assert _terminal(events).kind is TurnEventKind.ABORTED
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_steer_answered_as_a_new_cycle_stays_in_the_same_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.scripts.append(
+        [
+            sdk.AssistantMessage(
+                content=[sdk.TextBlock(text="first")],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage=None,
+                message_id="msg-1",
+                stop_reason="end_turn",
+                session_id="s",
+            ),
+            _result(sdk, result="first"),
+            sdk.AssistantMessage(
+                content=[sdk.TextBlock(text="second")],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage=None,
+                message_id="msg-2",
+                stop_reason="end_turn",
+                session_id="s",
+            ),
+            _result(sdk, result="second", total_cost_usd=0.004, num_turns=1),
+        ]
+    )
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    receipt = await harness.send(HarnessInput(content="do it"))
+    events = await _turn(harness, receipt.turn_id)
+    terminal = _terminal(events)
+    assert terminal.kind is TurnEventKind.FINISHED
+    result = terminal.result
+    # The cycle the CLI ran for the steered message belongs to this turn.
+    assert result.final_output == "second"
+    assert [message.message_id for message in result.messages] == ["msg-1", "msg-2"]
+    # Usage is reported per cycle and summed; cost is reported per session.
+    assert result.usage.input_tokens == 24 and result.usage.output_tokens == 10
+    assert result.cost.micros == 4000
+    assert result.provider_data["num_turns"] == 2
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_turn_cost_is_what_the_turn_added_to_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.scripts.append([_result(sdk, total_cost_usd=0.0025)])
+    state.scripts.append([_result(sdk, total_cost_usd=0.004)])
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    first = await harness.send(HarnessInput(content="one"))
+    assert _terminal(await _turn(harness, first.turn_id)).result.cost.micros == 2500
+    second = await harness.send(HarnessInput(content="two"))
+    terminal = _terminal(await _turn(harness, second.turn_id))
+    # The CLI reports the session total; the turn reports its own share.
+    assert terminal.result.cost.micros == 1500
+    assert terminal.result.provider_data["session_cost_usd"] == 0.004
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_the_submitted_message_carries_the_receipt_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.scripts.append([_result(sdk)])
+    harness = ClaudeCodeHarness(ClaudeCodeHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    receipt = await harness.send(HarnessInput(content="hi"))
+    await _turn(harness, receipt.turn_id)
+    submitted = state.clients[0].submitted
+    # The CLI echoes this id back as the ``command_uuid`` of its receipts.
+    assert [frame["uuid"] for frame in submitted] == [receipt.message_id]
+    assert submitted[0]["type"] == "user" and submitted[0]["parent_tool_use_id"] is None
     await harness.stop()
 
 

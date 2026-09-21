@@ -19,7 +19,7 @@ harness_providers/
 ├── trajectory.py   # HarnessTrajectoryRecorder: protocol events -> trajectory spans (host glue, like io_adapter)
 ├── telemetry/      # otlp_receiver.py: process-wide loopback OTLP receiver shared by providers
 ├── native/         # DeepAgentHarness over the in-process DeepAgent interaction loop (+ NativeHarnessProvider)
-├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier / observation)
+├── claudecode/     # ClaudeCodeHarness over claude-agent-sdk (config / options / mapping / failure_classifier / observation / lifecycle)
 ├── codex/          # CodexHarness over openai-codex (config / options / mapping / failure_classifier / observation / rollout_trace)
 └── dsh/            # DshHarness over deepseek-harness (moved from agent_teams.external.dsh; see dsh/AGENTS.md)
 ```
@@ -43,7 +43,9 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    pairing, interaction bookkeeping (`_request_interaction`,
    `_cancel_pending_interactions`) and checkpoint publishing
    (`_publish_checkpoint`, `_restored_checkpoint_data`). Do not re-implement
-   these per provider.
+   these per provider. `_steer` is handed the `message_id` the receipt will
+   report, so a provider that labels its outbound message keeps one identity
+   from the receipt down to its own transport.
 2. **Capabilities are truthful.** A card declares only what the SDK can do
    end to end; unsupported commands raise `UnsupportedHarnessCapabilityError`.
    DSH keeps an empty capability set; Claude Code / Codex declare STEER,
@@ -125,6 +127,21 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     `ProviderEvent("session/model_changed", {model, effort})`. A Codex model
     without `provider` / `api_base` stays on the official endpoint and keeps
     the approval reviewer; only `CodexModelConfig.is_external` bypasses it.
+11. **A turn ends when every message it submitted has been answered.** A
+    steered message the vendor folds into the running cycle and one it answers
+    in a cycle of its own belong to the same turn; ending at the first terminal
+    the SDK reports drops the second cycle's output into the next turn. Claude
+    Code reads the CLI's `command_lifecycle` receipts for this, one layer below
+    the SDK parser that drops them: `claudecode/lifecycle.py` wraps the
+    transport, keys receipts by the `uuid` each submitted message carried, and
+    appends a synthetic `system` frame once none is outstanding, which the turn
+    loop consumes as the end of the turn. A CLI build that reports no receipts
+    degrades to the first result; an interrupted or failed cycle settles at
+    once, because its receipts never arrive; a message left unacknowledged for
+    `lifecycle_ack_timeout_s` after a result is dropped with a WARNING
+    `DiagnosticEvent`. A turn spanning several cycles sums the per-cycle usage
+    and reports cost as what it added to the session total, which is what the
+    CLI counts.
 
 ## Change requirements
 

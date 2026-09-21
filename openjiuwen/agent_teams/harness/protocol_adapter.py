@@ -314,7 +314,8 @@ class NativeHarnessProtocolAdapter(DeepAgentHarness):
             raise HarnessStateError("the native turn is no longer active")
         return agent
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        _ = message_id
         agent = await self._ready_native(turn)
         if agent.state is not HarnessState.RUNNING:
             raise HarnessStateError("the native turn is not running")
