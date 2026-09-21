@@ -75,9 +75,11 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    marks the user messages carrying a turn's host inputs as the external
    user's and remembers those message ids: whose a message is does not change
    when its turn ends, and restating it as the harness's own would replace it
-   in the next window and read as the same message twice. A host states with
-   `record_input(..., external_user=)` which of its inputs are somebody
-   speaking, since a host also delivers standing context and runtime notices.
+   in the next window and read as the same message twice. Provenance follows
+   delivery, not wording: everything a host sends through the protocol is the
+   user's, and the messages a harness adds to its own context along the way
+   (CLI reminders, environment notes, tool-availability notices) match no
+   input and stay its own.
    Provenance and conversation message ids both survive a member restart: the
    recorder recovers the ids it had recognized from the subject's committed
    window, and a provider derives a conversation message's id from the message

@@ -228,27 +228,20 @@ class HarnessTrajectoryRecorder:
     # Host inputs
     # ------------------------------------------------------------------
 
-    def record_input(self, turn_id: str, text: str, *, external_user: bool = True) -> None:
+    def record_input(self, turn_id: str, text: str) -> None:
         """Remember an input the host sent into ``turn_id``.
 
-        The turn span states the input that opened the turn; an input that is
-        the external user speaking is also remembered, so the message carrying
-        it reads as the user's rather than as context.
-
-        Args:
-            turn_id: The protocol turn the input was sent into.
-            text: The input as the host delivered it.
-            external_user: Whether this input is somebody speaking to the
-                agent. A host also delivers standing context and runtime
-                notices, which open a turn just the same but are not the
-                user's words.
+        The turn span states the input that opened the turn, and every input,
+        including one steered into a running turn, is remembered so the
+        message carrying it reads as the user's. What a host delivers is what
+        the agent was told; the messages a harness adds to its own context
+        along the way match no input and stay the harness's own.
         """
         if not text:
             return
         if turn_id not in self._turns:
             self._pending_inputs.setdefault(turn_id, text)
-        if external_user:
-            self._turn_inputs.setdefault(turn_id, []).append(text)
+        self._turn_inputs.setdefault(turn_id, []).append(text)
 
     def _remembered_external_user_ids(self) -> set[str]:
         """Return the ids known to be the external user's, recovering once.

@@ -293,34 +293,6 @@ def snapshot_kind_of(text: str) -> str | None:
     return next((kind for kind in SNAPSHOT_EVENT_KINDS if stripped.startswith(_OPEN_TAG % kind)), None)
 
 
-def is_runtime_context_only(text: str) -> bool:
-    """Return whether ``text`` is only standing team state.
-
-    ``<team-context>`` states what the team *is* — the member's own identity,
-    the team metadata — which the member is told once and which nothing
-    happened to cause. Everything else a member is handed is something that
-    happened and is addressed to it: a message somebody sent
-    (``<team-inbound>``), a framework event it has to act on
-    (``<team-event>``: a task board to claim from, a roster change, a nudge),
-    or a bare instruction. A trajectory shows all of those as the member's
-    turn, the way an in-process member's does — there every queued input,
-    events included, joins one user message.
-
-    Anything unrecognized counts as something said, because losing a turn is
-    worse than showing standing state as one.
-
-    Args:
-        text: One input, as it was handed to the member.
-
-    Returns:
-        True when the input is standing team state and nothing else.
-    """
-    stripped = text.strip()
-    if not stripped or "<team-inbound" in stripped or "<team-event" in stripped:
-        return False
-    return stripped.startswith("<team-context>")
-
-
 def drop_superseded_snapshots(parts: list[str]) -> list[str]:
     """Return ``parts`` without the snapshot inputs a later one supersedes.
 
@@ -357,7 +329,6 @@ __all__ = [
     "INBOUND_TYPE_DIRECT",
     "SNAPSHOT_EVENT_KINDS",
     "drop_superseded_snapshots",
-    "is_runtime_context_only",
     "render_controller_input",
     "render_event",
     "render_inbound",

@@ -21,7 +21,6 @@ import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, Sequence, runtime_checkable
 
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
-from openjiuwen.agent_teams.inbound_render import is_runtime_context_only
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.runner.callback.framework import AsyncCallbackFramework
@@ -453,20 +452,18 @@ class ExternalHarnessMemberRuntime:
             if isinstance(content, InteractiveInput):
                 return await self._adapter.send(content, immediate=immediate)
             external_input = to_harness_input(content)
-            # What the member was sent, before the runtime attaches standing
-            # team context to it: the context rides along but is not part of
-            # what anyone said.
             delivered_text = harness_input_text(external_input)
             pending_context = await self._pending_team_context()
             if pending_context:
                 external_input = _prepend_context(external_input, pending_context)
             receipt = await self._adapter.send(external_input, immediate=immediate)
-            self._record_input(
-                receipt,
-                delivered_text,
-                external_user=not is_runtime_context_only(delivered_text),
-            )
+            # Both halves are recorded, and the message first so it is the one
+            # the turn states as its input. A provider splits the delivery into
+            # a message per block, so the combined text would match none of
+            # them and the turn would read as if nobody had said anything.
+            self._record_input(receipt, delivered_text)
             if pending_context:
+                self._record_input(receipt, pending_context)
                 await self._commit_team_context()
             return receipt
 
@@ -476,9 +473,7 @@ class ExternalHarnessMemberRuntime:
             if not pending:
                 return
             receipt = await self._adapter.send(pending, immediate=False)
-            # Standing team state the member is being told about; it opens a
-            # turn but nobody said it.
-            self._record_input(receipt, pending, external_user=False)
+            self._record_input(receipt, pending)
             await self._commit_team_context()
 
     async def abort(self, *, immediate: bool = False) -> None:
@@ -629,12 +624,13 @@ class ExternalHarnessMemberRuntime:
         )
         await ctx.mark_member_error()
 
-    def _record_input(self, receipt: SendReceipt | None, text: str, *, external_user: bool = True) -> None:
+    def _record_input(self, receipt: SendReceipt | None, text: str) -> None:
+        """Tell the recorder what the host delivered into the member's turn."""
         recorder = self._trajectory
         if recorder is None or receipt is None:
             return
         try:
-            recorder.record_input(receipt.turn_id, text, external_user=external_user)
+            recorder.record_input(receipt.turn_id, text)
         except Exception:
             team_logger.debug("[{}] trajectory recorder rejected an input", self._member_name, exc_info=True)
 
