@@ -33,32 +33,44 @@ def test_role_loaders_share_output_budget(tmp_path, monkeypatch, nested, limit):
 
     adjusted = with_rsi_output_budget(source)
     assert source == original
-    assert adjusted.get("model", adjusted)["model_request_config"].get("max_tokens") == limit
+    assert adjusted.get("model", adjusted)["model_request_config"].get("max_tokens") is None
     # Analyzer uses the shared reference loader; Task and Improver use the Model loader.
     loaded = load_model_config_ref(str(path))
-    assert loaded.get("model", loaded)["model_request_config"].get("max_tokens") == limit
+    assert loaded.get("model", loaded)["model_request_config"].get("max_tokens") is None
     built = load_member_optimizer_model(str(path))
-    assert built.model_config.max_tokens == limit
+    assert built.model_config.max_tokens is None
     assert built.model_config.temperature == 0.5
 
     monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: kwargs)
     judge = judge_runtime.build_judge_agent(
         EvaluatorConfig(judge_model_config_ref=str(path)), tmp_path, tmp_path / "tools.jsonl",
     )
-    assert judge["model"].model_config.max_tokens == limit
+    assert judge["model"].model_config.max_tokens is None
     assert json.loads(path.read_text(encoding="utf-8")) == original
 
 
 def test_missing_request_config_gets_budget_and_invalid_config_is_not_hidden():
-    assert "max_tokens" not in with_rsi_output_budget({})["model_request_config"]
+    assert with_rsi_output_budget({})["model_request_config"]["max_tokens"] is None
     assert with_rsi_output_budget({"model_request_config": "invalid"})["model_request_config"] == "invalid"
 
 
-@pytest.mark.parametrize("configured,expected", [(None, 393216), (8192, 8192), (2000000, 393216)])
-def test_known_model_capacity(configured, expected):
+@pytest.mark.parametrize("configured", [None, 8192, 2000000])
+def test_known_model_does_not_receive_an_output_cap(configured):
     request = {"model": "deepseek-v4-pro", "max_tokens": configured}
-    assert with_rsi_output_budget({"model_request_config": request})["model_request_config"]["max_tokens"] == expected
+    assert with_rsi_output_budget({"model_request_config": request})["model_request_config"]["max_tokens"] is None
     assert request["max_tokens"] == configured
+
+
+def test_legacy_output_caps_are_removed_without_changing_shared_config():
+    source = {"model_request_config": {"model": "custom", "max_tokens": 8192,
+              "max_completion_tokens": 8192, "extra_body": {"max_tokens": 4096,
+              "max_completion_tokens": 4096, "custom_option": True}}}
+    original = deepcopy(source)
+    request = with_rsi_output_budget(source)["model_request_config"]
+    assert request["max_tokens"] is None
+    assert "max_completion_tokens" not in request
+    assert request["extra_body"] == {"custom_option": True}
+    assert source == original
 
 
 @pytest.mark.parametrize("name", ["deepseek-v4-pro", "qwen-plus", "custom-gateway-model"])
@@ -71,7 +83,7 @@ def test_per_request_remaining_context_and_no_mutation(name):
     ))
     options = {"max_tokens": 393216}
     result = BudgetedRsiModel._budget_options(model, "a" * 10000, options)
-    assert 0 < result["max_tokens"] < 6000
+    assert "max_tokens" not in result
     assert options["max_tokens"] == model.model_config.max_tokens == 393216
     with pytest.raises(ValueError, match="no positive output budget"):
         BudgetedRsiModel._budget_options(model, "a" * 20000, options)

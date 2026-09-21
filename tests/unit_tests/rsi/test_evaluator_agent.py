@@ -28,7 +28,7 @@ def _config(**kwargs):
     return EvaluatorConfig(evaluation_method="llm_as_judge", judge_model_config_ref="mock-model.yaml", **kwargs)
 
 
-def test_judge_inherits_materialized_model_output_limit(tmp_path, monkeypatch):
+def test_judge_clears_materialized_model_output_limit(tmp_path, monkeypatch):
     from openjiuwen.agent_teams.schema.deep_agent_spec import TeamModelConfig
     from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_runtime
 
@@ -39,7 +39,7 @@ def test_judge_inherits_materialized_model_output_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(TeamModelConfig, "build", lambda self: self)
     monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: kwargs)
     result = judge_runtime.build_judge_agent(_config(), tmp_path, tmp_path / "tools.jsonl")
-    assert result["model"].model_config.max_tokens == 100000
+    assert result["model"].model_config.max_tokens is None
 
 
 def _case():

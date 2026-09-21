@@ -14,7 +14,6 @@ from typing import Any
 import yaml
 
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)}")
-_OUTPUT_LIMITS = {"deepseek-v4-pro": 393216, "deepseek-v4-flash": 393216, "deepseek-flash": 393216}
 
 
 def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
@@ -49,7 +48,7 @@ def with_rsi_reasoning_policy(config_data: dict[str, Any]) -> dict[str, Any]:
 
 
 def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
-    """Default known models to their capacity; preserve explicit gateway limits."""
+    """Let the provider choose output length for RSI, including legacy task files."""
     data = deepcopy(config_data)
     model_data = data.get("model", data)
     if isinstance(model_data, dict):
@@ -58,11 +57,12 @@ def with_rsi_output_budget(config_data: dict[str, Any]) -> dict[str, Any]:
             request = {}
             model_data["model_request_config"] = request
         if isinstance(request, dict):
-            name = request.get("model", "")
-            capacity = _OUTPUT_LIMITS.get(name)
-            configured = request.get("max_tokens")
-            if capacity is not None:
-                request["max_tokens"] = min(configured, capacity) if configured is not None else capacity
+            request["max_tokens"] = None
+            request.pop("max_completion_tokens", None)
+            extra = request.get("extra_body")
+            if isinstance(extra, dict):
+                extra.pop("max_tokens", None)
+                extra.pop("max_completion_tokens", None)
     return data
 
 

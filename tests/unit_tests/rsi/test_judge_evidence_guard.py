@@ -32,15 +32,15 @@ def test_complete_closeout_preserves_evidence_and_fits_output():
     assert guarded == rows
     assert json.dumps(rows) == original
     assert options == {'temperature': 0.0}
-    assert 16384 <= adjusted['max_tokens'] < 100000
-    assert guard_messages(guarded, reserve=adjusted['max_tokens']) == guarded
+    assert 'max_tokens' not in adjusted
+    assert guard_messages(guarded, reserve=0) == guarded
 
 
 def test_explicit_window_and_output_override():
     rows = [{'role': 'user', 'content': 'x' * 300000}]
     assert _prepare(rows, window=1048576)[1] == {}
     small = [{'role': 'user', 'content': 'x' * 190000}]
-    assert _prepare(small, {'max_tokens': 20000})[1]['max_tokens'] == 20000
+    assert 'max_tokens' not in _prepare(small, {'max_tokens': 20000})[1]
     with pytest.raises(EvaluationInfrastructureError, match='complete grading evidence was not truncated'):
         _prepare(rows)
 
@@ -69,8 +69,8 @@ def test_schemas_and_unicode_count_toward_budget():
     options = {'tools': [{'name': 'read', 'description': 'x' * 40000}]}
     guarded, adjusted = _prepare(rows, options)
     assert guarded == rows
-    assert 16384 <= adjusted['max_tokens'] < 40000
-    guard_messages(guarded, options['tools'], reserve=adjusted['max_tokens'])
+    assert 'max_tokens' not in adjusted
+    guard_messages(guarded, options['tools'], reserve=0)
 
 
 def test_reclaim_tools_before_lowering_output_limit():
@@ -115,8 +115,8 @@ async def test_actual_model_boundary_forwards_adjusted_budget(tmp_path, monkeypa
     rows, options = seen[0]
     assert rows == messages
     assert isinstance(rows[1], UserMessage)
-    assert 16384 <= options['max_tokens'] < 100000
-    assert model.model_config.max_tokens == 100000
+    assert 'max_tokens' not in options
+    assert model.model_config.max_tokens is None
 
 
 def test_byte_cap_and_immutable_input():

@@ -3,19 +3,17 @@
 import asyncio
 import copy
 import json
-import logging
 from pathlib import Path
 
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
-from openjiuwen.core.foundation.llm import Model
+from openjiuwen.core.foundation.llm import Model, ModelRequestConfig
 from openjiuwen.core.foundation.tool.base import Tool, ToolCard
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
+from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import with_rsi_output_budget
 
 TOOL_BYTES = 12000
 REQUEST_BYTES = 262144
-MIN_OUTPUT_TOKENS = 16384
-_LOGGER = logging.getLogger(__name__)
 
 
 def _json(value):
@@ -153,6 +151,12 @@ def guard_messages(messages, tools=None, *, limit=REQUEST_BYTES, reserve=16384):
 class GuardedJudgeModel(Model):
     """Guard the actual model boundary, not the pre-rail message preview."""
 
+    def __init__(self, model_client_config=None, model_config=None, **kwargs):
+        request = model_config.model_dump() if model_config is not None else {}
+        request = with_rsi_output_budget({"model_request_config": request})["model_request_config"]
+        super().__init__(model_client_config=model_client_config,
+                         model_config=ModelRequestConfig.model_validate(request), **kwargs)
+
     def context_budget(self):
         """Share model capacity with the evidence assembler."""
         return ContextUtils.resolve_context_max(
@@ -161,31 +165,15 @@ class GuardedJudgeModel(Model):
         )
 
     def _prepare(self, messages, kwargs):
-        """Reduce output headroom only after trying to reclaim tool history."""
+        """Bound input evidence without sending an output cap to the provider."""
         options = dict(kwargs)
-        requested = int(options.get("max_tokens") or self.model_config.max_tokens or MIN_OUTPUT_TOKENS)
-        if self.model_config.max_tokens is not None:
-            requested = min(requested, self.model_config.max_tokens)
-        if options.get("max_tokens") is not None:
-            options["max_tokens"] = requested
+        options.pop("max_tokens", None)
+        options.pop("max_completion_tokens", None)
         window = GuardedJudgeModel.context_budget(self)
-        if requested <= 0 or window <= 0:
-            raise EvaluationInfrastructureError("Judge context window and output limit must be positive")
+        if window <= 0:
+            raise EvaluationInfrastructureError("Judge context window must be positive")
         tools = options.get("tools")
-        try:
-            guarded = guard_messages(messages, tools, limit=window, reserve=requested)
-        except EvaluationInfrastructureError:
-            floor = min(requested, MIN_OUTPUT_TOKENS)
-            guarded = guard_messages(messages, tools, limit=window, reserve=floor)
-            rows = [m.model_dump(mode="json", exclude_none=True) if hasattr(m, "model_dump") else m
-                    for m in guarded]
-            schemas = [t.model_dump(mode="json") if hasattr(t, "model_dump") else t for t in (tools or [])]
-            available = window - _request_bound(rows, schemas)
-            options["max_tokens"] = min(requested, available)
-            _LOGGER.warning(
-                "Judge output budget adjusted: requested=%s effective=%s context_budget=%s; "
-                "grading evidence preserved", requested, options["max_tokens"], window,
-            )
+        guarded = guard_messages(messages, tools, limit=window, reserve=0)
         return guarded, options
 
     async def invoke(self, messages, **kwargs):
