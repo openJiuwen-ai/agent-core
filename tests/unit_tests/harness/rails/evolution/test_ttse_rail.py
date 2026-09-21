@@ -47,8 +47,10 @@ from openjiuwen.agent_evolving.ttse.catalog import project_catalog
 from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
 from openjiuwen.agent_evolving.ttse.consult import (
-    MAX_CONSULT_CATEGORIES,
+    CONSULT_ALL_CATEGORY,
+    consult_arg_errors,
     parse_consult_categories,
+    parse_consult_category,
     render_consult_result,
     render_consult_result_async,
 )
@@ -1501,12 +1503,30 @@ async def test_disk_catalog_injects_guidance_not_rule_body(tmp_path):
     await rail.before_model_call(ctx)
     section = builder.get_section(SectionName.TTSE_FACTS_TIPS)
     text = section.content["cn"]
-    assert "ttse_consult(category=" in text
-    assert "query=" in text
-    assert "无参" in text
+    assert "ttse_consult" in text
+    assert "ttse_consult(category=" not in text
+    assert "处境短句" not in text
+    assert "不要套 When/use" not in text
+    assert "CMakeLists" not in text
     assert text.strip() == DISK_CATALOG_GUIDANCE_CN.strip()
     assert "PresentBench grades slides.md" not in text
     assert "documents-office-and-records" not in text
+
+
+def test_catalog_guidance_explains_function_not_tool_args(tmp_path):
+    rail = _make_rail(tmp_path, ScriptedLLM(lambda p: "NONE"), cfg=_disk_catalog_cfg(tmp_path))
+    builder = SystemPromptBuilder()
+    rail._apply_catalog_guidance(builder)
+    text = builder.get_section(SectionName.TTSE_FACTS_TIPS).content["cn"]
+    assert "经验目录" in text
+    assert "ttse_consult" in text
+    assert "处境短句" not in text
+    assert "不要套 When/use" not in text
+    assert "CMakeLists" not in text
+    assert "不要堆关键词" not in text
+    rail._ttse_config.inject_enabled = False
+    rail._apply_catalog_guidance(builder)
+    assert builder.get_section(SectionName.TTSE_FACTS_TIPS) is None
 
 
 @pytest.mark.asyncio
@@ -1557,24 +1577,35 @@ def test_parse_assignments_illegal_id_becomes_other():
 
 
 @pytest.mark.asyncio
-async def test_consult_lists_catalog_and_opens_category(tmp_path):
+async def test_consult_requires_category_and_query(tmp_path):
     store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
     await store.add_fact("PresentBench grades slides.md")
     await store.set_categories([("PresentBench grades slides.md", "fact", "documents-office-and-records")])
-    listing = render_consult_result(store)
-    assert "documents-office-and-records" in listing
-    assert "PresentBench grades slides.md" not in listing
-    opened = render_consult_result(store, category="documents-office-and-records")
-    assert "PresentBench grades slides.md" in opened
-    unknown = render_consult_result(store, category="world.pptx")
+    missing = render_consult_result(store)
+    assert "category is required" in missing
+    assert "query is required" in missing
+    assert "already attached" in missing
+    assert "PresentBench grades slides.md" not in missing
+    missing_query = render_consult_result(store, category="documents-office-and-records")
+    assert "query is required" in missing_query
+    unknown = render_consult_result(
+        store, category="world.pptx", query="PresentBench slides.md"
+    )
     assert "Unknown category" in unknown
-    assert "trailing catalog" in unknown
+    assert CONSULT_ALL_CATEGORY in unknown
+    opened = await render_consult_result_async(
+        store,
+        category="documents-office-and-records",
+        query="PresentBench slides.md",
+    )
+    assert "PresentBench grades slides.md" in opened
     project_catalog(store)
     assert (tmp_path / "by_cat" / "documents-office-and-records" / "SUMMARY.md").is_file()
 
 
 def test_parse_consult_categories_splits_comma_list_and_json():
-    assert parse_consult_categories("documents-office-and-records") == ["documents-office-and-records"]
+    assert parse_consult_category("documents-office-and-records") == "documents-office-and-records"
+    assert parse_consult_category("all") == "all"
     assert parse_consult_categories("documents-office-and-records, software-engineering-devops") == [
         "documents-office-and-records",
         "software-engineering-devops",
@@ -1588,6 +1619,8 @@ def test_parse_consult_categories_splits_comma_list_and_json():
         "other",
     ]
     assert parse_consult_categories("") == []
+    errors = consult_arg_errors("all, documents-office-and-records", "When compiling: use utf-8")
+    assert any("Do not mix" in line for line in errors)
 
 
 @pytest.mark.asyncio
@@ -1601,9 +1634,10 @@ async def test_consult_opens_multiple_categories_in_one_call(tmp_path):
             ("When compiling C++: use cl /utf-8", "tip", "software-engineering-devops"),
         ]
     )
-    opened = render_consult_result(
+    opened = await render_consult_result_async(
         store,
         category="documents-office-and-records, software-engineering-devops",
+        query="csv bom utf-8 compile",
     )
     assert "csv bom needed" in opened
     assert "When compiling C++: use cl /utf-8" in opened
@@ -1612,37 +1646,24 @@ async def test_consult_opens_multiple_categories_in_one_call(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_consult_caps_categories_and_skips_unknown(tmp_path):
+async def test_consult_skips_unknown_and_rejects_all_mixed_with_ids(tmp_path):
     store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
     await store.add_fact("csv bom needed")
-    await store.add_fact("go run works")
-    await store.add_fact("pptx timeout")
-    await store.set_categories(
-        [
-            ("csv bom needed", "fact", "documents-office-and-records"),
-            ("go run works", "fact", "software-engineering-devops"),
-            ("pptx timeout", "fact", "other"),
-        ]
-    )
-    mixed = render_consult_result(
+    await store.set_categories([("csv bom needed", "fact", "documents-office-and-records")])
+    mixed = await render_consult_result_async(
         store,
         category="documents-office-and-records, not-a-real-id",
+        query="csv bom",
     )
     assert "csv bom needed" in mixed
     assert "Unknown category `not-a-real-id`" in mixed
-    ids = [
-        "documents-office-and-records",
-        "software-engineering-devops",
-        "other",
-        "skill-agent-meta-workflows",
-    ]
-    assert len(ids) > MAX_CONSULT_CATEGORIES
-    capped = render_consult_result(store, category=", ".join(ids))
-    assert "csv bom needed" in capped
-    assert "go run works" in capped
-    assert "pptx timeout" in capped
-    assert "Opened the first 3 categories" in capped
-    assert "`skill-agent-meta-workflows`" in capped
+    blocked = render_consult_result(
+        store,
+        category="all, documents-office-and-records",
+        query="csv bom",
+    )
+    assert "Do not mix" in blocked
+    assert "csv bom needed" not in blocked
 
 
 @pytest.mark.asyncio
@@ -1670,7 +1691,7 @@ async def test_disk_catalog_trails_listing_not_rule_body(tmp_path):
     assert attached[0].section == "ttse_catalog"
     body = attached[0].content or ""
     assert "documents-office-and-records" in body
-    assert "ttse_consult(category=" in body
+    assert "ttse_consult(category=" not in body
     assert "PresentBench grades slides.md" not in body
     rendered = manager.render(attached)
     assert "documents-office-and-records" in rendered

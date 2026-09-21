@@ -367,6 +367,8 @@ def test_render_catalog_markdown_empty_and_nonzero():
     listed = render_catalog_markdown({"documents-office-and-records": 2, "other": 0})
     assert "`documents-office-and-records`" in listed
     assert "other" not in listed
+    assert "When/use" not in listed
+    assert "ttse_consult(category=" not in listed
 
 
 def test_project_catalog_writes_markdown_and_by_cat(tmp_path):
