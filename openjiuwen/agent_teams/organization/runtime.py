@@ -34,6 +34,7 @@ from openjiuwen.agent_teams.organization.pool import get_process_org_manager, re
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     OrganizationSpec,
+    OrgAssignmentType,
     OrgTaskAggregationMode,
     OrgTaskFailureCode,
     OrgTaskReviewStatus,
@@ -1560,7 +1561,12 @@ class OrganizationRuntimeManager:
             "unless the parent task explicitly requests it. Only skip the claim when a required capability "
             "is actually absent or the claim fails because another team already claimed it."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            open_claim_task_id=task_id,
+        )
 
     def _schedule_delegated_turn(self, *, team_id: str, session_id: str, task_id: str, organization_id: str) -> None:
         prompt = (
@@ -1575,6 +1581,17 @@ class OrganizationRuntimeManager:
             "and complete it with the resulting output context and output abstract."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+
+    @staticmethod
+    def _is_unassigned_open_task(task: Any) -> bool:
+        """Return whether a queued claim wake still targets a claimable task."""
+        if task is None:
+            return False
+        if task.status is not OrgTaskStatus.OPEN:
+            return False
+        if task.assignment.assignment_type != OrgAssignmentType.UNASSIGNED:
+            return False
+        return task.assignment.team_id is None
 
     def schedule_summary_execution(
         self,
@@ -1930,6 +1947,7 @@ class OrganizationRuntimeManager:
         review_key: tuple[str, str, str] | None = None,
         summary_key: tuple[str, str, str] | None = None,
         claimed_task_id: str | None = None,
+        open_claim_task_id: str | None = None,
         relay_source: str | None = None,
         unclaimed_notification: tuple[tuple[str, str], dict[str, Any]] | None = None,
     ) -> None:
@@ -1942,6 +1960,7 @@ class OrganizationRuntimeManager:
                 "_org_review_key": review_key,
                 "_org_summary_key": summary_key,
                 "_org_claimed_task_id": claimed_task_id,
+                "_org_open_claim_task_id": open_claim_task_id,
                 "_org_relay_source": relay_source,
                 "_org_unclaimed_notification": unclaimed_notification,
             }
@@ -1991,14 +2010,20 @@ class OrganizationRuntimeManager:
                 review_key = None
                 summary_key = None
                 claimed_task_id = None
+                open_claim_task_id = None
                 turn_failed = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
                     summary_key = inputs.pop("_org_summary_key", None)
                     claimed_task_id = inputs.pop("_org_claimed_task_id", None)
+                    open_claim_task_id = inputs.pop("_org_open_claim_task_id", None)
                 try:
                     task_manager = getattr(getattr(entry.agent, "team_backend", None), "org_task_manager", None)
+                    if open_claim_task_id is not None and task_manager is not None:
+                        open_task = await task_manager.get_task(open_claim_task_id)
+                        if not self._is_unassigned_open_task(open_task):
+                            continue
                     if summary_key is not None and task_manager is not None:
                         summary_task = await task_manager.get_task(summary_key[2])
                         execution = await task_manager.get_summary_execution(summary_task_id=summary_key[2])

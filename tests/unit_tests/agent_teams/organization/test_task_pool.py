@@ -2817,6 +2817,9 @@ async def test_joined_leader_is_woken_to_consider_open_org_task(active_organizat
         )
     )
     await asyncio.sleep(0)
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     assert turns[0]["session_id"] == session_id
@@ -3874,6 +3877,9 @@ async def test_description_revised_wakes_capability_matched_team(active_organiza
         ),
         team_id="team-b",
     )
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     assert "legal-open" in turns[0]["inputs"]["query"]
@@ -3922,6 +3928,9 @@ async def test_completed_task_rewakes_team_for_matching_open_task(active_organiz
         ),
         team_id="team-b",
     )
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     prompt = turns[0]["inputs"]["query"]
@@ -4006,6 +4015,61 @@ async def test_non_owner_cannot_dissolve_organization_even_without_bindings(acti
     manager = agents["team-a"].team_backend.org_task_manager
     assert manager is not None
     assert (await manager.get_organization()) is not None
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_stale_open_claim(active_organization_runtime):
+    """A queued claim wake must not run after another turn completed the task."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(
+        org_runtime,
+        agents,
+        session_id,
+        "org-stale-open-claim",
+    )
+    created = await manager.create_task(
+        task_id="stale-open-claim",
+        title="Stale claim",
+        description="Complete before the queued claim turn runs.",
+        required_capabilities=["stale-test"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id=manager.organization_id,
+        ),
+    )
+    assert created.ok
+    assert (await manager.claim_task(task_id="stale-open-claim", team_id="team-a")).ok
+    assert (
+        await manager.set_root_aggregation_mode(
+            task_id="stale-open-claim",
+            team_id="team-a",
+            leader_id="leader-team-a",
+            aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+        )
+    ).ok
+    assert (await manager.start_task(task_id="stale-open-claim", team_id="team-a")).ok
+    assert (await manager.complete_task(task_id="stale-open-claim", team_id="team-a")).ok
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque(
+        [{"query": "Claim stale-open-claim", "_org_open_claim_task_id": "stale-open-claim"}]
+    )
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == []
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
 
 
 @pytest.mark.asyncio
