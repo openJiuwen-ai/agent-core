@@ -25,6 +25,7 @@ from openjiuwen.harness.tools.filesystem import EditFileTool, ReadFileTool, Writ
 from openjiuwen.rsi.harness_rsi.member_optimizer.action_groups import (
     filter_action_definitions,
 )
+from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
 from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import (
     ACTION_EXECUTION,
     ACTION_PLANNING,
@@ -95,7 +96,7 @@ def load_member_optimizer_model(model_config_ref: str) -> Model:
     try:
         client_config = ModelClientConfig.model_validate(client_data)
         request_config = ModelRequestConfig.model_validate(request_data) if request_data is not None else None
-        return Model(
+        return BudgetedRsiModel(
             model_client_config=client_config,
             model_config=request_config,
         )

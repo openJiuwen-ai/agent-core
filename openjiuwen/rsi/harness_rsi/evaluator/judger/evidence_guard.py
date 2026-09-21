@@ -164,6 +164,10 @@ class GuardedJudgeModel(Model):
         """Reduce output headroom only after trying to reclaim tool history."""
         options = dict(kwargs)
         requested = int(options.get("max_tokens") or self.model_config.max_tokens or MIN_OUTPUT_TOKENS)
+        if self.model_config.max_tokens is not None:
+            requested = min(requested, self.model_config.max_tokens)
+        if options.get("max_tokens") is not None:
+            options["max_tokens"] = requested
         window = GuardedJudgeModel.context_budget(self)
         if requested <= 0 or window <= 0:
             raise EvaluationInfrastructureError("Judge context window and output limit must be positive")

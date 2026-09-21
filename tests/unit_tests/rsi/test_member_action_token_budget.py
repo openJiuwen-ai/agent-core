@@ -108,7 +108,7 @@ async def test_artifact_generation_preserves_wire_model_options(
     assert len(requests) == 1
     body = requests[0]
     assert body["model"] == model_name
-    assert body["max_tokens"] == 100000
+    assert body["max_tokens"] == 16384
     if model_name.startswith("deepseek"):
         assert body["thinking"] == {"type": "disabled"}
     elif model_name == "qwen-plus":

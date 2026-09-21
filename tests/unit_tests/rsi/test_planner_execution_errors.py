@@ -54,10 +54,11 @@ def test_planner_read_tools_exclude_shell_and_writes():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["natural", "budget", "markup", "invalid_final"])
 async def test_native_planner_preserves_evidence_without_restarting_reads(monkeypatch, tmp_path, outcome):
-    from openjiuwen.core.foundation.llm import AssistantMessage, Model
+    from openjiuwen.core.foundation.llm import AssistantMessage
     from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
     from openjiuwen.rsi.harness_rsi.member_optimizer.action_planner import MemberActionPlannerAgent
     from openjiuwen.rsi.harness_rsi.member_optimizer.agents.profiles import ACTION_PLANNING
+    from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
     from openjiuwen.rsi.harness_rsi.member_optimizer.schema import (
         MechanismAttributionReport,
         RoleAttributionReport,
@@ -99,7 +100,7 @@ async def test_native_planner_preserves_evidence_without_restarting_reads(monkey
         assert len(payload["collected_evidence"]) == expected_reads
         return AssistantMessage(content=markup if outcome == "invalid_final" else json.dumps(plan))
 
-    monkeypatch.setattr(Model, "invoke", invoke)
+    monkeypatch.setattr(BudgetedRsiModel, "invoke", invoke)
     planner = MemberActionPlannerAgent(
         model_config_ref=str(model_path), workspace=tmp_path,
     )
