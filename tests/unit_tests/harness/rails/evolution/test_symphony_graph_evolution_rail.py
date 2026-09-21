@@ -183,7 +183,7 @@ async def _prepare(
 async def test_input_is_frozen_and_invoke_start_freezes_model_depth_and_snapshot() -> None:
     model_a = SimpleNamespace(invoke=AsyncMock())
     model_b = SimpleNamespace(invoke=AsyncMock())
-    identity = CapabilityIdentity("skill:a", "skill", "a")
+    identity = CapabilityIdentity("skill:a", "skill", "a", version="1.0.0")
     provider = SimpleNamespace(snapshot_capabilities=lambda: [identity])
     graph_snapshot = {
         "static_revision": "static-start",
@@ -317,25 +317,27 @@ async def test_legacy_framework_error_and_truncated_text_are_accepted_but_malfor
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert not issues
-    rail.trajectory_span_processor.on_end(
-        _span(
-            "tool.call",
-            4,
-            attributes={
-                semconv.GEN_AI_TOOL_CALL_RESULT: (
-                    '{"success": true, "data": {"skill_content": "large...<truncated 16270 chars>'
-                )
-            },
+    for span_id, suffix in (
+        (4, "...<truncated 16270 chars>"),
+        (5, "...<OTel attribute truncated: 16270 chars omitted>"),
+    ):
+        rail.trajectory_span_processor.on_end(
+            _span(
+                "tool.call",
+                span_id,
+                attributes={
+                    semconv.GEN_AI_TOOL_CALL_RESULT: (f'{{"success": true, "data": {{"skill_content": "large{suffix}')
+                },
+            )
         )
-    )
-    _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
-    assert not issues
+        _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
+        assert not issues
     rail.trajectory_span_processor.on_end(
-        _span("tool.call", 5, attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "{'broken': ]"})
+        _span("tool.call", 6, attributes={semconv.GEN_AI_TOOL_CALL_RESULT: "{'broken': ]"})
     )
     _, _, issues = rail._drain_for_hook(ctx, required_category="tool")
     assert {issue["code"] for issue in issues} == {"tool_payload_json_error"}
-    rail.trajectory_span_processor.on_end(_span("llm.call", 6))
+    rail.trajectory_span_processor.on_end(_span("llm.call", 7))
     rail._drain_for_hook(ctx)
     prepared = await rail._prepare_evolution_input(_trajectory(), ctx)
     assert prepared is not None
@@ -887,6 +889,102 @@ async def test_rail_preserves_repeated_skill_occurrences() -> None:
 
 
 @pytest.mark.asyncio
+async def test_otel_truncated_skill_result_reaches_execution_graph_with_long_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = AsyncMock()
+    rail = SymphonyGraphEvolutionRail(
+        trajectory_span_processor=TrajectorySpanProcessor(),
+        submit_evolution=callback,
+        graph_snapshot_provider=_graph_snapshot,
+    )
+    ctx = _ctx()
+    await rail.before_invoke(ctx)
+    rail.trajectory_span_processor.on_end(_span("agent.main", 1))
+    rail.trajectory_span_processor.on_end(
+        _span(
+            "tool.skill_tool",
+            2,
+            parent_span_id=1,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"skill_name": "weather"}),
+                semconv.GEN_AI_TOOL_CALL_RESULT: json.dumps({"success": True, "data": {"temperature": 20}}),
+            },
+        )
+    )
+    rail.trajectory_span_processor.on_end(
+        _span(
+            "tool.skill_tool",
+            3,
+            parent_span_id=1,
+            attributes={
+                semconv.GEN_AI_TOOL_NAME: "skill_tool",
+                semconv.GEN_AI_TOOL_CALL_ARGUMENTS: json.dumps({"skill_name": "travel-guide-generator"}),
+                semconv.GEN_AI_TOOL_CALL_RESULT: (
+                    '{"success": true, "data": {"guide": "large...<OTel attribute truncated: 16270 chars omitted>'
+                ),
+                semconv.OJ_TOOL_AUTHORITATIVE: True,
+            },
+        )
+    )
+    _, _, issues = rail._drain_for_hook(ctx)
+    assert not issues
+    prepared = await rail._prepare_evolution_input(_trajectory(), ctx)
+    assert prepared is not None
+    skills = tuple(fragment for fragment in prepared.execution_fragments if fragment.capability_type == "skill")
+    assert [fragment.capability_name for fragment in skills] == ["weather", "travel-guide-generator"]
+
+    source, target = skills
+    candidate = SymphonyEdgeCandidate(
+        "weather-to-travel",
+        source,
+        target,
+        (
+            f"{source.trace_id}#span={source.anchor_span_id}",
+            f"{target.trace_id}#span={target.anchor_span_id}",
+        ),
+        ("observed_order",),
+    )
+    unresolved = SymphonyEdgeDecision(
+        candidate.candidate_id,
+        source.fragment_id,
+        target.fragment_id,
+        "insufficient_evidence",
+        "awaiting_model_evidence",
+        (),
+        "deterministic",
+        "none",
+    )
+    monkeypatch.setattr(rail_module, "build_symphony_edge_candidates", lambda *args, **kwargs: (candidate,))
+    monkeypatch.setattr(rail_module, "build_model_edge_decisions", lambda value: (unresolved,))
+    prepared = replace(
+        prepared,
+        capability_snapshot=(
+            CapabilityIdentity("skill:weather", "skill", "weather", version="1.0.0"),
+            CapabilityIdentity(
+                "skill:travel-guide-generator",
+                "skill",
+                "travel-guide-generator",
+                version="1.0.0",
+            ),
+        ),
+        edge_evaluator_llm=SimpleNamespace(
+            invoke=AsyncMock(return_value={"status": "success", "reason": "判" * 171 + "a"})
+        ),
+    )
+
+    await rail.run_evolution(prepared)
+
+    execution_graph = callback.await_args.args[1]
+    assert execution_graph["graph"]["edges"]
+    assert execution_graph["graph"]["edges"][0]["metadata"] == {"success": True}
+    capture = rail._current_capture()
+    assert capture is not None
+    rail._unsubscribe_capture(capture)
+
+
+@pytest.mark.asyncio
 async def test_private_invoke_history_is_bounded_and_reports_truncation() -> None:
     callback = AsyncMock()
     rail = SymphonyGraphEvolutionRail(
@@ -1406,8 +1504,8 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
         messages=(),
         execution_fragments=(fragment_a, fragment_b),
         capability_snapshot=(
-            CapabilityIdentity("skill:a", "skill", "a"),
-            CapabilityIdentity("tool:b", "tool", "b"),
+            CapabilityIdentity("skill:a", "skill", "a", version="1.0.0"),
+            CapabilityIdentity("tool:b", "tool", "b", version="1.0.0"),
         ),
         query="q",
         outcome="success",
@@ -1426,7 +1524,10 @@ async def test_run_evolution_sends_every_candidate_to_frozen_model_and_callback(
     execution_graph = callback.await_args.args[1]
     assert execution_graph["graph"]["edges"]
     assert execution_graph["graph_snapshot"]["static_revision"] == "static-start"
-    assert execution_graph["graph"]["nodes"]["skill:a"] == {"label": "skill"}
+    assert execution_graph["graph"]["nodes"]["skill:a"] == {
+        "label": "skill",
+        "metadata": {"capability_type": "skill", "version": "1.0.0"},
+    }
     assert callback.await_args.kwargs == {"session_id": "unknown", "capture_mode": "agent"}
 
 
@@ -1603,7 +1704,14 @@ def test_summary_redacts_binary_and_bounds_values() -> None:
     assert "...<truncated>..." in compact["normal"]
 
 
-def test_summary_recovers_representative_branches_from_truncated_nested_json() -> None:
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "...<truncated 2048 chars>",
+        "...<OTel attribute truncated: 2048 chars omitted>",
+    ],
+)
+def test_summary_recovers_representative_branches_from_truncated_nested_json(suffix: str) -> None:
     content = json.dumps(
         {
             "schema_version": "1.0",
@@ -1619,7 +1727,7 @@ def test_summary_recovers_representative_branches_from_truncated_nested_json() -
         [[{"file_path": "/tmp/guide.json", "content": content}], {"session_id": "private-session"}],
         ensure_ascii=False,
     )
-    truncated = f"{wrapped[: wrapped.index('tail')]}...<truncated 2048 chars>"
+    truncated = f"{wrapped[: wrapped.index('tail')]}{suffix}"
 
     event_text = rail_module._summary_tool_event(
         {"name": "write_file", "input": truncated, "output": {"success": True}},
@@ -1754,6 +1862,10 @@ def test_summary_keeps_utf8_valid_when_unicode_escape_is_truncated() -> None:
         '{"safe":{"value":"keep"},"bad":1.e...<truncated 4 chars>',
         '{"content":"unterminated ordinary text}',
         "plain text...<truncated 20 chars>",
+        '{"safe": true...<OTel attribute truncated: 0 chars omitted>',
+        '{"safe": true...<OTel attribute truncated: -1 chars omitted>',
+        '{"safe": true...<OTel attribute truncated: 4 chars>',
+        '{"safe": true...<OTel attribute truncated: 4 chars omitted> trailing',
     ],
 )
 def test_summary_does_not_recover_nonstandard_or_invalid_json(value: str) -> None:
@@ -2419,7 +2531,7 @@ async def test_interrupt_lifecycle_matrix_preserves_complete_input(
     roots = {"value": _root(1)}
     monkeypatch.setattr(evolution_rail_module, "get_root_span", lambda: roots["value"])
     initial_model = SimpleNamespace(invoke=AsyncMock())
-    identity = CapabilityIdentity("skill:alpha", "skill", "alpha")
+    identity = CapabilityIdentity("skill:alpha", "skill", "alpha", version="1.0.0")
     snapshot = _graph_snapshot()
     received = []
     callback = AsyncMock()
@@ -2738,7 +2850,7 @@ async def test_team_member_spans_and_repeated_completion_do_not_duplicate_submis
 
 def test_prepared_input_preserves_legacy_positional_constructor() -> None:
     trajectory = _trajectory()
-    identity = CapabilityIdentity("skill:a", "skill", "a")
+    identity = CapabilityIdentity("skill:a", "skill", "a", version="1.0.0")
     # Historical positional order includes inherited skill_name before the
     # original Symphony fields, with capability_snapshot in position seven.
     prepared = SymphonyGraphEvolutionInput(

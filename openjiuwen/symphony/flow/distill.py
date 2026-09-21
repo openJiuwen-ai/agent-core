@@ -64,12 +64,16 @@ def normalize_execution_graph(
         metadata = raw_node.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         capability_type = str(metadata.get("capability_type") or raw_node.get("label") or "skill").strip() or "skill"
+        inputs = _normalize_capability_ports(metadata.get("inputs"))
+        outputs = _normalize_capability_ports(metadata.get("outputs"))
         nodes[node_id] = {
             "label": str(raw_node.get("label") or ""),
             "metadata": {
                 "capability_type": capability_type,
                 "version": str(metadata.get("version") or ""),
-                "content_hash": str(metadata.get("content_hash") or ""),
+                "description": str(metadata.get("description") or ""),
+                "inputs": inputs,
+                "outputs": outputs,
             },
         }
 
@@ -114,6 +118,27 @@ def normalize_execution_graph(
         outcome=outcome,
         graph=normalized_graph,
     )
+
+
+def _normalize_capability_ports(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for raw in value:
+        if not isinstance(raw, dict):
+            continue
+        name = str(raw.get("name") or "").strip()
+        port_type = str(raw.get("type") or "").strip()
+        if not name or not port_type:
+            continue
+        item: dict[str, Any] = {"name": name, "type": port_type}
+        if isinstance(raw.get("required"), bool):
+            item["required"] = raw["required"]
+        description = str(raw.get("description") or "").strip()
+        if description:
+            item["description"] = description
+        normalized.append(item)
+    return normalized
 
 
 @dataclass
@@ -294,7 +319,7 @@ def break_cycles(
 
 def _build_skill_pack(
     member_ids: list[str],
-    node_versions: dict[str, dict[str, str]],
+    node_metadata: dict[str, dict[str, Any]],
     edges: list[tuple[str, str, str]],
     stats: dict[tuple[str, str, str], EdgeStats],
 ) -> dict[str, Any]:
@@ -318,7 +343,7 @@ def _build_skill_pack(
         "nodes": {
             member_id: {
                 "label": "capability",
-                "metadata": node_versions.get(member_id, {}),
+                "metadata": node_metadata.get(member_id, {}),
             }
             for member_id in sorted(member_ids)
         },
@@ -403,18 +428,22 @@ def distill_group(
     records = group.records
     pack_edges = list(group.edges)
 
-    node_versions: dict[str, dict[str, str]] = {}
+    node_metadata: dict[str, dict[str, Any]] = {}
     for record in records:
         for node_id, node in (record.graph.get("nodes") or {}).items():
-            current = node_versions.setdefault(node_id, {})
+            current = node_metadata.setdefault(node_id, {})
             metadata = node.get("metadata") or {}
-            for key in ("capability_type", "version", "content_hash"):
+            for key in ("capability_type", "version", "description"):
                 value = str(metadata.get(key) or "")
                 if value and not current.get(key):
                     current[key] = value
+            for key in ("inputs", "outputs"):
+                value = metadata.get(key)
+                if isinstance(value, list) and value and not current.get(key):
+                    current[key] = value
 
     member_ids = sorted({node for edge in pack_edges for node in (edge[0], edge[1])})
-    skill_pack = _build_skill_pack(member_ids, node_versions, pack_edges, stats)
+    skill_pack = _build_skill_pack(member_ids, node_metadata, pack_edges, stats)
     quality = compute_quality(records, pack_edges)
     status, grade = resolve_status_grade(
         quality,

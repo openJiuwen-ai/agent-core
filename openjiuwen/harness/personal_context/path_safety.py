@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import ntpath
 import os
+import re
 import stat
 import unicodedata
 from pathlib import Path, PurePosixPath
@@ -22,6 +24,38 @@ WINDOWS_DEVICE_NAMES = frozenset(
 MAX_SEGMENT_CHARS = 80
 MAX_SEGMENT_UTF8_BYTES = 240
 SEMANTIC_NAME_MAX_CHARS = 20
+_LEGACY_SERVICE_SEGMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_HASHED_SERVICE_SEGMENT = re.compile(r"\.service-[0-9a-f]{64}")
+
+
+def validate_service_id(value: object) -> str:
+    """Validate a display name using the frontend's UTF-16 length limit."""
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("service_id must be a non-empty string")
+    text = value.strip()
+    if len(text.encode("utf-16-le", errors="surrogatepass")) > 1000:
+        raise ValueError("service_id must be at most 500 characters")
+    return text
+
+
+def service_storage_segment(service_id: str) -> str:
+    """Keep portable legacy paths; encode new names outside that namespace."""
+
+    text = validate_service_id(service_id)
+    if (
+        _LEGACY_SERVICE_SEGMENT.fullmatch(text)
+        and not text.endswith(".")
+        and text.split(".", 1)[0].casefold() not in WINDOWS_DEVICE_NAMES
+    ):
+        return text
+    return ".service-" + hashlib.sha256(text.encode("utf-8", errors="surrogatepass")).hexdigest()
+
+
+def service_storage_segment_is_safe(segment: str) -> bool:
+    """Recognize disk components during cleanup without encoding them again."""
+
+    return bool(_LEGACY_SERVICE_SEGMENT.fullmatch(segment) or _HASHED_SERVICE_SEGMENT.fullmatch(segment))
 
 
 def _extended_path(path: Path) -> Path:

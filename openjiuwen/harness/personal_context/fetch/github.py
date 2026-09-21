@@ -38,6 +38,7 @@ from openjiuwen.harness.personal_context.fetch.retry import (
     retry_provider_read,
 )
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
+from openjiuwen.harness.personal_context.path_safety import service_storage_segment
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 _API_ROOT = "https://api.github.com"
@@ -73,7 +74,7 @@ def _safe_detail(exc: BaseException, token: str) -> str:
 
 
 def _service_root(home: Path, service_id: str) -> Path:
-    return home / "materialized-sources" / "github" / service_id
+    return home / "materialized-sources" / "github" / service_storage_segment(service_id)
 
 
 def _candidate_path(home: Path, service_id: str) -> Path:

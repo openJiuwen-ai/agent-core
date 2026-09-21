@@ -62,6 +62,7 @@ from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
+    _match_observability_truncated_suffix,
     project_symphony_execution_fragments,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
@@ -84,7 +85,6 @@ _SUMMARY_VALUE_MAX_BYTES = 512
 _SUMMARY_MAX_KEYS = 12
 _SUMMARY_MAX_BRANCHES = 6
 _SUMMARY_MAX_BRANCH_VALUES = 2
-_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
 _SUMMARY_REDACTED_KEY_TOKENS = (
     "accesskey",
     "apikey",
@@ -659,7 +659,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
                     continue
                 stripped = value.strip()
-                if stripped.startswith("[ERROR]:") or _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped):
+                if stripped.startswith("[ERROR]:") or _match_observability_truncated_suffix(stripped):
                     continue
                 if not _is_structured_tool_payload(value):
                     issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))
@@ -1668,7 +1668,7 @@ def _is_possible_partial_json_scalar(value: str) -> bool:
 
 
 def _structured_truncated_summary(value: str) -> Mapping[str, Any] | None:
-    match = _OBSERVABILITY_TRUNCATED_SUFFIX.search(value)
+    match = _match_observability_truncated_suffix(value)
     if match is None:
         return None
     prefix = value[: match.start()].rstrip()

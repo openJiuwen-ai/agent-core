@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.security.path_checker import is_sensitive_path
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
+from openjiuwen.harness.personal_context.path_safety import validate_service_id
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
 
 Provider = Literal[
@@ -352,7 +353,7 @@ class PersonalContextFetchServiceConfig(BaseModel):
     @field_validator("service_id")
     @classmethod
     def validate_service_id(cls, value: str) -> str:
-        return _safe_segment(value, name="service_id")
+        return validate_service_id(value)
 
 
 class PersonalContextConfig(BaseModel):

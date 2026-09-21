@@ -49,6 +49,10 @@ _DEFAULT_MAX_ITEMS = 100
 _MAX_PAGES = 100
 _CLI_TIMEOUT_SECONDS = 30.0
 _CLI_OUTPUT_BYTES = 4 * 1024 * 1024
+_CONFIG_INIT_URL_TIMEOUT_SECONDS = 60.0
+_CONFIG_INIT_URL_RE = re.compile(r"https://[^\s\"'<>]+")
+_CONFIG_INIT_URL_HOSTS = ("feishu.cn", "larksuite.com")
+_NOT_CONFIGURED_SUBTYPE = "not_configured"
 _LARK_CLI_INSTALL_SPEC = "@larksuite/cli@1.0.94"
 _LARK_CLI_INSTALL_TIMEOUT = 300.0
 _LARK_CLI_INSTALL_COOLDOWN = 300.0
@@ -189,6 +193,16 @@ def _cli_error_message(stdout: str, stderr: str) -> str:
         if isinstance(message, str) and message.strip():
             return _safe_cli_output(message)
     return _safe_cli_output(stdout or stderr or "lark-cli command failed")
+
+
+def _cli_error_subtype(payload: object) -> str | None:
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            subtype = error.get("subtype")
+            if isinstance(subtype, str) and subtype.strip():
+                return subtype.strip()
+    return None
 
 
 def _decoded_process_output(value: object) -> str:
@@ -496,10 +510,27 @@ def supported_read_scopes() -> tuple[str, ...]:
     return _SUPPORTED_FEISHU_READ_SCOPES
 
 
-async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool, set[str]]:
-    payload = await _run_lark_cli_json(["auth", "status", "--json", "--verify"])
+async def _lark_cli_auth_status(required_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+    """Probe the CLI identity; the third element is ``False`` when lark-cli needs ``config init``."""
+
+    try:
+        payload = await _run_lark_cli_json(["auth", "status", "--json", "--verify"])
+    except BaseError as exc:
+        # 非零退出时，cli 的结构化错误 JSON 由 _coerce_lark_cli_error 收敛为文案，
+        # 原始输出留在 cause（CalledProcessError）里，从中恢复 subtype 做识别。
+        cause = exc.cause
+        if isinstance(cause, subprocess.CalledProcessError):
+            raw = _decoded_process_output(cause.output) or _decoded_process_output(cause.stderr)
+            with contextlib.suppress(BaseError):
+                if _cli_error_subtype(_parse_cli_json(raw)) == _NOT_CONFIGURED_SUBTYPE:
+                    return False, set(), False
+        raise
+    if isinstance(payload, Mapping) and payload.get("ok") is False:
+        if _cli_error_subtype(payload) == _NOT_CONFIGURED_SUBTYPE:
+            return False, set(), False
+        raise _fetch_error(f"lark-cli auth status failed: {_cli_error_message(json.dumps(payload), '')}")
     ready, granted = _user_auth_status(payload)
-    return ready and set(required_scopes).issubset(granted), granted
+    return ready and set(required_scopes).issubset(granted), granted, True
 
 
 async def _lark_cli_begin_authorization(required_scopes: tuple[str, ...]) -> tuple[str, str, str]:
@@ -530,6 +561,89 @@ async def _lark_cli_begin_authorization(required_scopes: tuple[str, ...]) -> tup
 
 async def _lark_cli_finish_authorization(device_code: str, *, timeout_seconds: float) -> None:
     await _run_lark_cli(["auth", "login", "--device-code", device_code], timeout_seconds=timeout_seconds)
+
+
+def _extract_config_init_url(text: str) -> str | None:
+    """Pick the feishu/lark verification URL out of free-form ``config init`` output."""
+
+    for match in _CONFIG_INIT_URL_RE.finditer(text):
+        url = match.group(0).rstrip(".,);]")
+        host = (urlsplit(url).hostname or "").lower()
+        if any(host == item or host.endswith(f".{item}") for item in _CONFIG_INIT_URL_HOSTS):
+            return url
+    return None
+
+
+async def _read_config_init_url(process: asyncio.subprocess.Process) -> str:
+    """Read the merged init output until the verification URL shows up."""
+
+    if process.stdout is None:
+        raise _fetch_error("lark-cli config init output is unavailable")
+    buffer = ""
+    while True:
+        try:
+            chunk = await asyncio.wait_for(process.stdout.read(4096), timeout=_CONFIG_INIT_URL_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise _fetch_error("lark-cli config init did not provide a verification URL in time") from exc
+        if not chunk:
+            detail = _cli_error_message(buffer, "") if buffer.strip() else ""
+            raise _fetch_error(detail or "lark-cli config init exited without a verification URL")
+        buffer += chunk.decode("utf-8", errors="replace")
+        if len(buffer) > _CLI_OUTPUT_BYTES:
+            tail_bytes = _CLI_OUTPUT_BYTES // 2
+            buffer = buffer[-tail_bytes:]
+        url = _extract_config_init_url(buffer)
+        if url is not None:
+            return url
+
+
+async def _lark_cli_begin_config_init() -> tuple[asyncio.subprocess.Process, str]:
+    """Spawn ``lark-cli config init --new`` and capture its verification URL.
+
+    The init flow provisions the CLI's own app configuration through a browser
+    handshake: the process prints a verification URL (JSON or plain text, on
+    either stream) and then blocks until the user completes the setup.
+    """
+
+    binary = shutil.which("lark-cli")
+    if binary is None:
+        await _ensure_lark_cli_installed()
+        binary = shutil.which("lark-cli")
+        if binary is None:
+            raise FileNotFoundError("lark-cli is not installed in the deployment environment")
+    kwargs: dict[str, object] = {
+        "stdout": asyncio.subprocess.PIPE,
+        # init 的错误 JSON 走 stderr、URL 走 stdout 都有可能，合并成单流读取。
+        "stderr": asyncio.subprocess.STDOUT,
+    }
+    if sys.platform == "win32":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    process = await asyncio.create_subprocess_exec(binary, "config", "init", "--new", **kwargs)
+    try:
+        url = await _read_config_init_url(process)
+    except BaseException:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise
+    return process, url
+
+
+async def _lark_cli_finish_config_init(process: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
+    """Wait for the user-driven ``config init`` handshake to settle."""
+
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+    except asyncio.CancelledError:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise
+    except asyncio.TimeoutError as exc:
+        with contextlib.suppress(Exception):
+            process.kill()
+        raise _fetch_error("lark-cli config init timed out") from exc
+    if process.returncode != 0:
+        detail = _cli_error_message(_decoded_process_output(stdout), "")
+        raise _fetch_error(f"lark-cli config init failed: {detail}")
 
 
 def _find_nested_text(value: object, key: str) -> str | None:
@@ -568,7 +682,7 @@ def _find_nested_number(value: object, key: str) -> float | None:
 
 async def _ensure_lark_cli_authorized(config: object) -> None:
     required = _required_scopes_for_service(config)
-    ready, granted = await _lark_cli_auth_status(required)
+    ready, granted, _configured = await _lark_cli_auth_status(required)
     if not ready:
         if not granted:
             raise _fetch_error("Feishu lark-cli user authorization is required; call authorize_provider")
