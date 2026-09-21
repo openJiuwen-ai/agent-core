@@ -67,6 +67,10 @@ _TERMINAL_INFERENCE_TYPES = {
     "inference_failed": ModelRequestStatus.FAILED,
     "inference_cancelled": ModelRequestStatus.CANCELLED,
 }
+_TOOL_SEARCH_OUTPUT_TYPE = "tool_search_output"
+# Codex names an MCP namespace with this prefix, while a tool item names the
+# server without it; the definitions follow the item so they can be joined.
+_MCP_NAMESPACE_PREFIX = "mcp__"
 _TOOL_CALL_TYPES = frozenset(
     {"function_call", "custom_tool_call", "local_shell_call", "mcp_tool_call", "tool_search_call"},
 )
@@ -78,7 +82,7 @@ _TOOL_OUTPUT_TYPES = frozenset(
         "mcp_tool_call_output",
         # The CLI answers its own tool search; the result is still a tool
         # result, not something the assistant said.
-        "tool_search_output",
+        _TOOL_SEARCH_OUTPUT_TYPE,
     },
 )
 _TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text", "summary_text", "reasoning_text"})
@@ -601,7 +605,7 @@ class CodexRequestObserver:
                 continue
             call_id = str(item.get("call_id") or "")
             if call_id:
-                self._tool_outputs[call_id] = _tool_output(item.get("output", item.get("result")))
+                self._tool_outputs[call_id] = _tool_output(_tool_output_payload(item))
 
     async def _emit_uncovered_tools(self, *, force: bool) -> None:
         """Report the tool calls the App Server never announced as items.
@@ -857,11 +861,13 @@ def _without_tool_catalogue(items: list[Any] | None) -> list[Any] | None:
 
 
 def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -> Any:
-    """Return the offered tools as flat ``{name, description, parameters}``.
+    """Return the tools this request could call, flat and named as its items are.
 
     Codex states its tools either as a request field or as catalogue input
-    items, and groups them into namespaces; a reader of a tool schema wants
-    each callable tool, named as the model addresses it.
+    items, and groups them into namespaces. It also defers MCP tools: they are
+    absent from the catalogue until the model finds them with its tool search,
+    and from then on the search result is the only statement of their schemas
+    -- so a request whose conversation carries one offers those tools too.
     """
     offered = request.get("tools")
     if not isinstance(offered, list) or not offered:
@@ -872,6 +878,14 @@ def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -
             for tool in (item.get("tools") or [])
         ]
     definitions = _flatten_tools(offered, namespace="")
+    known = {definition["name"] for definition in definitions}
+    for item in conversation or ():
+        if not isinstance(item, dict) or item.get("type") != _TOOL_SEARCH_OUTPUT_TYPE:
+            continue
+        for definition in _flatten_tools(item.get("tools"), namespace=""):
+            if definition["name"] not in known:
+                known.add(definition["name"])
+                definitions.append(definition)
     return definitions or None
 
 
@@ -884,7 +898,8 @@ def _flatten_tools(tools: Any, *, namespace: str) -> list[dict[str, Any]]:
             continue
         name = str(tool.get("name") or "")
         if tool.get("type") == "namespace":
-            definitions.extend(_flatten_tools(tool.get("tools"), namespace=name))
+            nested = name.removeprefix(_MCP_NAMESPACE_PREFIX)
+            definitions.extend(_flatten_tools(tool.get("tools"), namespace=nested))
             continue
         if not name:
             continue
@@ -1003,7 +1018,7 @@ def _item_message(message_id: str, item: dict[str, Any]) -> TurnMessage | None:
         block = ContentBlock(
             block_id=f"{message_id}:0",
             kind="tool_result",
-            content=_tool_output(item.get("output", item.get("result"))),
+            content=_tool_output(_tool_output_payload(item)),
             data={"call_id": str(item.get("call_id") or "")},
         )
         return TurnMessage(message_id=message_id, role=MessageRole.TOOL, content=(block,))
@@ -1063,6 +1078,18 @@ def _output_message(message_id: str, items: list[Any]) -> TurnMessage | None:
     if not blocks:
         return None
     return TurnMessage(message_id=message_id, role=MessageRole.ASSISTANT, content=tuple(blocks))
+
+
+def _tool_output_payload(item: dict[str, Any]) -> Any:
+    """Return what one tool output item carried back.
+
+    A tool search answers with the catalogue it found, under ``tools``; every
+    other tool output carries ``output`` (or ``result``). Reading only the
+    latter left a search looking like it returned nothing.
+    """
+    if item.get("type") == _TOOL_SEARCH_OUTPUT_TYPE and item.get("tools") is not None:
+        return item.get("tools")
+    return item.get("output", item.get("result"))
 
 
 def _tool_output(output: Any) -> Any:

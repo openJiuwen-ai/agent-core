@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from openjiuwen.harness_protocol import (
     MessageRole,
     ModelRequestEvent,
     TurnLifecycleEvent,
+    json_value_to_builtin,
 )
 from openjiuwen.harness_providers.codex import CodexHarness, CodexHarnessConfig
 from openjiuwen.harness_providers.codex import observation as observation_module
@@ -451,7 +453,29 @@ async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
                     "request_payload": {
                         "previous_response_id": "resp-1",
                         "input": [
-                            {"type": "tool_search_output", "id": "tso-1", "call_id": "call-search", "output": "found 1"},
+                            {
+                                "type": "tool_search_output",
+                                "id": "tso-1",
+                                "call_id": "call-search",
+                                "status": "completed",
+                                # A search answers with the catalogue it found,
+                                # which is also the only statement of those
+                                # tools' schemas.
+                                "tools": [
+                                    {
+                                        "type": "namespace",
+                                        "name": "mcp__openjiuwen_team",
+                                        "tools": [
+                                            {
+                                                "type": "function",
+                                                "name": "send_message",
+                                                "description": "talk",
+                                                "parameters": {"type": "object"},
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
                         ],
                     },
                 },
@@ -491,9 +515,18 @@ async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
     assert started.data["announced"] is False
     assert completed.data["duration_ms"] == 12
     assert completed.data["is_error"] is False
-    assert completed.data["result"] == "found 1"
-    # Session settings the CLI resolved to travel with the request.
+    # What the search returned is its result, not an empty one.
+    assert "send_message" in json.dumps(json_value_to_builtin(completed.data["result"]), ensure_ascii=False)
     second = [event.event for event in events if isinstance(event.event, ModelRequestEvent)][1]
+    # A deferred MCP tool is offered from the moment the search found it, named
+    # the way the tool item names it so the two can be joined.
+    definitions = json_value_to_builtin(second.tool_definitions) or []
+    assert [definition["name"] for definition in definitions] == ["openjiuwen_team.send_message"]
+    assert definitions[0]["parameters"] == {"type": "object"}
+    # The model reads the search result as a tool message, not as its own words.
+    tool_messages = [message for message in second.input_messages if message.role is MessageRole.TOOL]
+    assert [block.data["call_id"] for message in tool_messages for block in message.content] == ["call-search"]
+    # Session settings the CLI resolved to travel with the request.
     assert second.data["codex"]["context_window"] == 1000000
     assert second.data["codex"]["approval_policy"] == "never"
     await harness.stop()
