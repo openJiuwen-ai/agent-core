@@ -193,21 +193,6 @@ def _friendly_pruned_reason(
             context_parts.append(value)
     context = " ".join(context_parts).lower()
 
-    source_markers = (
-        "topic_survey",
-        "survey",
-        "research",
-        "source",
-        "download",
-        "fetch",
-        "retriev",
-        "文献",
-        "资料",
-    )
-    for marker in source_markers:
-        if marker in context:
-            return "资料获取质量不佳，已剪枝。"
-
     execution_markers = (
         "experiment_execution",
         "execution",
@@ -220,6 +205,11 @@ def _friendly_pruned_reason(
     for marker in execution_markers:
         if marker in context:
             return "实验验证效果不佳，已剪枝。"
+
+    source_markers = ("topic_survey", "survey", "文献", "资料")
+    for marker in source_markers:
+        if marker in context:
+            return "资料获取质量不佳，已剪枝。"
 
     # Do not use a bare "paper" marker: it matches task_mode names
     # (modify_paper / create_new_paper) and mislabels constructor failures
