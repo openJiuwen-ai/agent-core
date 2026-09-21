@@ -134,8 +134,8 @@ class MemberWorkspaceBinder:
             )
         return root
 
+    @staticmethod
     def _resolve_and_migrate_real_dir(
-        self,
         binding: TeamMemberBinding,
         mode: str,
     ) -> Path:
