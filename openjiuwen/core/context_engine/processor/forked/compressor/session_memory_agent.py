@@ -67,7 +67,11 @@ class SessionMemoryAbilityManager(AbilityManager):
         session,
         parallel_tool_calls: bool = True,
         tag=None,
+        *,
+        on_tool_result=None,
     ):
+        # on_tool_result reaches the base class, which reports the allowed calls it runs;
+        # rejected calls are answered here and not reported.
         tool_calls = self._normalize_tool_calls(tool_call)
         allowed = []
         rejected = []
@@ -115,6 +119,7 @@ class SessionMemoryAbilityManager(AbilityManager):
                 session=session,
                 parallel_tool_calls=parallel_tool_calls,
                 tag=tag,
+                on_tool_result=on_tool_result,
             )
         allowed_results_by_identity = {id(call): result for call, result in zip(allowed, allowed_results)}
         return [rejected_results.get(id(call)) or allowed_results_by_identity[id(call)] for call in tool_calls]

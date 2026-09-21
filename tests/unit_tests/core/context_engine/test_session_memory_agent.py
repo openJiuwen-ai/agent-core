@@ -184,6 +184,36 @@ async def test_session_memory_manager_rejects_edit_outside_pending_file(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_session_memory_manager_forwards_on_tool_result_to_base(tmp_path, monkeypatch):
+    manager = SessionMemoryAbilityManager(owner_id="session-memory")
+    manager.set_allowed_notes_path(tmp_path / "pending.md")
+    seen = {}
+
+    async def base_execute(self, ctx, tool_call, session, parallel_tool_calls=True, tag=None, *, on_tool_result=None):
+        seen["on_tool_result"] = on_tool_result
+        return [(None, SimpleNamespace(tool_call_id=call.id)) for call in tool_call]
+
+    monkeypatch.setattr(
+        "openjiuwen.core.context_engine.processor.forked.compressor.session_memory_agent.AbilityManager.execute",
+        base_execute,
+    )
+    call = ToolCall(
+        id="call-edit",
+        type="function",
+        name="edit_file",
+        arguments=json.dumps({"file_path": str(tmp_path / "pending.md")}),
+    )
+
+    def report(tool_call, message):
+        return None
+
+    results = await manager.execute(ctx=None, tool_call=call, session=None, on_tool_result=report)
+
+    assert results[0][1].tool_call_id == "call-edit"
+    assert seen["on_tool_result"] is report
+
+
+@pytest.mark.asyncio
 async def test_session_memory_compressor_renders_committed_notes(tmp_path):
     notes_path = tmp_path / "session_context.md"
     notes_path.write_text("# Current State\nworking", encoding="utf-8")

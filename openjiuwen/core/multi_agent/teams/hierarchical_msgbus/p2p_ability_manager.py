@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Callable, List, Optional, Tuple, Union, TYPE_CHECKING
 
 from openjiuwen.core.common.logging import multi_agent_logger as logger
 from openjiuwen.core.foundation.llm import ToolCall, ToolMessage
@@ -55,7 +55,9 @@ class P2PAbilityManager(AbilityManager):
         tool_call: Union[ToolCall, List[ToolCall]],
         session: Session,
         tag=None,
-        parallel_tool_calls: bool = True
+        parallel_tool_calls: bool = True,
+        *,
+        on_tool_result: Optional[Callable[[ToolCall, Optional[ToolMessage]], None]] = None,
     ) -> List[Tuple[Any, ToolMessage]]:
         """Execute tool calls, dispatching AgentCard calls via P2P and others via super().
 
@@ -64,6 +66,9 @@ class P2PAbilityManager(AbilityManager):
             tool_call: Single ToolCall or list of ToolCalls from the LLM.
             session:   Current agent session.
             tag:       Optional resource tag forwarded to base class.
+            on_tool_result: Forwarded to the base class, which reports the calls
+                            it runs. AgentCard calls dispatched over P2P are
+                            not reported.
 
         Returns:
             List of ``(result, ToolMessage)`` tuples in the original call order.
@@ -91,6 +96,7 @@ class P2PAbilityManager(AbilityManager):
                 session,
                 parallel_tool_calls=parallel_tool_calls, 
                 tag=tag,
+                on_tool_result=on_tool_result,
             )
 
         semaphore = self._get_semaphore()
@@ -106,7 +112,8 @@ class P2PAbilityManager(AbilityManager):
                 [tool_calls[i] for i in other_indices], 
                 session, 
                 parallel_tool_calls=parallel_tool_calls,
-                tag=tag
+                tag=tag,
+                on_tool_result=on_tool_result,
             )
             if other_indices
             else None
@@ -165,12 +172,27 @@ class P2PAbilityManager(AbilityManager):
         tool_call: ToolCall,
         session: Session,
         tag=None,
+        callback_context: Optional[AgentCallbackContext] = None,
     ) -> Tuple[Any, ToolMessage]:
-        """Route AgentCard calls via P2P send; delegate all others to super()."""
+        """Route AgentCard calls via P2P send; delegate all others to super().
+
+        Args:
+            tool_call:        The tool call to execute.
+            session:          Current agent session.
+            tag:              Optional resource tag forwarded to the base class.
+            callback_context: Callback context for the tool call, forwarded to
+                              the base class so that tools opting into
+                              ``accepts_tool_callback_context`` still receive it.
+        """
         tool_name = tool_call.name
 
         if tool_name not in self._agents:
-            return await super()._execute_single_tool_call(tool_call, session, tag)
+            return await super()._execute_single_tool_call(
+                tool_call=tool_call,
+                session=session,
+                tag=tag,
+                callback_context=callback_context,
+            )
 
         import json as _json
 
