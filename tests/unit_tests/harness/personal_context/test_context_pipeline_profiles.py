@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Mapping, cast
 
 import pytest
@@ -212,6 +213,7 @@ async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_processing_batch(0),
@@ -227,6 +229,152 @@ async def test_filesystem_rules_normalizes_legacy_root_page_before_increment(tmp
     )
     assert moved.parent != sandbox / "context"
     assert "../../source-meta/" in moved.read_text(encoding="utf-8")
+
+
+def test_modern_context_normalization_skips_legacy_rewrite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    page = context_root / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    page.write_text("# Page\n\nModern content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    before = {path.relative_to(context_root): path.read_bytes() for path in context_root.rglob("*.md")}
+
+    def unexpected_rewrite(*_args: object, **_kwargs: object) -> set[str]:
+        raise AssertionError("modern nested Context must not run legacy layout rewrite")
+
+    monkeypatch.setattr(context_pipeline, "_apply_context_layout_normalization", unexpected_rewrite)
+
+    baseline, baseline_paths = context_pipeline._normalize_context_candidate(
+        context_root,
+        source_root=source_root,
+        run_time=datetime(2026, 9, 14, tzinfo=timezone.utc),
+        max_pages_per_directory=20,
+        max_subdirectories_per_directory=20,
+    )
+
+    assert baseline_paths == {relative: relative for relative in baseline}
+    assert {path.relative_to(context_root): path.read_bytes() for path in context_root.rglob("*.md")} == before
+
+
+@pytest.mark.asyncio
+async def test_agent_context_normalization_keeps_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    context_root = tmp_path / "workspace" / "context"
+    source_root = tmp_path / "workspace" / "source-meta"
+    page = context_root / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    page.write_text("# Page\n\nModern content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    original_normalize = context_pipeline._normalize_context_candidate
+
+    def slow_normalize(*args: object, **kwargs: object) -> tuple[dict[str, tuple[int, str]], dict[str, str]]:
+        time.sleep(0.2)
+        return original_normalize(*args, **kwargs)  # type: ignore[arg-type]
+
+    async def fail_after_preparation(**_kwargs: object) -> str:
+        raise build_error(StatusCode.DEEPAGENT_RUNTIME_ERROR, error_msg="stop after preparation")
+
+    monkeypatch.setattr(context_pipeline, "_normalize_context_candidate", slow_normalize)
+    monkeypatch.setattr(context_pipeline, "run_personal_context_agent", fail_after_preparation)
+    attempt = asyncio.create_task(
+        service._filesystem_with_fallback(
+            run_id="run-progress",
+            processed={"documents": [], "blocks": [], "deleted_ids": []},
+            sandbox=sandbox,
+            batch=_processing_batch(0),
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = loop.time() - heartbeat_started
+    with pytest.raises(BaseError):
+        await attempt
+
+    assert heartbeat_elapsed < 0.1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_stage", ["validation", "commit"])
+async def test_publication_filesystem_stages_keep_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_stage: str,
+) -> None:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    sandbox = tmp_path / "sandbox"
+    page = sandbox / "context" / "topics" / "page.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("# Page\n\nPublished content.\n", encoding="utf-8")
+    (page.parent / "description.md").write_text("# Topics\n\n- [Page](page.md)\n", encoding="utf-8")
+    (sandbox / "context" / "description.md").write_text(
+        "# Context\n\n- [Topics](topics/description.md)\n",
+        encoding="utf-8",
+    )
+
+    async def skip_semantic_finalize(*_args: object, **_kwargs: object) -> set[str]:
+        return set()
+
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", skip_semantic_finalize)
+    if slow_stage == "validation":
+
+        def slow_validation(*_args: object, **_kwargs: object) -> None:
+            time.sleep(0.2)
+
+        monkeypatch.setattr(context_pipeline, "_validate_candidate", slow_validation)
+    else:
+        original_publish = context_pipeline._copy_and_publish_tree
+
+        def slow_publish(*args: object, **kwargs: object) -> set[str]:
+            time.sleep(0.2)
+            return original_publish(*args, **kwargs)  # type: ignore[arg-type]
+
+        monkeypatch.setattr(context_pipeline, "_copy_and_publish_tree", slow_publish)
+
+    publication = asyncio.create_task(
+        service._publish_processed(
+            service_id="local",
+            run_id="run-responsive",
+            batch=_processing_batch(0),
+            processed={
+                "documents": [],
+                "blocks": [],
+                "deleted_ids": [],
+                "source_link_book": {},
+                "_filesystem_candidate_prepared": True,
+                "_filesystem_candidate_profile": "agent",
+            },
+            sandbox=sandbox,
+        )
+    )
+
+    loop = asyncio.get_running_loop()
+    heartbeat_started = loop.time()
+    await asyncio.sleep(0.01)
+    heartbeat_elapsed = loop.time() - heartbeat_started
+    await publication
+
+    assert heartbeat_elapsed < 0.1
 
 
 @pytest.mark.asyncio
@@ -260,6 +408,7 @@ async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
     monkeypatch.setattr(context_pipeline, "run_personal_context_agent", unexpected_agent)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_processing_batch(0),
@@ -270,6 +419,46 @@ async def test_retaining_agent_run_uses_rules_and_preserves_existing_paths(
     assert (sandbox / "context" / "topics" / "existing.md").read_text(encoding="utf-8") == (
         "# Existing\n\nRetained content.\n"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("profile", ["rules", "balanced", "agent"])
+async def test_retaining_run_never_calls_embedding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: str,
+) -> None:
+    queue: asyncio.Queue[object] = asyncio.Queue()
+    service = ContextPipelineService(home=tmp_path, config=_config(profile), input_queue=queue)
+    service._embedding = cast(Any, object())
+    original_finalize = context_pipeline._finalize_semantic_context_hybrid
+    finalize_calls = 0
+
+    async def unexpected_embedding(_texts: object) -> list[list[float]] | None:
+        raise AssertionError("retention must not call embedding")
+
+    def unexpected_source_prior(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("retention must not scan the full Context source prior")
+
+    async def finalize_without_embedding(*args: object, **kwargs: object) -> None:
+        nonlocal finalize_calls
+        finalize_calls += 1
+        assert kwargs["embed_texts"] is None
+        assert kwargs["refresh_related_documents"] is False
+        await original_finalize(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(service, "_embed_semantic_texts", unexpected_embedding)
+    monkeypatch.setattr(context_pipeline, "_source_distribution_for_id", unexpected_source_prior)
+    monkeypatch.setattr(context_pipeline, "_finalize_semantic_context_hybrid", finalize_without_embedding)
+    await service.start()
+    try:
+        for tag, payload in (("batch", _batch()), ("retain", None)):
+            completion = asyncio.get_running_loop().create_future()
+            await queue.put((tag, "local", "run-retain", payload, completion))
+            await completion
+        assert finalize_calls == 1
+    finally:
+        await service.stop(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
@@ -309,6 +498,7 @@ async def test_agent_fallback_does_not_migrate_invalid_legacy_root_page(
 
     with pytest.raises(ExecutionError, match="root may only contain"):
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed={"documents": [], "blocks": [], "deleted_ids": []},
             sandbox=sandbox,
             batch=_processing_batch(0),
@@ -832,6 +1022,7 @@ async def test_balanced_groups_at_most_five_upserts_without_retry(
         sandbox=sandbox,
         batch=_processing_batch(item_count),
         service_id="local",
+        run_id="run-progress",
     )
 
     calls = _page_model_calls()
@@ -910,6 +1101,7 @@ async def test_balanced_uses_shared_configured_capacity_in_prompt_and_publish(
         sandbox=sandbox,
         batch=_processing_batch(3),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -994,6 +1186,7 @@ async def test_balanced_enriches_pages_without_rewriting_existing_directory_body
         sandbox=sandbox,
         batch=_processing_batch(2),
         service_id="local",
+        run_id="run-progress",
     )
 
     candidate = sandbox / "context"
@@ -1053,6 +1246,7 @@ async def test_balanced_long_display_titles_keep_full_h1_with_one_model_call(
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     candidate = sandbox / "context"
@@ -1123,6 +1317,7 @@ async def test_balanced_preexisting_managed_source_updates_title_and_summary_wit
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -1181,6 +1376,7 @@ async def test_balanced_invalid_items_fall_back_individually_and_later_groups_co
         sandbox=sandbox,
         batch=_processing_batch(7),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "balanced"
@@ -1224,6 +1420,7 @@ async def test_balanced_zero_accepted_items_returns_publishable_rules_candidate(
         sandbox=sandbox,
         batch=_processing_batch(1),
         service_id="local",
+        run_id="run-progress",
     )
 
     assert result == "rules"
@@ -1412,6 +1609,7 @@ async def test_filesystem_agent_noop_for_non_empty_run_is_repairable_and_falls_b
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={
             "documents": [
                 {
@@ -2076,6 +2274,7 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
     if profile == "agent":
         with pytest.raises(Exception) as raised:
             await service._filesystem_with_fallback(
+                run_id="run-progress",
                 processed=processed,
                 sandbox=sandbox,
                 batch=FetchBatch(batch_id="finish-run", items=[]),
@@ -2084,6 +2283,7 @@ async def test_filesystem_production_prompt_bounds_deleted_ids_documents_and_tit
     else:
         assert (
             await service._filesystem_with_fallback(
+                run_id="run-progress",
                 processed=processed,
                 sandbox=sandbox,
                 batch=FetchBatch(batch_id="finish-run", items=[]),
@@ -3663,15 +3863,15 @@ async def test_hybrid_capacity_route_uses_dense_only_full_leaf_match_in_one_embe
     source_id = _write_atomic_source(
         source_root,
         locator=locator,
-        title="向量召回实验",
+        title="近邻排序实验",
         provider="github",
         observed_at="2026-06-12T00:00:00Z",
     )
     document: Mapping[str, object] = {
         "logical_id": locator,
         "revision_id": "rev-new",
-        "title": "向量召回实验",
-        "markdown": "向量索引、召回排序与近邻搜索评估。\n",
+        "title": "近邻排序实验",
+        "markdown": "近似最近邻、索引构建与查询延迟测量。\n",
     }
     title, headings, preview = context_pipeline._document_semantic_parts(document)
     sparse_query = context_pipeline._semantic_fields(title, headings, preview)
@@ -3679,7 +3879,7 @@ async def test_hybrid_capacity_route_uses_dense_only_full_leaf_match_in_one_embe
         sparse_query,
         [context_pipeline._directory_semantic_fields(full_topic)],
     )
-    assert sparse_ranked[0][1] > 0.22
+    assert sparse_ranked[0][1] < context_pipeline._SEMANTIC_ACCEPT_FLOOR
     assert context_pipeline._accepted_semantic_directory(sparse_query, [full_topic]) is None
     embedding_calls = 0
 
@@ -3769,7 +3969,7 @@ async def test_provider_neutral_rules_uses_partition_label_for_directory_page_an
         embedding_calls += 1
         if embedding_calls == 1:
             assert texts[0] == semantic_label
-            return [[1.0, 0.0], *([[0.0, 1.0]] * (len(texts) - 1))]
+            return [[1.0, 0.0], *([[-1.0, 0.0]] * (len(texts) - 1))]
         return [[1.0, 0.0] for _ in texts]
 
     await context_pipeline._apply_rules_increment(
@@ -3962,6 +4162,7 @@ async def test_agent_to_balanced_cannot_move_new_readable_page_back_into_full_le
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -4007,26 +4208,26 @@ async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empt
     existing_page = existing_target / "既有会议.md"
     existing_page.write_text("# BM25 团队会议\n\n历史决策与会议记录。\n", encoding="utf-8")
     context_pipeline._render_context_navigation(formal_context)
-    locator = "file:///sources/bm25-routing.md"
+    locator = "file:///sources/sorting-notes.md"
     source_id = _write_atomic_source(
         source_root,
         locator=locator,
-        title="BM25 检索实践",
+        title="排序算法笔记",
         provider="github",
         observed_at="2026-06-12T00:00:00Z",
     )
     document: Mapping[str, object] = {
         "logical_id": locator,
         "revision_id": "rev-new",
-        "title": "BM25 检索实践",
-        "markdown": "稀疏召回、相关性排序与查询优化。\n",
+        "title": "排序算法笔记",
+        "markdown": "快速排序、归并排序与堆排序的实现。\n",
     }
     title, headings, preview = context_pipeline._document_semantic_parts(document)
     ranked = context_pipeline._rank_semantic_candidates(
         context_pipeline._semantic_fields(title, headings, preview),
         [context_pipeline._directory_semantic_fields(existing_target)],
     )
-    assert 0.0 < ranked[0][1] < context_pipeline._DIRECTORY_ACCEPT_SCORE
+    assert ranked[0][1] < context_pipeline._SEMANTIC_ACCEPT_FLOOR
 
     async def failed_agent(**kwargs: object) -> str:
         del kwargs
@@ -4040,9 +4241,9 @@ async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empt
                 "items": [
                     {
                         "item_index": 0,
-                        "summary": "BM25 检索实践的有界摘要。",
-                        "page_title": "BM25 检索实践",
-                        "keywords": [str("BM25 检索实践")[:40]],
+                        "summary": "排序算法笔记的有界摘要。",
+                        "page_title": "排序算法笔记",
+                        "keywords": [str("排序算法笔记")[:40]],
                     }
                 ]
             },
@@ -4054,6 +4255,7 @@ async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empt
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=_batch(),
@@ -4066,7 +4268,7 @@ async def test_agent_to_balanced_keeps_legal_rules_route_instead_of_leaving_empt
     candidate = sandbox / "context"
     assert (candidate / existing_page.relative_to(formal_context)).is_file()
     incoming_page = context_pipeline._managed_pages_by_source(candidate)[source_id]
-    rules_directory = candidate / context_pipeline._safe_semantic_name("BM25 检索实践")
+    rules_directory = candidate / context_pipeline._safe_semantic_name("排序算法笔记")
     assert incoming_page.parent == rules_directory
     assert incoming_page.parent != candidate / existing_target.relative_to(formal_context)
     assert all(
@@ -4127,6 +4329,7 @@ async def test_agent_authored_pending_path_does_not_trigger_profile_fallback(
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={
             "documents": [
                 {
@@ -4686,6 +4889,7 @@ async def test_direct_agent_prompt_and_inputs_do_not_expose_prescribed_fallback_
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=batch,
@@ -4724,6 +4928,8 @@ async def test_agent_success_validates_pages_and_does_not_serialize_raw_snapshot
             "validate_result",
             "max_pages_per_directory",
             "max_subdirectories_per_directory",
+            "recluster_plan",
+            "recluster_apply",
         }
         profile = _message_profile(messages, kwargs)
         calls.append((profile, content))
@@ -4839,6 +5045,7 @@ async def test_filesystem_agent_undeclared_root_is_a_non_fallback_security_error
     )
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -4913,6 +5120,7 @@ async def test_filesystem_agent_content_validation_can_fallback_to_balanced(
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", capture_balanced_attempt)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5019,6 +5227,7 @@ async def test_agent_originated_fallback_preserves_over_capacity_existing_paths(
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5034,6 +5243,439 @@ async def test_agent_originated_fallback_preserves_over_capacity_existing_paths(
     assert not (sandbox / "context" / "rogue.md").exists()
 
 
+def _recluster_sandbox(tmp_path: Path) -> tuple[ContextPipelineService, Path, Path]:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    (tmp_path / "workspace" / "source-meta").mkdir(parents=True)
+    sandbox = tmp_path / "sandbox"
+    context_root = sandbox / "context"
+    topic = context_root / "旧主题"
+    topic.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    (topic / "description.md").write_text("# 旧主题\n", encoding="utf-8")
+    (topic / "页面一.md").write_text("# 页面一\n\n[页面二](页面二.md)\n", encoding="utf-8")
+    (topic / "页面二.md").write_text("# 页面二\n\n正文。\n", encoding="utf-8")
+    (topic / "页面三.md").write_text("# 页面三\n\n保留内容。\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(context_root)
+    return service, sandbox, context_root
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_proposes_capacity_fix_without_touching_tree(tmp_path: Path) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent", max_pages_per_directory=2, max_subdirectories_per_directory=2),
+        input_queue=asyncio.Queue(),
+    )
+    (tmp_path / "workspace" / "source-meta").mkdir(parents=True)
+    sandbox = tmp_path / "sandbox"
+    context_root = sandbox / "context"
+    crowded = context_root / "拥挤主题"
+    crowded.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    (crowded / "description.md").write_text("# 拥挤主题\n", encoding="utf-8")
+    for index in range(1, 4):
+        (crowded / f"页面{index}.md").write_text(f"# 页面{index}\n\n关于主题 {index} 的既有内容。\n", encoding="utf-8")
+    single = context_root / "单页主题"
+    single.mkdir()
+    (single / "description.md").write_text("# 单页主题\n", encoding="utf-8")
+    (single / "一页.md").write_text("# 一页\n\n单页内容。\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(context_root)
+    before = {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")}
+
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+    planned = await plan(["拥挤主题"])
+    mapping = planned["mapping"]
+
+    # The crowded directory holds 3 pages over the configured 2-page capacity,
+    # so the planner must propose moving at least one page; planning itself is
+    # read-only and the agent reviews the JSON before anything is applied.
+    assert mapping
+    assert all(key.startswith("拥挤主题/") and key.endswith(".md") for key in mapping)
+    assert all(value.endswith(".md") and "/" in value.strip("/") for value in mapping.values())
+    assert {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")} == before
+    assert (await plan(["单页主题"]))["mapping"] == {}
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_apply_moves_pages_rewrites_links_and_preserves_unmapped(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    changed = await apply(
+        {"旧主题/页面一.md": "新主题/页面一.md", "旧主题/页面二.md": "新主题/子组/页面二.md"},
+        ["旧主题"],
+    )
+
+    assert changed
+    assert (context_root / "新主题" / "页面一.md").is_file()
+    assert (context_root / "新主题" / "子组" / "页面二.md").is_file()
+    rewritten = (context_root / "新主题" / "页面一.md").read_text(encoding="utf-8")
+    assert "[页面二](子组/页面二.md)" in rewritten
+    # Pages absent from the mapping stay put: partial, agent-edited mappings are legal.
+    assert (context_root / "旧主题" / "页面三.md").is_file()
+    assert "新主题" in (context_root / "description.md").read_text(encoding="utf-8")
+    context_pipeline._validate_description_navigation(
+        context_root,
+        final_context_root=context_root,
+        source_root=tmp_path / "workspace" / "source-meta",
+    )
+
+    await apply({"旧主题/页面三.md": "新主题/页面三.md"}, ["旧主题"])
+
+    assert not (context_root / "旧主题").exists()
+    assert "旧主题" not in (context_root / "description.md").read_text(encoding="utf-8")
+    context_pipeline._validate_description_navigation(
+        context_root,
+        final_context_root=context_root,
+        source_root=tmp_path / "workspace" / "source-meta",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mapping", "match"),
+    [
+        ({}, "empty"),
+        ({"旧主题/description.md": "新主题/description.md"}, "description.md"),
+        ({"旧主题/页面一.md": "新主题/页面一.txt"}, ".md extension"),
+        ({"旧主题/页面一.md": "页面一.md"}, "directly under context"),
+        ({"单页主题/一页.md": "新主题/一页.md"}, "outside the selected scope"),
+        (
+            {"旧主题/页面一.md": "新主题/同名.md", "旧主题/页面二.md": "新主题/同名.md"},
+            "duplicated",
+        ),
+    ],
+)
+async def test_agent_recluster_apply_preflight_rejects_unsafe_mappings(
+    tmp_path: Path,
+    mapping: dict[str, str],
+    match: str,
+) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    single = context_root / "单页主题"
+    single.mkdir()
+    (single / "一页.md").write_text("# 一页\n", encoding="utf-8")
+    before = {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")}
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match=match):
+        await apply(mapping, ["旧主题"])
+
+    assert {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")} == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope_paths", "match"),
+    [
+        (["不存在"], "not a directory"),
+        ([".."], "unsafe"),
+        (["旧主题/页面一.md"], "not a directory"),
+    ],
+)
+async def test_agent_recluster_scope_must_stay_inside_context(
+    tmp_path: Path,
+    scope_paths: list[str],
+    match: str,
+) -> None:
+    service, sandbox, _context_root = _recluster_sandbox(tmp_path)
+    plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match=match):
+        await plan(scope_paths)
+    with pytest.raises(BaseError, match=match):
+        await apply({"旧主题/页面一.md": "新主题/页面一.md"}, scope_paths)
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_scope_rejects_empty_directory(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    (context_root / "空目录").mkdir()
+    plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match="empty directory"):
+        await plan(["空目录"])
+    with pytest.raises(BaseError, match="empty directory"):
+        await apply({"旧主题/页面一.md": "新主题/页面一.md"}, ["空目录"])
+
+
+def _recluster_directory_sandbox(tmp_path: Path) -> tuple[ContextPipelineService, Path, Path]:
+    service = ContextPipelineService(home=tmp_path, config=_config("agent"), input_queue=asyncio.Queue())
+    (tmp_path / "workspace" / "source-meta").mkdir(parents=True)
+    sandbox = tmp_path / "sandbox"
+    context_root = sandbox / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    coffee_body = "咖啡研磨水温粉水比萃取注水闷蒸风味滤杯手冲壶豆子烘焙酸度甜感醇度干净度余韵浓度杯测产地。"
+    for name, heading, body in (
+        ("咖啡手冲", "咖啡冲煮", coffee_body),
+        ("咖啡拉花", "咖啡冲煮", coffee_body),
+        ("爬虫笔记", "爬虫采集", "请求解析代理入库调度反爬中间件管道去重增量。"),
+    ):
+        directory = context_root / name
+        directory.mkdir()
+        (directory / "description.md").write_text(f"# {heading}\n\n{body}\n", encoding="utf-8")
+        (directory / "第一页.md").write_text(f"# {heading}第一页\n\n{body}\n", encoding="utf-8")
+        (directory / "第二页.md").write_text(f"# {heading}第二页\n\n{body}\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(context_root)
+    return service, sandbox, context_root
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_groups_directories_without_embedder(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_directory_sandbox(tmp_path)
+    before = {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")}
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+
+    mapping = (await plan(["."]))["mapping"]
+
+    # The two coffee directories cluster into one new group as whole-directory
+    # entries; the unrelated crawler directory shares no cluster and stays put.
+    assert set(mapping) == {"咖啡手冲", "咖啡拉花"}
+    groups = {PurePosixPath(value).parent.as_posix() for value in mapping.values()}
+    assert len(groups) == 1
+    group = groups.pop()
+    assert len(PurePosixPath(group).parts) == 1
+    assert mapping["咖啡手冲"] == f"{group}/咖啡手冲"
+    assert mapping["咖啡拉花"] == f"{group}/咖啡拉花"
+    assert {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")} == before
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_with_embedder_anchors_groups_under_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, sandbox, context_root = _recluster_directory_sandbox(tmp_path)
+    scope = context_root / "父目录"
+    scope.mkdir()
+    for name in ("咖啡手冲", "咖啡拉花", "爬虫笔记"):
+        (context_root / name).rename(scope / name)
+    context_pipeline._render_context_navigation(context_root)
+    service._embedding = cast(Any, object())
+
+    async def fake_embed(texts: object) -> list[list[float]]:
+        return [[-1.0, 0.0] if "爬虫" in str(text) else [1.0, 0.0] for text in cast(list[str], texts)]
+
+    monkeypatch.setattr(service, "_embed_semantic_texts", fake_embed)
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+
+    mapping = (await plan(["父目录"]))["mapping"]
+
+    assert set(mapping) == {"父目录/咖啡手冲", "父目录/咖啡拉花"}
+    groups = {PurePosixPath(value).parent.as_posix() for value in mapping.values()}
+    assert len(groups) == 1
+    group = groups.pop()
+    assert PurePosixPath(group).parent.as_posix() == "父目录"
+    assert mapping["父目录/咖啡手冲"] == f"{group}/咖啡手冲"
+    assert mapping["父目录/咖啡拉花"] == f"{group}/咖啡拉花"
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_with_group_names_files_items_into_named_groups(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_directory_sandbox(tmp_path)
+    before = {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")}
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+
+    planned = await plan(["."], ["咖啡", "爬虫"])
+
+    mapping = planned["mapping"]
+    # Each item files into the semantically matching named group; every group
+    # becomes one new directory under the scope root.
+    assert mapping["咖啡手冲"] == "咖啡/咖啡手冲"
+    assert mapping["咖啡拉花"] == "咖啡/咖啡拉花"
+    assert mapping["爬虫笔记"] == "爬虫/爬虫笔记"
+    assert planned["unassigned"] == []
+    assert planned["over_capacity"] == []
+    assert {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")} == before
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_with_group_names_pins_matching_directory(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_directory_sandbox(tmp_path)
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+
+    planned = await plan(["."], ["咖啡手冲", "新口味"])
+
+    mapping = planned["mapping"]
+    # 咖啡手冲 names an in-scope directory: it stays put and its coffee peer
+    # is filed into it.  爬虫笔记 matches neither group and is reported as
+    # unassigned instead of being forced into a group.
+    assert "咖啡手冲" not in mapping
+    assert mapping["咖啡拉花"] == "咖啡手冲/咖啡拉花"
+    assert planned["unassigned"] == ["爬虫笔记"]
+    assert planned["over_capacity"] == []
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_plan_with_group_names_reports_projected_over_capacity(tmp_path: Path) -> None:
+    service = ContextPipelineService(
+        home=tmp_path,
+        config=_config("agent", max_pages_per_directory=2, max_subdirectories_per_directory=2),
+        input_queue=asyncio.Queue(),
+    )
+    (tmp_path / "workspace" / "source-meta").mkdir(parents=True)
+    sandbox = tmp_path / "sandbox"
+    context_root = sandbox / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    for index in range(1, 4):
+        (context_root / f"咖啡页面{index}.md").write_text(
+            f"# 咖啡页面{index}\n\n咖啡研磨水温粉水比萃取注水闷蒸风味滤杯手冲。\n",
+            encoding="utf-8",
+        )
+    context_pipeline._render_context_navigation(context_root)
+    plan, _apply = service._agent_recluster_hooks(sandbox)
+
+    planned = await plan(["."], ["咖啡"])
+
+    mapping = planned["mapping"]
+    assert set(mapping) == {f"咖啡页面{index}.md" for index in range(1, 4)}
+    assert all(value.startswith("咖啡/") for value in mapping.values())
+    assert planned["unassigned"] == []
+    over_capacity = planned["over_capacity"]
+    assert len(over_capacity) == 1
+    assert "3 ordinary pages" in over_capacity[0]
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_apply_moves_whole_directory_preserving_descriptions(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    topic = context_root / "旧主题"
+    nested = topic / "子组"
+    nested.mkdir()
+    (nested / "深页.md").write_text("# 深页\n\n[页面一](../页面一.md)\n", encoding="utf-8")
+    (nested / "description.md").write_text("# 子组\n\n子组简介。\n", encoding="utf-8")
+    (topic / "description.md").write_text("# 旧主题\n\n手工简介。\n", encoding="utf-8")
+    shell = context_root / "纯嵌套"
+    (shell / "内层").mkdir(parents=True)
+    (shell / "description.md").write_text("# 纯嵌套\n\n嵌套简介。\n", encoding="utf-8")
+    (shell / "内层" / "深页.md").write_text("# 深页\n\n内容。\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(context_root)
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    changed = await apply({"旧主题": "新组/旧主题", "纯嵌套": "新组/纯嵌套"}, ["."])
+
+    assert changed
+    assert (context_root / "新组" / "旧主题" / "页面一.md").is_file()
+    assert (context_root / "新组" / "旧主题" / "子组" / "深页.md").is_file()
+    assert (context_root / "新组" / "纯嵌套" / "内层" / "深页.md").is_file()
+    assert not (context_root / "旧主题").exists()
+    # 纯嵌套 never held a direct page: its description-only husk is cleaned too.
+    assert not (context_root / "纯嵌套").exists()
+    topic_description = (context_root / "新组" / "旧主题" / "description.md").read_text(encoding="utf-8")
+    assert "手工简介。" in topic_description
+    nested_description = (context_root / "新组" / "旧主题" / "子组" / "description.md").read_text(encoding="utf-8")
+    assert "子组简介。" in nested_description
+    shell_description = (context_root / "新组" / "纯嵌套" / "内层" / "description.md").read_text(encoding="utf-8")
+    assert "嵌套简介。" in shell_description
+    page = (context_root / "新组" / "旧主题" / "页面一.md").read_text(encoding="utf-8")
+    assert "[页面二](页面二.md)" in page
+    deep_page = (context_root / "新组" / "旧主题" / "子组" / "深页.md").read_text(encoding="utf-8")
+    assert "[页面一](../页面一.md)" in deep_page
+    assert "新组" in (context_root / "description.md").read_text(encoding="utf-8")
+    context_pipeline._validate_description_navigation(
+        context_root,
+        final_context_root=context_root,
+        source_root=tmp_path / "workspace" / "source-meta",
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_apply_moves_directory_into_existing_directory(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    single = context_root / "单页主题"
+    single.mkdir()
+    (single / "一页.md").write_text("# 一页\n", encoding="utf-8")
+    context_pipeline._render_context_navigation(context_root)
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    await apply({"旧主题": "单页主题/旧主题"}, ["."])
+
+    assert (context_root / "单页主题" / "旧主题" / "页面一.md").is_file()
+    assert (context_root / "单页主题" / "一页.md").is_file()
+    assert not (context_root / "旧主题").exists()
+    context_pipeline._validate_description_navigation(
+        context_root,
+        final_context_root=context_root,
+        source_root=tmp_path / "workspace" / "source-meta",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mapping", "scope_paths", "match"),
+    [
+        ({"旧主题": "新组"}, ["."], "Context directories cannot be placed directly under context/"),
+        ({"旧主题": "旧主题/子/旧主题"}, ["."], "into itself"),
+        ({"不存在的目录": "新组/不存在的目录"}, ["."], "source directory is invalid"),
+        ({"单页主题": "新组/单页主题"}, ["旧主题"], "outside the selected scope"),
+        ({"旧主题": "组/旧主题", "旧主题/子组": "组/旧主题/子组"}, ["."], "directory entries cannot be nested"),
+        ({"旧主题": "组/旧主题", "单页主题": "组/旧主题/单页主题"}, ["."], "directory targets cannot be nested"),
+        ({"旧主题": "单页主题/旧主题", "单页主题": "组/单页主题"}, ["."], "into a directory being moved"),
+        (
+            {"旧主题": "组/旧主题", "旧主题/页面一.md": "组/页面一.md"},
+            ["."],
+            "page entries cannot be inside a moved directory",
+        ),
+        (
+            {"旧主题": "组/旧主题", "单页主题/一页.md": "旧主题/一页.md"},
+            ["."],
+            "page targets cannot be inside a moved directory",
+        ),
+        ({"旧主题": "组/同名", "单页主题": "组/同名"}, ["."], "directory targets are duplicated"),
+        ({"空壳目录": "组/空壳目录"}, ["."], "has no pages to move"),
+        ({"旧主题": "待整理/旧主题"}, ["."], "into a reserved directory"),
+        ({"旧主题/页面一.md": "组/页面一"}, ["."], ".md extension"),
+    ],
+)
+async def test_agent_recluster_apply_preflight_rejects_unsafe_directory_mappings(
+    tmp_path: Path,
+    mapping: dict[str, str],
+    scope_paths: list[str],
+    match: str,
+) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    single = context_root / "单页主题"
+    single.mkdir()
+    (single / "一页.md").write_text("# 一页\n", encoding="utf-8")
+    nested = context_root / "旧主题" / "子组"
+    nested.mkdir()
+    (nested / "深页.md").write_text("# 深页\n", encoding="utf-8")
+    shell = context_root / "空壳目录"
+    shell.mkdir()
+    (shell / "description.md").write_text("# 空壳目录\n", encoding="utf-8")
+    before = {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")}
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match=match):
+        await apply(mapping, scope_paths)
+
+    assert {path.relative_to(context_root).as_posix() for path in context_root.rglob("*")} == before
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_apply_preflight_rejects_directory_with_non_markdown_file(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    (context_root / "旧主题" / "图片.png").write_bytes(b"png")
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match="may only contain Markdown files"):
+        await apply({"旧主题": "组/旧主题"}, ["."])
+
+
+@pytest.mark.asyncio
+async def test_agent_recluster_apply_preflight_rejects_reserved_source_directory(tmp_path: Path) -> None:
+    service, sandbox, context_root = _recluster_sandbox(tmp_path)
+    pending = context_root / "待整理"
+    pending.mkdir()
+    (pending / "杂页.md").write_text("# 杂页\n", encoding="utf-8")
+    _plan, apply = service._agent_recluster_hooks(sandbox)
+
+    with pytest.raises(BaseError, match="cannot move a reserved directory"):
+        await apply({"待整理": "组/待整理"}, ["."])
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fallback_profile", ["balanced", "rules"])
 async def test_agent_fallback_preserves_every_baseline_path_and_uses_page_metadata_pending_route(
@@ -5043,7 +5685,7 @@ async def test_agent_fallback_preserves_every_baseline_path_and_uses_page_metada
 ) -> None:
     service = ContextPipelineService(
         home=tmp_path,
-        config=_config("agent", max_pages_per_directory=1, max_subdirectories_per_directory=2),
+        config=_config("agent", max_pages_per_directory=2, max_subdirectories_per_directory=2),
         input_queue=asyncio.Queue(),
     )
     formal_context = tmp_path / "workspace" / "context"
@@ -5145,6 +5787,7 @@ async def test_agent_fallback_preserves_every_baseline_path_and_uses_page_metada
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5235,6 +5878,7 @@ async def test_direct_balanced_cannot_launder_new_deterministic_fallback_with_mo
     sandbox.mkdir()
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5302,6 +5946,7 @@ async def test_direct_balanced_fallback_to_rules_reclusters_over_capacity_contex
     }
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5372,6 +6017,7 @@ async def test_filesystem_agent_root_layout_failure_falls_back_from_clean_baseli
     monkeypatch.setattr(context_pipeline, "Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5423,6 +6069,7 @@ async def test_filesystem_rules_fallback_discards_failed_candidate(
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", failed_balanced)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5488,6 +6135,7 @@ async def test_filesystem_agent_missing_markdown_link_does_not_force_fallback(
     monkeypatch.setattr("openjiuwen.harness.personal_context.context_pipeline.Model", _FakeDirectModel)
 
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5533,6 +6181,7 @@ async def test_balanced_invalid_output_does_not_retry(tmp_path: Path, monkeypatc
         "actual_profile": "balanced",
     }
     result = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=_batch(),
@@ -5597,6 +6246,7 @@ async def test_balanced_delete_only_skips_page_model_and_does_not_restore_page(
             alias_targets=aliases,
             deleted_source_ids={source_id},
             service_id="local",
+            run_id="run-progress",
         )
         == "rules"
     )
@@ -5683,6 +6333,7 @@ async def test_balanced_model_error_publishes_rules_candidate(tmp_path: Path, mo
     }
     assert (
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -5722,6 +6373,7 @@ async def test_filesystem_candidate_prepare_disk_error_is_non_fallback(
     }
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=_batch(),
@@ -5934,6 +6586,7 @@ async def test_filesystem_agent_can_update_an_existing_page_without_repair(
 
     assert (
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=second_sandbox,
             batch=new_batch,
@@ -6387,6 +7040,7 @@ async def test_materialized_source_is_copied_once_and_not_exposed_to_balanced_fa
     monkeypatch.setattr(service, "_filesystem_balanced_model_attempt", balanced_success)
 
     profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed=processed,
         sandbox=sandbox,
         batch=batch,
@@ -6462,6 +7116,7 @@ async def test_filesystem_non_model_agent_statuses_do_not_fallback(
 
     with pytest.raises(Exception) as raised:
         await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed={
                 "documents": [],
                 "blocks": [],
@@ -6703,6 +7358,47 @@ def test_reference_graph_accepts_nested_descriptions_and_virtual_alias(tmp_path:
         alias_targets={"[[ref:0]]": source_id},
         repairable=True,
     )
+
+
+def test_reference_graph_groups_pages_by_directory_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate, final_context_root, source_root, source_id = _reference_graph_roots(tmp_path)
+    pages = {
+        "description.md": "# Context\n\n"
+        + "".join(f"- [Topic {index}](topic-{index}/description.md)\n" for index in range(20))
+    }
+    for index in range(20):
+        relative = f"topic-{index}/page.md"
+        source_link = _source_link(
+            page_relative=relative,
+            final_context_root=final_context_root,
+            source_root=source_root,
+            source_id=source_id,
+        )
+        pages[f"topic-{index}/description.md"] = f"# Topic {index}\n\n- [Page](page.md)\n"
+        pages[relative] = f"# Page {index}\n\nReferenced object: {source_link}.\n"
+    _write_context_pages(candidate, pages)
+
+    real_pure_posix_path = context_pipeline.PurePosixPath
+    constructor_calls = 0
+
+    def count_pure_posix_path(*parts: object) -> PurePosixPath:
+        nonlocal constructor_calls
+        constructor_calls += 1
+        return real_pure_posix_path(*parts)
+
+    monkeypatch.setattr(context_pipeline, "PurePosixPath", count_pure_posix_path)
+
+    context_pipeline._validate_reference_graph(
+        candidate,
+        final_context_root=final_context_root,
+        source_root=source_root,
+        repairable=False,
+    )
+
+    assert constructor_calls < 300
 
 
 def test_reference_graph_ignores_unlinked_source_and_parses_fragment_and_title(tmp_path: Path) -> None:

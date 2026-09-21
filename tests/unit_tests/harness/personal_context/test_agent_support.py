@@ -229,17 +229,10 @@ async def test_personal_context_grep_bounds_results_without_shell(
     assert result.data["appliedLimit"] == 3
 
 
-def _move_tool(
-    sandbox: Path,
-    *,
-    max_pages_per_directory: int = 20,
-    max_subdirectories_per_directory: int = 20,
-) -> Any:
+def _move_tool(sandbox: Path) -> Any:
     tools = agent_support._make_personal_context_file_tools(
         cast(Any, object()),
         sandbox,
-        max_pages_per_directory=max_pages_per_directory,
-        max_subdirectories_per_directory=max_subdirectories_per_directory,
     )
     return next(tool for tool in tools if tool.card.name == "move_path")
 
@@ -452,7 +445,7 @@ async def test_move_path_rejects_reported_reparse_before_changes(
 
 
 @pytest.mark.asyncio
-async def test_move_path_enforces_configured_page_and_subdirectory_capacity(tmp_path: Path) -> None:
+async def test_move_path_allows_moves_into_directories_at_capacity(tmp_path: Path) -> None:
     sandbox = tmp_path / "sandbox"
     context = sandbox / "context"
     source = context / "来源"
@@ -468,15 +461,238 @@ async def test_move_path_enforces_configured_page_and_subdirectory_capacity(tmp_
     (full_children / "已有子目录").mkdir()
     (context / "description.md").write_text("# Context\n", encoding="utf-8")
 
-    tool = _move_tool(sandbox, max_pages_per_directory=1, max_subdirectories_per_directory=1)
+    tool = _move_tool(sandbox)
     page_result = await tool.invoke({"source_path": "来源/页面.md", "destination_path": "页面已满/新页面.md"})
     directory_result = await tool.invoke({"source_path": "来源", "destination_path": "子目录已满/新来源"})
 
-    assert page_result.success is False
-    assert directory_result.success is False
-    assert (source / "页面.md").is_file()
-    assert not (full_pages / "新页面.md").exists()
-    assert not (full_children / "新来源").exists()
+    # Capacity is enforced by post-turn validation and repair-message injection,
+    # never by refusing tool calls; regrouping an over-limit tree requires moves
+    # into directories that are already at the suggested capacity.
+    assert page_result.success is True
+    assert directory_result.success is True
+    assert not (source / "页面.md").exists()
+    assert (full_pages / "新页面.md").is_file()
+    assert (full_children / "新来源").is_dir()
+
+
+def _recluster_tool(sandbox: Path, plan: Any, apply: Any) -> Any:
+    tools = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+        recluster_plan=plan,
+        recluster_apply=apply,
+    )
+    return next(tool for tool in tools if tool.card.name == "recluster_context")
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_tool_is_only_listed_with_both_pipeline_hooks(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    async def plan(scope_paths: list[str]) -> dict[str, str]:
+        return {}
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        return set()
+
+    without_hooks = agent_support._make_personal_context_file_tools(cast(Any, object()), sandbox)
+    assert "recluster_context" not in [tool.card.name for tool in without_hooks]
+    partial = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+        recluster_plan=plan,
+    )
+    assert "recluster_context" not in [tool.card.name for tool in partial]
+    with_hooks = agent_support._make_personal_context_file_tools(
+        cast(Any, object()),
+        sandbox,
+        recluster_plan=plan,
+        recluster_apply=apply,
+    )
+    assert [tool.card.name for tool in with_hooks] == [
+        "read_file",
+        "write_file",
+        "edit_file",
+        "glob",
+        "list_files",
+        "grep",
+        "move_path",
+        "recluster_context",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_plan_returns_editable_mapping_and_default_scope(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    seen_scopes: list[list[str]] = []
+
+    async def plan(scope_paths: list[str], group_names: list[str] | None = None) -> dict[str, object]:
+        assert group_names is None
+        seen_scopes.append(list(scope_paths))
+        return {
+            "mapping": {"旧主题": "新组/旧主题", "零散/页面.md": "新组/页面.md"},
+            "unassigned": [],
+            "over_capacity": [],
+        }
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        raise AssertionError("apply must not run during the planning phase")
+
+    tool = _recluster_tool(sandbox, plan, apply)
+
+    planned = await tool.invoke({})
+    assert planned.success is True
+    assert planned.data["phase"] == "planned"
+    assert planned.data["entry_count"] == 2
+    assert planned.data["mapping"] == {"旧主题": "新组/旧主题", "零散/页面.md": "新组/页面.md"}
+    assert planned.data["unassigned"] == []
+    assert planned.data["over_capacity_groups"] == []
+    assert seen_scopes == [["."]]
+
+    scoped = await tool.invoke({"scope_paths": ["旧主题", "  "]})
+    assert scoped.success is True
+    assert seen_scopes[-1] == ["旧主题"]
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_plan_forwards_group_names_and_surfaces_advisories(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    seen: list[tuple[list[str], list[str] | None]] = []
+
+    async def plan(scope_paths: list[str], group_names: list[str] | None = None) -> dict[str, object]:
+        seen.append((list(scope_paths), None if group_names is None else list(group_names)))
+        return {
+            "mapping": {"爬虫笔记": "技术/爬虫笔记"},
+            "unassigned": ["零散/页面.md"],
+            "over_capacity": ["技术 projects 21 ordinary pages (limit 20 pages / 20 subdirectories)"],
+        }
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        raise AssertionError("apply must not run during the planning phase")
+
+    tool = _recluster_tool(sandbox, plan, apply)
+
+    planned = await tool.invoke({"scope_paths": ["."], "group_names": [" 技术 ", "生活"]})
+
+    assert planned.success is True
+    assert planned.data["phase"] == "planned"
+    assert planned.data["mapping"] == {"爬虫笔记": "技术/爬虫笔记"}
+    assert planned.data["unassigned"] == ["零散/页面.md"]
+    assert planned.data["over_capacity_groups"] == [
+        "技术 projects 21 ordinary pages (limit 20 pages / 20 subdirectories)"
+    ]
+    assert "unassigned" in str(planned.data["guidance"])
+    assert "over_capacity_groups" in str(planned.data["guidance"])
+    assert seen == [(["."], ["技术", "生活"])]
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_plan_reports_empty_scope_result(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    async def plan(scope_paths: list[str], group_names: list[str] | None = None) -> dict[str, object]:
+        return {"mapping": {}, "unassigned": [], "over_capacity": []}
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        return set()
+
+    result = await _recluster_tool(sandbox, plan, apply).invoke({"scope_paths": ["主题"]})
+
+    assert result.success is True
+    assert result.data["phase"] == "planned"
+    assert result.data["entry_count"] == 0
+    assert result.data["mapping"] == {}
+    assert "无需调整" in str(result.data["guidance"])
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_apply_forwards_edited_mapping_and_scope(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    seen: list[tuple[dict[str, str], list[str]]] = []
+
+    async def plan(scope_paths: list[str]) -> dict[str, str]:
+        raise AssertionError("plan must not run when mapping is supplied")
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        seen.append((dict(mapping), list(scope_paths)))
+        return {"新主题/页面.md", "新主题/description.md"}
+
+    tool = _recluster_tool(sandbox, plan, apply)
+    mapping = {"旧主题": "新组/旧主题", "零散/页面.md": "新组/页面.md"}
+
+    applied = await tool.invoke({"mapping": mapping, "scope_paths": ["旧主题"]})
+
+    assert applied.success is True
+    assert applied.data == {"phase": "applied", "changed_count": 2}
+    assert seen == [(mapping, ["旧主题"])]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "inputs",
+    [
+        {"scope_paths": ["旧主题"] * 21},
+        {"scope_paths": ["旧主题", 1]},
+        {"scope_paths": ["  ", ""]},
+        {"group_names": ["组"] * 21},
+        {"group_names": ["组", 1]},
+        {"group_names": []},
+        {"group_names": ["  "]},
+        {"mapping": {}},
+        {"mapping": {f"{index}.md": f"{index}.md" for index in range(2001)}},
+        {"mapping": {"a.md": "b.md", 1: "c.md"}},
+        {"mapping": {"a.md": 2}},
+    ],
+)
+async def test_recluster_context_rejects_invalid_inputs_before_hooks(
+    tmp_path: Path,
+    inputs: dict[str, object],
+) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+    calls: list[str] = []
+
+    async def plan(scope_paths: list[str], group_names: list[str] | None = None) -> dict[str, object]:
+        calls.append("plan")
+        return {"mapping": {}, "unassigned": [], "over_capacity": []}
+
+    async def apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        calls.append("apply")
+        return set()
+
+    result = await _recluster_tool(sandbox, plan, apply).invoke(inputs)
+
+    assert result.success is False
+    assert result.error
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_recluster_context_converts_hook_failures_into_tool_errors(tmp_path: Path) -> None:
+    sandbox = tmp_path / "sandbox"
+    sandbox.mkdir()
+
+    async def failing_plan(scope_paths: list[str], group_names: list[str] | None = None) -> dict[str, object]:
+        raise RuntimeError("plan " + "x" * 400)
+
+    async def failing_apply(mapping: dict[str, str], scope_paths: list[str]) -> set[str]:
+        raise RuntimeError("apply failed")
+
+    tool = _recluster_tool(sandbox, failing_plan, failing_apply)
+
+    planned = await tool.invoke({})
+    assert planned.success is False
+    assert str(planned.error).startswith("plan ")
+    assert len(str(planned.error)) <= 300
+
+    applied = await tool.invoke({"mapping": {"a/页面.md": "b/页面.md"}})
+    assert applied.success is False
+    assert "apply failed" in str(applied.error)
 
 
 @pytest.mark.parametrize(
