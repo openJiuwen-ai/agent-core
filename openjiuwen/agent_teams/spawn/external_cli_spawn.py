@@ -90,9 +90,14 @@ async def _build_member_system_prompt(
     """Build the external CLI member's system prompt from team-rail sections.
 
     Gives the member the same team sections an in-process DeepAgent member gets
-    (role / workflow / lifecycle / private prompt / ...), built the same way, but
-    excluding the other DeepAgent rails (safety, workspace, memory, ...) that
-    do not apply to a CLI whose brain is not a local DeepAgent.
+    (role / workflow / lifecycle / ...), built the same way, but excluding the
+    other DeepAgent rails (safety, workspace, memory, ...) that do not apply to
+    a CLI whose brain is not a local DeepAgent.
+
+    The prompt carries the team's standing policy only. Who the member is and
+    what it privately agreed to is team state, delivered as ``<team-context>``
+    through the tracker bound right after spawn — the same channel in-process
+    members use.
 
     Args:
         spec: The team spec carrying lifecycle / teammate_mode / team_mode /
@@ -115,9 +120,7 @@ async def _build_member_system_prompt(
     language = (ctx.team_spec.language if ctx.team_spec else None) or "cn"
     prompt = build_team_member_system_prompt(
         role=ctx.role,
-        member_prompt=ctx.prompt,
         member_name=member_name,
-        display_name=ctx.display_name or "",
         lifecycle=spec.lifecycle,
         teammate_mode=spec.teammate_mode,
         team_mode=_resolve_team_mode(spec),
