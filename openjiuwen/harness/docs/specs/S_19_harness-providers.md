@@ -146,7 +146,7 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 
 ## 系统提示词模式
 
-Codex 和 DSH provider config 新增 `system_prompt_mode: append | replace`，默认 replace 保持兼容。
+Codex 和 DSH provider config 提供 `system_prompt_mode: append | replace`。**Codex 默认 append**（与 Claude 一致：宿主提示词加在 CLI 既有配置之上，而不是顶掉它），DSH 默认 replace。
 Codex append 读取 app-server config/read 的生效 developer_instructions，并优先采用显式
 thread_config.developer_instructions，再追加宿主提示词；每次连接重新从原始配置构造，避免 resume
 或 fallback 重复追加。读取失败则启动失败，不静默降级为替换。replace 直接设置字段；均不修改

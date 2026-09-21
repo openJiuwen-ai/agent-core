@@ -71,7 +71,11 @@ class CodexHarnessConfig:
     """
 
     # Append to effective developer instructions, or replace their field.
-    system_prompt_mode: Literal["append", "replace"] = "replace"
+    # Appending is the default so the host's prompt adds to what the CLI was
+    # configured with rather than dropping it, the way Claude Code's preset
+    # append does. It costs one ``config/read`` per connection, and a failure
+    # there fails startup instead of silently replacing.
+    system_prompt_mode: Literal["append", "replace"] = "append"
     skills: tuple[SkillSource, ...] = ()
     skill_conflict: str = "skip"
     cwd: str | None = None

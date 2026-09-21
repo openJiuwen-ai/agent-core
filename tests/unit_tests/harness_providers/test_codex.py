@@ -79,6 +79,9 @@ class _FakeSdkState:
         self.turn_gate.set()
         self.turn_overrides: list[dict[str, str | None]] = []
         self.model_list: Any = SimpleNamespace(data=[])
+        # What ``config/read`` reports as the CLI's own developer instructions,
+        # which the host prompt is appended to.
+        self.developer_instructions: str | None = None
 
 
 class _FakeHandle:
@@ -140,8 +143,20 @@ class _FakeCodex:
         self.state = state
         self.config = config
         self.closed = False
-        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None))
+        self.requests: list[tuple[str, Any]] = []
+        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None), request=self._request)
         state.clients.append(self)
+
+    async def _ensure_initialized(self) -> None:
+        return None
+
+    async def _request(self, method: str, params: Any, **_kwargs: Any) -> Any:
+        """Answer the App Server calls the harness makes outside a turn."""
+        self.requests.append((method, params))
+        if method == "config/read":
+            instructions = self.state.developer_instructions
+            return SimpleNamespace(config=SimpleNamespace(developer_instructions=instructions))
+        raise AssertionError(f"unexpected app-server request {method!r}")
 
     async def thread_start(self, **options: Any) -> _FakeThread:
         self.state.thread_calls.append(("start", options))
@@ -173,6 +188,7 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _Fak
         def __init__(self, config: Any = None) -> None:
             super().__init__(state, config)
 
+    sdk.generated = SimpleNamespace(v2_all=SimpleNamespace(ConfigReadResponse=object))
     sdk.CodexConfig = CodexConfig
     sdk.AsyncCodex = AsyncCodex
     sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all", auto_review="auto_review")
@@ -720,6 +736,20 @@ async def test_append_developer_instructions_reads_effective_config():
     assert options["developer_instructions"] == "Host rules"
     with pytest.raises(ValueError, match="system_prompt_mode"):
         CodexHarnessConfig(system_prompt_mode="unknown")
+
+
+@pytest.mark.asyncio
+async def test_the_host_prompt_is_appended_to_the_cli_instructions_by_default(monkeypatch):
+    # Appending is the default: a member adds to what the CLI was configured
+    # with instead of dropping it, the way Claude Code's preset append does.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.developer_instructions = "CLI rules"
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(system_prompt="Team rules"))
+    _kind, options = state.thread_calls[0]
+    assert options["developer_instructions"] == "CLI rules\n\nTeam rules"
+    assert ("config/read", {"cwd": None, "includeLayers": False}) in state.clients[0].requests
+    await harness.stop()
 
 
 @pytest.mark.asyncio
