@@ -77,6 +77,18 @@ def test_pruned_reason_does_not_treat_modify_paper_as_quality_failure():
     assert "modify_paper" not in reason
 
 
+def test_pruned_reason_does_not_treat_resource_as_source_failure():
+    reason = module._friendly_pruned_reason(  # noqa: SLF001
+        terminal=TerminalReport(
+            status="failed",
+            run_id="run-r3",
+            failure_reason="out of resource: opensource dependency missing",
+        ),
+    )
+
+    assert reason != "资料获取质量不佳，已剪枝。"
+
+
 @pytest.mark.asyncio
 async def test_uploaded_latex_baseline_score_is_persisted_and_projected(tmp_path, monkeypatch):
     source = tmp_path / "uploaded-paper"

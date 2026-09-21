@@ -211,6 +211,13 @@ def _friendly_pruned_reason(
         if marker in context:
             return "资料获取质量不佳，已剪枝。"
 
+    # Token-bounded: bare substring would false-positive on "resource",
+    # "opensource", "source_code", etc. (same reasoning as paper_markers below).
+    source_token_markers = ("source", "download")
+    for marker in source_token_markers:
+        if _contains_token(context, marker):
+            return "资料获取质量不佳，已剪枝。"
+
     # Do not use a bare "paper" marker: it matches task_mode names
     # (modify_paper / create_new_paper) and mislabels constructor failures
     # as a content-quality prune.
