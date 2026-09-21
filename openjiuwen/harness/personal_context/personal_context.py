@@ -64,6 +64,9 @@ from openjiuwen.harness.personal_context.fetch.local_files import LocalFilesFetc
 from openjiuwen.harness.personal_context.fetch.rss_feed import RssFeedFetchService
 from openjiuwen.harness.personal_context.fetch.toutiao_reader import ToutiaoReaderFetchService
 from openjiuwen.harness.personal_context.fetch.zhihu_reader import ZhihuReaderFetchService
+from openjiuwen.harness.personal_context.im.config_targets import build_im_learning_targets
+from openjiuwen.harness.personal_context.im.scheduler import ImLearningScheduler
+from openjiuwen.harness.personal_context.im.source import ImLearningSource
 from openjiuwen.harness.personal_context.models import FetchBatch, PersonalContextStatus
 from openjiuwen.harness.personal_context.source_metadata import read_source_detail
 from openjiuwen.harness.personal_context.status_codes import StatusCode, build_error
@@ -336,7 +339,7 @@ class PersonalContext:
 
         return getattr(StatusCode, name, StatusCode.CONTEXT_PROACTIVE_CONFIG_INVALID)
 
-    def __init__(self, *, home: str | Path) -> None:
+    def __init__(self, *, home: str | Path, im_learning_source: ImLearningSource | None = None) -> None:
         self._home = Path(home).expanduser().resolve()
         self._state = "CREATED"
         self._state_lock = asyncio.Lock()
@@ -345,6 +348,8 @@ class PersonalContext:
         self._authorization_task: asyncio.Task[None] | None = None
         self._authorization_challenge: dict[str, object] | None = None
         self._authorization_error: str | None = None
+        self._im_learning_source = im_learning_source
+        self._im_learning_scheduler: ImLearningScheduler | None = None
 
         self._config: PersonalContextConfig | None = None
         self._embedding_config: EmbeddingConfig | None = None
@@ -851,6 +856,7 @@ class PersonalContext:
                 for service in config.fetch_services:
                     if service.enabled:
                         await self.start_fetch_service(service.service_id)
+                await self._start_im_learning_scheduler()
             await self._start_distill_scheduler()
             async with self._state_lock:
                 if self._state != "STARTING":
@@ -895,6 +901,7 @@ class PersonalContext:
                     self._fetch_states[service_id] = "STOPPED"
                 else:
                     self._fetch_states[service_id] = "FAILED"
+        await self._stop_im_learning_scheduler()
         if pipeline is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await pipeline.stop(timeout_seconds=1.0)
@@ -903,6 +910,61 @@ class PersonalContext:
                 pipeline_running = pipeline.is_running()
             if not pipeline_running:
                 self._pipeline_service = None
+
+    async def _start_im_learning_scheduler(self) -> None:
+        """Start the IM learning scheduler when configured and a source is injected."""
+        config = self._config
+        if config is None or not config.collection_enabled:
+            return
+        im_config = config.im_learning
+        if not im_config.enabled or self._im_learning_source is None:
+            return
+        if self._im_learning_scheduler is not None and self._im_learning_scheduler.is_running():
+            return
+        targets = build_im_learning_targets(im_config)
+        scheduler = ImLearningScheduler(
+            source=self._im_learning_source,
+            home=self._home,
+            targets=targets,
+            since_ms=im_config.since_ms,
+            fetch_interval_seconds=im_config.fetch_interval_seconds,
+            fetch_top_n=im_config.fetch_top_n,
+        )
+        await scheduler.start()
+        self._im_learning_scheduler = scheduler
+
+    async def _stop_im_learning_scheduler(self, *, timeout_seconds: float = 10.0) -> None:
+        scheduler = self._im_learning_scheduler
+        if scheduler is None:
+            return
+        self._im_learning_scheduler = None
+        with contextlib.suppress(Exception):
+            await scheduler.stop(timeout_seconds=timeout_seconds)
+
+    async def run_im_learning_now(self) -> bool:
+        """Request one immediate IM learning fetch cycle; False when inactive."""
+        scheduler = self._im_learning_scheduler
+        if scheduler is None:
+            return False
+        return await scheduler.trigger_now()
+
+    async def get_im_learning_status(self) -> dict[str, object]:
+        """Read the IM learning status surface (empty when not configured)."""
+        scheduler = self._im_learning_scheduler
+        config = self._config
+        if config is None:
+            return {"running": False, "enabled": False}
+        im_config = config.im_learning
+        if scheduler is None:
+            return {
+                "running": False,
+                "enabled": im_config.enabled,
+                "source_injected": self._im_learning_source is not None,
+                "targets": len(im_config.targets),
+            }
+        status = await scheduler.read_status()
+        status["enabled"] = im_config.enabled
+        return status
 
     async def start_fetch_service(self, service_id: str) -> None:
         """Start one enabled provider scheduler without fetching immediately."""
@@ -1515,6 +1577,10 @@ class PersonalContext:
                 # If the runtime cannot report its state, retain it so a
                 # subsequent stop can still attempt cleanup.
                 pipeline_running = True
+        remaining = deadline - asyncio.get_running_loop().time()
+        await self._stop_im_learning_scheduler(
+            timeout_seconds=max(1.0, min(10.0, remaining if remaining > 0 else 10.0))
+        )
         activation_running = activation is not None and not activation.done()
         if not pipeline_running:
             self._pipeline_service = None
