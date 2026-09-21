@@ -161,7 +161,15 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
         else:
             combined_content = other.content
 
-        # merge tool_calls by concatenating fragments of the same call instead of appending new elements
+        # merge tool_calls by concatenating fragments of the same call instead of
+        # appending new elements. Routing rules (in priority order):
+        # 1. Non-None index on both sides → merge only when indexes match, so a
+        #    parallel second call's fragments never land on the first call;
+        # 2. Distinct non-empty ids → always separate calls (some OpenAI-compatible
+        #    gateways strip ids on continuation fragments but still assign one per
+        #    call; two different ids must never be concatenated);
+        # 3. Otherwise (single streamed call with missing id/index) → merge into
+        #    the last call.
         merged_tool_calls = []
         if self.tool_calls:
             for tc in self.tool_calls:
@@ -174,19 +182,38 @@ class AssistantMessageChunk(AssistantMessage, BaseMessageChunk):
                     response_item_id=tc.response_item_id,
                 ))
 
+        def _routes_to_last(incoming: ToolCall, last: ToolCall) -> bool:
+            # Distinct non-empty ids always mean distinct calls, even when both
+            # fragments claim the same index (gateways that renumber every call
+            # to 0). Index mismatch is only consulted when ids don't contradict.
+            if last.id and incoming.id and last.id != incoming.id:
+                return False
+            if (incoming.index is not None and last.index is not None
+                    and incoming.index != last.index):
+                return False
+            return True
+
+        def _mergeable(incoming: ToolCall, last: ToolCall) -> bool:
+            # Merging is only valid for fragments of the same streamed
+            # function call: routing must agree and both fragments must be
+            # function-type calls.
+            if not _routes_to_last(incoming, last):
+                return False
+            if not (hasattr(last, 'type') and last.type == 'function'):
+                return False
+            return hasattr(incoming, 'type') and incoming.type == 'function'
+
         if other.tool_calls:
             for incoming in other.tool_calls:
                 if merged_tool_calls:
                     last = merged_tool_calls[-1]
-                    same_id = (last.id and incoming.id and last.id == incoming.id) or (not last.id or not incoming.id)
-                    if (same_id and hasattr(last, 'type') and last.type == 'function'
-                            and hasattr(incoming, 'type') and incoming.type == 'function'):
+                    if _mergeable(incoming, last):
                         merged_tool_calls[-1] = ToolCall(
                             id=last.id or incoming.id,
                             type=last.type or incoming.type,
                             name=(last.name if last.name else incoming.name) or "",
                             arguments=(last.arguments or "") + (incoming.arguments or ""),
-                            index=last.index,
+                            index=last.index if last.index is not None else incoming.index,
                             response_item_id=last.response_item_id or incoming.response_item_id,
                         )
                         continue
