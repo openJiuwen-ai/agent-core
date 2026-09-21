@@ -71,6 +71,17 @@ tool item 的 COMPLETED data 统一带 `is_error`（Codex 补齐）。`Serialize
   历史消息 id **一律**用内容身份哈希（剥离 `cache_control`，tool_use 只认 id），不沿用回复的 `msg_` id：
   id 只能由消息自身决定。观察者是每个 harness 会话一个，成员中途重启就会换新，若 id 依赖"这个观察者记得
   哪条回复"，重启后窗口里每条消息的 id 都会变，读者会看到整段历史被重述一遍。
+
+- **两种请求体形态都要支持**，取决于 CLI 版本：
+  - **非线程式**（如 SDK 自带的 2.1.206）：每次请求体都带完整会话，事件上没有 `request_body_id`。
+    配对靠推断——按时间取最新、且历史里含上一条主线回复的那个请求（旁路查询与子 agent 请求会交错进来）。
+  - **线程式**（如 2.1.278）：请求体只带增量，另有 `thread`（`create` / `continue` +
+    `previous_message_id`），而且**两个 body 事件都带 `request_body_id`**。配对直接按这个 id，不再推断；
+    完整会话按 `previous_message_id` 逐段回溯拼出；工具目录只在开线程那次出现，之后沿用。
+  在线程式 CLI 上沿用推断法会失效：`continue` 请求的历史里根本没有 assistant 消息，于是**除首次外每次都配不上**，
+  表现为轨迹只显示第一段对话、之后不再增长。另外，配对失败的回复**不能**用来推进 `_last_output_identity`——
+  没配上的回复当锚点会把后续每次推断一起带偏。
+  前缀缺失的 `continue`（观察者中途接手）按 `input_observed=False` 处理：宁可不提交窗口，也不能用增量冒充完整会话。
 - **OTel 说得出的事实一律以 OTel 为准**，SDK 消息流只提供 OTel 不记录的东西（工具入参与结果正文，
   OTel 只记大小）。实测各信号的用途：
 

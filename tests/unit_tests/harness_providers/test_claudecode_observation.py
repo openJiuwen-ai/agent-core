@@ -69,6 +69,7 @@ def _body_event(
     *,
     time_ns: int,
     request_id: str | None = None,
+    request_body_id: str | None = None,
 ) -> None:
     """Write one body file where the CLI would and publish its log event."""
     body_dir = Path(client.options.env["OTEL_LOG_RAW_API_BODIES"].removeprefix("file:"))
@@ -77,6 +78,9 @@ def _body_event(
     attributes: dict[str, Any] = {"body_ref": reference}
     if request_id is not None:
         attributes["request_id"] = request_id
+    if request_body_id is not None:
+        # Both body events of one call carry it; it is what pairs them.
+        attributes["request_body_id"] = request_body_id
     receiver.publish(
         {
             "signal": "log",
@@ -195,8 +199,16 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             "max_tokens": 4096,
             "temperature": 0.2,
             "stream": True,
+            "thread": {"type": "create"},
         }
-        _body_event(receiver, client, "claude_code.api_request_body", body, time_ns=1_000_000_000_000)
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_000_000_000_000,
+            request_body_id="body-1",
+        )
 
     async def first_response(client: Any) -> None:
         body = {
@@ -218,13 +230,21 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             body,
             time_ns=1_002_000_000_000,
             request_id="req-1",
+            request_body_id="body-1",
         )
         _request_span(receiver, client, request_id="req-1", start_ns=1_000_100_000_000, end_ns=1_001_900_000_000)
         _api_request_event(receiver, client, request_id="req-1")
 
     async def side_query(client: Any) -> None:
         body = {"model": "claude-haiku", "messages": [{"role": "user", "content": "title this"}]}
-        _body_event(receiver, client, "claude_code.api_request_body", body, time_ns=1_003_500_000_000)
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_003_500_000_000,
+            request_body_id="body-side",
+        )
 
     async def tool_facts(client: Any) -> None:
         _tool_events(
@@ -237,9 +257,22 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
         )
 
     async def second_request(client: Any) -> None:
-        history = [_USER, {"role": "assistant", "content": _FIRST_REPLY}, _TOOL_RESULT]
-        body = {"model": "claude-x", "system": _SYSTEM, "tools": _TOOLS, "messages": history}
-        _body_event(receiver, client, "claude_code.api_request_body", body, time_ns=1_003_000_000_000)
+        # A threaded call states only what is new; the tool catalogue is not
+        # repeated either.
+        body = {
+            "model": "claude-x",
+            "system": _SYSTEM,
+            "messages": [_TOOL_RESULT],
+            "thread": {"type": "continue", "previous_message_id": "msg-1"},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_003_000_000_000,
+            request_body_id="body-2",
+        )
 
     async def second_response(client: Any) -> None:
         body = {
@@ -249,7 +282,14 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
             "stop_reason": "end_turn",
             "usage": {"input_tokens": 40, "output_tokens": 2},
         }
-        _body_event(receiver, client, "claude_code.api_response_body", body, time_ns=1_004_000_000_000)
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            body,
+            time_ns=1_004_000_000_000,
+            request_body_id="body-2",
+        )
 
     return [
         sdk.StreamEvent(uuid="s1", session_id="s", event={"type": "message_start"}, parent_tool_use_id=None),
@@ -419,6 +459,83 @@ async def test_missing_request_logs_fall_back_to_the_sdk_reply(monkeypatch: pyte
     assert request.usage.input_tokens == 9
     assert [block.kind for block in request.output_message.content] == ["reasoning", "text"]
     assert request.data["claude-code"]["observation"] == "sdk_stream"
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_thread_continued_from_an_unknown_reply_is_not_observed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A conversation that lost its prefix must not be stated as the whole one."""
+    sdk, state = _install_fake_sdk(monkeypatch)
+    receiver = _FakeReceiver()
+    _install_receiver(monkeypatch, receiver)
+
+    async def orphan_request(client: Any) -> None:
+        body = {
+            "model": "claude-x",
+            "system": _SYSTEM,
+            "messages": [_TOOL_RESULT],
+            # The reply this continues from was never observed: the prefix it
+            # names is not in hand.
+            "thread": {"type": "continue", "previous_message_id": "msg-gone"},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_000_000_000_000,
+            request_body_id="body-9",
+        )
+
+    async def orphan_response(client: Any) -> None:
+        body = {
+            "id": "msg-9",
+            "model": "claude-x",
+            "content": [{"type": "text", "text": "done"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 5, "output_tokens": 1},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            body,
+            time_ns=1_001_000_000_000,
+            request_id="req-9",
+            request_body_id="body-9",
+        )
+
+    state.scripts.append(
+        [
+            orphan_request,
+            sdk.AssistantMessage(
+                content=[sdk.TextBlock(text="done")],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage=None,
+                message_id="msg-9",
+                stop_reason="end_turn",
+                session_id="s",
+            ),
+            orphan_response,
+            _result(sdk, result="done"),
+        ]
+    )
+    harness = ClaudeCodeHarness(
+        ClaudeCodeHarnessConfig(inherit_process_env=False, cwd="/tmp", request_observation_wait_s=0.05),
+    )
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+
+    request = next(event.event for event in events if isinstance(event.event, ModelRequestEvent))
+    logger.info("orphan thread request observed={}", request.input_observed)
+    # Reported, but not as an observed conversation: a window committed from
+    # the delta alone would read as if everything before it had been dropped.
+    assert not request.input_observed
+    assert request.output_message is not None
     await harness.stop()
 
 

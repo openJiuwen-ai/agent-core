@@ -69,6 +69,13 @@ _TOOL_DECISION_EVENT = "claude_code.tool_decision"
 # One model request as the CLI accounts for it: cost and reasoning effort are
 # stated nowhere else.
 _API_REQUEST_EVENT = "claude_code.api_request"
+# The id both body events of one model call carry: what pairs a request log
+# with the response log that answers it.
+_REQUEST_BODY_ID = "request_body_id"
+# How many replies' conversations are kept for the calls that continue them.
+# A thread is linear, so only the newest is ever read; the rest are slack for
+# a retry that continues from an earlier reply.
+_THREAD_HISTORY_LIMIT = 32
 _MODEL_PROVIDER = "anthropic"
 _DATA_NAMESPACE = "claude-code"
 _DRAIN_INTERVAL_S = 0.25
@@ -182,6 +189,11 @@ class ClaudeRequestObserver:
         self._lock = asyncio.Lock()
         self._requests: list[_BodyEvent] = []
         self._responses: dict[str, tuple[_BodyEvent, dict[str, Any]]] = {}
+        # The conversation each reply leaves behind, by its message id. A
+        # threaded request states only what is new, so the call that continues
+        # from a reply is the reply's conversation plus its own delta.
+        self._threads: dict[str, tuple[TurnMessage, ...]] = {}
+        self._thread_tools: Any = None
         self._last_output_identity = ""
         self._emit: EmitFn | None = None
         self._drain_task: asyncio.Task[None] | None = None
@@ -577,12 +589,33 @@ class ClaudeRequestObserver:
                 _unlink(path)
 
     async def _pick_request(self, response_event: _BodyEvent) -> _BodyEvent | None:
-        """Return the request log that produced a main-conversation reply.
+        """Return the request log of the call this response answers.
 
-        Requests from sub-agents and side queries interleave with the main
-        conversation. A main-conversation request states the previous
-        main-conversation reply in its history, which rules the others out.
+        A build that states ``request_body_id`` on both body events has said
+        which pair belongs together, and that is taken. Without it the pair is
+        inferred: requests from sub-agents and side queries interleave with
+        the main conversation, and a main-conversation request states the
+        previous main-conversation reply in its history, which rules the
+        others out.
         """
+        body_id = str(response_event.attributes.get(_REQUEST_BODY_ID) or "")
+        if body_id:
+            return await self._stated_request(body_id)
+        return await self._inferred_request(response_event)
+
+    async def _stated_request(self, body_id: str) -> _BodyEvent | None:
+        """Return the request whose body id the response names."""
+        for index, candidate in enumerate(self._requests):
+            if str(candidate.attributes.get(_REQUEST_BODY_ID) or "") != body_id:
+                continue
+            chosen = self._requests.pop(index)
+            await self._load_body(chosen, keep_file=True)
+            await asyncio.to_thread(self._discard_bodies, [chosen])
+            return chosen if isinstance(chosen.parsed, dict) else None
+        return None
+
+    async def _inferred_request(self, response_event: _BodyEvent) -> _BodyEvent | None:
+        """Return the newest request that carries the previous reply."""
         candidates = sorted(
             (item for item in self._requests if item.time_ns <= response_event.time_ns),
             key=lambda item: item.time_ns,
@@ -604,6 +637,31 @@ class ClaudeRequestObserver:
         await asyncio.to_thread(self._discard_bodies, consumed)
         return chosen
 
+    def _thread_prefix(self, request: dict[str, Any]) -> tuple[tuple[TurnMessage, ...], bool]:
+        """Return the conversation this request continues, and whether it is known.
+
+        Claude Code threads a conversation server-side: only the first call
+        carries it, and every later one states just what is new beside a
+        ``previous_message_id``. Without the prefix the request would read as
+        a conversation that had lost everything before it.
+        """
+        thread = request.get("thread")
+        if not isinstance(thread, dict) or thread.get("type") != "continue":
+            return (), True
+        previous = str(thread.get("previous_message_id") or "")
+        known = self._threads.get(previous)
+        if known is None:
+            return (), False
+        return known, True
+
+    def _remember_thread(self, message_id: str, conversation: tuple[TurnMessage, ...]) -> None:
+        """Keep the conversation a reply leaves behind for the call that continues it."""
+        if not message_id:
+            return
+        self._threads[message_id] = conversation
+        while len(self._threads) > _THREAD_HISTORY_LIMIT:
+            self._threads.pop(next(iter(self._threads)))
+
     async def _native_request(self, snapshot: _ReplySnapshot) -> ModelRequestEvent:
         response_event, response = self._responses.pop(snapshot.message_id)
         request_event = await self._pick_request(response_event)
@@ -613,14 +671,30 @@ class ClaudeRequestObserver:
         tool_definitions: Any = None
         request_parameters: dict[str, Any] = {}
         billing_header = ""
+        input_observed = False
         if isinstance(request, dict):
-            input_messages = tuple(self._conversation(request.get("messages")))
+            prefix, prefix_known = self._thread_prefix(request)
+            input_messages = prefix + tuple(self._conversation(request.get("messages")))
+            input_observed = prefix_known
             system_instructions, billing_header = _system_instructions(request.get("system"))
             tools = request.get("tools")
-            tool_definitions = _tool_definitions(tools) if isinstance(tools, list) else None
+            if isinstance(tools, list):
+                # Only the call that opens a thread carries the catalogue; the
+                # rest of the thread is offered the same tools.
+                self._thread_tools = _tool_definitions(tools)
+            tool_definitions = self._thread_tools
             request_parameters = _request_parameters(request)
-        output = _message(snapshot.message_id, MessageRole.ASSISTANT, response.get("content"))
-        self._last_output_identity = _identity("assistant", response.get("content"))
+        # Identified by its content, like every other conversation message: a
+        # thread the CLI reopens after a restart replays this reply inside a
+        # request body, where that is the only id there is.
+        output = _message(
+            self._message_id("assistant", response.get("content")),
+            MessageRole.ASSISTANT,
+            response.get("content"),
+        )
+        if input_observed:
+            self._last_output_identity = _identity("assistant", response.get("content"))
+            self._remember_thread(snapshot.message_id, input_messages + (output,))
         native = self._spans.pop(str(response_event.attributes.get("request_id") or ""), None)
         if native is not None and native.start_ns > 0 and native.end_ns >= native.start_ns:
             started_at = native.start_ns / 1e9
@@ -642,7 +716,7 @@ class ClaudeRequestObserver:
             provider_name=_MODEL_PROVIDER,
             system_instructions=system_instructions,
             input_messages=input_messages,
-            input_observed=request_event is not None,
+            input_observed=input_observed,
             output_message=output,
             tool_definitions=tool_definitions,
             request_parameters=request_parameters,
@@ -857,6 +931,7 @@ def _identity(role: str, content: Any) -> str:
 
 
 def _assistant_identities(request: dict[str, Any]) -> set[str]:
+    """Return the content identities of the assistant turns a request states."""
     messages = request.get("messages")
     if not isinstance(messages, list):
         return set()
