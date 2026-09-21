@@ -189,8 +189,9 @@ def _check_rail_runtime_contract(role: str, root: Path, target: str) -> Verifica
                 destination = writes if node.func.attr == "setdefault" else reads
             else:
                 continue
-            if (isinstance(owner, ast.Attribute) and owner.attr == "extra"
-                    and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+            if not isinstance(owner, ast.Attribute) or owner.attr != "extra":
+                continue
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
                 destination.add(key.value)
         missing = (reads - writes) & {"remaining_iterations", "answer_text", "task"}
         if missing:
@@ -1217,12 +1218,12 @@ class HarnessChangeVerifier:
                     integration_dir,
                     expected_tool_names_by_role.get(role, set()),
                 )
-                checks.extend(
-                    _check_rail_runtime_contract(role, integration_dir, action.target_path)
-                    for action in plan.actions
-                    if action.role == role and action.action_group == "rail"
-                    and action.operation in {"add", "modify"} and action.target_path.endswith(".py")
-                )
+                for action in plan.actions:
+                    if action.role != role or action.action_group != "rail":
+                        continue
+                    if action.operation not in {"add", "modify"} or not action.target_path.endswith(".py"):
+                        continue
+                    checks.append(_check_rail_runtime_contract(role, integration_dir, action.target_path))
                 failed_static_checks = [c for c in checks if c.status == "failed"]
                 error = f"{len(failed_static_checks)} static check(s) failed" if failed_static_checks else ""
             except Exception as e:

@@ -14,9 +14,7 @@ class BudgetedRsiModel(Model):
         requested = options.get("max_tokens")
         if requested is None:
             requested = self.model_config.max_tokens
-        if requested is None:
-            return options
-        if self.model_config.max_tokens is not None:
+        if requested is not None and self.model_config.max_tokens is not None:
             requested = min(requested, self.model_config.max_tokens)
         rows = [{"role": "user", "content": messages}] if isinstance(messages, str) else [
             m.model_dump(mode="json", exclude_none=True) if hasattr(m, "model_dump") else m
@@ -31,9 +29,10 @@ class BudgetedRsiModel(Model):
         # Conservative text-token bound; never silently discard evidence.
         used = sum(len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
                    for value in (rows, schemas)) + 4096
-        if requested <= 0 or used >= window:
+        if (requested is not None and requested <= 0) or used >= window:
             raise ValueError("RSI request has no positive output budget within the configured context window")
-        options["max_tokens"] = min(requested, window - used)
+        if requested is not None:
+            options["max_tokens"] = min(requested, window - used)
         return options
 
     async def invoke(self, messages, **kwargs):

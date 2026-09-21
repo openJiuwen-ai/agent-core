@@ -1124,7 +1124,6 @@ def _short_id() -> str:
 
 def _write_execution_results(path: Path, results: Any) -> None:
     """Write execution results to JSON."""
-    import json
     from dataclasses import asdict as _asdict
 
     with open(path, "w", encoding="utf-8") as f:
@@ -1133,7 +1132,6 @@ def _write_execution_results(path: Path, results: Any) -> None:
 
 def _write_stage_error(path: Path, *, stage: str, error: Exception, details: dict[str, Any]) -> None:
     """Persist a stage failure with enough context for rerun debugging."""
-    import json
 
     payload = {
         "stage": stage,
@@ -1149,8 +1147,6 @@ def _read_input_harness_refs(harness_refs_path: str) -> dict[str, str]:
     """Read input harness refs as a simple role->path mapping."""
     if not harness_refs_path:
         return {}
-    import json
-
     p = Path(harness_refs_path).expanduser().resolve()
     if not p.exists():
         return {}

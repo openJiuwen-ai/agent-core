@@ -169,7 +169,7 @@ async def check_candidate_behavior(
         if (
             model_config_ref
             and all(check.get("acceptance_observable") for check in checks)
-            and all(evidence[side]["files"] for side in ("source", "candidate"))
+            and all(evidence.get(side, {}).get("files") for side in ("source", "candidate"))
         ):
 
             async def invoke(message: str = message) -> str:

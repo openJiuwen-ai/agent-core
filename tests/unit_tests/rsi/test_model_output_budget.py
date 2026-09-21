@@ -61,12 +61,13 @@ def test_known_model_capacity(configured, expected):
     assert request["max_tokens"] == configured
 
 
-def test_per_request_remaining_context_and_no_mutation():
+@pytest.mark.parametrize("name", ["deepseek-v4-pro", "qwen-plus", "custom-gateway-model"])
+def test_per_request_remaining_context_and_no_mutation(name):
     from types import SimpleNamespace
 
     from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
     model = SimpleNamespace(model_config=SimpleNamespace(
-        max_tokens=393216, model_name="deepseek-v4-pro", context_window=20000,
+        max_tokens=393216, model_name=name, context_window=20000,
     ))
     options = {"max_tokens": 393216}
     result = BudgetedRsiModel._budget_options(model, "a" * 10000, options)
@@ -74,3 +75,16 @@ def test_per_request_remaining_context_and_no_mutation():
     assert options["max_tokens"] == model.model_config.max_tokens == 393216
     with pytest.raises(ValueError, match="no positive output budget"):
         BudgetedRsiModel._budget_options(model, "a" * 20000, options)
+
+
+def test_unknown_output_capacity_still_checks_input_budget():
+    from types import SimpleNamespace
+
+    from openjiuwen.rsi.harness_rsi.member_optimizer.budget_model import BudgetedRsiModel
+
+    model = SimpleNamespace(model_config=SimpleNamespace(
+        max_tokens=None, model_name="custom-gateway-model", context_window=20000,
+    ))
+    assert BudgetedRsiModel._budget_options(model, "hello", {}) == {}
+    with pytest.raises(ValueError, match="no positive output budget"):
+        BudgetedRsiModel._budget_options(model, "a" * 20000, {})

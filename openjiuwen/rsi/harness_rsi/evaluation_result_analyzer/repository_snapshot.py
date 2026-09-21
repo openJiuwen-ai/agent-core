@@ -51,9 +51,10 @@ def prepare_repository_snapshot(
         source = _io_path(Path(location).expanduser())
         destination = runtime / name
 
-        def ignore(directory: str, names: list[str]) -> set[str]:
+        def ignore(directory: str, names: list[str], *, snapshot_name: str = name,
+                   snapshot_source: Path = source) -> set[str]:
             ignored = _COPY_IGNORES.intersection(names)
-            if name == "repository" and Path(directory) == source:
+            if snapshot_name == "repository" and Path(directory) == snapshot_source:
                 ignored.update(_ROOT_RUNTIME_DIRS.intersection(names))
             return ignored
 

@@ -939,8 +939,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     ) if gate in retained_gates else selection
                     for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True)
                 ]
-                if any(not selection["retained"] for gate, selection in
-                       zip(epoch_provisional_gates, replay_selections, strict=True) if gate in retained_gates):
+                retained_replay_failed = False
+                for gate, selection in zip(epoch_provisional_gates, replay_selections, strict=True):
+                    if gate in retained_gates and not selection["retained"]:
+                        retained_replay_failed = True
+                        break
+                if retained_replay_failed:
                     # A second pruning pass would create yet another unverified package.
                     replay_selections = [dict(selection, retained=False, reason="filtered_harness_failed_replay")
                                          for selection in replay_selections]
@@ -1556,9 +1560,12 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             output_dir=output_dir / "behavior_check",
         ) if not _eval_has_errors(candidate_eval_ref) else {}
         for case_id, observation in observations.items():
-            required_names = [item for item in capabilities
-                              if case_id in item.get("target_case_ids", [])
-                              and item.get("action_group") in {"tool", "skill"}]
+            required_names = []
+            for item in capabilities:
+                if case_id not in item.get("target_case_ids", []):
+                    continue
+                if item.get("action_group") in {"tool", "skill"}:
+                    required_names.append(item)
             observation["availability"] = (
                 "yes" if required_names and all(
                     item.get("runtime_name") in (invoked_tools_by_case if item["action_group"] == "tool"
