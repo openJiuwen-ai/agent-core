@@ -310,13 +310,10 @@ def _max_content_tokens() -> int:
 
 
 def _estimate_tokens(text: str) -> int:
-    try:
-        import tiktoken
-
-        encoding = tiktoken.get_encoding("cl100k_base")
-        return len(encoding.encode(text, disallowed_special=()))
-    except Exception:
-        return len(text) // 3
+    # Match the archive's local estimate instead of initializing a tokenizer
+    # that may download its encoding asset on a cold, offline runtime.
+    byte_length = len(text.encode("utf-8"))
+    return (byte_length + 3) // 4
 
 
 def _resolve_relative_file(archive_path: Path, relative_path: Any) -> Path:

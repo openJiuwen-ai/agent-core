@@ -969,16 +969,10 @@ def _validated_fetch_candidate(candidate: Mapping[str, object]) -> tuple[RawChan
         repo = candidate.get("repo")
         head_sha = candidate.get("head_sha")
         materialized_path = candidate.get("materialized_source_path")
-        if (
-            not isinstance(owner, str)
-            or not owner.strip()
-            or not isinstance(repo, str)
-            or not repo.strip()
-            or not isinstance(head_sha, str)
-            or not _SHA.fullmatch(head_sha)
-            or not isinstance(materialized_path, str)
-            or not Path(materialized_path).is_absolute()
-        ):
+        strings_valid = all(isinstance(value, str) and bool(value.strip()) for value in (owner, repo))
+        sha_valid = isinstance(head_sha, str) and _SHA.fullmatch(head_sha) is not None
+        path_valid = isinstance(materialized_path, str) and Path(materialized_path).is_absolute()
+        if not strings_valid or not sha_valid or not path_valid:
             raise _fetch_error("GitHub code candidate is invalid")
     return item, item_ref
 

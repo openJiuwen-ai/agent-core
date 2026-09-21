@@ -247,12 +247,11 @@ def select_latest_candidates(
         changed_failed_revision = (
             _failure_resource_prefix(candidate) in failed_resource_prefixes and not quarantined
         )
-        if (
-            earliest is not None
-            and _time_sort_value(candidate["candidate_time"]) < _time_sort_value(earliest)
-            and not changed_revision
-            and not changed_failed_revision
-        ):
+        before_earliest = earliest is not None and _time_sort_value(candidate["candidate_time"]) < _time_sort_value(
+            earliest
+        )
+        changed_after_failure = changed_revision or changed_failed_revision
+        if before_earliest and not changed_after_failure:
             continue
         newly_visible = latest_seen is None or _time_sort_value(candidate["candidate_time"]) > _time_sort_value(
             latest_seen

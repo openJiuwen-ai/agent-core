@@ -235,38 +235,40 @@ def _split_text(
 ) -> list[str]:
     if not text:
         return []
-    try:
-        import tiktoken
-
-        encoding = tiktoken.get_encoding("cl100k_base")
-        token_ids = encoding.encode(text, disallowed_special=())
-        if len(token_ids) <= chunk_size_tokens:
-            return [text]
-        step = chunk_size_tokens - chunk_overlap_tokens
-        chunks: list[str] = []
-        start = 0
-        while start < len(token_ids):
-            end = start + chunk_size_tokens
-            chunks.append(encoding.decode(token_ids[start:end]))
-            if end >= len(token_ids):
+    # Keep archive persistence offline. Initializing cl100k_base may download
+    # its encoding asset on a cold host and block compression on network I/O.
+    # UTF-8 bytes / 4 is a small local approximation that remains useful for
+    # both ASCII text and multibyte content.
+    byte_size = chunk_size_tokens * 4
+    byte_overlap = chunk_overlap_tokens * 4
+    if len(text.encode("utf-8")) <= byte_size:
+        return [text]
+    chunks: list[str] = []
+    start = 0
+    while start < len(text):
+        end = start
+        used_bytes = 0
+        while end < len(text):
+            char_bytes = len(text[end].encode("utf-8"))
+            if used_bytes + char_bytes > byte_size:
                 break
-            start += step
-        return chunks
-    except Exception:
-        char_size = chunk_size_tokens * 3
-        char_overlap = chunk_overlap_tokens * 3
-        if len(text) <= char_size:
-            return [text]
-        step = char_size - char_overlap
-        chunks = []
-        start = 0
-        while start < len(text):
-            end = start + char_size
-            chunks.append(text[start:end])
-            if end >= len(text):
+            used_bytes += char_bytes
+            end += 1
+        if end == start:
+            end += 1
+        chunks.append(text[start:end])
+        if end >= len(text):
+            break
+        next_start = end
+        overlap_bytes = 0
+        while next_start > start:
+            char_bytes = len(text[next_start - 1].encode("utf-8"))
+            if overlap_bytes + char_bytes > byte_overlap:
                 break
-            start += step
-        return chunks
+            overlap_bytes += char_bytes
+            next_start -= 1
+        start = next_start if next_start > start else end
+    return chunks
 
 
 def _recall_root(workspace_dir: Path, session_id: str) -> Path:

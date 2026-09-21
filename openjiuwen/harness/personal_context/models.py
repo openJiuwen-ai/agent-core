@@ -135,15 +135,9 @@ class PersonalContextStatus(BaseModel):
             failed = numeric["failed_items"]
             quarantined = numeric["quarantined_items"]
             omitted = numeric["omitted_item_errors"]
-            if (
-                not 0 <= percent <= 100
-                or total < 0
-                or completed < 0
-                or failed < 0
-                or completed + failed > total
-                or quarantined < 0
-                or omitted < 0
-            ):
+            has_negative_count = any(value < 0 for value in (total, completed, failed, quarantined, omitted))
+            has_overcount = completed + failed > total
+            if not 0 <= percent <= 100 or has_negative_count or has_overcount:
                 raise ValueError("fetch run progress counts are out of range")
             item_errors = progress["item_errors"]
             if not isinstance(item_errors, (list, tuple)) or len(item_errors) > 20:

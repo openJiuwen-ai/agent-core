@@ -157,15 +157,17 @@ def _fetch_run_status(
     phase: str = "processing",
     progress_percent: int | None = None,
 ) -> dict[str, object]:
-    if progress_percent is not None:
-        percent = min(100, max(0, progress_percent))
-    elif run_state in {"succeeded", "partial_succeeded"} or (
+    completed_terminal = run_state in {"succeeded", "partial_succeeded"}
+    all_items_failed = (
         run_state == "failed"
         and last_error is None
         and total_items > 0
         and completed_items == 0
         and failed_items == total_items
-    ):
+    )
+    if progress_percent is not None:
+        percent = min(100, max(0, progress_percent))
+    elif completed_terminal or all_items_failed:
         percent = 100
     elif phase == "organizing":
         percent = 25

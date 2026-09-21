@@ -104,6 +104,33 @@ def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
     assert raw_messages[0]["content"] == "How should database retries work?"
 
 
+def test_recall_is_offline(tmp_path, monkeypatch):
+    import tiktoken
+
+    get_encoding_calls: list[str] = []
+
+    def unavailable_encoding(name: str):
+        get_encoding_calls.append(name)
+        raise RuntimeError("encoding asset is unavailable offline")
+
+    monkeypatch.setattr(tiktoken, "get_encoding", unavailable_encoding)
+    messages = [
+        UserMessage(content="database"),
+        AssistantMessage(content="retry database"),
+    ]
+
+    archive = _archive(tmp_path, messages)
+    result = recall_compressed_context(
+        workspace_dir=str(tmp_path),
+        session_id="session-1",
+        memory_id=archive.memory_id,
+        query="database retry",
+    )
+
+    assert result["chunks"]
+    assert get_encoding_calls == []
+
+
 def test_archive_extracts_query_text_from_structured_user_content(tmp_path):
     messages = [
         UserMessage(content=[{"type": "text", "text": "How should database retries work?"}]),
