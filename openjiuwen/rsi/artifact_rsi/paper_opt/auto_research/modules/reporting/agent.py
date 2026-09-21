@@ -274,7 +274,10 @@ class ReportingAgent:
             )
         repair_text = "\n\n".join(repair_parts)
         query = self._build_task_query(
-            evidence, repair_text, previous_context=inputs.previous_context
+            evidence,
+            repair_text,
+            previous_context=inputs.previous_context,
+            contract_brief=getattr(inputs, "contract_brief", "") or "",
         )
 
         session_error = await self._run_paper_agent(run_id=run_id, query=query)
@@ -639,6 +642,7 @@ class ReportingAgent:
         evidence: dict[str, str],
         repair_instruction: str = "",
         previous_context=None,
+        contract_brief: str = "",
     ) -> str:
         modify = previous_context is not None
         if modify:
@@ -679,7 +683,20 @@ class ReportingAgent:
                     f"section, compiling, and staying within word/citation/"
                     f"traceable-number requirements over polish. "
                 ) + preamble
-        return preamble + "\n\n" + "\n\n".join(f"## Evidence: {key}\n\n{value}" for key, value in evidence.items())
+        cleaned_brief = (contract_brief or "").strip()
+        contract_section = ""
+        if cleaned_brief:
+            contract_section = (
+                "\n\n## Manager subtask contract\n\n"
+                "Follow this assignment when writing the paper. It is host-inlined "
+                "from the manager; do not invent extra tables, methods, or claims "
+                "beyond it.\n\n"
+                f"{cleaned_brief}"
+            )
+        evidence_block = "\n\n".join(
+            f"## Evidence: {key}\n\n{value}" for key, value in evidence.items()
+        )
+        return preamble + contract_section + "\n\n" + evidence_block
 
     def _enabled_skill_dirs(self, skills_root: Path | None = None) -> list[str]:
         """Explicit per-skill directory list rather than the whole
@@ -1080,6 +1097,7 @@ class ReportingAgent:
                 refs_bib_path=str(refs_bib_path),
                 figure_paths=figure_paths,
                 notes="; ".join(notes),
+                lint_issues=list(notes),
             )
 
         artifact_path = final_pdf if final_pdf.is_file() else final_tex
@@ -1090,6 +1108,7 @@ class ReportingAgent:
             refs_bib_path=str(refs_bib_path),
             figure_paths=figure_paths,
             notes="; ".join(notes) if notes else None,
+            lint_issues=list(notes),
         )
 
     # -- model settings: same per-module pattern every module uses -----------

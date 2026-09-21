@@ -72,6 +72,9 @@ class ExperimentDesignInput(BaseModel):
     run_id: str = Field(default_factory=new_run_id)
     branch: str | None = None
     session_epoch: int = Field(default=0, ge=0)
+    # Manager SubtaskContract inlined into the design query. Empty when the
+    # caller is not the manager loop.
+    contract_brief: str = ""
 
     @field_validator("run_id")
     @classmethod
@@ -126,6 +129,9 @@ class ExperimentDesignFeedbackInput(BaseModel):
     feedback: EvaluationFeedback
     allow_after_terminal: bool = False
     session_epoch: int = Field(default=0, ge=0)
+    # Manager SubtaskContract inlined into the design query. Empty when the
+    # caller is not the manager loop.
+    contract_brief: str = ""
 
     @field_validator("run_id")
     @classmethod
@@ -143,6 +149,9 @@ class ExperimentDesignResearchRevisionInput(BaseModel):
     additional_research_paths: list[str] = Field(min_length=1)
     reason: str = Field(min_length=1)
     session_epoch: int = Field(default=0, ge=0)
+    # Manager SubtaskContract inlined into the design query. Empty when the
+    # caller is not the manager loop.
+    contract_brief: str = ""
 
     @field_validator("run_id", "reason")
     @classmethod
