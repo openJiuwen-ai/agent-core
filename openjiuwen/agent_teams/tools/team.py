@@ -519,6 +519,15 @@ class TeamBackend:
         On spawn failure, startup_member rolls back STARTING→UNSTARTED
         and re-raises.
 
+        Per-member fault tolerant: a member that fails to spawn is
+        logged, left rolled back to UNSTARTED (so a later startup pass
+        can retry it), and skipped — it never aborts the loop. Every
+        caller of this funnel (send_message auto-start, interact
+        broadcast, create_task autostart) wants best-effort semantics:
+        the work at hand (a message, a task) must still land for the
+        members that did start, and one broken member must not silence
+        the team's whole communication channel.
+
         Args:
             on_created: Callback that receives a member_name and
                 launches the corresponding agent process.
@@ -529,7 +538,14 @@ class TeamBackend:
         unstarted = await self.db.member.get_team_members(self.team_name, status=MemberStatus.UNSTARTED)
         started: list[str] = []
         for member in unstarted:
-            await self.startup_member(member.member_name, on_created)
+            try:
+                await self.startup_member(member.member_name, on_created)
+            except Exception as e:
+                team_logger.error(
+                    "startup: failed to start member {} (left UNSTARTED for retry): {}",
+                    member.member_name, e,
+                )
+                continue
             started.append(member.member_name)
         return started
 
@@ -556,6 +572,34 @@ class TeamBackend:
         if not self.is_leader or self._on_member_started is None:
             return []
         return await self.startup(on_created=self._on_member_started)
+
+    async def autostart_member(self, member_name: str) -> bool:
+        """Start one UNSTARTED member using the injected spawn callback.
+
+        Single-member companion to ``autostart_unstarted`` for the
+        assignment path: ``update_task(assignee=...)`` hands work to one
+        specific member, so only that member needs to exist — starting
+        the whole roster would spawn teammates the leader never
+        addressed. An assigned-but-never-started member is otherwise a
+        structural dead end: the assignment event has no subscriber, the
+        member-side stale self-check requires a running kernel, and the
+        leader-side stale-pending sweep only scans unassigned tasks.
+
+        Same guards as ``autostart_unstarted`` (leader-only,
+        callback-gated); the UNSTARTED→STARTING CAS in ``startup_member``
+        makes repeated or concurrent calls idempotent.
+
+        Args:
+            member_name: The member to start when still UNSTARTED.
+
+        Returns:
+            True if this call started the member; False when the member
+            was already started/starting or this backend does not own
+            spawning.
+        """
+        if not self.is_leader or self._on_member_started is None:
+            return False
+        return await self.startup_member(member_name, self._on_member_started)
 
     async def startup_member(
         self,

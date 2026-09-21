@@ -20,7 +20,6 @@ import errno
 import os
 import shutil
 import stat
-import subprocess
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -37,6 +36,7 @@ from openjiuwen.agent_teams.team_workspace.models import (
 )
 from openjiuwen.harness.tools.worktree.git import _run_git, rev_parse
 from openjiuwen.core.common.logging import team_logger
+from openjiuwen.core.common.utils.windows_junction import create_windows_junction
 
 try:
     import winerror
@@ -163,8 +163,12 @@ class TeamWorkspaceManager:
 
         Windows requires elevated privileges or Developer Mode for directory
         symlinks. When that privilege is unavailable, fall back to a junction.
-        On other restricted runtimes where symlink creation is forbidden, fall
-        back to copying the directory so the mount remains usable.
+        When the junction cannot be created either (e.g. a link path beyond
+        the classic 248-char directory limit that even the reparse-point
+        fallback rejects), fall back to copying the directory so the mount
+        remains usable — degraded to a snapshot of the shared workspace,
+        so it is logged at WARNING. On other restricted runtimes where
+        symlink creation is forbidden, the same copy fallback applies.
 
         Args:
             target_path: Existing directory to expose.
@@ -174,7 +178,23 @@ class TeamWorkspaceManager:
             os.symlink(target_path, link_path, target_is_directory=True)
         except OSError as exc:
             if os.name == "nt" and getattr(exc, "winerror", None) == ERROR_PRIVILEGE_NOT_HELD:
-                self._create_windows_junction(target_path, link_path)
+                try:
+                    self._create_windows_junction(target_path, link_path)
+                except OSError as junction_error:
+                    team_logger.warning(
+                        "Junction mount at %s failed (%s); falling back to a copied directory "
+                        "(snapshot semantics: later shared-workspace writes stay invisible here)",
+                        link_path,
+                        junction_error,
+                    )
+                    shutil.copytree(
+                        target_path,
+                        link_path,
+                        symlinks=False,
+                        copy_function=shutil.copy2,
+                        dirs_exist_ok=False,
+                    )
+                    return
                 team_logger.info(
                     "Symlink privilege unavailable on Windows; mounted %s via junction at %s",
                     target_path,
@@ -198,18 +218,8 @@ class TeamWorkspaceManager:
 
     @staticmethod
     def _create_windows_junction(target_path: str, link_path: str) -> None:
-        """Create a directory junction using mklink /J on Windows."""
-        cmd_path = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "cmd.exe")
-        result = subprocess.run(
-            [cmd_path, "/c", "mklink", "/J", link_path, target_path],
-            capture_output=True,
-            text=True,
-            check=False,
-            shell=False,
-        )
-        if result.returncode != 0:
-            error_output = result.stderr.strip() or result.stdout.strip()
-            raise OSError(f"Failed to create junction {link_path} -> {target_path}: {error_output}")
+        """Create a directory junction (mklink, then long-path reparse fallback)."""
+        create_windows_junction(target_path, link_path)
 
 
     @staticmethod

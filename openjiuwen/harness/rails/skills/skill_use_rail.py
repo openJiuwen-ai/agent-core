@@ -119,6 +119,21 @@ class SkillUseRail(DeepAgentRail):
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
 
+        # Hot-bind bookkeeping (extension_binder): resolved leaf skill
+        # directories bound onto this rail. Sibling leaves under an
+        # already-mounted root merge into the shared mount, and the root is
+        # kept until its last bound leaf is unbound.
+        self._bound_leaf_dirs: Set[str] = set()
+
+    @property
+    def bound_leaf_dirs(self) -> Set[str]:
+        """Resolved leaf skill directories bound via hot extension binds."""
+        return set(self._bound_leaf_dirs)
+
+    @bound_leaf_dirs.setter
+    def bound_leaf_dirs(self, directories: Set[str]) -> None:
+        self._bound_leaf_dirs = set(directories)
+
     @property
     def skills_meta(self) -> List[Skill]:
         """Return all managed skills."""

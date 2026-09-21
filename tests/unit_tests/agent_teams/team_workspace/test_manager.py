@@ -111,29 +111,54 @@ def test_mount_into_workspace_falls_back_to_junction_on_windows_1314(monkeypatch
         error.winerror = ERROR_PRIVILEGE_NOT_HELD
         raise error
 
-    def fake_run(command, capture_output, text, check, shell=False):
-        junction_calls.append(
-            {
-                "command": command,
-                "capture_output": capture_output,
-                "text": text,
-                "check": check,
-            }
-        )
-        return SimpleNamespace(returncode=0, stdout="ok", stderr="")
+    def fake_create_junction(target_path, link_path):
+        junction_calls.append({"target_path": target_path, "link_path": link_path})
 
     monkeypatch.setattr(os, "symlink", fake_symlink)
     monkeypatch.setattr(os, "name", "nt", raising=False)
-    monkeypatch.setattr("openjiuwen.agent_teams.team_workspace.manager.subprocess.run", fake_run)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.manager.create_windows_junction",
+        fake_create_junction,
+    )
 
     manager.mount_into_workspace(str(workspace_root))
 
     expected_link = os.path.join(str(workspace_root), ".team", "team-alpha")
-    assert len(junction_calls) == 1
-    assert junction_calls[0]["command"][1:] == ["/c", "mklink", "/J", expected_link, manager.workspace_path]
-    assert junction_calls[0]["capture_output"] is True
-    assert junction_calls[0]["text"] is True
-    assert junction_calls[0]["check"] is False
+    assert junction_calls == [{"target_path": manager.workspace_path, "link_path": expected_link}]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
+@pytest.mark.level0
+def test_mount_into_workspace_falls_back_to_copy_when_junction_fails(monkeypatch, tmp_path):
+    """junction 全链失败（如 248+ 长路径连 reparse 兜底也被拒）时降级为目录拷贝：
+    挂载点必须可用（快照语义），不能以异常炸掉成员 spawn。"""
+    manager = _make_manager(tmp_path)
+    (tmp_path / "shared-workspace" / "phase1").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "shared-workspace" / "phase1" / "a.md").write_text("shared", encoding="utf-8")
+    workspace_root = tmp_path / "agent-workspace"
+    workspace_root.mkdir()
+
+    def fake_symlink(*args, **kwargs):
+        error = OSError("missing privilege")
+        error.winerror = ERROR_PRIVILEGE_NOT_HELD
+        raise error
+
+    def fake_create_junction(target_path, link_path):
+        raise OSError(206, "文件名或扩展名太长")
+
+    monkeypatch.setattr(os, "symlink", fake_symlink)
+    monkeypatch.setattr(os, "name", "nt", raising=False)
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.team_workspace.manager.create_windows_junction",
+        fake_create_junction,
+    )
+
+    manager.mount_into_workspace(str(workspace_root))
+
+    copied = workspace_root / ".team" / "team-alpha"
+    assert copied.is_dir() and not os.path.islink(copied)
+    assert (copied / "phase1" / "a.md").read_text(encoding="utf-8") == "shared"
+
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction fallback only applies on Windows")
 @pytest.mark.level0

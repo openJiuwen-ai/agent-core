@@ -1213,6 +1213,7 @@ class TeamAgent(BaseAgent):
         if spec_data is None:
             raise ValueError(f"No leader spec found for team '{team_name}'")
         spec = TeamAgentSpec.model_validate(spec_data)
+        cls._prune_retired_spec_elements(spec, team_name)
         # build_context is Field(exclude=True) and dropped on the checkpoint
         # round-trip. Prefer the live runtime spec's context on warm recovery;
         # otherwise rebuild it from the serializable seed so provider-based
@@ -1224,6 +1225,7 @@ class TeamAgent(BaseAgent):
         if runtime_spec is not None and runtime_spec.memory and runtime_spec.memory.embedding_config:
             if spec.memory:
                 spec.memory.embedding_config = runtime_spec.memory.embedding_config
+        cls._refresh_model_choices_from_runtime(spec, runtime_spec)
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
@@ -1250,6 +1252,57 @@ class TeamAgent(BaseAgent):
 
         set_session_id(session.get_session_id())
         return agent
+
+    @classmethod
+    def _prune_retired_spec_elements(cls, spec: TeamAgentSpec, team_name: str) -> None:
+        """Drop tool/rail provider types the current build has retired.
+
+        Recovery hygiene: the checkpoint may name element types that no
+        longer exist (e.g. a removed swarm.* tool). Fresh construction stays
+        fail-fast; here a retired type degrades to "absent" so one stale
+        entry cannot kill the whole team rebuild.
+        """
+        from openjiuwen.harness.schema.deep_agent_spec import drop_unregistered_elements
+
+        for role, member_spec in spec.agents.items():
+            dropped = drop_unregistered_elements(member_spec)
+            if dropped["tools"] or dropped["rails"]:
+                team_logger.warning(
+                    "recover_from_session: dropped retired element types from persisted spec "
+                    "(team={}, role={}, tools={}, rails={})",
+                    team_name, role, dropped["tools"], dropped["rails"],
+                )
+
+    @classmethod
+    def _refresh_model_choices_from_runtime(
+        cls,
+        spec: TeamAgentSpec,
+        runtime_spec: TeamAgentSpec | None,
+    ) -> None:
+        """Re-point model choices at the CURRENT config, not the checkpoint.
+
+        The persisted spec froze model names/endpoints at team-creation
+        time, and riding a stale model name would send the recovered team to
+        a dead or unintended endpoint. Per-member models copy by role key
+        (only when the live spec actually declares one); team-level
+        pool/router fields copy wholesale. The allocator state restored
+        during recovery is just rotation counters guarded by a pool digest,
+        so a changed pool resets the rotation instead of reviving stale
+        names.
+        """
+        if runtime_spec is None:
+            return
+        if runtime_spec.model_pool:
+            spec.model_pool = runtime_spec.model_pool
+            spec.model_pool_strategy = runtime_spec.model_pool_strategy
+        if runtime_spec.model_router is not None:
+            spec.model_router = runtime_spec.model_router
+        if runtime_spec.model_intelli_router is not None:
+            spec.model_intelli_router = runtime_spec.model_intelli_router
+        for role, member_spec in spec.agents.items():
+            fresh = runtime_spec.agents.get(role)
+            if fresh is not None and fresh.model is not None:
+                member_spec.model = fresh.model
 
 
 __all__ = ["TeamAgent"]

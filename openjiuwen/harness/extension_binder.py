@@ -217,6 +217,18 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
     already carry one (see ``factory._make_skill_rail`` / ``enable_skill_discovery``).
     Binding only adds this skill's root to the rail and reloads it; unbinding
     (``_unbind`` below) removes that root again.
+
+    Visibility contract: binding never derives an ``enabled_skills``
+    allow-list from the bound skill's directory name. The rail keeps scanning
+    every mounted root, so skills the agent already exposes (e.g.
+    pre-installed workspace skills) stay visible alongside the newly bound
+    ones. Only a manifest that explicitly declares ``enabled_skills``
+    (``SkillSpec.enabled_skills``) narrows the rail's allow-list.
+
+    Leaf bookkeeping lives on the rail instance as the ``bound_leaf_dirs``
+    property (resolved leaf directory strings) so sibling leaves under an
+    already-mounted root merge into the shared mount instead of raising,
+    and ``_unbind`` can keep the root until its last bound leaf is removed.
     """
     config = _require_deep_config(agent)
     directory = Path(skill.directory).expanduser().resolve()
@@ -228,30 +240,34 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
         raise ValueError("No SkillUseRail registered on the agent; cannot bind a skill.")
     target = rails[0]
 
-    roots, enabled_names = _skill_paths_to_rail_mounts([skill.directory])
-    if skill.enabled_skills:
-        for name in skill.enabled_skills:
-            if name not in enabled_names:
-                enabled_names.append(name)
+    roots, _derived_names = _skill_paths_to_rail_mounts([skill.directory])
+    # Only an explicit manifest declaration narrows visibility; the leaf
+    # names derived above are deliberately not turned into an allow-list.
+    explicit_names = list(skill.enabled_skills or [])
 
     previous_dirs = _skill_values(target.skills_dir)
     current_dirs = {str(Path(item).expanduser().resolve()) for item in previous_dirs}
+    bound_leaves = target.bound_leaf_dirs
 
     if mount_root in current_dirs:
         # Parent-dir mounts are one-shot. Leaf dirs under the same parent are
         # siblings in new manifests and must merge into the shared mount.
-        if not is_leaf or target.enabled_skills is None:
+        if not is_leaf:
             raise ValueError(f"Skill already bound: {mount_root}")
-        if directory.name in target.enabled_skills:
+        if str(directory) in bound_leaves:
             raise ValueError(f"Skill already bound: {directory}")
 
     previous_enabled = None if target.enabled_skills is None else set(target.enabled_skills)
+    previous_bound_leaves = set(bound_leaves)
 
     # New roots go first: duplicate skill names across roots keep the first
     # (i.e. newly bound) one, so a fresh bind can refresh/shadow a stale copy.
     target.skills_dir = [*(root for root in roots if root not in current_dirs), *previous_dirs]
-    if enabled_names:
-        target.enabled_skills = (target.enabled_skills or set()) | set(enabled_names)
+    if explicit_names:
+        target.enabled_skills = (target.enabled_skills or set()) | set(explicit_names)
+    if is_leaf:
+        bound_leaves.add(str(directory))
+        target.bound_leaf_dirs = bound_leaves
     target.enable_cache = False
     target.clear_skills()
     try:
@@ -259,6 +275,7 @@ async def _bind_skill(agent: DeepAgent, skill: ResolvedSkill) -> ResourceRef:
     except Exception:
         target.skills_dir = previous_dirs
         target.enabled_skills = previous_enabled
+        target.bound_leaf_dirs = previous_bound_leaves
         target.enable_cache = False
         target.clear_skills()
         raise
@@ -402,10 +419,19 @@ async def _unbind(agent: DeepAgent, ref: ResourceRef) -> None:
             if root not in mounted:
                 continue
 
-            # Sibling leaf unbind: drop only this skill name while others remain.
-            if is_leaf and rail.enabled_skills is not None:
-                rail.enabled_skills.discard(path.name)
-                if rail.enabled_skills:
+            # Sibling leaf unbind: drop only this leaf while others remain.
+            if is_leaf:
+                if rail.enabled_skills is not None:
+                    rail.enabled_skills.discard(path.name)
+                bound_leaves = rail.bound_leaf_dirs
+                bound_leaves.discard(str(path))
+                rail.bound_leaf_dirs = bound_leaves
+                siblings_remain = any(
+                    str(Path(item).parent) == root for item in bound_leaves
+                )
+                # Keep the shared mount while tracked siblings remain, or an
+                # explicit allow-list still names skills from this root.
+                if siblings_remain or rail.enabled_skills:
                     if agent.is_registered_rail(rail):
                         rail.enable_cache = False
                         rail.clear_skills()
