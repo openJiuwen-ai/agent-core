@@ -10,6 +10,7 @@ from __future__ import annotations
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation import agent as agent_module
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
     CodeImplementationAgent,
+    _extract_stdout_metrics,
     _ReferencedPath,
 )
 
@@ -167,3 +168,100 @@ def test_build_referenced_paths_prompt_describes_oversized_file():
     prompt = CodeImplementationAgent._build_referenced_paths_prompt([record])
     assert "/data/huge.bin" in prompt
     assert "not copied" in prompt.lower()
+
+
+# -- _extract_stdout_metrics ---------------------------------------------------
+# Smoke-test result recovery channel added after a packaged-desktop-host
+# incident where the candidate's own --output file write silently landed
+# under the host's home directory instead of the requested path (the
+# launcher was observed changing its process cwd before running the
+# candidate script). Stdout is not subject to that.
+
+
+def test_extract_stdout_metrics_finds_marker_among_noisy_log_lines():
+    stdout = (
+        "2026-09-21 | INFO | Registered connector pool type: default\n"
+        'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+        "2026-09-21 | INFO | done\n"
+    )
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is True
+    assert payload == {"method": "proposed", "n_questions": 1}
+
+
+def test_extract_stdout_metrics_no_marker_returns_not_found():
+    found, payload = _extract_stdout_metrics("just some ordinary log output\n")
+    assert found is False
+    assert payload is None
+
+
+def test_extract_stdout_metrics_malformed_json_reports_found_with_no_payload():
+    found, payload = _extract_stdout_metrics("SMOKE_METRICS_JSON:{not valid json\n")
+    assert found is True
+    assert payload is None
+
+
+def test_extract_stdout_metrics_keeps_last_of_repeated_markers():
+    stdout = 'SMOKE_METRICS_JSON:{"n": 1}\nSMOKE_METRICS_JSON:{"n": 2}\n'
+    found, payload = _extract_stdout_metrics(stdout)
+    assert found is True
+    assert payload == {"n": 2}
+
+
+def test_extract_stdout_metrics_non_dict_payload_treated_as_not_found_content():
+    found, payload = _extract_stdout_metrics("SMOKE_METRICS_JSON:[1, 2, 3]\n")
+    assert found is True
+    assert payload is None
+
+
+# -- _resolve_smoke_metrics -----------------------------------------------------
+
+
+def test_resolve_smoke_metrics_no_marker_falls_back_to_file(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics_path.write_text('{"method": "proposed", "n_questions": 1}', encoding="utf-8")
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "plain log output, no marker", metrics_path, "proposed"
+    )
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+
+
+def test_resolve_smoke_metrics_no_marker_and_missing_file_reports_missing(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "plain log output, no marker", metrics_path, "proposed"
+    )
+    assert state == "missing"
+    assert metrics == {}
+
+
+def test_resolve_smoke_metrics_marker_present_and_file_missing_repairs_file(tmp_path):
+    metrics_path = tmp_path / "smoke" / "proposed.metrics.json"
+    stdout = 'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(stdout, metrics_path, "proposed")
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+    # The candidate's own file write never landed -- the host must repair it,
+    # since smoke_test_dir's metrics.json is a kept-on-disk debugging artifact.
+    assert metrics_path.is_file()
+    assert metrics_path.read_text(encoding="utf-8").strip().startswith("{")
+
+
+def test_resolve_smoke_metrics_marker_and_file_both_present_prefers_stdout(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics_path.write_text('{"method": "proposed", "n_questions": 99}', encoding="utf-8")
+    stdout = 'SMOKE_METRICS_JSON:{"method": "proposed", "n_questions": 1}\n'
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(stdout, metrics_path, "proposed")
+    assert state == "present"
+    assert metrics == {"method": "proposed", "n_questions": 1}
+
+
+def test_resolve_smoke_metrics_marker_malformed_reports_invalid_json_without_touching_file(tmp_path):
+    metrics_path = tmp_path / "proposed.metrics.json"
+    metrics, state = CodeImplementationAgent._resolve_smoke_metrics(
+        "SMOKE_METRICS_JSON:{not valid", metrics_path, "proposed"
+    )
+    assert state == "invalid_json"
+    assert metrics == {}
+    assert not metrics_path.exists()

@@ -206,6 +206,41 @@ def _hash_staged_deliverable(root: Path) -> str:
     return digest.hexdigest()[:16]
 
 
+_SMOKE_METRICS_STDOUT_MARKER = "SMOKE_METRICS_JSON:"
+
+
+def _extract_stdout_metrics(stdout: str) -> tuple[bool, dict[str, Any] | None]:
+    """Pull the smoke-test metrics payload out of stdout, if the candidate
+    printed one (see the "Required entry-point contract" prompt section).
+
+    This is a second, filesystem-independent channel for the same payload
+    the candidate also writes to `--output`: the packaged desktop host has
+    been observed changing its own process's cwd before running the
+    candidate script, so a relative `--output` value can silently resolve
+    somewhere other than the path the host asked for. Stdout is not subject
+    to that.
+
+    Returns ``(found, payload)``: ``found`` is True whenever a marker line
+    exists at all, even with unparsable JSON after it -- callers must treat
+    "no marker" (fall back to the file) differently from "marker present but
+    broken" (a real bug worth surfacing, not masking). Scans every line, not
+    just the tail, and keeps the last match in case the candidate's own
+    logging prints the marker more than once.
+    """
+    marker_line: str | None = None
+    for line in stdout.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(_SMOKE_METRICS_STDOUT_MARKER):
+            marker_line = stripped[len(_SMOKE_METRICS_STDOUT_MARKER):].strip()
+    if marker_line is None:
+        return False, None
+    try:
+        payload = json.loads(marker_line)
+    except json.JSONDecodeError:
+        return True, None
+    return True, (payload if isinstance(payload, dict) else None)
+
+
 def _discover_variant_names(code_dir: Path, *, timeout: float = 30) -> list[str]:
     """Ask the entry point's own argparse --method flag what it actually
     supports, instead of trusting a separately-tracked list. The task
@@ -1033,12 +1068,25 @@ class CodeImplementationAgent:
             "per_question=[<one item-result object>] and model_call_count >= 1, "
             "and exit 0/1 — no full-dataset run. Parser-only stubs and dummy model replies "
             "are invalid.\n"
-            "  --output <path>   write a metrics.json to this path\n\n"
+            "  --output <path>   a complete path (may be absolute) chosen by the host — "
+            "treat it as opaque and use it exactly as given for `open(...)`/file writing. "
+            "Do not reinterpret it as a bare filename, do not join it with a directory "
+            "convention of your own, and do not derive your own path from just its "
+            "basename: the host may run you under a launcher whose current working "
+            "directory is not what you expect, so anything other than the literal "
+            "`--output` value can silently write the file somewhere the host will never "
+            "look.\n\n"
             "The host invokes each variant separately as "
-            f"`{_ENTRY_POINT} --method <name> --output <name>.metrics.json`. "
+            f"`{_ENTRY_POINT} --method <name> --output /abs/path/to/<name>.metrics.json`. "
             "Do not require `--method all`. Do not refuse a full (non-smoke) "
             "`--method proposed` or `--method <baseline>` run. Each invocation "
             "must write exactly that variant's JSON to `--output`.\n\n"
+            "Redundant recovery channel for `--smoke-test` only (skip this on a full, "
+            "non-smoke run): after writing `--output`, also print one line to stdout — "
+            f"`{_SMOKE_METRICS_STDOUT_MARKER}<the same JSON object, compact, one line>` — "
+            "so the host can recover the result even if the file above did not end up "
+            "where it asked. If you print this line more than once, only the last one "
+            "is read.\n\n"
             f"Metrics to compute, identically across all variants: {', '.join(plan.metrics)}.\n"
             "Write every declared plan metric under a top-level `metrics` object keyed by "
             "that exact name, as a JSON number or `{\"value\": <number>}`. Operational "
@@ -1143,6 +1191,64 @@ class CodeImplementationAgent:
         if len(cleaned) <= limit:
             return cleaned
         return "...(truncated; see full log on disk)...\n" + cleaned[-limit:]
+
+    @staticmethod
+    def _resolve_smoke_metrics(
+        stdout: str, metrics_path: Path, variant_name: str
+    ) -> tuple[dict[str, Any], str]:
+        """Recover one variant's smoke metrics, preferring stdout over the
+        `--output` file the candidate was asked to write.
+
+        The file channel alone is not trustworthy end-to-end: the
+        candidate's own `open(args.output, ...)` runs inside a subprocess
+        whose actual cwd we do not fully control (the packaged desktop host
+        has been observed changing it before the candidate script runs), so
+        a relative interpretation of `--output` can silently land elsewhere.
+        `smoke_test_dir` is documented as a kept-on-disk debugging/
+        reflection artifact (see workspace.smoke_test_dir), so when stdout
+        saves the validation but the file never showed up, repair it here
+        from this (trusted) host process instead of leaving a silent gap
+        that would only surface much later.
+        """
+        file_metrics: dict[str, Any] | None = None
+        file_state = "present"
+        if not metrics_path.is_file():
+            file_state = "missing"
+        else:
+            try:
+                payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeError):
+                file_state = "invalid_json"
+            else:
+                if isinstance(payload, dict):
+                    file_metrics = payload
+                else:
+                    file_state = "invalid_json"
+
+        stdout_found, stdout_metrics = _extract_stdout_metrics(stdout)
+        if not stdout_found:
+            return (file_metrics or {}), file_state
+        if stdout_metrics is None:
+            return {}, "invalid_json"
+
+        if file_metrics is None:
+            try:
+                metrics_path.parent.mkdir(parents=True, exist_ok=True)
+                metrics_path.write_text(
+                    json.dumps(stdout_metrics, indent=2, ensure_ascii=False), encoding="utf-8"
+                )
+            except OSError as exc:
+                logger.warning(
+                    "could not repair missing smoke metrics file variant=%s path=%s: %s",
+                    variant_name, metrics_path, exc,
+                )
+            else:
+                logger.warning(
+                    "smoke metrics file missing/invalid at %s; recovered from stdout "
+                    "and repaired variant=%s",
+                    metrics_path, variant_name,
+                )
+        return stdout_metrics, "present"
 
     @staticmethod
     def _write_validation_artifact(log_dir: Path, validation: CandidateValidation) -> None:
@@ -1347,7 +1453,7 @@ class CodeImplementationAgent:
         errors: list[str] = []
 
         for variant in variants:
-            metrics_path = log_dir / f"{variant.name}.metrics.json"
+            metrics_path = (log_dir / f"{variant.name}.metrics.json").resolve()
             log_path = log_dir / f"{variant.name}.log"
             command = [*variant.invocation, "--smoke-test", "--output", str(metrics_path)]
             try:
@@ -1393,21 +1499,9 @@ class CodeImplementationAgent:
                     first_stderr = diagnostic
                 continue
 
-            metrics_state = "present"
-            metrics: dict[str, Any] = {}
-            if not metrics_path.is_file():
-                metrics_state = "missing"
-            else:
-                try:
-                    payload = json.loads(metrics_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError, UnicodeError):
-                    metrics_state = "invalid_json"
-                    payload = None
-                if metrics_state == "present":
-                    if not isinstance(payload, dict):
-                        metrics_state = "invalid_json"
-                    else:
-                        metrics = payload
+            metrics, metrics_state = self._resolve_smoke_metrics(
+                proc.stdout, metrics_path, variant.name
+            )
 
             contract = validate_metrics_contract(
                 metrics, expected_method=variant.name, metrics_state=metrics_state
