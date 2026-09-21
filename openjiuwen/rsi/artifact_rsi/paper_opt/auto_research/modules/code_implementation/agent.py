@@ -1284,6 +1284,17 @@ class CodeImplementationAgent:
         )
 
     def _compile_staged_python(self, code_dir: Path) -> str:
+        """Syntax-check every staged .py file.
+
+        Deliberately in-process (``compile()``) rather than shelling out to
+        ``sys.executable -m compileall``: under a frozen desktop host,
+        ``sys.executable`` resolves to the host launcher binary, which has no
+        ``-m`` module-runner and no bundled ``compileall`` -- the subprocess
+        always failed with ImportError there regardless of whether the staged
+        code was actually valid. Compiling in-process needs no interpreter
+        subprocess at all, so it works the same from source and from the
+        packaged build.
+        """
         py_files = [
             path
             for path in code_dir.rglob("*.py")
@@ -1291,25 +1302,20 @@ class CodeImplementationAgent:
         ]
         if not py_files:
             return "no Python files to compile"
-        module_cfg = self.config.get("code_implementation", {}) or {}
-        timeout = module_cfg.get("smoke_test_timeout_seconds", 60)
-        command = [PYTHON_EXE, "-m", "compileall", "-q", str(code_dir)]
-        try:
-            proc = subprocess.run(
-                command,
-                cwd=code_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            return f"static compile failed: {exc}"
-        if proc.returncode == 0:
+        errors: list[str] = []
+        for path in py_files:
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                errors.append(f"{path}: {exc}")
+                continue
+            try:
+                compile(source, str(path), "exec")
+            except SyntaxError as exc:
+                errors.append(f"{path}:{exc.lineno}: {exc.msg}")
+        if not errors:
             return ""
-        return self._tail(proc.stderr) or self._tail(proc.stdout) or (
-            f"compileall exit_code={proc.returncode}"
-        )
+        return self._tail("\n".join(errors))
 
     def _run_smoke_and_metrics(
         self,
