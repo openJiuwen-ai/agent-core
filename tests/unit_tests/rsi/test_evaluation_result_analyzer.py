@@ -1097,7 +1097,8 @@ class TestDiagnosisAgentStrategy:
             # Analyzer agent reads only bounded evidence, not raw trace/artifact dirs.
             assert "evidence_summary.md" in prompt
             assert "judge/normalized_trace.json" not in prompt
-            assert "artifacts" not in prompt
+            assert "artifacts/" in prompt
+            assert "not reference solutions or a complete repository" in prompt
             return json.dumps(
                 {
                     "issue_category": "member_harness",
@@ -1944,7 +1945,8 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "Analyze concrete member harness capability" in prompt
         assert "member_harness.<role>.<variable>" in prompt
         assert "judge/normalized_trace.json" not in prompt
-        assert "artifacts" not in prompt
+        assert "artifacts/" in prompt
+        assert "not reference solutions or a complete repository" in prompt
 
     def test_prompt_uses_inline_json_when_summary_is_missing(self, tmp_path: Path) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
@@ -2115,13 +2117,13 @@ class TestDiagnosisPromptEvidenceSummary:
         assert "team_skill.<role>.<variable>" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Never output role-less target_ref" in DIAGNOSIS_SYSTEM_PROMPT
 
-    def test_system_prompt_no_longer_allows_rail_attribution(self) -> None:
+    def test_system_prompt_allows_supported_rail_attribution(self) -> None:
         from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import (
             AGGREGATION_SYSTEM_PROMPT,
             DIAGNOSIS_SYSTEM_PROMPT,
         )
 
-        assert "rail:" not in DIAGNOSIS_SYSTEM_PROMPT
+        assert "rail:" in DIAGNOSIS_SYSTEM_PROMPT
         assert "Valid member_harness variables: prompt, skill, tool, config." in (AGGREGATION_SYSTEM_PROMPT)
         assert "Valid member_harness variables: prompt, skill, tool, rail, config." not in (AGGREGATION_SYSTEM_PROMPT)
 

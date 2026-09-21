@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 import yaml
 
@@ -80,38 +80,53 @@ async def invoke_member_optimizer_agent_structured(
     parse_response: ParseResponse,
     validate_response: ValidateResponse | None = None,
     build_retry_message: BuildRetryMessage | None = None,
+    recover_response: Callable[[str, str], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
-    """Invoke a Member Optimizer Agent and retry until structured output validates."""
+    """Validate output; an optional finalizer replaces agent replays on retries."""
     attempt = 0
     message = user_message
     last_error = ""
     previous: dict[str, Any] = {}
+    raw_text = ""
 
     while attempt <= retry_limit:
         try:
-            session = Session(
-                session_id=session_id,
-                card=getattr(agent, "card", None) or AgentCard(name=agent_name),
-            )
-            response = await agent.invoke(
-                inputs={"query": message},
-                session=session,
-            )
-            raw_text = extract_agent_text(response)
-            if model_output_has_mojibake(raw_text):
-                raise ValueError("agent response contains mojibake")
-            raw = parse_response(raw_text)
-            errors = validate_response(raw) if validate_response is not None else []
-            if not errors:
-                return raw
-            last_error = f"validation errors: {'; '.join(errors)}"
-            previous = raw
-        except (yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
-            last_error = f"parse error: {exc}"
-            previous = {}
+            if attempt and recover_response is not None:
+                response = await recover_response(message, raw_text)
+            else:
+                session = Session(
+                    session_id=session_id,
+                    card=getattr(agent, "card", None) or AgentCard(name=agent_name),
+                )
+                response = await agent.invoke(
+                    inputs={"query": message},
+                    session=session,
+                )
         except Exception as exc:
-            last_error = f"agent error: {exc}"
+            raise RuntimeError(f"{agent_name} execution failed: {exc}") from exc
+        if isinstance(response, dict) and response.get("result_type") == "error":
+            raw_text = extract_agent_text(response)
+            if (
+                recover_response is None or attempt >= retry_limit
+                or raw_text != "Max iterations reached without completion"
+            ):
+                raise RuntimeError(f"{agent_name} execution failed: {raw_text}")
+            last_error = raw_text
             previous = {}
+        else:
+            try:
+                raw_text = extract_agent_text(response)
+                if model_output_has_mojibake(raw_text):
+                    raise ValueError("agent response contains mojibake")
+                raw = parse_response(raw_text)
+                errors = validate_response(raw) if validate_response is not None else []
+                if not errors:
+                    return raw
+                last_error = f"validation errors: {'; '.join(errors)}"
+                previous = raw
+            except (yaml.YAMLError, KeyError, TypeError, ValueError) as exc:
+                last_error = f"parse error: {exc}"
+                previous = {}
 
         attempt += 1
         if attempt > retry_limit:

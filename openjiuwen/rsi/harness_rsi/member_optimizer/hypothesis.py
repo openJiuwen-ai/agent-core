@@ -19,7 +19,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.loader import (
     resolve_team_issues,
 )
 
-_HYPOTHESIS_VERSION = 3
+_HYPOTHESIS_VERSION = 4
 
 
 def compile_optimization_hypotheses(
@@ -30,9 +30,9 @@ def compile_optimization_hypotheses(
 ) -> str:
     """Compile analyzer output into immutable, case-bound optimization contracts.
 
-    The analyzer is the final semantic author. Downstream stages receive these
-    records verbatim and may choose a runtime surface, but may not reinterpret
-    the required behavior.
+    Preserve the observed failure, behavioral objective and independent checks.
+    The recorded cause remains a hypothesis: downstream counterevidence can
+    request reanalysis, but cannot silently rewrite this experiment's contract.
     """
     analysis_path = Path(analysis_ref_path).expanduser().resolve()
     analysis_ref = load_analysis_ref(analysis_path)
@@ -260,6 +260,8 @@ def _decisive_probe(issue: Any) -> dict[str, Any]:
     return {
         "root_cause": attribution.get("root_cause", ""),
         "critical_mistake": attribution.get("critical_mistake", ""),
+        "check": _decision_contract(issue, attribution).get("acceptance_observable", ""),
+        "boundary": _decision_contract(issue, attribution).get("scope_boundary", []),
         "validation_observations": metadata.get("validation_observations", {}),
         "verifier_observations": metadata.get("verifier_observations", {}),
     }
@@ -309,7 +311,7 @@ def _decision_contract(issue: Any, attribution: dict[str, Any]) -> dict[str, Any
         ).strip(),
         "required_action": str(supplied.get("required_action") or issue.recommendation or "").strip(),
         "acceptance_observable": str(
-            supplied.get("acceptance_observable") or attribution.get("root_cause") or issue.summary or ""
+            supplied.get("acceptance_observable") or ""
         ).strip(),
         "scope_boundary": boundaries,
         "activation_phase": activation_phase,

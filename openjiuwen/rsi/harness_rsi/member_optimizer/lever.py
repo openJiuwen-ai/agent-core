@@ -71,22 +71,17 @@ def available_surfaces_for_lever(
     lever: str,
     allowed_action_groups: list[str] | tuple[str, ...] | set[str],
 ) -> list[str]:
-    """Return executable surfaces without crossing a causal lever boundary."""
+    """Return supported surfaces; an upstream label is advice, not a sandbox."""
     groups = {str(group).strip().lower() for group in allowed_action_groups}
-    if lever == LEVER_INSTRUCTION:
-        surfaces: list[str] = []
-        if "prompt" in groups:
-            surfaces.append("prompt_section")
-        if "skill" in groups:
-            surfaces.append("skill")
-        return surfaces
-    if lever == LEVER_ACTION:
-        return [group for group in ("tool", "subagent") if group in groups]
-    if lever == LEVER_CONTROL:
-        return [group for group in ("rail", "processor") if group in groups]
     if lever == LEVER_CONFIGURATION:
         return [group for group in ("config", "configuration") if group in groups]
-    return []
+    if lever == LEVER_UNRESOLVED:
+        return []
+    return [
+        "prompt_section" if group == "prompt" else group
+        for group in ("prompt", "skill", "tool", "rail", "subagent", "processor")
+        if group in groups
+    ]
 
 
 def build_hypothesis_lever_policy(
@@ -97,36 +92,17 @@ def build_hypothesis_lever_policy(
 ) -> dict[str, Any]:
     """Build an optimizer-only, surface-independent lever decision policy."""
     lever = target_ref_lever(target_ref)
-    why_this = {
-        LEVER_INSTRUCTION: (
-            "The diagnosed variable is behavioral guidance or reusable method; no "
-            "missing deterministic operation or runtime-control defect is evidenced."
-        ),
-        LEVER_ACTION: ("The diagnosis requires executable capability that instructions alone cannot supply."),
-        LEVER_CONTROL: (
-            "The defect concerns lifecycle, context, retry, routing, or result-flow "
-            "control rather than task methodology."
-        ),
-        LEVER_CONFIGURATION: (
-            "The defect concerns an existing runtime parameter or environment setting, "
-            "not model guidance or a new task capability."
-        ),
-        LEVER_UNRESOLVED: (
-            "The analyzer did not identify a supported harness variable; do not guess a runtime surface."
-        ),
-    }[lever]
-    rejected = {other: reason for other, reason in _alternative_rejections(lever).items() if other != lever}
     return {
         "recommended_lever": lever,
         "target_ref": str(target_ref).strip(),
-        "why_this_lever": why_this,
-        "why_not_other_levers": rejected,
+        "why_this_lever": "Advisory classification from target_ref; select components using the observed operation.",
+        "why_not_other_levers": {},
         "predicted_affected_case_ids": sorted({str(case_id) for case_id in target_case_ids}),
         "retroactive_check": {
             "decisive_probe": dict(decisive_probe),
             "falsification_rule": (
-                "The selected lever is falsified unless paired evaluation improves every "
-                "failing target case without regressing protected cases."
+                "Check the predicted behavior against paired evidence independently of task score. "
+                "A score change alone neither confirms nor refutes the cause."
             ),
         },
     }
@@ -171,24 +147,6 @@ def _predicted_affected_case_ids(policies: list[dict[str, Any]]) -> list[str]:
             if normalized:
                 case_ids.add(normalized)
     return sorted(case_ids)
-
-
-def _alternative_rejections(selected: str) -> dict[str, str]:
-    defaults = {
-        LEVER_CONFIGURATION: "No runtime parameter or environment defect is evidenced.",
-        LEVER_CONTROL: "No lifecycle, routing, retry, context, or result-flow defect is evidenced.",
-        LEVER_ACTION: "No missing deterministic capability is evidenced.",
-        LEVER_INSTRUCTION: "Guidance cannot repair a lower-level executable or runtime defect.",
-    }
-    if selected == LEVER_CONFIGURATION:
-        defaults[LEVER_CONFIGURATION] = "Selected by the diagnosed configuration variable."
-    elif selected == LEVER_CONTROL:
-        defaults[LEVER_CONTROL] = "Selected by the diagnosed control-flow variable."
-    elif selected == LEVER_ACTION:
-        defaults[LEVER_ACTION] = "Selected by the diagnosed executable capability variable."
-    elif selected == LEVER_INSTRUCTION:
-        defaults[LEVER_INSTRUCTION] = "Selected by the diagnosed instruction or method variable."
-    return defaults
 
 
 __all__ = [

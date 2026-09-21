@@ -17,6 +17,7 @@ Orchestrates the two-step attribution-first pipeline:
 from __future__ import annotations
 
 import inspect
+import json
 import shutil
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -373,6 +374,8 @@ class MemberOptimizer:
         action_definitions = load_action_definitions(self._action_group_config_paths)
         planning_workspace = run_dir / "stage_workspaces" / "action_planning"
         try:
+            if single_harness:
+                _prepare_planning_evidence(planning_workspace, eval_ref_path, hypotheses, harness_refs_path)
             plan_kwargs: dict[str, Any] = {
                 "targets": selection_report.targets,
                 "role_attribution_report": role_attr_report,
@@ -391,7 +394,8 @@ class MemberOptimizer:
             if "allowed_prompt_surfaces" in planner_parameters:
                 plan_kwargs["allowed_prompt_surfaces"] = self.config.allowed_prompt_surfaces
             if "max_actions_per_plan" in planner_parameters:
-                plan_kwargs["max_actions_per_plan"] = self.config.max_actions_per_plan
+                limit = self.config.max_actions_per_plan
+                plan_kwargs["max_actions_per_plan"] = min(limit or 3, 3) if single_harness else limit
             if "optimization_hypotheses" in planner_parameters:
                 plan_kwargs["optimization_hypotheses"] = hypotheses
             if "optimization_experience" in planner_parameters:
@@ -823,6 +827,32 @@ class MemberOptimizer:
 # ---------------------------------------------------------------------------
 
 
+def _prepare_planning_evidence(
+    workspace: Path, eval_ref_path: str, hypotheses: list[dict[str, Any]], harness_refs_path: str,
+) -> None:
+    """Reuse the Analyzer's evidence projection, never copy hidden grading files."""
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.analyzer import _prepare_diagnosis_evidence
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.case_reader import CaseReader
+    from openjiuwen.rsi.harness_rsi.evaluation_result_analyzer.harness_context import prepare_harness_context
+
+    root = workspace / "evidence"
+    root.mkdir(parents=True, exist_ok=True)
+    case_ids = {str(case_id) for item in hypotheses for case_id in item.get("target_case_ids", [])}
+    index = {"source_eval_ref": eval_ref_path, "harness_refs": harness_refs_path, "cases": []}
+    for number, case in enumerate(CaseReader.read_case_inputs(str(Path(eval_ref_path).parent / "cases"))):
+        if case.case_id not in case_ids:
+            continue
+        destination = root / f"case_{number:03d}"
+        _prepare_diagnosis_evidence(case=case, runtime_dir=destination)
+        (destination / "task_and_response.json").write_text(
+            json.dumps({"task": case.input, "response": case.response}, ensure_ascii=False), encoding="utf-8",
+        )
+        index["cases"].append({"case_id": case.case_id, "path": destination.relative_to(workspace).as_posix()})
+    if not (root / "current_harness").exists():
+        prepare_harness_context(eval_ref_path=eval_ref_path, harness_refs_path=harness_refs_path, runtime_dir=root)
+    (root / "index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def _compile_single_harness_planning_inputs(
     *,
     team_issues: list[Any],
@@ -930,9 +960,8 @@ def _compile_single_harness_planning_inputs(
                 evidence=evidence,
                 evidence_refs=list(hypothesis.get("evidence_refs", [])),
                 rationale=(
-                    f"Analyzer-selected lever={recommended_lever}; choose only an "
-                    "executable surface within that lever without changing the immutable "
-                    "hypothesis."
+                    f"Analyzer suggests lever={recommended_lever}; choose the smallest "
+                    "supported intervention preserving the failure facts and behavior objective."
                 ),
             )
         )

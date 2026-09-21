@@ -65,6 +65,7 @@ _REPAIRABLE_CHECK_PREFIXES = (
     "tool_schema:",
     "tool_activation:",
     "rail_file_ref:",
+    "rail_runtime_contract:",
     "expert_harness_resolve:",
 )
 _UNREPAIRABLE_CHECK_NAMES = {
@@ -166,6 +167,45 @@ def _check_python_compile(path: Path) -> VerificationCheck:
             status="failed",
             error=str(e),
         )
+
+
+def _check_rail_runtime_contract(role: str, root: Path, target: str) -> VerificationCheck:
+    """Catch known unsupported host fields without executing generated code."""
+    errors = []
+    try:
+        path = (root / target).resolve()
+        if not path.is_relative_to(root.resolve()):
+            raise ValueError("Rail target is outside the integration package")
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        reads, writes = set(), set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Subscript):
+                owner, key = node.value, node.slice
+                destination = writes if isinstance(node.ctx, ast.Store) else reads
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.args:
+                owner, key = node.func.value, node.args[0]
+                if node.func.attr not in {"get", "pop", "setdefault"}:
+                    continue
+                destination = writes if node.func.attr == "setdefault" else reads
+            else:
+                continue
+            if (isinstance(owner, ast.Attribute) and owner.attr == "extra"
+                    and isinstance(key, ast.Constant) and isinstance(key.value, str)):
+                destination.add(key.value)
+        missing = (reads - writes) & {"remaining_iterations", "answer_text", "task"}
+        if missing:
+            errors.append(
+                f"Host does not populate ctx.extra keys {sorted(missing)}; derive rail-owned state from hooks"
+            )
+        if "_next_model_tool_choice" in reads | writes:
+            errors.append("Host does not consume _next_model_tool_choice; use supported callback control APIs")
+    except (OSError, ValueError, SyntaxError) as exc:
+        errors.append(str(exc))
+    return VerificationCheck(
+        name=f"rail_runtime_contract:{role}:{target}",
+        status="failed" if errors else "passed",
+        error="; ".join(errors),
+    )
 
 
 def _validate_package_python_source(source: str, *, path: str = "<source>") -> list[str]:
@@ -980,7 +1020,7 @@ def _failed_check_relative_path(check_name: str) -> str:
             if "/" in value:
                 return value.split("/", 1)[1]
             return value
-    for prefix in ("tool_file_ref:", "rail_file_ref:"):
+    for prefix in ("tool_file_ref:", "rail_file_ref:", "rail_runtime_contract:"):
         if check_name.startswith(prefix):
             value = check_name.removeprefix(prefix)
             parts = value.split(":", 1)
@@ -1177,6 +1217,12 @@ class HarnessChangeVerifier:
                     integration_dir,
                     expected_tool_names_by_role.get(role, set()),
                 )
+                checks.extend(
+                    _check_rail_runtime_contract(role, integration_dir, action.target_path)
+                    for action in plan.actions
+                    if action.role == role and action.action_group == "rail"
+                    and action.operation in {"add", "modify"} and action.target_path.endswith(".py")
+                )
                 failed_static_checks = [c for c in checks if c.status == "failed"]
                 error = f"{len(failed_static_checks)} static check(s) failed" if failed_static_checks else ""
             except Exception as e:
@@ -1312,6 +1358,10 @@ class HarnessChangeVerifier:
                         role,
                         integration_dir,
                         expected_tool_names,
+                    )
+                    re_checks.extend(
+                        _check_rail_runtime_contract(role, integration_dir, _failed_check_relative_path(check.name))
+                        for check in rvr.checks if check.name.startswith(f"rail_runtime_contract:{role}:")
                     )
                     if not any(c.status == "failed" for c in re_checks):
                         repairs.extend(

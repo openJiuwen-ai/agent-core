@@ -105,12 +105,15 @@ def test_filtered_native_prompt_preserves_h0_and_excludes_rejected_sibling(tmp_p
      {"file": "prompt_sections/identity.md", "priority": 77}),
     ("skill", "skills/base/SKILL.md", "skills", {"dir": "skills/base", "mode": "all"}),
     ("tool", "tools/base.py", "tools", {"file": "tools/base.py", "class": "UpdatedTool"}),
+    ("rail", "rails/base.py", "rails", {"file": "rails/base.py", "class": "UpdatedRail"}),
 ])
 def test_filtered_native_modification_replaces_registration_once(tmp_path, group, target, field, entry):
     base, candidate = tmp_path / "base", tmp_path / "candidate"
     payload = _package(base)
     shutil.copytree(base, candidate)
     payload[field][0] = entry
+    if group in {"tool", "rail"}:
+        _write(candidate / target, f"# Updated {group}\n")
     _manifest(candidate, payload)
     prepare_plugin_registries(candidate)
     selected = _filter(tmp_path, base, candidate, [_gate(candidate, group, target, operation="modify")])
@@ -120,13 +123,15 @@ def test_filtered_native_modification_replaces_registration_once(tmp_path, group
     assert len(actual) == len(payload[field])
     assert all(actual[0][key] == value for key, value in entry.items())
     assert len(plugin.prompt_sections) == 2
-    assert len(plugin.skills) == len(plugin.tools) == 1
+    assert len(plugin.skills) == len(plugin.tools) == len(plugin.rails) == 1
+    assert (selected / target).read_bytes() == (candidate / target).read_bytes()
 
 
 @pytest.mark.parametrize("group,target,field", [
     ("prompt", "prompt_sections/identity.md", "prompt_sections"),
     ("skill", "skills/base/SKILL.md", "skills"),
     ("tool", "tools/base.py", "tools"),
+    ("rail", "rails/base.py", "rails"),
 ])
 def test_filtered_native_removal_does_not_resurrect_from_manifest(tmp_path, group, target, field):
     base = tmp_path / "base"
@@ -160,17 +165,78 @@ def test_invalid_native_checkpoint_does_not_replace_previous_selection(tmp_path)
     assert not (tmp_path / "run/epoch_selections/e001.filter_tmp").exists()
 
 
-def test_native_candidate_with_unregistered_file_is_rejected(tmp_path):
+@pytest.mark.parametrize("group,target,registry", [
+    ("prompt", "prompt_sections/new.md", "prompt_sections/sections.yaml"),
+    ("rail", "rails/new.py", "rails/rails.yaml"),
+])
+def test_native_candidate_with_unregistered_file_is_rejected(tmp_path, group, target, registry):
     base, candidate = tmp_path / "base", tmp_path / "candidate"
     _package(base)
     shutil.copytree(base, candidate)
-    _write(candidate / "prompt_sections/new.md", "Unregistered instruction")
-    _write(candidate / "prompt_sections/sections.yaml", "sections:\n- file: prompt_sections/new.md\n")
+    _write(candidate / target, "# Unregistered capability\n")
+    _write(candidate / registry, yaml.safe_dump({Path(registry).stem: [{"file": target}]}))
 
     with pytest.raises(RuntimeError, match="no matching entry"):
-        _filter(tmp_path, base, candidate, [_gate(candidate, "prompt", "prompt_sections/new.md")])
+        _filter(tmp_path, base, candidate, [_gate(candidate, group, target)])
 
     assert not (tmp_path / "run/epoch_selections/e001").exists()
+
+
+@pytest.mark.parametrize("native_candidate,with_sidecars", [(True, False), (True, True), (False, True)])
+def test_filtered_rail_preserves_registration_and_excludes_rejected_changes(
+    tmp_path, native_candidate, with_sidecars,
+):
+    base, candidate = tmp_path / "base", tmp_path / "candidate"
+    original = _package(base)
+    shutil.copytree(base, candidate)
+    payload = json.loads(json.dumps(original))
+    retained_entry = {"file": "rails/retained.py", "class_name": "RetainedRail"}
+    payload["rails"].extend([retained_entry, {"file": "rails/rejected.py", "class": "RejectedRail"}])
+    payload["prompt_sections"].append({"file": "prompt_sections/rejected.md"})
+    _write(candidate / "rails/retained.py", "# Retained rail\n")
+    _write(candidate / "rails/rejected.py", "# Rejected rail\n")
+    _write(candidate / "prompt_sections/rejected.md", "Rejected instruction")
+    _manifest(candidate, payload)
+    if with_sidecars or not native_candidate:
+        prepare_plugin_registries(candidate)
+    if not native_candidate:
+        (candidate / "manifest.json").unlink()
+        _write(candidate / "harness.yaml", "name: legacy-candidate\n")
+    before = (_snapshot(base), _snapshot(candidate))
+
+    selected = _filter(tmp_path, base, candidate, [_gate(candidate, "rail", "rails/retained.py")])
+    relocated = tmp_path / "installed"
+    shutil.copytree(selected, relocated)
+    plugin = load_plugin_package(find_plugin_manifest(relocated))
+    native = json.loads((selected / "manifest.json").read_text(encoding="utf-8"))
+
+    assert native["rails"] == original["rails"] + [retained_entry]
+    assert [rail.params["class_name"] for rail in plugin.rails] == ["BaseRail", "RetainedRail"]
+    assert Path(plugin.rails[-1].params["file_path"]) == relocated / "rails/retained.py"
+    assert (relocated / "rails/retained.py").read_bytes() == (candidate / "rails/retained.py").read_bytes()
+    assert [section.name for section in plugin.prompt_sections] == ["identity", "soul"]
+    assert [section.content["en"] for section in plugin.prompt_sections] == ["Original identity", "Original policy"]
+    for field in ("skills", "tools", "metadata", "display_name", "id", "version"):
+        assert native[field] == original[field]
+    assert not (selected / "rails/rejected.py").exists()
+    assert not (selected / "prompt_sections/rejected.md").exists()
+    assert (_snapshot(base), _snapshot(candidate)) == before
+
+
+def test_missing_retained_rail_does_not_replace_previous_selection(tmp_path):
+    base, candidate = tmp_path / "base", tmp_path / "candidate"
+    payload = _package(base)
+    shutil.copytree(base, candidate)
+    payload["rails"].append({"file": "rails/missing.py", "class": "MissingRail"})
+    _manifest(candidate, payload)
+    sentinel = tmp_path / "run/epoch_selections/e001/previous.txt"
+    _write(sentinel, "Previous selection")
+
+    with pytest.raises(RuntimeError, match="source path is missing"):
+        _filter(tmp_path, base, candidate, [_gate(candidate, "rail", "rails/missing.py")])
+
+    assert sentinel.read_text(encoding="utf-8") == "Previous selection"
+    assert not (tmp_path / "run/epoch_selections/e001.filter_tmp").exists()
 
 
 def test_checkpoint_keeps_native_yaml_baseline_compatible(tmp_path):

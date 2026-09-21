@@ -83,8 +83,9 @@ def test_context_matches_plugin_manifest_prompt_and_resource_declarations(tmp_pa
     assert [item["name"] for item in role["prompt_sections"]] == ["check"]
     content = json.loads((workspace / role["prompt_sections"][0]["path"]).read_text(encoding="utf-8"))
     assert content == runtime_package.prompt_sections[0].content
-    assert role["tools"] == manifest["tools"]
-    assert role["rails"] == manifest["rails"]
+    for group in ("tools", "rails"):
+        assert {key: value for key, value in role[group][0].items() if key != "path"} == manifest[group][0]
+        assert "must not execute" in (workspace / role[group][0]["path"]).read_text(encoding="utf-8")
     assert [item["name"] for item in role["skills"]] == ["trace_owner"]
 
 

@@ -62,6 +62,7 @@ from openjiuwen.rsi.harness_rsi.schema import (
     DatasetArtifact,
     EvaluationResultAnalysisInvocation,
 )
+from openjiuwen.rsi.harness_rsi.single_harness.behavior_check import check_candidate_behavior, feedback_route
 from openjiuwen.rsi.harness_rsi.single_harness.events_translate import (
     active_epoch_node_event,
     analysis_stage_payload,
@@ -186,6 +187,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
     ) -> IterativeSingleHarnessResult:
         async with ModelUsageObserver(on_event).observe() as observer:
             cancelled = False
+            failed = False
             try:
                 return await self._run(request, on_event=on_event)
             except asyncio.CancelledError:
@@ -194,6 +196,11 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 # coroutine without incrementing this task's cancelling()
                 # counter, but the whole RSI run is still terminated.
                 cancelled = True
+                raise
+            except Exception:
+                failed = True
+                if observer.state is not None:
+                    observer.state["status"] = "failed"
                 raise
             finally:
                 # A worker-initiated termination cancels the running
@@ -216,10 +223,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         report["model_calls_path"] = observer.state.get("model_calls_path", "")
                         report["status"] = observer.state.get("status", report.get("status"))
                         _write_yaml_atomic(report_path, report)
-                if cancelled:
+                if cancelled or failed:
                     try:
-                        await emit(on_event, EventStatus(status="terminated"))
-                    except Exception:  # noqa: BLE001 - delivery failure must not mask termination
+                        await emit(on_event, EventStatus(status="terminated" if cancelled else "failed"))
+                    except Exception:  # noqa: BLE001 - delivery failure must not mask the original error
                         pass
 
     async def _run(
@@ -280,6 +287,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             _write_yaml_atomic(report_path, _build_report(state, dataset))
             return _result_from_state(state, state_path, report_path)
 
+        state["status"] = "running"
         total_iterations = max_epochs
         all_case_ids = {str(case.get("case_id", "") or "") for case in all_cases if str(case.get("case_id", "") or "")}
         baseline_before = str(state.get("baseline_eval_ref_path", "") or "")
@@ -434,6 +442,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 attempt_source_eval_ref = source_eval_ref
                 repair_refs = current_refs
                 repair_capabilities: list[dict[str, Any]] = []
+                reuse_analysis = False
                 source_case_scores = _eval_case_scores(source_eval_ref)
                 _sync_retained_case_ids(
                     working_retained_case_ids,
@@ -453,7 +462,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         if analysis_round_index == 1
                         else batch_dir / "residual_analyses" / f"r{analysis_round_index:03d}"
                     )
-                    analysis_ref = await self._analyze(
+                    analysis_ref = analysis_ref if reuse_analysis else await self._analyze(
                         eval_ref_path=attempt_source_eval_ref,
                         harness_refs_path=repair_refs,
                         output_dir=analysis_dir,
@@ -467,6 +476,7 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                         ),
                         on_event=on_event,
                     )
+                    reuse_analysis = False
                     hypotheses_ref = compile_optimization_hypotheses(
                         analysis_ref_path=analysis_ref,
                         cases=active_cases,
@@ -666,6 +676,10 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                                 if issue_id:
                                     attempted_issue_ids.discard(issue_id)
                                 attempted_issue_signatures.discard(issue_signature)
+                                reuse_analysis = (
+                                    _is_operational_repair(gate)
+                                    and repair_refs == before_attempt_refs
+                                )
                                 refresh_residual_analysis = True
                                 break
                             continue
@@ -915,6 +929,26 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                 selected_eval_ref = full_eval_ref
             selected_score = _eval_score(selected_eval_ref)
 
+            if performed_selected_replay:
+                selected_errors = _error_case_ids(selected_eval_ref)
+                selected_machine_failures = _machine_evidence_case_ids(_failed_machine_evidence(selected_eval_ref))
+                replay_selections = [
+                    _select_gate_from_epoch_checkpoint(
+                        gate, full_eval_ref=selected_eval_ref,
+                        error_case_ids=selected_errors, machine_evidence_case_ids=selected_machine_failures,
+                    ) if gate in retained_gates else selection
+                    for gate, selection in zip(epoch_provisional_gates, gate_selections, strict=True)
+                ]
+                if any(not selection["retained"] for gate, selection in
+                       zip(epoch_provisional_gates, replay_selections, strict=True) if gate in retained_gates):
+                    # A second pruning pass would create yet another unverified package.
+                    replay_selections = [dict(selection, retained=False, reason="filtered_harness_failed_replay")
+                                         for selection in replay_selections]
+                    retained_gates = []
+                    removed_gates = list(epoch_provisional_gates)
+                    checkpoint_status = "rejected"
+                gate_selections = replay_selections
+
             checkpoint.update(
                 {
                     "status": checkpoint_status,
@@ -942,6 +976,13 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                     previous_best_eval_ref=previous_best_eval_ref,
                     previous_best_score=best_score,
                 )
+                protected_case_ids = set(epoch_start_retained_case_ids) | (
+                    set(working_retained_case_ids) - provisional_target_case_ids
+                )
+                if promotable and protected_case_ids - _passing_case_ids(selected_eval_ref):
+                    promotable, promotion_reason = False, "protected_case_regressed"
+                elif promotable and (_error_case_ids(selected_eval_ref) or _failed_machine_evidence(selected_eval_ref)):
+                    promotable, promotion_reason = False, "selected_evaluation_inconclusive"
             else:
                 promotable, promotion_reason = False, ""
             checkpoint["promotion_applied"] = promotable
@@ -1507,12 +1548,38 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             missing_skill_invocations=missing_skill_invocations,
             verifier_deltas_by_case=verifier_deltas_by_case,
         )
+        observations = await check_candidate_behavior(
+            source_eval_ref=paired_source_eval_ref,
+            candidate_eval_ref=candidate_eval_ref,
+            capabilities=capabilities,
+            model_config_ref=self.config.evaluation_result_analyzer.model_config_ref,
+            output_dir=output_dir / "behavior_check",
+        ) if not _eval_has_errors(candidate_eval_ref) else {}
+        for case_id, observation in observations.items():
+            required_names = [item for item in capabilities
+                              if case_id in item.get("target_case_ids", [])
+                              and item.get("action_group") in {"tool", "skill"}]
+            observation["availability"] = (
+                "yes" if required_names and all(
+                    item.get("runtime_name") in (invoked_tools_by_case if item["action_group"] == "tool"
+                                                 else invoked_skills_by_case).get(case_id, set())
+                    for item in required_names) else "unknown"
+            )
+            observation["next_action"] = feedback_route(
+                observation, task_passed=case_id in _passing_case_ids(candidate_eval_ref)
+            )
+        if accepted and any(item["next_action"] != "verified" for item in observations.values()):
+            accepted = False
+            reason = "candidate_behavior_change_not_verified"
+            failure_class = "behavior_evidence_inconclusive"
+            target_confirmation["confirmed"] = False
         candidate_failure_analysis_ref = ""
         candidate_failure_diagnoses: dict[str, list[dict[str, Any]]] = {}
         candidate_behavior_by_case = {
             case_id: {
                 "gate_reason": reason,
                 "failure_class": failure_class,
+                "behavior_check": observations.get(case_id, {}),
                 "capabilities": [
                     {key: capability.get(key) for key in ("action_group", "runtime_name", "target_path")}
                     for capability in capabilities
@@ -1529,7 +1596,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
             }
             for case_id in target_case_ids
         }
-        if not accepted and not _eval_has_errors(candidate_eval_ref):
+        if (not accepted and not _eval_has_errors(candidate_eval_ref)
+                and not _is_operational_repair({"candidate_behavior_by_case": candidate_behavior_by_case})):
             paired_feedback = {
                 "by_case": {
                     case_id: [
@@ -1538,6 +1606,8 @@ class SingleHarnessIterativeOptimizationOrchestrator:
                             "verifier_delta": dict(delta),
                             "candidate_patch_excerpt": str(candidate_patch_excerpts_by_case.get(case_id, "")),
                             "candidate_behavior": candidate_behavior_by_case.get(case_id, {}),
+                            "source_eval_ref_path": paired_source_eval_ref,
+                            "candidate_eval_ref_path": candidate_eval_ref,
                         }
                     ]
                     for case_id, delta in verifier_deltas_by_case.items()
@@ -2246,6 +2316,7 @@ def _rejected_capability_history(candidate_gates: list[dict[str, Any]]) -> list[
         "epoch_checkpoint_outcome",
         "verifier_deltas_by_case",
         "candidate_failure_diagnoses",
+        "candidate_behavior_by_case",
     )
     for gate in candidate_gates:
         if gate.get("status") != "rejected":
@@ -3561,13 +3632,15 @@ def _checkpoint_remove_added_capability(
             section_name=runtime_name,
         )
         return
-    if action_group == "tool":
-        if target_rel == "tools/tools.yaml":
-            raise RuntimeError("Cannot remove an added tool whose target is only tools/tools.yaml")
+    if action_group in {"tool", "rail"}:
+        registry = f"{action_group}s"
+        manifest_name = f"{registry}/{registry}.yaml"
+        if target_rel == manifest_name:
+            raise RuntimeError(f"Cannot remove an added {action_group} whose target is only {manifest_name}")
         _checkpoint_remove_path(harness_root, target_rel)
         _checkpoint_remove_manifest_entries(
-            harness_root / "tools" / "tools.yaml",
-            list_key="tools",
+            harness_root / manifest_name,
+            list_key=registry,
             target_rel=target_rel,
             runtime_name=runtime_name,
         )
@@ -3594,9 +3667,9 @@ def _checkpoint_copy_capability(
     elif action_group == "prompt":
         manifest_name = "prompt_sections/sections.yaml"
         manifest_key = "sections"
-    elif action_group == "tool":
-        manifest_name = "tools/tools.yaml"
-        manifest_key = "tools"
+    elif action_group in {"tool", "rail"}:
+        manifest_key = f"{action_group}s"
+        manifest_name = f"{manifest_key}/{manifest_key}.yaml"
     else:
         raise RuntimeError(f"Checkpoint filtering does not support action_group={action_group!r}")
 
@@ -4138,7 +4211,14 @@ def _merge_repair_capabilities(
 
 def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, Any]]) -> bool:
     """Retain measured partial progress only inside the existing batch budget."""
-    if gate.get("status") != "rejected" or gate.get("reason") != "candidate_made_partial_verifier_progress":
+    behavior = gate.get("candidate_behavior_by_case", {})
+    local_repair = any(
+        item.get("behavior_check", {}).get("next_action") == "investigate_residuals"
+        for item in behavior.values() if isinstance(item, dict)
+    )
+    if gate.get("status") != "rejected":
+        return False
+    if gate.get("reason") != "candidate_made_partial_verifier_progress" and not local_repair:
         return False
     if set(gate.get("target_case_ids", [])) != {str(case.get("case_id", "")) for case in cases}:
         return False  # No mixed-Harness evidence for the remaining active cases.
@@ -4149,7 +4229,7 @@ def _candidate_can_continue_locally(gate: dict[str, Any], cases: list[dict[str, 
     if any(gate.get(key) for key in blocking_evidence_keys):
         return False
     deltas = gate.get("verifier_deltas_by_case", {})
-    if not deltas or not any(delta.get("partial_progress") for delta in deltas.values()):
+    if not local_repair and (not deltas or not any(delta.get("partial_progress") for delta in deltas.values())):
         return False
     regression_keys = (
         "regressed_requirements", "regressed_fail_to_pass", "regressed_pass_to_pass", "regressed_atomic_checks",
@@ -4169,7 +4249,9 @@ def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:
     """Return whether a rejected candidate produced usable repair evidence."""
     if str(gate.get("status", "")) != "rejected":
         return False
-    return bool(gate.get("candidate_failure_analysis_ref_path")) or str(gate.get("reason", "")) in {
+    if _is_operational_repair(gate) or gate.get("candidate_failure_analysis_ref_path"):
+        return True
+    return str(gate.get("reason", "")) in {
         "candidate_made_partial_verifier_progress",
         "expected_skill_not_invoked_on_target_case",
         "expected_skill_invoked_after_first_persistent_edit",
@@ -4178,6 +4260,15 @@ def _candidate_failure_supports_repair(gate: dict[str, Any]) -> bool:
         "expected_tool_invoked_after_first_persistent_edit",
         "expected_tool_invoked_outside_activation_window",
     }
+
+
+def _is_operational_repair(gate: dict[str, Any]) -> bool:
+    """Reuse the diagnosed issue only when evidence points to delivery/execution."""
+    observations = list(gate.get("candidate_behavior_by_case", {}).values())
+    return bool(observations) and all(
+        item.get("behavior_check", {}).get("next_action") in {"repair_activation", "repair_execution"}
+        for item in observations
+    )
 
 
 def _rejected_capabilities(state: dict[str, Any]) -> list[dict[str, Any]]:

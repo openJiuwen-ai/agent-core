@@ -82,7 +82,11 @@ _EXECUTION_HISTORY_NOTICE = (
     "Use read/search tools to recover earlier decisions and observations before claiming an "
     "action was never performed or selecting the earliest decisive mistake. Missing material "
     "in an excerpt does not prove the evaluated agent never saw it. Source-side truncation "
-    "markers remain unknown information, not negative evidence.\n\n"
+    "markers remain unknown information, not negative evidence. "
+    "artifacts/ contains archived agent-produced files when available; consult "
+    "repository_snapshot.json for availability. These are observed outputs, not "
+    "reference solutions or a complete repository. Inspect relevant contents "
+    "before concluding that only an empty final response was delivered.\n\n"
 )
 
 
@@ -208,6 +212,7 @@ Variables (member_harness.<role>.<variable>):
 - prompt: role identity, domain framing, behavioral style, or task interpretation is wrong.
 - skill: reusable multi-step capability is not triggered, missing, misused, or procedurally flawed.
 - tool: local atomic tool choice, args, schema, call format, implementation, or result handling is wrong.
+- rail: a lifecycle check, transition, or bounded recovery needs runtime control.
 - config: runtime/model/harness configuration for this role is wrong.
 
 ### Scope: team_skill
@@ -277,8 +282,8 @@ Per-case schema (one wrapper containing 1-3 diagnoses):
         "wrong_decision": "<structural decision error; keep this task's literal code in critical_mistake>",
         "causal_distinction": "<relationship that distinguishes the wrong decision from the supported one>",
         "required_action": "<reusable procedure over the NEXT task's inputs; not this task's patch or assertion>",
-        "acceptance_observable": "<how the next task's own requirements will demonstrate the changed behavior>",
-        "scope_boundary": ["<nearby behavior that is not an equivalent substitute>"],
+        "acceptance_observable": "<a task/verifier-grounded check distinguishing incorrect from corrected behavior>",
+        "scope_boundary": ["<nearby valid input or behavior where this intervention must not introduce an error>"],
         "activation_phase": "<task_start | during_investigation | post_diagnosis | pre_submission>"
       },
       "validation_observations": {
@@ -314,7 +319,10 @@ Per-case schema (one wrapper containing 1-3 diagnoses):
   either different failed_checks or a materially different observable_behavior;
   paraphrases, downstream symptoms, and repeated recommendations are one
   diagnosis. Prefer fewer well-supported diagnoses over filling the limit.
-- recommendation MUST name the target_ref variable and what to change.
+- target_ref suggests a component; it does not exclude other supported carriers.
+- Freeze the failure facts and goal, not an unproven cause. Counterevidence in
+  prior_candidate_feedback may revise the cause; do not silently switch targets.
+- recommendation MUST state the operation to change, not merely a component name.
 - Prefer "unassigned" over guessing.
 """
 
@@ -1629,10 +1637,12 @@ def _prepare_repository_snapshot(*, case: CaseAnalysisInput, runtime_dir: Path) 
     evaluation = result.get("evaluation")
     metadata = evaluation.get("metadata") if isinstance(evaluation, dict) else None
     patch_value = metadata.get("model_patch_path") if isinstance(metadata, dict) else None
+    artifacts_dir = Path(case.result_path).parent / "artifacts"
     manifest = prepare_repository_snapshot(
         workspace=workspace_value.strip() if isinstance(workspace_value, str) else None,
         patch=patch_value.strip() if isinstance(patch_value, str) else None,
         runtime_dir=runtime_dir,
+        artifacts=str(artifacts_dir) if artifacts_dir.is_dir() else None,
     )
     if manifest["errors"]:
         logger.warning(
@@ -1663,7 +1673,9 @@ def _prepare_diagnosis_evidence(*, case: CaseAnalysisInput, runtime_dir: Path) -
         "\n\n## Repository Snapshot Availability\n"
         "Read repository_snapshot.json before repository probes. It lists any missing "
         "or unreadable files. Readable repository files and source_patch.diff are retained "
-        "independently. A missing snapshot file is not evidence of missing source code. "
+        "independently. artifacts/ contains harvested agent outputs, not a complete "
+        "repository; its copy status is reported separately in the manifest. "
+        "A missing snapshot file is not evidence of missing source code. "
         "Do not search outside this diagnosis workspace for omitted evidence.\n"
     )
     (runtime_dir / "evidence_summary.md").write_text(summary, encoding="utf-8")

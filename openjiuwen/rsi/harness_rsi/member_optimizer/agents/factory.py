@@ -190,15 +190,18 @@ def create_action_planning_agent(
     action_definitions: list[ActionDefinition],
     agent_skills_dirs: list[str] | None = None,
     extra_rails: list[Any] | None = None,
+    evidence_rail: Any | None = None,
 ) -> Any:
     """Create the member action planning Member Optimizer Agent."""
+    from openjiuwen.rsi.harness_rsi.member_optimizer.agents.rails.planner_evidence import PlannerEvidenceRail
+
     return create_member_optimizer_agent(
         profile=ACTION_PLANNING,
         model_config_ref=model_config_ref,
         workspace=workspace,
         prompt_values={},
         agent_skills_dirs=agent_skills_dirs,
-        extra_rails=extra_rails,
+        extra_rails=[*(extra_rails or []), evidence_rail or PlannerEvidenceRail(ACTION_PLANNING.max_iterations)],
     )
 
 

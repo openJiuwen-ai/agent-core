@@ -66,10 +66,14 @@ loading before applying the candidate.
 - `rails/*.py` must contain a loadable
   `openjiuwen.core.single_agent.rail.base.AgentRail` subclass. A generated Rail
   must implement the evidence-backed runtime transition, not merely store the
-  same advice as a static string. For diagnosis-to-action recovery, react to a
-  no-action model turn with one bounded `ctx.push_steering(...)` continuation;
-  set `ctx.extra["_next_model_tool_choice"] = "required"` when the continuation
-  must perform a tool action, and guard the intervention so it does not loop.
+  same advice as a static string. `ctx.extra` is cross-rail storage, not an
+  automatic source of task, remaining_iterations, or answer_text. Maintain
+  per-invocation state in the rail, resetting it in before_invoke. Read model
+  responses from ctx.inputs.response in after_model_call. Use bounded
+  ctx.push_steering(...) for a reminder (requires a bound queue), or
+  ctx.request_force_finish(existing_result) to return an already-produced
+  result; force_finish does not generate an answer. Do not invent control keys
+  in ctx.extra or treat a steering reminder as an enforced model/tool choice.
 - Preserve valid syntax for Python, YAML, JSON, and Markdown frontmatter.
 
 ## Output

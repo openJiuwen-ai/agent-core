@@ -38,6 +38,7 @@ ACTION_PLANNING = MemberOptimizerAgentProfile(
     agent_name="member_action_planner",
     description="Plans constrained member Expert Harness changes.",
     prompt_file="action_planning.md",
+    max_iterations=15,
 )
 
 ACTION_EXECUTION = MemberOptimizerAgentProfile(
