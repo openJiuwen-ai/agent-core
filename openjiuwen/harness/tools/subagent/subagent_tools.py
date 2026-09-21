@@ -10,10 +10,11 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.prompts.tools.subagent_tools import SUBAGENT_RESUME_IDLE_MESSAGE
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
+from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
-from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
@@ -427,6 +428,9 @@ class SubagentResumeTool(Tool):
         }
         if result.message:
             data["message"] = result.message
+        if view["status"] == "idle":
+            guidance = SUBAGENT_RESUME_IDLE_MESSAGE.get(self._language, SUBAGENT_RESUME_IDLE_MESSAGE["cn"])
+            data["message"] = f"{result.message}\n{guidance}" if result.message else guidance
         return ToolOutput(success=True, data=data)
 
     def render_for_llm(self, output: ToolOutput) -> str:
