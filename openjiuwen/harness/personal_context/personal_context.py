@@ -18,6 +18,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime, timezone
@@ -29,7 +30,11 @@ from uuid import uuid4
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
-from openjiuwen.harness.personal_context.config import PersonalContextConfig, PersonalContextFetchServiceConfig
+from openjiuwen.harness.personal_context.config import (
+    DistillScheduleSettings,
+    PersonalContextConfig,
+    PersonalContextFetchServiceConfig,
+)
 from openjiuwen.harness.personal_context.context_graph import (
     build_context_graph,
     build_context_tree,
@@ -37,6 +42,12 @@ from openjiuwen.harness.personal_context.context_graph import (
     search_context_graph,
 )
 from openjiuwen.harness.personal_context.context_pipeline import ContextPipelineService
+from openjiuwen.harness.personal_context.distill.corpus import CorpusPort
+from openjiuwen.harness.personal_context.distill.schedule import (
+    DistillRunnerPort,
+    DistillScheduleConfig,
+    run_distill_scheduler_loop,
+)
 from openjiuwen.harness.personal_context.fetch.base import ContextFetchService
 from openjiuwen.harness.personal_context.fetch.browser_bookmarks import BrowserBookmarksFetchService
 from openjiuwen.harness.personal_context.fetch.cursor_selection import compact_cursor, record_completed_candidates
@@ -358,6 +369,10 @@ class PersonalContext:
         self._fetch_run_profile: dict[str, str] = {}
         self._invalidated_fetch_runs: set[tuple[str, str]] = set()
         self._query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-query")
+        self._distill_corpus: CorpusPort | None = None
+        self._distill_runner: DistillRunnerPort | None = None
+        self._distill_task: asyncio.Task[None] | None = None
+        self._distill_stop_event: asyncio.Event | None = None
 
     def _set_embedding_configuration(
         self,
@@ -414,6 +429,100 @@ class PersonalContext:
             self._invalidated_fetch_runs = set()
             self._last_error = None
             self._state = "CONFIGURED"
+
+    def set_distill_corpus(self, corpus: CorpusPort | None) -> None:
+        """Inject or clear the IM corpus used by the distill scheduler."""
+
+        if self._state in {"STARTING", "RUNNING", "STOPPING"}:
+            raise _state_error("distill corpus can only change while stopped")
+        self._distill_corpus = corpus
+
+    def set_distill_runner(self, runner: DistillRunnerPort | None) -> None:
+        """Inject or clear the distill runner used by the distill scheduler loop."""
+
+        if self._state in {"STARTING", "RUNNING", "STOPPING"}:
+            raise _state_error("distill runner can only change while stopped")
+        self._distill_runner = runner
+
+    @staticmethod
+    def _distill_schedule_config(settings: DistillScheduleSettings) -> DistillScheduleConfig:
+        return DistillScheduleConfig(
+            enabled=settings.enabled,
+            interval_ms=int(settings.interval_seconds * 1000),
+            message_threshold=settings.message_threshold,
+            lease_ms=int(settings.lease_seconds * 1000),
+            poll_seconds=float(settings.poll_seconds),
+            learning_since_ms=settings.learning_since_ms,
+            max_messages=settings.max_messages,
+        )
+
+    def _resolve_distill_runner(self) -> DistillRunnerPort:
+        if self._distill_runner is None:
+            raise _state_error("distill runner is not configured")
+        return self._distill_runner
+
+    def _resolve_distill_corpus(self) -> CorpusPort:
+        if self._distill_corpus is None:
+            raise _state_error("distill corpus is not configured")
+        return self._distill_corpus
+
+    async def _start_distill_scheduler(self) -> None:
+        config = self._config
+        if (
+            config is None
+            or not config.distill.enabled
+            or self._distill_corpus is None
+            or self._distill_runner is None
+        ):
+            return
+        if self._distill_task is not None and not self._distill_task.done():
+            return
+        stop_event = asyncio.Event()
+        schedule = self._distill_schedule_config(config.distill)
+        home = str(self._home)
+
+        async def _loop() -> None:
+            await run_distill_scheduler_loop(
+                home,
+                stop_event,
+                get_corpus=self._resolve_distill_corpus,
+                get_runner=self._resolve_distill_runner,
+                config=schedule,
+                now_ms=lambda: int(time.time() * 1000),
+            )
+
+        self._distill_stop_event = stop_event
+        self._distill_task = asyncio.create_task(_loop(), name="personal-context-distill-schedule")
+
+    async def _stop_distill_scheduler(self, *, timeout_seconds: float | None = None) -> None:
+        stop_event = self._distill_stop_event
+        task = self._distill_task
+        if stop_event is not None:
+            stop_event.set()
+        if task is None:
+            self._distill_stop_event = None
+            return
+        if task.done():
+            self._distill_task = None
+            self._distill_stop_event = None
+            return
+        try:
+            if timeout_seconds is None:
+                await task
+            else:
+                await asyncio.wait_for(asyncio.shield(task), timeout=timeout_seconds)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        finally:
+            if self._distill_task is task:
+                self._distill_task = None
+                self._distill_stop_event = None
 
     async def _required_authorization_scopes(self, provider: str) -> tuple[str, ...]:
         if provider != "feishu":
@@ -742,6 +851,7 @@ class PersonalContext:
                 for service in config.fetch_services:
                     if service.enabled:
                         await self.start_fetch_service(service.service_id)
+            await self._start_distill_scheduler()
             async with self._state_lock:
                 if self._state != "STARTING":
                     raise _state_error("PersonalContext activation was superseded")
@@ -767,6 +877,7 @@ class PersonalContext:
             raise wrapped from exc
 
     async def _cancel_runtime_after_activation_failure(self, pipeline: ContextPipelineService | None) -> None:
+        await self._stop_distill_scheduler(timeout_seconds=1.0)
         async with self._fetch_lock:
             tasks = list(self._fetch_tasks.values())
             for event in self._fetch_stop_events.values():
@@ -1310,6 +1421,7 @@ class PersonalContext:
                 await self._cancel_authorization()
             self._state = "STOPPING"
             activation = self._activation_task
+        await self._stop_distill_scheduler(timeout_seconds=min(timeout_seconds, _STOP_FINALIZE_TIMEOUT_SECONDS))
         stop_error: BaseError | None = None
         if activation is not None and not activation.done():
             activation.cancel()
