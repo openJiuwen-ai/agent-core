@@ -141,10 +141,13 @@ diff 变成一条 `replace`，读者会看到同一条消息先以 user、后以
 是新的、会话还在继续，所以新记录器首次记录前从该 subject 已提交的窗口
 （`current_context_window_messages`）恢复这份记忆，否则整段历史会被重述一遍。
 
-**并非每条投递都是"有人在说话"**：宿主也会投递常驻状态与框架通知。`inbound_render.is_runtime_context_only`
-按标签判定——`<team-inbound>`（含裸文本）是有人在说，纯 `<team-context>` / `<team-event>` 是上下文，
-`member_runtime` 据此决定 `record_input(..., external_user=)`。无法识别的一律算"有人在说"：漏掉用户的一轮
-比把上下文显示成用户更糟。另外 `send()` 只把**前置团队上下文之前**的原始文本记为输入，上下文随行但不是谁说的话。
+**只有常驻状态不算"这一轮"**：`inbound_render.is_runtime_context_only` 按标签判定——纯 `<team-context>`
+（成员身份 + 团队元信息，只是被告知、没有任何事发生）是上下文；`<team-inbound>`（有人发来的消息）、
+`<team-event>`（看板 / 名册变更 / 催促这类**要成员去处理**的框架事件）以及裸文本都算这一轮，
+`member_runtime` 据此决定 `record_input(..., external_user=)`。**与原生成员对齐**：`react_agent._add_user_message`
+把所有排队输入（事件在内）合成一条 `external_user` 的 UserMessage，两条 lane 因此读起来一致。
+无法识别的一律算"有人在说"：漏掉一轮比把常驻状态显示成一轮更糟。另外 `send()` 只把**前置团队上下文之前**
+的原始文本记为输入，上下文随行但不是谁说的话。
 
 三方 harness **不模拟 native rail 的"插入 context message"**：`member_runtime` 把待发的团队上下文
 前置到下一次输入的文本里（`_prepend_context`），由 CLI 当作一条用户消息收下；provider 再按块拆开，

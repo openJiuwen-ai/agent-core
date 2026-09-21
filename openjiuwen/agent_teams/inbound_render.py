@@ -294,26 +294,31 @@ def snapshot_kind_of(text: str) -> str | None:
 
 
 def is_runtime_context_only(text: str) -> bool:
-    """Return whether ``text`` is only what the runtime is telling the member.
+    """Return whether ``text`` is only standing team state.
 
-    A member's input is either what somebody said (``<team-inbound>``, or a
-    bare instruction handed straight to it) or standing state and framework
-    notices the runtime raises on its own (``<team-context>`` /
-    ``<team-event>``). Only the former is somebody speaking, which is what a
-    trajectory shows as the user's turn; the rest is context, however it was
-    delivered. Anything unrecognized counts as somebody speaking, because
-    losing a user's turn is worse than showing context as one.
+    ``<team-context>`` states what the team *is* — the member's own identity,
+    the team metadata — which the member is told once and which nothing
+    happened to cause. Everything else a member is handed is something that
+    happened and is addressed to it: a message somebody sent
+    (``<team-inbound>``), a framework event it has to act on
+    (``<team-event>``: a task board to claim from, a roster change, a nudge),
+    or a bare instruction. A trajectory shows all of those as the member's
+    turn, the way an in-process member's does — there every queued input,
+    events included, joins one user message.
+
+    Anything unrecognized counts as something said, because losing a turn is
+    worse than showing standing state as one.
 
     Args:
         text: One input, as it was handed to the member.
 
     Returns:
-        True when the input carries runtime context and nothing said.
+        True when the input is standing team state and nothing else.
     """
     stripped = text.strip()
-    if not stripped or "<team-inbound" in stripped:
+    if not stripped or "<team-inbound" in stripped or "<team-event" in stripped:
         return False
-    return stripped.startswith("<team-context>") or stripped.startswith("<team-event")
+    return stripped.startswith("<team-context>")
 
 
 def drop_superseded_snapshots(parts: list[str]) -> list[str]:

@@ -28,12 +28,19 @@ def _inbound() -> str:
 
 
 @pytest.mark.level1
-def test_runtime_context_is_not_somebody_speaking() -> None:
-    board = render_event(kind="task-board", body="- [t-1] [pending] write the parser")
+def test_standing_team_state_is_not_somebody_speaking() -> None:
     context = render_team_context(body="# 成员身份\n你的 member_name: coder")
-    logger.info("board: {}", board[:60])
-    assert is_runtime_context_only(board)
+    logger.info("context: {}", context[:60])
     assert is_runtime_context_only(context)
+
+
+@pytest.mark.level1
+def test_an_event_the_member_must_act_on_is_its_turn() -> None:
+    # An in-process member folds events into its user message; a third-party
+    # one reads the same turn, so both lanes state it the same way.
+    board = render_event(kind="task-board", body="- [t-1] [pending] write the parser")
+    assert not is_runtime_context_only(board)
+    assert not is_runtime_context_only(render_team_context(body="team state") + "\n\n" + board)
 
 
 @pytest.mark.level1
