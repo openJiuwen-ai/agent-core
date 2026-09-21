@@ -478,3 +478,23 @@ async def test_contribution_detection_uses_actual_worktree_head_when_branch_chan
     state = await TeammateWorktreeLifecycle._classify_worktree_contribution(info, "/repo")
 
     assert state is WorktreeContributionState.CONTRIBUTED
+
+
+def test_project_worktree_context_keeps_skill_roots(tmp_path):
+    """Entering and leaving a worktree operation keeps the agent's skill trees."""
+    from openjiuwen.agent_teams.worktree.session_scope import (
+        enter_project_worktree_context,
+        restore_project_worktree_context,
+    )
+    from openjiuwen.core.sys_operation import cwd as cwd_mod
+
+    skills = str((tmp_path / "skills").resolve())
+    token = cwd_mod._cwd_state.set(None)
+    try:
+        cwd_mod.init_cwd(str(tmp_path), workspace=str(tmp_path), skill_roots=[skills])
+        snapshot = enter_project_worktree_context(str(tmp_path / "repo"), str(tmp_path / "wt"))
+        assert cwd_mod.get_skill_roots() == [skills]
+        restore_project_worktree_context(snapshot)
+        assert cwd_mod.get_skill_roots() == [skills]
+    finally:
+        cwd_mod._cwd_state.reset(token)
