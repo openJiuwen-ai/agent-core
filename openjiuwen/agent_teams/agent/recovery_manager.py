@@ -39,7 +39,8 @@ class RecoveryManager:
 
     async def recover_team(self) -> list[str]:
         team_backend = self._configurator.team_backend
-        if not team_backend:
+        team_name = self._configurator.team_name
+        if not team_backend or team_name is None:
             return []
 
         member_name = self._configurator.member_name
@@ -63,8 +64,7 @@ class RecoveryManager:
 
             # Idempotency: a teammate already running in this runtime keeps its
             # live spawn handle, so skip it. ``recover_team`` can be invoked more
-            # than once per activation (the runtime manager's COLD_RECOVER path
-            # and the leader's ``coordination.start`` both call it); without this
+            # than once per activation; without this
             # guard ``restart_teammate`` tears down and rebuilds an already
             # healthy teammate, re-registering its whole tool set each time.
             if self._spawn_manager.has_live_handle(member.member_name):
@@ -90,13 +90,23 @@ class RecoveryManager:
                 )
                 continue
 
-            team_name = self._configurator.team_name
-            if team_name:
-                await team_backend.db.member.update_member_status(
+            try:
+                current_status = MemberStatus(member.status)
+            except ValueError:
+                team_logger.warning(
+                    "Skipping teammate {} with unknown recovery status {}",
                     member.member_name,
-                    team_name,
-                    MemberStatus.RESTARTING.value,
+                    member.status,
                 )
+                continue
+            claimed = await team_backend.db.member.claim_member_restart(
+                member.member_name,
+                team_name,
+                current_status,
+            )
+            if not claimed:
+                team_logger.warning("Skipping teammate {} because its recovery status changed", member.member_name)
+                continue
             if await self._spawn_manager.restart_teammate(member.member_name):
                 restarted.append(member.member_name)
 

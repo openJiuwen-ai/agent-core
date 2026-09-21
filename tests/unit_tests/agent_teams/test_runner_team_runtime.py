@@ -584,6 +584,14 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     session_id = f"cold_recover_{uuid.uuid4().hex}"
     spec = _runtime_spec("cold_recover_team")
     agent = FakeTeamAgent("cold_recover_team", stream_label="team.chunk")
+    reset_execution = AsyncMock(return_value=1)
+    agent.team_backend = SimpleNamespace(
+        db=SimpleNamespace(
+            initialize=AsyncMock(),
+            member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
+        )
+    )
+    agent.member_name = "leader"
 
     manager = TeamRuntimeManager()
     manager._pool.add = AsyncMock()
@@ -608,6 +616,7 @@ async def test_team_runtime_manager_cold_recover_reinjects_runtime_spec():
     # Call site: TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
     assert args[1] == "cold_recover_team"
     assert kwargs["runtime_spec"] is spec
+    reset_execution.assert_awaited_once_with("cold_recover_team", ("leader",))
     # COLD_RECOVER recovers only the leader here; teammate recovery is owned by
     # the leader's coordination.start (the activation is streamed right after),
     # so the manager no longer eagerly calls recover_team.

@@ -3695,3 +3695,93 @@ async def test_dynamic_index_migration_rewrites_legacy_task_table(db):
     assert f"ix_{table}_status" in names
     for col in ("team_name", "assignee", "updated_at"):
         assert f"ix_{table}_{col}" not in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_reset_paused_member_execution_status_updates_only_targeted_active_rows(db: TeamDatabase) -> None:
+    """One pause cleanup leaves active and untargeted members unchanged."""
+    team_name = "pause_cleanup"
+    await db.team.create_team(
+        team_name=team_name,
+        display_name="Pause Cleanup",
+        leader_member_name="leader",
+    )
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    cases = (
+        ("paused_running", "paused", "running"),
+        ("paused_idle", "paused", "idle"),
+        ("busy_running", "busy", "running"),
+        ("paused_excluded", "paused", "running"),
+        ("paused_null", "paused", None),
+    )
+    for member_name, status, execution_status in cases:
+        await db.member.create_member(
+            member_name=member_name,
+            team_name=team_name,
+            display_name=member_name,
+            agent_card=agent_card,
+            status=status,
+            execution_status=execution_status,
+        )
+
+    assert await db.member.reset_paused_member_execution_status(team_name, ()) == 0
+    updated = await db.member.reset_paused_member_execution_status(
+        team_name,
+        ("paused_running", "paused_idle", "busy_running", "paused_null"),
+    )
+
+    assert updated == 2
+    members = {member.member_name: member for member in await db.member.get_team_members(team_name)}
+    assert members["paused_running"].execution_status == "idle"
+    assert members["paused_idle"].execution_status == "idle"
+    assert members["busy_running"].execution_status == "running"
+    assert members["paused_excluded"].execution_status == "running"
+    assert members["paused_null"].execution_status == "idle"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cold_recovery_sql_resets_execution_and_claims_only_observed_members(db: TeamDatabase) -> None:
+    """Cold recovery resets stale rounds and rejects changed or departed teammates."""
+    from openjiuwen.agent_teams.schema.status import MemberStatus
+
+    team_name = "cold_recovery"
+    await db.team.create_team(
+        team_name=team_name,
+        display_name="Cold Recovery",
+        leader_member_name="leader",
+    )
+    agent_card = AgentCard(name="TestAgent").model_dump_json()
+    cases = (
+        ("leader", "ready", "running"),
+        ("ready_member", "ready", "running"),
+        ("busy_member", "busy", "running"),
+        ("departed", "shutdown_requested", "running"),
+        ("untargeted", "ready", "running"),
+    )
+    for member_name, status, execution_status in cases:
+        await db.member.create_member(
+            member_name=member_name,
+            team_name=team_name,
+            display_name=member_name,
+            agent_card=agent_card,
+            status=status,
+            execution_status=execution_status,
+        )
+
+    assert await db.member.reset_cold_recovery_execution_status(team_name, ("leader",)) == 1
+    assert await db.member.claim_member_restart("ready_member", team_name, MemberStatus.READY)
+    assert not await db.member.claim_member_restart("busy_member", team_name, MemberStatus.READY)
+    assert await db.member.claim_member_restart("busy_member", team_name, MemberStatus.BUSY)
+    assert not await db.member.claim_member_restart("departed", team_name, MemberStatus.SHUTDOWN_REQUESTED)
+
+    members = {member.member_name: member for member in await db.member.get_team_members(team_name)}
+    assert members["leader"].execution_status == "idle"
+    assert members["ready_member"].status == "restarting"
+    assert members["ready_member"].execution_status == "idle"
+    assert members["busy_member"].status == "restarting"
+    assert members["busy_member"].execution_status == "idle"
+    assert members["departed"].status == "shutdown_requested"
+    assert members["departed"].execution_status == "running"
+    assert members["untargeted"].execution_status == "running"

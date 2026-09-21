@@ -14,8 +14,10 @@ import pytest
 
 from openjiuwen.agent_teams import paths as apaths
 from openjiuwen.agent_teams.agent.member import TeamMember
+from openjiuwen.agent_teams.agent.team_agent import TeamAgent
 from openjiuwen.agent_teams.interaction import ExternalTeamEvent
 from openjiuwen.agent_teams.messager.inprocess import InProcessMessager, cleanup_inprocess_bus
+from openjiuwen.agent_teams.runtime.dispatch import RunAction, RunActionKind
 from openjiuwen.agent_teams.runtime.manager import TeamRuntimeManager
 from openjiuwen.agent_teams.runtime.pool import ActiveTeam, RuntimeState
 from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
@@ -357,3 +359,45 @@ class TestDeleteTeamFilesystemCleanup:
             assert not apaths.team_home("teamA").is_dir(), "team home must be removed"
         finally:
             apaths.reset_openjiuwen_home()
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_cold_recovery_resets_leader_execution_before_activation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leader starts a new runtime only after the stale execution snapshot is reset."""
+    calls: list[str] = []
+
+    async def initialize() -> None:
+        calls.append("initialize")
+
+    async def reset_execution(team_name: str, member_names: tuple[str, ...]) -> int:
+        assert (team_name, member_names) == ("team", ("leader",))
+        calls.append("reset")
+        return 1
+
+    async def add_to_pool(entry: ActiveTeam) -> None:
+        assert entry.agent is agent
+        calls.append("activate")
+
+    backend = SimpleNamespace(
+        db=SimpleNamespace(
+            initialize=initialize,
+            member=SimpleNamespace(reset_cold_recovery_execution_status=reset_execution),
+        )
+    )
+    agent = SimpleNamespace(team_backend=backend, member_name="leader")
+    monkeypatch.setattr(TeamAgent, "recover_from_session", lambda *args, **kwargs: agent)
+    manager = TeamRuntimeManager()
+    monkeypatch.setattr(manager._pool, "add", add_to_pool)
+    session = SimpleNamespace(get_session_id=lambda: "session")
+    spec = SimpleNamespace(team_name="team")
+
+    await manager._apply_action(
+        RunAction(kind=RunActionKind.COLD_RECOVER, require_spec=False),
+        spec=spec,
+        team_session=session,
+        pool_entry=None,
+        inputs=None,
+    )
+
+    assert calls == ["initialize", "reset", "activate"]

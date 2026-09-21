@@ -1140,6 +1140,12 @@ class TeamRuntimeManager:
             # would just rebuild the same members the coordination start spawns
             # — a redundant second restart per teammate every cold recover.
             agent = TeamAgent.recover_from_session(team_session, team_name, runtime_spec=spec)
+            backend = agent.team_backend
+            leader_name = agent.member_name
+            if backend is None or leader_name is None:
+                raise RuntimeError("Cold recovery requires a configured leader and team backend")
+            await backend.db.initialize()
+            await backend.db.member.reset_cold_recovery_execution_status(team_name, (leader_name,))
         elif kind is RunActionKind.NEW_TEAM_IN_SESSION:
             await self._pre_run_with_inputs(team_session, inputs)
             agent = spec.build()
