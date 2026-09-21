@@ -17,6 +17,26 @@ class CorpusPort(Protocol):
     ) -> tuple[list[CorpusMessage], bool]:
         """Return (messages, sampled) in [window_start_ms, window_end_ms)."""
 
+    def count_eligible_since(self, *, cursor_ms: int, until_ms: int) -> int:
+        """Count eligible non-empty messages in [cursor_ms, until_ms)."""
+
+
+def _eligible_in_window(
+    messages: list[CorpusMessage],
+    *,
+    window_start_ms: int,
+    window_end_ms: int,
+) -> list[CorpusMessage]:
+    selected = [
+        message
+        for message in messages
+        if window_start_ms <= message.sent_at_ms < window_end_ms
+        and message.learning_eligible == 1
+        and str(message.content_text or "").strip()
+    ]
+    selected.sort(key=lambda item: item.sent_at_ms)
+    return selected
+
 
 def _downsample(
     selected: list[CorpusMessage],
@@ -42,15 +62,21 @@ class FixtureCorpus:
         window_end_ms: int,
         max_messages: int,
     ) -> tuple[list[CorpusMessage], bool]:
-        selected = [
-            message
-            for message in self._messages
-            if window_start_ms <= message.sent_at_ms < window_end_ms
-            and message.learning_eligible == 1
-            and str(message.content_text or "").strip()
-        ]
-        selected.sort(key=lambda item: item.sent_at_ms)
+        selected = _eligible_in_window(
+            self._messages,
+            window_start_ms=window_start_ms,
+            window_end_ms=window_end_ms,
+        )
         return _downsample(selected, max_messages)
+
+    def count_eligible_since(self, *, cursor_ms: int, until_ms: int) -> int:
+        return len(
+            _eligible_in_window(
+                self._messages,
+                window_start_ms=cursor_ms,
+                window_end_ms=until_ms,
+            )
+        )
 
 
 def default_fixture_messages() -> list[CorpusMessage]:

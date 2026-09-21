@@ -22,6 +22,23 @@ from openjiuwen.harness.personal_context.distill.profile import (
     version_dir,
 )
 from openjiuwen.harness.personal_context.distill.runner import DistillRunResult, run_distill_job
+from openjiuwen.harness.personal_context.distill.schedule import (
+    DistillDueDecision,
+    DistillRunnerPort,
+    DistillScheduleConfig,
+    DistillTickResult,
+    evaluate_distill_due,
+    run_distill_scheduler_loop,
+    tick_distill_schedule,
+)
+from openjiuwen.harness.personal_context.distill.store import (
+    complete_distill_lease,
+    get_last_attempt_at_ms,
+    recover_expired_distill_lease,
+    renew_distill_lease,
+    set_last_attempt_at_ms,
+    try_claim_distill_lease,
+)
 from openjiuwen.harness.personal_context.distill.types import CorpusMessage, DistillCandidates
 
 __all__ = [
@@ -29,20 +46,33 @@ __all__ = [
     "CorpusMessage",
     "CorpusPort",
     "DistillCandidates",
+    "DistillDueDecision",
     "DistillRunResult",
+    "DistillRunnerPort",
+    "DistillScheduleConfig",
+    "DistillTickResult",
     "FixtureCorpus",
     "LlmAnalyzer",
     "LlmPort",
     "OpenJiuwenLlm",
     "activate_profile_version",
+    "complete_distill_lease",
     "default_fixture_messages",
     "delete_distilled_profile",
+    "evaluate_distill_due",
+    "get_last_attempt_at_ms",
     "load_prompt",
     "merge_markdown",
     "neutralize",
     "publish_distilled",
+    "recover_expired_distill_lease",
+    "renew_distill_lease",
     "resolve_current_profile",
     "run_distill_job",
+    "run_distill_scheduler_loop",
     "save_distilled_profile",
+    "set_last_attempt_at_ms",
+    "tick_distill_schedule",
+    "try_claim_distill_lease",
     "version_dir",
 ]

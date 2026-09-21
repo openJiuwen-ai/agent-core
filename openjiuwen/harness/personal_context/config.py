@@ -355,6 +355,20 @@ class PersonalContextFetchServiceConfig(BaseModel):
         return _safe_segment(value, name="service_id")
 
 
+class DistillScheduleSettings(BaseModel):
+    """Account-level portrait distill schedule; independent of fetch intervals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    interval_seconds: float = Field(default=86_400.0, gt=0, le=31_536_000)
+    message_threshold: int = Field(default=50, strict=True, ge=1)
+    lease_seconds: float = Field(default=3_600.0, gt=0, le=31_536_000)
+    poll_seconds: float = Field(default=60.0, gt=0, le=86_400)
+    learning_since_ms: int | None = Field(default=None, strict=True, ge=0)
+    max_messages: int = Field(default=800, strict=True, ge=1)
+
+
 class PersonalContextConfig(BaseModel):
     """Complete immutable PersonalContext configuration parsed from a plain dictionary."""
 
@@ -378,6 +392,7 @@ class PersonalContextConfig(BaseModel):
     model_client: ModelClientConfig | None = Field(default=None, repr=False)
     model_request: ModelRequestConfig | None = None
     fetch_services: tuple[PersonalContextFetchServiceConfig, ...]
+    distill: DistillScheduleSettings = Field(default_factory=DistillScheduleSettings)
 
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "PersonalContextConfig":

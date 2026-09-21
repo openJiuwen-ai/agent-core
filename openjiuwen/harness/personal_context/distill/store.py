@@ -1,4 +1,7 @@
-"""JSON job / cursor store for distill (account-level; interim until OJ-03 db)."""
+"""JSON job / cursor / schedule store for distill (account-level).
+
+Lease and Distill cursor live here until ``im_context.db`` holds stage state.
+"""
 
 from __future__ import annotations
 
@@ -9,6 +12,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+
+from filelock import FileLock
 
 
 def _distill_root(home: str) -> Path:
@@ -23,8 +28,26 @@ def _jobs_dir(home: str) -> Path:
     return _distill_root(home) / "jobs"
 
 
+def _lease_path(home: str) -> Path:
+    return _distill_root(home) / "lease.json"
+
+
+def _lease_lock_path(home: str) -> Path:
+    return _distill_root(home) / "lease.lock"
+
+
+def _schedule_path(home: str) -> Path:
+    return _distill_root(home) / "schedule.json"
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _lease_file_lock(home: str) -> FileLock:
+    root = _distill_root(home)
+    root.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(_lease_lock_path(home)), timeout=10)
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -127,3 +150,98 @@ def clear_distill_cursor(home: str) -> None:
 
 def get_job(home: str, job_id: str) -> dict[str, Any] | None:
     return _read_json(_jobs_dir(home) / f"{job_id}.json")
+
+
+def get_last_attempt_at_ms(home: str) -> int:
+    payload = _read_json(_schedule_path(home))
+    if not payload:
+        return 0
+    return int(payload.get("last_attempt_at_ms") or 0)
+
+
+def set_last_attempt_at_ms(home: str, last_attempt_at_ms: int) -> None:
+    atomic_write_json(
+        _schedule_path(home),
+        {"last_attempt_at_ms": int(last_attempt_at_ms)},
+    )
+
+
+def get_distill_lease(home: str) -> dict[str, Any] | None:
+    return _read_json(_lease_path(home))
+
+
+def clear_distill_lease(home: str) -> None:
+    path = _lease_path(home)
+    if path.is_file():
+        path.unlink()
+
+
+def recover_expired_distill_lease(home: str, *, now_ms: int) -> bool:
+    with _lease_file_lock(home):
+        return _recover_expired_distill_lease_unlocked(home, now_ms=now_ms)
+
+
+def _recover_expired_distill_lease_unlocked(home: str, *, now_ms: int) -> bool:
+    payload = get_distill_lease(home)
+    if not payload:
+        return False
+    expires = int(payload.get("lease_expires_at_ms") or 0)
+    if expires <= int(now_ms):
+        clear_distill_lease(home)
+        return True
+    return False
+
+
+def try_claim_distill_lease(
+    home: str,
+    *,
+    now_ms: int,
+    lease_ms: int,
+) -> str | None:
+    """Claim Distill-stage lease for this home; at most one active holder."""
+    with _lease_file_lock(home):
+        _recover_expired_distill_lease_unlocked(home, now_ms=now_ms)
+        existing = get_distill_lease(home)
+        if existing is not None:
+            return None
+        token = uuid.uuid4().hex
+        atomic_write_json(
+            _lease_path(home),
+            {
+                "lease_token": token,
+                "claimed_at_ms": int(now_ms),
+                "lease_expires_at_ms": int(now_ms) + int(lease_ms),
+            },
+        )
+        return token
+
+
+def renew_distill_lease(
+    home: str,
+    lease_token: str,
+    *,
+    now_ms: int,
+    lease_ms: int,
+) -> bool:
+    with _lease_file_lock(home):
+        payload = get_distill_lease(home)
+        if not payload or str(payload.get("lease_token") or "") != lease_token:
+            return False
+        atomic_write_json(
+            _lease_path(home),
+            {
+                "lease_token": lease_token,
+                "claimed_at_ms": int(payload.get("claimed_at_ms") or now_ms),
+                "lease_expires_at_ms": int(now_ms) + int(lease_ms),
+            },
+        )
+        return True
+
+
+def complete_distill_lease(home: str, lease_token: str) -> bool:
+    with _lease_file_lock(home):
+        payload = get_distill_lease(home)
+        if not payload or str(payload.get("lease_token") or "") != lease_token:
+            return False
+        clear_distill_lease(home)
+        return True
