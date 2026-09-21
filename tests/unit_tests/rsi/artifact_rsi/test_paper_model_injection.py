@@ -536,4 +536,9 @@ def test_reflection_build_uses_injected_model_without_credentials(tmp_path, monk
         pytest.fail("injected model must bypass config/environment resolution")
     monkeypatch.setattr(llm, "init_model", unexpected)
     monkeypatch.setattr(harness, "create_deep_agent", lambda supplied, **kwargs: supplied)
-    assert ReflectionAgent({}, model=model)._build_reflection_agent(tmp_path) is model
+    assert (
+        ReflectionAgent({}, model=model)._build_reflection_agent(
+            tmp_path, submit_tool=object()
+        )
+        is model
+    )
