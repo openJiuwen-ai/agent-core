@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 from openjiuwen.core.common.logging import logger
@@ -499,6 +499,20 @@ class CurrentRoundCompressor(ContextProcessor):
         self._summary_merge_min_blocks = config.summary_merge_min_blocks
         self._prior_context_window_size = config.prior_context_window_size
         self._model = Model(self.config.model_client, self.config.model)
+
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Refresh the model used for legacy current-round compression."""
+        return self._rebind_model_reference(
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
 
     def _wrap_memory_block(self, summary: str) -> str:
         """

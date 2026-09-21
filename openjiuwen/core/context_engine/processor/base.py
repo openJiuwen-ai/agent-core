@@ -185,6 +185,67 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     def _current_compression_usage(self) -> Dict[str, Any] | None:
         return dict(self._compression_usage) if self._compression_usage else None
 
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Refresh model-backed processor state after a runtime model switch.
+
+        Most processors are model-independent.  Model-backed compressors
+        override this hook; keeping a no-op default preserves compatibility
+        with third-party processors that only implement the original context
+        processor contract.
+        """
+        _ = model, model_config, model_client_config
+        return False
+
+    def _rebind_model_reference(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Replace the cached ``_model`` and synchronize its config fields.
+
+        This helper is shared by the built-in compressors.  Callers normally
+        pass the already-created main-agent ``Model`` so provider clients and
+        request options stay identical to the next user-facing call.  The
+        config-only path remains available for direct ContextEngine users.
+        """
+        current = getattr(self, "_model", None)
+        if model is not None:
+            model_config = model_config or getattr(model, "model_config", None)
+            model_client_config = model_client_config or getattr(model, "model_client_config", None)
+        else:
+            model_config = model_config or getattr(self._config, "model", None)
+            model_client_config = model_client_config or getattr(self._config, "model_client", None)
+            if current is not None and (
+                getattr(current, "model_config", None) == model_config
+                and getattr(current, "model_client_config", None) == model_client_config
+            ):
+                model = current
+            elif model_config is not None and model_client_config is not None:
+                from openjiuwen.core.foundation.llm import Model
+
+                model = Model(model_client_config, model_config)
+
+        if model is None:
+            return False
+
+        if hasattr(self._config, "model"):
+            self._config.model = model_config
+        if hasattr(self._config, "model_client"):
+            self._config.model_client = model_client_config
+
+        if model is current:
+            return False
+        self._model = model
+        return True
+
     @staticmethod
     def _extract_usage_metadata(response: Any) -> Dict[str, Any] | None:
         metadata = getattr(response, "usage_metadata", None)

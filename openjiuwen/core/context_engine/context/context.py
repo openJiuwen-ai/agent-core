@@ -172,6 +172,9 @@ class SessionModelContext(ModelContext):
         config: ContextEngineConfig,
         *,
         token_counter: TokenCounter = None,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> bool:
         """Switch model-specific state while retaining this context history.
 
@@ -189,9 +192,35 @@ class SessionModelContext(ModelContext):
             enable_openrouter_model_context_window_tokens=config.enable_openrouter_model_context_window_tokens,
             openrouter_request_timeout=config.openrouter_request_timeout,
         )
+        next_model_context_window_tokens_override = config.model_context_window_tokens_override
+        next_context_window_tokens = (
+            config.context_window_tokens
+            if isinstance(config.context_window_tokens, int) and config.context_window_tokens > 0
+            else next_model_context_window_tokens_override
+        )
+        processors_rebound = False
+        if model is not None or model_config is not None or model_client_config is not None:
+            for processor in self._processors or []:
+                rebind_processor = getattr(processor, "rebind_model", None)
+                if not callable(rebind_processor):
+                    continue
+                try:
+                    processors_rebound = bool(
+                        rebind_processor(
+                            model=model,
+                            model_config=model_config,
+                            model_client_config=model_client_config,
+                        )
+                    ) or processors_rebound
+                except TypeError:
+                    # Third-party processors may not implement the optional
+                    # model-rebind hook with the full keyword signature.
+                    continue
+
         current_model_state = (
             self._default_window_size,
             self._context_window_tokens,
+            self._model_context_window_tokens_override,
             self._model_name,
             self._model_context_window_tokens,
             self._default_dialogue_round,
@@ -200,18 +229,20 @@ class SessionModelContext(ModelContext):
         )
         next_model_state = (
             config.default_window_message_num,
-            config.context_window_tokens,
+            next_context_window_tokens,
+            next_model_context_window_tokens_override,
             config.model_name,
             next_model_context_window_tokens,
             config.default_window_round_num,
             config.compression_recall_config,
             self._token_counter_binding(token_counter),
         )
-        if current_model_state == next_model_state:
+        if current_model_state == next_model_state and not processors_rebound:
             return False
 
         self._default_window_size = config.default_window_message_num
-        self._context_window_tokens = config.context_window_tokens
+        self._context_window_tokens = next_context_window_tokens
+        self._model_context_window_tokens_override = next_model_context_window_tokens_override
         self._model_name = config.model_name
         self._model_context_window_tokens = next_model_context_window_tokens
         self._default_dialogue_round = config.default_window_round_num

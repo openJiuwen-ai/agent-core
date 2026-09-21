@@ -207,6 +207,20 @@ class RoundLevelCompressor(ContextProcessor):
         self._compression_marker = config.compression_marker
         self._model: Optional[Model] = None
 
+    def rebind_model(
+        self,
+        *,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
+    ) -> bool:
+        """Refresh the model used for legacy round-level compression."""
+        return self._rebind_model_reference(
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
+
     async def trigger_add_messages(
         self,
         context: ModelContext,

@@ -769,21 +769,41 @@ class ReActAgent(BaseAgent):
         *,
         model_name: Optional[str] = None,
         context_window_tokens: Optional[int] = None,
+        model: Optional[Model] = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> None:
-        """Refresh selected-model context metadata without rebuilding contexts."""
+        """Refresh selected-model metadata and cached compressor bindings."""
+        if model is None:
+            candidate = self._llm
+            candidate_name = getattr(getattr(candidate, "model_config", None), "model_name", None)
+            if not model_name or not candidate_name or str(candidate_name) == str(model_name):
+                model = candidate
+        if model is not None:
+            model_config = model_config or getattr(model, "model_config", None)
+            model_client_config = model_client_config or getattr(model, "model_client_config", None)
+
+        model_provider = getattr(model_client_config, "client_provider", None)
+        model_provider = getattr(model_provider, "value", model_provider)
+        context_updates = {
+            "model_name": model_name or None,
+            "model_context_window_tokens_override": (
+                context_window_tokens
+                if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                else None
+            ),
+        }
+        if model_provider:
+            context_updates["model_provider"] = str(model_provider)
         self._config.context_engine_config = self._config.context_engine_config.model_copy(
-            update={
-                "model_name": model_name or None,
-                "model_context_window_tokens_override": (
-                    context_window_tokens
-                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
-                    else None
-                ),
-            }
+            update=context_updates
         )
         self.context_engine.update_model_context(
             model_name=model_name,
             context_window_tokens=context_window_tokens,
+            model=model,
+            model_config=model_config,
+            model_client_config=model_client_config,
         )
 
     def set_llm(self, llm: Model) -> None:

@@ -145,6 +145,9 @@ class ContextEngine:
         *,
         model_name: Optional[str] = None,
         context_window_tokens: Optional[int] = None,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> None:
         """Update selected-model metadata for this engine and cached contexts.
 
@@ -153,23 +156,45 @@ class ContextEngine:
         priority source. Only the selected model name and model-level window
         are refreshed, including on contexts already cached for a session.
         """
-        self._config = self._config.model_copy(
-            update={
-                "model_name": model_name or None,
-                "model_context_window_tokens_override": (
-                    context_window_tokens
-                    if isinstance(context_window_tokens, int) and context_window_tokens > 0
-                    else None
-                ),
-            }
-        )
+        context_updates = {
+            "model_name": model_name or None,
+            "model_context_window_tokens_override": (
+                context_window_tokens
+                if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                else None
+            ),
+        }
+        model_provider = getattr(model_client_config, "client_provider", None)
+        model_provider = getattr(model_provider, "value", model_provider)
+        if model_provider:
+            context_updates["model_provider"] = str(model_provider)
+        self._config = self._config.model_copy(update=context_updates)
+        token_counter = self._select_token_counter(self._config) if self._context_pool else None
         for context in self._context_pool.values():
-            update_context = getattr(context, "update_model_context", None)
-            if callable(update_context):
-                update_context(
-                    model_name=model_name,
-                    context_window_tokens=context_window_tokens,
-                )
+            rebound = False
+            rebind = getattr(context, "rebind_model", None)
+            if callable(rebind):
+                try:
+                    rebound = bool(
+                        rebind(
+                            self._config,
+                            token_counter=token_counter,
+                            model=model,
+                            model_config=model_config,
+                            model_client_config=model_client_config,
+                        )
+                    )
+                except TypeError:
+                    # Keep third-party ModelContext implementations with the
+                    # pre-rebind signature source-compatible.
+                    rebound = bool(rebind(self._config, token_counter=token_counter))
+            if not rebound:
+                update_context = getattr(context, "update_model_context", None)
+                if callable(update_context):
+                    update_context(
+                        model_name=model_name,
+                        context_window_tokens=context_window_tokens,
+                    )
 
     @_fw.emit_after(ContextEvents.CONTEXT_RETRIEVED, result_key="context")
     async def create_context(
@@ -256,6 +281,9 @@ class ContextEngine:
         *,
         session_id: str | None = None,
         context_id: str | None = None,
+        model: Any = None,
+        model_config: Any = None,
+        model_client_config: Any = None,
     ) -> int:
         """Apply a new model binding to cached contexts without losing history.
 
@@ -283,7 +311,19 @@ class ContextEngine:
             if not callable(rebind):
                 continue
             try:
-                if rebind(config, token_counter=token_counter):
+                try:
+                    did_rebind = rebind(
+                        config,
+                        token_counter=token_counter,
+                        model=model,
+                        model_config=model_config,
+                        model_client_config=model_client_config,
+                    )
+                except TypeError:
+                    # Keep third-party ModelContext implementations with the
+                    # pre-rebind signature source-compatible.
+                    did_rebind = rebind(config, token_counter=token_counter)
+                if did_rebind:
                     rebound += 1
             except Exception:  # noqa: BLE001 - one custom context must not block switching
                 context_engine_logger.warning(
