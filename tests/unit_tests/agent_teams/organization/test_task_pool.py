@@ -35,7 +35,9 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskFailureCode,
     OrgTaskRecord,
     OrgTaskReviewStatus,
+    OrgSummaryExecutionRecord,
     OrgSummaryExecutionStatus,
+    OrgSummaryTeamRecord,
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
@@ -47,6 +49,7 @@ from openjiuwen.agent_teams.organization.tools import (
     OrgListExpertGroupsTool,
     OrgListLeaderMessagesTool,
     OrgReviewTaskTool,
+    OrgSummaryCompleteTool,
     OrgSummaryGetInputsTool,
     OrgUpdateTaskTool,
     OrgViewChildTasksTool,
@@ -879,6 +882,127 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
     assert (await manager.complete_task(task_id="summary-sibling", team_id="summary-team")).ok
     completed_root = await manager.get_task("summary-root")
     assert completed_root is not None and completed_root.status is OrgTaskStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_rebinding_running_summary_execution_keeps_running_state(org_manager):
+    """A repeated creation request must not reset an active Summary Execution."""
+    manager, _ = org_manager
+    client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
+    leader = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    assert (
+        await manager.create_task(
+            task_id="repeat-root",
+            title="Root",
+            description="Root",
+            required_capabilities=["analysis"],
+            aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+            created_by=client,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="repeat-root", team_id="team-a")).ok
+    await _select_summary_aggregation(manager, root_task_id="repeat-root", leader=leader)
+    assert (
+        await manager.create_task(
+            task_id="repeat-source",
+            parent_task_id="repeat-root",
+            title="Source",
+            description="Source",
+            required_capabilities=["analysis"],
+            delegated_to_team_id="team-b",
+            created_by=leader,
+        )
+    ).ok
+    created = await manager.create_summary_execution(
+        root_task_id="repeat-root",
+        task_id="repeat-summary",
+        title="Summary",
+        description="Summary",
+        source_task_ids=["repeat-source"],
+        summary_team_id="summary-team",
+        created_by=leader,
+    )
+    assert created.ok
+    assert (
+        await manager.complete_task(
+            task_id="repeat-source", team_id="team-b", output_abstract="Source result"
+        )
+    ).ok
+    assert (
+        await manager.review_task(
+            task_id="repeat-source", reviewer_team_id="team-a", review_status=OrgTaskReviewStatus.ACCEPTED
+        )
+    ).ok
+
+    before = await manager.get_summary_execution(summary_task_id="repeat-summary")
+    assert before is not None and before.status == OrgSummaryExecutionStatus.RUNNING.value
+    rebound = await manager.bind_summary_execution(
+        summary_task_id="repeat-summary", summary_team_id="summary-team"
+    )
+    after = await manager.get_summary_execution(summary_task_id="repeat-summary")
+
+    assert rebound.ok
+    assert after is not None and after.status == OrgSummaryExecutionStatus.RUNNING.value
+
+
+@pytest.mark.asyncio
+async def test_summary_execution_rejects_stale_summary_task_id(org_manager):
+    """A leftover execution must return a tool error before SQLite raises a unique-key error."""
+    manager, _ = org_manager
+    client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
+    leader = OrgTaskCreator(
+        creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
+    )
+    assert (
+        await manager.create_task(
+            task_id="new-root", title="Root", description="Root", required_capabilities=["analysis"],
+            aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM, created_by=client,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="new-root", team_id="team-a")).ok
+    await _select_summary_aggregation(manager, root_task_id="new-root", leader=leader)
+    async with manager._write() as session:
+        session.add(OrgSummaryExecutionRecord(
+            execution_id="old-execution", organization_id="org-1", root_task_id="old-root",
+            summary_task_id="reused-summary", status=OrgSummaryExecutionStatus.COMPLETED.value,
+            created_at=1, updated_at=1,
+        ))
+        await session.commit()
+
+    result = await manager.create_summary_execution(
+        root_task_id="new-root", task_id="reused-summary", title="Summary", description="Summary",
+        source_task_ids=["source-not-created"], created_by=leader,
+    )
+
+    assert not result.ok
+    assert result.reason == "summary task id already used by another execution: reused-summary"
+
+
+@pytest.mark.asyncio
+async def test_dissolve_removes_orphan_summary_rows(org_manager):
+    """Organization removal must clear summary rows even when their task rows are already gone."""
+    manager, _ = org_manager
+    await manager.initialize()
+    async with manager._write() as session:
+        session.add(OrgSummaryExecutionRecord(
+            execution_id="old-execution", organization_id="org-1", root_task_id="old-root",
+            summary_task_id="old-summary", status=OrgSummaryExecutionStatus.COMPLETED.value,
+            created_at=1, updated_at=1,
+        ))
+        session.add(OrgSummaryTeamRecord(
+            organization_id="org-1", summary_team_id="old-summary-team", leader_id="leader",
+            status="READY", created_at=1, updated_at=1,
+        ))
+        await session.commit()
+
+    deleted = await manager.dissolve_organization()
+
+    assert deleted["summary_executions"] == 1
+    assert deleted["summary_teams"] == 1
+    assert await manager.get_summary_execution(summary_task_id="old-summary") is None
+    assert await manager.get_summary_team() is None
 
 
 @pytest.mark.asyncio
@@ -2693,6 +2817,9 @@ async def test_joined_leader_is_woken_to_consider_open_org_task(active_organizat
         )
     )
     await asyncio.sleep(0)
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     assert turns[0]["session_id"] == session_id
@@ -2754,7 +2881,10 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
             )
         )
     )
-    await asyncio.sleep(0)
+    for _ in range(20):
+        if turns:
+            break
+        await asyncio.sleep(0.01)
 
     assert turns[0]["team_name"] == "team-b"
     prompt = turns[0]["inputs"]["query"]
@@ -2768,10 +2898,10 @@ async def test_claimed_task_wakes_claiming_team_to_execute(active_organization_r
 @pytest.mark.asyncio
 async def test_task_execution_prompts_describe_child_decomposition(active_organization_runtime):
     runtime, _, session_id = active_organization_runtime
-    prompts: list[str] = []
+    scheduled: list[dict] = []
 
     def capture_prompt(**kwargs):
-        prompts.append(kwargs["prompt"])
+        scheduled.append(kwargs)
 
     runtime._schedule_leader_turn = capture_prompt
     runtime._schedule_delegated_turn(
@@ -2788,10 +2918,11 @@ async def test_task_execution_prompts_describe_child_decomposition(active_organi
         organization_id="org-1",
     )
 
-    assert "org_create_task(parent_task_id='delegated-parent')" in prompts[0]
-    assert "org_view_child_tasks" in prompts[0]
-    assert "repairs_task_id=child-1" in prompts[1]
-    assert "org_create_task" in prompts[1]
+    assert "org_create_task(parent_task_id='delegated-parent')" in scheduled[0]["prompt"]
+    assert "org_view_child_tasks" in scheduled[0]["prompt"]
+    assert "repairs_task_id=child-1" in scheduled[1]["prompt"]
+    assert "org_create_task" in scheduled[1]["prompt"]
+    assert scheduled[1]["relay_source"] == "org_root_background"
 
 
 @pytest.mark.asyncio
@@ -2836,8 +2967,8 @@ async def test_summary_execution_prompt_requires_source_aggregation_only(active_
 def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization_runtime):
     """Keep Root Leader guidance aligned with the two mutually exclusive aggregation paths."""
     runtime, _, session_id = active_organization_runtime
-    prompts: list[str] = []
-    runtime._schedule_leader_turn = lambda **kwargs: prompts.append(kwargs["prompt"])
+    scheduled: list[dict] = []
+    runtime._schedule_leader_turn = lambda **kwargs: scheduled.append(kwargs)
 
     runtime._schedule_claimed_task_execution_turn(
         team_id="team-a",
@@ -2846,14 +2977,76 @@ def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization
         organization_id="org-1",
     )
 
-    assert len(prompts) == 1
-    assert "HIERARCHICAL" in prompts[0]
-    assert "supporting evidence or dependent work" in prompts[0]
-    assert "complete the root yourself" in prompts[0]
-    assert "SUMMARY_TEAM" in prompts[0]
-    assert "independent, orthogonal conclusions" in prompts[0]
-    assert "org_create_summary_execution" in prompts[0]
-    assert "Do not directly complete a SUMMARY_TEAM root" in prompts[0]
+    assert len(scheduled) == 1
+    prompt = scheduled[0]["prompt"]
+    assert "HIERARCHICAL" in prompt
+    assert "supporting evidence or dependent work" in prompt
+    assert "complete the root yourself" in prompt
+    assert "SUMMARY_TEAM" in prompt
+    assert "independent, orthogonal conclusions" in prompt
+    assert "org_create_summary_execution" in prompt
+    assert "Do not directly complete a SUMMARY_TEAM root" in prompt
+    assert scheduled[0]["relay_source"] == "org_root_background"
+
+
+@pytest.mark.asyncio
+async def test_parent_followup_recovery_skips_summary_team_work():
+    """Recovery keeps hierarchical follow-ups but never asks a Root Leader to finish a Summary Task."""
+    summary_task = SimpleNamespace(
+        task_id="summary-task",
+        task_type="organization.summary",
+        parent_task_id=None,
+        status=OrgTaskStatus.IN_PROGRESS,
+        unclaimed=None,
+        failure_code=None,
+    )
+    summary_root = SimpleNamespace(
+        task_id="summary-root",
+        task_type="organization.task",
+        parent_task_id=None,
+        status=OrgTaskStatus.IN_PROGRESS,
+        unclaimed=None,
+        failure_code=None,
+        aggregation=SimpleNamespace(
+            mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+            summary_task_id="summary-task",
+        ),
+    )
+    hierarchical_root = SimpleNamespace(
+        task_id="hierarchical-root",
+        task_type="organization.task",
+        parent_task_id=None,
+        status=OrgTaskStatus.IN_PROGRESS,
+        unclaimed=None,
+        failure_code=None,
+        aggregation=SimpleNamespace(
+            mode=OrgTaskAggregationMode.HIERARCHICAL,
+            summary_task_id=None,
+        ),
+    )
+    tasks = {task.task_id: task for task in (summary_task, summary_root, hierarchical_root)}
+
+    class FakeTaskPool:
+        async def list_pending_reviews(self, *, team_id):
+            return []
+
+        async def list_tasks_created_by_team(self, *, team_id):
+            return list(tasks.values())
+
+        async def get_task(self, task_id):
+            return tasks[task_id]
+
+        async def can_complete_parent_task(self, *, parent_task_id, team_id):
+            return parent_task_id == "hierarchical-root"
+
+    runtime = OrganizationRuntimeManager(SimpleNamespace())
+    scheduled = []
+    runtime._schedule_parent_ready_turn = lambda **kwargs: scheduled.append(kwargs["parent_task_id"])
+    manager = SimpleNamespace(organization_id="org-1", task_pool=FakeTaskPool())
+
+    await runtime._resume_parent_followups(manager=manager, team_id="team-a", session_id="session-1")
+
+    assert scheduled == ["hierarchical-root"]
 
 
 @pytest.mark.asyncio
@@ -2960,6 +3153,174 @@ async def test_summary_execution_tool_uses_fresh_task_status_for_initial_schedul
             "root_task_id": "root-task",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_summary_complete_requires_report_description():
+    """A Summary Task must not complete with fields discarded by output validation."""
+
+    class FakeManager:
+        async def register_leader(self, **kwargs):
+            return None
+
+        async def get_task(self, task_id):
+            return SimpleNamespace(
+                task_type="organization.summary",
+                assignment=SimpleNamespace(team_id="summary-team"),
+            )
+
+        async def complete_task(self, **kwargs):
+            raise AssertionError("invalid report must not complete the task")
+
+    tool = OrgSummaryCompleteTool(FakeManager(), "summary-team", "summary-leader")
+    result = await tool.invoke(
+        {"summary_task_id": "summary-task", "output_context": {"key_risks": ["risk"]}, "output_abstract": "short"}
+    )
+    assert not result.success
+    assert "output_context.description" in result.error
+
+
+@pytest.mark.asyncio
+async def test_summary_complete_notifies_root_without_bypassing_root_leader():
+    """A completed Summary Task notifies the Root Leader for verified delivery."""
+    notices = []
+    scheduled = []
+    summary = SimpleNamespace(
+        task_type="organization.summary",
+        status=OrgTaskStatus.IN_PROGRESS,
+        root_task_id="root-task",
+        assignment=SimpleNamespace(team_id="summary-team"),
+        brief=lambda: {"task_id": "summary-task"},
+    )
+    root = SimpleNamespace(task_id="root-task", assignment=SimpleNamespace(team_id="root-team"))
+
+    class FakeManager:
+        organization_id = "org-1"
+
+        async def register_leader(self, **kwargs):
+            return None
+
+        async def get_task(self, task_id):
+            return summary if task_id == "summary-task" else root
+
+        async def complete_task(self, **kwargs):
+            assert kwargs["output_context"].description == "Final report"
+            return SimpleNamespace(ok=True, task=summary)
+
+        async def get_summary_execution(self, **kwargs):
+            return SimpleNamespace(execution_id="execution-1")
+
+    class FakeMessages:
+        async def send_leader_message(self, **kwargs):
+            notices.append(kwargs)
+            return SimpleNamespace(ok=True, data={"message_id": "message-1"})
+
+    class FakeRuntime:
+        def schedule_summary_completion_delivery(self, **kwargs):
+            scheduled.append(kwargs)
+
+    tool = OrgSummaryCompleteTool(
+        FakeManager(), "summary-team", "summary-leader", FakeMessages(), FakeRuntime(), "session-1"
+    )
+    result = await tool.invoke({
+        "summary_task_id": "summary-task",
+        "output_context": {"description": "Final report"},
+        "output_abstract": "Short report",
+    })
+    assert result.success
+    assert notices[0]["to_team_id"] == "root-team"
+    assert notices[0]["metadata"] == {
+        "kind": "summary_completed",
+        "execution_id": "execution-1",
+        "root_task_id": "root-task",
+        "summary_task_id": "summary-task",
+    }
+    assert scheduled[0]["team_id"] == "root-team"
+    assert scheduled[0]["message_id"] == "message-1"
+
+
+def test_summary_completion_delivery_turn_requires_root_leader_verification():
+    """The Root Leader must read and verify a summary before delivering it."""
+    runtime = OrganizationRuntimeManager(SimpleNamespace())
+    scheduled = []
+    runtime._schedule_leader_turn = lambda **kwargs: scheduled.append(kwargs)
+
+    runtime._schedule_summary_completion_delivery_turn(
+        team_id="root-team",
+        session_id="session-1",
+        message_id="message-1",
+        organization_id="org-1",
+        metadata={
+            "execution_id": "execution-1",
+            "root_task_id": "root-task",
+            "summary_task_id": "summary-task",
+        },
+    )
+
+    assert len(scheduled) == 1
+    prompt = scheduled[0]["prompt"]
+    assert "org_get_leader_message" in prompt
+    assert "root-task" in prompt
+    assert "summary-task" in prompt
+    assert "org_ack_leader_message" in prompt
+    assert "org_summary_complete" in prompt
+    assert "directly deliver the verified final report" in prompt
+    assert scheduled[0]["relay_source"] == "org_root_delivery"
+
+
+@pytest.mark.asyncio
+async def test_summary_turn_skips_completed_execution_and_starts_active_task():
+    """A queued Summary Team turn must be checked against durable state before running."""
+    task = SimpleNamespace(task_id="summary-task", status=OrgTaskStatus.COMPLETED)
+    execution = SimpleNamespace(status=OrgSummaryExecutionStatus.COMPLETED.value)
+    started = []
+    turns = []
+
+    class FakeTaskManager:
+        async def get_task(self, task_id):
+            return task
+
+        async def get_summary_execution(self, *, summary_task_id):
+            return execution
+
+        async def start_task(self, *, task_id, team_id):
+            started.append(task_id)
+            task.status = OrgTaskStatus.IN_PROGRESS
+            return SimpleNamespace(ok=True)
+
+    entry = SimpleNamespace(
+        current_session_id="session-1",
+        state=RuntimeState.PAUSED,
+        agent=SimpleNamespace(team_backend=SimpleNamespace(org_task_manager=FakeTaskManager())),
+    )
+
+    class FakePool:
+        async def get(self, team_id):
+            return entry
+
+    runtime = OrganizationRuntimeManager(SimpleNamespace(pool=FakePool()))
+
+    async def run_turn(team_id, session_id, inputs):
+        turns.append(inputs)
+        return True
+
+    runtime._run_leader_turn = run_turn
+    runtime.schedule_summary_execution(
+        team_id="summary-team", session_id="session-1", task_id="summary-task",
+        organization_id="org-1", execution_id="execution-1", root_task_id="root-1",
+    )
+    await asyncio.sleep(0.01)
+    assert not turns
+
+    task.status = OrgTaskStatus.DELEGATED
+    execution.status = OrgSummaryExecutionStatus.RUNNING.value
+    runtime.schedule_summary_execution(
+        team_id="summary-team", session_id="session-1", task_id="summary-task",
+        organization_id="org-1", execution_id="execution-1", root_task_id="root-1",
+    )
+    await asyncio.sleep(0.01)
+    assert started == ["summary-task"]
+    assert len(turns) == 1
 
 
 @pytest.mark.asyncio
@@ -3516,6 +3877,9 @@ async def test_description_revised_wakes_capability_matched_team(active_organiza
         ),
         team_id="team-b",
     )
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     assert "legal-open" in turns[0]["inputs"]["query"]
@@ -3564,6 +3928,9 @@ async def test_completed_task_rewakes_team_for_matching_open_task(active_organiz
         ),
         team_id="team-b",
     )
+    worker = runtime._leader_turn_workers.get((session_id, "team-b"))
+    if worker is not None:
+        await worker
 
     assert turns[0]["team_name"] == "team-b"
     prompt = turns[0]["inputs"]["query"]
@@ -3651,6 +4018,61 @@ async def test_non_owner_cannot_dissolve_organization_even_without_bindings(acti
 
 
 @pytest.mark.asyncio
+async def test_drain_leader_turns_drops_stale_open_claim(active_organization_runtime):
+    """A queued claim wake must not run after another turn completed the task."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(
+        org_runtime,
+        agents,
+        session_id,
+        "org-stale-open-claim",
+    )
+    created = await manager.create_task(
+        task_id="stale-open-claim",
+        title="Stale claim",
+        description="Complete before the queued claim turn runs.",
+        required_capabilities=["stale-test"],
+        created_by=OrgTaskCreator(
+            creator_type="client",
+            creator_id="client",
+            organization_id=manager.organization_id,
+        ),
+    )
+    assert created.ok
+    assert (await manager.claim_task(task_id="stale-open-claim", team_id="team-a")).ok
+    assert (
+        await manager.set_root_aggregation_mode(
+            task_id="stale-open-claim",
+            team_id="team-a",
+            leader_id="leader-team-a",
+            aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+        )
+    ).ok
+    assert (await manager.start_task(task_id="stale-open-claim", team_id="team-a")).ok
+    assert (await manager.complete_task(task_id="stale-open-claim", team_id="team-a")).ok
+
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs)
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque(
+        [{"query": "Claim stale-open-claim", "_org_open_claim_task_id": "stale-open-claim"}]
+    )
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == []
+    assert key not in org_runtime._leader_turn_queues
+    assert key not in org_runtime._leader_turn_workers
+
+
+@pytest.mark.asyncio
 async def test_drain_leader_turns_waits_until_running_team_pauses(active_organization_runtime, monkeypatch):
     org_runtime, _agents, session_id = active_organization_runtime
     sleep_calls: list[float] = []
@@ -3688,6 +4110,40 @@ async def test_drain_leader_turns_waits_until_running_team_pauses(active_organiz
     assert len(sleep_calls) == 3
 
 
+@pytest.mark.asyncio
+async def test_summary_delivery_wakes_running_root_leader(active_organization_runtime, monkeypatch):
+    """A live Owner stream receives the final-delivery prompt without waiting for pause."""
+    org_runtime, _agents, session_id = active_organization_runtime
+    async def settled(_entry) -> bool:
+        return True
+
+    monkeypatch.setattr(org_runtime, "_team_is_idle_settled_for_org_wake", settled)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.RUNNING
+    sent = []
+
+    async def interact(prompt, **kwargs):
+        sent.append((prompt, kwargs))
+        return SimpleNamespace(ok=True)
+
+    org_runtime._team_runtime_manager.interact = interact
+    key = (session_id, "team-a")
+    message_key = (session_id, "team-a", "message-1")
+    org_runtime._scheduled_leader_messages.add(message_key)
+    org_runtime._leader_turn_queues[key] = deque([{
+        "query": "Verify and deliver the final report",
+        "_org_message_key": message_key,
+        "_org_relay_source": "org_root_delivery",
+    }])
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert sent == [(
+        "Verify and deliver the final report",
+        {"team_name": "team-a", "session_id": session_id},
+    )]
+    assert message_key not in org_runtime._scheduled_leader_messages
+    assert key not in org_runtime._leader_turn_queues
 @pytest.mark.asyncio
 async def test_drain_leader_turns_delivers_via_interact_when_running_idle(
     active_organization_runtime, monkeypatch

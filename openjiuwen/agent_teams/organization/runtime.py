@@ -34,6 +34,8 @@ from openjiuwen.agent_teams.organization.pool import get_process_org_manager, re
 from openjiuwen.agent_teams.organization.schema import (
     ORG_TASK_REPAIRS_TASK_ID_KEY,
     OrganizationSpec,
+    OrgAssignmentType,
+    OrgTaskAggregationMode,
     OrgTaskFailureCode,
     OrgTaskReviewStatus,
     OrgSummaryExecutionStatus,
@@ -155,6 +157,7 @@ class OrganizationRuntimeManager:
         self._scheduled_parent_reviews: set[tuple[str, str, str]] = set()
         self._scheduled_summary_executions: set[tuple[str, str, str]] = set()
         self._leader_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
+        self._summary_turn_runner: Callable[[str, str, object], Awaitable[bool]] | None = None
         self._configured_team_provider: Callable[[str], Awaitable[list[dict[str, Any]]]] | None = None
         self._team_activator: Callable[[str, str], Awaitable[str | None]] | None = None
         self._expert_group_catalog: ExpertGroupCatalog | None = None
@@ -162,12 +165,17 @@ class OrganizationRuntimeManager:
         self._expert_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
         self._summary_team_launcher: SummaryTeamLauncher | None = None
         self._summary_adapter_installer: Callable[["OrganizationRuntimeManager"], None] | None = None
+        self._organization_progress_publisher: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None = None
         self._summary_team_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
     def set_leader_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
         """Set the host-owned path used to run an autonomous leader turn."""
 
         self._leader_turn_runner = runner
+
+    def set_summary_turn_runner(self, runner: Callable[[str, str, object], Awaitable[bool]]) -> None:
+        """Run only Summary Team background turns through the host's event relay."""
+        self._summary_turn_runner = runner
 
     def set_configured_team_provider(self, provider: Callable[[str], Awaitable[list[dict[str, Any]]]]) -> None:
         """Set the host callback exposing dormant same-process team templates."""
@@ -203,6 +211,21 @@ class OrganizationRuntimeManager:
         """Set the host launcher for the organization-wide reusable Summary Team."""
 
         self._summary_team_launcher = launcher
+
+    def set_organization_progress_publisher(
+        self, publisher: Callable[[str, str, dict[str, Any]], Awaitable[None]] | None
+    ) -> None:
+        """Install the host callback for user-visible organization milestones."""
+
+        self._organization_progress_publisher = publisher
+
+    async def publish_organization_progress(
+        self, session_id: str, root_team_id: str, progress: dict[str, Any]
+    ) -> None:
+        """Forward a factual organization milestone without exposing model reasoning."""
+
+        if self._organization_progress_publisher is not None:
+            await self._organization_progress_publisher(session_id, root_team_id, progress)
 
     def set_summary_adapter_installer(self, installer: Callable[["OrganizationRuntimeManager"], None] | None) -> None:
         """Register the host's lazy Summary Team adapter installer."""
@@ -736,8 +759,11 @@ class OrganizationRuntimeManager:
             tools = (
                 create_summary_leader_tools(
                     manager=manager.task_pool,
+                    message_service=manager.message_service,
                     team_id=backend.team_name,
                     leader_id=leader_id,
+                    runtime_manager=self,
+                    session_id=session_id,
                 )
                 if is_summary_team
                 else create_org_leader_tools(
@@ -983,6 +1009,16 @@ class OrganizationRuntimeManager:
             if message["from_team_id"] == "__organization__":
                 # The deadline scanner replays these with phase-aware prompts.
                 continue
+            metadata = message.get("metadata") or {}
+            if metadata.get("kind") == "summary_completed":
+                self._schedule_summary_completion_delivery_turn(
+                    team_id=team_id,
+                    session_id=session_id,
+                    message_id=message["message_id"],
+                    organization_id=manager.organization_id,
+                    metadata=metadata,
+                )
+                continue
             self._schedule_leader_message_turn(
                 team_id=team_id,
                 session_id=session_id,
@@ -1127,6 +1163,10 @@ class OrganizationRuntimeManager:
             )
 
         for task in await manager.task_pool.list_tasks_created_by_team(team_id=team_id):
+            if task.task_type == "organization.summary":
+                # Summary Tasks are root siblings with bound sources, not
+                # hierarchical parents with direct child tasks.
+                continue
             if (
                 task.unclaimed is not None
                 and task.failure_code is OrgTaskFailureCode.EXPIRED
@@ -1181,6 +1221,14 @@ class OrganizationRuntimeManager:
             parent = await manager.task_pool.get_task(parent_task_id)
             if parent is None or parent.status in _PARENT_RESUME_TERMINAL_STATUSES:
                 continue
+            aggregation = parent.aggregation
+            is_root = parent.parent_task_id is None
+            is_summary_aggregation = (
+                aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+            )
+            if is_root and is_summary_aggregation and aggregation.summary_task_id:
+                # A Summary Execution already owns final delivery for this root.
+                continue
             if not await manager.task_pool.can_complete_parent_task(
                 parent_task_id=parent_task_id,
                 team_id=team_id,
@@ -1230,6 +1278,8 @@ class OrganizationRuntimeManager:
                 if event.team_id == backend.team_name:
                     return
                 task = await manager.task_pool.get_task(event.task_id)
+                if task is not None and task.task_type == "organization.summary":
+                    return
                 required = set(task.required_capabilities) if task is not None else set()
                 if not required or not required.issubset(capabilities):
                     return
@@ -1384,6 +1434,16 @@ class OrganizationRuntimeManager:
                 )
                 if persisted is None or persisted["handled_at"] is not None:
                     return
+                metadata = persisted.get("metadata") or {}
+                if metadata.get("kind") == "summary_completed":
+                    self._schedule_summary_completion_delivery_turn(
+                        team_id=backend.team_name,
+                        session_id=session_id,
+                        message_id=message_id,
+                        organization_id=manager.organization_id,
+                        metadata=metadata,
+                    )
+                    return
                 self._schedule_leader_message_turn(
                     team_id=backend.team_name,
                     session_id=session_id,
@@ -1464,6 +1524,8 @@ class OrganizationRuntimeManager:
         for task in await manager.task_pool.list_open_tasks():
             if completed_task_id is not None and task.task_id == completed_task_id:
                 continue
+            if task.task_type == "organization.summary":
+                continue
             required = set(task.required_capabilities)
             if required and required.issubset(capabilities):
                 self._schedule_claim_turn(
@@ -1499,7 +1561,12 @@ class OrganizationRuntimeManager:
             "unless the parent task explicitly requests it. Only skip the claim when a required capability "
             "is actually absent or the claim fails because another team already claimed it."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            open_claim_task_id=task_id,
+        )
 
     def _schedule_delegated_turn(self, *, team_id: str, session_id: str, task_id: str, organization_id: str) -> None:
         prompt = (
@@ -1514,6 +1581,17 @@ class OrganizationRuntimeManager:
             "and complete it with the resulting output context and output abstract."
         )
         self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+
+    @staticmethod
+    def _is_unassigned_open_task(task: Any) -> bool:
+        """Return whether a queued claim wake still targets a claimable task."""
+        if task is None:
+            return False
+        if task.status is not OrgTaskStatus.OPEN:
+            return False
+        if task.assignment.assignment_type != OrgAssignmentType.UNASSIGNED:
+            return False
+        return task.assignment.team_id is None
 
     def schedule_summary_execution(
         self,
@@ -1584,6 +1662,59 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             message_key=message_key,
+            relay_source="org_root_background",
+        )
+
+    def _schedule_summary_completion_delivery_turn(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        message_id: str,
+        organization_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Schedule the Root Leader to verify and deliver a completed Summary Task."""
+        message_key = (session_id, team_id, message_id)
+        if message_key in self._scheduled_leader_messages:
+            self._ensure_leader_turn_worker(team_id, session_id)
+            return
+        self._scheduled_leader_messages.add(message_key)
+        root_task_id = str(metadata.get("root_task_id") or "")
+        summary_task_id = str(metadata.get("summary_task_id") or "")
+        prompt = (
+            f"Summary Team completion notice {message_id} arrived in organization {organization_id}. "
+            f"Read it with org_get_leader_message, then inspect completed root task {root_task_id} with "
+            "org_view_tasks(action='get'). Verify that its output_context.description contains the final "
+            f"report produced by Summary Task {summary_task_id}. Do not create, delegate, modify, review, "
+            "or complete any task; do not call org_summary_complete and do not start another summary. "
+            "After verification, call org_ack_leader_message, then directly deliver the verified final report "
+            "to the user in this turn. Do not poll or say that you are waiting."
+        )
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            message_key=message_key,
+            relay_source="org_root_delivery",
+        )
+
+    def schedule_summary_completion_delivery(
+        self,
+        *,
+        team_id: str,
+        session_id: str,
+        message_id: str,
+        organization_id: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        """Wake the Root Leader after its durable completion notice is saved."""
+        self._schedule_summary_completion_delivery_turn(
+            team_id=team_id,
+            session_id=session_id,
+            message_id=message_id,
+            organization_id=organization_id,
+            metadata=metadata,
         )
 
     def _schedule_claimed_task_execution_turn(
@@ -1628,7 +1759,13 @@ class OrganizationRuntimeManager:
             "complete a SUMMARY_TEAM root; its Summary Task completes it. If the task is already IN_PROGRESS "
             "or COMPLETED, do not duplicate work."
         )
-        self._schedule_leader_turn(team_id=team_id, session_id=session_id, prompt=prompt)
+        self._schedule_leader_turn(
+            team_id=team_id,
+            session_id=session_id,
+            prompt=prompt,
+            claimed_task_id=task_id,
+            relay_source="org_root_background",
+        )
 
     def _schedule_parent_review_turn(
         self,
@@ -1662,6 +1799,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+            relay_source="org_root_background",
         )
 
     def _schedule_parent_repair_turn(
@@ -1696,6 +1834,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+            relay_source="org_root_background",
         )
 
     def _schedule_parent_ready_turn(
@@ -1725,6 +1864,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+            relay_source="org_root_background",
         )
 
     def _schedule_parent_child_failed_turn(
@@ -1806,6 +1946,9 @@ class OrganizationRuntimeManager:
         message_key: tuple[str, str, str] | None = None,
         review_key: tuple[str, str, str] | None = None,
         summary_key: tuple[str, str, str] | None = None,
+        claimed_task_id: str | None = None,
+        open_claim_task_id: str | None = None,
+        relay_source: str | None = None,
         unclaimed_notification: tuple[tuple[str, str], dict[str, Any]] | None = None,
     ) -> None:
         key = (session_id, team_id)
@@ -1816,6 +1959,9 @@ class OrganizationRuntimeManager:
                 "_org_message_key": message_key,
                 "_org_review_key": review_key,
                 "_org_summary_key": summary_key,
+                "_org_claimed_task_id": claimed_task_id,
+                "_org_open_claim_task_id": open_claim_task_id,
+                "_org_relay_source": relay_source,
                 "_org_unclaimed_notification": unclaimed_notification,
             }
         )
@@ -1863,12 +2009,42 @@ class OrganizationRuntimeManager:
                 message_key = None
                 review_key = None
                 summary_key = None
+                claimed_task_id = None
+                open_claim_task_id = None
                 turn_failed = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
                     review_key = inputs.pop("_org_review_key", None)
                     summary_key = inputs.pop("_org_summary_key", None)
+                    claimed_task_id = inputs.pop("_org_claimed_task_id", None)
+                    open_claim_task_id = inputs.pop("_org_open_claim_task_id", None)
                 try:
+                    task_manager = getattr(getattr(entry.agent, "team_backend", None), "org_task_manager", None)
+                    if open_claim_task_id is not None and task_manager is not None:
+                        open_task = await task_manager.get_task(open_claim_task_id)
+                        if not self._is_unassigned_open_task(open_task):
+                            continue
+                    if summary_key is not None and task_manager is not None:
+                        summary_task = await task_manager.get_task(summary_key[2])
+                        execution = await task_manager.get_summary_execution(summary_task_id=summary_key[2])
+                        summary_task_active = summary_task is not None and summary_task.status in {
+                            OrgTaskStatus.DELEGATED,
+                            OrgTaskStatus.IN_PROGRESS,
+                        }
+                        execution_running = (
+                            execution is not None
+                            and execution.status == OrgSummaryExecutionStatus.RUNNING.value
+                        )
+                        if not summary_task_active or not execution_running:
+                            continue
+                        if summary_task.status is OrgTaskStatus.DELEGATED:
+                            started = await task_manager.start_task(task_id=summary_task.task_id, team_id=team_id)
+                            if not started.ok:
+                                raise RuntimeError(started.reason or "summary task start failed")
+                    if claimed_task_id is not None and task_manager is not None:
+                        claimed_task = await task_manager.get_task(claimed_task_id)
+                        if claimed_task is None or claimed_task.status in _PARENT_RESUME_TERMINAL_STATUSES:
+                            continue
                     notification = inputs.pop("_org_unclaimed_notification", None) if isinstance(inputs, dict) else None
                     if notification is not None:
                         service_key, message = notification
@@ -2000,6 +2176,8 @@ class OrganizationRuntimeManager:
         if entry is None or entry.current_session_id != session_id:
             return False
         if entry.state is RuntimeState.PAUSED:
+            if self._is_summary_team(entry.agent) and self._summary_turn_runner is not None:
+                return await self._summary_turn_runner(team_id, session_id, inputs)
             if self._leader_turn_runner is not None:
                 return await self._leader_turn_runner(team_id, session_id, inputs)
             return await self._team_runtime_manager.run_organization_turn(

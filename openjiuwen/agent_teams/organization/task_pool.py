@@ -310,6 +310,16 @@ class OrgTaskManager:
                 "task_events",
             )
             await _delete(
+                delete(OrgSummaryExecutionRecord).where(
+                    OrgSummaryExecutionRecord.organization_id == self.organization_id
+                ),
+                "summary_executions",
+            )
+            await _delete(
+                delete(OrgSummaryTeamRecord).where(OrgSummaryTeamRecord.organization_id == self.organization_id),
+                "summary_teams",
+            )
+            await _delete(
                 delete(OrgTaskRecord).where(OrgTaskRecord.organization_id == self.organization_id),
                 "tasks",
             )
@@ -1884,6 +1894,25 @@ class OrgTaskManager:
             if aggregation.summary_task_id:
                 existing = await session.get(OrgTaskRecord, aggregation.summary_task_id)
                 return OrgTaskOpResult(ok=True, task=self._to_task(existing) if existing else None)
+            conflicting_execution = (
+                await session.execute(
+                    select(OrgSummaryExecutionRecord).where(
+                        or_(
+                            OrgSummaryExecutionRecord.root_task_id == root_task_id,
+                            OrgSummaryExecutionRecord.summary_task_id == summary_task_id,
+                        )
+                    )
+                )
+            ).scalars().first()
+            if conflicting_execution is not None:
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        "summary execution already exists for this root task"
+                        if conflicting_execution.root_task_id == root_task_id
+                        else f"summary task id already used by another execution: {summary_task_id}"
+                    ),
+                )
             for source_task_id in source_task_ids:
                 source = await session.get(OrgTaskRecord, source_task_id)
                 if source is None or source.organization_id != self.organization_id:
@@ -2092,8 +2121,22 @@ class OrgTaskManager:
             if execution.status == OrgSummaryExecutionStatus.FAILED.value:
                 logger.warning("bind_summary_execution rejected: summary=%s already FAILED", summary_task_id)
                 return OrgTaskOpResult(ok=False, reason="summary execution provisioning failed")
+            if execution.summary_team_id and execution.summary_team_id != summary_team_id:
+                return OrgTaskOpResult(ok=False, reason="summary execution is already bound to another Summary Team")
+            if execution.status in {
+                OrgSummaryExecutionStatus.RUNNING.value,
+                OrgSummaryExecutionStatus.COMPLETED.value,
+            }:
+                # A repeated create request must not move active or completed work
+                # back to WAITING_SOURCES.
+                return OrgTaskOpResult(
+                    ok=True,
+                    task=self._to_task(summary),
+                    data={"execution_id": execution.execution_id},
+                )
             execution.summary_team_id = summary_team_id
-            execution.status = OrgSummaryExecutionStatus.WAITING_SOURCES.value
+            if execution.status == OrgSummaryExecutionStatus.PROVISIONING.value:
+                execution.status = OrgSummaryExecutionStatus.WAITING_SOURCES.value
             execution.updated_at = now
             summary.assignment_type = OrgAssignmentType.DELEGATED.value
             summary.assigned_team_id = summary_team_id
