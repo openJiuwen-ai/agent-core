@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import python_error_tree
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.logging import active_artifact_dir
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import (
     harness_failed,
@@ -616,6 +617,9 @@ class ExperimentExecutionAgent:
         # result) — that's the correct basis for both process_status and the
         # metrics/exit_code/etc. fields below.
         process_status = _process_status_for(run, expected_method=variant.name)
+        error_tree = ""
+        if process_status != "completed":
+            error_tree = python_error_tree(run.stderr) or python_error_tree(run.stdout)
         return (
             VariantResult(
                 name=variant.name,
@@ -628,6 +632,7 @@ class ExperimentExecutionAgent:
                 process_status=process_status,
                 attempts=attempt,
                 diagnostics_path=copied,
+                error_tree=error_tree,
             ),
             run,
         )

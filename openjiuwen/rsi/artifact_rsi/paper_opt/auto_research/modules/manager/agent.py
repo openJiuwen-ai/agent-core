@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.env import load_project_dotenv
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.error_tree import exception_banner
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.metrics import compact_metrics_for_manager
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import project_root, set_project_root
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.manager_capability_rail import (
@@ -313,7 +314,12 @@ def _compact_routing(snapshot: ManagerSnapshot, *, plan_metrics: list[str]) -> d
     return data
 
 
+def _exception_banner_for_manager(tree: str) -> str:
+    return exception_banner(tree)
+
+
 def _compact_variant(variant: dict[str, Any], *, plan_metrics: list[str]) -> dict[str, Any]:
+    excerpt = str(variant.get("excerpt") or "").strip()
     payload = {
         "name": variant.get("name"),
         "passed": variant.get("passed"),
@@ -326,12 +332,21 @@ def _compact_variant(variant: dict[str, Any], *, plan_metrics: list[str]) -> dic
         "log_path": variant.get("log_path") or "",
         "diagnostics_path": variant.get("diagnostics_path") or "",
         "code_commit": variant.get("code_commit") or "",
+        "excerpt": _exception_banner_for_manager(excerpt) if excerpt else "",
     }
     return {key: value for key, value in payload.items() if value not in (None, "", {}, [])}
 
 
 def _compact_handoff(handoff: dict[str, Any], *, plan_metrics: list[str]) -> dict[str, Any]:
+    raw_excerpts = [str(item) for item in list(handoff.get("failure_excerpts") or []) if item]
     handoff.pop("failure_excerpts", None)
+    banners: list[str] = []
+    for item in raw_excerpts[:2]:
+        banner = _exception_banner_for_manager(item)
+        if banner and banner not in banners:
+            banners.append(banner)
+    if banners:
+        handoff["failure_excerpts"] = banners
     for key in ("log_paths", "source_paths", "result_paths", "diagnostic_paths"):
         _shrink_str_list(handoff, key, keep=_KEEP_PATHS)
     variants = handoff.get("variants")
@@ -430,6 +445,7 @@ def _minimal_handoff(handoff: Any) -> dict[str, Any] | None:
         "report_path": handoff.get("report_path"),
         "readiness": handoff.get("readiness"),
         "lint_issues": list(handoff.get("lint_issues") or []),
+        "excerpt": _exception_banner_for_manager(str(handoff.get("excerpt") or "")),
         "variant_names": names,
         "variant_count": handoff.get("variant_count", len(names)),
     }

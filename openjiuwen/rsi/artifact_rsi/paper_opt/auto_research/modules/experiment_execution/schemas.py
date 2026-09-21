@@ -41,6 +41,9 @@ class VariantResult(BaseModel):
     # harness diagnostics_path, if any.
     diagnostics_path: str = ""
     code_commit: str = ""
+    # Python traceback from stderr/stdout when the process did not complete.
+    # Empty on completed runs and on contract/missing-metrics with no traceback.
+    error_tree: str = ""
 
 
 class ExperimentResult(BaseModel):
