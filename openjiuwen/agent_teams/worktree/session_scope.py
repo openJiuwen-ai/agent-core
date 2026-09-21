@@ -102,12 +102,13 @@ def manager_for_worktree_scope(manager: Any, scope: WorktreeOwnerScope) -> Any:
 def enter_project_worktree_context(
     project_dir: str,
     worktree_root: str,
-) -> tuple[str, str, str, str | None, str | None]:
+) -> tuple[str, str, str, str | None, str | None, list[str]]:
     """Temporarily anchor worktree git commands to the explicit project root."""
     from openjiuwen.core.sys_operation.cwd import (
         get_cwd,
         get_original_cwd,
         get_project_root,
+        get_skill_roots,
         get_team_workspace,
         get_workspace,
         init_cwd,
@@ -119,19 +120,32 @@ def enter_project_worktree_context(
         get_project_root(),
         get_workspace(),
         get_team_workspace(),
+        get_skill_roots(),
     )
-    init_cwd(project_dir, project_root=project_dir, workspace=worktree_root, team_workspace=snapshot[4])
+    init_cwd(
+        project_dir,
+        project_root=project_dir,
+        workspace=worktree_root,
+        team_workspace=snapshot[4],
+        skill_roots=snapshot[5],
+    )
     return snapshot
 
 
 def restore_project_worktree_context(
-    snapshot: tuple[str, str, str, str | None, str | None],
+    snapshot: tuple[str, str, str, str | None, str | None, list[str]],
 ) -> None:
     """Restore cwd state after a session-scoped worktree operation."""
     from openjiuwen.core.sys_operation.cwd import init_cwd, set_cwd, set_original_cwd
 
-    cwd, original_cwd, project_root, workspace, team_workspace = snapshot
-    init_cwd(original_cwd, project_root=project_root, workspace=workspace, team_workspace=team_workspace)
+    cwd, original_cwd, project_root, workspace, team_workspace, skill_roots = snapshot
+    init_cwd(
+        original_cwd,
+        project_root=project_root,
+        workspace=workspace,
+        team_workspace=team_workspace,
+        skill_roots=skill_roots,
+    )
     set_cwd(cwd)
     set_original_cwd(original_cwd)
 
