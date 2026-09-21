@@ -95,7 +95,7 @@ def test_delete_if_zero_removes_dynamic_dir() -> None:
 def test_delete_if_zero_keeps_predefined_dir() -> None:
     store = MemberRefStore()
     store.add_ref("teamA", "shared", mode=MEMBER_MODE_PREDEFINED)
-    indep = apaths.get_agent_teams_home() / "members" / "shared"
+    indep = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
     indep.mkdir(parents=True, exist_ok=True)
     store.remove_ref("teamA", "shared", mode=MEMBER_MODE_PREDEFINED)
     assert store.delete_if_zero("teamA", "shared", mode=MEMBER_MODE_PREDEFINED) is False

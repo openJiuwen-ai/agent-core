@@ -333,7 +333,7 @@ class TestDeleteTeamFilesystemCleanup:
             binder.setup(TeamMemberBinding(team_name="teamA", member_name="worker", mode=MEMBER_MODE_DYNAMIC))
             binder.setup(TeamMemberBinding(team_name="teamA", member_name="shared", mode=MEMBER_MODE_PREDEFINED))
             worker_real = member_real_dir("teamA", "worker", MEMBER_MODE_DYNAMIC)
-            shared_real = apaths.get_agent_teams_home() / "members" / "shared"
+            shared_real = apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
             assert worker_real.is_dir()
 
             fake_db = SimpleNamespace(

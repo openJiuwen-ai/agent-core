@@ -43,25 +43,25 @@ def test_member_real_dir_leader_is_in_team() -> None:
 @pytest.mark.level0
 def test_member_real_dir_predefined_is_agent_teams_shared() -> None:
     got = member_real_dir("teamA", "shared", MEMBER_MODE_PREDEFINED)
-    assert got == apaths.get_agent_teams_home() / "members" / "shared"
+    assert got == apaths.get_agent_teams_home() / "jiuwen_team_members" / "shared"
 
 
 @pytest.mark.level0
 def test_member_real_dir_dynamic_with_prefix() -> None:
     got = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC, member_workspace_prefix=True)
-    assert got == apaths.get_agent_teams_home() / "members" / "teamA#memX"
+    assert got == apaths.get_agent_teams_home() / "jiuwen_team_members" / "teamA#memX"
 
 
 @pytest.mark.level0
 def test_member_real_dir_dynamic_without_prefix() -> None:
     got = member_real_dir("teamA", "memX", MEMBER_MODE_DYNAMIC, member_workspace_prefix=False)
-    assert got == apaths.get_agent_teams_home() / "members" / "memX"
+    assert got == apaths.get_agent_teams_home() / "jiuwen_team_members" / "memX"
 
 
 @pytest.mark.level0
 def test_member_real_dir_probes_legacy_root_when_only_there() -> None:
-    """A dir left at the .agent_teams/ root (pre-members/ layout) resolves in
-    place — probing members/ first, then root, so a failed migration never
+    """A dir left at the .agent_teams/ root (original layout) resolves in
+    place — probing the current layout first, so a failed migration never
     breaks the member."""
     legacy = apaths.get_agent_teams_home() / "shared"
     legacy.mkdir(parents=True)
@@ -70,11 +70,22 @@ def test_member_real_dir_probes_legacy_root_when_only_there() -> None:
 
 
 @pytest.mark.level0
-def test_member_real_dir_prefers_members_over_legacy() -> None:
-    """When both positions exist, members/ wins — the migrated location is
-    authoritative."""
+def test_member_real_dir_prefers_current_over_older_layouts() -> None:
+    """When several layouts hold the dir, the current one wins: current >
+    pre-rename members/ > root. The migrated location is authoritative."""
     home = apaths.get_agent_teams_home()
+    (home / "jiuwen_team_members" / "shared").mkdir(parents=True)
     (home / "members" / "shared").mkdir(parents=True)
     (home / "shared").mkdir(parents=True)
+    got = member_real_dir("teamA", "shared", MEMBER_MODE_PREDEFINED)
+    assert got == home / "jiuwen_team_members" / "shared"
+
+
+@pytest.mark.level0
+def test_member_real_dir_probes_pre_rename_members_layer() -> None:
+    """A dir left under the pre-rename members/ layer (no current-layout or
+    root copy) resolves in place — it gets migrated on the next setup."""
+    home = apaths.get_agent_teams_home()
+    (home / "members" / "shared").mkdir(parents=True)
     got = member_real_dir("teamA", "shared", MEMBER_MODE_PREDEFINED)
     assert got == home / "members" / "shared"

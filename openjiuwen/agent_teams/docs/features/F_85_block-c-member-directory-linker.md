@@ -39,14 +39,16 @@ C = **成员目录链接器**，是 A（prompt/tool 演进）/ B（DB 长文本 
 | 模式 | 真实目录 | team 内访问路径 |
 |---|---|---|
 | leader | `team_member_workspace_dir`（team 内，不拉平、不 link） | 就是真实目录 |
-| predefined | `.agent_teams/members/<member>`（跨 team 共享，与动态齐平） | link → 真实目录 |
-| dynamic | `.agent_teams/members/<team>#<member>/`（prefix 开）或 `.agent_teams/members/<member>/`（prefix 关） | link → 真实目录 |
+| predefined | `.agent_teams/jiuwen_team_members/<member>`（跨 team 共享，与动态齐平） | link → 真实目录 |
+| dynamic | `.agent_teams/jiuwen_team_members/<team>#<member>/`（prefix 开）或 `.agent_teams/jiuwen_team_members/<member>/`（prefix 关） | link → 真实目录 |
 
-> 2026-09-20：真实目录下沉到 `.agent_teams/members/` 子目录（不再与 team 目录混排根级）。
-> `member_real_dir` 对 predefined/dynamic 是 probe-first：先 `members/<name>`、再根级
-> `<name>`（旧布局遗留）、都没有则返回 `members/<name>` 作新建目标。根级遗留目录在
-> 下一次 `Binder.setup` 时尽力迁移（跨进程锁 + 锁内二次探测 + 全 team link 重建，
-> 失败留原地照常工作）。`members` 为保留 team 目录名（`RESERVED_TEAM_DIR_NAMES`）。
+> 2026-09-21：真实目录下沉到 `.agent_teams/jiuwen_team_members/` 子目录（不再与 team 目录
+> 混排根级；`jiuwen_` 前缀避开任何现实的 team 名）。`member_real_dir` 对 predefined/dynamic
+> 是 probe-first：先 `jiuwen_team_members/<name>`、再 pre-rename `members/<name>`、再根级
+> `<name>`（原始布局遗留）、都没有则返回 `jiuwen_team_members/<name>` 作新建目标。旧布局
+> 遗留目录在下一次 `Binder.setup` 时尽力迁移（跨进程锁 + 锁内二次探测 + 全 team link 重建，
+> 失败留原地照常工作）。`members` / `jiuwen_team_members` 均为保留 team 目录名
+> （`RESERVED_TEAM_DIR_NAMES`）。
 
 - link 成功 → team 内路径是 link，透明映射到 team 外。
 - link 失败 → 真实目录建在 team 内，team 内路径就是真实目录。
