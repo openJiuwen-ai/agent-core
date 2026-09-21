@@ -2,8 +2,10 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 import asyncio
+import os
 import pathlib
 import sqlite3
+from concurrent import futures
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from typing import Callable, Literal
@@ -14,15 +16,38 @@ from filelock import AsyncReadWriteLock, ReadWriteLock, Timeout as FileLockTimeo
 class _ManagedReadWriteLock(ReadWriteLock):
     """Expose lifecycle management for filelock's singleton registry."""
 
+    def reopen_connection(self) -> None:
+        """Reopen the SQLite connection after it was closed underneath us."""
+        old_con = self._con
+        self._con = sqlite3.connect(self.lock_file, check_same_thread=False)
+        if old_con is not None:
+            try:
+                old_con.close()
+            except sqlite3.Error:
+                pass
+
     def _configure_and_begin(
-            self,
-            mode: Literal["read", "write"],
-            timeout: float,
-            *,
-            blocking: bool,
-            start_time: float,
+        self,
+        mode: Literal["read", "write"],
+        timeout: float,
+        *,
+        blocking: bool,
+        start_time: float,
     ) -> None:
+        # Production self-heal entry: the async adapter builds this subclass as
+        # its inner lock (see _ManagedAsyncReadWriteLock.__init__), so every
+        # Hybrid acquisition funnels through this override.
         try:
+            super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
+        except sqlite3.ProgrammingError as exc:
+            if "closed database" not in str(exc).lower():
+                raise
+            # The cached connection was closed by idle cleanup (or any other
+            # holder): reopen it and retry once so callers holding a stale
+            # instance self-heal instead of failing permanently. Acquire fails
+            # on the first PRAGMA before any lock-level state is mutated, so
+            # the retry is safe.
+            self.reopen_connection()
             super()._configure_and_begin(mode, timeout, blocking=blocking, start_time=start_time)
         except sqlite3.OperationalError as exc:
             if mode != "read" or "no such table: sqlite_schema" not in str(exc).lower():
@@ -38,7 +63,26 @@ class _ManagedReadWriteLock(ReadWriteLock):
 
 
 class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
-    """Add an explicit singleton-eviction operation to the async adapter."""
+    """Async adapter that builds the managed sync lock and adds singleton eviction."""
+
+    def __init__(
+        self,
+        lock_file: str | os.PathLike[str],
+        timeout: float = -1,
+        *,
+        blocking: bool = True,
+        is_singleton: bool = True,
+        loop: asyncio.AbstractEventLoop | None = None,
+        executor: futures.Executor | None = None,
+    ) -> None:
+        # Mirrors AsyncReadWriteLock.__init__ but constructs the managed sync
+        # lock so the connection-reopen fallback runs on the production path.
+        self._lock: _ManagedReadWriteLock = _ManagedReadWriteLock(
+            lock_file, timeout, blocking=blocking, is_singleton=is_singleton
+        )
+        self._loop = loop
+        self._owns_executor = executor is None
+        self._executor = executor or ThreadPoolExecutor(max_workers=1)
 
     def evict_singleton(self) -> None:
         _ManagedReadWriteLock.evict_singleton(self.lock_file, self._lock)
