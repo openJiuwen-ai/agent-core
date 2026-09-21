@@ -178,12 +178,6 @@ def _contract_brief(contract: SubtaskContract) -> str:
     return "\n".join(parts)
 
 
-def _write_subtask_contract(state: PersistedManagerState, contract: SubtaskContract) -> str:
-    dest = ensure_manager_dir(state.original_task.run_id) / "subtask_contract.md"
-    dest.write_text(_contract_brief(contract), encoding="utf-8")
-    return to_project_relative(dest)
-
-
 def _write_original_task_brief(state: PersistedManagerState) -> str:
     """Persist the original task so design can read constraints without a fixture folder."""
     task = state.original_task
@@ -232,18 +226,17 @@ def _unique_paths(*groups: list[str]) -> list[str]:
     return out
 
 
-def _design_resource_paths(
-    state: PersistedManagerState, contract: SubtaskContract | None = None
-) -> list[str]:
-    """Prefer topic-survey artifacts over leftover fixture paths; always include the task brief."""
+def _design_resource_paths(state: PersistedManagerState) -> list[str]:
+    """Prefer topic-survey artifacts over leftover fixture paths; always include the task brief.
+
+    The manager subtask contract is inlined into the design query, not written
+    to ``subtask_contract.md`` for the agent to rediscover.
+    """
     brief = _write_original_task_brief(state)
-    extra: list[str] = []
-    if contract is not None:
-        extra.append(_write_subtask_contract(state, contract))
     survey = _latest_survey_paths(state)
     if survey:
-        return _unique_paths(survey, [brief], extra)
-    return _unique_paths(list(state.task_state.research_paths), [brief], extra)
+        return _unique_paths(survey, [brief])
+    return _unique_paths(list(state.task_state.research_paths), [brief])
 
 
 _REPAIR_CONTEXT_CHARS = 4000
@@ -792,6 +785,21 @@ def _code_retry_block(contract: SubtaskContract, state: PersistedManagerState) -
         )
     remaining = _REPAIR_CONTEXT_CHARS - len(tried_block)
     sections: list[str] = []
+    trees: list[str] = []
+    for excerpt in list(getattr(handoff, "failure_excerpts", []) or []):
+        cleaned = str(excerpt or "").strip()
+        if cleaned:
+            trees.append(cleaned)
+    for item in list(getattr(handoff, "variants", []) or []):
+        excerpt = str(getattr(item, "excerpt", "") or "").strip()
+        if excerpt and excerpt not in trees:
+            trees.append(excerpt)
+    for excerpt in trees:
+        if remaining <= 0:
+            break
+        clipped = excerpt if len(excerpt) <= remaining else excerpt[: remaining - 1] + "…"
+        sections.append(clipped)
+        remaining -= len(clipped)
     per_file = max(400, remaining // max(len(log_paths), 1)) if log_paths else remaining
     for path in log_paths:
         if remaining <= 0:
@@ -803,17 +811,6 @@ def _code_retry_block(contract: SubtaskContract, state: PersistedManagerState) -
         block = f"### {path}\n{body}"
         sections.append(block)
         remaining -= len(block)
-    if remaining > 0:
-        for excerpt in list(getattr(handoff, "failure_excerpts", []) or []):
-            if remaining <= 0:
-                break
-            if not excerpt or _is_sdk_noise_line(excerpt):
-                continue
-            clipped = excerpt.strip()
-            if len(clipped) > remaining:
-                clipped = clipped[: remaining - 1] + "…"
-            sections.append(clipped)
-            remaining -= len(clipped)
     logs = "\n\n".join(sections) or (
         "\n".join(f"- {path}" for path in log_paths) or "- (none)"
     )
@@ -828,13 +825,84 @@ def _code_retry_block(contract: SubtaskContract, state: PersistedManagerState) -
     )
 
 
+def _load_smoke_variant_metrics(metrics_path: Path) -> tuple[dict[str, Any], str]:
+    if not metrics_path.is_file():
+        return {}, "missing"
+    try:
+        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return {}, "invalid_json"
+    if not isinstance(payload, dict):
+        return {}, "invalid_json"
+    compact, _diag = materialize_handoff_metrics(payload)
+    return compact, "present"
+
+
+def _smoke_metrics_note(variants: list[VariantHandoff]) -> str:
+    bits: list[str] = []
+    for item in variants:
+        compact = compact_metrics(dict(item.metrics or {}))
+        if not compact:
+            continue
+        bits.append(f"{item.name}={compact}")
+    if not bits:
+        return ""
+    return "smoke metrics: " + "; ".join(bits)
+
+
+def _copy_runner_excerpt(error_tree: str, *fallbacks: str) -> str:
+    """Prefer the runner-owned traceback; otherwise the first non-empty fallback."""
+    cleaned = (error_tree or "").strip()
+    if cleaned:
+        return cleaned
+    for item in fallbacks:
+        text = (item or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _code_failure_excerpts(
+    *,
+    succeeded: bool,
+    smoke_failures: dict[str, str],
+    variants: list[VariantHandoff] | None = None,
+) -> list[str]:
+    if succeeded:
+        return []
+    excerpts: list[str] = []
+    seen: set[str] = set()
+    for item in variants or []:
+        seen.add(item.name)
+        if item.excerpt.strip():
+            excerpts.append(item.excerpt.strip())
+        elif item.name in smoke_failures:
+            detail = (smoke_failures[item.name] or "").strip()
+            if detail:
+                excerpts.append(f"{item.name}: {bounded_text(detail, 800)}")
+    for name, detail in smoke_failures.items():
+        if name in seen:
+            continue
+        cleaned = (detail or "").strip()
+        if not cleaned:
+            continue
+        excerpts.append(f"{name}: {bounded_text(cleaned, 800)}")
+    return [item for item in _unique_paths(excerpts) if item][:8]
+
+
 def _variant_handoffs_from_logs(
     *,
     names: list[str],
     log_dir: Path,
     passed: bool,
     excerpt_limit: int,
+    failed_names: set[str] | None = None,
+    smoke_failures: dict[str, str] | None = None,
+    error_trees: dict[str, str] | None = None,
 ) -> tuple[list[VariantHandoff], list[str]]:
+    failed = failed_names or set()
+    failures = smoke_failures or {}
+    trees = error_trees or {}
     variants: list[VariantHandoff] = []
     log_paths: list[str] = []
     for name in names:
@@ -842,11 +910,20 @@ def _variant_handoffs_from_logs(
         rel = _safe_rel(str(log_path)) if log_path.is_file() else ""
         if rel:
             log_paths.append(rel)
+        variant_passed = bool(passed) and name not in failed
+        metrics, metrics_state = _load_smoke_variant_metrics(log_dir / f"{name}.metrics.json")
+        excerpt = ""
+        if not variant_passed:
+            excerpt = _copy_runner_excerpt(trees.get(name, ""), failures.get(name, ""))
         variants.append(
             VariantHandoff(
                 name=name,
-                passed=passed,
+                passed=variant_passed,
                 log_path=rel,
+                metrics=metrics,
+                process_status="completed" if variant_passed else "failed",
+                metrics_state=metrics_state,
+                excerpt=excerpt,
             )
         )
     return variants, log_paths
@@ -1088,7 +1165,7 @@ class ExperimentDesignAdapter:
                 output = await self.agent.acreate(
                     ExperimentDesignInput(
                         research=ResearchBrief(
-                            resource_paths=_design_resource_paths(state, contract)
+                            resource_paths=_design_resource_paths(state)
                         ),
                         run_id=state.task_state.run_id,
                         session_epoch=state.task_state.design_session_epoch,
@@ -1100,7 +1177,6 @@ class ExperimentDesignAdapter:
                 if feedback is None:
                     feedback = _evaluation_from_execution(state)
                     state.task_state.latest_evaluation = feedback
-                _write_subtask_contract(state, contract)
                 output = await self.agent.aupdate(
                     ExperimentDesignFeedbackInput(
                         run_id=state.task_state.run_id,
@@ -1110,7 +1186,7 @@ class ExperimentDesignAdapter:
                     )
                 )
             elif contract.mode == "revise_research":
-                extra = _design_resource_paths(state, contract)
+                extra = _design_resource_paths(state)
                 output = await self.agent.arevise_research(
                     ExperimentDesignResearchRevisionInput(
                         run_id=state.task_state.run_id,
@@ -1346,34 +1422,40 @@ class CodeImplementationAdapter:
         smoke_dir = module_attempt_dir(impl.run_id, "code_implementation", round_index, attempt)
         if not smoke_dir.is_dir():
             smoke_dir = smoke_test_dir(impl.run_id)
+        succeeded = impl.status == "ready"
+        smoke_failures = dict(getattr(impl, "smoke_failures", {}) or {})
+        error_trees = dict(getattr(impl, "error_trees", {}) or {})
         variants, smoke_logs = _variant_handoffs_from_logs(
             names=[item.name for item in impl.variants],
             log_dir=smoke_dir,
             passed=impl.smoke_test_passed,
             excerpt_limit=excerpt_limit,
+            failed_names=set(smoke_failures),
+            smoke_failures=smoke_failures,
+            error_trees=error_trees,
         )
-        extra_logs, extra_excerpts = _code_log_artifacts(
+        extra_logs, _ = _code_log_artifacts(
             impl.run_id, excerpt_limit, round_index=round_index, attempt=attempt
         )
         log_paths = _unique_paths(extra_logs, smoke_logs)
         artifacts = [_safe_rel(impl.workspace_dir), *log_paths]
         for harness in find_harness_run_dirs(impl.run_id):
             artifacts.append(_safe_rel(str(harness)))
-        succeeded = impl.status == "ready"
         readiness = getattr(impl, "readiness", None) or (
             "smoke_ready" if succeeded else "failed"
         )
-        smoke_failures = dict(getattr(impl, "smoke_failures", {}) or {})
         notes = bounded_text(impl.notes or f"implementation {impl.status}", 400)
-        failure_excerpts: list[str] = []
-        for name, detail in smoke_failures.items():
-            chunk = f"{name}: {detail}"
-            if chunk.strip():
-                failure_excerpts.append(bounded_text(chunk, 800))
-        failure_excerpts.extend(extra_excerpts)
-        if impl.notes and not succeeded:
-            failure_excerpts.append(bounded_text(impl.notes, 800))
-        failure_excerpts = [item for item in _unique_paths(failure_excerpts) if item][:8]
+        metrics_note = _smoke_metrics_note(variants)
+        if metrics_note:
+            notes = bounded_text(
+                f"{notes}\n{metrics_note}".strip() if notes else metrics_note,
+                400,
+            )
+        failure_excerpts = _code_failure_excerpts(
+            succeeded=succeeded,
+            smoke_failures=smoke_failures,
+            variants=variants,
+        )
         return _report(
             module=self.module,
             mode="run",
@@ -1468,7 +1550,12 @@ class CodeImplementationAdapter:
         )
         state.latest_implementation = impl
         handoff_variants = [
-            VariantHandoff(name=item.name, passed=True, code_commit=sha)
+            VariantHandoff(
+                name=item.name,
+                passed=True,
+                process_status="completed",
+                code_commit=sha,
+            )
             for item in variants
         ]
         return _report(
@@ -1552,7 +1639,12 @@ class CodeImplementationAdapter:
         state.latest_implementation = impl
         _apply_latest_per_variant(state)
         handoff_variants = [
-            VariantHandoff(name=item.name, passed=True, code_commit=restored)
+            VariantHandoff(
+                name=item.name,
+                passed=True,
+                process_status="completed",
+                code_commit=restored,
+            )
             for item in variants
         ]
         return _report(
@@ -1693,6 +1785,23 @@ class ExperimentExecutionAdapter:
             if rate is not None:
                 diagnostic["item_failure_rate"] = rate
             sidecar_rel = _safe_rel(source.diagnostics_path) if source.diagnostics_path else ""
+            stage = str(diagnostic.get("failure_stage") or compact.get("failure_stage") or "")
+            substage = str(
+                diagnostic.get("failure_substage") or compact.get("failure_substage") or ""
+            )
+            detail = str(diagnostic.get("detail") or compact.get("detail") or "")
+            error_code = str(diagnostic.get("error_code") or compact.get("error_code") or "")
+            banner = ""
+            if any((stage, substage, detail, error_code)):
+                banner = f"Harness failed at {stage}/{substage}"
+                if error_code:
+                    banner += f": {error_code}"
+                if detail:
+                    banner += f": {detail}"
+            tree = ""
+            if process_status != "completed":
+                tree = (getattr(source, "error_tree", "") or "").strip()
+            excerpt = _copy_runner_excerpt(tree, banner, detail)
             variants.append(
                 VariantHandoff(
                     name=source.name,
@@ -1700,6 +1809,7 @@ class ExperimentExecutionAdapter:
                     exit_code=source.exit_code,
                     metrics=compact,
                     log_path=_safe_rel(source.log_path),
+                    excerpt=excerpt if process_status != "completed" else "",
                     failure_kind=source.failure_kind,
                     metrics_state=source.metrics_state,
                     duration_ms=source.duration_ms,
@@ -1711,19 +1821,11 @@ class ExperimentExecutionAdapter:
             )
             if sidecar_rel:
                 diagnostic_paths.append(sidecar_rel)
-            stage = str(diagnostic.get("failure_stage") or compact.get("failure_stage") or "")
-            substage = str(
-                diagnostic.get("failure_substage") or compact.get("failure_substage") or ""
-            )
-            detail = str(diagnostic.get("detail") or compact.get("detail") or "")
-            error_code = str(diagnostic.get("error_code") or compact.get("error_code") or "")
-            if any((stage, substage, detail, error_code)):
-                banner = f"Harness failed at {stage}/{substage}"
-                if error_code:
-                    banner += f": {error_code}"
-                if detail:
-                    banner += f": {detail}"
-                failure_excerpts.append(banner)
+            if process_status != "completed":
+                if tree:
+                    failure_excerpts.append(tree)
+                elif banner:
+                    failure_excerpts.append(banner)
         result_paths = [
             rel for rel in (_safe_rel(item.log_path) for item in result.variants if item.log_path) if rel
         ]
@@ -1786,7 +1888,7 @@ class ExperimentExecutionAdapter:
                 dict(proposed_handoff.metrics if proposed_handoff is not None else {})
             )
         )
-        if diagnostic.get("detail"):
+        if diagnostic.get("detail") and not process_ok and not failure_excerpts:
             failure_excerpts.append(str(diagnostic.get("detail")))
         failure_excerpts = [item for item in _unique_paths(failure_excerpts) if item][:8]
         explicit_retryability: list[bool] = []
@@ -1854,6 +1956,26 @@ class ExperimentExecutionAdapter:
         )
 
 
+def _evaluation_verdict_from_reflection(
+    *,
+    hypothesis_verdict: str,
+    validity: str,
+    recommendation: str,
+) -> str:
+    """Map science judgment onto design EvaluationFeedback.verdict.
+
+    ``supported`` stays on ReflectionHandoff. Host ``accept`` is only for a
+    valid run whose recommendation is to write the paper.
+    """
+    if (
+        hypothesis_verdict == "supported"
+        and validity == "valid"
+        and recommendation == "accept_and_report"
+    ):
+        return "accept"
+    return "continue"
+
+
 def _reflection_feedback(
     *,
     plan,
@@ -1861,6 +1983,8 @@ def _reflection_feedback(
     reflection,
     verdict: str,
     summary: str,
+    validity: str = "",
+    recommendation: str = "",
 ) -> EvaluationFeedback:
     observed: dict[str, float | int | str] = {}
     plan_metrics = list(plan.metrics) if plan is not None else []
@@ -1871,7 +1995,11 @@ def _reflection_feedback(
             )
         )
     return EvaluationFeedback(
-        verdict="accept" if verdict == "supported" else "continue",
+        verdict=_evaluation_verdict_from_reflection(
+            hypothesis_verdict=verdict,
+            validity=validity,
+            recommendation=recommendation,
+        ),
         summary=summary,
         observed_metrics=observed,
         result_paths=[reflection.reflection_path],
@@ -1938,6 +2066,8 @@ class ReflectionAdapter:
             reflection=reflection,
             verdict=verdict,
             summary=summary,
+            validity=judgment.validity,
+            recommendation=judgment.recommendation,
         )
         return _report(
             module=self.module,

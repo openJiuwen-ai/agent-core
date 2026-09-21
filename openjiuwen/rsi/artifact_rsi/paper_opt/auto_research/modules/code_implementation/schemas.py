@@ -43,6 +43,9 @@ class CodeImplementationManifest(BaseModel):
     status: Literal["ready", "failed"] = "failed"
     readiness: Literal["smoke_ready", "failed", "promotion_failed"] = "failed"
     smoke_failures: dict[str, str] = Field(default_factory=dict)
+    # Python traceback per variant, filled by the smoke runner from stderr/stdout.
+    # Omitted for metrics-contract failures and for variants with no traceback.
+    error_trees: dict[str, str] = Field(default_factory=dict)
     notes: str = ""
     code_commit: str = ""
 

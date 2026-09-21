@@ -280,6 +280,39 @@ def test_code_retry_block_returns_empty_when_prior_succeeded():
     assert _code_retry_block(_contract(), state) == ""
 
 
+def test_code_retry_block_inlines_full_traceback_from_handoff():
+    run_id = "run-5"
+    tree = (
+        "Traceback (most recent call last):\n"
+        '  File "run.py", line 142, in main\n'
+        '    raise ValueError("paired_discordance")\n'
+        "ValueError: paired_discordance\n"
+    )
+    state = _state_with_prior_report(run_id)
+    state.reports[-1] = state.reports[-1].model_copy(
+        update={
+            "handoff": CodeHandoff(
+                status="failed",
+                readiness="failed",
+                smoke_test_passed=False,
+                failure_excerpts=[tree],
+                variants=[
+                    VariantHandoff(
+                        name="proposed",
+                        passed=False,
+                        process_status="failed",
+                        excerpt=tree,
+                    )
+                ],
+            )
+        }
+    )
+    block = _code_retry_block(_contract(), state)
+    assert "Traceback (most recent call last):" in block
+    assert "ValueError: paired_discordance" in block
+    assert 'File "run.py", line 142' in block
+
+
 def _execution_state(
     run_id: str,
     *,
