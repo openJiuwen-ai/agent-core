@@ -40,6 +40,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import logger
@@ -69,31 +70,81 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
 def _now() -> float:
     return time.time()
 
 
-def _as_ts(value: Any) -> Optional[float]:
-    if value is None:
+def format_ts(epoch: float) -> str:
+    """Format an epoch second as local ``YYYY-MM-DD HH:MM:SS``."""
+    return datetime.fromtimestamp(float(epoch)).strftime(_TS_FMT)
+
+
+def parse_ts(value: Any) -> Optional[float]:
+    """Parse a persisted timestamp to epoch seconds.
+
+    Accepts legacy Unix floats/ints and ``YYYY-MM-DD HH:MM:SS`` strings.
+    """
+    if value is None or value == "":
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, _TS_FMT).timestamp()
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
+def _as_ts(value: Any) -> Optional[float]:
+    return parse_ts(value)
+
+
+def _normalize_ts_value(value: Any, *, default_epoch: Optional[float] = None) -> Any:
+    """Rewrite a timestamp field to the display string form when possible."""
+    if value is None:
+        if default_epoch is None:
+            return None
+        return format_ts(default_epoch)
+    parsed = parse_ts(value)
+    if parsed is None:
+        return value
+    return format_ts(parsed)
+
+
 def _later_ts(left: Any, right: Any) -> Any:
-    """Return the later of two timestamps; ``None`` loses to a real value."""
+    """Return the later of two timestamps; ``None`` loses to a real value.
+
+    Prefer the display-string form when both sides parse; otherwise keep the
+    original winner so callers can persist a normalized clock.
+    """
     left_ts, right_ts = _as_ts(left), _as_ts(right)
     if left_ts is None:
-        return right if right_ts is not None else left
+        return _normalize_ts_value(right) if right_ts is not None else left
     if right_ts is None:
-        return left
-    return left if left_ts >= right_ts else right
+        return _normalize_ts_value(left)
+    winner_epoch = left_ts if left_ts >= right_ts else right_ts
+    return format_ts(winner_epoch)
 
 
 def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Dict[str, Any]:
-    ts = now if now is not None else _now()
+    epoch = now if now is not None else _now()
+    ts = format_ts(epoch)
     return {
         "text": text,
         "count": count,
@@ -108,17 +159,25 @@ def _migrate_record(record: Dict[str, Any], default_ts: float) -> Dict[str, Any]
     """Fill missing TTL/display fields for legacy bank entries.
 
     Conservative migration: treat missing ``last_injected_at`` as ``default_ts``
-    (file mtime or now) so an upgrade does not mass-prune overnight.
+    (file mtime or now) so an upgrade does not mass-prune overnight. Legacy
+    Unix-float clocks are rewritten to ``YYYY-MM-DD HH:MM:SS``.
     """
+    default_display = format_ts(default_ts)
     if "count" not in record:
         record["count"] = 1
     if "created_at" not in record:
-        record["created_at"] = default_ts
+        record["created_at"] = default_display
+    else:
+        record["created_at"] = _normalize_ts_value(record["created_at"], default_epoch=default_ts)
     if "updated_at" not in record:
-        record["updated_at"] = record.get("created_at", default_ts)
+        record["updated_at"] = record.get("created_at", default_display)
+    else:
+        record["updated_at"] = _normalize_ts_value(record["updated_at"], default_epoch=default_ts)
     if "last_injected_at" not in record:
         # Legacy banks: assume recently shown to avoid one-shot wipe.
-        record["last_injected_at"] = record.get("created_at", default_ts)
+        record["last_injected_at"] = record.get("created_at", default_display)
+    elif record["last_injected_at"] is not None:
+        record["last_injected_at"] = _normalize_ts_value(record["last_injected_at"])
     if "inject_hits" not in record:
         record["inject_hits"] = 0
     return record
@@ -731,7 +790,7 @@ class TTSERecordStore:
             if matched is not None:
                 matched["count"] = matched.get("count", 0) + 1
                 # Keep the surviving record's category; do not reclassify on merge.
-                matched["updated_at"] = _now()
+                matched["updated_at"] = format_ts(_now())
                 store.sort(key=lambda x: -x.get("count", 0))
                 return "merged"
             store.append(_new_record(text))
@@ -793,7 +852,8 @@ class TTSERecordStore:
         were updated. Persistence is debounced; call
         :meth:`flush_inject_metadata` to force a write.
         """
-        ts = now if now is not None else _now()
+        epoch = now if now is not None else _now()
+        ts = format_ts(epoch)
         updated = 0
         for record in records:
             if not isinstance(record, dict) or "text" not in record:
@@ -914,6 +974,8 @@ __all__ = [
     "TTSERecordStore",
     "shared_store",
     "reset_shared_stores",
+    "format_ts",
+    "parse_ts",
     "_cosine",
     "_norm",
     "_new_record",
