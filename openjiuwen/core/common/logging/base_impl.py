@@ -20,11 +20,16 @@ from typing import (
 from openjiuwen.core.common.logging.events import (
     BaseLogEvent,
     create_log_event,
+    EventStatus,
     LogEventType,
     LogLevel,
 )
 from openjiuwen.core.common.logging.invocation import capture_invocation_log
 from openjiuwen.core.common.logging.utils import get_session_id
+
+# Levels at which the record already reports a failure, so a ``success`` status
+# in the payload beside it contradicts the record it belongs to.
+_FAILURE_LOG_LEVELS = frozenset({LogLevel.ERROR, LogLevel.CRITICAL})
 
 
 def resolve_log_type_label(log_type: str) -> str:
@@ -99,15 +104,24 @@ class StructuredLoggerMixin:
         exception: bool = False,
     ) -> None:
         """Capture once before a backend applies its global output level."""
+        event = kwargs.get("event")
+        if event is not None:
+            self._reconcile_event_status(event, log_level)
         capture_invocation_log(
             self.log_type,
             log_level,
             msg,
             args,
-            event=kwargs.get("event"),
+            event=event,
             event_type=kwargs.get("event_type"),
             exc_info=True if exception else kwargs.get("exc_info"),
         )
+
+    @staticmethod
+    def _reconcile_event_status(event: BaseLogEvent, log_level: LogLevel) -> None:
+        """Replace a ``success`` status with ``failure`` on an ERROR or CRITICAL record."""
+        if event.status is EventStatus.SUCCESS and log_level in _FAILURE_LOG_LEVELS:
+            event.status = EventStatus.FAILURE
 
     @staticmethod
     def _auto_format_message(msg: Any, args: Tuple[Any, ...]) -> str:
@@ -154,10 +168,18 @@ class StructuredLoggerMixin:
         event: Optional[BaseLogEvent] = None,
         **kwargs: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Build a structured event payload for backends that support it."""
+        """Build a structured event payload for backends that support it.
+
+        ``BaseLogEvent.status`` defaults to ``SUCCESS`` and callers rarely
+        override it, so reconcile the status with the emitting level the same
+        way the level itself is reconciled: log analysis reads the payload, and
+        ``status: success`` beside an ``ERROR`` record contradicts it.
+        """
         if event is not None:
             if event.log_level != log_level:
                 event.log_level = log_level
+
+            self._reconcile_event_status(event, log_level)
 
             if msg and msg.strip():
                 event.message = self._sanitize_message(msg)
@@ -168,6 +190,9 @@ class StructuredLoggerMixin:
 
         if event_type is None:
             return None
+
+        if "status" not in kwargs and log_level in _FAILURE_LOG_LEVELS:
+            kwargs["status"] = EventStatus.FAILURE
 
         if "trace_id" not in kwargs:
             trace_id = get_session_id()
