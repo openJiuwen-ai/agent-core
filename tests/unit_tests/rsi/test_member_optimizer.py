@@ -4301,6 +4301,11 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
                                     "probe its direct operation."
                                 ),
                                 "critical_mistake": ("Do not substitute a returned iterator for direct __next__."),
+                                "decision_contract": {
+                                    "acceptance_observable": (
+                                        "Direct next succeeds before and after iterator initialization."
+                                    )
+                                },
                                 "causal_coverage": {
                                     "explained_requirement_ids": ["verifier:FAIL_TO_PASS:test_next"],
                                     "residual_requirement_ids": [],
@@ -4350,7 +4355,7 @@ def test_optimization_hypothesis_is_immutable_and_case_bound(tmp_path: Path) -> 
         "wrong_decision": "Do not substitute a returned iterator for direct __next__.",
         "causal_distinction": ("A directly requested stateful protocol must implement and probe its direct operation."),
         "required_action": "Implement and probe stateful direct __next__ semantics.",
-        "acceptance_observable": "",
+        "acceptance_observable": "Direct next succeeds before and after iterator initialization.",
         "scope_boundary": ["Treat __iter__ alone as sufficient."],
         "activation_phase": "task_start",
     }
@@ -4399,6 +4404,7 @@ def test_optimization_hypothesis_preserves_diagnosis_without_legacy_reaudit(
     attribution: dict[str, object],
     affected_cases: list[str],
 ) -> None:
+    attribution = {**attribution, "decision_contract": {"acceptance_observable": "Replay satisfies the task contract."}}
     analysis_ref = tmp_path / "analysis_ref.yaml"
     analysis_ref.write_text(
         yaml.safe_dump(
@@ -4464,6 +4470,9 @@ def test_optimization_hypothesis_keeps_supported_local_issue_with_unresolved_alt
                                     {"hypothesis_id": "h2", "status": "unresolved"},
                                 ],
                                 "general_mechanism": "Select values only after observing their source provenance.",
+                                "decision_contract": {
+                                    "acceptance_observable": "The selected value matches the observed source."
+                                },
                                 "causal_coverage": {
                                     "explained_requirement_ids": ["criterion:value"],
                                     "residual_requirement_ids": [],
@@ -4523,6 +4532,7 @@ def test_supported_diagnosis_does_not_require_a_second_verifier(
                                 "target_ref": "member_harness.solver.prompt",
                                 "evidence_status": "supported_hypothesis",
                                 "selected_hypothesis_id": "h1",
+                                "decision_contract": {"acceptance_observable": "The requested routing branch is used."},
                                 "hypothesis_assessment": [assessment],
                             }
                         },

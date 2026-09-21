@@ -15,6 +15,7 @@ from openjiuwen.rsi.harness_rsi.member_optimizer.lever import (
     build_hypothesis_lever_policy,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.loader import (
+    AnalysisUnavailableError,
     load_analysis_ref,
     resolve_team_issues,
 )
@@ -65,6 +66,7 @@ def compile_optimization_hypotheses(
         decisive_probe = _decisive_probe(issue)
         target_ref = str(attribution.get("target_ref", "") or "").strip()
         decision_contract = _decision_contract(issue, attribution)
+        _require_acceptance_observable(decision_contract, issue.issue_id)
         payload: dict[str, Any] = {
             "source_issue_id": issue.issue_id,
             "target_case_ids": target_case_ids,
@@ -134,6 +136,7 @@ def load_optimization_hypotheses(path: str | Path) -> list[dict[str, Any]]:
             raise ValueError(
                 f"optimization hypothesis content digest mismatch: {raw.get('hypothesis_id', '<unknown>')}"
             )
+        _require_acceptance_observable(item.get("decision_contract"), str(item.get("source_issue_id", "")))
         hypotheses.append(dict(raw))
     return hypotheses
 
@@ -267,6 +270,17 @@ def _decisive_probe(issue: Any) -> dict[str, Any]:
     }
 
 
+def _require_acceptance_observable(contract: Any, issue_id: str) -> None:
+    observable = contract.get("acceptance_observable") if isinstance(contract, dict) else None
+    if not isinstance(observable, str) or not observable.strip():
+        raise AnalysisUnavailableError(
+            f"Issue {issue_id!r} has an unexecutable decision_contract: missing non-empty "
+            "acceptance_observable. Rerun Analyzer to supply a task/verifier-grounded acceptance check; "
+            "the contract cannot enter candidate generation or acceptance. "
+            "Legacy contracts are not inferred from recommendations."
+        )
+
+
 def _decision_contract(issue: Any, attribution: dict[str, Any]) -> dict[str, Any]:
     """Preserve the decision change that the runtime artifact must teach.
 
@@ -310,9 +324,7 @@ def _decision_contract(issue: Any, attribution: dict[str, Any]) -> dict[str, Any
             supplied.get("causal_distinction") or attribution.get("general_mechanism") or issue.summary or ""
         ).strip(),
         "required_action": str(supplied.get("required_action") or issue.recommendation or "").strip(),
-        "acceptance_observable": str(
-            supplied.get("acceptance_observable") or ""
-        ).strip(),
+        "acceptance_observable": supplied.get("acceptance_observable"),
         "scope_boundary": boundaries,
         "activation_phase": activation_phase,
     }

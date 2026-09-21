@@ -849,6 +849,9 @@ class _Analyzer:
                         "recommendation": "Apply the evidenced behavior correction and verify the result.",
                         "metadata": {
                             "attribution": {
+                                "decision_contract": {
+                                    "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                },
                                 "evidence_status": "confirmed",
                                 "target_ref": "member_harness.solver.prompt",
                                 "hypothesis_assessment": [
@@ -867,6 +870,42 @@ class _Analyzer:
             },
         )
         return str(analysis_ref)
+
+
+def test_missing_acceptance_stops_before_optimizer_and_candidate_evaluation(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from openjiuwen.rsi.harness_rsi.member_optimizer.loader import AnalysisUnavailableError
+
+    class IncompleteAnalyzer(_Analyzer):
+        async def analyze(self, *args, **kwargs):
+            path = await super().analyze(*args, **kwargs)
+            payload = yaml.safe_load(await asyncio.to_thread(Path(path).read_text, encoding="utf-8"))
+            for issue in payload["issues"]:
+                issue["metadata"]["attribution"].pop("decision_contract", None)
+            _write_yaml(Path(path), payload)
+            return path
+
+    dataset = tmp_path / "cases.json"
+    dataset.write_text(json.dumps({"cases": [{"case_id": "one", "input": "fix"}]}), encoding="utf-8")
+    refs = tmp_path / "refs.yaml"
+    _write_yaml(refs, {"harness_refs": {"solver": "baseline"}})
+    optimizer = SimpleNamespace(optimize=AsyncMock())
+    run_dir = tmp_path / "run"
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(max_epochs=1, evaluator=EvaluatorConfig(backend="single_harness"),
+                                     data_loader=DataLoaderConfig(batch_size=1)),
+        evaluator=_Evaluator(), analyzer=IncompleteAnalyzer(), member_optimizer=optimizer,
+    )
+    with pytest.raises(AnalysisUnavailableError, match="acceptance_observable"):
+        asyncio.run(orchestrator.run(IterativeSingleHarnessRequest(
+            dataset_files=[str(dataset)], harness_refs_path=str(refs), output_dir=str(run_dir),
+        )))
+    optimizer.optimize.assert_not_awaited()
+    state = yaml.safe_load((run_dir / "single_harness_state.yaml").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert not state["candidate_gates"]
+    assert list(run_dir.rglob("eval_ref.yaml"))
 
 
 class _MemberOptimizer:
@@ -1635,6 +1674,9 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "decision_contract": {
+                                        "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                    },
                                     "target_ref": "member_harness.solver.skill",
                                 }
                             },
@@ -1649,6 +1691,9 @@ def test_multiple_batch_issues_follow_latest_source_in_the_same_epoch(
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "decision_contract": {
+                                        "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                    },
                                     "target_ref": "member_harness.solver.skill",
                                 }
                             },
@@ -1847,6 +1892,9 @@ def test_partial_candidate_is_reanalyzed_before_case_is_retained(tmp_path: Path)
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "decision_contract": {
+                                        "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                    },
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
                                     "hypothesis_assessment": [
@@ -2050,6 +2098,9 @@ def test_residual_repair_stops_when_analyzer_repeats_same_issue(tmp_path: Path) 
                             "optimization_target": "member_harness",
                             "metadata": {
                                 "attribution": {
+                                    "decision_contract": {
+                                        "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                    },
                                     "evidence_status": "confirmed",
                                     "target_ref": "member_harness.solver.prompt_section",
                                     "hypothesis_assessment": [
@@ -2178,6 +2229,9 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                     "optimization_target": "member_harness",
                     "metadata": {
                         "attribution": {
+                            "decision_contract": {
+                                "acceptance_observable": "Replay exhibits the task-required behavior.",
+                            },
                             "evidence_status": "confirmed",
                             "target_ref": "member_harness.solver.prompt_section",
                             "hypothesis_assessment": [
@@ -2202,6 +2256,9 @@ def test_rejected_candidate_failure_analysis_drives_next_repair_round(tmp_path: 
                         "optimization_target": "member_harness",
                         "metadata": {
                             "attribution": {
+                                "decision_contract": {
+                                    "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                },
                                 "evidence_status": "confirmed",
                                 "target_ref": "member_harness.solver.prompt_section",
                                 "hypothesis_assessment": [
@@ -3338,6 +3395,9 @@ def test_residual_metadata_alone_does_not_reset_issue_attempt_budget(tmp_path: P
                         "affected_cases": ["case_1"],
                         "metadata": {
                             "attribution": {
+                                "decision_contract": {
+                                    "acceptance_observable": "Replay exhibits the task-required behavior.",
+                                },
                                 "evidence_status": "confirmed",
                                 "target_ref": "member_harness.policy_harness.prompt",
                                 "causal_coverage": {
