@@ -451,7 +451,7 @@ class DeepAgentSpec(BaseModel):
     add_general_purpose_agent: bool = False
     enable_security_rail: bool = True
     enable_tool_resilience_rail: bool = True
-    max_iterations: int = 15
+    max_iterations: Optional[int] = None
     workspace: Optional[WorkspaceSpec] = None
     cwd: Optional[str] = None
     """Shell working directory / relative-path base. Defaults to the workspace root."""
