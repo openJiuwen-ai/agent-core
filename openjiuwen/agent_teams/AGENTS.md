@@ -70,7 +70,7 @@ agent_teams/
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
-├── observability/       # 团队 OpenTelemetry 观测。三方 harness 成员不在这里：其模型请求由 provider 以 ModelRequestEvent 交付，`harness_providers/trajectory.py` 记录（F_112）。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider） **team 根 span（`team.{name}`）按 session 注册**（`get_or_create_team_span` → `set_root_span(session_id=)`）：进程内 teammate 在自己的 task 里跑，只按 session id 查根，光绑 ContextVar 会让它整轮不落记录。
+├── observability/       # 团队 OpenTelemetry 观测。三方 harness 成员不在这里：其模型请求由 provider 以 ModelRequestEvent 交付，`harness_providers/trajectory.py` 记录（F_112）。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider） **team 根 span（`team.{name}`）按 session 注册**（`get_or_create_team_span(session_id=)` → `set_root_span(session_id=)`，session 由 runner 传入而非只靠 ContextVar）：进程内 teammate 在自己的 task 里跑，只按 session id 查根，注册不上就整轮不落记录。**interact 路径（用户 `@` 直呼成员）也要开根**——它不属于任何 streaming run，上一条 trace finalize 后就没有根可挂了。
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）

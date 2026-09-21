@@ -193,7 +193,7 @@ class _TeamRunnerMixin:
                         action.reason or "",
                     )
                     return None
-                self._maybe_attach_observability(activation.agent)
+                self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
                 self._maybe_finalize_trace(team_name_for_finally)
@@ -267,7 +267,7 @@ class _TeamRunnerMixin:
                 if stream_logger is not None:
                     stream_logger.feed(ready_chunk)
                 yield ready_chunk
-                self._maybe_attach_observability(activation.agent)
+                self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 if background_task_controller is not None:
                     # Attach the embedder's pause/resume control surface to the
                     # leader brain; SwarmflowTool reads it to register run handles.
@@ -439,6 +439,15 @@ class _TeamRunnerMixin:
         if team_name is None or session_id is None:
             return DeliverResult.failure("missing_target")
         with self._bind_interact_team_session(session_id):
+            # An interact wakes a member the same way a run does, and it is the
+            # only thing that happens when the user addresses one directly. The
+            # team root belongs to the team, not to the streaming run that
+            # usually opens it: without it here, everything the woken member
+            # does goes unrecorded.
+            await self._maybe_attach_interact_observability(
+                team_name=team_name,
+                session_id=session_id,
+            )
             return await self._get_team_runtime_manager().interact(
                 payload,
                 team_name=team_name,
@@ -516,6 +525,20 @@ class _TeamRunnerMixin:
             if message_id is None:
                 raise RuntimeError(f"Could not queue input for {member_name}")
             return {"message_id": message_id, "status": "queued"}
+
+    async def _maybe_attach_interact_observability(self, *, team_name: str, session_id: str) -> None:
+        """Open the team root for an interact that reaches a live runtime.
+
+        The streaming run closes the root in its ``finally``; an interact never
+        owns a run, so it only ever adds a root the next run finalizes.
+        """
+        try:
+            entry = await self._get_team_runtime_manager().pool.get(team_name)
+            if entry is None or entry.current_session_id != session_id:
+                return
+            self._maybe_attach_observability(entry.agent, session_id)
+        except Exception as exc:
+            logger.debug("interact observability attach skipped: {}", exc)
 
     async def register_human_agent_inbound(
         self,
@@ -826,13 +849,18 @@ class _TeamRunnerMixin:
         await entry.interact_gate.close_and_drain()
 
     @staticmethod
-    def _maybe_attach_observability(agent: Any) -> None:
+    def _maybe_attach_observability(agent: Any, session_id: str | None = None) -> None:
         """Attach observability to a leader agent.
 
         Creates the team span so that callback handlers see the correct identity.
         Team span lifecycle (create / close) is owned by the runner:
         - Created here (before agent.invoke/stream)
         - Closed in _maybe_finalize_trace (runner's finally block)
+
+        ``session_id`` is the session the root is registered under, so a
+        teammate running in a task of its own can resolve it. The runner knows
+        it; the context vars it would otherwise be read from may not be bound
+        on this path.
         """
         try:
             from openjiuwen.agent_teams.observability import (
@@ -868,7 +896,11 @@ class _TeamRunnerMixin:
                     )
                     from openjiuwen.agent_teams.observability.span_context import clear_team_span
                     clear_team_span()
-                get_or_create_team_span(team_name, get_tracer("openjiuwen.agent_teams.observability"))
+                get_or_create_team_span(
+                team_name,
+                get_tracer("openjiuwen.agent_teams.observability"),
+                session_id=session_id,
+            )
         except Exception as exc:
             logger.debug("observability attach skipped: {}", exc)
 
