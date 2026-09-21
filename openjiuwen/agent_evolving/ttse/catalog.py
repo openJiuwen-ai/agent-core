@@ -40,12 +40,9 @@ def render_catalog_markdown(counts: Dict[str, int], *, categories: Iterable[Dict
     """Directory listing: preset scenarios with a non-zero count."""
     by_id = category_by_id(categories)
     lines = [
-        "# TTSE catalog",
+        "# 经验目录",
         "",
-        "Business-scenario categories with learned FACT/TIP counts.",
-        "Call ttse_consult(category=<id>, query=<experience-style query>) to retrieve "
-        "FACT/TIP in a class; comma-separated ids (max 3) share one query. "
-        "category alone dumps the class.",
+        "按类目的经验条数，不是 FACT/TIP 正文。正文用 `ttse_consult` 取回。",
         "",
     ]
     any_row = False
@@ -100,6 +97,8 @@ def project_catalog(store: Any) -> None:
             path = os.path.join(by_cat, name)
             if os.path.isdir(path) and name not in live_dirs:
                 shutil.rmtree(path, ignore_errors=True)
+        live = {k: int(v) for k, v in counts.items() if int(v) > 0}
+        logger.info("[TTSERail] catalog projected path=%s counts=%s", root, live)
     except Exception as exc:  # noqa: BLE001
         logger.warning("[TTSERail] catalog projection failed: %s", exc)
 

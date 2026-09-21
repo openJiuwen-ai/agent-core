@@ -28,7 +28,7 @@ tests / ``asyncio.run`` / ephemeral workers may replace that loop. Bank mutexes
 are therefore :class:`threading.Lock`-backed so they are not bound to the loop
 of first acquire. Distinct :class:`TTSEConfig` objects that resolve to the same
 path share one instance; the first config wins (later callers only backfill a
-missing embedding provider).
+missing embedding provider, or replace it when the fingerprint changes).
 """
 
 from __future__ import annotations
@@ -189,7 +189,8 @@ def shared_store(
 
     Empty ``store_path`` is not cached. Two configs that normalize to the same
     path share one object; knobs on the second config (caps, dedup, RPS, …)
-    are ignored except that a missing embedding provider may be backfilled.
+    are ignored except that a missing embedding provider may be backfilled,
+    and a different embedding fingerprint replaces the provider and rebuilds ANN.
     """
     key = _store_key(config.store_path)
     if not key:
@@ -243,11 +244,32 @@ class TTSERecordStore:
         self._inject_save_task: Optional[asyncio.Task] = None
         self._inject_save_handle: Optional[asyncio.TimerHandle] = None
         self._load_sync()
+        from .index import TTSEIndex
+
+        TTSEIndex.bind(self)
 
     def attach_embedding(self, embedding: EmbeddingProvider) -> None:
-        """Bind an embedding provider if this bank was created without one."""
-        if self._embedding is None:
-            self._embedding = embedding
+        """Bind or replace the embedding provider and mark ANN for rebuild.
+
+        A missing provider is backfilled. A different fingerprint (late config
+        or model swap) replaces the provider, drops the in-memory cache, and
+        lets ``TTSEIndex`` batch-rebuild Chroma from the current bank.
+        """
+        if embedding is None:
+            return
+        from .index import _fingerprint
+
+        incoming = _fingerprint(embedding)
+        current = _fingerprint(self._embedding)
+        if self._embedding is not None and incoming == current:
+            return
+        if self._embedding is not None:
+            self._emb_cache.clear()
+        self._embedding = embedding
+        index = getattr(self, "index", None)
+        note = getattr(index, "note_embedding", None)
+        if callable(note):
+            note(embedding)
 
     # ------------------------------------------------------------------
     # Persistence
@@ -761,6 +783,12 @@ class TTSERecordStore:
             logger.debug("[TTSERail] merged duplicate tip: %s", text[:80])
         return result == "added"
 
+    def replace_mutator(self, name: str, replacement: Any) -> Any:
+        """Swap a mutation method. Used by ``TTSEIndex.bind``."""
+        original = getattr(self, name)
+        setattr(self, name, replacement)
+        return original
+
     async def add_record_direct(
         self,
         rtype: str,
@@ -886,6 +914,16 @@ class TTSERecordStore:
         facts = [r for r in self.facts_records() if self.record_category(r) == cid]
         tips = [r for r in self.tips_records() if self.record_category(r) == cid]
         return facts, tips
+
+    async def consult_pool(
+        self, category: Optional[str] = None
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """Locked FACT/TIP snapshot for consult (one category or the whole bank)."""
+        async with self._lock:
+            if category:
+                facts, tips = self.records_for_category(category)
+                return list(facts), list(tips)
+            return list(self.facts_records()), list(self.tips_records())
 
     async def set_categories(self, assignments: List[Tuple[str, str, str]]) -> int:
         """Patch ``category`` on matching records. Returns how many were updated."""
