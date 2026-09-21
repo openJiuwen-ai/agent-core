@@ -77,6 +77,11 @@ class _ManagedAsyncReadWriteLock(AsyncReadWriteLock):
     ) -> None:
         # Mirrors AsyncReadWriteLock.__init__ but constructs the managed sync
         # lock so the connection-reopen fallback runs on the production path.
+        # filelock 3.21+ reads these on every acquire; skipping super() without
+        # them raises AttributeError (_fork_invalidated) and write_file fails.
+        self._creator_pid = os.getpid()
+        self._fork_invalidated = False
+        self._closed = False
         self._lock: _ManagedReadWriteLock = _ManagedReadWriteLock(
             lock_file, timeout, blocking=blocking, is_singleton=is_singleton
         )
