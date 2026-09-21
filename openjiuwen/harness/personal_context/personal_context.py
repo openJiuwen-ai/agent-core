@@ -70,6 +70,9 @@ _CURSOR_SCHEMA_VERSION = 1
 _MAX_CURSOR_BYTES = 512 * 1024
 _AUTHORIZATION_FAILED = "Feishu authorization failed"
 _AUTHORIZATION_STATUS_UNAVAILABLE = "Feishu authorization status is unavailable"
+_CONFIG_INIT_STEP = "config_init"
+_DEVICE_AUTHORIZATION_STEP = "device_authorization"
+_AUTHORIZATION_STEPS = {_CONFIG_INIT_STEP, _DEVICE_AUTHORIZATION_STEP}
 _CONFIG_INIT_TIMEOUT_SECONDS = 30.0 * 60.0
 
 _PROVIDER_TYPES: dict[str, type[ContextFetchService]] = {
@@ -298,32 +301,42 @@ def _authorization_result(
     task: asyncio.Task[None] | None,
     challenge: Mapping[str, object] | None,
     error: str | None,
+    configured: bool | None = None,
+    error_step: str | None = None,
 ) -> dict[str, object]:
     verification_url: str | None = None
     expires_at: str | None = None
+    authorization_step: str | None = None
     if task is not None and not task.done():
         state = "authorizing"
         if challenge is not None:
             raw_url = challenge.get("verification_url")
             raw_expiry = challenge.get("expires_at")
+            raw_step = challenge.get("authorization_step")
             verification_url = raw_url if isinstance(raw_url, str) else None
             expires_at = raw_expiry if isinstance(raw_expiry, str) else None
+            authorization_step = raw_step if isinstance(raw_step, str) and raw_step in _AUTHORIZATION_STEPS else None
         result_error = None
     elif error is not None:
         state = "authorization_failed"
+        authorization_step = error_step if error_step in _AUTHORIZATION_STEPS else None
         result_error = error
     elif set(required_scopes).issubset(granted_scopes):
         state = "authorized"
         result_error = None
     elif granted_scopes:
         state = "authorization_required"
+        authorization_step = _DEVICE_AUTHORIZATION_STEP if configured else _CONFIG_INIT_STEP
         result_error = None
     else:
         state = "not_authorized"
+        if configured is not None:
+            authorization_step = _DEVICE_AUTHORIZATION_STEP if configured else _CONFIG_INIT_STEP
         result_error = None
     return {
         "provider": "feishu",
         "state": state,
+        "authorization_step": authorization_step,
         "verification_url": verification_url,
         "expires_at": expires_at,
         "error": result_error,
@@ -353,6 +366,7 @@ class PersonalContext:
         self._authorization_task: asyncio.Task[None] | None = None
         self._authorization_challenge: dict[str, object] | None = None
         self._authorization_error: str | None = None
+        self._authorization_error_step: str | None = None
 
         self._config: PersonalContextConfig | None = None
         self._embedding_config: EmbeddingConfig | None = None
@@ -513,12 +527,17 @@ class PersonalContext:
                 task = self._authorization_task
                 challenge = self._authorization_challenge
                 authorization_error = self._authorization_error
+                authorization_error_step = self._authorization_error_step
                 if task is not None and task.done():
                     if authorization_error is None and not task.cancelled():
                         with contextlib.suppress(asyncio.CancelledError):
                             task_exception = task.exception()
                             if task_exception is not None:
                                 authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, task_exception)
+                                if challenge is not None:
+                                    raw_step = challenge.get("authorization_step")
+                                    if isinstance(raw_step, str) and raw_step in _AUTHORIZATION_STEPS:
+                                        authorization_error_step = raw_step
                 if task is not None and not task.done():
                     return _authorization_result(
                         required_scopes=required_scopes,
@@ -526,6 +545,7 @@ class PersonalContext:
                         task=task,
                         challenge=challenge,
                         error=authorization_error,
+                        error_step=authorization_error_step,
                     )
                 if authorization_error is not None:
                     return _authorization_result(
@@ -534,18 +554,22 @@ class PersonalContext:
                         task=task,
                         challenge=challenge,
                         error=authorization_error,
+                        error_step=authorization_error_step,
                     )
                 try:
-                    _ready, granted_scopes, _configured = await _lark_cli_auth_status(required_scopes)
+                    _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
                 except Exception as exc:
                     authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
                     granted_scopes = set()
+                    configured = None
                 return _authorization_result(
                     required_scopes=required_scopes,
                     granted_scopes=granted_scopes,
                     task=task,
                     challenge=challenge,
                     error=authorization_error,
+                    configured=configured,
+                    error_step=authorization_error_step,
                 )
 
     async def authorize_provider(
@@ -571,6 +595,7 @@ class PersonalContext:
                         task=task,
                         challenge=challenge,
                         error=self._authorization_error,
+                        error_step=self._authorization_error_step,
                     )
                 if task is not None:
                     with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -583,12 +608,14 @@ class PersonalContext:
                     _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
                 except Exception as exc:
                     self._authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
+                    self._authorization_error_step = None
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=set(),
                         task=None,
                         challenge=None,
                         error=self._authorization_error,
+                        error_step=self._authorization_error_step,
                     )
                 if not configured:
                     # First use on this machine: lark-cli has no app configuration yet.
@@ -600,27 +627,33 @@ class PersonalContext:
                         init_process, init_url = await _lark_cli_begin_config_init()
                     except Exception as exc:
                         self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+                        self._authorization_error_step = _CONFIG_INIT_STEP
                         return _authorization_result(
                             required_scopes=required_scopes,
                             granted_scopes=set(),
                             task=None,
                             challenge=None,
                             error=self._authorization_error,
+                            error_step=self._authorization_error_step,
                         )
                     init_expires_at = (
-                        datetime.now(UTC) + timedelta(seconds=_CONFIG_INIT_TIMEOUT_SECONDS)
-                    ).isoformat().replace("+00:00", "Z")
+                        (datetime.now(UTC) + timedelta(seconds=_CONFIG_INIT_TIMEOUT_SECONDS))
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                    )
                     init_task = asyncio.create_task(
                         self._finish_config_init(init_process, timeout_seconds=_CONFIG_INIT_TIMEOUT_SECONDS),
                         name="personal-context-feishu-config-init",
                     )
                     self._authorization_task = init_task
                     self._authorization_challenge = {
+                        "authorization_step": _CONFIG_INIT_STEP,
                         "verification_url": init_url,
                         "expires_at": init_expires_at,
                         "expires_monotonic": now + _CONFIG_INIT_TIMEOUT_SECONDS,
                     }
                     self._authorization_error = None
+                    self._authorization_error_step = None
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=set(),
@@ -630,23 +663,28 @@ class PersonalContext:
                     )
                 if not reauthorize and set(required_scopes).issubset(granted_scopes):
                     self._authorization_error = None
+                    self._authorization_error_step = None
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=granted_scopes,
                         task=None,
                         challenge=None,
                         error=None,
+                        configured=True,
                     )
                 try:
                     device_code, verification_url, expires_at = await _lark_cli_begin_authorization(required_scopes)
                 except Exception as exc:
                     self._authorization_error = _authorization_failure_text(_AUTHORIZATION_FAILED, exc)
+                    self._authorization_error_step = _DEVICE_AUTHORIZATION_STEP
                     return _authorization_result(
                         required_scopes=required_scopes,
                         granted_scopes=granted_scopes,
                         task=None,
                         challenge=None,
                         error=self._authorization_error,
+                        configured=True,
+                        error_step=self._authorization_error_step,
                     )
                 expires_monotonic = _authorization_expiry_monotonic(expires_at, now=now)
                 timeout_seconds = max(1.0, min(30.0 * 60.0, expires_monotonic - now))
@@ -656,11 +694,13 @@ class PersonalContext:
                 )
                 self._authorization_task = task
                 self._authorization_challenge = {
+                    "authorization_step": _DEVICE_AUTHORIZATION_STEP,
                     "verification_url": verification_url,
                     "expires_at": expires_at,
                     "expires_monotonic": expires_monotonic,
                 }
                 self._authorization_error = None
+                self._authorization_error_step = None
                 return _authorization_result(
                     required_scopes=required_scopes,
                     granted_scopes=granted_scopes,
@@ -687,6 +727,9 @@ class PersonalContext:
                     self._authorization_challenge = None
                     if update_error:
                         self._authorization_error = authorization_error
+                        self._authorization_error_step = (
+                            _DEVICE_AUTHORIZATION_STEP if authorization_error is not None else None
+                        )
 
     async def _finish_config_init(self, process: asyncio.subprocess.Process, *, timeout_seconds: float) -> None:
         """Settle the one-time lark-cli ``config init`` handshake like an authorization round."""
@@ -708,6 +751,7 @@ class PersonalContext:
                     self._authorization_challenge = None
                     if update_error:
                         self._authorization_error = authorization_error
+                        self._authorization_error_step = _CONFIG_INIT_STEP if authorization_error is not None else None
 
     async def _run_query(self, function: Callable[..., _T], /, *args: object, **kwargs: object) -> _T:
         """Run one small read in the dedicated query pool, away from pipeline I/O."""
@@ -1575,6 +1619,7 @@ class PersonalContext:
             self._authorization_challenge = None
             if clear_error:
                 self._authorization_error = None
+                self._authorization_error_step = None
             if task is not None and not task.done():
                 task.cancel()
         if task is not None:
