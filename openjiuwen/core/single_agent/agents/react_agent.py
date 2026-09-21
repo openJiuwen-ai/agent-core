@@ -35,12 +35,13 @@ from openjiuwen.core.common.security.user_config import UserConfig
 from openjiuwen.core.foundation.prompt import PromptTemplate
 from openjiuwen.core.foundation.llm.schema.config import (
     ModelClientConfig,
-    ModelRequestConfig
+    ModelRequestConfig,
 )
 from openjiuwen.core.context_engine import (
     ContextEngine,
     ContextEngineConfig,
-    ModelContext
+    ContextWindow,
+    ModelContext,
 )
 from openjiuwen.core.context_engine.usage import (
     CacheAggregationKey,
@@ -611,6 +612,11 @@ class ReActAgent(BaseAgent):
         self._kv_cache_model_call_hook = kv_cache_react_model_call_hook.KVCacheModelCallHook()
         self._context_usage_aggregator = SessionKVCacheAggregator()
         self._context_usage_sequences: dict[str, int] = {}
+        # The ability manager contains every registered tool, while the final
+        # model window may expose a filtered subset after Swarm/Core rails run.
+        # Manual context snapshots reuse the last finalized model tool list so
+        # their tool-token estimate matches the immediately preceding request.
+        self._last_model_tools: list[ToolInfo] | None = None
 
     def _create_default_config(self) -> ReActAgentConfig:
         """Create default configuration"""
@@ -712,6 +718,7 @@ class ReActAgent(BaseAgent):
         config = self._with_context_engine_model_window(config)
         old_config = self._config
         self._config = config
+        self._last_model_tools = None
         kv_config_changed = old_config.kv_cache_affinity_config != config.kv_cache_affinity_config
 
         # Reset LLM if model config changed
@@ -813,6 +820,38 @@ class ReActAgent(BaseAgent):
             llm: Pre-built Model instance to use.
         """
         self._llm = llm
+        self._last_model_tools = None
+        model_config = getattr(llm, "model_config", None)
+        model_client_config = getattr(llm, "model_client_config", None)
+        model_name = getattr(model_config, "model_name", None)
+        if not isinstance(model_name, str) or not model_name.strip():
+            return
+
+        # ``set_llm`` is also used by model-selection rails, which switch the
+        # provider object without going through DeepAgent's configuration
+        # reload path. Keep the agent metadata and cached context processors
+        # synchronized at that boundary.
+        self._config.model_name = model_name
+        if model_client_config is not None:
+            self._config.model_client_config = model_client_config
+            provider = getattr(model_client_config, "client_provider", None)
+            provider = getattr(provider, "value", provider)
+            if provider:
+                self._config.model_provider = str(provider)
+        if model_config is not None:
+            self._config.model_config_obj = model_config
+        context_window_tokens = getattr(model_config, "context_window", None)
+        self.update_model_context(
+            model_name=model_name,
+            context_window_tokens=(
+                context_window_tokens
+                if isinstance(context_window_tokens, int) and context_window_tokens > 0
+                else None
+            ),
+            model=llm,
+            model_config=model_config,
+            model_client_config=model_client_config,
+        )
 
     def _get_llm(self) -> Model:
         """Get LLM instance (lazy initialization)
@@ -1173,6 +1212,56 @@ class ReActAgent(BaseAgent):
                     exc_info=True,
                 )
 
+    async def _build_model_context_window(
+        self,
+        ctx: AgentCallbackContext,
+        *,
+        model_client_config: Any = None,
+    ) -> tuple[ContextWindow, tuple[tuple[ContextCategory, str, str], ...]]:
+        """Build the final context window used by a model request.
+
+        Keep this preparation shared by the provider call and out-of-band
+        context operations that need to report the usage of the next request.
+        In particular, usage must observe the same prompt attachment sync,
+        context processors, truncation, and window mutators as the request
+        path instead of assembling a second approximate window.
+        """
+        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
+        final_system = [SystemMessage(content=self.prompt_builder.build())]
+        await self._sync_prompt_attachments(ctx, ctx.context)
+
+        context_window_kwargs = self._build_context_window_kwargs(
+            ctx,
+            final_system,
+        )
+        attachment_manager = getattr(self, "prompt_attachment_manager", None)
+        build_window_mutator = getattr(attachment_manager, "build_model_window_mutator", None)
+        if callable(build_window_mutator):
+            attachment_session_id = (
+                ctx.session.get_session_id()
+                if ctx.session is not None
+                else ctx.context.session_id()
+            )
+            if model_client_config is None:
+                model_client_config = getattr(self._llm, "model_client_config", None)
+            if model_client_config is None:
+                model_client_config = getattr(self._config, "model_client_config", None)
+            context_window_kwargs["window_mutators"] = [
+                build_window_mutator(
+                    session_id=attachment_session_id,
+                    model_client_config=model_client_config,
+                )
+            ]
+
+        context_window = await ctx.context.get_context_window(
+            **context_window_kwargs
+        )
+        # Keep callback inputs aligned with the exact window sent to the
+        # provider.  Rails and the usage report both consume these values.
+        ctx.inputs.messages = context_window.get_messages()
+        ctx.inputs.tools = context_window.get_tools()
+        return context_window, usage_prompt_sections
+
     def _context_usage_prompt_sections(self) -> list[tuple[ContextCategory, str, str]]:
         """Return builder sections using the four-category product taxonomy."""
         sections: list[tuple[ContextCategory, str, str]] = []
@@ -1353,10 +1442,12 @@ class ReActAgent(BaseAgent):
         *,
         phase: str,
         usage_metadata=None,
-    ) -> None:
+        emit_stream: bool = True,
+        record_session_usage: bool = True,
+    ) -> dict[str, Any] | None:
         """Send a context usage snapshot without affecting model execution."""
         session = ctx.session
-        if session is None or not hasattr(session, "write_stream"):
+        if emit_stream and (session is None or not hasattr(session, "write_stream")):
             return
 
         context_config = self._config.context_engine_config
@@ -1425,7 +1516,7 @@ class ReActAgent(BaseAgent):
             cache_mode=attribution.get("cache_mode") or "provider",
             cache_scope=attribution.get("cache_scope") or "session",
         )
-        if phase == "post_call":
+        if phase == "post_call" and record_session_usage:
             session_usage = self._context_usage_aggregator.record(
                 request_id=request_id,
                 scope_key=scope_key,
@@ -1434,12 +1525,24 @@ class ReActAgent(BaseAgent):
         else:
             # A pre-call event also carries the aggregate from completed calls
             # in this scope, so the value means "session to date" at every
-            # emission point rather than only on post-call events.
+            # emission point rather than only on post-call events.  An
+            # out-of-band compact event likewise observes the aggregate but
+            # must not add a synthetic model call.
             session_usage = self._context_usage_aggregator.snapshot(scope_key)
 
         try:
+            token_counter = ctx.context.token_counter()
+            if token_counter is None:
+                from openjiuwen.core.context_engine.token.string_length_counter import (
+                    StringLengthCounter,
+                )
+
+                token_counter = StringLengthCounter(
+                    model=model_name,
+                    fallback_reason="counter_unavailable",
+                )
             analyzer = ContextUsageAnalyzer(
-                ctx.context.token_counter(),
+                token_counter,
                 model=model_name,
                 context_window_limit=ctx.context.context_window_tokens(),
             )
@@ -1447,7 +1550,14 @@ class ReActAgent(BaseAgent):
                 "request": (
                     request_usage.model_dump(mode="json")
                     if phase == "post_call"
-                    else {"status": "unknown", "source": "awaiting_provider_response"}
+                    else {
+                        "status": "not_reported",
+                        "source": (
+                            "manual_context_operation"
+                            if phase == "post_compact"
+                            else "awaiting_provider_response"
+                        ),
+                    }
                 ),
                 "session": session_usage.model_dump(mode="json") if session_usage is not None else {},
                 "measurement_cache": getattr(report, "measurement_cache", {}) if report is not None else {},
@@ -1485,20 +1595,129 @@ class ReActAgent(BaseAgent):
                     deployment=str(self._config.api_base or "") or None,
                     attribution=attribution,
                 )
-            await session.write_stream(
-                OutputSchema(
-                    type="context.usage",
-                    index=sequence,
-                    payload=snapshot.model_dump(mode="json"),
+            snapshot_payload = snapshot.model_dump(mode="json")
+            if emit_stream:
+                await session.write_stream(
+                    OutputSchema(
+                        type="context.usage",
+                        index=sequence,
+                        payload=snapshot_payload,
+                    )
                 )
-            )
-            # Swarm's compatibility rail can emit a legacy snapshot for older
-            # core versions.  Mark the callback context after the complete
-            # core event is actually accepted by the session writer so that
-            # the compatibility rail never adds a second event.
-            ctx.extra["_context_usage_event_emitted"] = True
+                # Swarm's compatibility rail can emit a legacy snapshot for older
+                # core versions.  Mark the callback context after the complete
+                # core event is actually accepted by the session writer so that
+                # the compatibility rail never adds a second event.
+                ctx.extra["_context_usage_event_emitted"] = True
+            return snapshot_payload
         except Exception as exc:  # telemetry must never fail an LLM call
             logger.warning("Failed to emit context usage snapshot: %s", exc)
+            return None
+
+    async def build_context_usage_snapshot(
+        self,
+        context: ModelContext,
+        *,
+        session: Session | None = None,
+        tools: Optional[List[ToolInfo]] = None,
+        request_id: str | None = None,
+        phase: str = "post_compact",
+        attribution: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """Build a local usage snapshot for an out-of-band context operation.
+
+        Manual context operations, such as a standalone ``/compact`` command,
+        run outside the normal model-call callback chain and therefore have no
+        provider ``usage_metadata``.  The returned ``post_compact`` event is
+        based on local measurement/estimation and is not an authoritative
+        provider token count.  The caller decides how to transport and persist
+        it.
+        """
+        if context is None:
+            return None
+
+        if session is None:
+            get_session_ref = getattr(context, "get_session_ref", None)
+            if callable(get_session_ref):
+                session = get_session_ref()
+
+        if tools is None:
+            if self._last_model_tools is not None:
+                tools = list(self._last_model_tools)
+            else:
+                try:
+                    tools = list(await self.ability_manager.list_tool_info() or [])
+                except Exception:  # usage telemetry must not block the caller
+                    logger.debug("Failed to collect tools for context usage snapshot", exc_info=True)
+                    tools = []
+
+        ctx = AgentCallbackContext(
+            agent=self,
+            inputs=ModelCallInputs(
+                messages=[],
+                tools=list(tools or []),
+                model_context=context,
+            ),
+            session=session,
+            context=context,
+        )
+        if isinstance(attribution, dict):
+            ctx.context_usage_attribution.update(attribution)
+
+        context_window, usage_prompt_sections = await self._build_model_context_window(
+            ctx,
+            model_client_config=getattr(self._llm, "model_client_config", None),
+        )
+
+        if isinstance(request_id, str) and request_id.strip():
+            # Allocate the monotonic sequence through the normal request path,
+            # then replace only the identifier with the command's request id.
+            self._begin_context_usage_request(ctx)
+            ctx.context_usage_request_id = request_id.strip()
+            ctx.inputs.context_usage_request_id = request_id.strip()
+
+        usage_attribution = self._context_usage_attribution(ctx, session)
+        ctx.context_usage_attribution.clear()
+        ctx.context_usage_attribution.update(usage_attribution)
+        build_report = getattr(context, "build_context_usage_report", None)
+        if callable(build_report):
+            try:
+                context_config = self._config.context_engine_config
+                model_name = str(
+                    getattr(context_config, "model_name", None)
+                    or self._config.model_name
+                    or ""
+                )
+                model_provider = str(
+                    getattr(context_config, "model_provider", None)
+                    or self._resolve_context_engine_model_provider(self._config)
+                    or ""
+                )
+                ctx.context_usage_report = build_report(
+                    context_window,
+                    system_prompt_sections=usage_prompt_sections,
+                    model=model_name,
+                    provider=model_provider or None,
+                    deployment=str(self._config.api_base or "") or None,
+                    attribution=usage_attribution,
+                )
+                ctx.inputs.context_usage_report = ctx.context_usage_report
+                ctx.inputs.context_usage_attribution = dict(usage_attribution)
+            except NotImplementedError:
+                logger.debug("ModelContext does not provide a context usage report")
+            except Exception:
+                logger.warning(
+                    "Failed to build manual context usage report; using compatibility analyzer path",
+                    exc_info=True,
+                )
+
+        return await self._emit_context_usage(
+            ctx,
+            context_window,
+            phase=phase,
+            emit_stream=False,
+            record_session_usage=False,
+        )
 
     @rail(
         before=AgentCallbackEvent.BEFORE_MODEL_CALL,
@@ -1521,42 +1740,16 @@ class ReActAgent(BaseAgent):
         falls back to llm.invoke() otherwise.
         """
         # --- Finalize system message and context window (post-rails) ---
-        usage_prompt_sections = tuple(self._context_usage_prompt_sections())
-        final_system = [SystemMessage(content=self.prompt_builder.build())]
-        await self._sync_prompt_attachments(ctx, ctx.context)
         llm = self._get_llm()
         kv_runtime = self._kv_cache_model_call_hook.resolve_runtime(
             llm,
             self._config.kv_cache_affinity_config,
         )
-
-        context_window_kwargs = self._build_context_window_kwargs(
+        context_window, usage_prompt_sections = await self._build_model_context_window(
             ctx,
-            final_system,
+            model_client_config=getattr(llm, "model_client_config", None),
         )
-        attachment_manager = getattr(self, "prompt_attachment_manager", None)
-        build_window_mutator = getattr(attachment_manager, "build_model_window_mutator", None)
-        if callable(build_window_mutator):
-            attachment_session_id = (
-                ctx.session.get_session_id()
-                if ctx.session is not None
-                else ctx.context.session_id()
-            )
-            context_window_kwargs["window_mutators"] = [
-                build_window_mutator(
-                    session_id=attachment_session_id,
-                    model_client_config=getattr(llm, "model_client_config", None),
-                )
-            ]
-
-        context_window = await ctx.context.get_context_window(
-            **context_window_kwargs
-        )
-        # Update ctx.inputs: after_model_call hooks inspect these to see
-        # what was actually sent. (LLM call uses them too, but could
-        # equally pass context_window.get_*() directly.)
-        ctx.inputs.messages = context_window.get_messages()
-        ctx.inputs.tools = context_window.get_tools()
+        self._last_model_tools = list(ctx.inputs.tools or [])
 
         # Freeze the final-window report before the provider call.  The same
         # request-local object is used by post_call; post_call must not ask the

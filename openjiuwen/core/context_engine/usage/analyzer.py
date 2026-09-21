@@ -172,7 +172,11 @@ class ContextUsageAnalyzer:
         )
 
         local_total = sum(part.tokens for part in parts.values())
-        self._attribute_provider_remainder_to_messages(parts, provider_input_tokens)
+        self._attribute_provider_remainder_to_messages(
+            parts,
+            provider_input_tokens,
+            proportional=self._uses_fallback_measurement(),
+        )
         total_tokens = provider_input_tokens if provider_input_tokens is not None else local_total
         total_source = "provider_usage" if provider_input_tokens is not None else self._merge_source(parts.values())
         limit = self.context_window_limit
@@ -283,13 +287,20 @@ class ContextUsageAnalyzer:
     ) -> ContextUsageSnapshot:
         """Create an event snapshot from an already measured window report.
 
-        No tokenizer method is called here.  ``post_call`` uses this path so a
-        concurrent context mutation cannot replace the report captured by the
-        corresponding ``pre_call``.
+        No tokenizer method is called here.  ``post_call`` and
+        ``post_compact`` use this path so a concurrent context mutation cannot
+        replace the report captured for the corresponding operation.
         """
         parts = {name: part.model_copy(deep=True) for name, part in report.parts.items()}
         local_total = report.context_window.local_estimated_input_tokens
-        self._attribute_provider_remainder_to_messages(parts, provider_input_tokens)
+        self._attribute_provider_remainder_to_messages(
+            parts,
+            provider_input_tokens,
+            proportional=(
+                self._uses_fallback_measurement()
+                or self._is_fallback_source(report.measurement.category_source)
+            ),
+        )
         total_tokens = provider_input_tokens if provider_input_tokens is not None else local_total
         total_source = "provider_usage" if provider_input_tokens is not None else report.context_window.tokens_source
         denominator = provider_input_tokens if provider_input_tokens is not None else local_total
@@ -312,7 +323,11 @@ class ContextUsageAnalyzer:
         measurement = report.measurement.model_copy(
             deep=True,
             update={
+                "category_source": self._merge_source(parts.values()),
                 "total_source": total_source,
+                "estimated": any(
+                    part.estimated for part in parts.values() if part.source != "not_reported"
+                ),
                 "authoritative_total": provider_input_tokens is not None,
                 "context_snapshot_id": report.context_snapshot_id,
             },
@@ -381,21 +396,86 @@ class ContextUsageAnalyzer:
         )
 
     @staticmethod
+    def _is_fallback_source(source: str | None) -> bool:
+        """Return whether a measurement source is not a model tokenizer.
+
+        Provider totals are authoritative for the whole prompt, but a
+        character count or a tokenizer from another model is not precise
+        enough to keep some categories fixed while assigning the entire
+        reconciliation delta to messages.
+        """
+        normalized = str(source or "").strip().casefold()
+        return normalized.endswith("_fallback")
+
+    def _uses_fallback_measurement(self) -> bool:
+        return self._is_fallback_source(getattr(self.token_counter, "measurement_source", None))
+
+    @staticmethod
     def _attribute_provider_remainder_to_messages(
         parts: dict[str, ContextPartUsage],
         provider_input_tokens: int | None,
+        *,
+        proportional: bool = False,
     ) -> None:
-        """Put provider/local reconciliation into the logical messages bucket.
+        """Reconcile a provider total with locally measured categories.
 
-        ``system_prompt``, ``skills`` and ``tools`` are measured locally and
-        remain unchanged.  The provider's authoritative input total is then
-        reconciled by assigning the remainder to ``messages``.  This makes
-        the four displayed categories add up to the provider total while the
-        original local estimate remains available on ``context_window`` for
-        diagnostics.
+        A model-native tokenizer can keep locally measured prompt categories
+        fixed and put the remaining provider overhead in ``messages``.  When
+        the local counter is a fallback estimate, however, every category can
+        carry the same measurement error.  Scale all measured categories by
+        the provider/local ratio so a large fixed-category estimate cannot
+        make the history bucket incorrectly become zero.
         """
         if provider_input_tokens is None:
             return
+
+        provider_total = max(int(provider_input_tokens), 0)
+        if proportional:
+            local_total = sum(max(part.tokens, 0) for part in parts.values())
+            if local_total > 0:
+                scaled_tokens = {
+                    name: provider_total * max(part.tokens, 0) / local_total
+                    for name, part in parts.items()
+                }
+                allocations = {
+                    name: int(value)
+                    for name, value in scaled_tokens.items()
+                }
+                remaining = provider_total - sum(allocations.values())
+                part_order = {name: index for index, name in enumerate(parts)}
+                # Largest-remainder rounding keeps the category sum exactly
+                # equal to the authoritative provider total.
+                order = sorted(
+                    parts,
+                    key=lambda name: (
+                        -(scaled_tokens[name] - allocations[name]),
+                        part_order[name],
+                    ),
+                )
+                for name in order[:remaining]:
+                    allocations[name] += 1
+                for name, part in parts.items():
+                    if part.tokens <= 0 and allocations[name] <= 0:
+                        continue
+                    part.tokens = allocations[name]
+                    part.source = "provider_usage_proportional"
+                    part.measurement_source = "provider_usage_proportional"
+                    part.estimated = True
+                    part.fallback_reason = "provider_total_proportional_reconciliation"
+                return
+
+            # If a custom counter reported no local tokens at all, keep the
+            # authoritative total visible while explicitly marking it as
+            # unattributed instead of pretending it belongs to history.
+            messages = parts.get(ContextCategory.MESSAGES.value)
+            if messages is not None:
+                messages.tokens = provider_total
+                messages.source = "provider_usage_unattributed"
+                messages.measurement_source = "provider_usage_unattributed"
+                messages.estimated = True
+                messages.fallback_reason = "provider_total_without_local_measurement"
+            return
+
         messages = parts.get(ContextCategory.MESSAGES.value)
         if messages is None:
             return
@@ -403,7 +483,7 @@ class ContextUsageAnalyzer:
         fixed_tokens = sum(
             part.tokens for name, part in parts.items() if name != ContextCategory.MESSAGES.value
         )
-        residual_tokens = provider_input_tokens - fixed_tokens
+        residual_tokens = provider_total - fixed_tokens
         messages.tokens = max(residual_tokens, 0)
         messages.source = "provider_usage_residual"
         messages.measurement_source = "provider_usage_residual"

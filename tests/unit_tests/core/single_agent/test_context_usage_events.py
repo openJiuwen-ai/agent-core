@@ -7,6 +7,7 @@ import pytest
 
 from openjiuwen.core.context_engine import CacheAggregationKey, ContextEngineConfig, ContextWindow, RequestKVCacheUsage
 from openjiuwen.core.foundation.llm import AssistantMessage, SystemMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -68,7 +69,10 @@ async def test_react_agent_emits_one_post_context_usage_event() -> None:
     assert events[0].payload["kv_cache"]["session"]["weighted_hit_rate"] == 0.4
     assert events[0].payload["session_kv_cache_hit_rate"] == 0.4
     assert sum(part["tokens"] for part in events[0].payload["parts"].values()) == 100
-    assert events[0].payload["parts"]["messages"]["source"] == "provider_usage_residual"
+    assert events[0].payload["parts"]["messages"]["source"] in {
+        "provider_usage_residual",
+        "provider_usage_proportional",
+    }
 
 
 @pytest.mark.asyncio
@@ -120,6 +124,46 @@ async def test_railed_model_call_does_not_emit_pre_call_usage_event() -> None:
     assert len(usage_events) == 1
     assert usage_events[0].payload["phase"] == "post_call"
     assert usage_events[0].payload["sequence"] == 0
+
+
+@pytest.mark.asyncio
+async def test_build_context_usage_snapshot_for_manual_context_operation() -> None:
+    agent = ReActAgent(AgentCard(name="manual-usage-agent")).configure(
+        ReActAgentConfig(
+            model_name="deepseek-chat",
+            model_provider="deepseek",
+            context_engine_config=ContextEngineConfig(context_window_tokens=1_000),
+        )
+    )
+    session = Session(session_id="manual-usage-session", card=agent.card)
+    session.write_stream = AsyncMock()
+    context = await agent.context_engine.create_context(session=session)
+    await context.add_messages([UserMessage(content="after manual compact")])
+    cached_tool = ToolInfo(name="cached_tool", description="cached", parameters={})
+    agent._last_model_tools = [cached_tool]
+    list_tool_info = AsyncMock(return_value=[])
+
+    with patch.object(agent.ability_manager, "list_tool_info", list_tool_info):
+        payload = await agent.build_context_usage_snapshot(
+            context,
+            session=session,
+            request_id="compact-request",
+        )
+
+    assert payload is not None
+    assert payload["event_type"] == "context.usage"
+    assert payload["schema_version"] == "context-usage.v1"
+    assert payload["phase"] == "post_compact"
+    assert payload["request_id"] == "compact-request"
+    assert payload["product_session_id"] == "manual-usage-session"
+    assert set(payload["parts"]) == {"system_prompt", "skills", "tools", "messages"}
+    assert payload["context_window"]["input_tokens"] > 0
+    assert payload["context_window"]["tokens_source"] != "provider_usage"
+    assert payload["measurement"]["authoritative_total"] is False
+    assert payload["kv_cache"]["session"]["calls_total"] == 0
+    assert payload["parts"]["tools"]["tokens"] > 0
+    list_tool_info.assert_not_awaited()
+    assert session.write_stream.await_count == 0
 
 
 @pytest.mark.asyncio
