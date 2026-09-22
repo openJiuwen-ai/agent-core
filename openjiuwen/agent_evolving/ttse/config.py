@@ -42,8 +42,9 @@ class TTSEConfig:
         store_path: JSON path for the shared FACT/TIP bank (created on first write).
         embedding: Optional embedding provider. When set, induction dedup and
             Auto-dream soft clustering use cosine similarity. When ``None``
-            (or embedding fails), both fall back to self-normalized BM25 with
-            ``bm25_sim_threshold`` (default ``0.5``). FACT/TIP are disclosed
+            (or embedding fails), induction dedup falls back to substring
+            matching; Auto-dream merge uses LLM Phase1/Phase2 clustering when
+            ``dream_llm_cluster_enabled`` is True. FACT/TIP are disclosed
             via ``ttse_consult``, not dumped into the system prompt.
             Semantic dedup / consult recall scan the in-memory bank in O(n)
             (n <= max_facts or max_tips, default 400). After the process-local
@@ -61,9 +62,6 @@ class TTSEConfig:
             matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Only used when ``embedding`` is set.
-        bm25_sim_threshold: Self-normalized BM25 similarity floor for
-            induction dedup and dream soft clustering when no embedding
-            provider is available. Default ``0.5``.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
             Also the O(n) bound for semantic dedup / consult embedding scans.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
@@ -114,24 +112,39 @@ class TTSEConfig:
         dream_min_hours: Min hours since last successful dream.
         dream_min_rules: Skip LLM merge when facts+tips below this (prune/purge still run).
         dream_soft_lo: Cosine edge threshold for soft clustering near-duplicates
-            when an embedding provider is set. Ignored for the BM25 fallback
-            path (uses ``bm25_sim_threshold`` instead).
+            when an embedding provider is set. Ignored on the no-embedding
+            LLM clustering path.
         dream_cluster_min_size: Min cluster size to consider for merge.
-        dream_max_llm_merges: Cap LLM merge calls per dream run.
+        dream_max_llm_merges: Cap on per-cluster LLM merge invokes per track
+            on the embedding soft-cluster path (default ``15``). Unused on the
+            no-embedding LLM Phase1/Phase2 path.
+        dream_merge_max_rules: Cap on rules sent to one per-cluster LLM merge
+            prompt on the embedding path (highest-count kept). Soft clusters
+            larger than this are truncated before the merge invoke so the
+            pairwise similarity table stays bounded. Default ``20``.
+        dream_category_max_rules: Cap on rules sent to LLM Phase1/Phase2
+            prompts on the no-embedding path (random shuffle then take first N).
+        dream_llm_cluster_enabled: When True (default) and no embedding
+            provider is set, Auto-dream uses LLM Phase1/Phase2 clustering.
+            When False and no embedding, merge clustering is skipped.
         dream_ttl_days: Delete rules not injected for this many days.
             Uses ``last_injected_at`` (else ``created_at``). Consult hits
             persist on the debounce described by ``inject_persist_min_secs``
             / ``inject_persist_min_hits``.
         dream_prune_enabled: Enable TTL prune pass.
-        dream_purge_tips_enabled: Enable deterministic low-quality TIP purge.
+        dream_purge_tips_enabled: Enable LLM form/over-generic TIP quality purge.
+        dream_purge_batch_size: Max unchecked tips sent to the quality LLM per dream
+            pass (one invoke). Packing also respects ``dream_purge_max_chars``.
+        dream_purge_max_chars: Cumulative tip-text char budget for one quality invoke.
         dream_state_path: Optional path for dream-state.json; derived from store_path when empty.
+        dream_clusters_path: Optional path for incremental LLM cluster cache;
+            default ``{dirname(store_path)}/dream/dream-clusters.json``.
     """
 
     store_path: str = ".ttse/bank.json"
     embedding: Optional[EmbeddingProvider] = None
     embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
-    bm25_sim_threshold: float = 0.5
     max_facts: int = 400
     max_tips: int = 400
     traj_char_budget: Optional[int] = None
@@ -167,11 +180,17 @@ class TTSEConfig:
     dream_min_rules: int = 8
     dream_soft_lo: float = 0.72
     dream_cluster_min_size: int = 2
-    dream_max_llm_merges: int = 10
+    dream_max_llm_merges: int = 15
+    dream_merge_max_rules: int = 20
+    dream_category_max_rules: int = 80
+    dream_llm_cluster_enabled: bool = True
     dream_ttl_days: int = 90
     dream_prune_enabled: bool = True
     dream_purge_tips_enabled: bool = True
+    dream_purge_batch_size: int = 100
+    dream_purge_max_chars: int = 16000
     dream_state_path: str = ""
+    dream_clusters_path: str = ""
 
     def resolved_dream_state_path(self) -> str:
         """Path for dream-state.json (same directory as the bank by default)."""
@@ -179,6 +198,13 @@ class TTSEConfig:
             return self.dream_state_path
         directory = os.path.dirname(self.store_path) or ".ttse"
         return os.path.join(directory, "dream-state.json")
+
+    def resolved_dream_clusters_path(self) -> str:
+        """Path for LLM-path dream-clusters.json under a ``dream/`` subdir."""
+        if self.dream_clusters_path:
+            return self.dream_clusters_path
+        directory = os.path.dirname(self.store_path) or ".ttse"
+        return os.path.join(directory, "dream", "dream-clusters.json")
 
 
 __all__ = [
