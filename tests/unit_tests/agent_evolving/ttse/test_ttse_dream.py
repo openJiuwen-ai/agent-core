@@ -14,15 +14,22 @@ import pytest
 from openjiuwen.agent_evolving.ttse import TTSEConfig, TTSERecordStore
 from openjiuwen.agent_evolving.ttse.dream import (
     DreamState,
+    _cap_cluster_by_count,
+    _sample_rules,
     bump_dream_session_count,
+    load_dream_clusters,
     load_dream_state,
+    normalize_merge_subset,
+    parse_category_merge_decisions,
+    parse_cluster_groups,
     parse_merge_verdict,
+    parse_purge_verdicts,
     prune_stale,
     run_dream_pass,
     save_dream_state,
     should_run_dream,
 )
-from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip, tip_purge_reason
+from openjiuwen.agent_evolving.ttse.tip_parse import parse_tip
 from openjiuwen.agent_evolving.ttse.stores import _new_record, format_ts, parse_ts
 
 
@@ -96,49 +103,18 @@ def test_parse_tip_accepts_fullwidth_colon():
     )
 
 
-def test_tip_purge_malformed_and_unknown_and_generic():
-    names = {"grep", "bash"}
-    assert tip_purge_reason("always be careful", names) == "tip_fact_shaped"
-    assert tip_purge_reason("When x: use nope to do y", names) == "tip_unknown_capability"
-    assert tip_purge_reason("When any task: use grep to scan files", names) == "tip_too_generic_condition"
-    assert tip_purge_reason("When reading logs: use grep to check", names) == "tip_too_generic_action"
-    assert tip_purge_reason("When reading large .log files: use grep to extract matches", names) is None
-    assert tip_purge_reason("[PINNED] When any task: use grep to check", names) is None
-
-
-def test_tip_purge_fullwidth_colon_not_malformed():
-    names = {"ask_user", "grep"}
-    assert (
-        tip_purge_reason(
-            "When 估值请求只包含公司名而缺少上市状态、行业或财务数据：use ask_user to "
-            "先向用户收集这些信息，再决定安装哪个估值技能",
-            names,
-        )
-        is None
+def test_parse_purge_verdicts_lines():
+    raw = (
+        "INDEX: 0 | VERDICT: PURGE | REASON: tip_fact_shaped\n"
+        "INDEX: 1 | VERDICT: KEEP | REASON: ok\n"
+        "INDEX: 2 | VERDICT: PURGE | REASON: tip_too_generic_condition\n"
     )
-
-
-def test_tip_purge_longest_whitelist_match_on_noisy_span():
-    names = {"code", "web_search", "fetch_webpage"}
-    # Backticks + trailing junk after capability.
-    assert (
-        tip_purge_reason(
-            "When a PDF must be read: use `code` with pdfplumber to parse content",
-            names,
-        )
-        is None
-    )
-    # Long adverbial between name and "to" — still matches web_search.
-    assert (
-        tip_purge_reason(
-            "When researching a niche product: use web_search with multiple query "
-            "variations (a, b, c) to gather information",
-            names,
-        )
-        is None
-    )
-    assert tip_purge_reason("When fetching a URL: use `fetch_webpage` to get HTML", names) is None
-    assert tip_purge_reason("When coding: use decode to transform bytes", names) == "tip_unknown_capability"
+    verdicts = parse_purge_verdicts(raw, 3)
+    assert [(v.index, v.verdict, v.reason) for v in verdicts] == [
+        (0, "PURGE", "tip_fact_shaped"),
+        (1, "KEEP", "ok"),
+        (2, "PURGE", "tip_too_generic_condition"),
+    ]
 
 
 # ----------------------------------------------------------------------
@@ -157,6 +133,7 @@ async def test_store_new_record_has_metadata(tmp_path):
     assert rec["created_at"] == format_ts(parse_ts(rec["created_at"]))
     assert rec["last_injected_at"] is None
     assert rec["inject_hits"] == 0
+    assert rec["form_checked"] is False
 
 
 @pytest.mark.asyncio
@@ -172,6 +149,7 @@ async def test_legacy_bank_migration_sets_last_injected(tmp_path):
     assert isinstance(rec["created_at"], str)
     assert parse_ts(rec["last_injected_at"]) is not None
     assert parse_ts(rec["created_at"]) is not None
+    assert rec["form_checked"] is False
 
 
 @pytest.mark.asyncio
@@ -436,14 +414,41 @@ def test_parse_merge_verdict():
         "REASON: paraphrase\n"
         "VERDICT: MERGE\n"
         "CANONICAL: the grader is case-sensitive\n"
+        "MERGE_INDICES:\n"
         "KEEP_INDICES:\n",
         3,
     )
     assert v is not None
     assert v.verdict == "MERGE"
     assert v.canonical == "the grader is case-sensitive"
+    assert v.merge_indices == []
     assert "paraphrases" in v.thinking
     assert v.reason == "paraphrase"
+
+
+def test_parse_merge_verdict_subset():
+    v = parse_merge_verdict(
+        "THINKING:\n"
+        "0 and 1 are paraphrases; 2 has a different condition.\n"
+        "REASON: merge pair keep third\n"
+        "VERDICT: MERGE\n"
+        "CANONICAL: the grader is case-sensitive\n"
+        "MERGE_INDICES: 0, 1\n"
+        "KEEP_INDICES: 2\n",
+        3,
+    )
+    assert v is not None
+    assert v.verdict == "MERGE"
+    assert v.merge_indices == [0, 1]
+    assert v.keep_indices == [2]
+
+
+def test_normalize_merge_subset():
+    assert normalize_merge_subset(3, "MERGE", [], []) == ([0, 1, 2], [])
+    assert normalize_merge_subset(3, "MERGE", [0, 1], [2]) == ([0, 1], [2])
+    assert normalize_merge_subset(3, "MERGE", [0, 1], []) == ([0, 1], [2])
+    assert normalize_merge_subset(3, "MERGE", [0], [1, 2]) == ([], [0, 1, 2])
+    assert normalize_merge_subset(3, "KEEP_DISTINCT", [0, 1], [0]) == ([], [0, 1, 2])
 
 
 def test_parse_merge_verdict_requires_thinking_and_reason():
@@ -488,7 +493,6 @@ async def test_dream_merge_near_duplicate_facts(tmp_path):
         dream_min_hours=0,
         dream_min_rules=1,
         dream_soft_lo=0.72,
-        dream_max_llm_merges=5,
         dream_purge_tips_enabled=False,
         dream_prune_enabled=False,
     )
@@ -529,6 +533,70 @@ async def test_dream_merge_near_duplicate_facts(tmp_path):
     assert store.facts[0]["count"] >= 6
     assert "grader" in store.facts[0]["text"].lower()
     assert store.retired == []
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_subset_keeps_one_fact(tmp_path):
+    """MERGE_INDICES folds two near-dupes; KEEP_INDICES leaves the third."""
+    emb = FakeEmbedding(
+        {
+            "grader checks case": [1.0, 0.0],
+            "grader is case sensitive": [0.99, 0.01],
+            "grader cares about case": [0.98, 0.02],
+            "unrelated weather": [0.0, 1.0],
+        }
+    )
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=emb,
+        embedding_max_rps=0,
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_soft_lo=0.72,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+
+    def handler(prompt: str):
+        return (
+            "THINKING:\n"
+            "1 and 2 are paraphrases; 0 is related but a distinct wording we keep.\n"
+            "REASON: merge pair keep one\n"
+            "VERDICT: MERGE\n"
+            "CANONICAL: the grader checks column names case-sensitively\n"
+            "MERGE_INDICES: 1, 2\n"
+            "KEEP_INDICES: 0\n"
+        )
+
+    store, cfg = _make_store(tmp_path, cfg=cfg, embedding=emb)
+    llm = ScriptedLLM(handler)
+    for text, count in (
+        ("grader checks case", 2),
+        ("grader is case sensitive", 3),
+        ("grader cares about case", 4),
+    ):
+        await store.add_record_direct("fact", text, count=count, save=False)
+    await store.save()
+    assert len(store.facts) == 3
+
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names={"grep"},
+    )
+    assert not result.skipped
+    assert result.merged_clusters >= 1
+    texts = set(store.facts_texts())
+    assert "the grader checks column names case-sensitively" in texts
+    assert "grader cares about case" in texts
+    assert "grader checks case" not in texts
+    assert "grader is case sensitive" not in texts
+    assert len(store.facts) == 2
+    merged = next(r for r in store.facts if "column names" in r["text"])
+    assert merged["count"] == 5
 
 
 @pytest.mark.asyncio
@@ -579,7 +647,7 @@ async def test_dream_keep_distinct_tips(tmp_path):
 
 
 # ----------------------------------------------------------------------
-# purge tips
+# purge tips (LLM form / over-generic)
 # ----------------------------------------------------------------------
 
 
@@ -595,16 +663,133 @@ async def test_dream_purge_bad_tips(tmp_path):
     store, cfg = _make_store(tmp_path, cfg=cfg)
     await store.add_tip("the grader checks exact columns")  # fact-shaped
     await store.add_tip("When logs are large: use grep to extract matches")
+
+    def handler(prompt: str):
+        return (
+            "INDEX: 0 | VERDICT: PURGE | REASON: tip_fact_shaped\n"
+            "INDEX: 1 | VERDICT: KEEP | REASON: ok\n"
+        )
+
+    llm = ScriptedLLM(handler)
     result, _ = await run_dream_pass(
         store,
         cfg,
-        llm=ScriptedLLM(lambda _: "NONE"),
+        llm=llm,
         model="dummy-model",
-        capability_names={"grep"},
     )
     assert result.purged_tips == 1
     assert store.tips_texts() == ["When logs are large: use grep to extract matches"]
+    assert store.tips[0]["form_checked"] is True
     assert store.retired == []
+    assert len(llm.calls) == 1
+    # Persist form_checked on disk.
+    reloaded = TTSERecordStore(cfg)
+    assert reloaded.tips[0]["form_checked"] is True
+
+
+@pytest.mark.asyncio
+async def test_dream_purge_skips_form_checked_on_second_pass(tmp_path):
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_min_hours=0,
+        dream_min_rules=100,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=True,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    await store.add_tip("When logs are large: use grep to extract matches")
+
+    def keep_all(prompt: str):
+        return "INDEX: 0 | VERDICT: KEEP | REASON: ok\n"
+
+    llm1 = ScriptedLLM(keep_all)
+    result1, state = await run_dream_pass(store, cfg, llm=llm1, model="dummy-model", now=1.0)
+    assert result1.purged_tips == 0
+    assert store.tips[0]["form_checked"] is True
+    assert len(llm1.calls) == 1
+
+    llm2 = ScriptedLLM(keep_all)
+    # Force gate open with a later timestamp.
+    result2, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm2,
+        model="dummy-model",
+        state=state,
+        now=1.0 + 3600 * 25,
+    )
+    assert not result2.skipped
+    assert len(llm2.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_dream_purge_keeps_unknown_capability(tmp_path):
+    """Capability whitelist pruning is removed — unknown cap still KEEP when LLM says so."""
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_min_hours=0,
+        dream_min_rules=100,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=True,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    tip = "When decoding bytes: use decode to transform bytes"
+    await store.add_tip(tip)
+
+    llm = ScriptedLLM(lambda _: "INDEX: 0 | VERDICT: KEEP | REASON: ok\n")
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names={"grep"},  # decode not listed; must not force purge
+    )
+    assert result.purged_tips == 0
+    assert store.tips_texts() == [tip]
+    assert store.tips[0]["form_checked"] is True
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_canonical_form_checked_false(tmp_path):
+    emb = FakeEmbedding(
+        {
+            "when logs are huge: use grep to extract matches": [1.0, 0.0],
+            "when log files are large: use grep to find matches": [0.99, 0.01],
+        }
+    )
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=emb,
+        embedding_max_rps=0,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_prune_enabled=False,
+        dream_purge_tips_enabled=False,
+    )
+
+    def handler(prompt: str):
+        return (
+            "THINKING:\n"
+            "Near-duplicate log/grep tips; merge.\n"
+            "REASON: paraphrases\n"
+            "VERDICT: MERGE\n"
+            "CANONICAL: When logs are large: use grep to extract matches\n"
+            "KEEP_INDICES:\n"
+        )
+
+    store, cfg = _make_store(tmp_path, cfg=cfg, embedding=emb)
+    await store.add_record_direct("tip", "When logs are huge: use grep to extract matches", save=False)
+    await store.add_record_direct("tip", "When log files are large: use grep to find matches", save=False)
+    await store.save()
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=ScriptedLLM(handler),
+        model="dummy-model",
+    )
+    assert result.merged_clusters >= 1
+    assert len(store.tips) == 1
+    assert store.tips[0]["form_checked"] is False
 
 
 # ----------------------------------------------------------------------
@@ -713,6 +898,583 @@ async def test_dream_merge_skipped_without_embedding_still_prunes(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_dream_merge_llm_without_embedding(tmp_path):
+    """Near-duplicate facts cluster via LLM Phase1/2 when no embedding is set."""
+
+    def handler(prompt: str):
+        if "You are clustering" in prompt:
+            return (
+                "THINKING:\n"
+                "Two facts describe PresentBench slide grading as paraphrases.\n"
+                "REASON: one near-duplicate pair\n"
+                "GROUPS:\n"
+                "- 0,1\n"
+            )
+        return (
+            "THINKING:\n"
+            "Group 0 members are paraphrases; MERGE.\n"
+            "REASON: merged PresentBench grading facts\n"
+            "DECISIONS:\n"
+            "- group=0 | ids=0,1 | VERDICT: MERGE | "
+            "CANONICAL: PresentBench grades slides.md not a pptx file | KEEP_INDICES:\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+        dream_llm_cluster_enabled=True,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    assert not store.has_embedding_provider()
+    llm = ScriptedLLM(handler)
+    for text, count in (
+        ("PresentBench grades slides.md not a pptx file", 2),
+        ("PresentBench grades slides.md rather than pptx", 2),
+    ):
+        await store.add_record_direct("fact", text, count=count, save=False)
+    await store.save()
+    assert len(store.facts) == 2
+
+    soft_calls = {"n": 0}
+    original_soft = store.soft_cluster
+
+    async def _guarded_soft(*args, **kwargs):
+        soft_calls["n"] += 1
+        return await original_soft(*args, **kwargs)
+
+    store.soft_cluster = _guarded_soft  # type: ignore[method-assign]
+
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters >= 1
+    assert len(store.facts) == 1
+    assert store.facts[0]["count"] >= 4
+    assert soft_calls["n"] == 0
+    assert len(llm.calls) >= 2
+    clusters_path = cfg.resolved_dream_clusters_path()
+    assert os.path.exists(clusters_path)
+    assert "/dream/" in clusters_path.replace("\\", "/") or clusters_path.replace("\\", "/").endswith(
+        "dream/dream-clusters.json"
+    )
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_llm_subset_keeps_one(tmp_path):
+    """LLM Phase2 MERGE_INDICES merges two of three; KEEP_INDICES leaves one."""
+
+    def handler(prompt: str):
+        if "You are clustering" in prompt:
+            return (
+                "THINKING:\n"
+                "All three describe PresentBench grading with near-duplicate wording.\n"
+                "REASON: one oversized near-duplicate group\n"
+                "GROUPS:\n"
+                "- 0,1,2\n"
+            )
+        return (
+            "THINKING:\n"
+            "1 and 2 are paraphrases; 0 mentions a distinct pptx detail worth keeping.\n"
+            "REASON: merge pair keep one\n"
+            "DECISIONS:\n"
+            "- group=0 | ids=0,1,2 | VERDICT: MERGE | "
+            "CANONICAL: PresentBench grades slides.md not a pptx file | "
+            "MERGE_INDICES: 1,2 | KEEP_INDICES: 0\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+        dream_llm_cluster_enabled=True,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(handler)
+    keep_text = "PresentBench also records whether pptx packaging was attempted"
+    for text, count in (
+        ("PresentBench grades slides.md not a pptx file", 2),
+        ("PresentBench grades slides.md rather than pptx", 3),
+        (keep_text, 4),
+    ):
+        await store.add_record_direct(
+            "fact",
+            text,
+            count=count,
+            category="documents-office-and-records",
+            save=False,
+        )
+    await store.save()
+
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters >= 1
+    texts = set(store.facts_texts())
+    assert "PresentBench grades slides.md not a pptx file" in texts
+    assert keep_text in texts
+    assert "PresentBench grades slides.md rather than pptx" not in texts
+    assert len(store.facts) == 2
+    merged = next(r for r in store.facts if r["text"].startswith("PresentBench grades slides.md not"))
+    assert merged["count"] == 5
+    clusters = load_dream_clusters(cfg.resolved_dream_clusters_path())
+    assert clusters
+    member_set = set(clusters[0].member_texts)
+    assert "PresentBench grades slides.md not a pptx file" in member_set
+    assert keep_text in member_set
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_llm_skips_cross_category(tmp_path):
+    """Single-rule categories must not trigger LLM clustering across categories."""
+
+    def handler(prompt: str):
+        raise AssertionError("LLM merge must not run for singleton categories")
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(handler)
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md not a pptx file",
+        count=2,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md rather than pptx",
+        count=2,
+        category="software-engineering-devops",
+        save=False,
+    )
+    await store.save()
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=llm,
+        model="dummy-model",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters == 0
+    assert len(store.facts) == 2
+    assert not llm.calls
+
+
+@pytest.mark.asyncio
+async def test_dream_llm_cluster_disabled_skips_without_bm25(tmp_path):
+    """No embedding + dream_llm_cluster_enabled=False must not soft_cluster via BM25."""
+
+    def handler(prompt: str):
+        raise AssertionError("LLM must not be called when llm cluster is disabled")
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_llm_cluster_enabled=False,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    soft_calls = {"n": 0}
+    original_soft = store.soft_cluster
+
+    async def _guarded_soft(*args, **kwargs):
+        soft_calls["n"] += 1
+        return await original_soft(*args, **kwargs)
+
+    store.soft_cluster = _guarded_soft  # type: ignore[method-assign]
+    await store.add_record_direct("fact", "alpha fact one", count=2, save=False)
+    await store.add_record_direct("fact", "alpha fact two near", count=2, save=False)
+    await store.save()
+    result, _ = await run_dream_pass(
+        store,
+        cfg,
+        llm=ScriptedLLM(handler),
+        model="m",
+        capability_names=set(),
+    )
+    assert not result.skipped
+    assert result.merged_clusters == 0
+    assert soft_calls["n"] == 0
+    assert len(store.facts) == 2
+
+
+@pytest.mark.asyncio
+async def test_dream_llm_incremental_skips_already_clustered(tmp_path):
+    """Second dream must not Phase1 re-cluster KEEP_DISTINCT members; only new rules."""
+
+    phase1_prompts: list[str] = []
+
+    def handler(prompt: str):
+        if "You are clustering" in prompt:
+            phase1_prompts.append(prompt)
+            if "brand-new orphan rule about widgets" in prompt:
+                return (
+                    "THINKING:\nnew singleton alone\n"
+                    "REASON: no near duplicates among new rules\n"
+                    "GROUPS:\nNONE\n"
+                )
+            return (
+                "THINKING:\nparaphrases\n"
+                "REASON: keep distinct wording for now\n"
+                "GROUPS:\n- 0,1\n"
+            )
+        return (
+            "THINKING:\nconditions differ slightly\n"
+            "REASON: keep both\n"
+            "DECISIONS:\n"
+            "- group=0 | ids=0,1 | VERDICT: KEEP_DISTINCT | CANONICAL: | KEEP_INDICES: 0,1\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    llm = ScriptedLLM(handler)
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md not a pptx file",
+        count=2,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await store.add_record_direct(
+        "fact",
+        "PresentBench grades slides.md rather than pptx",
+        count=2,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await store.save()
+
+    result1, state1 = await run_dream_pass(
+        store, cfg, llm=llm, model="m", capability_names=set(), now=time.time()
+    )
+    assert not result1.skipped
+    assert result1.kept_clusters >= 1 or result1.merged_clusters == 0
+    assert len(phase1_prompts) == 1
+    clusters = load_dream_clusters(cfg.resolved_dream_clusters_path())
+    assert clusters
+    assert all(not c.dirty for c in clusters if c.track == "fact")
+
+    await store.add_record_direct(
+        "fact",
+        "brand-new orphan rule about widgets",
+        count=1,
+        category="documents-office-and-records",
+        save=False,
+    )
+    await store.save()
+    # Reset dream gate so a second pass runs.
+    state1.last_dream_at = 0.0
+    save_dream_state(cfg.resolved_dream_state_path(), state1)
+
+    result2, _ = await run_dream_pass(
+        store, cfg, llm=llm, model="m", capability_names=set(), now=time.time()
+    )
+    assert not result2.skipped
+    assert len(phase1_prompts) == 2
+    # Second Phase1 must only see the new rule, not the already-clustered pair.
+    assert "PresentBench grades slides.md not a pptx file" not in phase1_prompts[1]
+    assert "brand-new orphan rule about widgets" in phase1_prompts[1]
+
+
+def test_parse_cluster_groups_and_attach():
+    text = (
+        "THINKING:\n0 and 2 are paraphrases; 1 attaches to existing cluster.\n"
+        "REASON: one new group plus attach\n"
+        "GROUPS:\n"
+        "- 0,2\n"
+        "ATTACH:\n"
+        "- cluster=c_abc | ids=1\n"
+    )
+    part = parse_cluster_groups(text, n=3, min_size=2, known_cluster_ids={"c_abc"})
+    assert part is not None
+    assert part.groups == [[0, 2]]
+    assert part.attaches == [("c_abc", [1])]
+
+
+def test_parse_cluster_groups_none():
+    text = "THINKING:\nnone\nREASON: all distinct\nGROUPS:\nNONE\n"
+    part = parse_cluster_groups(text, n=3, min_size=2)
+    assert part is not None
+    assert part.groups == []
+
+
+def test_parse_cluster_groups_none_reason_block():
+    """REASON on its own line then body (common LLM layout) must still parse."""
+    text = (
+        "THINKING:\n"
+        "Rule 0, 1, and 2 are distinct declarative facts.\n"
+        "REASON:\n"
+        "All three rules concern different topics and should remain separate "
+        "singletons.\n"
+        "GROUPS:\n"
+        "NONE\n"
+    )
+    part = parse_cluster_groups(text, n=3, min_size=2)
+    assert part is not None
+    assert part.groups == []
+    assert part.attaches == []
+    assert "different topics" in part.reason
+    assert "distinct declarative" in part.thinking
+
+
+def test_parse_category_merge_decisions_basic():
+    text = (
+        "THINKING:\nmerge group 0\n"
+        "REASON: paraphrase\n"
+        "DECISIONS:\n"
+        "- group=0 | ids=0,2 | VERDICT: MERGE | CANONICAL: hello world | KEEP_INDICES:\n"
+    )
+    result = parse_category_merge_decisions(text, clusters=[[0, 2]], n=3)
+    assert result is not None
+    assert len(result.decisions) == 1
+    assert result.decisions[0].verdict == "MERGE"
+    assert result.decisions[0].canonical == "hello world"
+    assert result.decisions[0].merge_indices == []
+
+
+def test_parse_category_merge_decisions_subset():
+    text = (
+        "THINKING:\nmerge 0+1 keep 2\n"
+        "REASON: partial paraphrase\n"
+        "DECISIONS:\n"
+        "- group=0 | ids=0,1,2 | VERDICT: MERGE | CANONICAL: hello world | "
+        "MERGE_INDICES: 0,1 | KEEP_INDICES: 2\n"
+    )
+    result = parse_category_merge_decisions(text, clusters=[[0, 1, 2]], n=3)
+    assert result is not None
+    assert len(result.decisions) == 1
+    d = result.decisions[0]
+    assert d.verdict == "MERGE"
+    assert d.merge_indices == [0, 1]
+    assert d.keep_indices == [2]
+    assert d.canonical == "hello world"
+
+
+def test_resolved_dream_clusters_path_default(tmp_path):
+    cfg = TTSEConfig(store_path=str(tmp_path / "bank.json"))
+    path = cfg.resolved_dream_clusters_path()
+    assert path.replace("\\", "/").endswith("dream/dream-clusters.json")
+
+
+def test_sample_rules_random_cap(monkeypatch):
+    """Random shuffle keeps first max_rules; omitted covers the rest."""
+    records = [{"text": f"r{i}", "count": i} for i in range(5)]
+
+    def _fixed_shuffle(seq):
+        # Force order: reverse of original indexed pairs.
+        seq[:] = list(reversed(seq))
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_evolving.ttse.dream.random.shuffle",
+        _fixed_shuffle,
+    )
+    kept, omitted = _sample_rules(records, max_rules=2)
+    assert len(kept) == 2
+    # After reverse shuffle of indexed pairs, first 2 kept indices are 4 and 3.
+    assert [r["text"] for r in kept] == ["r3", "r4"]  # original relative order
+    assert omitted == [0, 1, 2]
+    # Under cap: no truncation.
+    all_kept, all_omitted = _sample_rules(records, max_rules=10)
+    assert len(all_kept) == 5
+    assert all_omitted == []
+
+
+def test_cap_cluster_by_count_prefers_high_count():
+    """Embedding-path cap keeps highest count while preserving relative order."""
+    records = [
+        {"text": "low-a", "count": 1},
+        {"text": "high-a", "count": 9},
+        {"text": "mid", "count": 5},
+        {"text": "high-b", "count": 8},
+        {"text": "low-b", "count": 2},
+    ]
+    kept, omitted = _cap_cluster_by_count(records, max_rules=3)
+    assert [r["text"] for r in kept] == ["high-a", "mid", "high-b"]
+    assert omitted == [0, 4]
+    under, under_omitted = _cap_cluster_by_count(records, max_rules=10)
+    assert len(under) == 5
+    assert under_omitted == []
+
+
+@pytest.mark.asyncio
+async def test_dream_merge_max_rules_truncates_embedding_cluster(tmp_path):
+    """Embedding soft-cluster merge prompt must respect dream_merge_max_rules."""
+    # Five near-duplicate vectors so soft_cluster yields one oversized cluster.
+    vecs = {
+        "rule-low-0": [1.0, 0.0],
+        "rule-high-1": [0.99, 0.01],
+        "rule-high-2": [0.98, 0.02],
+        "rule-mid-3": [0.97, 0.03],
+        "rule-low-4": [0.96, 0.04],
+    }
+    emb = FakeEmbedding(vecs)
+    seen: list[str] = []
+
+    def handler(prompt: str):
+        seen.append(prompt)
+        return (
+            "THINKING:\nsubset merge of high-count near-dupes\n"
+            "REASON: near duplicates\n"
+            "VERDICT: KEEP_DISTINCT\n"
+            "CANONICAL:\n"
+            "KEEP_INDICES:\n"
+        )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        embedding=emb,
+        embedding_max_rps=0,
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_soft_lo=0.72,
+        dream_merge_max_rules=3,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg, embedding=emb)
+    for text, count in (
+        ("rule-low-0", 1),
+        ("rule-high-1", 10),
+        ("rule-high-2", 9),
+        ("rule-mid-3", 5),
+        ("rule-low-4", 2),
+    ):
+        await store.add_record_direct("fact", text, count=count, save=False)
+    await store.save()
+
+    await run_dream_pass(
+        store,
+        cfg,
+        llm=ScriptedLLM(handler),
+        model="m",
+        capability_names=set(),
+    )
+    assert seen
+    prompt = seen[0]
+    # Highest-count three kept; lowest-count two omitted from the merge prompt.
+    assert "rule-high-1" in prompt
+    assert "rule-high-2" in prompt
+    assert "rule-mid-3" in prompt
+    assert "rule-low-0" not in prompt
+    assert "rule-low-4" not in prompt
+    # Omitted members remain in the bank.
+    texts = {r["text"] for r in store.facts}
+    assert "rule-low-0" in texts
+    assert "rule-low-4" in texts
+
+
+@pytest.mark.asyncio
+async def test_dream_category_max_rules_truncates_phase1(tmp_path, monkeypatch):
+    """Phase1 prompt must not include rules beyond dream_category_max_rules."""
+
+    seen: list[str] = []
+
+    def handler(prompt: str):
+        if "You are clustering" in prompt:
+            seen.append(prompt)
+            return "THINKING:\nnone\nREASON: none\nGROUPS:\nNONE\n"
+        raise AssertionError("unexpected Phase2")
+
+    def _keep_low_indices(seq):
+        # Indexed pairs stay in original order so first max_rules = 0,1.
+        pass
+
+    monkeypatch.setattr(
+        "openjiuwen.agent_evolving.ttse.dream.random.shuffle",
+        _keep_low_indices,
+    )
+
+    cfg = TTSEConfig(
+        store_path=str(tmp_path / "bank.json"),
+        dream_enabled=True,
+        dream_min_hours=0,
+        dream_min_rules=1,
+        dream_category_max_rules=2,
+        dream_purge_tips_enabled=False,
+        dream_prune_enabled=False,
+    )
+    store, cfg = _make_store(tmp_path, cfg=cfg)
+    for i in range(5):
+        await store.add_record_direct(
+            "fact",
+            f"rule number {i} about the same office docs domain",
+            count=10 - i,
+            category="documents-office-and-records",
+            save=False,
+        )
+    await store.save()
+    await run_dream_pass(
+        store,
+        cfg,
+        llm=ScriptedLLM(handler),
+        model="m",
+        capability_names=set(),
+    )
+    assert seen
+    # With identity shuffle, first 2 original rules are kept; later ones omitted.
+    assert "rule number 0" in seen[0]
+    assert "rule number 1" in seen[0]
+    assert "rule number 4" not in seen[0]
+
+
+@pytest.mark.asyncio
+async def test_induction_bm25_dedup_merges_near_duplicate(tmp_path):
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
+    )
+    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
+    assert await store.add_fact("PresentBench grades slides.md rather than pptx") is False
+    assert len(store.facts) == 1
+    assert store.facts[0]["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_induction_bm25_dedup_keeps_unrelated(tmp_path):
+    store = TTSERecordStore(
+        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
+    )
+    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
+    assert await store.add_fact("compile cxx with cl utf-8 flag on windows") is True
+    assert len(store.facts) == 2
+
+
+@pytest.mark.asyncio
 async def test_dream_merge_skips_cross_category_near_duplicates(tmp_path):
     """High-similarity facts in different categories must not share a cluster."""
     emb = FakeEmbedding(
@@ -733,7 +1495,6 @@ async def test_dream_merge_skips_cross_category_near_duplicates(tmp_path):
         dream_min_hours=0,
         dream_min_rules=1,
         dream_soft_lo=0.72,
-        dream_max_llm_merges=5,
         dream_purge_tips_enabled=False,
         dream_prune_enabled=False,
     )
@@ -784,7 +1545,6 @@ async def test_dream_merge_same_category_inherits_category(tmp_path):
         dream_min_hours=0,
         dream_min_rules=1,
         dream_soft_lo=0.72,
-        dream_max_llm_merges=5,
         dream_purge_tips_enabled=False,
         dream_prune_enabled=False,
     )

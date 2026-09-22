@@ -212,6 +212,24 @@ DREAM_MERGE_SYSTEM = (
 )
 
 
+DREAM_CLUSTER_SYSTEM = (
+    "You partition near-duplicate rules within ONE business-scenario category of an "
+    "agent experience bank. You only ASSIGN indices into clusters. Do NOT merge, "
+    "rewrite, or invent rule text. Always write THINKING first, then REASON, then "
+    "GROUPS (and ATTACH when existing clusters are listed). Output the format exactly."
+)
+
+
+DREAM_CATEGORY_MERGE_SYSTEM = (
+    "You consolidate near-duplicate rule clusters within ONE business-scenario "
+    "category of an agent experience bank. Reduce redundancy without dropping "
+    "mutually exclusive conditions. Clusters were proposed by a prior step; decide "
+    "MERGE, KEEP_DISTINCT, or REWRITE inside each cluster only. Do not merge across "
+    "clusters. Always write THINKING first, then REASON, then DECISIONS. Output the "
+    "format exactly."
+)
+
+
 def dream_merge_prompt(
     track: str,
     rules_block: str,
@@ -227,7 +245,8 @@ def dream_merge_prompt(
 TIP constraints:
 - CANONICAL (for MERGE/REWRITE) MUST be exactly: When <condition>: use <capability> to <action>
 - <capability> MUST be ONE name from Available Capabilities below.
-- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT.
+- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT
+  (or MERGE a subset and KEEP the rest via MERGE_INDICES/KEEP_INDICES).
 - Do NOT invent capabilities not listed.
 
 Available Capabilities:
@@ -247,6 +266,9 @@ same idea; KEEP_DISTINCT when conditions conflict or cover different cases. The 
 is only an importance hint — never override "different conditions" just because one count
 is higher.
 
+At most ONE merge per reply: fold one subset into a single CANONICAL; leave the rest
+unchanged. Do not emit multiple canonicals.
+
 Cluster rules (0-based index, text, count):
 {rules_block}
 
@@ -259,9 +281,202 @@ THINKING:
 REASON: <one-sentence decision summary>
 VERDICT: MERGE | KEEP_DISTINCT | REWRITE
 CANONICAL: <single retained or rewritten text; empty allowed for KEEP_DISTINCT>
-KEEP_INDICES: <comma-separated 0-based indices to keep when KEEP_DISTINCT; else empty>
+MERGE_INDICES: <comma-separated 0-based indices folded into CANONICAL when MERGE/REWRITE; empty = all>
+KEEP_INDICES: <comma-separated 0-based indices left unchanged; for KEEP_DISTINCT audit-only; for MERGE/REWRITE empty = complement of MERGE_INDICES>
 
 THINKING is the comparison/trade-off process (required, non-empty). REASON is the final conclusion sentence (required, non-empty).
+For full-cluster MERGE/REWRITE leave MERGE_INDICES and KEEP_INDICES empty.
+For subset MERGE (e.g. merge 0,1 keep 2): MERGE_INDICES: 0,1 and KEEP_INDICES: 2.
+"""
+
+
+def dream_cluster_prompt(
+    track: str,
+    category_id: str,
+    rules_block: str,
+    *,
+    min_size: int = 2,
+    existing_clusters_block: str = "",
+) -> str:
+    """Phase 1 user prompt: partition near-duplicates within one category."""
+    track_u = (track or "fact").upper()
+    if track_u == "TIP":
+        track_extra = (
+            "TIP note: different capabilities or mutually exclusive When-conditions "
+            "must NOT share a cluster."
+        )
+    else:
+        track_extra = (
+            "FACT note: cluster only declarative paraphrases; do not mix unrelated "
+            "environment claims."
+        )
+    attach_section = ""
+    if (existing_clusters_block or "").strip():
+        attach_section = f"""
+Existing clusters in this category (id + description only; members already clustered):
+{existing_clusters_block.strip()}
+
+You MAY attach new rule indices to an existing cluster when they clearly belong:
+ATTACH:
+- cluster=<id> | ids=3,5
+Omit ATTACH (or write ATTACH:\\nNONE) when no attachment applies.
+"""
+    return f"""You are clustering {track_u} rules that already share business-scenario category `{category_id}`.
+
+Goal: group rules that are paraphrases / near-duplicates of the SAME idea.
+Do NOT put mutually exclusive conditions, different capabilities, or clearly
+different cases in the same cluster.
+
+Rules (0-based index, count, text):
+{rules_block}
+{attach_section}
+Clustering rules:
+- A cluster means "these might be the same knowledge item" (paraphrase,
+  subsumption, or trivial wording difference).
+- Prefer SMALL, high-precision clusters over large mixed bags.
+- Singleton rules may be omitted (recommended) or listed as size-1; the
+  server ignores groups with size < {min_size}.
+- Every index appears in at most ONE group (or one ATTACH). Do not reuse an index.
+- Do not invent indices. Only use indices present above.
+- The count field is an importance hint only; do not cluster solely because
+  counts are high.
+- Do NOT output CANONICAL, MERGE, REWRITE, or rewritten rule text.
+
+{track_extra}
+
+Reply in EXACTLY this format (field order mandatory):
+THINKING:
+<multi-line: compare conditions/capabilities/scope; justify groups vs kept apart>
+REASON: <one-sentence summary of the partition>
+GROUPS:
+- 0,3,5
+- 1,4
+
+Each GROUPS line is one cluster: comma-separated 0-based indices.
+If there are no near-duplicate groups, output:
+GROUPS:
+NONE
+"""
+
+
+def _tip_or_fact_merge_constraints(track: str, *, capabilities: str = "") -> str:
+    track_u = (track or "fact").upper()
+    if track_u == "TIP":
+        return f"""
+TIP constraints:
+- CANONICAL (for MERGE/REWRITE) MUST be exactly: When <condition>: use <capability> to <action>
+- <capability> MUST be ONE name from Available Capabilities below.
+- If conditions are mutually exclusive or meaningfully different, choose KEEP_DISTINCT
+  or MERGE only the paraphrase subset (MERGE_INDICES) and KEEP the rest.
+- Do NOT invent capabilities not listed.
+- KEEP_DISTINCT leaves all members in the bank unchanged; KEEP_INDICES is audit-only then.
+- For MERGE/REWRITE: MERGE_INDICES lists members folded into CANONICAL (empty = all);
+  KEEP_INDICES lists members left unchanged (empty = complement of MERGE_INDICES).
+  At most one merge subset per group (one CANONICAL).
+
+Available Capabilities:
+{capabilities or "(none)"}
+"""
+    return """
+FACT constraints:
+- CANONICAL must remain a DECLARATIVE environment statement (no "you should", no TIP form).
+- Never convert a FACT into a TIP.
+- KEEP_DISTINCT leaves all members in the bank unchanged; KEEP_INDICES is audit-only then.
+- For MERGE/REWRITE: MERGE_INDICES lists members folded into CANONICAL (empty = all);
+  KEEP_INDICES lists members left unchanged (empty = complement of MERGE_INDICES).
+  At most one merge subset per group (one CANONICAL).
+"""
+
+
+def dream_category_merge_prompt(
+    track: str,
+    category_id: str,
+    rules_block: str,
+    clusters_block: str,
+    *,
+    capabilities: str = "",
+    invalid_tip_hint: bool = False,
+) -> str:
+    """Phase 2 user prompt: merge decisions for all proposed groups in one category."""
+    track_u = (track or "fact").upper()
+    tip_or_fact = _tip_or_fact_merge_constraints(track, capabilities=capabilities)
+    retry_hint = ""
+    if invalid_tip_hint:
+        retry_hint = """
+Previous CANONICAL was invalid for TIP shape; rewrite as a valid TIP
+(When <condition>: use <capability> to <action>) or KEEP_DISTINCT.
+"""
+    return f"""You are consolidating {track_u} rules in category `{category_id}`.
+
+These rules already share the same business-scenario category. A prior clustering
+step proposed the near-duplicate groups below. Your job:
+- For EACH proposed group with 2+ members: choose MERGE | KEEP_DISTINCT | REWRITE.
+- Do NOT move indices across groups.
+- Do NOT create new groups that mix indices from different proposed groups.
+- You MAY KEEP_DISTINCT when a proposed group was over-merged.
+- You MAY MERGE a subset: set MERGE_INDICES to the paraphrase members and
+  KEEP_INDICES to the rest (at most one subset → one CANONICAL per group).
+- Prefer MERGE or REWRITE when members are paraphrases of the same idea.
+- The count field is only an importance hint — never override "different
+  conditions" just because one count is higher.
+{retry_hint}
+All rules (0-based index, count, text):
+{rules_block}
+
+Proposed clusters (0-based group id → member indices):
+{clusters_block}
+{tip_or_fact}
+Reply in EXACTLY this format (field order mandatory):
+THINKING:
+<multi-line: per group, compare members and justify verdict>
+REASON: <one-sentence category-level summary>
+DECISIONS:
+- group=0 | ids=0,3,5 | VERDICT: MERGE | CANONICAL: <text> | MERGE_INDICES: 0,3 | KEEP_INDICES: 5
+- group=1 | ids=1,4 | VERDICT: KEEP_DISTINCT | CANONICAL: | MERGE_INDICES: | KEEP_INDICES: 1,4
+- group=2 | ids=2,7 | VERDICT: REWRITE | CANONICAL: <text> | MERGE_INDICES: | KEEP_INDICES:
+
+Field rules:
+- Include exactly one DECISIONS line per proposed group (same group ids as above).
+- ids MUST equal the proposed member set for that group (order may differ).
+- VERDICT is one of MERGE | KEEP_DISTINCT | REWRITE.
+- CANONICAL required for MERGE/REWRITE (single retained or rewritten text);
+  empty allowed for KEEP_DISTINCT.
+- MERGE_INDICES: members folded into CANONICAL for MERGE/REWRITE (subset of ids;
+  empty = merge all ids). Empty for KEEP_DISTINCT.
+- KEEP_INDICES: members left unchanged. For KEEP_DISTINCT may list all ids
+  (audit). For MERGE/REWRITE must be a subset of ids disjoint from MERGE_INDICES;
+  empty = complement of MERGE_INDICES (or empty when merging all).
+- THINKING and REASON are required and non-empty.
+"""
+
+
+DREAM_PURGE_SYSTEM = (
+    "You quality-check TIP rules in an agent experience bank. "
+    "Judge format validity and over-genericity only. "
+    "Do not require capabilities to appear on any whitelist. "
+    "Output one structured line per tip index exactly."
+)
+
+
+def dream_purge_prompt(tips_block: str) -> str:
+    """Prompt for Auto-dream batch TIP form / over-generic quality check."""
+    return f"""You are reviewing TIP rules from an agent experience bank.
+
+For each tip, decide KEEP or PURGE using ONLY these criteria:
+1. Format: a valid TIP is shaped like
+   When <condition>: use <capability> to <action>
+   Fullwidth colon (：) is acceptable. Declarative statements without this shape
+   are tip_fact_shaped. Broken When/use/to structure is tip_malformed.
+2. Over-generic: purge when the condition is empty/vacuous (e.g. "any task",
+   "always", "in general") — tip_too_generic_condition — or the action is empty
+   / vague with no concrete object (e.g. "check", "handle it") — tip_too_generic_action.
+3. Do NOT purge merely because <capability> is unfamiliar or not on a list.
+
+Tips (0-based index):
+{tips_block}
+
+Reply with EXACTLY one line per tip, in index order, no other text:
+INDEX: <i> | VERDICT: KEEP|PURGE | REASON: tip_malformed|tip_fact_shaped|tip_too_generic_condition|tip_too_generic_action|ok
 """
 
 
