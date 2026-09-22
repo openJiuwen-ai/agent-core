@@ -3,6 +3,9 @@
 
 """Unit tests for AgentTeam module"""
 
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import (
     AsyncMock,
     patch,
@@ -11,7 +14,9 @@ from unittest.mock import (
 import pytest
 import pytest_asyncio
 
+from openjiuwen.agent_teams.agent.agent_configurator import _validate_member_worktree_isolation
 from openjiuwen.agent_teams.messager import Messager
+from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     TeamRuntimeContext,
     TeamSpec,
@@ -1837,3 +1842,153 @@ async def test_shutdown_error_member_settles_without_runtime_event(db, message_b
     member = await db.member.get_member("dev-1", team_id)
     assert member.status == MemberStatus.SHUTDOWN.value
     assert await db.message.get_team_messages(team_name=team_id) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_worktree_without_scope_rejects_before_registration(
+    agent_team: TeamBackend,
+    sample_agent_card: AgentCard,
+    db: TeamDatabase,
+) -> None:
+    """Reject worktree isolation when no scope validator was configured."""
+    result = await agent_team.spawn_member(
+        member_name="isolated",
+        display_name="Isolated",
+        agent_card=sample_agent_card,
+        isolation="worktree",
+    )
+
+    assert not result.ok
+    assert "no worktree validator was configured" in result.reason
+    assert await db.member.get_member("isolated", "test_team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_worktree_without_project_dir_rejects_before_registration(
+    db: TeamDatabase,
+    message_bus: Messager,
+    sample_agent_card: AgentCard,
+) -> None:
+    """Expose the runtime's project-dir error before writing a member row."""
+    spec = TeamAgentSpec(agents={}, build_context=SimpleNamespace(project_dir=None))
+
+    async def validate_worktree(member_name: str) -> None:
+        """Use the configured registration check."""
+        await _validate_member_worktree_isolation(spec, "test_team", member_name)
+
+    await db.team.create_team(
+        team_name="test_team",
+        display_name="Test Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name="test_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        validate_worktree_isolation=validate_worktree,
+    )
+    result = await backend.spawn_member(
+        member_name="isolated",
+        display_name="Isolated",
+        agent_card=sample_agent_card,
+        isolation="worktree",
+    )
+
+    assert not result.ok
+    assert "build_context.project_dir" in result.reason
+    assert await db.member.get_member("isolated", "test_team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_worktree_with_non_git_directory_rejects_before_registration(
+    db: TeamDatabase,
+    message_bus: Messager,
+    sample_agent_card: AgentCard,
+    tmp_path: Path,
+) -> None:
+    """Reject a regular directory without leaving a member record."""
+    project_dir = tmp_path / "project"
+    project_dir.mkdir()
+    spec = TeamAgentSpec(agents={}, build_context=SimpleNamespace(project_dir=str(project_dir)))
+
+    async def validate_worktree(member_name: str) -> None:
+        """Use the configured registration check."""
+        await _validate_member_worktree_isolation(spec, "test_team", member_name)
+
+    await db.team.create_team(
+        team_name="test_team",
+        display_name="Test Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name="test_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        validate_worktree_isolation=validate_worktree,
+    )
+    result = await backend.spawn_member(
+        member_name="isolated",
+        display_name="Isolated",
+        agent_card=sample_agent_card,
+        isolation="worktree",
+    )
+
+    assert not result.ok
+    assert "not in a git repository" in result.reason
+    assert await db.member.get_member("isolated", "test_team") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_spawn_worktree_with_git_subdirectory_registers_member(
+    db: TeamDatabase,
+    message_bus: Messager,
+    sample_agent_card: AgentCard,
+    tmp_path: Path,
+) -> None:
+    """Accept worktree isolation when the runtime can resolve its scope."""
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    subprocess.run(
+        ["git", "init", str(repo_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    project_dir = repo_dir / "source"
+    project_dir.mkdir()
+    spec = TeamAgentSpec(agents={}, build_context=SimpleNamespace(project_dir=str(project_dir)))
+
+    async def validate_worktree(member_name: str) -> None:
+        """Use the configured registration check."""
+        await _validate_member_worktree_isolation(spec, "test_team", member_name)
+
+    await db.team.create_team(
+        team_name="test_team",
+        display_name="Test Team",
+        leader_member_name="leader1",
+    )
+    backend = TeamBackend(
+        team_name="test_team",
+        member_name="leader1",
+        db=db,
+        messager=message_bus,
+        is_leader=True,
+        validate_worktree_isolation=validate_worktree,
+    )
+    result = await backend.spawn_member(
+        member_name="isolated",
+        display_name="Isolated",
+        agent_card=sample_agent_card,
+        isolation="worktree",
+    )
+
+    assert result.ok
+    assert await db.member.get_member("isolated", "test_team") is not None

@@ -58,6 +58,26 @@ if TYPE_CHECKING:
     from openjiuwen.harness.tools.worktree import WorktreeManager
 
 
+async def _validate_member_worktree_isolation(
+    spec: TeamAgentSpec,
+    team_name: str,
+    member_name: str,
+) -> None:
+    """Check the project scope and Git repository before registering a member."""
+    from openjiuwen.agent_teams.worktree.session_scope import build_worktree_owner_scope
+    from openjiuwen.harness.tools.worktree.git import find_canonical_git_root
+
+    scope = build_worktree_owner_scope(
+        team_name=team_name,
+        member_name=member_name,
+        spec=spec,
+    )
+    if await find_canonical_git_root(scope.project_dir) is None:
+        raise RuntimeError(
+            f"Team worktree isolation project_dir is not in a git repository: {scope.project_dir}"
+        )
+
+
 _TEAM_WORKTREE_BASH_DENY_PATTERNS = [
     r"\bgit(?:\s+(?:-[A-Za-z](?:\s+\S+)?|--[^\s;&|]+(?:=\S+)?))*\s+worktree\s+"
     r"(?:add|remove|prune|move|repair|lock|unlock)\b",
@@ -1007,6 +1027,11 @@ class AgentConfigurator:
                 current_model_name = request_config.model_name
             provider = current_model_config.model_client_config.client_provider
             current_model_provider = provider.value if isinstance(provider, ProviderType) else provider
+
+        async def validate_worktree_isolation(member_name: str) -> None:
+            """Validate the member's worktree scope and repository before registration."""
+            await _validate_member_worktree_isolation(spec, team_name, member_name)
+
         agent_team = TeamBackend(
             team_name=team_name,
             member_name=current_member_name,
@@ -1035,6 +1060,7 @@ class AgentConfigurator:
             on_member_started=self._on_teammate_created,
             on_member_restarted=on_member_restarted,
             on_member_stopped=on_member_stopped,
+            validate_worktree_isolation=validate_worktree_isolation,
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
         )
 

@@ -127,6 +127,7 @@ class TeamBackend:
         on_member_started: Callable[[str], Awaitable[None]] | None = None,
         on_member_restarted: Callable[[str], Awaitable[bool]] | None = None,
         on_member_stopped: Callable[[str], Awaitable[None]] | None = None,
+        validate_worktree_isolation: Callable[[str], Awaitable[None]] | None = None,
         plan_storage_dir: str | None = None,
         plan_id: str | None = None,
         leader_member_name: str | None = None,
@@ -217,6 +218,8 @@ class TeamBackend:
                 member runtime. Used after an atomic ERROR→RESTARTING claim.
             on_member_stopped: Optional async callback that removes a dead
                 member's stale runtime handle after ERROR→SHUTDOWN settles.
+            validate_worktree_isolation: Validate a member's worktree scope
+                before its database row is created.
             leader_prompt: The leader's private prompt (``LeaderSpec.prompt``
                 via ``ctx.prompt``). Persisted on the leader's DB row at
                 ``build_team`` so cold-recovery — which rebuilds the leader
@@ -300,6 +303,7 @@ class TeamBackend:
         self._on_member_started = on_member_started
         self._on_member_restarted = on_member_restarted
         self._on_member_stopped = on_member_stopped
+        self._validate_worktree_isolation = validate_worktree_isolation
 
         self.task_manager = TeamTaskManager(
             self.team_name,
@@ -671,6 +675,15 @@ class TeamBackend:
             return MemberOpResult.fail(f"Member {member_name} already exists in team {self.team_name}")
         if isolation is not None and isolation != "worktree":
             return MemberOpResult.fail("Invalid isolation: expected 'worktree' or None")
+        if isolation == "worktree":
+            if self._validate_worktree_isolation is None:
+                return MemberOpResult.fail(
+                    "Team worktree isolation is unavailable: no worktree validator was configured",
+                )
+            try:
+                await self._validate_worktree_isolation(member_name)
+            except RuntimeError as exc:
+                return MemberOpResult.fail(str(exc))
 
         if not await self.db.team.team_exists(self.team_name):
             return MemberOpResult.fail(
