@@ -52,7 +52,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.base import logger
 from openjiuwen.harness_providers.codex.mapping import MappedCodexEvent
-from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides
+from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides, namespaced_tool_name
 from openjiuwen.harness_providers.codex.rollout_trace import CodexRolloutTraceReader
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
@@ -69,9 +69,6 @@ _TERMINAL_INFERENCE_TYPES = {
     "inference_cancelled": ModelRequestStatus.CANCELLED,
 }
 _TOOL_SEARCH_OUTPUT_TYPE = "tool_search_output"
-# Codex groups its tools into namespaces and leaves this one implicit: a call
-# states its namespace only when the tool is not in it.
-_DEFAULT_TOOL_NAMESPACE = "functions"
 _TOOL_CALL_TYPES = frozenset(
     {"function_call", "custom_tool_call", "local_shell_call", "mcp_tool_call", "tool_search_call"},
 )
@@ -680,7 +677,7 @@ class CodexRequestObserver:
         """
         name = str(call.get("name") or "")
         if not name and facts is not None and facts.tool_name:
-            name = _namespaced_tool_name(facts.namespace or "", facts.tool_name)
+            name = namespaced_tool_name(facts.namespace or "", facts.tool_name)
         name = name or str(call.get("item_type") or "tool")
         started_at = float(call.get("asked_at") or 0.0) or None
         duration_ms = facts.duration_ms if facts is not None else None
@@ -944,24 +941,17 @@ def _flatten_tools(tools: Any, *, namespace: str = "") -> list[dict[str, Any]]:
         definitions.append({
             # The model addresses a tool by its namespace and name, which is
             # how its calls arrive and how a tool item is named here.
-            "name": _namespaced_tool_name(namespace, name),
+            "name": namespaced_tool_name(namespace, name),
             "description": str(tool.get("description") or ""),
             "parameters": to_json_safe(schema),
         })
     return definitions
 
 
-def _namespaced_tool_name(namespace: str, name: str) -> str:
-    """Return the name the model addresses one tool by."""
-    if not namespace or namespace == _DEFAULT_TOOL_NAMESPACE:
-        return name
-    return f"{namespace}.{name}"
-
-
 def _called_tool_name(item: dict[str, Any]) -> str:
     """Return the name a tool call item states, namespace included."""
     name = str(item.get("name") or item.get("type") or "tool")
-    return _namespaced_tool_name(str(item.get("namespace") or ""), name)
+    return namespaced_tool_name(str(item.get("namespace") or ""), name)
 
 
 def _request_parameters(request: dict[str, Any]) -> dict[str, Any]:

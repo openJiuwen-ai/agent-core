@@ -20,6 +20,7 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, Sequence, runtime_checkable
 
+from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn
 from openjiuwen.agent_teams.team_context import TeamContextTracker
 from openjiuwen.core.common.logging import team_logger
@@ -208,7 +209,7 @@ class ExternalHarnessMemberRuntime:
         agent_kind: str | None = None,
         cli_path: str | None = None,
         inject_mcp: bool = False,
-        mcp_server_name: str = "openjiuwen-team",
+        mcp_server_name: str = TEAM_MCP_SERVER_NAME,
     ) -> None:
         self._harness = harness
         self._context_source = context

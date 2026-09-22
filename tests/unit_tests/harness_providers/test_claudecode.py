@@ -977,6 +977,47 @@ def test_builtin_model_and_effort_flow_to_options(monkeypatch: pytest.MonkeyPatc
     assert card.supports(HarnessCapability.MODEL_DISCOVERY)
 
 
+def test_the_prompt_states_how_this_cli_names_an_mcp_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The host names its tools by their bare names, and this CLI ships tools
+    # of its own that a bare name can just as well be read as. Which server a
+    # name belongs to is the host's to say; what the model must call it is
+    # this provider's, because only it knows how its CLI spells one out.
+    sdk, _ = _install_fake_sdk(monkeypatch)
+    options = build_claude_options(
+        sdk=sdk,
+        config=ClaudeCodeHarnessConfig(),
+        model=None,
+        cwd=None,
+        env={},
+        system_prompt="Use `send_message` to reach a teammate.",
+        session_id=None,
+        resume=None,
+        mcp_servers={"openjiuwen-team": {"type": "stdio", "command": "team", "args": []}},
+        can_use_tool=None,
+        stderr=None,
+    )
+    appended = options.system_prompt["append"]
+    assert appended.startswith('<mcp-tools>\n<server name="openjiuwen-team"')
+    assert 'tool-name="mcp__openjiuwen-team__{tool}"' in appended
+    assert appended.endswith("Use `send_message` to reach a teammate.")
+
+    # Nothing to declare without a server, and the prompt stays byte-identical.
+    bare = build_claude_options(
+        sdk=sdk,
+        config=ClaudeCodeHarnessConfig(),
+        model=None,
+        cwd=None,
+        env={},
+        system_prompt="Use `send_message` to reach a teammate.",
+        session_id=None,
+        resume=None,
+        mcp_servers={},
+        can_use_tool=None,
+        stderr=None,
+    )
+    assert bare.system_prompt == {"type": "preset", "append": "Use `send_message` to reach a teammate."}
+
+
 @pytest.mark.asyncio
 async def test_list_models_reads_the_live_catalog_or_probes_without_starting(monkeypatch: pytest.MonkeyPatch) -> None:
     _, state = _install_fake_sdk(monkeypatch)

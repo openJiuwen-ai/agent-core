@@ -19,6 +19,7 @@ import os
 from typing import TYPE_CHECKING, Any, Optional
 
 from openjiuwen.harness_providers.skills import normalize_skills
+from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.external.cli_agent.backends import backend_for
 from openjiuwen.agent_teams.external.cli_agent.spawn import build_cli_runtime
 from openjiuwen.agent_teams.paths import team_workspace_dir
@@ -99,6 +100,12 @@ async def _build_member_system_prompt(
     through the tracker bound right after spawn — the same channel in-process
     members use.
 
+    The policy names the team's tools by their bare names, which is not what a
+    CLI member sees: its tools arrive through MCP, under a namespace. The
+    prompt therefore declares which server they come from, so the bare names
+    resolve to the team's tools and not to a built-in of the CLI that happens
+    to be named alike.
+
     Args:
         spec: The team spec carrying lifecycle / teammate_mode / team_mode /
             dispatch_mode.
@@ -129,6 +136,7 @@ async def _build_member_system_prompt(
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=spec.expose_human_agents_to_teammates,
         workspace_prompt_variant="external",
+        mcp_server_name=TEAM_MCP_SERVER_NAME,
         loader=make_template_loader(ws_cache),
     )
     return prompt or None

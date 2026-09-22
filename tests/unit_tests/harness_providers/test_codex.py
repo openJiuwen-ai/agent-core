@@ -54,6 +54,7 @@ from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
     build_thread_options,
     codex_mcp_config_overrides,
+    codex_mcp_tool_naming,
     codex_model_config_overrides,
 )
 from tests.test_logger import logger
@@ -314,7 +315,11 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
     assert harness.provider_session_id == "thread-1"
     kind, options = state.thread_calls[0]
     assert kind == "start"
-    assert options["developer_instructions"] == "You are a coder."
+    # The host prompt names the team's tools by their bare names, so the
+    # namespace the CLI puts them in is stated ahead of it.
+    assert options["developer_instructions"].startswith('<mcp-tools>\n<server name="team"')
+    assert 'tool-name="mcp__team.{tool}"' in options["developer_instructions"]
+    assert options["developer_instructions"].endswith("You are a coder.")
     assert options["approval_mode"] == "deny_all"
     codex_config = state.configs[0].kwargs
     assert codex_config["env"]["OPENJIUWEN_CODEX_API_KEY"] == "k"
@@ -1065,3 +1070,19 @@ async def test_set_model_rides_the_next_turn_and_survives_reconnects(monkeypatch
     assert options["model"] == "gpt-5.5"
     assert options["config"]["model_reasoning_effort"] == "high"
     await harness.stop()
+
+
+def test_the_tool_name_declared_is_the_one_a_call_states() -> None:
+    # The declaration tells the model what to call a team tool; the observer
+    # reads back what it did call. Both come from the same rule, so a change
+    # to one cannot leave the other behind — and the form is the one a real
+    # rollout records: namespace "mcp__openjiuwen_team", name "send_message".
+    from openjiuwen.harness_providers.codex.observation import _called_tool_name
+
+    server = McpServerConfig(name="openjiuwen-team", transport=McpTransport.STDIO, command=("mcp",))
+    declared = codex_mcp_tool_naming((server,))
+    assert 'tool-name="mcp__openjiuwen_team.{tool}"' in declared
+
+    called = _called_tool_name({"type": "function_call", "name": "send_message", "namespace": "mcp__openjiuwen_team"})
+    assert called == "mcp__openjiuwen_team.send_message"
+    assert called in declared.replace("{tool}", "send_message")

@@ -51,6 +51,7 @@ from openjiuwen.harness_providers.codex.options import (
     build_codex_config,
     build_process_env,
     build_thread_options,
+    codex_mcp_tool_naming,
     codex_model_options,
     load_codex_sdk,
     start_thread_with_raw_events,
@@ -249,20 +250,26 @@ class CodexHarness(SerializedTurnHarness):
             enable_user_input=HostCapability.USER_INPUT in context.host_capabilities,
             extra_config_overrides=self._observation_overrides,
         )
+        # The host names its tools by their bare names; the CLI shows them
+        # under a namespace of its own. Leading with the naming declaration is
+        # what makes the two the same tools.
+        host_prompt = "\n\n".join(
+            part for part in (codex_mcp_tool_naming(context.mcp_servers), context.system_prompt) if part
+        )
         options = build_thread_options(
             sdk=sdk,
             config=self._config,
             model=model,
             cwd=cwd,
-            system_prompt=context.system_prompt,
+            system_prompt=host_prompt,
         )
         client = sdk.AsyncCodex(config=codex_config)
         if context.host_capabilities & _INTERACTIVE_HOST_CAPABILITIES:
             _install_approval_handler(client, self._approval_handler)
         try:
-            if self._config.system_prompt_mode == "append" and context.system_prompt:
+            if self._config.system_prompt_mode == "append" and host_prompt:
                 options["developer_instructions"] = await append_developer_instructions(
-                    client, sdk, self._config, cwd=cwd, system_prompt=context.system_prompt,
+                    client, sdk, self._config, cwd=cwd, system_prompt=host_prompt,
                 )
             confirmed_model = ""
             if resume_thread_id is not None:

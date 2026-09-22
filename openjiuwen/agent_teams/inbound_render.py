@@ -21,6 +21,11 @@ clean boundary:
 - ``<team-context>`` wraps **standing team state** the member is being
   told about for the first time (its own identity, the team metadata) —
   a fact about the team rather than something that happened.
+- ``<team-policy>`` wraps the **standing team policy** in an external CLI
+  member's system prompt. It is the one block of this family that is not a
+  conversation message, and it is what lets the other four be described as
+  a family: the tools the policy names without a namespace are the same
+  tools the messages name, so one declaration inside it covers them all.
 - ``<team-note>`` carries a framework-added hint or constraint attached to
   either of the above (e.g. a reply hint, or the HITT silence constraint).
   It is rendered **nested inside the block it annotates**, as the last
@@ -271,6 +276,33 @@ def render_team_context_with_identity(
     return f"<team-context>\n{chr(10).join(inner)}\n</team-context>"
 
 
+def render_team_policy(*, body: str, tools: str, note: str) -> str:
+    """Render the standing team policy as a ``<team-policy>`` XML block.
+
+    The ``tools`` attribute names the MCP server that provides the team's
+    collaboration tools, and ``note`` states what that means for the bare tool
+    names the policy uses. How one of those tools is actually addressed is not
+    stated here: the name a model calls it by is the harness provider's to
+    state, and the two meet on the server name alone.
+
+    The body is the team's own prompt text rather than something a sender
+    wrote, so, unlike every other block in this module, it is **not escaped**:
+    it is Markdown, and escaping would corrupt the backticks, ampersands and
+    comparison operators the policy templates are written with.
+
+    Args:
+        body: The assembled policy sections, inserted verbatim.
+        tools: Name of the MCP server providing the team's tools.
+        note: The tool-namespace declaration, inserted verbatim as the
+            block's first child.
+
+    Returns:
+        The rendered ``<team-policy>`` block.
+    """
+    declaration = f'<team-note kind="tool-namespace">\n{note}\n</team-note>'
+    return f'<team-policy tools="{_esc_attr(tools)}">\n{declaration}\n\n{body}\n</team-policy>'
+
+
 def snapshot_kind_of(text: str) -> str | None:
     """Return the snapshot kind ``text`` is, or None when it is not one.
 
@@ -334,5 +366,6 @@ __all__ = [
     "render_inbound",
     "render_team_context",
     "render_team_context_with_identity",
+    "render_team_policy",
     "snapshot_kind_of",
 ]

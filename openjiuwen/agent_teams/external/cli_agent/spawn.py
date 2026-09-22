@@ -20,6 +20,7 @@ import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
@@ -194,7 +195,7 @@ async def build_cli_runtime(
     cli_path: str | None = None,
     codex_bin: str | None = None,
     inject_mcp: bool = True,
-    mcp_server_name: str = "openjiuwen-team",
+    mcp_server_name: str = TEAM_MCP_SERVER_NAME,
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     mcp_default_tools_approval_mode: str | None = None,
     codex_bypass_approvals_and_sandbox: bool = True,

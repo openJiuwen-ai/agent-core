@@ -15,6 +15,7 @@ harness_providers/
 ├── factory.py      # create_harness(manifest, provider=...) / build_harness_context(...) / resolve_provider
 ├── skills.py       # Portable bundle copying to CLI project discovery roots; skip/replace conflicts
 ├── inputs.py       # harness_input_text: HarnessInput -> prompt text
+├── mcp_naming.py   # mcp_tool_naming_preamble: the <mcp-tools> declaration each provider leads its prompt with
 ├── jsonsafe.py     # to_json_safe: vendor objects -> protocol JSON values
 ├── trajectory.py   # HarnessTrajectoryRecorder: protocol events -> trajectory spans (host glue, like io_adapter)
 ├── telemetry/      # otlp_receiver.py: process-wide loopback OTLP receiver shared by providers
@@ -168,6 +169,25 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
     `DiagnosticEvent`. A turn spanning several cycles sums the per-cycle usage
     and reports cost as what it added to the session total, which is what the
     CLI counts.
+12. **A provider states how its CLI names the tools the host registered.** A
+    host writes its prompt in terms of the tools it registered, by the names it
+    gave them; a CLI shows them under a namespace of its own and may ship a
+    built-in whose name resembles one of them, so a bare name has two readings
+    and a smaller model picks the wrong one (a Claude Code member answered
+    `send_message` with the CLI's own `SendMessage`). Before the host prompt,
+    each provider leads with the `<mcp-tools>` declaration built by
+    `mcp_naming.mcp_tool_naming_preamble`, one line per registered server
+    carrying the name pattern that server's tools are addressed by: Claude Code
+    `mcp__<server>__<tool>`, Codex `mcp__<server with - as _>.<tool>`. The
+    pattern is the provider's alone — the host only says which server its bare
+    names belong to, and the two meet on the server name, so neither has to
+    know the other's rule and a provider that declares nothing still leaves the
+    host's statement true. Codex builds the pattern from the same
+    `namespaced_tool_name` its observer reads a call back with, so the name the
+    model is told and the name the trajectory records cannot drift apart.
+    Built-in tools are never removed to resolve the clash: a CLI's own
+    subagents and messaging are its business, and the team's teammates are a
+    layer above them.
 
 ## Change requirements
 

@@ -123,3 +123,53 @@ def test_member_system_prompt_uses_external_workspace_policy():
     assert "shared team deliverables directory" not in prompt
     assert "given in the team info (`<team-context>`)" in prompt
     assert "workspace_meta" in prompt
+
+
+@pytest.mark.level0
+def test_member_system_prompt_declares_the_server_its_bare_tool_names_belong_to():
+    # A CLI member reaches the team's tools through MCP, under a namespace,
+    # and may have a built-in tool named like one of them. Naming the server
+    # once says which reading of every bare name in the policy is the right
+    # one — without the policy having to spell any tool out.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+        workspace_prompt_variant="external",
+        mcp_server_name="openjiuwen-team",
+    )
+    assert prompt.startswith('<team-policy tools="openjiuwen-team">')
+    assert prompt.endswith("</team-policy>")
+    assert '<team-note kind="tool-namespace">' in prompt
+    assert "the MCP server `openjiuwen-team` provides" in prompt
+    # How that server's tools are actually addressed is the provider's to say.
+    assert "mcp__" not in prompt
+
+
+@pytest.mark.level0
+def test_the_declaration_covers_the_message_blocks_too():
+    # The policy is not the only place a tool is named by its bare name: the
+    # reply hints and task notices a member receives do it as well. They are
+    # the same family of blocks, so one declaration reaches all of them.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+        workspace_prompt_variant="external",
+        mcp_server_name="openjiuwen-team",
+    )
+    declaration = prompt.split("</team-note>")[0]
+    for block in ("team-inbound", "team-event", "team-context", "team-note"):
+        assert block in declaration
+
+
+@pytest.mark.level0
+def test_an_in_process_member_reads_the_policy_unwrapped():
+    # Its tools are called by the bare name, so there is nothing to declare.
+    prompt = build_team_member_system_prompt(
+        role=TeamRole.TEAMMATE,
+        member_name="dev-1",
+        language="en",
+    )
+    assert "<team-policy" not in prompt
+    assert "tool-namespace" not in prompt

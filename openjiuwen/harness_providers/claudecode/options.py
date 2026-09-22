@@ -9,7 +9,7 @@ import json
 import os
 import uuid
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from openjiuwen.harness_protocol import (
     HarnessError,
@@ -20,6 +20,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
 from openjiuwen.harness_providers.jsonsafe import to_json_safe
+from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_naming_preamble
 from openjiuwen.harness_providers.telemetry.otlp_receiver import OTEL_RESOURCE_SOURCE_ID
 
 if TYPE_CHECKING:
@@ -285,6 +286,15 @@ def mcp_servers_to_sdk(servers: tuple[McpServerConfig, ...]) -> dict[str, Any]:
     return result
 
 
+def claude_mcp_tool_naming(server_names: Iterable[str]) -> str:
+    """State how the CLI names the tools of the given MCP servers.
+
+    Claude Code offers an MCP tool as ``mcp__<server>__<tool>``, with the
+    server name spelled exactly as it was registered.
+    """
+    return mcp_tool_naming_preamble({name: f"mcp__{name}__{TOOL_PLACEHOLDER}" for name in server_names})
+
+
 def build_claude_options(
     *,
     sdk: Any,
@@ -304,11 +314,18 @@ def build_claude_options(
 
     ``settings_env`` is merged over ``config.settings_env`` into the
     ``--settings`` env, for env the harness itself must pin above user settings.
+
+    The prompt is led by the naming declaration for the session's MCP servers,
+    so the tools the host names by their bare names resolve to the servers it
+    registered rather than to a built-in tool of the CLI.
     """
-    if config.system_prompt_mode == "replace" and system_prompt:
-        prompt_option: Any = system_prompt
+    prompt_text = "\n\n".join(
+        part for part in (claude_mcp_tool_naming(mcp_servers), system_prompt) if part
+    )
+    if config.system_prompt_mode == "replace" and prompt_text:
+        prompt_option: Any = prompt_text
     else:
-        prompt_option = {"type": "preset", "append": system_prompt or ""}
+        prompt_option = {"type": "preset", "append": prompt_text}
     settings = config.settings
     endpoint_settings = model_settings(model, {**config.settings_env, **settings_env})
     if endpoint_settings is not None:
@@ -338,6 +355,7 @@ def build_claude_options(
 
 __all__ = [
     "apply_claude_flag_settings",
+    "claude_mcp_tool_naming",
     "claude_model_options",
     "claude_request_log_env",
     "claude_request_log_settings_env",

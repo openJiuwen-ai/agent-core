@@ -9,7 +9,7 @@ import inspect
 import json
 import os
 import re
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 from openjiuwen.core.common.logging import LazyLogger, LogManager
 from openjiuwen.harness_protocol import (
@@ -20,10 +20,14 @@ from openjiuwen.harness_protocol import (
     UnsupportedHarnessCapabilityError,
 )
 from openjiuwen.harness_providers.codex.config import CodexHarnessConfig, CodexModelConfig
+from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_naming_preamble
 
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 CODEX_API_KEY_ENV = "OPENJIUWEN_CODEX_API_KEY"
+# Codex groups its tools into namespaces and leaves this one implicit: a call
+# states its namespace only when the tool is not in it.
+DEFAULT_TOOL_NAMESPACE = "functions"
 # Codex feature flag exposing the experimental ``request_user_input`` tool in
 # default mode; without it the model only has the tool in collaboration modes.
 USER_INPUT_FEATURE_OVERRIDE = "features.default_mode_request_user_input=true"
@@ -113,6 +117,36 @@ def codex_otel_config_overrides(*, endpoint: str, source_id: str) -> tuple[str, 
     )
 
 
+def codex_server_key(server_name: str) -> str:
+    """Return the ``mcp_servers.<key>`` name Codex knows one server by.
+
+    Codex reads the key as a TOML bare key, so a hyphen in the protocol name
+    becomes an underscore here -- and stays one in the namespace the model
+    addresses that server's tools in.
+    """
+    return server_name.replace("-", "_")
+
+
+def namespaced_tool_name(namespace: str, name: str) -> str:
+    """Return the name the model addresses one tool by.
+
+    Codex groups its tools into namespaces and leaves the default one implicit:
+    a call states its namespace only when the tool is not in it.
+    """
+    if not namespace or namespace == DEFAULT_TOOL_NAMESPACE:
+        return name
+    return f"{namespace}.{name}"
+
+
+def codex_mcp_tool_naming(servers: Iterable[McpServerConfig]) -> str:
+    """State how the CLI names the tools of the given MCP servers."""
+    patterns = {
+        server.name: namespaced_tool_name(f"mcp__{codex_server_key(server.name)}", TOOL_PLACEHOLDER)
+        for server in servers
+    }
+    return mcp_tool_naming_preamble(patterns)
+
+
 def codex_mcp_config_overrides(
     server: McpServerConfig,
     *,
@@ -122,7 +156,7 @@ def codex_mcp_config_overrides(
     default_tools_approval_mode: str | None,
 ) -> tuple[str, ...]:
     """Render ``mcp_servers.*`` entries for one protocol MCP server."""
-    key = _dotted_table_key(server.name.replace("-", "_"))
+    key = _dotted_table_key(codex_server_key(server.name))
     overrides: list[str] = []
     if server.transport is McpTransport.STDIO:
         binary, *args = server.command
@@ -360,14 +394,18 @@ async def start_thread_with_raw_events(
 
 __all__ = [
     "CODEX_API_KEY_ENV",
+    "DEFAULT_TOOL_NAMESPACE",
     "USER_INPUT_FEATURE_OVERRIDE",
     "build_codex_config",
     "build_process_env",
     "build_thread_options",
     "codex_mcp_config_overrides",
+    "codex_mcp_tool_naming",
     "codex_model_config_overrides",
     "codex_otel_config_overrides",
     "codex_model_options",
+    "codex_server_key",
     "load_codex_sdk",
+    "namespaced_tool_name",
     "start_thread_with_raw_events",
 ]
