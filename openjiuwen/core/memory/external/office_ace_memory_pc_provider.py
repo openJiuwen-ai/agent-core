@@ -7,7 +7,9 @@ PC 部署形态：记忆搜索与对话上报均走 chat-service 的 appapi 接�
 * 搜索：POST /v1/appapi/memory/search（X-Chat-User-Id 头鉴权）
 * 上报：POST /v1/appapi/memory/pc-threads/{thread_id}/messages（X-Chat-User-Id 头鉴权）
 
-凭据/endpoint 复用上层下发的 per-session api_key + base_url。
+凭据/endpoint 直接读 config/env（无 pre-session 级别）。
+thread_id（业务对话 ID）由 ExternalMemoryRail 从 kwargs 透传——云端由
+relay-claw CloudMemoryService 上报，PC 端在本 provider 上报。
 任何失败均不抛异常（调用方 prefetch/handle_tool_call/sync_turn 零阻断）。
 """
 
@@ -76,7 +78,9 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
         self._api_key = api_key
         self._default_actor_id = actor_id
         self._actor_id = self._default_actor_id
-        self._session_id = ""
+        # 业务对话 ID：initialize 时由 rail 透传，sync_turn 上报用。
+        # sync_turn 的 kwargs 也会带 thread_id（同一 rail 实例），kwargs 优先。
+        self._thread_id: str | None = None
         self._initialized = False
         self._consecutive_failures = 0
 
@@ -94,7 +98,7 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
     async def initialize(self, **kwargs: Any) -> None:
         logger.info("[OfficeAceMemoryPcProvider] initializing with params: %s", json.dumps(kwargs))
         self._actor_id = kwargs.get("user_id") or self._default_actor_id
-        self._session_id = kwargs.get("session_id") or ""
+        self._thread_id = kwargs.get("thread_id") or self._thread_id
         self._initialized = True
 
     def _runtime_actor_id(self, params: dict[str, Any]) -> str:
@@ -233,7 +237,9 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
         if not user_msg or not assistant_msg:
             return
         user_id = self._runtime_actor_id(kwargs)
-        thread_id = kwargs.get("session_id") or self._session_id
+        # thread_id：业务对话 ID，由 ExternalMemoryRail 从 kwargs 透传。
+        # session_id 是 thread_id 的 sha256 哈希、不可逆，不能用作上报键。
+        thread_id = kwargs.get("thread_id") or self._thread_id
         if not thread_id:
             logger.debug("[OfficeAceMemoryPcProvider] sync_turn skipped: no thread_id")
             return

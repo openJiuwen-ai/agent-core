@@ -41,12 +41,16 @@ class ExternalMemoryRail(DeepAgentRail):
         user_id: str = "__default__",
         scope_id: str = "__default__",
         session_id: str = "__default__",
+        thread_id: Optional[str] = None,
     ):
         super().__init__()
         self._provider = provider
         self._user_id = user_id
         self._scope_id = scope_id
         self._session_id = session_id
+        # 业务对话 ID（thread_id）：PC 端 OfficeAce 记忆 sync_turn 上报
+        # pc-threads/{thread_id}/messages 用它。云端 provider 不消费。
+        self._thread_id = thread_id
         self._initialized = False
         # Abilities this rail actually registered, mapped from tool name to the
         # exact card that was stored. The name is the ability-manager key, while
@@ -134,6 +138,7 @@ class ExternalMemoryRail(DeepAgentRail):
                     user_id=self._user_id,
                     scope_id=self._scope_id,
                     session_id=self._session_id,
+                    thread_id=self._thread_id,
                 )
                 self._initialized = True
                 logger.info(f"[ExternalMemoryRail] Provider '{self._provider.name}' initialized")
@@ -245,6 +250,7 @@ class ExternalMemoryRail(DeepAgentRail):
                     user_id=self._user_id,
                     scope_id=self._scope_id,
                     session_id=self._session_id,
+                    thread_id=self._thread_id,
                 )
                 self._sync_consecutive_failures = 0
             except Exception as e:

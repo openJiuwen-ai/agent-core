@@ -250,12 +250,19 @@ async def test_pc_search_no_user_id_omits_x_chat_user_id(patch_httpx):
 
 @pytest.mark.asyncio
 async def test_pc_sync_turn_posts_messages_to_pc_threads_endpoint(patch_httpx):
+    """PC provider sync_turn POSTs user+assistant messages to pc-threads/{thread_id}.
+
+    thread_id (业务对话 ID) is taken from kwargs — session_id is the sha256 hash
+    of thread_id and is NOT used as the upload key.
+    """
     provider = OfficeAceMemoryPcProvider(
         base_url="https://mem.example.com", api_key="k", actor_id="user-42"
     )
-    await provider.initialize(user_id="user-42", session_id="thread-9")
+    await provider.initialize(user_id="user-42", thread_id="thread-9")
 
-    await provider.sync_turn("u-msg", "a-msg", user_id="user-42", session_id="thread-9")
+    await provider.sync_turn(
+        "u-msg", "a-msg", user_id="user-42", scope_id="scope-1", thread_id="thread-9"
+    )
 
     assert _FakeAsyncClient.last is not None
     assert (
@@ -270,12 +277,15 @@ async def test_pc_sync_turn_posts_messages_to_pc_threads_endpoint(patch_httpx):
     assert body["messages"][0]["parts"][0] == {"type": "text", "text": "u-msg"}
     assert body["messages"][1]["role"] == "assistant"
     assert body["messages"][1]["parts"][0] == {"type": "text", "text": "a-msg"}
+    # scope_id → assistant_id stamped on every message
+    assert body["messages"][0]["assistant_id"] == "scope-1"
+    assert body["messages"][1]["assistant_id"] == "scope-1"
 
 
 @pytest.mark.asyncio
 async def test_pc_sync_turn_skipped_without_thread_id(patch_httpx):
     provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
-    await provider.initialize(user_id="u")  # no session_id
+    await provider.initialize(user_id="u")  # no thread_id
 
     await provider.sync_turn("u", "a", user_id="u")
 
@@ -285,12 +295,12 @@ async def test_pc_sync_turn_skipped_without_thread_id(patch_httpx):
 @pytest.mark.asyncio
 async def test_pc_sync_turn_skipped_on_empty_messages(patch_httpx):
     provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
-    await provider.initialize(user_id="u", session_id="t")
+    await provider.initialize(user_id="u", thread_id="t")
 
-    await provider.sync_turn("", "a-msg", user_id="u", session_id="t")
+    await provider.sync_turn("", "a-msg", user_id="u", thread_id="t")
     assert _FakeAsyncClient.last is None
 
-    await provider.sync_turn("u-msg", "", user_id="u", session_id="t")
+    await provider.sync_turn("u-msg", "", user_id="u", thread_id="t")
     assert _FakeAsyncClient.last is None
 
 
@@ -299,10 +309,10 @@ async def test_pc_sync_turn_does_not_raise_on_error_status(patch_httpx):
     _FakeAsyncClient.next_response = _FakeResponse(500, text="server down")
 
     provider = OfficeAceMemoryPcProvider(api_key="k", actor_id="u")
-    await provider.initialize(user_id="u", session_id="t")
+    await provider.initialize(user_id="u", thread_id="t")
 
     # Should not raise.
-    await provider.sync_turn("u", "a", user_id="u", session_id="t")
+    await provider.sync_turn("u", "a", user_id="u", thread_id="t")
 
 
 @pytest.mark.asyncio
