@@ -2370,7 +2370,12 @@ class ReActAgent(BaseAgent):
                                 reasoning = (
                                     getattr(ai_message, "reasoning_content", None) or ""
                                 ).strip()
-                                if not content and not reasoning:
+                                # Reasoning-only (or fully blank) no-tool turns are not a
+                                # valid ReAct answer: they deliver nothing to the user /
+                                # team board. Treat as error so callers can retry instead
+                                # of silently ending with empty output (see 2026-09-11
+                                # team stall: OA.05000090).
+                                if not content:
                                     result = {
                                         "output": (
                                             "模型未返回有效内容（空响应），"
@@ -2380,6 +2385,7 @@ class ReActAgent(BaseAgent):
                                         "finish_reason": getattr(
                                             ai_message, "finish_reason", "null"
                                         ),
+                                        "reasoning_present": bool(reasoning),
                                     }
                                 else:
                                     result = {

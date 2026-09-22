@@ -157,11 +157,11 @@ def test_spec_stall_knobs_validation():
     """Autonomous stall thresholds are tunable seconds and must be positive (F_65)."""
     base = {"agents": {"leader": DeepAgentSpec()}, "spawn_mode": "inprocess"}
     spec = TeamAgentSpec(**base)
-    assert spec.stale_claim_idle_timeout == 600
+    assert spec.stale_claim_idle_timeout == 180
     assert spec.stale_pending_idle_timeout == 600
 
-    tuned = TeamAgentSpec(**base, stale_claim_idle_timeout=120, stale_pending_idle_timeout=300)
-    assert tuned.stale_claim_idle_timeout == 120
+    tuned = TeamAgentSpec(**base, stale_claim_idle_timeout=180, stale_pending_idle_timeout=300)
+    assert tuned.stale_claim_idle_timeout == 180
     assert tuned.stale_pending_idle_timeout == 300
 
     with pytest.raises(ValueError):

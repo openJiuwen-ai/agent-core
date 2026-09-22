@@ -272,13 +272,13 @@ async def test_stall_thresholds_come_from_the_spec(db, bus):
     """Stall thresholds are per-team tunables read off the spec (F_65)."""
     host, poll = FakeHost(), FakePoll()
     blueprint = _blueprint(LEADER, TeamRole.LEADER)
-    blueprint.spec.stale_claim_idle_timeout = 120
+    blueprint.spec.stale_claim_idle_timeout = 180
     blueprint.spec.stale_pending_idle_timeout = 300
     infra = _infra(db, bus, LEADER)
 
     handler = StaleTaskHandler(host, blueprint, infra, poll)
 
-    assert handler._idle_claim_seconds == 120.0
+    assert handler._idle_claim_seconds == 180.0
     assert handler._idle_pending_seconds == 300.0
 
 
