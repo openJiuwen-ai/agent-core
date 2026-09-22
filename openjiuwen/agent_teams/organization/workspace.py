@@ -11,7 +11,7 @@ from pathlib import Path, PurePosixPath
 
 from pydantic import BaseModel
 
-from openjiuwen.agent_teams.paths import organization_workspace_dir
+from openjiuwen.agent_teams.paths import organization_workspace_dir, safe_path_segment
 from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
 from openjiuwen.agent_teams.team_workspace.models import ConflictStrategy, TeamWorkspaceConfig
 from openjiuwen.harness.tools.worktree.git import _run_git
@@ -37,7 +37,9 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
         session_id: str,
         config: OrganizationWorkspaceConfig | None = None,
     ) -> None:
+        validate_organization_id(organization_id)
         self.organization_id = organization_id
+        self.mount_name = safe_path_segment(organization_id)
         self.session_id = session_id
         self.organization_config = config or OrganizationWorkspaceConfig()
         self._git_mutex = asyncio.Lock()
@@ -87,20 +89,31 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
         """Mount this workspace at ``.organization/{organization_id}``."""
         hub = os.path.join(workspace_root, ".organization")
         os.makedirs(hub, exist_ok=True)
-        link_path = os.path.join(hub, self.organization_id)
+        link_path = os.path.join(hub, self.mount_name)
         if self._prepare_mount_path(link_path):
             self._mount_directory(self.workspace_path, link_path)
 
     def unmount_from_workspace(self, workspace_root: str) -> None:
         """Remove this organization's managed mount from a member workspace."""
-        link_path = os.path.join(workspace_root, ".organization", self.organization_id)
+        link_path = os.path.join(workspace_root, ".organization", self.mount_name)
         if self._is_mounted_to_workspace(link_path):
             self._remove_directory_mount(link_path)
 
     def relative_path(self, mounted_path: str) -> str:
         """Resolve a mounted Organization path to a safe workspace-relative path."""
+        path = Path(mounted_path).expanduser()
+        if path.is_absolute():
+            try:
+                relative = path.resolve(strict=False).relative_to(Path(self.workspace_path).resolve(strict=False))
+            except ValueError as exc:
+                raise ValueError("path is outside the current organization workspace") from exc
+            pure = PurePosixPath(relative.as_posix())
+            if not pure.parts:
+                raise ValueError("invalid organization workspace path")
+            return pure.as_posix()
+
         normalized = str(mounted_path).replace("\\", "/")
-        prefix = f".organization/{self.organization_id}/"
+        prefix = f".organization/{self.mount_name}/"
         if not normalized.startswith(prefix):
             raise ValueError("path is outside the current organization workspace")
         relative = normalized[len(prefix):]
@@ -108,6 +121,18 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
         if not relative or pure.is_absolute() or ".." in pure.parts:
             raise ValueError("invalid organization workspace path")
         return pure.as_posix()
+
+    def references_workspace(self, mounted_path: str) -> bool:
+        """Return whether a tool path addresses this Organization workspace."""
+        path = Path(mounted_path).expanduser()
+        if path.is_absolute():
+            try:
+                path.resolve(strict=False).relative_to(Path(self.workspace_path).resolve(strict=False))
+                return True
+            except ValueError:
+                return False
+        normalized = str(mounted_path).replace("\\", "/")
+        return normalized.startswith(f".organization/{self.mount_name}/")
 
     def can_write(self, relative_path: str, *, team_id: str, summary_team: bool) -> bool:
         """Apply the phase-one top-level ownership policy."""
@@ -132,9 +157,15 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
     @staticmethod
     def _safe_segment(value: str) -> str:
         """Use the canonical path sanitizer without exposing it as public API."""
-        from openjiuwen.agent_teams.paths import _safe_segment
+        return safe_path_segment(value)
 
-        return _safe_segment(value)
+
+def validate_organization_id(organization_id: str) -> None:
+    """Require an Organization ID that is already one safe path segment."""
+    if not organization_id:
+        raise ValueError("organization_id is required")
+    if organization_id != safe_path_segment(organization_id):
+        raise ValueError("organization_id must use 1-96 characters from [A-Za-z0-9_.-]")
 
 
 _WORKSPACES: dict[tuple[str, str], OrganizationWorkspaceManager] = {}
@@ -169,4 +200,5 @@ __all__ = [
     "OrganizationWorkspaceManager",
     "get_organization_workspace_manager",
     "remove_organization_workspace_manager",
+    "validate_organization_id",
 ]

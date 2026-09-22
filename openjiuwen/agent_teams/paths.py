@@ -179,7 +179,7 @@ def team_member_workspace_dir(team_name: str, member_name: str) -> Path:
 
 def organization_home(organization_id: str) -> Path:
     """Return the persistent root for one organization."""
-    return get_openjiuwen_home() / ".organizations" / _safe_segment(organization_id)
+    return get_openjiuwen_home() / ".organizations" / safe_path_segment(organization_id)
 
 
 def organization_workspace_dir(organization_id: str, session_id: str) -> Path:
@@ -250,6 +250,11 @@ def _safe_segment(value: str, fallback: str = "_") -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
     normalized = normalized.strip("._-")
     return normalized[:96] or fallback
+
+
+def safe_path_segment(value: str, fallback: str = "_") -> str:
+    """Return the canonical filesystem-safe form of an untrusted path segment."""
+    return _safe_segment(value, fallback)
 
 
 def team_sessions_dir(team_name: str) -> Path:

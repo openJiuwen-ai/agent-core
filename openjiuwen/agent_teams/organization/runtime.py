@@ -392,8 +392,9 @@ class OrganizationRuntimeManager:
     ) -> OrganizationSpec:
         """Create an organization owned by an active team and bind its leader."""
 
-        if not organization_id:
-            raise ValueError("organization_id is required")
+        from openjiuwen.agent_teams.organization.workspace import validate_organization_id
+
+        validate_organization_id(organization_id)
         async with self._membership_lock:
             owner_agent, owner_backend = await self._resolve_leader(owner_team_id, session_id)
             existing_manager = getattr(owner_backend, "org_task_manager", None)

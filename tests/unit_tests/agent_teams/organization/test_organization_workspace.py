@@ -8,6 +8,7 @@ import pytest
 from openjiuwen.agent_teams.organization.workspace import (
     OrganizationWorkspaceConfig,
     OrganizationWorkspaceManager,
+    validate_organization_id,
 )
 from openjiuwen.agent_teams.organization.workspace_rail import OrganizationWorkspaceRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -57,8 +58,16 @@ def test_organization_workspace_write_boundaries(tmp_path: Path) -> None:
         manager.relative_path(".organization/org-1/../outside.txt")
 
 
+@pytest.mark.parametrize("organization_id", ["../outside", "nested/org", "nested\\org", "C:\\outside", " org"])
+def test_organization_id_must_be_a_safe_path_segment(organization_id: str) -> None:
+    with pytest.raises(ValueError, match="organization_id must use"):
+        validate_organization_id(organization_id)
+
+
 @pytest.mark.asyncio
 async def test_organization_workspace_rail_blocks_cross_team_write(tmp_path: Path) -> None:
+    member = tmp_path / "member"
+    member.mkdir()
     manager = OrganizationWorkspaceManager(
         organization_id="org-1",
         session_id="session-1",
@@ -69,9 +78,11 @@ async def test_organization_workspace_rail_blocks_cross_team_write(tmp_path: Pat
         team_id="team-a",
         member_name="leader",
     )
+    manager.ensure_team_directory("team-b")
+    manager.mount_into_workspace(str(member))
     inputs = SimpleNamespace(
         tool_name="write_file",
-        tool_args={"file_path": ".organization/org-1/teams/team-b/report.md"},
+        tool_args={"file_path": str(member / ".organization" / "org-1" / "teams" / "team-b" / "report.md")},
         tool_call=SimpleNamespace(id="call-1"),
         tool_result=None,
         tool_msg=None,

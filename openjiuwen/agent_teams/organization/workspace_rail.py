@@ -39,7 +39,7 @@ class OrganizationWorkspaceRail(DeepAgentRail):
         self._prompt_builder = getattr(agent, "system_prompt_builder", None)
         if self._prompt_builder is None:
             return
-        mount = f".organization/{self._manager.organization_id}/"
+        mount = f".organization/{self._manager.mount_name}/"
         own_target = "summary/" if self._summary_team else f"teams/{self._team_id}/"
         content = (
             "## Organization shared workspace\n"
@@ -67,8 +67,7 @@ class OrganizationWorkspaceRail(DeepAgentRail):
         tool_name = ctx.inputs.tool_name
         args = ctx.inputs.tool_args if isinstance(ctx.inputs.tool_args, dict) else {}
         path = args.get("file_path", "")
-        prefix = f".organization/{self._manager.organization_id}/"
-        if not isinstance(path, str) or not path.replace("\\", "/").startswith(prefix):
+        if not isinstance(path, str) or not self._manager.references_workspace(path):
             return
         try:
             relative = self._manager.relative_path(path)
