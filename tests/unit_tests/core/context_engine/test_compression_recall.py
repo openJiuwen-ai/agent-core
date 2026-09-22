@@ -36,6 +36,23 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
 
+def _fail_get_encoding(*_args, **_kwargs):
+    raise RuntimeError("tiktoken disabled in tests: unit tests must not make network calls")
+
+
+@pytest.fixture(autouse=True)
+def _no_network_tokenizer(monkeypatch):
+    """archive.py's _split_text lazily calls tiktoken.get_encoding("cl100k_base"),
+    which downloads its BPE vocab file over HTTPS on first use -- on a sandboxed/
+    offline CI runner this blocks until pytest-timeout kills it (observed: a
+    60s timeout inside tiktoken's own requests.get, failing the whole test).
+    _split_text already has a deterministic character-based fallback for
+    exactly this case (see its `except Exception` branch); force that path
+    instead of ever touching the network from a unit test.
+    """
+    monkeypatch.setattr("tiktoken.get_encoding", _fail_get_encoding)
+
+
 def _context(
     tmp_path: Path,
     session_id: str = "session-1",

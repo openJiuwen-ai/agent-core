@@ -67,7 +67,7 @@ def python_error_tree(text: str, *, limit: int = _ERROR_TREE_LIMIT) -> str:
     if len(tree) <= limit:
         return tree
     prefix = "...(truncated; see full log on disk)...\n"
-    return prefix + tree[-(limit - len(prefix)) :]
+    return prefix + tree[-(limit - len(prefix)):]
 
 
 def exception_banner(tree: str, *, limit: int = _EXCEPTION_BANNER_CHARS) -> str:

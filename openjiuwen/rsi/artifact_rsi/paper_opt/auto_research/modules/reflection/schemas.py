@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
     CodeImplementationManifest,
@@ -52,6 +53,20 @@ class ReflectionJudgment(BaseModel):
     recommendation: Recommendation
     recommendation_reason: str = Field(min_length=1)
     summary: str = Field(min_length=1)
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def _decode_evidence(cls, value: Any) -> Any:
+        # Some tool-calling backends don't dereference the `$ref` this nested
+        # model gets in the JSON schema (see `model_json_schema()`) and emit
+        # the argument as a JSON string instead of a list -- decode it here
+        # rather than failing validation outright.
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except (TypeError, ValueError):
+                return value
+        return value
 
     @model_validator(mode="after")
     def _reinterpretation_requires_reason(self) -> ReflectionJudgment:
