@@ -63,7 +63,6 @@ class ContextProcessor(metaclass=MetaContextProcessor):
         """
         self._config = config
         self._compression_usage: Dict[str, Any] | None = None
-        self._model: Any = None
 
     # ------------------------------------------------------------------
     # Processing hooks
@@ -185,8 +184,8 @@ class ContextProcessor(metaclass=MetaContextProcessor):
     def _current_compression_usage(self) -> Dict[str, Any] | None:
         return dict(self._compression_usage) if self._compression_usage else None
 
-    @staticmethod
     def rebind_model(
+        self,
         *,
         model: Any = None,
         model_config: Any = None,
