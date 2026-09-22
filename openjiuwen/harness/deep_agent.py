@@ -2991,7 +2991,11 @@ class DeepAgent(BaseAgent):
             return
         try:
             parent_session_id = session.get_session_id()
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[DeepAgent] Failed to read session id for subagent release: %s",
+                exc,
+            )
             return
         if not parent_session_id:
             return
@@ -2999,11 +3003,17 @@ class DeepAgent(BaseAgent):
             release_subagent_control,
         )
 
-        with suppress(Exception):
+        try:
             await release_subagent_control(
                 self,
                 parent_session_id,
                 reason="parent_ended",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DeepAgent] Failed to release subagent control on stop: %s",
+                exc,
+                exc_info=True,
             )
 
     async def stop(self) -> None:

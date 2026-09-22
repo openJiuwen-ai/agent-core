@@ -233,10 +233,16 @@ class SubagentInstance:
             raise asyncio.CancelledError()
 
     async def _on_turn_timeout(self) -> None:
-        if not self.status.current().is_final():
-            await self._set_status(
-                SubagentStatus.errored("turn timeout", code="TIMEOUT"),
-            )
+        # wait_for cancels the turn task first; that settle may already be
+        # CANCELLED. Timeout is the authoritative reason for this path.
+        status = self.status.current()
+        if status.kind is SubagentStatusKind.CLOSED:
+            return
+        if status.is_final() and status.error_code not in (None, "CANCELLED"):
+            return
+        await self._set_status(
+            SubagentStatus.errored("turn timeout", code="TIMEOUT"),
+        )
 
     async def _on_turn_cancelled(self) -> bool:
         await self._settle_cancelled_turn()
