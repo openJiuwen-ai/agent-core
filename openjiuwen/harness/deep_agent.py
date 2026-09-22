@@ -3087,9 +3087,13 @@ class DeepAgent(BaseAgent):
         return active.work.request_id if active is not None else None
 
     def _steering_unavailable_reason(self, active_request_id: str) -> str | None:
-        if (not self._interaction_started or self._interaction_phase is not InteractionPhase.RUNNING
-                or self.get_active_steering_request_id() != active_request_id
-                or not self._steering_inbox.accepting or self._steering_inbox.queue is None):
+        if (
+            not self._interaction_started
+            or self._interaction_phase is not InteractionPhase.RUNNING
+            or self.get_active_steering_request_id() != active_request_id
+        ):
+            return "not_active"
+        if not self._steering_inbox.accepting or self._steering_inbox.queue is None:
             return "not_active"
         if self._interaction_session is not None and self._interaction_session.get_state(INTERRUPTION_KEY):
             return "waiting_input"
@@ -3525,7 +3529,7 @@ class DeepAgent(BaseAgent):
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
         self._interaction_phase = InteractionPhase.RUNNING
-        steering_window = self._steering_inbox.open(work.request_id)
+        steering_window = self._steering_inbox.begin_round(work.request_id)
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return

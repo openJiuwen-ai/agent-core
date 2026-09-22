@@ -39,6 +39,7 @@ from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
+    from openjiuwen.core.single_agent.schema.steering import SteeringWindow
 
 # Above this, a rail chain is reported at INFO so a slow hook shows up without
 # having to enable debug logging. A chain that does real work -- memory
@@ -416,6 +417,9 @@ class AgentCallbackContext:
         default=None, init=False, repr=False
     )
     _steering_queue: Optional[asyncio.Queue] = field(
+        default=None, init=False, repr=False
+    )
+    _steering_window: Optional[SteeringWindow] = field(
         default=None, init=False, repr=False
     )
 

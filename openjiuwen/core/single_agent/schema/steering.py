@@ -34,9 +34,7 @@ class SteeringInput(str):
         return self
 
     def begin_context_write(self) -> None:
-        record = self.inbox._records.get(self.key)
-        if record is not None:
-            record["writing"] = True
+        self.inbox.begin_context_write(self.key)
 
     def settle(self, status: str, reason: str | None = None) -> None:
         self.inbox.settle(self.key, status, reason)
@@ -80,7 +78,8 @@ class SteeringInbox:
             result["reason"] = reason
         return result
 
-    def open(self, owner: str) -> SteeringWindow:
+    def begin_round(self, owner: str) -> SteeringWindow:
+        """Start an in-memory admission window for one execution round."""
         self.finish("execution_finished")
         self.owner = owner
         self.queue = None
@@ -106,7 +105,8 @@ class SteeringInbox:
         return dict(record["result"])
 
     def accept(self, owner: str, input_id: str, content: str) -> dict:
-        if not isinstance(content, str) or not content.strip() or len(content) > 32000 or not input_id:
+        invalid_content = not isinstance(content, str) or not content.strip() or len(content) > 32000
+        if invalid_content or not input_id:
             return self.result(owner, input_id, "not_applied", "invalid_input")
         previous = self.previous(owner, input_id, content)
         if previous is not None:
@@ -136,6 +136,12 @@ class SteeringInbox:
         self.queue.put_nowait(SteeringInput(content, self, key))
         self._records[key] = {"content": content, "result": result}
         return dict(result)
+
+    def begin_context_write(self, key: tuple[str, str]) -> None:
+        """Track an in-flight context write without exposing receipt storage."""
+        record = self._records.get(key)
+        if record is not None:
+            record["writing"] = True
 
     def settle(self, key: tuple[str, str], status: str, reason: str | None = None) -> None:
         record = self._records.get(key)

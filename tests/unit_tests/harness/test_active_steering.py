@@ -30,7 +30,7 @@ def active_agent():
     work = RoundWorkItem.user(request_id="original", inputs={"query": "first"})
     agent._active_interaction_round = ActiveInteractionRound(work=work, task_id="task")
     queue = asyncio.Queue()
-    agent._steering_inbox.open("original")
+    agent._steering_inbox.begin_round("original")
     agent._steering_inbox.bind(queue)
     return agent, queue
 
@@ -184,14 +184,14 @@ async def test_wrong_execution_idle_and_pending_approval_never_start_work():
 def test_retained_dedup_is_bounded_without_eviction_of_current_execution():
     inbox = SteeringInbox(max_records=2)
     queue = asyncio.Queue()
-    inbox.open("first")
+    inbox.begin_round("first")
     inbox.bind(queue)
     for input_id in ["1", "2"]:
         assert inbox.accept("first", input_id, input_id)["status"] == "accepted"
         queue.get_nowait().settle("consumed")
     assert inbox.accept("first", "3", "3")["reason"] == "queue_full"
     assert inbox.accept("first", "1", "1")["status"] == "consumed"
-    inbox.open("second")
+    inbox.begin_round("second")
     inbox.bind(queue)
     assert inbox.accept("second", "3", "3")["status"] == "accepted"
     assert len(inbox._records) == 2
@@ -200,7 +200,7 @@ def test_retained_dedup_is_bounded_without_eviction_of_current_execution():
 def test_user_text_is_not_dropped_as_superseded_team_snapshot():
     inbox = SteeringInbox()
     queue = asyncio.Queue()
-    inbox.open("team")
+    inbox.begin_round("team")
     inbox.bind(queue)
     text = '<team-event kind="task-board">user text</team-event>'
     inbox.accept("team", "1", text)
@@ -214,7 +214,7 @@ def test_context_write_in_flight_is_unknown_when_execution_is_cancelled():
 
     inbox = SteeringInbox()
     queue = asyncio.Queue()
-    inbox.open("request")
+    inbox.begin_round("request")
     inbox.bind(queue)
     inbox.accept("request", "1", "text")
     value = queue.get_nowait()
@@ -227,11 +227,11 @@ def test_context_write_in_flight_is_unknown_when_execution_is_cancelled():
 def test_old_loop_cannot_close_or_consume_new_execution_inputs():
     inbox = SteeringInbox()
     shared_queue = asyncio.Queue()
-    old_window = inbox.open("old")
+    old_window = inbox.begin_round("old")
     inbox.bind(shared_queue)
     old_context = AgentCallbackContext(agent=None, inputs=None, session=None)
     old_context.bind_steering_queue(shared_queue)
-    inbox.open("new")
+    inbox.begin_round("new")
     inbox.bind(shared_queue)
     new_context = AgentCallbackContext(agent=None, inputs=None, session=None)
     new_context.bind_steering_queue(shared_queue)

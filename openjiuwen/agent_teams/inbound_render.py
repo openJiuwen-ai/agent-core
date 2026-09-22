@@ -42,9 +42,9 @@ system-prompt section documents them by name.
 
 from __future__ import annotations
 
-from openjiuwen.core.single_agent.schema.steering import SteeringInput
-
 import html
+
+from openjiuwen.core.single_agent.schema.steering import SteeringInput
 
 # Stable contract tokens for the <team-inbound> ``type`` attribute.
 INBOUND_TYPE_DIRECT = "direct"

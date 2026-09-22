@@ -573,9 +573,11 @@ class NativeHarness(DeepAgent):
         active = self._st.active
         if self._st.phase in (HarnessState.PAUSED, HarnessState.PAUSING):
             return "waiting_input"
-        if (self._st.phase is not HarnessState.RUNNING or active is None
-                or active.task_id != active_request_id or active.graceful_abort or active.pause_requested
-                or not self._steering_inbox.accepting or self._steering_inbox.queue is None):
+        if self._st.phase is not HarnessState.RUNNING or active is None:
+            return "not_active"
+        round_stopping = active.graceful_abort or active.pause_requested
+        inbox_unavailable = not self._steering_inbox.accepting or self._steering_inbox.queue is None
+        if active.task_id != active_request_id or round_stopping or inbox_unavailable:
             return "not_active"
         if self._session is not None and self._session.get_state(INTERRUPTION_KEY):
             return "waiting_input"
@@ -1392,7 +1394,7 @@ class NativeHarness(DeepAgent):
         task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
         self._st.active = active
-        self._steering_inbox.open(task_id)
+        self._steering_inbox.begin_round(task_id)
         logger.info(
             "[NativeHarness] round_id=%s started query=%r follow_up=%s",
             round_id,
