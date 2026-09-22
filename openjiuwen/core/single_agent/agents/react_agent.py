@@ -1925,6 +1925,28 @@ class ReActAgent(BaseAgent):
             )
         )
 
+    async def _inject_empty_response_notice(
+        self,
+        context: ModelContext,
+    ) -> None:
+        """Inject a notice after an empty no-tool assistant turn already
+        committed to context, so the next iteration can produce tools or text.
+
+        The empty AssistantMessage must already be in ``context`` (unlike
+        truncation, which re-adds the assistant turn).
+        """
+        await context.add_messages(
+            UserMessage(
+                content=(
+                    "[EMPTY_RESPONSE_NOTICE] Your previous response had no "
+                    "assistant text and no tool calls. Continue the task: "
+                    "call the appropriate tool(s), or provide a clear text "
+                    "answer. If you finished a claimed team task, call "
+                    "member_complete_task."
+                ),
+            )
+        )
+
     def _extract_user_text(self, user_input: Any) -> str:
         """Extract plain text from user_input (supports InteractiveInput or str)."""
         from openjiuwen.core.session import InteractiveInput
@@ -2205,6 +2227,7 @@ class ReActAgent(BaseAgent):
 
                 if invoke_inputs.result is None:
                     _truncation_retry_count = 0
+                    _empty_response_retry_count = 0
                     for iteration in range(start_iteration, self._config.max_iterations):
                         logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
                         ctx.extra["_react_iteration"] = iteration + 1
@@ -2365,11 +2388,41 @@ class ReActAgent(BaseAgent):
                                 # drains and injects it.
                                 if ctx.has_pending_steering():
                                     continue
-                                await self.context_engine.save_contexts(session)
                                 content = (getattr(ai_message, "content", None) or "").strip()
                                 reasoning = (
                                     getattr(ai_message, "reasoning_content", None) or ""
                                 ).strip()
+                                # Empty text + no tools (reasoning-only
+                                # included): one in-loop retry so teammates
+                                # do not idle with claimed board tasks still
+                                # open. Cap at 1 to avoid infinite loops.
+                                if (
+                                    not content
+                                    and _empty_response_retry_count < 1
+                                ):
+                                    _empty_response_retry_count += 1
+                                    logger.info(
+                                        "[ReActAgent] empty no-tool response "
+                                        "session_id=%s iteration=%s "
+                                        "reasoning_len=%s, retrying once",
+                                        session.get_session_id(),
+                                        iteration + 1,
+                                        len(reasoning),
+                                    )
+                                    await session.write_stream(OutputSchema(
+                                        type="empty_response_retry",
+                                        index=0,
+                                        payload={
+                                            "phase": "retry_attempt",
+                                            "reasoning_len": len(reasoning),
+                                            "finish_reason": getattr(
+                                                ai_message, "finish_reason", "null"
+                                            ),
+                                        },
+                                    ))
+                                    await self._inject_empty_response_notice(context)
+                                    continue
+                                await self.context_engine.save_contexts(session)
                                 if not content and not reasoning:
                                     result = {
                                         "output": (
