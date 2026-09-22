@@ -12,6 +12,7 @@ from openjiuwen.agent_teams.organization.workspace import (
 )
 from openjiuwen.agent_teams.organization.workspace_rail import OrganizationWorkspaceRail
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.harness.tools.worktree.git import _run_git
 
 
 @pytest.mark.asyncio
@@ -40,6 +41,10 @@ async def test_organization_workspace_mount_and_local_git(tmp_path: Path) -> Non
     )
     assert sha
     assert (root / ".git").is_dir()
+    user_name = await _run_git(["config", "--local", "user.name"], cwd=str(root), check=True)
+    user_email = await _run_git(["config", "--local", "user.email"], cwd=str(root), check=True)
+    assert user_name.stdout == "OpenJiuwen"
+    assert user_email.stdout == "openjiuwen@example.invalid"
 
 
 def test_organization_workspace_write_boundaries(tmp_path: Path) -> None:

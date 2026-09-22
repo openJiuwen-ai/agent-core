@@ -70,14 +70,26 @@ class OrganizationWorkspaceManager(TeamWorkspaceManager):
             os.makedirs(os.path.join(self.workspace_path, directory), exist_ok=True)
         if not self.config.version_control:
             return
-        if os.path.isdir(os.path.join(self.workspace_path, ".git")):
-            return
-        await _run_git(["init"], cwd=self.workspace_path, check=True)
+        git_dir = os.path.join(self.workspace_path, ".git")
+        if not os.path.isdir(git_dir):
+            await _run_git(["init"], cwd=self.workspace_path, check=True)
+
+        # This is a runtime-owned repository and must not depend on a host or
+        # CI worker having global Git identity configured.  Repository-local
+        # identity also covers all later automatic artifact commits.
+        await _run_git(["config", "--local", "user.name", "OpenJiuwen"], cwd=self.workspace_path, check=True)
         await _run_git(
-            ["commit", "--allow-empty", "-m", "Initialize organization workspace"],
+            ["config", "--local", "user.email", "openjiuwen@example.invalid"],
             cwd=self.workspace_path,
             check=True,
         )
+        head = await _run_git(["rev-parse", "--verify", "HEAD"], cwd=self.workspace_path)
+        if not head.ok:
+            await _run_git(
+                ["commit", "--allow-empty", "-m", "Initialize organization workspace"],
+                cwd=self.workspace_path,
+                check=True,
+            )
 
     def ensure_team_directory(self, team_id: str) -> Path:
         """Create and return the publishing directory owned by ``team_id``."""
