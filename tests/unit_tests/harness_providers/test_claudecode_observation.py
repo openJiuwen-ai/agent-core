@@ -133,34 +133,62 @@ def _tool_events(
     )
 
 
-def _api_request_event(receiver: _FakeReceiver, client: Any, *, request_id: str) -> None:
-    """Publish the CLI's own accounting of one model request."""
+def _api_request_event(
+    receiver: _FakeReceiver,
+    client: Any,
+    *,
+    request_id: str | None = None,
+    time_ns: int = 1_002_100_000_000,
+    cost_usd_micros: int = 33228,
+) -> None:
+    """Publish the CLI's own accounting of one model request.
+
+    Builds that name the request keep ``request_id``; recent ones state none
+    and are paired with their response body by ``time_ns``.
+    """
+    attributes: dict[str, Any] = {
+        "cost_usd_micros": cost_usd_micros,
+        "effort": "high",
+        "speed": "normal",
+        "query_source": "sdk",
+    }
+    if request_id is not None:
+        attributes["request_id"] = request_id
     receiver.publish(
         {
             "signal": "log",
             "name": "claude_code.api_request",
-            "time_ns": 1_002_100_000_000,
-            "attributes": {
-                "request_id": request_id,
-                "cost_usd_micros": 33228,
-                "effort": "high",
-                "speed": "normal",
-                "query_source": "sdk",
-            },
+            "time_ns": time_ns,
+            "attributes": attributes,
             "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: _source_id(client)},
         }
     )
 
 
-def _request_span(receiver: _FakeReceiver, client: Any, *, request_id: str, start_ns: int, end_ns: int) -> None:
-    """Publish the CLI's own per-request span."""
+def _request_span(
+    receiver: _FakeReceiver,
+    client: Any,
+    *,
+    start_ns: int,
+    end_ns: int,
+    request_id: str | None = None,
+    ttft_ms: int = 400,
+) -> None:
+    """Publish the CLI's own per-request span.
+
+    Recent builds state no request id on it, leaving the window it covers as
+    the only thing that ties it to a response body.
+    """
+    attributes: dict[str, Any] = {"ttft_ms": ttft_ms, "attempt": 1, "speed": "normal", "success": True}
+    if request_id is not None:
+        attributes["request_id"] = request_id
     receiver.publish(
         {
             "signal": "trace",
             "name": "claude_code.llm_request",
             "start_time_ns": start_ns,
             "end_time_ns": end_ns,
-            "attributes": {"request_id": request_id, "ttft_ms": 400, "attempt": 1, "speed": "normal", "success": True},
+            "attributes": attributes,
             "resource_attributes": {OTEL_RESOURCE_SOURCE_ID: _source_id(client)},
         }
     )
@@ -539,6 +567,165 @@ async def test_a_thread_continued_from_an_unknown_reply_is_not_observed(monkeypa
     # the delta alone would read as if everything before it had been dropped.
     assert not request.input_observed
     assert request.output_message is not None
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_request_spans_stating_no_request_id_are_paired_by_their_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every call's own timing must reach it when the CLI keys nothing.
+
+    Claude Code 2.1 states no ``request_id`` on its request span, its
+    accounting log or its body logs, so each response body has to find the
+    span whose window covers it. Pairing them by order alone would hand the
+    second call the first one's timing.
+    """
+    sdk, state = _install_fake_sdk(monkeypatch)
+    receiver = _FakeReceiver()
+    _install_receiver(monkeypatch, receiver)
+
+    async def first_request(client: Any) -> None:
+        body = {
+            "model": "claude-x",
+            "system": _SYSTEM,
+            "tools": _TOOLS,
+            "messages": [_USER],
+            "thread": {"type": "create"},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_000_000_000_000,
+            request_body_id="body-1",
+        )
+
+    async def first_response(client: Any) -> None:
+        body = {
+            "id": "msg-1",
+            "model": "claude-x",
+            "content": _FIRST_REPLY,
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 30, "output_tokens": 4},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            body,
+            time_ns=1_002_000_000_000,
+            request_body_id="body-1",
+        )
+        _request_span(receiver, client, start_ns=1_000_100_000_000, end_ns=1_001_900_000_000, ttft_ms=400)
+        _api_request_event(receiver, client, time_ns=1_002_050_000_000, cost_usd_micros=33228)
+
+    async def tool_facts(client: Any) -> None:
+        _tool_events(
+            receiver,
+            client,
+            tool_use_id="tool-1",
+            start_ns=1_002_100_000_000,
+            end_ns=1_002_600_000_000,
+            success=True,
+        )
+
+    async def second_request(client: Any) -> None:
+        body = {
+            "model": "claude-x",
+            "messages": [_TOOL_RESULT],
+            "thread": {"type": "continue", "previous_message_id": "msg-1"},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_request_body",
+            body,
+            time_ns=1_003_000_000_000,
+            request_body_id="body-2",
+        )
+
+    async def second_response(client: Any) -> None:
+        body = {
+            "id": "msg-2",
+            "model": "claude-x",
+            "content": [{"type": "text", "text": "a.py"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 40, "output_tokens": 2},
+        }
+        _body_event(
+            receiver,
+            client,
+            "claude_code.api_response_body",
+            body,
+            time_ns=1_005_000_000_000,
+            request_body_id="body-2",
+        )
+        _request_span(receiver, client, start_ns=1_003_100_000_000, end_ns=1_004_900_000_000, ttft_ms=900)
+        _api_request_event(receiver, client, time_ns=1_005_050_000_000, cost_usd_micros=44444)
+
+    state.scripts.append(
+        [
+            first_request,
+            sdk.AssistantMessage(
+                content=[sdk.ToolUseBlock(id="tool-1", name="Bash", input={"command": "ls"})],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage=None,
+                message_id="msg-1",
+                stop_reason="tool_use",
+                session_id="s",
+            ),
+            first_response,
+            sdk.UserMessage(
+                content=[sdk.ToolResultBlock(tool_use_id="tool-1", content="a.py", is_error=False)],
+                uuid="um-1",
+                parent_tool_use_id=None,
+                tool_use_result=None,
+            ),
+            tool_facts,
+            second_request,
+            sdk.AssistantMessage(
+                content=[sdk.TextBlock(text="a.py")],
+                model="claude-x",
+                parent_tool_use_id=None,
+                error=None,
+                usage=None,
+                message_id="msg-2",
+                stop_reason="end_turn",
+                session_id="s",
+            ),
+            second_response,
+            _result(sdk, result="a.py"),
+        ]
+    )
+    harness = ClaudeCodeHarness(
+        ClaudeCodeHarnessConfig(inherit_process_env=False, cwd="/tmp", request_observation_wait_s=0.05),
+    )
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="list files"))
+    events = await _turn(harness, receipt.turn_id)
+
+    requests = [event.event for event in events if isinstance(event.event, ModelRequestEvent)]
+    first, second = requests
+    logger.info(
+        "unkeyed spans paired ttft={} cost={}",
+        [request.time_to_first_chunk for request in requests],
+        [request.cost.micros if request.cost is not None else None for request in requests],
+    )
+    # Each call carries its own span window, not the previous call's.
+    assert (first.started_at, first.ended_at) == (1000.1, 1001.9)
+    assert (second.started_at, second.ended_at) == (1003.1, 1004.9)
+    assert (first.time_to_first_chunk, second.time_to_first_chunk) == (0.4, 0.9)
+    assert first.cost is not None and second.cost is not None
+    assert (first.cost.micros, second.cost.micros) == (33228, 44444)
+    # The span states the facts even though it names no request id.
+    assert first.data["claude-code"]["attempt"] == 1
+    assert "api_request_id" not in first.data["claude-code"]
+    assert first.input_observed and second.input_observed
     await harness.stop()
 
 

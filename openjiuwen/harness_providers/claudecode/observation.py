@@ -72,6 +72,15 @@ _API_REQUEST_EVENT = "claude_code.api_request"
 # The id both body events of one model call carry: what pairs a request log
 # with the response log that answers it.
 _REQUEST_BODY_ID = "request_body_id"
+# How far a log may sit outside a request span's window and still belong to
+# it. The CLI logs the response body and its accounting microseconds before
+# it closes the span, but the three travel in different OTLP batches, so the
+# timestamps are compared with slack rather than exactly.
+_UNKEYED_MATCH_WINDOW_NS = 1_000_000_000
+# How many unkeyed spans and accounting logs are kept waiting for the reply
+# they belong to. A call the CLI abandoned never logs a response body, so its
+# span would otherwise sit here for the whole session.
+_UNKEYED_HISTORY_LIMIT = 64
 # How many replies' conversations are kept for the calls that continue them.
 # A thread is linear, so only the newest is ever read; the rest are slack for
 # a retry that continues from an earlier reply.
@@ -114,12 +123,23 @@ class _BodyEvent:
 
 @dataclass
 class _NativeRequestSpan:
-    """One ``claude_code.llm_request`` span, keyed by its API request id."""
+    """One ``claude_code.llm_request`` span.
+
+    Builds that state an API request id on the span and on the body logs are
+    paired by it. Recent builds state it on neither, leaving ``request_id``
+    empty, and the span is then paired by the window it covers.
+    """
 
     request_id: str
     start_ns: int
     end_ns: int
     attributes: dict[str, Any]
+
+    def covers(self, time_ns: int) -> bool:
+        """Report whether a log written at ``time_ns`` belongs to this span."""
+        if self.start_ns <= 0 or self.end_ns < self.start_ns:
+            return False
+        return self.start_ns <= time_ns <= self.end_ns + _UNKEYED_MATCH_WINDOW_NS
 
 
 @dataclass
@@ -184,6 +204,15 @@ class ClaudeRequestObserver:
         self._incoming_observations: list[Any] = []
         self._spans: dict[str, _NativeRequestSpan] = {}
         self._api_requests: dict[str, dict[str, Any]] = {}
+        # What a build stating no request id leaves to be paired by time,
+        # oldest first: the CLI runs its calls one at a time, so a response
+        # body belongs to the one span whose window covers it.
+        self._timed_spans: list[_NativeRequestSpan] = []
+        self._timed_api_requests: list[tuple[int, dict[str, Any]]] = []
+        # Whether this session has seen an unkeyed request span. A reply whose
+        # body names no request id waits for its span only once one has
+        # arrived this way, so a build exporting none never spends the wait.
+        self._timed_spans_seen = False
         self._tool_facts: dict[str, _ToolFacts] = {}
         self._changed = asyncio.Event()
         self._lock = asyncio.Lock()
@@ -422,12 +451,21 @@ class ClaudeRequestObserver:
         The response body names the reply; its ``claude_code.llm_request``
         span states the request window and its timing. They export on the same
         interval, so waiting for both costs nothing in the normal case.
+
+        A build stating the API request id on both is paired by it. One that
+        states it on neither is paired by time instead, and waits only once a
+        span has shown that this build exports them at all.
         """
         entry = self._responses.get(snapshot.message_id)
         if entry is None:
             return False
-        request_id = str(entry[0].attributes.get("request_id") or "")
-        return not request_id or request_id in self._spans
+        response_event = entry[0]
+        request_id = str(response_event.attributes.get("request_id") or "")
+        if request_id:
+            return request_id in self._spans
+        if not self._timed_spans_seen:
+            return True
+        return self._covering_span_index(response_event.time_ns) is not None
 
     async def _release_items(self, *, force: bool = False) -> None:
         while self._held:
@@ -496,15 +534,20 @@ class ClaudeRequestObserver:
                 time_ns=int(event.get("time_ns") or time.time_ns()),
                 attributes=attributes,
             )
-        elif signal == "trace" and name == _LLM_REQUEST_SPAN and attributes.get("request_id"):
+        elif signal == "trace" and name == _LLM_REQUEST_SPAN:
             accepted = _NativeRequestSpan(
-                request_id=str(attributes["request_id"]),
+                request_id=str(attributes.get("request_id") or ""),
                 start_ns=int(event.get("start_time_ns") or 0),
                 end_ns=int(event.get("end_time_ns") or 0),
                 attributes=attributes,
             )
-        elif signal == "log" and name == _API_REQUEST_EVENT and attributes.get("request_id"):
-            accepted = ("api_request", str(attributes["request_id"]), attributes)
+        elif signal == "log" and name == _API_REQUEST_EVENT:
+            accepted = (
+                "api_request",
+                str(attributes.get("request_id") or ""),
+                int(event.get("time_ns") or 0),
+                attributes,
+            )
         elif signal == "trace" and name == _TOOL_SPAN and tool_use_id:
             accepted = _ToolFacts(
                 tool_use_id=tool_use_id,
@@ -537,12 +580,22 @@ class ClaudeRequestObserver:
         observations, self._incoming_observations = self._incoming_observations, []
         for observation in observations:
             if isinstance(observation, _NativeRequestSpan):
-                self._spans[observation.request_id] = observation
+                if observation.request_id:
+                    self._spans[observation.request_id] = observation
+                else:
+                    self._timed_spans_seen = True
+                    self._timed_spans.append(observation)
+                    self._timed_spans.sort(key=lambda span: span.start_ns)
+                    del self._timed_spans[:-_UNKEYED_HISTORY_LIMIT]
             elif isinstance(observation, _ToolFacts):
                 self._merge_tool_facts(observation)
             else:
-                _kind, request_id, attributes = observation
-                self._api_requests[request_id] = attributes
+                _kind, request_id, time_ns, attributes = observation
+                if request_id:
+                    self._api_requests[request_id] = attributes
+                else:
+                    self._timed_api_requests.append((time_ns, attributes))
+                    del self._timed_api_requests[:-_UNKEYED_HISTORY_LIMIT]
         incoming, self._incoming = self._incoming, []
         for body_event in incoming:
             if body_event.name == _REQUEST_BODY_EVENT:
@@ -667,6 +720,55 @@ class ClaudeRequestObserver:
         while len(self._threads) > _THREAD_HISTORY_LIMIT:
             self._threads.pop(next(iter(self._threads)))
 
+    def _covering_span_index(self, time_ns: int) -> int | None:
+        """Return the index of the unkeyed span covering a log written then."""
+        for index, span in enumerate(self._timed_spans):
+            if span.covers(time_ns):
+                return index
+        return None
+
+    def _take_native_span(self, response_event: _BodyEvent) -> _NativeRequestSpan | None:
+        """Return the request span of the call this response answers.
+
+        A build stating the API request id on the span and on the response
+        body has said which two belong together. Recent builds state it on
+        neither, so the span is found by its window: the CLI closes it just
+        after it logs the body, and its calls run one at a time, so exactly
+        one window covers that log.
+        """
+        request_id = str(response_event.attributes.get("request_id") or "")
+        if request_id:
+            return self._spans.pop(request_id, None)
+        index = self._covering_span_index(response_event.time_ns)
+        if index is None:
+            return None
+        span = self._timed_spans[index]
+        # Spans before it answered calls that logged no body — an attempt the
+        # CLI retried — and no later response can belong to them.
+        del self._timed_spans[: index + 1]
+        return span
+
+    def _take_accounting(self, response_event: _BodyEvent) -> dict[str, Any]:
+        """Return the CLI's own accounting of the call this response answers.
+
+        The ``claude_code.api_request`` log is written as the call finishes,
+        in the same millisecond as the response body, so an unkeyed one is
+        paired with the body it sits closest to.
+        """
+        request_id = str(response_event.attributes.get("request_id") or "")
+        if request_id:
+            return self._api_requests.pop(request_id, {})
+        chosen: int | None = None
+        closest = _UNKEYED_MATCH_WINDOW_NS
+        for index, (time_ns, _attributes) in enumerate(self._timed_api_requests):
+            distance = abs(time_ns - response_event.time_ns)
+            if distance <= closest:
+                closest = distance
+                chosen = index
+        if chosen is None:
+            return {}
+        return self._timed_api_requests.pop(chosen)[1]
+
     async def _native_request(self, snapshot: _ReplySnapshot) -> ModelRequestEvent:
         response_event, response = self._responses.pop(snapshot.message_id)
         request_event = await self._pick_request(response_event)
@@ -702,14 +804,14 @@ class ClaudeRequestObserver:
         if input_observed:
             self._last_output_identity = _identity("assistant", response.get("content"))
             self._remember_thread(snapshot.message_id, input_messages + (output,))
-        native = self._spans.pop(str(response_event.attributes.get("request_id") or ""), None)
+        native = self._take_native_span(response_event)
         if native is not None and native.start_ns > 0 and native.end_ns >= native.start_ns:
             started_at = native.start_ns / 1e9
             ended_at = native.end_ns / 1e9
         else:
             started_at = request_event.time_ns / 1e9 if request_event is not None else snapshot.started_at
             ended_at = max(response_event.time_ns / 1e9, started_at)
-        accounting = self._api_requests.pop(str(response_event.attributes.get("request_id") or ""), {})
+        accounting = self._take_accounting(response_event)
         effort = accounting.get("effort")
         if isinstance(effort, str) and effort:
             request_parameters["reasoning_level"] = effort
@@ -973,7 +1075,10 @@ def _native_diagnostics(native: _NativeRequestSpan | None) -> dict[str, Any]:
         value = native.attributes.get(key)
         if isinstance(value, (str, bool, int, float)):
             facts[key.replace(".", "_")] = value
-    facts["api_request_id"] = native.request_id
+    # Builds that key their spans state the id here; those that do not leave
+    # whatever the span itself named, rather than an empty id.
+    if native.request_id:
+        facts["api_request_id"] = native.request_id
     return facts
 
 
