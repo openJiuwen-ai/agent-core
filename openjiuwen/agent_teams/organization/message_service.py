@@ -89,6 +89,17 @@ class OrgMessageService:
             to_leader_id=to_leader_id,
         )
         if not recipient_leaders:
+            target = str(to_team_id or "").strip()
+            if target:
+                return OrgMessageOpResult(
+                    ok=False,
+                    reason=(
+                        f"org_send_leader_message target is not an organization member team: {target}. "
+                        "Use this Team's send_message for in-team teammates; "
+                        "org_send_leader_message only targets other organization teams "
+                        "(org team_id), never member names."
+                    ),
+                )
             logger.warning(
                 "leader message has no delivery targets: org=%s from=%s to=%s",
                 self.organization_id,

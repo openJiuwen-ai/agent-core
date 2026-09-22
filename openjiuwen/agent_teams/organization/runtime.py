@@ -45,6 +45,7 @@ from openjiuwen.agent_teams.organization.schema import (
 )
 from openjiuwen.agent_teams.organization.task_pool import (
     OrgTaskManager,
+    _is_root_task_row,
     _is_supersedable_task,
 )
 from openjiuwen.agent_teams.organization.unclaimed import OrgUnclaimedTaskService
@@ -77,6 +78,10 @@ _ORG_OWNER_LIFECYCLE_PROMPT = {
 _ORG_COLLABORATION_PROMPT = {
     "cn": (
         "## Team Organization 协作记录\n"
+        "团内 ≠ 跨 Team：拆分给本 Team 的 teammate 时，只用 create_task / claim_task / "
+        "spawn_teammate / send_message；禁止把成员名当作 to_team_id 去调 org_create_task、"
+        "org_delegate_task 或 org_send_leader_message。org_* 仅用于 Organization 内其他 Team"
+        "（org team_id）。\n"
         "当跨 Team 依赖需要确认 API 契约、输入输出、验收结论或明确阻塞项时，使用 "
         "org_send_leader_message 向相关 leader 发送简短、可执行的消息。不要用它发送例行状态，"
         "也不要用它替代 task pool 的认领、完成和评审操作。\n"
@@ -87,11 +92,16 @@ _ORG_COLLABORATION_PROMPT = {
         "认领根任务后，先按职责选择汇总模式：本 Team 能独立作最终判断、其他 Team 仅提供佐证时选 "
         "HIERARCHICAL；财务、法律、技术、市场等独立领域需要跨域形成最终判断，或本 Team 只负责其中 "
         "一部分时选 SUMMARY_TEAM。选择并启动根任务后，所有拆分工作都必须以该根任务为直接父任务，"
-        "不能创建并列根任务。SUMMARY_TEAM 下，本 Team 自己的贡献也必须写成 "
+        "不能创建并列根任务；禁止对根任务调用 org_delegate_task，跨 Team 只通过子任务的 "
+        "delegated_to_team_id 或对子任务 org_delegate_task。SUMMARY_TEAM 下，本 Team 自己的贡献也必须写成 "
         "根任务的直接子任务并完成验收，才能作为最终汇总来源；不要只留在 Team 内部任务中。"
     ),
     "en": (
         "## Team Organization collaboration record\n"
+        "In-team ≠ cross-team: to assign work to this Team's teammates, use create_task / "
+        "claim_task / spawn_teammate / send_message only. Never pass a member name as to_team_id "
+        "to org_create_task, org_delegate_task, or org_send_leader_message. org_* tools target "
+        "other organization Teams (org team_id) only.\n"
         "When a cross-team dependency needs an API-contract, input/output, acceptance, or concrete "
         "blocker confirmation, send a short actionable org_send_leader_message to the relevant leader. "
         "Do not use it for routine status updates or instead of task-pool claim, completion, and review operations.\n"
@@ -103,8 +113,10 @@ _ORG_COLLABORATION_PROMPT = {
         "your Team can independently make the final judgment and other Teams supply supporting evidence. "
         "Use SUMMARY_TEAM for independent specialist domains requiring a cross-domain final judgment, or when "
         "your Team handles only one part. After choosing and starting the root, create every work item as "
-        "its direct child, never as a parallel root. In SUMMARY_TEAM mode, record your own contribution as a direct "
-        "root child and have it accepted; an internal Team task alone is not a summary source."
+        "its direct child, never as a parallel root; never org_delegate_task the root—cross-team work uses "
+        "child delegated_to_team_id or org_delegate_task on that child only. In SUMMARY_TEAM mode, record your "
+        "own contribution as a direct root child and have it accepted; an internal Team task alone is not a "
+        "summary source."
     ),
 }
 
@@ -1323,8 +1335,10 @@ class OrganizationRuntimeManager:
             if parent is None or parent.status in _PARENT_RESUME_TERMINAL_STATUSES:
                 continue
             aggregation = parent.aggregation
-            is_root = parent.parent_task_id is None
-            is_summary_aggregation = aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+            is_root = _is_root_task_row(parent)
+            is_summary_aggregation = (
+                aggregation is not None and aggregation.mode is OrgTaskAggregationMode.SUMMARY_TEAM
+            )
             if is_root and is_summary_aggregation and aggregation.summary_task_id:
                 # A Summary Execution already owns final delivery for this root.
                 continue

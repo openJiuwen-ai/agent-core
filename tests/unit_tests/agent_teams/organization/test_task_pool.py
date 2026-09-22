@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
 )
 from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+from openjiuwen.agent_teams.tools.database.engine import get_current_time
 from openjiuwen.agent_teams.organization.tools import (
     OrgCreateSummaryExecutionTool,
     OrgCreateTaskTool,
@@ -434,6 +435,14 @@ async def test_concurrent_org_claim_same_task_single_winner(org_manager):
 @pytest.mark.asyncio
 async def test_claim_and_delegate_use_single_assignment(org_manager):
     manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
+    leader = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
     result = await manager.create_task(
         task_id="task-1",
         title="Analyze logs",
@@ -454,8 +463,20 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
     assert claimed.task.assignment.team_id == "team-a"
     assert claimed.task.assignment.assigned_by_team_id is None
 
+    await _select_hierarchical_aggregation(manager, root_task_id="task-1")
+    child = await manager.create_task(
+        task_id="task-1-child",
+        parent_task_id="task-1",
+        title="Child slice",
+        description="Delegatable child.",
+        required_capabilities=["analysis"],
+        created_by=leader,
+    )
+    assert child.ok
+    assert (await manager.claim_task(task_id="task-1-child", team_id="team-a")).ok
+
     delegated = await manager.delegate_task(
-        task_id="task-1",
+        task_id="task-1-child",
         from_team_id="team-a",
         to_team_id="team-b",
     )
@@ -464,6 +485,109 @@ async def test_claim_and_delegate_use_single_assignment(org_manager):
     assert delegated.task.assignment.assignment_type == OrgAssignmentType.DELEGATED
     assert delegated.task.assignment.team_id == "team-b"
     assert delegated.task.assignment.assigned_by_team_id == "team-a"
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_rejects_root_task(org_manager):
+    manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
+    assert (
+        await manager.create_task(
+            task_id="root-no-delegate",
+            title="Root",
+            description="Must stay with claimer.",
+            required_capabilities=["analysis"],
+            created_by=OrgTaskCreator(
+                creator_type="client",
+                creator_id="client-1",
+                organization_id="org-1",
+            ),
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="root-no-delegate", team_id="team-a")).ok
+
+    rejected = await manager.delegate_task(
+        task_id="root-no-delegate",
+        from_team_id="team-a",
+        to_team_id="team-b",
+    )
+    assert not rejected.ok
+    assert "cannot reassign a root task" in rejected.reason
+    root = await manager.get_task("root-no-delegate")
+    assert root is not None
+    assert root.assignment.team_id == "team-a"
+
+
+@pytest.mark.asyncio
+async def test_delegate_task_rejects_non_member_team_id(org_manager):
+    manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    leader = OrgTaskCreator(
+        creator_type="team_leader",
+        creator_id="leader-a",
+        organization_id="org-1",
+        team_id="team-a",
+    )
+    assert (
+        await manager.create_task(
+            task_id="task-member-mixup-root",
+            title="Root",
+            description="Parent for membership mixup.",
+            required_capabilities=["analysis"],
+            created_by=OrgTaskCreator(
+                creator_type="client",
+                creator_id="client-1",
+                organization_id="org-1",
+            ),
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="task-member-mixup-root", team_id="team-a")).ok
+    await _select_hierarchical_aggregation(manager, root_task_id="task-member-mixup-root")
+    assert (
+        await manager.create_task(
+            task_id="task-member-mixup",
+            parent_task_id="task-member-mixup-root",
+            title="Tech slice",
+            description="Should stay on an org team.",
+            required_capabilities=["analysis"],
+            created_by=leader,
+        )
+    ).ok
+    assert (await manager.claim_task(task_id="task-member-mixup", team_id="team-a")).ok
+
+    rejected = await manager.delegate_task(
+        task_id="task-member-mixup",
+        from_team_id="team-a",
+        to_team_id="rust-audit-engineer",
+    )
+    assert not rejected.ok
+    assert "not an organization member team" in rejected.reason
+    task = await manager.get_task("task-member-mixup")
+    assert task is not None
+    assert task.assignment.team_id == "team-a"
+
+
+@pytest.mark.asyncio
+async def test_create_task_rejects_non_member_delegated_to_team_id(org_manager):
+    manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    rejected = await manager.create_task(
+        task_id="task-create-member-mixup",
+        title="Tech slice",
+        description="Should not assign to a member name.",
+        required_capabilities=["analysis"],
+        delegated_to_team_id="rust-audit-engineer",
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert not rejected.ok
+    assert "not an organization member team" in rejected.reason
+    assert await manager.get_task("task-create-member-mixup") is None
 
 
 @pytest.mark.asyncio
@@ -754,6 +878,126 @@ async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
 
 
 @pytest.mark.asyncio
+async def test_create_task_blank_parent_task_id_is_treated_as_root(org_manager):
+    """LLMs often pass parent_task_id=\"\"; that must still create a selectable root."""
+    manager, _ = org_manager
+    created = await manager.create_task(
+        task_id="blank-parent-root",
+        parent_task_id="",
+        title="Root via blank parent",
+        description="Empty parent_task_id must normalize to a real root.",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-a",
+            organization_id="org-1",
+            team_id="team-a",
+        ),
+    )
+    assert created.ok and created.task is not None
+    assert created.task.parent_task_id is None
+    assert created.task.aggregation is not None
+    assert (await manager.claim_task(task_id="blank-parent-root", team_id="team-a")).ok
+    selected = await manager.set_root_aggregation_mode(
+        task_id="blank-parent-root",
+        team_id="team-a",
+        leader_id="leader-a",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )
+    assert selected.ok
+    assert selected.task.aggregation.controller_team_id == "team-a"
+
+
+async def _insert_legacy_blank_parent_root(
+    manager: OrgTaskManager,
+    *,
+    task_id: str,
+    team_id: str = "team-a",
+    leader_id: str = "leader-a",
+    status: str = OrgTaskStatus.CLAIMED.value,
+) -> None:
+    """Insert a historical dirty root with parent_task_id=\"\" (not NULL)."""
+    await manager.initialize()
+    now = get_current_time()
+    assigned = status in {
+        OrgTaskStatus.CLAIMED.value,
+        OrgTaskStatus.IN_PROGRESS.value,
+        OrgTaskStatus.DELEGATED.value,
+    }
+    async with manager._write() as session:
+        session.add(
+            OrgTaskRecord(
+                task_id=task_id,
+                organization_id=manager.organization_id,
+                parent_task_id="",
+                root_task_id=task_id,
+                creator_type="team_leader",
+                creator_id=leader_id,
+                creator_team_id=team_id,
+                status=status,
+                created_at=now,
+                updated_at=now,
+                title="Legacy blank parent root",
+                description="Dirty root stored with empty-string parent_task_id",
+                required_capabilities_json='["analysis"]',
+                assignment_type=(
+                    OrgAssignmentType.CLAIMED.value if assigned else OrgAssignmentType.UNASSIGNED.value
+                ),
+                assigned_team_id=team_id if assigned else None,
+                assigned_by_team_id=team_id if assigned else None,
+                assigned_at=now if assigned else None,
+                aggregation_json=None,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_legacy_blank_parent_root_is_healed_on_aggregation_select(org_manager):
+    """set_root_aggregation_mode must rewrite parent_task_id=\"\" to NULL."""
+    manager, _ = org_manager
+    await _insert_legacy_blank_parent_root(manager, task_id="legacy-blank-root")
+    selected = await manager.set_root_aggregation_mode(
+        task_id="legacy-blank-root",
+        team_id="team-a",
+        leader_id="leader-a",
+        aggregation_mode=OrgTaskAggregationMode.SUMMARY_TEAM,
+    )
+    assert selected.ok
+    assert selected.task.parent_task_id is None
+    async with manager._write() as session:
+        healed = await session.get(OrgTaskRecord, "legacy-blank-root")
+        assert healed is not None
+        assert healed.parent_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_blank_parent_root_blocks_parallel_root_via_sql(org_manager):
+    """Active-root SQL must see legacy blank-parent rows, not only parent IS NULL."""
+    manager, _ = org_manager
+    await _insert_legacy_blank_parent_root(
+        manager,
+        task_id="legacy-active-root",
+        status=OrgTaskStatus.IN_PROGRESS.value,
+    )
+    rejected = await manager.create_task(
+        task_id="parallel-root",
+        title="Parallel",
+        description="Must be blocked by legacy blank-parent active root",
+        required_capabilities=["analysis"],
+        created_by=OrgTaskCreator(
+            creator_type="team_leader",
+            creator_id="leader-b",
+            organization_id="org-1",
+            team_id="team-b",
+        ),
+    )
+    assert not rejected.ok
+    assert "parallel root" in rejected.reason
+    assert "legacy-active-root" in rejected.reason
+
+
+@pytest.mark.asyncio
 async def test_create_task_accepts_summary_team_aggregation(org_manager):
     manager, _ = org_manager
     created = await manager.create_task(
@@ -801,6 +1045,8 @@ async def test_generic_task_creation_reserves_summary_task_type(org_manager):
 async def test_summary_execution_waits_for_accepted_sources_then_completes_root(org_manager):
     """The MVP Summary Task is a root sibling and opens only after source acceptance."""
     manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
     client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
     leader = OrgTaskCreator(
         creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
@@ -888,6 +1134,8 @@ async def test_summary_execution_waits_for_accepted_sources_then_completes_root(
 async def test_rebinding_running_summary_execution_keeps_running_state(org_manager):
     """A repeated creation request must not reset an active Summary Execution."""
     manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
     client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
     leader = OrgTaskCreator(
         creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
@@ -1009,6 +1257,8 @@ async def test_dissolve_removes_orphan_summary_rows(org_manager):
 async def test_hierarchical_root_waits_for_accepted_sources_then_completes(org_manager):
     """A Root Leader can explicitly choose HIERARCHICAL and complete only after source acceptance."""
     manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
     client = OrgTaskCreator(creator_type="client", creator_id="client", organization_id="org-1")
     leader = OrgTaskCreator(
         creator_type="team_leader", creator_id="leader-a", organization_id="org-1", team_id="team-a"
@@ -1521,6 +1771,8 @@ async def test_org_update_task_failed_action(org_manager):
 @pytest.mark.asyncio
 async def test_start_task_allows_delegated_task(org_manager):
     manager, _ = org_manager
+    await manager.register_leader(team_id="team-a", leader_id="leader-a")
+    await manager.register_leader(team_id="team-b", leader_id="leader-b")
     created = await manager.create_task(
         task_id="delegated-start-task",
         title="Delegated start",
@@ -2739,6 +2991,11 @@ async def test_active_teams_can_create_and_join_organization(active_organization
     assert "org_dissolve_organization" in owner_prompt.content["en"]
     collaboration_prompt = agents["team-a"].harness.system_prompt_builder.sections["organization_collaboration"]
     assert "do not create a duplicate replacement" in collaboration_prompt.content["en"]
+    assert "In-team ≠ cross-team" in collaboration_prompt.content["en"]
+    assert "团内 ≠ 跨 Team" in collaboration_prompt.content["cn"]
+    assert "Never pass a member name" in collaboration_prompt.content["en"]
+    assert "never org_delegate_task the root" in collaboration_prompt.content["en"]
+    assert "禁止对根任务调用 org_delegate_task" in collaboration_prompt.content["cn"]
     owner_tools = {tool.card.name: tool for tool in agents["team-a"].harness.tools}
     owner_tool_names = set(owner_tools)
     assert {"org_create_organization", "org_invite_team", "org_view_tasks"} <= owner_tool_names
