@@ -705,8 +705,7 @@ class AgentConfigurator:
             if swarmflow_worker_base_spec is not None:
                 swarmflow_worker_base_spec = swarmflow_worker_base_spec.model_copy(
                     update={
-                        "rails": list(swarmflow_worker_base_spec.rails or [])
-                                 + [observability_rail_spec],
+                        "rails": list(swarmflow_worker_base_spec.rails or []) + [observability_rail_spec],
                     },
                 )
 
@@ -796,6 +795,22 @@ class AgentConfigurator:
             initial_plan_mode=is_team_plan_leader,
             build_context=member_build_context,
         )
+
+        organization_workspace_manager = getattr(self.team_backend, "organization_workspace_manager", None)
+        if organization_workspace_manager is not None and workspace_root_path:
+            organization_workspace_manager.mount_into_workspace(workspace_root_path)
+            from openjiuwen.agent_teams.organization.workspace_rail import (
+                OrganizationWorkspaceRail,
+            )
+
+            self.harness.add_rail(
+                OrganizationWorkspaceRail(
+                    organization_workspace_manager,
+                    team_id=resolved_team_name,
+                    member_name=member_name,
+                    summary_team=bool((spec.metadata or {}).get("summary_team")),
+                )
+            )
 
         # Team memory manager (only when explicitly enabled in the spec).
         self.memory_manager = self._build_memory_manager(spec, ctx, agent_spec, resolved_language, member_name)
@@ -904,18 +919,26 @@ class AgentConfigurator:
             organization_id = spec.metadata.get("organization_id")
         org_task_manager = None
         org_message_service = None
+        organization_workspace_manager = None
         if organization_id:
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.organization.pool import get_process_org_manager
+            from openjiuwen.agent_teams.organization.workspace import (
+                get_organization_workspace_manager,
+            )
 
+            organization_session_id = get_session_id() or "default"
             org_manager = get_process_org_manager(
                 organization_id=str(organization_id),
                 db=db,
                 messager=messager,
-                session_id=get_session_id() or None,
+                session_id=organization_session_id,
             )
             org_task_manager = org_manager.task_pool
             org_message_service = org_manager.message_service
+            organization_workspace_manager = get_organization_workspace_manager(
+                str(organization_id), organization_session_id
+            )
 
         is_leader = ctx.role == TeamRole.LEADER
         current_member_name = ctx.member_name or (ctx.team_spec.leader_member_name if ctx.team_spec else "")
@@ -942,6 +965,7 @@ class AgentConfigurator:
             leader_member_name=ctx.team_spec.leader_member_name if ctx.team_spec else None,
             org_task_manager=org_task_manager,
             org_message_service=org_message_service,
+            organization_workspace_manager=organization_workspace_manager,
         )
 
         def _snapshot_length() -> int:
