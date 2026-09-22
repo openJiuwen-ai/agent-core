@@ -35,6 +35,8 @@ from openjiuwen.core.foundation.llm import (
 )
 from openjiuwen.core.foundation.tool import ToolInfo
 
+_TIKTOKEN_CI_SKIP_REASON = "CI cannot initialize cl100k_base without network access"
+
 
 def test_forked_agent_inherits_compression_executor():
     assert issubclass(ForkedAgent, CompressionExecutor)
@@ -252,6 +254,7 @@ def _recall_test_window():
 
 
 @pytest.mark.asyncio
+@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_session_memory_compressor_archives_replaced_messages_for_recall(tmp_path):
     notes_path = tmp_path / "session_context.md"
     notes_path.write_text("# Current State\nworking on database retries", encoding="utf-8")
