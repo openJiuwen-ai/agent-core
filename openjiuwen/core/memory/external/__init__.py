@@ -3,10 +3,12 @@
 """External memory provider subsystem."""
 
 from openjiuwen.core.memory.external.agentarts_memory_provider import AgentArtsMemoryProvider
+from openjiuwen.core.memory.external.lakebase_memory_provider import LakeBaseMemoryProvider
 from openjiuwen.core.memory.external.mem0_provider import Mem0MemoryProvider
+from openjiuwen.core.memory.external.office_ace_memory_cloud_provider import OfficeAceMemoryCloudProvider
+from openjiuwen.core.memory.external.office_ace_memory_pc_provider import OfficeAceMemoryPcProvider
 from openjiuwen.core.memory.external.openjiuwen_memory_provider import OpenJiuwenMemoryProvider
 from openjiuwen.core.memory.external.openviking_memory_provider import OpenVikingMemoryProvider
-from openjiuwen.core.memory.external.lakebase_memory_provider import LakeBaseMemoryProvider
 from openjiuwen.core.memory.external.provider import MemoryProvider
 
 try:
@@ -19,6 +21,8 @@ except ModuleNotFoundError as exc:
 __all__ = [
     "MemoryProvider",
     "AgentArtsMemoryProvider",
+    "OfficeAceMemoryCloudProvider",
+    "OfficeAceMemoryPcProvider",
     "OpenJiuwenMemoryProvider",
     "OpenVikingMemoryProvider",
     "LakeBaseMemoryProvider",
