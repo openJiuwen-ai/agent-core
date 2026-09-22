@@ -85,9 +85,14 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    reported from the response that made it and the request that read its
    result, between those two requests. Codex states first-token latency on
    `codex.sse_event` when a response completes, naming no response, so it is
-   claimed by the inference whose window it lands in and a finished inference
-   waits briefly for it (`codex.turn_ttft` is a different, turn-level number
-   measured from the turn's start, and is not that latency). Codex states no
+   claimed by the inference whose window it lands in. That report crosses the
+   telemetry channel while the rollout record is tailed from a file, so the
+   two race: the CLI is asked to flush its batches every 100ms
+   (`OTEL_BLRP_SCHEDULE_DELAY`), which brings the report within tens of
+   milliseconds, and a finished inference waits that long for it rather than
+   the second the default batch delay would cost (`codex.turn_ttft` is a
+   different, turn-level number measured from the turn's start, and is not
+   that latency). Codex states no
    cost at all, so none is reported rather than derived. What a vendor states
    once and then omits is remembered: Claude Code threads a conversation
    server-side, and a continuation states neither the system prompt nor the

@@ -25,6 +25,8 @@ from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_n
 logger = LazyLogger(lambda: LogManager.get_logger("harness_providers"))
 
 CODEX_API_KEY_ENV = "OPENJIUWEN_CODEX_API_KEY"
+# How often the CLI flushes batched telemetry, in milliseconds.
+_OTEL_LOG_EXPORT_INTERVAL_MS = "100"
 # Codex groups its tools into namespaces and leaves this one implicit: a call
 # states its namespace only when the tool is not in it.
 DEFAULT_TOOL_NAMESPACE = "functions"
@@ -89,6 +91,19 @@ def codex_model_config_overrides(model: CodexModelConfig) -> tuple[str, ...]:
     # for external endpoints only; members on the official endpoint keep it.
     overrides.append("features.enable_request_compression=false")
     return tuple(overrides)
+
+
+def codex_telemetry_env() -> dict[str, str]:
+    """Env making the CLI flush its telemetry batches promptly.
+
+    A completion report is only useful while the inference it describes is
+    still being assembled, and the default batch delay holds it several
+    hundred milliseconds -- long enough that the rollout record, which is
+    tailed from a file, always wins the race. Flushing every
+    ``_OTEL_LOG_EXPORT_INTERVAL_MS`` brings the report within tens of
+    milliseconds, so the wait for it is imperceptible rather than a second.
+    """
+    return {"OTEL_BLRP_SCHEDULE_DELAY": _OTEL_LOG_EXPORT_INTERVAL_MS}
 
 
 def codex_otel_config_overrides(*, endpoint: str, source_id: str) -> tuple[str, ...]:
@@ -403,6 +418,7 @@ __all__ = [
     "codex_mcp_tool_naming",
     "codex_model_config_overrides",
     "codex_otel_config_overrides",
+    "codex_telemetry_env",
     "codex_model_options",
     "codex_server_key",
     "load_codex_sdk",

@@ -52,7 +52,7 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.base import logger
 from openjiuwen.harness_providers.codex.mapping import MappedCodexEvent
-from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides, namespaced_tool_name
+from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides, codex_telemetry_env, namespaced_tool_name
 from openjiuwen.harness_providers.codex.rollout_trace import CodexRolloutTraceReader
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
@@ -99,9 +99,11 @@ _RESPONSE_COMPLETED_KIND = "response.completed"
 # How long after an inference ends its completion report may still arrive.
 _RESPONSE_FACT_TOLERANCE_S = 2.0
 # How long a finished inference waits for that report before being reported
-# without it. The rollout record lands the moment the response ends while the
-# telemetry event is batched, so the two always race by a fraction of a second.
-_RESPONSE_FACT_WAIT_S = 1.5
+# without it. The rollout record is tailed from a file and lands the moment
+# the response ends, while the report crosses the telemetry channel, so the
+# two always race; the CLI is asked to flush promptly (``codex_telemetry_env``)
+# to keep that race down to tens of milliseconds.
+_RESPONSE_FACT_WAIT_S = 0.4
 _TOOL_DECISION_EVENT = "codex.tool_decision"
 _CONVERSATION_STARTS_EVENT = "codex.conversation_starts"
 # Settings the session resolved to, worth stating once per turn.
@@ -266,7 +268,10 @@ class CodexRequestObserver:
             logger.warning("[codex] rollout trace unavailable; reporting requests from raw events: %s", exc)
             self._reader = None
         env = {ROLLOUT_TRACE_ROOT_ENV: str(self._reader.root)} if self._reader is not None else {}
-        return CodexObservationAttachment(env=env, config_overrides=await self._attach_telemetry())
+        overrides = await self._attach_telemetry()
+        if overrides:
+            env.update(codex_telemetry_env())
+        return CodexObservationAttachment(env=env, config_overrides=overrides)
 
     async def _attach_telemetry(self) -> tuple[str, ...]:
         """Subscribe to the loopback receiver; empty when it cannot serve."""
