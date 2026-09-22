@@ -108,7 +108,6 @@ class FtsIndexRepository:
         ``scope`` may contain:
             channel_id: str
             conversation_ids: list[str]
-            since_ms: int
 
         ``learning_eligible_only`` (decision D8): when True, join
         ``im_messages`` and keep only rows with ``learning_eligible = 1``.

@@ -57,6 +57,12 @@ EXPECTED_CLASSES = {
     "NormalizedBatch",
     "ImLearningScheduler",
     "ImLearningSchedulerStatus",
+    # im/ search subpackage (OJ-06)
+    "ImSearchQuery",
+    "ImSearchHit",
+    "ImSearchPort",
+    "SqliteImSearchStore",
+    "ImSearchTool",
     # distill/ subpackage (OJ-07/08, landed separately)
     "AnalyzerPort",
     "CorpusMessage",

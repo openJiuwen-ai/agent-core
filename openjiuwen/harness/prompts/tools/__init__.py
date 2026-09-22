@@ -75,6 +75,9 @@ from openjiuwen.harness.prompts.tools.goal import (
     GetCurrentGoalMetadataProvider,
     SubmitGoalReportMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.im_search import (
+    ImSearchMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.list_skill import (
     ListSkillMetadataProvider,
 )
@@ -193,6 +196,7 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     ExitWorktreeMetadataProvider(),
     SubmitGoalReportMetadataProvider(),
     GetCurrentGoalMetadataProvider(),
+    ImSearchMetadataProvider(),
 ]
 
 _REGISTRY: Dict[str, ToolMetadataProvider] = {p.get_name(): p for p in _PROVIDERS}
