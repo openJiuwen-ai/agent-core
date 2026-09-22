@@ -760,9 +760,20 @@ class ReportingAgent:
         from openjiuwen.harness import create_deep_agent
         from openjiuwen.harness.rails.sys_operation_rail import SysOperationRail
         from openjiuwen.harness.schema.config import SubAgentConfig
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.python_runtime import (
+            discover_python_runtime,
+            ensure_on_path,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.observability_rail import (
             with_observability,
         )
+
+        # See code_implementation's _build_coding_agent for why: a bare
+        # `python`/`py` typed in this agent's bash tool (e.g. by ts-figure's
+        # matplotlib renderer path) can resolve to Windows' App Execution
+        # Alias placeholder instead of a real interpreter on the packaged
+        # desktop host. Prepend a verified real interpreter once per process.
+        ensure_on_path(discover_python_runtime())
 
         # A real agentic session turn carries a lot of accumulated context
         # (evidence blocks, prior tool results, read-back section files) and

@@ -723,6 +723,10 @@ class CodeImplementationAgent:
         from openjiuwen.core.single_agent.schema.agent_card import AgentCard
         from openjiuwen.harness.rails.task_completion_rail import TaskCompletionRail
         from openjiuwen.harness.subagents import create_code_agent
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.python_runtime import (
+            discover_python_runtime,
+            ensure_on_path,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
         )
@@ -742,6 +746,17 @@ class CodeImplementationAgent:
         # explicit override (e.g. OPENJIUWEN_BASH_STRICT=0 for local debugging)
         # is respected.
         os.environ.setdefault("OPENJIUWEN_BASH_STRICT", "1")
+
+        # On the packaged desktop host, a bare `python`/`py` typed in this
+        # agent's bash tool can resolve to Windows' own App Execution Alias
+        # placeholder instead of a real interpreter (prints a "go install
+        # from the Microsoft Store" message rather than running anything) —
+        # observed directly burning an attempt's entire retry budget on the
+        # agent re-locating a real interpreter from scratch instead of ever
+        # writing `output/run.py`. Prepend a verified real interpreter's
+        # directory to PATH once so every bash call in this process resolves
+        # correctly without the agent having to rediscover it each attempt.
+        ensure_on_path(discover_python_runtime())
 
         model = self._injected_model or init_model(
             provider=self._setting("provider", "MODEL_PROVIDER", default="OpenAI"),
