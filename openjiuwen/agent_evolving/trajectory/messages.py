@@ -123,6 +123,22 @@ def _merge_prompt(messages: list[dict[str, Any]], prompt: list[dict[str, Any]]) 
     messages.extend(deepcopy(prompt[overlap:]))
 
 
+def _trim_prompt_to_last_user(prompt: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """Keep the current-invoke entry: last ``user`` message through the end.
+
+    LLM spans may store the full request prompt (prior session rounds included).
+    Callers such as TTSE pass ``invoke_local=True`` so projection does not
+    re-import that history. This is a slice, not text-overlap merge.
+    """
+    last_user: int | None = None
+    for index, message in enumerate(prompt):
+        if message.get("role") == "user":
+            last_user = index
+    if last_user is None:
+        return []
+    return list(prompt[last_user:])
+
+
 def _tool_message(
     tool_call: Mapping[str, Any],
     tool_call_names: Mapping[str, object],
@@ -155,12 +171,18 @@ def trajectory_to_messages(
     trajectory: Trajectory,
     *,
     fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    invoke_local: bool = False,
 ) -> list[dict[str, Any]]:
     """Project canonical LLM/tool spans into detached OpenAI-compatible messages.
 
     ``fields`` selects semantic output fields; physical span attribute mapping
     remains owned by trajectory accessors. Message values are preserved rather
     than validated, while tool-call containers are normalized structurally.
+
+    ``invoke_local=True`` (TTSE detect/induce) slices the first LLM prompt to
+    the last ``user`` message. Later LLM spans in the same projection do not
+    re-append that prompt; they only add completions. Tool results come from
+    tool spans. This does not compare prompt text to merge overlap.
     """
 
     selected_fields = frozenset(fields)
@@ -177,7 +199,12 @@ def trajectory_to_messages(
             raw_prompt, raw_completions = read_llm_exchange(span)
             prompt = [_normalize_message(message) for message in raw_prompt]
             completions = [_normalize_message(message) for message in raw_completions]
-            _merge_prompt(messages, prompt)
+            if invoke_local:
+                prompt = list(_trim_prompt_to_last_user(prompt))
+                if not messages:
+                    messages.extend(deepcopy(prompt))
+            else:
+                _merge_prompt(messages, prompt)
             messages.extend(completions)
             for message in (*prompt, *completions):
                 for tool_call in message.get("tool_calls", ()):

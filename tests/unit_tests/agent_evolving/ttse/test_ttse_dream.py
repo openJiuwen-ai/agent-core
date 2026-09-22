@@ -1086,8 +1086,8 @@ async def test_dream_merge_llm_skips_cross_category(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_dream_llm_cluster_disabled_skips_without_bm25(tmp_path):
-    """No embedding + dream_llm_cluster_enabled=False must not soft_cluster via BM25."""
+async def test_dream_llm_cluster_disabled_skips_soft_cluster(tmp_path):
+    """No embedding + dream_llm_cluster_enabled=False must not call soft_cluster."""
 
     def handler(prompt: str):
         raise AssertionError("LLM must not be called when llm cluster is disabled")
@@ -1454,21 +1454,17 @@ async def test_dream_category_max_rules_truncates_phase1(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_induction_bm25_dedup_merges_near_duplicate(tmp_path):
-    store = TTSERecordStore(
-        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
-    )
-    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
-    assert await store.add_fact("PresentBench grades slides.md rather than pptx") is False
+async def test_induction_substring_dedup_merges_contained(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
+    assert await store.add_fact("PresentBench grades slides.md") is True
+    assert await store.add_fact("PresentBench grades slides.md not a pptx file") is False
     assert len(store.facts) == 1
     assert store.facts[0]["count"] == 2
 
 
 @pytest.mark.asyncio
-async def test_induction_bm25_dedup_keeps_unrelated(tmp_path):
-    store = TTSERecordStore(
-        TTSEConfig(store_path=str(tmp_path / "bank.json"), bm25_sim_threshold=0.5)
-    )
+async def test_induction_substring_dedup_keeps_unrelated(tmp_path):
+    store = TTSERecordStore(TTSEConfig(store_path=str(tmp_path / "bank.json")))
     assert await store.add_fact("PresentBench grades slides.md not a pptx file") is True
     assert await store.add_fact("compile cxx with cl utf-8 flag on windows") is True
     assert len(store.facts) == 2

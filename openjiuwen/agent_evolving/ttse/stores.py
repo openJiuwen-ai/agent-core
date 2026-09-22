@@ -7,11 +7,10 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 
 * I/O is async via :func:`asyncio.to_thread` with an atomic ``tmp`` + ``os.replace``.
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
-  is configured, falling back to self-normalized BM25
-  (>= ``bm25_sim_threshold``, default 0.5) otherwise. Exact normalized
-  equality is always a hit. The scan is O(n) in bank size (capped by
-  ``max_facts`` / ``max_tips``); a process-local embedding cache makes
-  repeat adds CPU-only when a provider is set. Cold cache fills with
+  is configured, falling back to the reference's substring dedup otherwise.
+  Exact normalized equality is always a hit. The scan is O(n) in bank size
+  (capped by ``max_facts`` / ``max_tips``); a process-local embedding cache
+  makes repeat adds CPU-only when a provider is set. Cold cache fills with
   batched ``embed_documents``, not one RPC per row. n<=400 is a linear
   scan; an ANN index is not used.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
@@ -49,7 +48,6 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
 
-from .bm25_sim import bm25_best_match, pairwise_bm25_sims
 from .categories import OTHER_CATEGORY, normalize_category
 from .config import TTSEConfig
 
@@ -625,8 +623,8 @@ class TTSERecordStore:
             logger.debug("[TTSERail] embedding model=%s text=%s", model, text[:60])
             await self._wait_embedding_slot()
             vec = await self._embedding.embed_query(text)
-        except Exception as exc:  # noqa: BLE001 - degrade to BM25 dedup
-            logger.warning("[TTSERail] embedding failed, falling back to BM25 dedup: %s", exc)
+        except Exception as exc:  # noqa: BLE001 - degrade to substring dedup
+            logger.warning("[TTSERail] embedding failed, falling back to substring dedup: %s", exc)
             return None
         if vec:
             self._store_embedding(key, vec)
@@ -686,9 +684,9 @@ class TTSERecordStore:
         """Return the matching record if ``text`` duplicates an existing rule.
 
         Cosine match when an embedding provider is available; otherwise
-        self-normalized BM25 (>= ``bm25_sim_threshold``). Exact normalized
-        equality is always treated as a duplicate. Scans are O(n) in
-        ``store`` (n capped by max_facts/max_tips).
+        substring match (reference behavior). Exact normalized equality is
+        always treated as a duplicate. Scans are O(n) in ``store`` (n capped
+        by max_facts/max_tips).
         """
         n = _norm(text)
         if not n:
@@ -714,16 +712,12 @@ class TTSERecordStore:
                         best, best_sim = record, sim
                 return best
 
-        # BM25 fallback (no provider, or embedding produced no query vector).
-        docs = [str(record.get("text") or "") for record in store]
-        idx = bm25_best_match(
-            text,
-            docs,
-            threshold=float(self._config.bm25_sim_threshold),
-        )
-        if idx is None:
-            return None
-        return store[idx]
+        # Substring dedup (reference behavior when no embedding provider).
+        for record in store:
+            rn = _norm(record.get("text", ""))
+            if rn and (n in rn or rn in n):
+                return record
+        return None
 
     # ------------------------------------------------------------------
     # Soft clustering (Auto-dream)
@@ -736,20 +730,20 @@ class TTSERecordStore:
         soft_lo: float,
         min_size: int = 2,
     ) -> List[List[Dict[str, Any]]]:
-        """Union-find clusters by pairwise similarity >= threshold.
+        """Union-find clusters by pairwise cosine >= ``soft_lo``.
 
-        With an embedding provider, edges use cosine >= ``soft_lo``.
-        Without one, edges use self-normalized BM25 >= ``bm25_sim_threshold``
-        (``soft_lo`` is ignored on that path). Returns only components with
-        ``len >= min_size``.
+        Returns only components with ``len >= min_size``. Empty when no
+        embedding provider or fewer than ``min_size`` embeddable records.
 
-        Auto-dream merge no longer calls this without an embedding provider
-        (it uses LLM clustering instead); induction/consult may still rely on
-        BM25 elsewhere.
+        Auto-dream merge without an embedding provider uses LLM clustering
+        instead of calling this helper.
         """
-        if len(records) < min_size:
+        if not self.has_embedding_provider() or len(records) < min_size:
             return []
         n = len(records)
+        vectors: List[Optional[List[float]]] = []
+        for record in records:
+            vectors.append(await self._embedding_of(record["text"]))
         parent = list(range(n))
 
         def find(i: int) -> int:
@@ -763,46 +757,26 @@ class TTSERecordStore:
             if ri != rj:
                 parent[rj] = ri
 
-        if self.has_embedding_provider():
-            vectors: List[Optional[List[float]]] = []
-            for record in records:
-                vectors.append(await self._embedding_of(record["text"]))
-            for i in range(n):
-                if vectors[i] is None:
+        for i in range(n):
+            if vectors[i] is None:
+                continue
+            for j in range(i + 1, n):
+                if vectors[j] is None:
                     continue
-                for j in range(i + 1, n):
-                    if vectors[j] is None:
-                        continue
-                    if _cosine(vectors[i], vectors[j]) >= soft_lo:
-                        union(i, j)
-            buckets: Dict[int, List[Dict[str, Any]]] = {}
-            for i, record in enumerate(records):
-                if vectors[i] is None:
-                    continue
-                buckets.setdefault(find(i), []).append(record)
-        else:
-            threshold = float(self._config.bm25_sim_threshold)
-            texts = [str(record.get("text") or "") for record in records]
-            for i, j, sim in pairwise_bm25_sims(texts):
-                if sim >= threshold:
+                if _cosine(vectors[i], vectors[j]) >= soft_lo:
                     union(i, j)
-            buckets = {}
-            for i, record in enumerate(records):
-                buckets.setdefault(find(i), []).append(record)
 
+        buckets: Dict[int, List[Dict[str, Any]]] = {}
+        for i, record in enumerate(records):
+            if vectors[i] is None:
+                continue
+            buckets.setdefault(find(i), []).append(record)
         clusters = [members for members in buckets.values() if len(members) >= min_size]
         clusters.sort(key=lambda c: -len(c))
         return clusters
 
     async def pairwise_sims(self, records: Sequence[Dict[str, Any]]) -> List[Tuple[int, int, float]]:
-        """Pairwise similarities for LLM merge context (i < j).
-
-        Cosine when an embedding provider is set; otherwise self-normalized
-        BM25.
-        """
-        if not self.has_embedding_provider():
-            texts = [str(record.get("text") or "") for record in records]
-            return pairwise_bm25_sims(texts)
+        """Pairwise cosine similarities for LLM merge context (i < j)."""
         out: List[Tuple[int, int, float]] = []
         vectors: List[Optional[List[float]]] = []
         for record in records:
@@ -824,7 +798,7 @@ class TTSERecordStore:
         """Add or merge a rule.
 
         Returns ``"added"`` for a new rule, ``"merged"`` when an existing rule's
-        count was bumped (BM25/semantic duplicate), or ``None`` when the
+        count was bumped (substring/semantic duplicate), or ``None`` when the
         text was empty. Mirrors the reference: the bank mutates on both ``added``
         and ``merged``, but only ``added`` counts as a new rule.
         """

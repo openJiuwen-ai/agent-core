@@ -31,9 +31,8 @@ class TTSEConfig:
         store_path: JSON path for the shared FACT/TIP bank (created on first write).
         embedding: Optional embedding provider. When set, induction dedup and
             Auto-dream soft clustering use cosine similarity. When ``None``
-            (or embedding fails), induction dedup falls back to self-normalized
-            BM25 with ``bm25_sim_threshold`` (default ``0.5``); Auto-dream
-            merge instead uses LLM Phase1/Phase2 clustering (not BM25) when
+            (or embedding fails), induction dedup falls back to substring
+            matching; Auto-dream merge uses LLM Phase1/Phase2 clustering when
             ``dream_llm_cluster_enabled`` is True. FACT/TIP are disclosed
             via ``ttse_consult``, not dumped into the system prompt.
             Semantic dedup / consult recall scan the in-memory bank in O(n)
@@ -52,9 +51,6 @@ class TTSEConfig:
             matches ModelArts rate limits. ``<= 0`` disables throttling.
         dedup_threshold: Cosine threshold above which two rules are treated as
             duplicates during induction. Only used when ``embedding`` is set.
-        bm25_sim_threshold: Self-normalized BM25 similarity floor for
-            induction dedup and consult when no embedding provider is
-            available. Not used for Auto-dream clustering. Default ``0.5``.
         max_facts / max_tips: Hard caps on bank size (highest-count kept).
             Also the O(n) bound for semantic dedup / consult embedding scans.
         traj_char_budget: Max chars of trajectory text fed to the induce prompt.
@@ -109,9 +105,8 @@ class TTSEConfig:
         dream_category_max_rules: Cap on rules sent to LLM Phase1/Phase2
             prompts on the no-embedding path (random shuffle then take first N).
         dream_llm_cluster_enabled: When True (default) and no embedding
-            provider is set, Auto-dream uses LLM clustering instead of BM25.
-            When False and no embedding, merge clustering is skipped (never
-            falls back to BM25 soft_cluster).
+            provider is set, Auto-dream uses LLM Phase1/Phase2 clustering.
+            When False and no embedding, merge clustering is skipped.
         dream_ttl_days: Delete rules not injected for this many days.
             Uses ``last_injected_at`` (else ``created_at``). Consult hits
             persist on the debounce described by ``inject_persist_min_secs``
@@ -130,7 +125,6 @@ class TTSEConfig:
     embedding: Optional[EmbeddingProvider] = None
     embedding_max_rps: float = 4.0
     dedup_threshold: float = 0.88
-    bm25_sim_threshold: float = 0.5
     max_facts: int = 400
     max_tips: int = 400
     traj_char_budget: Optional[int] = None

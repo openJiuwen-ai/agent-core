@@ -9,7 +9,7 @@ form/over-generic purge for unchecked tips.
 Dream merge is dual-path:
 * With an embedding provider: cosine ``soft_cluster`` then per-cluster LLM merge
   (cluster size capped by ``dream_merge_max_rules``).
-* Without embedding: LLM Phase1 partition + Phase2 category merge (never BM25),
+* Without embedding: LLM Phase1 partition + Phase2 category merge,
   with incremental cluster persistence under ``dream/dream-clusters.json``.
 """
 
@@ -1660,7 +1660,7 @@ async def dream_merge(
 
     With embedding: cosine soft_cluster + per-cluster merge
     (capped by ``dream_merge_max_rules``, highest-count kept).
-    Without: LLM Phase1/Phase2 (never BM25) when ``dream_llm_cluster_enabled``.
+    Without: LLM Phase1/Phase2 when ``dream_llm_cluster_enabled``.
 
     Returns (merged, kept, new rules). Clusters never cross category boundaries.
     """

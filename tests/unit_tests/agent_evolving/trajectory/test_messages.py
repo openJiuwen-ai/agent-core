@@ -318,3 +318,104 @@ def test_uses_tool_error_only_when_output_is_absent() -> None:
     )
 
     assert trajectory_to_messages(_trajectory([tool])) == [{"role": "tool", "name": "failed", "content": "boom"}]
+
+
+def test_invoke_local_trims_first_llm_prompt_to_last_user() -> None:
+    """Prior-round tool failures in the request prompt must not leak in."""
+    trajectory = _trajectory(
+        [
+            _llm_span(
+                "llm-1",
+                start=10,
+                prompt=[
+                    {"role": "system", "content": "rules"},
+                    {"role": "user", "content": "make xlsx"},
+                    {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "bash"}]},
+                    {"role": "tool", "tool_call_id": "c1", "name": "bash", "content": "Error: python3 not found"},
+                    {"role": "assistant", "content": "done"},
+                    {"role": "user", "content": "你好"},
+                ],
+                completion={"role": "assistant", "content": "你好！有什么可以帮你？"},
+            )
+        ]
+    )
+
+    full = trajectory_to_messages(trajectory)
+    assert any(m.get("role") == "tool" and "python3" in str(m.get("content") or "") for m in full)
+
+    local = trajectory_to_messages(trajectory, invoke_local=True)
+    assert local == [
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好！有什么可以帮你？"},
+    ]
+
+
+def test_invoke_local_keeps_same_invoke_react_steps() -> None:
+    """After the first trimmed prompt, later spans still keep invoke-local tools."""
+    first = _llm_span(
+        "llm-1",
+        start=10,
+        prompt=[
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "run bash"},
+        ],
+        completion={
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "python3 x"}}],
+        },
+    )
+    tool = _span(
+        "tool-1",
+        start=20,
+        name="tool.bash",
+        attributes={
+            semconv.GEN_AI_TOOL_NAME: "bash",
+            semconv.GEN_AI_TOOL_ID: "c1",
+            semconv.GEN_AI_TOOL_OUTPUT: "Error: python3 is not recognized",
+        },
+    )
+    second = _llm_span(
+        "llm-2",
+        start=30,
+        prompt=[
+            {"role": "system", "content": "rules"},
+            {"role": "user", "content": "old task"},
+            {"role": "assistant", "content": "old answer"},
+            {"role": "user", "content": "run bash"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "c1", "name": "bash", "arguments": {"command": "python3 x"}}],
+            },
+            {"role": "tool", "tool_call_id": "c1", "name": "bash", "content": "Error: python3 is not recognized"},
+        ],
+        completion={"role": "assistant", "content": "retry with python"},
+    )
+
+    messages = trajectory_to_messages(_trajectory([first, tool, second]), invoke_local=True)
+    assert messages[0] == {"role": "user", "content": "run bash"}
+    assert not any(m.get("content") == "old task" for m in messages)
+    assert any(m.get("role") == "tool" and "python3" in str(m.get("content") or "") for m in messages)
+    assert messages[-1] == {"role": "assistant", "content": "retry with python"}
+
+
+def test_invoke_local_without_user_keeps_only_completions() -> None:
+    trajectory = _trajectory(
+        [
+            _llm_span(
+                "llm-1",
+                start=10,
+                prompt=[
+                    {"role": "system", "content": "rules"},
+                    {"role": "assistant", "content": "stale"},
+                ],
+                completion={"role": "assistant", "content": "fresh"},
+            )
+        ]
+    )
+    assert trajectory_to_messages(trajectory, invoke_local=True) == [
+        {"role": "assistant", "content": "fresh"},
+    ]
