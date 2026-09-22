@@ -179,3 +179,14 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
 - Mapping changes need the corresponding fake-SDK test updated; keep raw SDK
   objects out of `ProviderEvent` payloads (`to_json_safe` first).
 - Public protocol changes are made in `openjiuwen/harness_protocol` first.
+- **Settle a question about vendor data from the vendor's own record.** What a
+  provider emits has already been through its mapping, so reading a
+  `ModelRequestEvent`, a `gen_ai.*` attribute or a recorded trajectory back
+  confirms that mapping and nothing else — a field the mapping drops looks
+  exactly like a field the vendor never sent. Go to the source the vendor
+  writes: Claude's raw request/response bodies, Codex's rollout payloads and
+  `~/.codex/sessions`. Tool naming was decided twice from the projected form
+  before the rollout showed that a Codex call also states the namespace its
+  tool is in, which the projection had dropped.
+- A fake SDK is only evidence about our code. Shape its fixtures like records
+  taken from a real run, or a test will pin a payload the vendor never sends.

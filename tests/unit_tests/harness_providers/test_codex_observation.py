@@ -208,7 +208,9 @@ async def test_rollout_inferences_become_ordered_model_request_events(monkeypatc
     assert first.input_observed and first.model == "gpt-test" and first.provider_name == "openai"
     assert [block.content for block in first.system_instructions] == ["be brief"]
     # The tool catalogue is a tool definition, not something the model said.
-    assert first.tool_definitions == ({"name": "functions.shell", "description": "run", "parameters": {"type": "object"}},)
+    # A definition is named the way the model calls the tool, not the way
+    # Codex grouped it.
+    assert first.tool_definitions == ({"name": "shell", "description": "run", "parameters": {"type": "object"}},)
     assert first.request_parameters == {"stream": True, "reasoning_level": "medium"}
     assert first.response_id == "resp-1"
     assert [message.role for message in first.input_messages] == [MessageRole.USER]
@@ -404,11 +406,12 @@ async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
     # its result in the next request.
     sdk, state = _install_fake_sdk(monkeypatch)
     _install_reader(monkeypatch)
+    # A search is a typed item: it names no function, unlike a function call.
     search_call = {
         "type": "tool_search_call",
         "id": "tsc-1",
         "call_id": "call-search",
-        "name": "tool_search_call",
+        "status": "completed",
         "arguments": {"query": "send_message", "limit": 5},
     }
     harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False, cwd="/w"))
@@ -511,6 +514,7 @@ async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
     ]
     assert "inf-1" in [event for event in events if event.event is started][0].causation_ids
     # The CLI's own report of the call wins over what the conversation implies.
+    # Nothing in the conversation names it, so the CLI's own report does.
     assert started.data["name"] == "tool_search"
     assert started.data["announced"] is False
     assert completed.data["duration_ms"] == 12
@@ -519,9 +523,11 @@ async def test_a_tool_call_the_app_server_never_announces_is_still_reported(
     assert "send_message" in json.dumps(json_value_to_builtin(completed.data["result"]), ensure_ascii=False)
     second = [event.event for event in events if isinstance(event.event, ModelRequestEvent)][1]
     # A deferred MCP tool is offered from the moment the search found it, named
-    # the way the tool item names it so the two can be joined.
+    # the way the model addresses it -- namespace included, since two
+    # namespaces may each carry a send_message -- so a tool row and its schema
+    # can be joined without guessing.
     definitions = json_value_to_builtin(second.tool_definitions) or []
-    assert [definition["name"] for definition in definitions] == ["openjiuwen_team.send_message"]
+    assert [definition["name"] for definition in definitions] == ["mcp__openjiuwen_team.send_message"]
     assert definitions[0]["parameters"] == {"type": "object"}
     # The model reads the search result as a tool message, not as its own words.
     tool_messages = [message for message in second.input_messages if message.role is MessageRole.TOOL]
@@ -582,6 +588,113 @@ async def test_an_announced_tool_call_gets_no_stand_in(monkeypatch: pytest.Monke
     assert _kinds(events).count("tool:cmd-1:started") == 1
     assert not [event for event in events if _kinds([event]) == ["tool:call-search:started"]]
     await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_an_announced_item_is_named_the_way_the_model_called_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The App Server names a command item after the runtime it ran; the model
+    # asked for ``exec_command``, which is also the name its definition
+    # carries, and a reader joins the two by that name.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    _install_reader(monkeypatch)
+    model_call = {
+        "type": "function_call",
+        "id": "fc-1",
+        "call_id": "cmd-1",
+        "name": "exec_command",
+        "arguments": '{"command":"ls"}',
+    }
+    state.scripts.append(
+        [
+            _record("codex_turn_started"),
+            _record(
+                "inference_started",
+                inference_call_id="inf-1",
+                resolved_payloads={"request_payload": {"input": [_USER_INPUT]}},
+            ),
+            _notification("item/started", **_command()),
+            _record(
+                "inference_completed",
+                inference_call_id="inf-1",
+                response_id="resp-1",
+                resolved_payloads={"response_payload": {"output_items": [model_call]}},
+            ),
+            _notification("item/completed", **_command(aggregated_output="a.py", status="completed", error=None)),
+            _record("codex_turn_ended"),
+            _turn_completed("turn-hi", _Status.completed),
+        ]
+    )
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False, cwd="/w"))
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="list files"))
+    events = await _turn(harness, receipt.turn_id)
+    started, completed = [event.event for event in events if isinstance(event.event, ItemLifecycleEvent)]
+
+    assert started.data["name"] == "exec_command"
+    assert completed.data["tool_name"] == "exec_command"
+    # What the App Server called it is kept: its own logs use that name.
+    assert started.data["announced_name"] == "shell"
+    await harness.stop()
+
+
+def test_a_tool_is_named_by_the_namespace_the_model_addressed_it_in() -> None:
+    from openjiuwen.harness_providers.codex.observation import (
+        _called_tool_name,
+        _conversation,
+        _tool_definitions,
+    )
+
+    # Two namespaces each carry a send_message, which is why the bare name
+    # cannot identify one: the catalogue states both, and so must we.
+    catalogue = {
+        "type": "additional_tools",
+        "id": "at-1",
+        "tools": [
+            {
+                "type": "namespace",
+                "name": "functions",
+                "tools": [{"type": "custom", "name": "exec", "parameters": {}}],
+            },
+            {
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{"type": "function", "name": "send_message", "parameters": {}}],
+            },
+            {
+                "type": "namespace",
+                "name": "mcp__openjiuwen_team",
+                "tools": [{"type": "function", "name": "send_message", "parameters": {"type": "object"}}],
+            },
+        ],
+    }
+    definitions = _tool_definitions({}, [catalogue])
+    assert [definition["name"] for definition in definitions] == [
+        # The default namespace is implicit on the wire, so it is left off.
+        "exec",
+        "collaboration.send_message",
+        "mcp__openjiuwen_team.send_message",
+    ]
+
+    # A call states its namespace unless the tool is in the default one.
+    assert _called_tool_name({"type": "function_call", "name": "exec"}) == "exec"
+    assert _called_tool_name(
+        {"type": "function_call", "name": "send_message", "namespace": "mcp__openjiuwen_team"},
+    ) == "mcp__openjiuwen_team.send_message"
+
+    messages = _conversation([
+        {
+            "type": "function_call",
+            "id": "fc-1",
+            "call_id": "call-1",
+            "name": "send_message",
+            "namespace": "mcp__openjiuwen_team",
+            "arguments": "{}",
+        },
+    ])
+    assert messages[0].content[0].content["name"] == "mcp__openjiuwen_team.send_message"
 
 
 def test_telemetry_reads_only_what_the_agent_did() -> None:

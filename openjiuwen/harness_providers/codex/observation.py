@@ -48,12 +48,13 @@ from openjiuwen.harness_protocol import (
     TurnMessage,
     TurnUsage,
     freeze_json_object,
+    json_value_to_builtin,
 )
 from openjiuwen.harness_providers.base import logger
 from openjiuwen.harness_providers.codex.mapping import MappedCodexEvent
 from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides
 from openjiuwen.harness_providers.codex.rollout_trace import CodexRolloutTraceReader
-from openjiuwen.harness_providers.jsonsafe import to_json_safe
+from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
 
 EmitFn = Callable[[Any, str | None, tuple[str, ...], float | None], Awaitable[None]]
@@ -68,9 +69,9 @@ _TERMINAL_INFERENCE_TYPES = {
     "inference_cancelled": ModelRequestStatus.CANCELLED,
 }
 _TOOL_SEARCH_OUTPUT_TYPE = "tool_search_output"
-# Codex names an MCP namespace with this prefix, while a tool item names the
-# server without it; the definitions follow the item so they can be joined.
-_MCP_NAMESPACE_PREFIX = "mcp__"
+# Codex groups its tools into namespaces and leaves this one implicit: a call
+# states its namespace only when the tool is not in it.
+_DEFAULT_TOOL_NAMESPACE = "functions"
 _TOOL_CALL_TYPES = frozenset(
     {"function_call", "custom_tool_call", "local_shell_call", "mcp_tool_call", "tool_search_call"},
 )
@@ -554,7 +555,38 @@ class CodexRequestObserver:
                 self._covered_calls.add(self._tool_aliases.get(item_id, item_id))
                 self._covered_calls.add(item_id)
             causes = (owner,) if owner else ()
-            await self._emit_event(head.payload, head.item_id, causes, head.observed_at)
+            await self._emit_event(self._named_as_the_model_called_it(head), head.item_id, causes, head.observed_at)
+
+    def _named_as_the_model_called_it(self, held: _HeldItem) -> ItemLifecycleEvent:
+        """Rename an announced tool item to the name the model asked for.
+
+        The App Server names an item in its own vocabulary -- the runtime it
+        ran (``shell``), or the MCP server and tool -- while the model asked
+        for one tool by one name, which is also the name its definition
+        carries. Naming the item after the call is what lets a reader match
+        the two.
+        """
+        item_id = held.item_id or ""
+        call = self._model_calls.get(self._tool_aliases.get(item_id, item_id))
+        name = str((call or {}).get("name") or "")
+        payload = held.payload
+        data = json_value_to_builtin(payload.data)
+        if not name or not isinstance(data, dict):
+            return payload
+        key = "name" if payload.kind is ItemEventKind.STARTED else "tool_name"
+        if data.get(key) == name:
+            return payload
+        announced = str(data.get(key) or "")
+        updated = {**data, key: name}
+        if announced and announced != name:
+            # What the App Server called it stays, since that is the name its
+            # own notifications and logs use.
+            updated["announced_name"] = announced
+        return ItemLifecycleEvent(
+            kind=payload.kind,
+            item_type=payload.item_type,
+            data=freeze_json_object(to_json_object(updated)),
+        )
 
     def _owner_of(self, held: _HeldItem) -> str | None:
         item_id = held.item_id or ""
@@ -589,7 +621,9 @@ class CodexRequestObserver:
                 continue
             arguments = item.get("arguments", item.get("input", item.get("action")))
             self._model_calls[call_id] = {
-                "name": str(item.get("name") or item.get("type") or "tool"),
+                # Empty for a typed call item (a tool search), which names no
+                # function; the CLI's own report names those.
+                "name": _called_tool_name(item) if item.get("name") else "",
                 "arguments": to_json_safe(arguments),
                 "item_type": str(item.get("type") or ""),
                 "owner": owner,
@@ -639,11 +673,15 @@ class CodexRequestObserver:
     ) -> None:
         """Emit one unannounced tool call as a started / completed pair.
 
-        Where the CLI stated a fact about the call -- its name, how long it
-        ran, whether it succeeded -- that statement wins over anything the
-        conversation implies.
+        The call names itself, since that is how the model addressed the tool
+        and how its definition is named; a typed call item (a tool search)
+        names no function, and there the CLI's own report names it. Every
+        other fact -- how long it ran, whether it succeeded -- is the CLI's.
         """
-        name = (facts.tool_name if facts is not None and facts.tool_name else None) or str(call.get("name") or "tool")
+        name = str(call.get("name") or "")
+        if not name and facts is not None and facts.tool_name:
+            name = _namespaced_tool_name(facts.namespace or "", facts.tool_name)
+        name = name or str(call.get("item_type") or "tool")
         started_at = float(call.get("asked_at") or 0.0) or None
         duration_ms = facts.duration_ms if facts is not None else None
         ended_at = started_at
@@ -877,19 +915,19 @@ def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -
             if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE
             for tool in (item.get("tools") or [])
         ]
-    definitions = _flatten_tools(offered, namespace="")
+    definitions = _flatten_tools(offered)
     known = {definition["name"] for definition in definitions}
     for item in conversation or ():
         if not isinstance(item, dict) or item.get("type") != _TOOL_SEARCH_OUTPUT_TYPE:
             continue
-        for definition in _flatten_tools(item.get("tools"), namespace=""):
+        for definition in _flatten_tools(item.get("tools")):
             if definition["name"] not in known:
                 known.add(definition["name"])
                 definitions.append(definition)
     return definitions or None
 
 
-def _flatten_tools(tools: Any, *, namespace: str) -> list[dict[str, Any]]:
+def _flatten_tools(tools: Any, *, namespace: str = "") -> list[dict[str, Any]]:
     definitions: list[dict[str, Any]] = []
     if not isinstance(tools, list):
         return definitions
@@ -898,18 +936,32 @@ def _flatten_tools(tools: Any, *, namespace: str) -> list[dict[str, Any]]:
             continue
         name = str(tool.get("name") or "")
         if tool.get("type") == "namespace":
-            nested = name.removeprefix(_MCP_NAMESPACE_PREFIX)
-            definitions.extend(_flatten_tools(tool.get("tools"), namespace=nested))
+            definitions.extend(_flatten_tools(tool.get("tools"), namespace=name))
             continue
         if not name:
             continue
         schema = tool.get("parameters") or tool.get("input_schema") or {}
         definitions.append({
-            "name": f"{namespace}.{name}" if namespace else name,
+            # The model addresses a tool by its namespace and name, which is
+            # how its calls arrive and how a tool item is named here.
+            "name": _namespaced_tool_name(namespace, name),
             "description": str(tool.get("description") or ""),
             "parameters": to_json_safe(schema),
         })
     return definitions
+
+
+def _namespaced_tool_name(namespace: str, name: str) -> str:
+    """Return the name the model addresses one tool by."""
+    if not namespace or namespace == _DEFAULT_TOOL_NAMESPACE:
+        return name
+    return f"{namespace}.{name}"
+
+
+def _called_tool_name(item: dict[str, Any]) -> str:
+    """Return the name a tool call item states, namespace included."""
+    name = str(item.get("name") or item.get("type") or "tool")
+    return _namespaced_tool_name(str(item.get("namespace") or ""), name)
 
 
 def _request_parameters(request: dict[str, Any]) -> dict[str, Any]:
@@ -1043,7 +1095,7 @@ def _item_blocks(message_id: str, item: dict[str, Any]) -> list[ContentBlock]:
             ContentBlock(
                 block_id=f"{message_id}:0",
                 kind="tool_call",
-                content={"name": str(item.get("name") or item_type), "arguments": to_json_safe(arguments)},
+                content={"name": _called_tool_name(item), "arguments": to_json_safe(arguments)},
                 data={"call_id": str(item.get("call_id") or item.get("id") or "")},
             )
         ]
