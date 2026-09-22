@@ -97,6 +97,39 @@ _SUPERSEDEABLE_REVIEW_STATUSES = frozenset(
 )
 
 
+def _normalize_parent_task_id(value: str | None) -> str | None:
+    """Treat omitted / blank parent_task_id as NULL (LLMs often pass \"\" for roots)."""
+    return str(value or "").strip() or None
+
+
+def _is_root_task_row(row: Any) -> bool:
+    """True when a task has no parent (NULL or legacy blank), including summary siblings."""
+    return _normalize_parent_task_id(getattr(row, "parent_task_id", None)) is None
+
+
+def _is_normal_root_task_row(row: Any) -> bool:
+    """True for a decomposable root (excludes organization.summary sibling tasks)."""
+    return _is_root_task_row(row) and getattr(row, "task_type", None) != "organization.summary"
+
+
+def _sql_is_root_parent():
+    """SQL match for root rows: parent IS NULL or legacy empty string."""
+    return or_(
+        OrgTaskRecord.parent_task_id.is_(None),
+        OrgTaskRecord.parent_task_id == "",
+    )
+
+
+def _heal_blank_parent_task_id(row: OrgTaskRecord) -> bool:
+    """Rewrite legacy blank parent_task_id to NULL. Returns True when the row mutated."""
+    if row.parent_task_id is None:
+        return False
+    if _normalize_parent_task_id(row.parent_task_id) is not None:
+        return False
+    row.parent_task_id = None
+    return True
+
+
 def _is_accepted_task(status: str, review: Any) -> bool:
     return (
         status == OrgTaskStatus.COMPLETED.value
@@ -409,6 +442,9 @@ class OrgTaskManager:
                 reason="required_capabilities must contain at least one non-empty capability",
             )
         capabilities = list(dict.fromkeys(capability.strip() for capability in capabilities))
+        # LLMs often pass parent_task_id="" for roots; treat blank as omitted so aggregation
+        # init and set_root_aggregation_mode see a real root (parent_task_id IS NULL).
+        parent_task_id = _normalize_parent_task_id(parent_task_id)
         task_id = task_id or f"org-task-{uuid.uuid4().hex[:12]}"
         now = get_current_time()
         task_metadata = dict(metadata or {})
@@ -440,6 +476,12 @@ class OrgTaskManager:
                 OrgTaskAggregationMode.SUMMARY_TEAM,
             }:
                 return OrgTaskOpResult(ok=False, reason=f"invalid aggregation_mode: {aggregation_mode!r}")
+        delegated_to_team_id = str(delegated_to_team_id or "").strip() or None
+        if delegated_to_team_id is not None and not await self._is_org_member_team(delegated_to_team_id):
+            return OrgTaskOpResult(
+                ok=False,
+                reason=self._non_member_team_reason(delegated_to_team_id, action="org_create_task"),
+            )
         assignment_type = OrgAssignmentType.DELEGATED if delegated_to_team_id else OrgAssignmentType.UNASSIGNED
         status = OrgTaskStatus.DELEGATED if delegated_to_team_id else OrgTaskStatus.OPEN
         spec_model = self._coerce_output_spec(output_spec)
@@ -470,9 +512,11 @@ class OrgTaskManager:
                 source = await session.get(OrgTaskRecord, notification_meta["task_id"])
                 if not self._is_expired_recreation_source(source):
                     return OrgTaskOpResult(ok=False, reason="recreation source is not expired")
-                if parent_task_id is not None and parent_task_id != source.parent_task_id:
+                source_parent = _normalize_parent_task_id(source.parent_task_id)
+                if parent_task_id is not None and parent_task_id != source_parent:
                     return OrgTaskOpResult(ok=False, reason="recreation must keep the original parent")
-                parent_task_id = source.parent_task_id
+                # Re-normalize after copying from the source so legacy "" does not reappear.
+                parent_task_id = source_parent
                 target = _repairs_target_id(source.metadata_json) or source.task_id
                 if parent_task_id:
                     if repairs_target is not None and repairs_target != target:
@@ -515,7 +559,7 @@ class OrgTaskManager:
                     )
                 if parent.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                     return OrgTaskOpResult(ok=False, reason=f"parent task is terminal: {parent_task_id}")
-                if parent.parent_task_id is None and parent.task_type != "organization.summary":
+                if _is_normal_root_task_row(parent):
                     aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(parent.aggregation_json, {}))
                     if not aggregation.controller_team_id:
                         return OrgTaskOpResult(
@@ -551,7 +595,7 @@ class OrgTaskManager:
                         await session.execute(
                             select(OrgTaskRecord).where(
                                 OrgTaskRecord.organization_id == self.organization_id,
-                                OrgTaskRecord.parent_task_id.is_(None),
+                                _sql_is_root_parent(),
                                 or_(
                                     OrgTaskRecord.task_type.is_(None),
                                     OrgTaskRecord.task_type != "organization.summary",
@@ -1213,6 +1257,33 @@ class OrgTaskManager:
         )
         return OrgTaskOpResult(ok=True, task=task)
 
+    async def _is_org_member_team(self, team_id: str, *, session: Any | None = None) -> bool:
+        """Return whether ``team_id`` is a registered organization leader team."""
+        tid = str(team_id or "").strip()
+        if not tid:
+            return False
+        stmt = (
+            select(OrgLeaderRecord.team_id)
+            .where(
+                OrgLeaderRecord.organization_id == self.organization_id,
+                OrgLeaderRecord.team_id == tid,
+            )
+            .limit(1)
+        )
+        if session is not None:
+            return (await session.execute(stmt)).scalar_one_or_none() is not None
+        await self.initialize()
+        async with self._read() as read_session:
+            return (await read_session.execute(stmt)).scalar_one_or_none() is not None
+
+    @staticmethod
+    def _non_member_team_reason(team_id: str, *, action: str) -> str:
+        return (
+            f"{action} target is not an organization member team: {team_id}. "
+            "Use this Team's create_task / claim_task / send_message for in-team teammates; "
+            "org_* tools only target other organization teams (org team_id), never member names."
+        )
+
     async def delegate_task(
         self,
         *,
@@ -1222,10 +1293,23 @@ class OrgTaskManager:
     ) -> OrgTaskOpResult:
         """Delegate a normal task without allowing a Summary Task to change its responsible team."""
         await self.initialize()
+        to_team_id = str(to_team_id or "").strip()
+        if not to_team_id:
+            return OrgTaskOpResult(ok=False, reason="to_team_id is required")
         async with self._write() as session:
             row = await session.get(OrgTaskRecord, task_id)
             if row is None or row.organization_id != self.organization_id:
                 return OrgTaskOpResult(ok=False, reason=f"org task not found: {task_id}")
+            if _is_normal_root_task_row(row):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        "org_delegate_task cannot reassign a root task. "
+                        "Keep the root on the claiming team; create child work with "
+                        "org_create_task(parent_task_id=<root>, delegated_to_team_id=<org team_id>) "
+                        "or org_delegate_task only on that child."
+                    ),
+                )
             if row.task_type == "organization.summary":
                 execution = (
                     (
@@ -1247,6 +1331,11 @@ class OrgTaskManager:
                 return OrgTaskOpResult(
                     ok=False,
                     reason="HIERARCHICAL summary tasks must remain with their creator team",
+                )
+            if not await self._is_org_member_team(to_team_id, session=session):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=self._non_member_team_reason(to_team_id, action="org_delegate_task"),
                 )
             now = get_current_time()
             result = await session.execute(
@@ -1332,7 +1421,7 @@ class OrgTaskManager:
                 return OrgTaskOpResult(ok=False, reason=f"task is not assigned to team: {team_id}")
             if row.status in ORG_TASK_TERMINAL_STATUS_VALUES:
                 return OrgTaskOpResult(ok=False, reason=f"task is terminal: {task_id}")
-            if row.parent_task_id is None and row.task_type != "organization.summary":
+            if _is_normal_root_task_row(row):
                 aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(row.aggregation_json, {}))
                 if not aggregation.controller_team_id:
                     logger.warning(
@@ -1364,7 +1453,7 @@ class OrgTaskManager:
                     blocked_reason,
                 )
                 return OrgTaskOpResult(ok=False, reason=blocked_reason)
-            if row.parent_task_id is None and row.task_type != "organization.summary":
+            if _is_normal_root_task_row(row):
                 if row.status != OrgTaskStatus.IN_PROGRESS.value:
                     return OrgTaskOpResult(ok=False, reason="root task must be started before completion")
             row.status = OrgTaskStatus.COMPLETED.value
@@ -1654,7 +1743,7 @@ class OrgTaskManager:
                         )
             if (
                 status is OrgTaskReviewStatus.ACCEPTED
-                and task_row.parent_task_id is not None
+                and _normalize_parent_task_id(task_row.parent_task_id) is not None
                 and not _has_aggregation_source_output(task_row)
             ):
                 return OrgTaskOpResult(
@@ -1874,8 +1963,10 @@ class OrgTaskManager:
         now = get_current_time()
         async with self._write() as session:
             root = await session.get(OrgTaskRecord, root_task_id)
-            if root is None or root.organization_id != self.organization_id or root.parent_task_id is not None:
+            if root is None or root.organization_id != self.organization_id or not _is_root_task_row(root):
                 return OrgTaskOpResult(ok=False, reason=f"root task not found: {root_task_id}")
+            if _heal_blank_parent_task_id(root):
+                root.updated_at = now
             aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(root.aggregation_json, {}))
             if aggregation.mode is not OrgTaskAggregationMode.SUMMARY_TEAM:
                 return OrgTaskOpResult(ok=False, reason="root task is not configured for SUMMARY_TEAM aggregation")
@@ -2016,8 +2107,10 @@ class OrgTaskManager:
         now = get_current_time()
         async with self._write() as session:
             root = await session.get(OrgTaskRecord, task_id)
-            if root is None or root.organization_id != self.organization_id or root.parent_task_id is not None:
+            if root is None or root.organization_id != self.organization_id or not _is_root_task_row(root):
                 return OrgTaskOpResult(ok=False, reason="aggregation mode can only be selected for a root task")
+            if _heal_blank_parent_task_id(root):
+                root.updated_at = now
             if root.assigned_team_id != team_id:
                 return OrgTaskOpResult(ok=False, reason="current team has not claimed this root task")
             aggregation = OrgTaskAggregationConfig.model_validate(_json_loads(root.aggregation_json, {}))
@@ -2060,7 +2153,7 @@ class OrgTaskManager:
                         select(OrgTaskRecord.task_id).where(
                             OrgTaskRecord.organization_id == self.organization_id,
                             OrgTaskRecord.task_id != root.task_id,
-                            OrgTaskRecord.parent_task_id.is_(None),
+                            _sql_is_root_parent(),
                             or_(
                                 OrgTaskRecord.task_type.is_(None),
                                 OrgTaskRecord.task_type != "organization.summary",
@@ -2537,7 +2630,7 @@ class OrgTaskManager:
             unclaimed=OrgTaskManager._unclaimed_state(row),
             recreated_from_task_id=row.recreated_from_task_id,
             task_id=row.task_id,
-            parent_task_id=row.parent_task_id,
+            parent_task_id=_normalize_parent_task_id(row.parent_task_id),
             root_task_id=row.root_task_id,
             created_by=OrgTaskCreator(
                 creator_type=row.creator_type,

@@ -18,7 +18,7 @@ from openjiuwen.agent_teams.organization.schema import (
     OrgTaskStatus,
     OrgUnclaimedTaskPolicy,
 )
-from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager
+from openjiuwen.agent_teams.organization.task_pool import OrgTaskManager, _normalize_parent_task_id
 from openjiuwen.agent_teams.tools.tool_base import TeamTool
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.tool.base import ToolCard
@@ -476,7 +476,13 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                         "Expiration notification message_id. Recreate once; parent and repair link are derived."
                     ),
                 },
-                "delegated_to_team_id": {"type": "string"},
+                "delegated_to_team_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional org team_id to assign immediately. Must be a registered organization "
+                        "member team; do not pass in-team teammate member names."
+                    ),
+                },
             },
             "required": ["title", "description", "required_capabilities"],
         }
@@ -496,9 +502,10 @@ class OrgCreateTaskTool(_OrgLeaderTool):
                 error="'required_capabilities' must contain at least one non-empty capability",
             )
         await self._ensure_registered()
+        parent_task_id = _normalize_parent_task_id(inputs.get("parent_task_id"))
         result = await self.manager.create_task(
             task_id=inputs.get("task_id"),
-            parent_task_id=inputs.get("parent_task_id"),
+            parent_task_id=parent_task_id,
             title=inputs["title"],
             description=inputs["description"],
             required_capabilities=capabilities,
@@ -553,7 +560,12 @@ class OrgDelegateTaskTool(_OrgLeaderTool):
     def __init__(self, manager: OrgTaskManager, team_id: str, leader_id: str) -> None:
         super().__init__(
             name="org_delegate_task",
-            description="Delegate an organization task to another team leader.",
+            description=(
+                "Delegate a non-root organization child task to another organization team "
+                "(org team_id). Do not pass in-team teammate member names. "
+                "Never use this on a root task; create children with "
+                "org_create_task(parent_task_id=..., delegated_to_team_id=...) instead."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,
@@ -706,7 +718,10 @@ class OrgSendLeaderMessageTool(_OrgLeaderTool):
     ) -> None:
         super().__init__(
             name="org_send_leader_message",
-            description="Send a DB-backed message to another team leader or all leaders.",
+            description=(
+                "Send a DB-backed message to another organization team leader "
+                "(org team_id) or all leaders. Do not pass in-team teammate member names."
+            ),
             manager=manager,
             team_id=team_id,
             leader_id=leader_id,

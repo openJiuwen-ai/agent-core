@@ -57,6 +57,19 @@ async def test_send_persists_without_side_channel(message_service: OrgMessageSer
 
 
 @pytest.mark.asyncio
+async def test_send_rejects_non_member_team_id(message_service: OrgMessageService):
+    result = await message_service.send_leader_message(
+        from_team_id="team-a",
+        from_leader_id="leader-a",
+        to_team_id="rust-audit-engineer",
+        content="Should stay in-team.",
+    )
+    assert not result.ok
+    assert "not an organization member team" in result.reason
+    assert await message_service.list_leader_messages(team_id="team-b") == []
+
+
+@pytest.mark.asyncio
 async def test_list_includes_broadcast_for_recipient(message_service: OrgMessageService):
     await message_service.send_leader_message(
         from_team_id="team-a",

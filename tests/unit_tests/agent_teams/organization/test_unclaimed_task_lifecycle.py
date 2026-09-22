@@ -58,6 +58,22 @@ async def create(manager, task_id="task", **kwargs):
     )
 
 
+async def create_open_child(manager, task_id="task"):
+    """Create an OPEN child that can still be claimed or delegated (not a root)."""
+    root_id = f"{task_id}-root"
+    assert (await create(manager, root_id)).ok
+    assert (await manager.task_pool.claim_task(task_id=root_id, team_id="creator")).ok
+    selected = await manager.task_pool.set_root_aggregation_mode(
+        task_id=root_id,
+        team_id="creator",
+        leader_id="creator",
+        aggregation_mode=OrgTaskAggregationMode.HIERARCHICAL,
+    )
+    assert selected.ok
+    assert (await manager.task_pool.start_task(task_id=root_id, team_id="creator")).ok
+    return await create(manager, task_id, parent_task_id=root_id)
+
+
 async def request_revision(manager, clock, task_id="task"):
     task = await manager.task_pool.get_task(task_id)
     clock[0] = task.unclaimed.deadline_at
@@ -162,7 +178,10 @@ async def test_full_two_stage_deadlines_and_durable_notifications(lifecycle):
 @pytest.mark.parametrize("phase", ["initial", "revision", "revised"])
 async def test_assignment_closes_all_waiting_phases(lifecycle, operation, phase):
     manager, clock = lifecycle
-    await create(manager)
+    if operation == "delegate":
+        assert (await create_open_child(manager)).ok
+    else:
+        await create(manager)
     if phase != "initial":
         task = await request_revision(manager, clock)
         if phase == "revised":
@@ -181,7 +200,7 @@ async def test_assignment_closes_all_waiting_phases(lifecycle, operation, phase)
 @pytest.mark.parametrize("revised", [False, True])
 async def test_deadline_is_enforced_before_scanner_runs(lifecycle, revised):
     manager, clock = lifecycle
-    await create(manager)
+    assert (await create_open_child(manager)).ok
     task = await request_revision(manager, clock)
     if revised:
         task = (await revise(manager, task)).task
