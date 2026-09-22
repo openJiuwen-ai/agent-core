@@ -285,10 +285,13 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
         )
 
     async def second_request(client: Any) -> None:
-        # A threaded call states only what is new: neither the system prompt
-        # nor the tool catalogue is repeated.
+        # A threaded call states only what is new: the tool catalogue is left
+        # out, and `system` carries the billing header alone — the shape a real
+        # continuation body has, where the instruction blocks the thread was
+        # opened with are simply not restated.
         body = {
             "model": "claude-x",
+            "system": [{"type": "text", "text": "x-anthropic-billing-header: cc_version=2.1; cc_prompt_id=p-2;"}],
             "messages": [_TOOL_RESULT],
             "thread": {"type": "continue", "previous_message_id": "msg-1"},
         }

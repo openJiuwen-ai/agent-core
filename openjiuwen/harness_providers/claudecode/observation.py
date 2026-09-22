@@ -783,8 +783,14 @@ class ClaudeRequestObserver:
             prefix, prefix_known = self._thread_prefix(request)
             input_messages = prefix + tuple(self._conversation(request.get("messages")))
             input_observed = prefix_known
-            if "system" in request:
-                self._thread_system, billing_header = _system_instructions(request.get("system"))
+            # A continuation does carry `system`, but only the billing header
+            # that every call restates; the instructions themselves are stated
+            # once, by the call that opens the thread. Keying off the field
+            # being present would read that header as the prompt having been
+            # emptied, so what was stated decides.
+            stated, billing_header = _system_instructions(request.get("system"))
+            if stated:
+                self._thread_system = stated
             system_instructions = self._thread_system
             tools = request.get("tools")
             if isinstance(tools, list):
