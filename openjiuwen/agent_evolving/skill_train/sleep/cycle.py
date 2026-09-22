@@ -24,6 +24,7 @@ from openjiuwen.agent_evolving.skill_train.sleep.memory import ensure_skill_scaf
 from openjiuwen.agent_evolving.skill_train.sleep.mine import group_tasks_by_skill_hint, mine
 from openjiuwen.agent_evolving.skill_train.sleep.multi_skill import (
     SkillGroup,
+    accepted_group_edits,
     accepted_group_skills,
     consolidate_groups,
     skill_group_reports,
@@ -228,6 +229,7 @@ def run_sleep_cycle(
     )
     group_rows = skill_group_reports(outcomes)
     accepted_skills = accepted_group_skills(outcomes) if cfg.evolve_skill else {}
+    accepted_edits = accepted_group_edits(outcomes) if cfg.evolve_skill else {}
 
     all_edits: List[EditRecord] = []
     all_rejected: List[EditRecord] = []
@@ -297,6 +299,7 @@ def run_sleep_cycle(
             baseline_skill="",
             skill_name="",
             skill_proposals=accepted_skills,
+            skill_proposal_edits=accepted_edits,
         )
         staging_dir = str(staging_path)
         if accepted_skills:

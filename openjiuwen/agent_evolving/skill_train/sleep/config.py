@@ -23,12 +23,12 @@ class SleepConfig:
     fallback group for tasks without a skill hint.
 
     ``trajectory_store_dir`` points at a JiuwenSwarm observation dir (or a
-    single file) holding ``traces-*.jsonl``; sessions are harvested by
-    ``session.id``.
+    single file) holding ``traces-*.jsonl``; trajectories are harvested by
+    OTLP ``traceId`` (one complete conversation per digest).
     """
 
     trajectory_store_dir: str = ""
-    session_id: Optional[str] = None
+    trace_id: Optional[str] = None
     max_trajectories: int = 40
     max_tasks_per_night: int = 40
     # off: heuristic rubric built from follow-up turns only.
@@ -75,7 +75,7 @@ class SleepConfig:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "trajectory_store_dir": self.trajectory_store_dir,
-            "session_id": self.session_id,
+            "trace_id": self.trace_id,
             "max_trajectories": self.max_trajectories,
             "max_tasks_per_night": self.max_tasks_per_night,
             "rubric_synthesis": self.rubric_synthesis,

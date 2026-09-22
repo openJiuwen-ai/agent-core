@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
+import atexit
+import threading
 from dataclasses import dataclass, field
 from typing import Any, Coroutine, Dict, List, Optional, TypeVar, Union
 
@@ -14,6 +15,17 @@ from openjiuwen.agent_evolving.skill_train.model_compat import get_reasoning_eff
 from openjiuwen.core.foundation.llm.model import Model
 
 _T = TypeVar("_T")
+
+# Shared AsyncClient / Model instances bind to the first event loop that drives
+# them. Analyst/reflect call ``chat()`` from a ThreadPoolExecutor and used to
+# ``asyncio.run`` per call, which creates+closes a fresh loop each time and
+# then fails with ``RuntimeError: Event loop is closed`` on the next invoke or
+# during httpx connection cleanup. Keep one long-lived loop for all sync→async
+# bridges in this module.
+_LOOP: asyncio.AbstractEventLoop | None = None
+_LOOP_THREAD: threading.Thread | None = None
+_LOOP_READY = threading.Event()
+_LOOP_LOCK = threading.Lock()
 
 
 def _response_to_text(response: Any) -> str:
@@ -36,20 +48,55 @@ def _effort_kwargs(reasoning_effort: str | None = None) -> Dict[str, Any]:
     }
 
 
+def _loop_main() -> None:
+    global _LOOP
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _LOOP = loop
+    _LOOP_READY.set()
+    loop.run_forever()
+
+
+def _ensure_background_loop() -> asyncio.AbstractEventLoop:
+    global _LOOP_THREAD
+    with _LOOP_LOCK:
+        if _LOOP is not None and _LOOP.is_running():
+            return _LOOP
+        if _LOOP_THREAD is None or not _LOOP_THREAD.is_alive():
+            _LOOP_READY.clear()
+            _LOOP_THREAD = threading.Thread(
+                target=_loop_main,
+                name="skill-train-llm-loop",
+                daemon=True,
+            )
+            _LOOP_THREAD.start()
+        if not _LOOP_READY.wait(timeout=30.0):
+            raise RuntimeError("skill_train LLM background event loop failed to start")
+        if _LOOP is None:
+            raise RuntimeError("skill_train LLM background event loop is unavailable")
+        return _LOOP
+
+
+def _shutdown_background_loop() -> None:
+    loop = _LOOP
+    if loop is None or loop.is_closed():
+        return
+    loop.call_soon_threadsafe(loop.stop)
+
+
+atexit.register(_shutdown_background_loop)
+
+
 def _run_coro(coro: Coroutine[Any, Any, _T]) -> _T:
-    """Run *coro* from sync code without nesting into a running event loop.
+    """Run *coro* from sync code on a process-wide persistent event loop.
 
-    When no loop is running, uses ``asyncio.run``. When already inside a loop
-    (async-first callers / notebooks), executes ``asyncio.run`` on a worker
-    thread so the outer loop is not re-entered.
+    Always schedules onto the background loop (even when the caller already has
+    a running loop) so shared ``Model`` / httpx clients stay bound to one loop
+    across ThreadPoolExecutor analyst workers.
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coro).result()
+    loop = _ensure_background_loop()
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result()
 
 
 def make_llm_invoke_policy(

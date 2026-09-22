@@ -107,6 +107,15 @@ _MISSING_RE = re.compile(
 )
 _TRAILING_PUNCT = "。！!，,；;、 \t"
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+# Intent mentions like "使用 tianqi 技能" / "用 tianqi-weather 技能".
+_INTENT_SKILL_RE = re.compile(
+    r"(?:使用|用)\s*([A-Za-z][A-Za-z0-9_-]*)\s*技能",
+)
+_EVOLUTION_STORE_SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+# Display / spoken aliases → EvolutionStore directory slug.
+_SKILL_ALIASES = {
+    "tianqi-weather": "tianqi",
+}
 
 
 def _tid(project: str, intent: str) -> str:
@@ -137,12 +146,6 @@ def _looks_negative(signals: List[str]) -> bool:
 
 def _looks_positive(signals: List[str]) -> bool:
     return any(signal.startswith("pos:") for signal in signals)
-
-
-def session_skill_hint(digest: SessionDigest) -> str:
-    skills = [skill for skill in (digest.skills_used or []) if skill]
-    unique = list(dict.fromkeys(skills))
-    return unique[0] if len(unique) == 1 else ""
 
 
 def _normalize(text: str) -> str:
@@ -286,13 +289,47 @@ def build_rubric(segment: Segment) -> str:
     return head + "\n" + "\n".join(lines)
 
 
+def _normalize_skill_slug(skill: str) -> str:
+    """Map spoken / alias names to an EvolutionStore-safe directory slug."""
+    text = (skill or "").strip()
+    if not text:
+        return ""
+    mapped = _SKILL_ALIASES.get(text.lower(), text)
+    if not _EVOLUTION_STORE_SKILL_NAME_RE.match(mapped):
+        return ""
+    return mapped
+
+
+def _skill_from_intent(intent: str) -> str:
+    match = _INTENT_SKILL_RE.search(intent or "")
+    if not match:
+        return ""
+    return _normalize_skill_slug(match.group(1))
+
+
 def _segment_skill_hint(segment: Segment, digest: SessionDigest) -> str:
-    unique = list(dict.fromkeys(skill for skill in segment.skills if skill))
+    """Resolve a single skill slug for this segment.
+
+    Priority:
+    1. Skills attached to tool turns inside the segment (exactly one).
+    2. Session-level ``skills_used`` when it is unambiguous (exactly one).
+    3. Skill name parsed from the user intent (e.g. ``使用 tianqi 技能``).
+
+    Returns empty when none of the signals uniquely identify a store-safe skill.
+    """
+    unique = list(dict.fromkeys(_normalize_skill_slug(s) for s in segment.skills if s))
+    unique = [s for s in unique if s]
     if len(unique) == 1:
         return unique[0]
-    if not unique:
-        return session_skill_hint(digest)
-    return ""
+
+    session = list(
+        dict.fromkeys(_normalize_skill_slug(s) for s in (digest.skills_used or []) if s)
+    )
+    session = [s for s in session if s]
+    if len(session) == 1:
+        return session[0]
+
+    return _skill_from_intent(segment.intent)
 
 
 def _segment_outcome(segment: Segment, digest: SessionDigest) -> str:
@@ -309,8 +346,8 @@ def _tags_for(digest: SessionDigest, tools: List[str]) -> List[str]:
     tags: List[str] = []
     if tools:
         tags.append("tools:" + "+".join(tools[:4]))
-    if digest.trajectory_id:
-        tags.append("trajectory:" + digest.trajectory_id)
+    if digest.trace_id:
+        tags.append("trajectory:" + digest.trace_id)
     return tags
 
 
@@ -329,6 +366,10 @@ def heuristic_mine(digests: List[SessionDigest], *, max_tasks: int = 40) -> List
                     _short(text, 200) for _kind, text in segment.follow_ups[:3]
                 )
             attempted = segment.assistant_replies[-1] if segment.assistant_replies else ""
+            skill_hint = _segment_skill_hint(segment, digest)
+            if not skill_hint:
+                # No resolvable skill name → do not mine / do not set skill_hint.
+                continue
             key = intent + "\n" + rubric if rubric else intent
             tasks.append(
                 TaskRecord(
@@ -341,8 +382,8 @@ def heuristic_mine(digests: List[SessionDigest], *, max_tasks: int = 40) -> List
                     reference_kind="rubric" if rubric else "none",
                     reference=rubric,
                     tags=_tags_for(digest, segment.tools or list(digest.tools_used or [])),
-                    source_sessions=[digest.session_id],
-                    skill_hint=_segment_skill_hint(segment, digest),
+                    source_traces=[digest.trace_id],
+                    skill_hint=skill_hint,
                 )
             )
             if len(tasks) >= max_tasks:
@@ -358,12 +399,12 @@ def dedup_tasks(tasks: List[TaskRecord]) -> List[TaskRecord]:
             hints_by_id.setdefault(task.id, set()).add(task.skill_hint)
         if task.id in by_id:
             existing = by_id[task.id]
-            existing.source_sessions = list(dict.fromkeys(existing.source_sessions + task.source_sessions))
+            existing.source_traces = list(dict.fromkeys(existing.source_traces + task.source_traces))
             order = {"success": 3, "fail": 2, "mixed": 1, "unknown": 0}
             if order.get(task.outcome, 0) > order.get(existing.outcome, 0):
                 existing.outcome = task.outcome
         else:
-            by_id[task.id] = replace(task, source_sessions=list(task.source_sessions))
+            by_id[task.id] = replace(task, source_traces=list(task.source_traces))
     for task_id, task in by_id.items():
         hints = hints_by_id.get(task_id, set())
         task.skill_hint = next(iter(hints)) if len(hints) == 1 else ""
@@ -382,7 +423,7 @@ def group_tasks_by_skill_hint(
     for task in tasks:
         observed.setdefault(task.id, set()).add((task.skill_hint or "").strip())
 
-    copied = [replace(task, source_sessions=list(task.source_sessions)) for task in tasks]
+    copied = [replace(task, source_traces=list(task.source_traces)) for task in tasks]
     groups: Dict[str, List[TaskRecord]] = {}
     for task in dedup_tasks(copied):
         hints = {h for h in observed.get(task.id, set()) if h}

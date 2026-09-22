@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Load JiuwenSwarm ``traces-*.jsonl`` into SessionDigest rows grouped by session.id."""
+"""Load JiuwenSwarm ``traces-*.jsonl`` into SessionDigest rows grouped by traceId."""
 
 from __future__ import annotations
 
@@ -20,6 +20,15 @@ _REVIEW_USER_MARKERS = (
     "判断「待判定的用户消息」",
     "判断「待判定的用户消息」是否包含",
     "是否包含对对话中已使用 skill",
+)
+# Internal skill_train / optimizer briefs sometimes land in llm.call as role=user.
+# They are not JiuwenSwarm chat turns and must never become SessionDigest intents.
+_META_USER_MARKERS = (
+    "Skill 优化分析专家",
+    "候选演进经验",
+    "完成根因归因",
+    "You are the skill_train optimizer",
+    "You are the target agent replaying a harvested task",
 )
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>[\s\S]*?</system-reminder>", re.IGNORECASE)
 _INDEXED_ATTR_RE = re.compile(r"^(?P<base>.+)\.(?P<index>\d+)\.(?P<field>[^.]+)$")
@@ -80,6 +89,19 @@ def _session_id_from_attrs(attrs: Mapping[str, Any]) -> str:
     return str(attrs.get("agentteam.session.id") or attrs.get("session.id") or "").strip()
 
 
+def _trace_id_from_span(span: Mapping[str, Any]) -> str:
+    return str(span.get("traceId") or span.get("trace_id") or "").strip()
+
+
+def _spans_look_like_noise(spans: list[dict[str, Any]]) -> bool:
+    """Skip prewarm / heartbeat traces even when the group key is a traceId."""
+    for span in spans:
+        sid = _session_id_from_attrs(_span_attrs(span))
+        if sid.startswith("__prewarm__") or sid.startswith("heartbeat_"):
+            return True
+    return False
+
+
 def _start_time(span: Mapping[str, Any]) -> int:
     raw = span.get("startTimeUnixNano") or 0
     try:
@@ -111,6 +133,8 @@ def _unwrap_user_content(text: str) -> str | None:
         return None
     if any(marker in raw for marker in _REVIEW_USER_MARKERS):
         return None
+    if any(marker in raw for marker in _META_USER_MARKERS):
+        return None
     if raw.startswith("这是一次心跳请求任务") or "<heartbeat_user_task>" in raw:
         return None
 
@@ -131,8 +155,12 @@ def _unwrap_user_content(text: str) -> str | None:
         cleaned = _strip_system_reminder(str(content)).strip()
         if cleaned.startswith("这是一次心跳请求任务") or "<heartbeat_user_task>" in cleaned:
             return None
+        if any(marker in cleaned for marker in _META_USER_MARKERS):
+            return None
         return cleaned or None
     cleaned = body.strip()
+    if any(marker in cleaned for marker in _META_USER_MARKERS):
+        return None
     return cleaned or None
 
 
@@ -193,10 +221,13 @@ def _select_main_llm_span(spans: list[dict[str, Any]]) -> dict[str, Any] | None:
         elif _has_clean_user(prompt):
             with_user.append((_start_time(span), prompt_len, span))
 
+    # Prefer real JiuwenSwarm chat envelopes. Among candidates, take the latest
+    # call (full multi-turn history). Do NOT prefer max prompt_len among plain
+    # user spans — internal optimizer briefs are often longer and later.
     if with_envelope:
         return max(with_envelope, key=lambda item: (item[0], item[1]))[2]
     if with_user:
-        return max(with_user, key=lambda item: (item[1], item[0]))[2]
+        return max(with_user, key=lambda item: (item[0], -item[1]))[2]
     return None
 
 
@@ -206,9 +237,21 @@ def _is_valid_skill_name(skill: str) -> bool:
         return False
     if text in {"skill_tool", "skill", "load_skill", "use_skill"}:
         return False
-    if any(ch in text for ch in "<>{}[]()/\\"):
+    # Reject path/markup noise and polluted slices from skill_content blobs.
+    if any(ch in text for ch in "<>{}[]()/\\'\"\n\r\t"):
+        return False
+    if "skill_content" in text or "skill_directory" in text:
         return False
     return True
+
+
+# Matches EvolutionStore.create_skill / skills/<dir> folder identity.
+_EVOLUTION_STORE_SKILL_NAME_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+
+def _is_evolution_store_skill_name(skill: str) -> bool:
+    """True when ``skill`` is a valid EvolutionStore / skills/ directory name."""
+    return bool(_EVOLUTION_STORE_SKILL_NAME_RE.match((skill or "").strip()))
 
 
 _SKILL_PATH_KEYS = frozenset(
@@ -221,22 +264,51 @@ _SKILL_PATH_KEYS = frozenset(
     }
 )
 
+# Frontmatter ``name:`` inside skill_tool output skill_content.
+_FRONTMATTER_NAME_RE = re.compile(
+    r"(?m)^name:\s*(?:[\"'](.+?)[\"']|([^\n#]+?))\s*$",
+)
+
 
 def _skill_from_directory_path(path: str) -> str | None:
-    """Extract a skill name from a filesystem path that contains a ``skills`` segment."""
+    """Extract a skill folder name from a path that contains a ``skills`` segment."""
     text = (path or "").replace("\\", "/").strip().strip("'\"")
     if not text:
         return None
     parts = [part for part in text.split("/") if part]
     for index, part in enumerate(parts):
         if part.lower() == "skills" and index + 1 < len(parts):
-            candidate = parts[index + 1].strip()
+            candidate = parts[index + 1].strip().strip("'\"")
+            # Directory basenames are usually slug-like; drop trailing junk.
+            for stopper in ("'", '"', ","):
+                if stopper in candidate:
+                    candidate = candidate.split(stopper, 1)[0].strip()
             if _is_valid_skill_name(candidate):
                 return candidate
     return None
 
 
+def _skill_from_skill_content(content: str) -> str | None:
+    """Read skill display name from SKILL.md-style frontmatter in tool output."""
+    text = (content or "").strip()
+    if not text:
+        return None
+    match = _FRONTMATTER_NAME_RE.search(text)
+    if not match:
+        return None
+    candidate = (match.group(1) or match.group(2) or "").strip().strip("'\"")
+    if _is_valid_skill_name(candidate):
+        return candidate
+    return None
+
+
 def _skills_from_tool_input(raw: Any) -> list[str]:
+    """Extract ``skill_name`` from skill_tool arguments.
+
+    JiuwenSwarm typically records::
+
+        [[{"skill_name": "天气"}], {"session": "...", "tool_call_id": "..."}]
+    """
     payload = _decode_jsonish(raw)
     if isinstance(payload, str):
         payload = _decode_jsonish(payload)
@@ -245,9 +317,6 @@ def _skills_from_tool_input(raw: Any) -> list[str]:
     def _walk(node: Any) -> None:
         if isinstance(node, dict):
             skill = str(node.get("skill_name") or "").strip()
-            if not skill:
-                # Only trust explicit skill_name; plain "name" is too noisy in nested payloads.
-                skill = ""
             if _is_valid_skill_name(skill) and skill not in found:
                 found.append(skill)
             for value in node.values():
@@ -274,45 +343,87 @@ def _decode_mappingish(value: Any) -> Any:
         return decoded
 
 
-def _skills_from_tool_output(raw: Any) -> list[str]:
-    """Extract skill names from structured tool output (paths / skill_name keys)."""
+def _tool_output_data_mapping(raw: Any) -> dict[str, Any] | None:
+    """Pull the ``data={...}`` mapping from skill_tool output when present."""
     payload = _decode_mappingish(raw)
-    if isinstance(payload, str):
-        nested = _decode_mappingish(payload)
-        if nested is not payload:
-            payload = nested
-        else:
-            # Some runtimes emit ``success=True data={...}``; pull the mapping out.
-            data_idx = payload.find("data=")
-            if data_idx >= 0:
-                nested = _decode_mappingish(payload[data_idx + len("data="):].strip())
-                if isinstance(nested, (dict, list)):
-                    payload = nested
+    if isinstance(payload, dict):
+        return payload
+    if not isinstance(payload, str):
+        return None
+    nested = _decode_mappingish(payload)
+    if isinstance(nested, dict):
+        return nested
+    # ``success=True data={'skill_directory': '...', 'skill_content': '...'}``
+    data_idx = payload.find("data=")
+    if data_idx < 0:
+        return None
+    rest = payload[data_idx + len("data="):].strip()
+    # skill_content often contains newlines/quotes that break literal_eval on the
+    # whole mapping. Prefer a targeted skill_directory slice, then content name.
+    nested = _decode_mappingish(rest)
+    if isinstance(nested, dict):
+        return nested
+    return {"_raw_output": rest}
 
+
+def _skills_from_tool_output(raw: Any) -> list[str]:
+    """Extract skill identities from skill_tool output.
+
+    Prefer the basename under ``skills/`` (EvolutionStore directory identity,
+    e.g. ``beer`` / ``tianqi``). Frontmatter / ``skill_name`` display titles are
+    secondary fallbacks only. Never return polluted slices of skill_content.
+    """
     found: list[str] = []
 
     def _add(skill: str | None) -> None:
         if skill and skill not in found:
             found.append(skill)
 
-    def _walk(node: Any) -> None:
-        if isinstance(node, dict):
-            skill = str(node.get("skill_name") or "").strip()
-            if _is_valid_skill_name(skill):
-                _add(skill)
-            for key, value in node.items():
-                if key in _SKILL_PATH_KEYS and isinstance(value, str):
-                    _add(_skill_from_directory_path(value))
-                else:
-                    _walk(value)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-        elif isinstance(node, str):
-            _add(_skill_from_directory_path(node))
+    data = _tool_output_data_mapping(raw)
+    if isinstance(data, dict):
+        # Directory slug first — matches skills/<dir> and EvolutionStore.
+        for key in _SKILL_PATH_KEYS:
+            value = data.get(key)
+            if isinstance(value, str):
+                _add(_skill_from_directory_path(value))
+        raw_tail = data.get("_raw_output")
+        if isinstance(raw_tail, str):
+            _add(_skill_from_directory_path(raw_tail))
+        # Display / frontmatter names only after directory identity.
+        _add(str(data.get("skill_name") or "").strip() or None)
+        content = data.get("skill_content")
+        if isinstance(content, str):
+            _add(_skill_from_skill_content(content))
+        if isinstance(raw_tail, str):
+            _add(_skill_from_skill_content(raw_tail))
+        if found:
+            return found
 
-    _walk(payload)
+    # Last resort: agent-core style ``skills/<name>`` string scan on the raw text.
+    text = str(raw or "")
+    for sep in ("skills\\", "skills/"):
+        idx = text.find(sep)
+        if idx < 0:
+            continue
+        rest = text[idx + len(sep):]
+        skill = rest.split("'")[0].split('"')[0].split(",")[0].split("\\")[0].split("/")[0].strip()
+        _add(skill if _is_valid_skill_name(skill) else None)
+    _add(_skill_from_skill_content(text))
     return found
+
+
+def _prefer_evolution_store_skill_names(candidates: list[str]) -> list[str]:
+    """Keep only EvolutionStore-safe ``skills/<dir>`` slugs.
+
+    Display titles like ``天气`` or ``Beer — Styles...`` are never used as the
+    sleep skill identity — ``EvolutionStore.create_skill`` only accepts
+    ``^[a-zA-Z0-9_-]+$``.
+    """
+    return [
+        s
+        for s in dict.fromkeys(candidates)
+        if s and _is_evolution_store_skill_name(s)
+    ]
 
 
 def _tool_events(spans: list[dict[str, Any]]) -> list[tuple[int, str, list[str]]]:
@@ -328,9 +439,15 @@ def _tool_events(spans: list[dict[str, Any]]) -> list[tuple[int, str, list[str]]
         attrs = _span_attrs(span)
         candidates: list[str] = []
         if tool_name in {"skill_tool", "skill", "load_skill", "use_skill"}:
+            # Always read tool output so skills/<dir> slugs (beer, tianqi) win over
+            # frontmatter / tool-input display names that EvolutionStore rejects.
+            out = attrs.get(semconv.GEN_AI_TOOL_OUTPUT)
+            if out is None:
+                out = attrs.get(semconv.LANGFUSE_OBSERVATION_OUTPUT)
+            candidates.extend(_skills_from_tool_output(out))
             candidates.extend(_skills_from_tool_input(attrs.get(semconv.GEN_AI_TOOL_INPUT)))
             candidates.extend(_skills_from_tool_input(attrs.get(semconv.LANGFUSE_OBSERVATION_INPUT)))
-            candidates.extend(_skills_from_tool_output(attrs.get(semconv.GEN_AI_TOOL_OUTPUT)))
+            candidates = _prefer_evolution_store_skill_names(candidates)
         skills = [s for s in dict.fromkeys(candidates) if s]
         events.append((_start_time(span), tool_name, skills))
     return events
@@ -387,13 +504,14 @@ def _tool_turns_by_user_index(
     return out
 
 
-def _digest_from_session(
-    session_id: str,
+def _digest_from_trace(
+    trace_id: str,
     spans: list[dict[str, Any]],
     *,
     project: str,
 ) -> SessionDigest | None:
-    if not session_id or session_id.startswith("__prewarm__") or session_id.startswith("heartbeat_"):
+    """Build one SessionDigest from spans that share an OTLP ``traceId``."""
+    if not trace_id or _spans_look_like_noise(spans):
         return None
 
     spans = sorted(spans, key=_start_time)
@@ -448,9 +566,8 @@ def _digest_from_session(
             turns.extend(tool_turns.get(user_index, []))
 
     return SessionDigest(
-        session_id=session_id,
+        trace_id=trace_id,
         project=project,
-        trajectory_id=session_id,
         user_prompts=user_prompts,
         assistant_finals=assistant_finals,
         tools_used=tools_used,
@@ -466,16 +583,20 @@ def load_jiuwenswarm_session_digests(
     path: str | Path,
     *,
     project: str = "invoked",
-    session_id: str | None = None,
+    trace_id: str | None = None,
     max_sessions: int = 0,
 ) -> list[SessionDigest]:
-    """Group ``traces-*.jsonl`` spans by session.id and emit SessionDigest rows."""
+    """Group ``traces-*.jsonl`` spans by OTLP ``traceId`` and emit SessionDigest rows.
+
+    Each ``traceId`` is one complete conversation trajectory stored in
+    ``SessionDigest.trace_id``. Optional ``trace_id`` filters to one trajectory.
+    """
     root = Path(path).expanduser()
     files = _trace_files(root)
     if not files:
         return []
 
-    by_session: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_trace: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for file_path in files:
         with file_path.open("r", encoding="utf-8") as handle:
             for line in handle:
@@ -488,23 +609,22 @@ def load_jiuwenswarm_session_digests(
                 if not isinstance(record, dict):
                     continue
                 for span in _iter_spans_from_record(record):
-                    attrs = _span_attrs(span)
-                    sid = _session_id_from_attrs(attrs)
-                    if not sid:
+                    tid = _trace_id_from_span(span)
+                    if not tid:
                         continue
-                    if session_id is not None and sid != session_id:
+                    if trace_id is not None and tid != trace_id:
                         continue
-                    by_session[sid].append(span)
+                    by_trace[tid].append(span)
 
     digests: list[SessionDigest] = []
-    # Prefer recently active sessions when max_sessions truncates.
-    ordered_sessions = sorted(
-        by_session.items(),
+    # Prefer recently active traces when max_sessions truncates.
+    ordered_traces = sorted(
+        by_trace.items(),
         key=lambda item: max((_start_time(span) for span in item[1]), default=0),
         reverse=True,
     )
-    for sid, spans in ordered_sessions:
-        digest = _digest_from_session(sid, spans, project=project)
+    for tid, spans in ordered_traces:
+        digest = _digest_from_trace(tid, spans, project=project)
         if digest is not None:
             digests.append(digest)
         if max_sessions > 0 and len(digests) >= max_sessions:

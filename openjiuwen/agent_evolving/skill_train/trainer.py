@@ -54,9 +54,14 @@ from openjiuwen.agent_evolving.skill_train.llm_client import (
     set_optimizer_client,
     set_target_client,
 )
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import configure_jiuwenswarm_exec
 from openjiuwen.agent_evolving.skill_train.longitudinal import normalise_longitudinal_pair_policy
 from openjiuwen.agent_evolving.skill_train.meta_skill import load_meta_skill_content
-from openjiuwen.agent_evolving.skill_train.model_compat import set_reasoning_effort
+from openjiuwen.agent_evolving.skill_train.model_compat import (
+    is_target_exec_backend,
+    set_reasoning_effort,
+    set_target_backend,
+)
 from openjiuwen.agent_evolving.skill_train.registry import get_env_adapter
 from openjiuwen.agent_evolving.skill_train.scoring import compute_score, skill_hash
 from openjiuwen.agent_evolving.skill_train.select import rank_and_select
@@ -176,6 +181,25 @@ def _applied_count(report: List[dict]) -> int:
     return sum(1 for entry in report if str(entry.get("status", "")).startswith("applied"))
 
 
+def _configure_target_backend(cfg: Dict[str, Any]) -> str:
+    """Select the target backend and wire the exec harness + reflect gates.
+
+    The trace attachment is enabled only when the target really runs on the exec
+    backend and the config knob is on, so chat targets never pay for it.
+    """
+    backend = set_target_backend(cfg.get("target_backend"))
+    if is_target_exec_backend():
+        configure_jiuwenswarm_exec(
+            cli_path=cfg.get("jiuwenswarm_cli_path") or None,
+            gateway_url=cfg.get("jiuwenswarm_gateway_url") or None,
+            chat_mode=cfg.get("jiuwenswarm_chat_mode") or None,
+            instance_name=cfg.get("jiuwenswarm_instance_name") or None,
+        )
+    trace_on = is_target_exec_backend() and cfg.get("jiuwenswarm_trace_to_optimizer", True) is not False
+    os.environ["REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER"] = "1" if trace_on else "0"
+    return backend
+
+
 class SkillReflACTTrainer:
     """Orchestrates the 6-stage ReflACT pipeline for benchmark env adapters."""
 
@@ -183,20 +207,27 @@ class SkillReflACTTrainer:
         self,
         *,
         optimizer_llm: Model,
-        target_llm: Model,
         optimizer_model: str,
-        target_model: str,
+        target_llm: Optional[Model] = None,
+        target_model: str = "",
         llm_attempt_timeout_secs: float = 120.0,
         llm_total_budget_secs: float = 600.0,
         llm_max_attempts: int = 3,
     ) -> None:
+        """Build the optimizer (and optional target) chat clients.
+
+        ``target_llm`` may be ``None`` when ``SkillTrainConfig.target_backend``
+        is an exec backend (the jiuwenswarm CLI answers instead of a chat model).
+        """
         policy = make_llm_invoke_policy(
             attempt_timeout_secs=llm_attempt_timeout_secs,
             total_budget_secs=llm_total_budget_secs,
             max_attempts=llm_max_attempts,
         )
         self._optimizer_client = ChatLLMClient(llm=optimizer_llm, model=optimizer_model, policy=policy)
-        self._target_client = ChatLLMClient(llm=target_llm, model=target_model, policy=policy)
+        self._target_client: Optional[ChatLLMClient] = (
+            ChatLLMClient(llm=target_llm, model=target_model, policy=policy) if target_llm is not None else None
+        )
 
     # ── Setup ────────────────────────────────────────────────────────────────
 
@@ -206,9 +237,13 @@ class SkillReflACTTrainer:
         out_root = os.path.abspath(config.output_dir)
         os.makedirs(out_root, exist_ok=True)
 
+        backend = _configure_target_backend(cfg)
+        if self._target_client is None and not is_target_exec_backend():
+            raise ValueError(f"target_llm is required when target_backend={backend!r} (chat backend)")
         set_optimizer_client(self._optimizer_client)
         set_target_client(self._target_client)
         set_reasoning_effort(cfg.get("reasoning_effort"))
+        logger.info("[skill_train] target_backend=%s", backend)
 
         env_adapter = adapter or get_env_adapter(config.env_name, **config.env_kwargs)
         env_adapter.setup(cfg)
@@ -252,8 +287,17 @@ class SkillReflACTTrainer:
     @staticmethod
     def _start_runtime(plan: TrainPlan) -> TrainRuntime:
         """Score the initial skill so later candidates have something to beat."""
-        sel_env = plan.adapter.build_eval_env(env_num=0, split="valid_seen", seed=plan.seed)
+        selection_n = int(plan.cfg.get("selection_eval_size", 40) or 0)
+        sel_env = plan.adapter.build_eval_env(
+            env_num=selection_n,
+            split="valid_seen",
+            seed=plan.seed,
+        )
         baseline_dir = os.path.join(plan.out_root, "selection_eval_baseline")
+        logger.info(
+            "[SkillReflACTTrainer] selection/gate eval size=%s (valid_seen)",
+            selection_n or "all",
+        )
         baseline = compute_score(plan.adapter.rollout(sel_env, plan.initial_skill, baseline_dir))
         baseline_hard, baseline_soft = baseline
         score = plan.gate_score(baseline_hard, baseline_soft, plan.initial_skill)
