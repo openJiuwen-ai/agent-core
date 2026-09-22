@@ -44,6 +44,8 @@ from __future__ import annotations
 
 import html
 
+from openjiuwen.core.single_agent.schema.steering import SteeringInput
+
 # Stable contract tokens for the <team-inbound> ``type`` attribute.
 INBOUND_TYPE_DIRECT = "direct"
 INBOUND_TYPE_BROADCAST = "broadcast"
@@ -215,6 +217,8 @@ def snapshot_kind_of(text: str) -> str | None:
     Returns:
         The matching kind from :data:`SNAPSHOT_EVENT_KINDS`, or None.
     """
+    if isinstance(text, SteeringInput):
+        return None
     stripped = text.strip()
     if not stripped.endswith("</team-event>"):
         return None

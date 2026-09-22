@@ -39,6 +39,7 @@ from openjiuwen.core.session.agent import Session
 
 if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import BaseAgent
+    from openjiuwen.core.single_agent.schema.steering import SteeringWindow
 
 # Above this, a rail chain is reported at INFO so a slow hook shows up without
 # having to enable debug logging. A chain that does real work -- memory
@@ -418,6 +419,9 @@ class AgentCallbackContext:
     _steering_queue: Optional[asyncio.Queue] = field(
         default=None, init=False, repr=False
     )
+    _steering_window: Optional[SteeringWindow] = field(
+        default=None, init=False, repr=False
+    )
 
     async def fire(
         self, event: AgentCallbackEvent
@@ -508,6 +512,7 @@ class AgentCallbackContext:
             queue: The shared asyncio.Queue instance.
         """
         self._steering_queue = queue
+        self._steering_window = getattr(queue, "steering_inbox", None)
 
     def push_steering(self, msg: str) -> None:
         """Push a steering message into the queue.
@@ -520,6 +525,10 @@ class AgentCallbackContext:
         if self._steering_queue is not None:
             self._steering_queue.put_nowait(msg)
 
+    def _steering_window_is_stale(self) -> bool:
+        window = getattr(self, "_steering_window", None)
+        return window is not None and not window.current
+
     def drain_steering(self) -> List[str]:
         """Drain all pending steering messages.
 
@@ -527,7 +536,7 @@ class AgentCallbackContext:
             List of steering message strings,
             empty if no queue bound or queue empty.
         """
-        if self._steering_queue is None:
+        if self._steering_queue is None or self._steering_window_is_stale():
             return []
         msgs: List[str] = []
         while not self._steering_queue.empty():
@@ -545,9 +554,18 @@ class AgentCallbackContext:
         Returns:
             True if a queue is bound and non-empty.
         """
-        if self._steering_queue is None:
+        if self._steering_queue is None or self._steering_window_is_stale():
             return False
         return not self._steering_queue.empty()
+
+    def close_steering_if_empty(self) -> bool:
+        """Close strict input admission atomically with the final empty check."""
+        if self.has_pending_steering():
+            return False
+        inbox = getattr(self, "_steering_window", None)
+        if inbox is not None:
+            inbox.close_acceptance()
+        return True
 
     @property
     def steering_queue(self) -> Optional[asyncio.Queue]:

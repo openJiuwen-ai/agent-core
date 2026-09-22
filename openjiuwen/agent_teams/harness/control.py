@@ -104,7 +104,18 @@ class _CmdResume:
     query: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _CmdSteerActive:
+    """Strict admission/capability request, handled only by the supervisor."""
+
+    active_request_id: str
+    input_id: str | None
+    content: str | None
+    ack: asyncio.Future
+
+
 ControlEvent = Union[
+    _CmdSteerActive,
     _CmdSend,
     _CmdAbort,
     _CmdPause,

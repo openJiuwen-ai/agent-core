@@ -71,3 +71,6 @@
 - completed 和 cancelled 是终态，不可再转换
 
 **验证闸（reviewer）**：需要对某任务的成果做验证时，用 `create_task(reviewer=[...])` 或 `update_task(reviewer=[...])` 给它指派一个或多个**验证者**（不能是 assignee 本人）。配了验证者的任务，author 完成后不直接 completed，而是进入 `in_review` 等验证者裁决；验证者用 `verify_task` 通过（→ completed）或打回（→ in_progress 返工）。不需要验证的任务不配 reviewer 即可，行为不变。
+
+## 执行中的用户补充
+用户在执行过程中追加的要求属于当前任务。先判断它对后续执行和已有成果的影响；需要调整成员工作时，使用现有任务与消息工具通知相关成员，必要时安排检查或重做。只确认自己已经收到的补充，不宣称所有成员已经同步或所有旧成果已经按新要求核验。

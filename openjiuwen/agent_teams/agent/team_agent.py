@@ -209,6 +209,29 @@ class TeamAgent(BaseAgent):
         """
         return self._configurator.harness
 
+    def get_active_steering_request_id(self) -> str | None:
+        """Return the native leader's current handle without creating a runtime."""
+        method = getattr(self.harness, "get_active_steering_request_id", None)
+        return method() if callable(method) else None
+
+    async def get_steering_capability(self, *, active_request_id: str) -> dict:
+        method = getattr(self.harness, "get_steering_capability", None)
+        return (await method(active_request_id=active_request_id) if callable(method)
+                else {"supported": False, "reason": "unsupported"})
+
+    async def steer_active(self, *, active_request_id: str, input_id: str, content: str) -> dict:
+        """Send literal text only to the existing native leader's active round."""
+        method = getattr(self.harness, "steer_active", None)
+        if not callable(method):
+            return {"input_id": input_id, "status": "not_applied", "reason": "unsupported"}
+        return await method(active_request_id=active_request_id, input_id=input_id, content=content)
+
+    async def get_steering_status(self, *, active_request_id: str, input_id: str) -> dict:
+        method = getattr(self.harness, "get_steering_status", None)
+        if not callable(method):
+            return {"input_id": input_id, "status": "unknown", "reason": "unsupported"}
+        return await method(active_request_id=active_request_id, input_id=input_id)
+
     @property
     def spec(self) -> Optional[TeamAgentSpec]:
         return self._configurator.spec
