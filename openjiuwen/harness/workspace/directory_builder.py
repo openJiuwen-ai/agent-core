@@ -3,6 +3,7 @@ import re
 from pathlib import Path
 from typing import Dict, List
 
+from openjiuwen.core.common.logging import logger
 from openjiuwen.core.sys_operation.sys_operation import SysOperation
 
 
@@ -44,6 +45,18 @@ class DirectoryBuilder:
     async def _create_directory_recursive(self, node: Dict, parent_path: str = "") -> None:
         """Create directories recursively."""
         relative_path = node.get("path", "")
+        is_absolute_path = isinstance(relative_path, str) and (
+            os.path.isabs(relative_path)
+            or relative_path.startswith(("/", "\\"))
+            or bool(re.match(r"^[A-Za-z]:[\\/]", relative_path))
+        )
+        if node.get("external") is True or is_absolute_path:
+            logger.info(
+                "DirectoryBuilder: skipped automatic creation for directory node %r (path=%r).",
+                node.get("name"),
+                relative_path,
+            )
+            return
 
         if not self._is_safe_path(relative_path):
             raise ValueError(f"Unsafe path detected: {relative_path}")
