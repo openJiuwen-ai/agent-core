@@ -122,13 +122,17 @@ class ModelBackend(Backend):
         sample_id: int = 0,
     ) -> str:
         del sample_id
+        # Follow-up corrections are encoded in the judge rubric only. Feeding
+        # ``context_excerpt`` here lets the target satisfy soft rubrics by
+        # copying user complaints without needing skill edits — sleep then
+        # returns [] forever. Keep attempt grounded on skill + intent alone.
         prompt = render(
             "attempt",
             {
                 "__SKILL__": skill or "(empty)",
                 "__MEMORY__": memory or "(empty)",
                 "__INTENT__": task.intent,
-                "__CONTEXT__": task.context_excerpt or "",
+                "__CONTEXT__": "",
             },
         )
         text, _meta = self._clients.target.chat(
@@ -235,10 +239,14 @@ class ModelBackend(Backend):
             },
         )
         raw, _meta = self._clients.optimizer.chat(
-            system="You propose bounded skill edits as JSON only.",
+            system=(
+                "You propose bounded skill edits as JSON only. "
+                "Match the natural language of the current skill/memory document "
+                "for content, anchor, and rationale."
+            ),
             user=prompt,
             stage="sleep_reflect",
-            max_completion_tokens=8192,
+            max_completion_tokens=16384,
         )
         self._charge(prompt, raw)
         return _edits_from_payload(raw, budget=request.edit_budget, target=target)

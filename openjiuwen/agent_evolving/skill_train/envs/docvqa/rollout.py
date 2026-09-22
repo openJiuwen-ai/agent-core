@@ -22,7 +22,16 @@ from openjiuwen.agent_evolving.skill_train.envs.io_helpers import (
     write_prediction_artifacts,
 )
 from openjiuwen.agent_evolving.skill_train.envs.rollout_batch import run_parallel_rollout
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
+    GatewayUnreachableError,
+    default_exec_prompt,
+    exec_work_dir_for,
+    prepare_workspace,
+    render_skill_md,
+    run_jiuwenswarm_cli_exec,
+)
 from openjiuwen.agent_evolving.skill_train.llm_client import chat_target_messages
+from openjiuwen.agent_evolving.skill_train.model_compat import is_target_exec_backend
 from openjiuwen.agent_evolving.skill_train.prompts_loader import load_prompt
 
 _ANLS_PASS = 0.999
@@ -204,8 +213,104 @@ def _apply_scores(row: dict, reply: str, golds: list) -> dict:
     return scored
 
 
+def _exec_task_text(user_text: str, previous_response: str = "") -> str:
+    parts = [
+        "# DocVQA Task",
+        "",
+        "The document image is listed in `ATTACHMENTS.md` (under `attachments/`). "
+        "Inspect it before answering.",
+        "",
+        "## Question",
+        user_text,
+    ]
+    if previous_response:
+        parts.extend(
+            [
+                "",
+                "## Previous Attempt",
+                previous_response,
+                "",
+                "Review it against the same image and question. If needed, correct it.",
+            ]
+        )
+    return "\n".join(parts)
+
+
+def _run_exec_once(
+    item: dict,
+    cfg: DocVQAItemConfig,
+    user_text: str,
+    *,
+    previous_response: str = "",
+) -> tuple[str, str, str]:
+    """One jiuwenswarm CLI turn with the page image copied into the workspace."""
+    work_dir = exec_work_dir_for(cfg.out_root, str(item["id"]))
+    skill_md = render_skill_md(cfg.skill_content)
+    task_text = _exec_task_text(user_text, previous_response)
+    prepare_workspace(
+        work_dir=work_dir,
+        skill_md=skill_md,
+        task_text=task_text,
+        images=[item["image_path"]],
+    )
+    response, raw = run_jiuwenswarm_cli_exec(
+        work_dir=work_dir,
+        prompt=default_exec_prompt("answer the question about the attached document image."),
+        timeout=cfg.exec_timeout,
+    )
+    return response or raw, skill_md, task_text
+
+
+def _process_one_exec(item: dict, cfg: DocVQAItemConfig) -> dict:
+    """Roll out one DocVQA item via the jiuwenswarm CLI harness."""
+    row = _blank_row(item)
+    question = item["question"]
+    row["question"] = question
+    row["task_description"] = question
+    golds = item.get("answers", [])
+    try:
+        user_text = _compose_user_text(
+            question,
+            diagnostic_mode=cfg.diagnostic_mode,
+            diagnostic_instruction=cfg.diagnostic_instruction,
+        )
+        conversation: list[dict] = []
+        reply = skill_md = task_text = ""
+        for turn in range(max(1, cfg.max_turns)):
+            reply, skill_md, task_text = _run_exec_once(
+                item,
+                cfg,
+                user_text,
+                previous_response=reply if turn > 0 else "",
+            )
+            conversation.append({"type": "message", "turn": turn + 1, "content": reply})
+            if _has_answer_tag(reply):
+                break
+        row["response"] = reply
+        row["agent_ok"] = True
+        row["n_turns"] = len(conversation)
+
+        scored = _apply_scores(row, reply, golds)
+        conversation.append({"role": "system", "content": _eval_note(question, scored, golds)})
+        write_prediction_artifacts(
+            cfg.out_root,
+            str(item["id"]),
+            system_prompt=skill_md,
+            user_prompt=task_text,
+            conversation=conversation,
+        )
+    except (AttributeError, KeyError, NameError, TypeError, AssertionError, GatewayUnreachableError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        row["fail_reason"] = f"error: {exc}"
+    return row
+
+
 def process_one(item: dict, cfg: DocVQAItemConfig) -> dict:
     """Run vision chat for one DocVQA item and score with ANLS."""
+    if is_target_exec_backend():
+        return _process_one_exec(item, cfg)
+
     row = _blank_row(item)
     question = item["question"]
     row["question"] = question

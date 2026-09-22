@@ -144,6 +144,14 @@ _ATTACHMENTS: tuple[Attachment, ...] = (
         env_flag="REFLACT_CLAUDE_TRACE_TO_OPTIMIZER",
         strip=True,
     ),
+    # jiuwenswarm CLI exec backend: the ``--jsonl`` event stream is persisted
+    # as compact steps so the analyst sees tool activity, not only the answer.
+    Attachment(
+        "JiuwenSwarm Trace Steps",
+        filename="jiuwenswarm_trace_steps.txt",
+        env_flag="REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER",
+        strip=True,
+    ),
     Attachment("Spreadsheet Preview", item_key="spreadsheet_preview", filename="spreadsheet_preview.txt"),
 )
 

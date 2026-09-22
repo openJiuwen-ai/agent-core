@@ -4,7 +4,7 @@
 
 Prerequisite (daytime): a JiuwenSwarm observation dir with ``traces-*.jsonl``
 (for example ``%USERPROFILE%\\.jiuwenswarm\\.trace``). Sleep groups spans by
-``session.id`` and harvests one SessionDigest per session.
+OTLP ``traceId`` and harvests one SessionDigest per complete conversation.
 
 Gate 通过后自动经 EvolutionStore 归档并写入新 skill 版本。
 仅更新轨迹中检测到的 skill（skill_tool 等）；无 hint 的任务会被跳过，不再创建兜底 skill。
@@ -18,6 +18,9 @@ Usage:
     --trajectory-dir %USERPROFILE%\\.jiuwenswarm\\.trace \\
     --skills-base-dir ./skills \\
     --backend model --dry-run
+
+Optimizer/target LLM attempt timeout defaults to 300s (override with
+``LLM_ATTEMPT_TIMEOUT``); total budget scales with ``LLM_MAX_ATTEMPTS``.
 """
 
 from __future__ import annotations
@@ -29,11 +32,15 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
-from openjiuwen.agent_evolving.skill_train.llm_client import ChatLLMClient
+from openjiuwen.agent_evolving.skill_train.llm_client import ChatLLMClient, make_llm_invoke_policy
 from openjiuwen.agent_evolving.skill_train.sleep import SleepConfig, run_sleep_cycle
 from openjiuwen.agent_evolving.skill_train.sleep.backend import build_backend
 from openjiuwen.core.foundation.llm import ModelClientConfig, ModelRequestConfig
 from openjiuwen.core.foundation.llm.model import Model
+
+# DeepSeek-style reasoning models often exceed the default 120s on reflect.
+_DEFAULT_ATTEMPT_TIMEOUT = 300.0
+_DEFAULT_MAX_ATTEMPTS = 3
 
 
 def _env(*names: str, default: str = "") -> str:
@@ -67,6 +74,8 @@ def _build_chat_client() -> ChatLLMClient:
     ]
     if missing:
         raise SystemExit("Missing required environment variables: " + ", ".join(missing))
+    attempt_timeout = float(_env("LLM_ATTEMPT_TIMEOUT", default=str(_DEFAULT_ATTEMPT_TIMEOUT)))
+    max_attempts = int(_env("LLM_MAX_ATTEMPTS", default=str(_DEFAULT_MAX_ATTEMPTS)))
     model = Model(
         model_client_config=ModelClientConfig(
             client_provider=provider,
@@ -75,7 +84,15 @@ def _build_chat_client() -> ChatLLMClient:
         ),
         model_config=ModelRequestConfig(model=model_name),
     )
-    return ChatLLMClient(llm=model, model=model_name)
+    return ChatLLMClient(
+        llm=model,
+        model=model_name,
+        policy=make_llm_invoke_policy(
+            attempt_timeout_secs=attempt_timeout,
+            total_budget_secs=attempt_timeout * max_attempts + 30.0,
+            max_attempts=max_attempts,
+        ),
+    )
 
 
 def main() -> None:
@@ -100,7 +117,11 @@ def main() -> None:
         default="",
         help="可选：与 --skill-name 配套的初始 SKILL.md 路径",
     )
-    parser.add_argument("--session-id", default=None, help="可选：只 harvest 该 session")
+    parser.add_argument(
+        "--trace-id",
+        default=None,
+        help="可选：只 harvest 该 OTLP traceId（完整对话轨迹）",
+    )
     parser.add_argument("--state-dir", default="")
     parser.add_argument("--staging-root", default="")
     parser.add_argument("--backend", default="model", choices=["mock", "model"])
@@ -109,6 +130,12 @@ def main() -> None:
         default="off",
         choices=["off", "llm"],
         help="off: 仅用 follow-up 启发式拼 rubric；llm: 额外调用 optimizer 模型合成可核查的 rubric 清单",
+    )
+    parser.add_argument(
+        "--gate-mode",
+        default="on",
+        choices=["on", "off", "none", "false", "greedy"],
+        help="on: holdout gate 验收后才写 skill；off/greedy/none/false: 跳过 gate，有 edits 就直接更新 skill",
     )
     parser.add_argument(
         "--dry-run",
@@ -135,11 +162,12 @@ def main() -> None:
         skills_base_dir=args.skills_base_dir,
         skill_name=args.skill_name,
         skill_init=args.skill_init,
-        session_id=args.session_id,
+        trace_id=args.trace_id,
         state_dir=args.state_dir or str(Path("./outputs/skill_sleep_state").resolve()),
         staging_root=args.staging_root or "",
         backend=args.backend,
         rubric_synthesis=args.rubric_synthesis,
+        gate_mode=args.gate_mode,
         progress=True,
     )
     outcome = run_sleep_cycle(

@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Adopt staged sleep proposals via EvolutionStore SemVer."""
+"""Adopt staged sleep proposals via EvolutionStore SemVer + changelog."""
 
 from __future__ import annotations
 
@@ -8,16 +8,21 @@ import asyncio
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Sequence
 
+from openjiuwen.agent_evolving.checkpointing.changelog import (
+    CHANGELOG_FILENAME,
+    classify_records_for_changelog,
+)
 from openjiuwen.agent_evolving.checkpointing.evolution_store import EvolutionStore
-from openjiuwen.agent_evolving.checkpointing.versioning import VersionBump, bump_semver
+from openjiuwen.agent_evolving.checkpointing.types import EvolutionRecord
+from openjiuwen.agent_evolving.skill_train.sleep.evolution_records import edits_to_evolution_records
 from openjiuwen.agent_evolving.skill_train.sleep.staging import (
+    list_skill_proposal_edits,
     list_skill_proposals,
     load_manifest,
     read_proposed_skill,
 )
-from openjiuwen.agent_evolving.utils import split_markdown_frontmatter
 from openjiuwen.core.common.logging import logger
 
 
@@ -43,45 +48,30 @@ def _run(coro: Any) -> Any:
     )
 
 
-async def _write_skill_md_version(store: EvolutionStore, skill_dir: Path, version: str) -> None:
-    """Update ``version:`` in SKILL.md via public EvolutionStore file helpers."""
-    skill_md = store.find_skill_md(skill_dir)
-    if skill_md is None:
-        return
-    content = await store.read_file_text(skill_md)
-    front_matter, body = split_markdown_frontmatter(content)
-    if front_matter is None:
-        rewritten = f"---\nversion: {version}\n---\n{content}"
-        await store.write_file_text(skill_md, rewritten)
-        return
-    lines = front_matter.strip("\n").split("\n") if front_matter.strip("\n") else []
-    updated = False
-    for idx, line in enumerate(lines):
-        if line.startswith("version:"):
-            lines[idx] = f"version: {version}"
-            updated = True
-            break
-    if not updated:
-        lines.append(f"version: {version}")
-    new_front = "\n".join(lines)
-    if body.startswith("\n") or body.startswith("\r\n") or not body:
-        rewritten = f"---\n{new_front}\n---{body}"
-    else:
-        rewritten = f"---\n{new_front}\n---\n{body}"
-    await store.write_file_text(skill_md, rewritten)
-
-
-async def _bump_minor_version(store: EvolutionStore, skill_name: str) -> tuple[str, str]:
-    current = await store.resolve_current_version(skill_name)
-    new_version = bump_semver(current, VersionBump.MINOR)
-    skill_dir = store.resolve_skill_dir(skill_name)
-    if skill_dir is None:
-        raise RuntimeError(f"skill '{skill_name}' directory not found after write")
-    await _write_skill_md_version(store, skill_dir, new_version)
-    evo_log = await store.load_full_evolution_log(skill_name)
-    evo_log.version = new_version
-    await store.save_evolution_log(skill_name, evo_log, skill_dir=skill_dir)
-    return current, new_version
+async def _finalize_version_and_changelog(
+    store: EvolutionStore,
+    skill_name: str,
+    records: Sequence[EvolutionRecord],
+) -> Optional[str]:
+    """Mirror experience rebuild finalize: bump → changelog → clear entries."""
+    new_version = await store.bump_version_for_rebuild(skill_name, entries=list(records))
+    if not new_version:
+        logger.warning(
+            "[skill_sleep] no SemVer bump for skill=%s (empty/skip-only records)",
+            skill_name,
+        )
+        return None
+    classified = await classify_records_for_changelog(records)
+    if classified:
+        written = await store.append_changelog_for_rebuild(skill_name, new_version, classified)
+        if not written:
+            logger.info(
+                "[skill_sleep] changelog unchanged for skill=%s version=%s",
+                skill_name,
+                new_version,
+            )
+    await store.clear_evolutions(skill_name, retain_version=new_version)
+    return new_version
 
 
 async def publish_skill_content_async(
@@ -91,14 +81,16 @@ async def publish_skill_content_async(
     *,
     staging_dir: str = "",
     description: str = "Skill consolidated by skill_train sleep",
+    applied_edits: Optional[Sequence[Any]] = None,
 ) -> AdoptResult:
-    """Archive (if exists), write content, bump MINOR SemVer."""
+    """Archive (if exists), write content, bump SemVer, append changelog."""
     name = (skill_name or "").strip()
     if not name:
         raise ValueError("skill_name is required")
     archived_body: Optional[str] = None
     archived_evo: Optional[str] = None
     previous_version = "0.0.0"
+    records = edits_to_evolution_records(applied_edits, skill_name=name)
 
     if store.skill_exists(name):
         previous_version = await store.resolve_current_version(name)
@@ -109,7 +101,9 @@ async def publish_skill_content_async(
         if not ok:
             raise RuntimeError(f"failed to write skill content for '{name}'")
         try:
-            previous_version, new_version = await _bump_minor_version(store, name)
+            new_version = await _finalize_version_and_changelog(store, name, records)
+            if not new_version:
+                raise RuntimeError(f"failed to bump skill version for '{name}'")
         except Exception:
             restored = await store.write_skill_content(name, prior_content)
             if restored:
@@ -130,14 +124,19 @@ async def publish_skill_content_async(
         ok = await store.write_skill_content(name, content)
         if not ok:
             raise RuntimeError(f"failed to write initial skill content for '{name}'")
-        new_version = await store.resolve_current_version(name)
+        previous_version = await store.resolve_current_version(name)
+        new_version = await _finalize_version_and_changelog(store, name, records)
+        if not new_version:
+            # create_skill left a default version; keep it if bump could not run.
+            new_version = previous_version
 
     logger.info(
-        "[skill_sleep] published skill=%s version %s -> %s staging=%s",
+        "[skill_sleep] published skill=%s version %s -> %s staging=%s changelog=%s",
         name,
         previous_version,
         new_version,
         staging_dir or "-",
+        CHANGELOG_FILENAME,
     )
     return AdoptResult(
         skill_name=name,
@@ -159,6 +158,7 @@ async def adopt_staged_skill_async(
     """Adopt one skill from staging (legacy single-file or named proposal)."""
     staging_path = Path(staging_dir)
     proposals = list_skill_proposals(staging_path)
+    edits_by_skill = list_skill_proposal_edits(staging_path)
     name = (skill_name or "").strip()
     if name and name in proposals:
         return await publish_skill_content_async(
@@ -167,6 +167,7 @@ async def adopt_staged_skill_async(
             proposals[name],
             staging_dir=str(staging_path),
             description=description,
+            applied_edits=edits_by_skill.get(name),
         )
 
     manifest = load_manifest(staging_path)
@@ -191,6 +192,7 @@ async def adopt_staged_skill_async(
         body,
         staging_dir=str(staging_path),
         description=description,
+        applied_edits=edits_by_skill.get(name),
     )
 
 
@@ -203,6 +205,7 @@ async def adopt_all_staged_skills_async(
     """Publish every skill proposal present in a staging directory."""
     staging_path = Path(staging_dir)
     proposals = list_skill_proposals(staging_path)
+    edits_by_skill = list_skill_proposal_edits(staging_path)
     results: List[AdoptResult] = []
     for name, body in proposals.items():
         results.append(
@@ -212,6 +215,7 @@ async def adopt_all_staged_skills_async(
                 body,
                 staging_dir=str(staging_path),
                 description=description,
+                applied_edits=edits_by_skill.get(name),
             )
         )
     return results
@@ -257,6 +261,7 @@ def publish_skill_content(
     *,
     staging_dir: str = "",
     description: str = "Skill consolidated by skill_train sleep",
+    applied_edits: Optional[Sequence[Any]] = None,
 ) -> AdoptResult:
     return _run(
         publish_skill_content_async(
@@ -265,5 +270,6 @@ def publish_skill_content(
             content,
             staging_dir=staging_dir,
             description=description,
+            applied_edits=applied_edits,
         )
     )

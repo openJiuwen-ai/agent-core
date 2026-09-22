@@ -13,7 +13,16 @@ from openjiuwen.agent_evolving.skill_train.envs.io_helpers import (
 )
 from openjiuwen.agent_evolving.skill_train.envs.rollout_batch import run_parallel_rollout
 from openjiuwen.agent_evolving.skill_train.envs.searchqa.evaluator import evaluate
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
+    GatewayUnreachableError,
+    default_exec_prompt,
+    exec_work_dir_for,
+    prepare_workspace,
+    render_skill_md,
+    run_jiuwenswarm_cli_exec,
+)
 from openjiuwen.agent_evolving.skill_train.llm_client import chat_target
+from openjiuwen.agent_evolving.skill_train.model_compat import is_target_exec_backend
 from openjiuwen.agent_evolving.skill_train.prompts_loader import load_prompt
 
 _CONTEXT_CHARS = 6000
@@ -205,8 +214,80 @@ def _item_cfg_for(batch: SearchQABatchConfig, item_id: str) -> SearchQAItemConfi
     )
 
 
+def _exec_task_text(item: dict, cfg: SearchQAItemConfig, previous_response: str = "") -> str:
+    """``task.md`` body for the exec target (same blocks as the chat user prompt)."""
+    parts = [_build_prompts(item, cfg).user]
+    if previous_response:
+        parts.append(
+            "## Previous Attempt\n"
+            f"{previous_response}\n\n"
+            "Review it against the same context and question. If needed, correct it."
+        )
+    return "\n\n".join(parts)
+
+
+def _run_exec_once(
+    item: dict,
+    cfg: SearchQAItemConfig,
+    *,
+    previous_response: str = "",
+) -> tuple[str, str, str]:
+    """One jiuwenswarm CLI turn: prepare workspace, run, return (response, skill_md, task_text)."""
+    work_dir = exec_work_dir_for(cfg.out_root, str(item["id"]))
+    skill_md = render_skill_md(cfg.skill_content)
+    task_text = _exec_task_text(item, cfg, previous_response)
+    prepare_workspace(work_dir=work_dir, skill_md=skill_md, task_text=task_text)
+    response, raw = run_jiuwenswarm_cli_exec(
+        work_dir=work_dir,
+        prompt=default_exec_prompt("answer the SearchQA question."),
+        timeout=cfg.exec_timeout,
+    )
+    return response or raw, skill_md, task_text
+
+
+def _process_one_exec(item: dict, cfg: SearchQAItemConfig) -> dict:
+    """Roll out one SearchQA item via the jiuwenswarm CLI harness."""
+    row = _blank_result(item)
+    question = item["question"]
+    golds = item.get("answers", [])
+    try:
+        conversation: list[dict] = []
+        response = skill_md = task_text = ""
+        for turn in range(max(1, cfg.max_turns)):
+            response, skill_md, task_text = _run_exec_once(
+                item,
+                cfg,
+                previous_response=response if turn > 0 else "",
+            )
+            conversation.append({"type": "message", "turn": turn + 1, "content": response})
+            if "<answer>" in response.lower():
+                break
+        row["response"] = response
+        row["agent_ok"] = True
+        row["n_turns"] = len(conversation)
+
+        scores = evaluate(response, golds)
+        note = _stamp_metrics(row, scores, question, golds)
+        conversation.append({"role": "system", "content": note})
+        write_prediction_artifacts(
+            cfg.out_root,
+            str(item["id"]),
+            system_prompt=skill_md,
+            user_prompt=task_text,
+            conversation=conversation,
+        )
+    except (AttributeError, KeyError, NameError, TypeError, AssertionError, GatewayUnreachableError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — expected rollout/runtime failures
+        row["fail_reason"] = f"error: {exc}"
+    return row
+
+
 def process_one(item: dict, cfg: SearchQAItemConfig) -> dict:
     """Run the QA agent on one item and attach evaluation metrics."""
+    if is_target_exec_backend():
+        return _process_one_exec(item, cfg)
+
     row = _blank_result(item)
     question = item["question"]
     golds = item.get("answers", [])

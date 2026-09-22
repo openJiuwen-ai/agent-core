@@ -29,6 +29,8 @@ class SkillTrainConfig:
     use_gate: bool = True
     gate_metric: str = "hard"
     gate_mixed_weight: float = 0.5
+    # Cap for selection_eval_baseline / gate_eval on valid_seen (0 = full split).
+    selection_eval_size: int = 40
     seed: int = 42
     num_parallel: int = 4
     skill_update_mode: str = "patch"
@@ -39,6 +41,17 @@ class SkillTrainConfig:
     longitudinal_pair_policy: str = "mixed"
     use_meta_skill: bool = True
     reasoning_effort: Optional[str] = "medium"
+    # Target (agent under evaluation) backend: "openai_chat" or
+    # "jiuwenswarm_cli_exec" (SkillOpt ``claude_code_exec`` pattern with the
+    # jiuwenswarm CLI as the harness). The optimizer always uses chat.
+    target_backend: str = "openai_chat"
+    # Inject ``jiuwenswarm_trace_steps.txt`` into the analyst prompt when the
+    # target is the jiuwenswarm CLI (mirrors ``claude_trace_to_optimizer``).
+    jiuwenswarm_trace_to_optimizer: bool = True
+    jiuwenswarm_cli_path: str = ""
+    jiuwenswarm_gateway_url: str = ""
+    jiuwenswarm_chat_mode: str = ""
+    jiuwenswarm_instance_name: str = ""
     env_kwargs: Dict[str, Any] = field(default_factory=dict)
     # "train" = ReflACT offline loop; "sleep" = OTLP Trajectory sleep cycle
     mode: str = "train"
@@ -61,6 +74,7 @@ class SkillTrainConfig:
             "use_gate": self.use_gate,
             "gate_metric": self.gate_metric,
             "gate_mixed_weight": self.gate_mixed_weight,
+            "selection_eval_size": self.selection_eval_size,
             "seed": self.seed,
             "skill_update_mode": self.skill_update_mode,
             "use_slow_update": self.use_slow_update,
@@ -69,6 +83,12 @@ class SkillTrainConfig:
             "longitudinal_pair_policy": self.longitudinal_pair_policy,
             "use_meta_skill": self.use_meta_skill,
             "reasoning_effort": self.reasoning_effort,
+            "target_backend": self.target_backend,
+            "jiuwenswarm_trace_to_optimizer": self.jiuwenswarm_trace_to_optimizer,
+            "jiuwenswarm_cli_path": self.jiuwenswarm_cli_path,
+            "jiuwenswarm_gateway_url": self.jiuwenswarm_gateway_url,
+            "jiuwenswarm_chat_mode": self.jiuwenswarm_chat_mode,
+            "jiuwenswarm_instance_name": self.jiuwenswarm_instance_name,
             "out_root": self.output_dir,
         }
         if self.skill_init:

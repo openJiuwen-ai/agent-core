@@ -35,8 +35,8 @@ class OfficeQARolloutSettings:
     workers: int = 8
     max_tool_turns: int = 12
     max_completion_tokens: int = 16384
-    exec_timeout: int = 120
-    task_timeout: int = 600
+    exec_timeout: int = 600
+    task_timeout: int = 1800
     search_mode: str = "offline"
     max_queries_per_turn: int = 4
     transport: _SearchTransport = field(default_factory=_SearchTransport)
@@ -80,8 +80,8 @@ class OfficeQARolloutSettings:
             workers=int(raw.get("workers", 8) or 8),
             max_tool_turns=int(raw.get("max_tool_turns", 12) or 12),
             max_completion_tokens=int(raw.get("max_completion_tokens", 16384) or 16384),
-            exec_timeout=int(raw.get("exec_timeout", 120) or 120),
-            task_timeout=int(raw.get("task_timeout", 600) or 600),
+            exec_timeout=int(raw.get("exec_timeout", 600) or 600),
+            task_timeout=int(raw.get("task_timeout", 1800) or 1800),
             search_mode=str(raw.get("search_mode") or "offline"),
             max_queries_per_turn=int(raw.get("max_queries_per_turn", 4) or 4),
             transport=transport,

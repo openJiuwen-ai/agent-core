@@ -9,25 +9,37 @@ from typing import Callable, List, Tuple
 
 from openjiuwen.agent_evolving.skill_train.sleep.types import EditRecord
 
+# Legacy delimiters: still stripped on read/write so older skills migrate cleanly.
 _MARK_OPEN = "<!-- SKILL-TRAIN-SLEEP:LEARNED START -->"
 _MARK_CLOSE = "<!-- SKILL-TRAIN-SLEEP:LEARNED END -->"
-# Back-compat aliases used by unit tests and callers.
 LEARNED_START = _MARK_OPEN
 LEARNED_END = _MARK_CLOSE
-_NOTE = (
-    "_This block is maintained by skill_train sleep. Edits here are proposed "
-    "offline, validated against harvested trajectories, and adopted only after "
-    "you approve them. Hand-edits outside this block are never touched._"
-)
+_LEGACY_HEADING = "## Learned preferences & procedures"
+_LEGACY_NOTE_PREFIX = "_This block is maintained by skill_train sleep."
+
+
+def _strip_legacy_chrome(body: str) -> str:
+    lines: List[str] = []
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped == _LEGACY_HEADING:
+            continue
+        if stripped.startswith(_LEGACY_NOTE_PREFIX):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
 
 
 def extract_learned(doc: str) -> str:
+    """Return learned bullet text from a legacy marked region, if any."""
     left = doc.find(_MARK_OPEN)
     right = doc.find(_MARK_CLOSE)
-    if left < 0 or right < 0:
+    if left < 0 or right <= left:
         return ""
     begin = left + len(_MARK_OPEN)
-    return doc[begin:right].strip()
+    return _strip_legacy_chrome(doc[begin:right].strip())
 
 
 def _remove_regions(doc: str) -> str:
@@ -48,18 +60,38 @@ def _remove_regions(doc: str) -> str:
 
 
 def set_learned(doc: str, learned_lines: List[str]) -> str:
+    """Append learned bullets only — no markers, heading, or maintenance note."""
     base = _remove_regions(doc)
-    bullets = []
+    prior = current_learned_lines(doc)
+    if prior:
+        prior_fold = {_fold(item) for item in prior}
+        kept = base.splitlines()
+        while kept:
+            stripped = kept[-1].strip()
+            if not stripped:
+                kept.pop()
+                continue
+            if stripped.startswith("- ") and _fold(stripped[2:]) in prior_fold:
+                kept.pop()
+                continue
+            break
+        base = "\n".join(kept).rstrip()
+
+    base_fold = _fold(base)
+    bullets: List[str] = []
+    seen: set[str] = set()
     for line in learned_lines:
         cleaned = line.strip().lstrip("- ").strip()
-        if cleaned:
-            bullets.append(f"- {cleaned}")
-    body = "\n".join(bullets)
-    region = (
-        f"\n\n{_MARK_OPEN}\n## Learned preferences & procedures\n\n{_NOTE}\n\n"
-        f"{body}\n{_MARK_CLOSE}\n"
-    )
-    return (base + region).lstrip("\n")
+        if not cleaned:
+            continue
+        folded = _fold(cleaned)
+        if folded in seen or folded in base_fold:
+            continue
+        seen.add(folded)
+        bullets.append(f"- {cleaned}")
+    if not bullets:
+        return base
+    return f"{base.rstrip()}\n\n" + "\n".join(bullets) + "\n"
 
 
 def current_learned_lines(doc: str) -> List[str]:
@@ -79,9 +111,15 @@ def _apply_add(
     lines: List[str],
     norms: set[str],
     edit: EditRecord,
+    *,
+    doc_fold: str = "",
 ) -> Tuple[bool, List[str], set[str]]:
     folded = _fold(edit.content)
-    if folded in norms or not edit.content.strip():
+    if folded in norms:
+        return False, lines, norms
+    if not edit.content.strip():
+        return False, lines, norms
+    if doc_fold and folded in doc_fold:
         return False, lines, norms
     updated = list(lines)
     updated.append(edit.content.strip())
@@ -94,7 +132,10 @@ def _apply_delete(
     lines: List[str],
     norms: set[str],
     edit: EditRecord,
+    *,
+    doc_fold: str = "",
 ) -> Tuple[bool, List[str], set[str]]:
+    del doc_fold
     anchor = _fold(edit.anchor or edit.content)
     if not anchor:
         return False, lines, norms
@@ -108,8 +149,10 @@ def _apply_replace(
     lines: List[str],
     norms: set[str],
     edit: EditRecord,
+    *,
+    doc_fold: str = "",
 ) -> Tuple[bool, List[str], set[str]]:
-    del norms
+    del norms, doc_fold
     anchor = _fold(edit.anchor)
     replacement = edit.content.strip()
     rebuilt: List[str] = []
@@ -125,7 +168,10 @@ def _apply_replace(
     return True, rebuilt, {_fold(line) for line in rebuilt}
 
 
-_OPS: dict[str, Callable[[List[str], set[str], EditRecord], Tuple[bool, List[str], set[str]]]] = {
+_OPS: dict[
+    str,
+    Callable[..., Tuple[bool, List[str], set[str]]],
+] = {
     "add": _apply_add,
     "delete": _apply_delete,
     "replace": _apply_replace,
@@ -138,6 +184,7 @@ def apply_edits_detailed(
 ) -> Tuple[str, List[EditRecord], List[EditRecord]]:
     lines = current_learned_lines(doc)
     norms = {_fold(line) for line in lines}
+    doc_fold = _fold(_remove_regions(doc))
     applied: List[EditRecord] = []
     unmatched: List[EditRecord] = []
 
@@ -146,7 +193,7 @@ def apply_edits_detailed(
         if handler is None:
             unmatched.append(edit)
             continue
-        ok, lines, norms = handler(lines, norms, edit)
+        ok, lines, norms = handler(lines, norms, edit, doc_fold=doc_fold)
         if ok:
             applied.append(edit)
         else:

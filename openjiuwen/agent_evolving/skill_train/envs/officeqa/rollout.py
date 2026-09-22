@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -18,19 +19,28 @@ from openjiuwen.agent_evolving.skill_train.envs.officeqa.dialogue_modes import (
     normalize_search_mode,
 )
 from openjiuwen.agent_evolving.skill_train.envs.officeqa.evaluator import evaluate
+from openjiuwen.agent_evolving.skill_train.envs.officeqa.prompt_builders import extract_answer
 from openjiuwen.agent_evolving.skill_train.envs.officeqa.tool_runtime import (
     build_oracle_parsed_pages_context,
     resolve_candidate_files,
     resolve_docs_roots,
 )
 from openjiuwen.agent_evolving.skill_train.envs.rollout_batch import run_parallel_rollout
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
+    default_exec_prompt,
+    exec_work_dir_for,
+    prepare_workspace,
+    render_skill_md,
+    run_jiuwenswarm_cli_exec,
+)
+from openjiuwen.agent_evolving.skill_train.model_compat import get_target_backend, is_target_exec_backend
 
 __all__ = ["OfficeQABatchKnobs", "OfficeQAItemKnobs", "_DialogueOutcome", "process_one", "run_batch"]
 
 _PROCESS_ONE_OPTION_DEFAULTS: dict[str, Any] = {
     "max_tool_turns": 12,
     "max_completion_tokens": 16384,
-    "exec_timeout": 120,
+    "exec_timeout": 600,
     "search_mode": SEARCH_OFFLINE,
     "max_queries_per_turn": 4,
     "search_api_url": "",
@@ -47,7 +57,7 @@ _PROCESS_ONE_OPTION_DEFAULTS: dict[str, Any] = {
 _BATCH_OPTION_DEFAULTS: dict[str, Any] = {
     **_PROCESS_ONE_OPTION_DEFAULTS,
     "workers": 8,
-    "task_timeout": 600,
+    "task_timeout": 1800,
 }
 
 _OFFLINE_TOOLS_NOTE = (
@@ -93,7 +103,7 @@ class OfficeQAItemKnobs:
     use_local_tools: bool = True
     data_dirs: list[str] | str | None = None
     probe: _DiagnosticProbe = field(default_factory=_DiagnosticProbe)
-    exec_timeout: int = 120
+    exec_timeout: int = 600
 
     @classmethod
     def from_flat(
@@ -128,7 +138,7 @@ class OfficeQAItemKnobs:
             use_local_tools=bool(flat.get("use_local_tools", True)),
             data_dirs=flat.get("data_dirs"),
             probe=probe,
-            exec_timeout=int(flat.get("exec_timeout", 120) or 120),
+            exec_timeout=int(flat.get("exec_timeout", 600) or 600),
         )
 
     @property
@@ -178,7 +188,7 @@ class OfficeQABatchKnobs:
 
     item: OfficeQAItemKnobs
     workers: int = 8
-    task_timeout: int = 600
+    task_timeout: int = 1800
 
     @classmethod
     def from_flat(
@@ -188,13 +198,13 @@ class OfficeQABatchKnobs:
         /,
         *,
         workers: int = 8,
-        task_timeout: int = 600,
+        task_timeout: int = 1800,
         **flat: Any,
     ) -> OfficeQABatchKnobs:
         return cls(
             item=OfficeQAItemKnobs.from_flat(out_root, skill_content, **flat),
             workers=int(workers or 8),
-            task_timeout=int(task_timeout or 600),
+            task_timeout=int(task_timeout or 1800),
         )
 
     @property
@@ -423,7 +433,155 @@ def _score_row(
     }
 
 
+_EXEC_DOCS_DIR = "docs"
+
+
+def _docs_root_aliases(docs_roots: list[str]) -> list[tuple[str, str]]:
+    """Unique ``docs/<basename>`` aliases for each corpus root."""
+    aliases: list[tuple[str, str]] = []
+    used: set[str] = set()
+    for root in docs_roots:
+        base = os.path.basename(os.path.normpath(root)) or "corpus"
+        name = base
+        suffix = 2
+        while name in used:
+            name = f"{base}_{suffix}"
+            suffix += 1
+        used.add(name)
+        aliases.append((os.path.abspath(root), f"{_EXEC_DOCS_DIR}/{name}"))
+    return aliases
+
+
+def _workspace_rel_for(path: str, aliases: list[tuple[str, str]]) -> str:
+    """Map an absolute corpus file to ``docs/<root_alias>/...`` (or ``docs/<name>``)."""
+    abs_path = os.path.abspath(path)
+    for root_abs, alias in aliases:
+        try:
+            rel = os.path.relpath(abs_path, root_abs)
+        except ValueError:  # different drive on Windows
+            continue
+        if not rel.startswith("..") and not os.path.isabs(rel):
+            return f"{alias}/{rel}".replace("\\", "/")
+    return f"{_EXEC_DOCS_DIR}/{os.path.basename(abs_path)}"
+
+
+def _exec_doc_links(candidates: list[str], docs_roots: list[str]) -> list[tuple[str, str]]:
+    """Link only *candidate* files into the workspace (never the full corpus root)."""
+    aliases = _docs_root_aliases(docs_roots)
+    links: list[tuple[str, str]] = []
+    seen_dst: set[str] = set()
+    for path in candidates:
+        if not path or not os.path.isfile(path):
+            continue
+        abs_path = os.path.abspath(path)
+        rel_dst = _workspace_rel_for(abs_path, aliases)
+        if rel_dst in seen_dst:
+            continue
+        seen_dst.add(rel_dst)
+        links.append((abs_path, rel_dst))
+    return links
+
+
+def _rebase_candidates(candidates: list[str], docs_roots: list[str]) -> list[str]:
+    """Rewrite absolute corpus paths to their workspace-relative ``docs/...`` form."""
+    aliases = _docs_root_aliases(docs_roots)
+    return [_workspace_rel_for(path, aliases) for path in candidates]
+
+
+def _named_source_files(item: dict) -> list[str]:
+    raw = item.get("source_files") or []
+    if isinstance(raw, str):
+        raw = [raw]
+    return [str(name).strip() for name in raw if str(name).strip()]
+
+
+def _exec_task_text(item: dict, knobs: OfficeQAItemKnobs, prepared: _PreparedItem, links: list[tuple[str, str]]) -> str:
+    display = [rel_dst for _src, rel_dst in links] or (
+        _rebase_candidates(prepared.candidate_files, prepared.docs_roots)
+        if _named_source_files(item)
+        else []
+    )
+    user = build_user_prompt(
+        item,
+        display,
+        diagnostic_mode=knobs.diagnostic_mode,
+        diagnostic_instruction=knobs.diagnostic_instruction,
+        search_mode=prepared.mode,
+        max_tool_turns=knobs.max_tool_turns,
+        max_queries_per_turn=knobs.max_queries_per_turn,
+        oracle_context=prepared.oracle_context,
+    )
+    if not links:
+        return user
+    lines = [f"- `{rel_dst}`" for _src, rel_dst in links]
+    return (
+        f"{user}\n\n## Local Documents\n"
+        "Only these candidate document files are available in this workspace; "
+        "use file tools (read / grep) on them instead of web search:\n" + "\n".join(lines)
+    )
+
+
+def _execute_single_item_exec(item: dict, knobs: OfficeQAItemKnobs) -> dict:
+    """Run one OfficeQA item through the jiuwenswarm CLI harness (offline corpus only)."""
+    prepared = _prepare_item(item, knobs)
+    if prepared.mode != SEARCH_OFFLINE:
+        raise ValueError(
+            f"search_mode={prepared.mode!r} requires a chat target backend; "
+            f"target backend {get_target_backend()!r} only supports offline mode"
+        )
+    # Mount only files named by source_files — never the whole docs root.
+    # (When source_files is empty, resolve_candidate_files returns the full corpus.)
+    mount_files = prepared.candidate_files if _named_source_files(item) else []
+    links = _exec_doc_links(mount_files, prepared.docs_roots)
+    skill_md = render_skill_md(knobs.skill_content)
+    task_text = _exec_task_text(item, knobs, prepared, links)
+    work_dir = exec_work_dir_for(knobs.out_root, str(item["id"]))
+    try:
+        prepare_workspace(work_dir=work_dir, skill_md=skill_md, task_text=task_text, link_dirs=links)
+        response, raw = run_jiuwenswarm_cli_exec(
+            work_dir=work_dir,
+            prompt=default_exec_prompt(
+                f"answer the OfficeQA question using the documents under `{_EXEC_DOCS_DIR}/` in this workspace."
+            ),
+            timeout=knobs.exec_timeout,
+        )
+    except (AttributeError, KeyError, NameError, TypeError, AssertionError):
+        raise
+    except Exception as exc:  # noqa: BLE001 — expected harness/runtime failures
+        outcome = _DialogueOutcome(
+            system=skill_md,
+            user=task_text,
+            response="",
+            answer="",
+            conversation=[{"role": "user", "content": task_text}],
+            fail_reason=f"error: {exc}",
+            response_metadata={},
+        )
+    else:
+        text = response or raw
+        tagged = "<answer>" in text.lower()
+        outcome = _DialogueOutcome(
+            system=skill_md,
+            user=task_text,
+            response=text,
+            answer=extract_answer(text) if tagged else "",
+            conversation=[{"type": "message", "turn": 1, "content": text}],
+            fail_reason="" if tagged else "Model reply lacked a final <answer> tag",
+            response_metadata={"backend": get_target_backend()},
+        )
+    write_prediction_artifacts(
+        knobs.out_root,
+        str(item["id"]),
+        system_prompt=outcome.system,
+        user_prompt=outcome.user,
+        conversation=outcome.conversation,
+    )
+    return _score_row(item, outcome, prepared, use_local_tools=knobs.use_local_tools)
+
+
 def _execute_single_item(item: dict, knobs: OfficeQAItemKnobs) -> dict:
+    if is_target_exec_backend():
+        return _execute_single_item_exec(item, knobs)
     prepared = _prepare_item(item, knobs)
     outcome = _invoke_dialogue(item, knobs, prepared)
     write_prediction_artifacts(

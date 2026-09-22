@@ -134,6 +134,41 @@ _try_register("myenv", "openjiuwen.agent_evolving.skill_train.envs.myenv.adapter
 
 训练侧用 `get_env_adapter("myenv", **cfg)` 实例化；未知 kwargs 会按 `__init__` 签名过滤。
 
+### 7. 可选：支持 `jiuwenswarm_cli_exec` 目标后端
+
+`target_backend` 除默认的 `openai_chat`（target 是聊天模型）外，还支持 `jiuwenswarm_cli_exec`：
+target 换成 jiuwenswarm coding agent，本仓库只做适配，实际由 `jiuwenswarm skill-train` 命令启动。每条样本的流程：
+
+1. `prepare_workspace` 在 `predictions/<id>/jiuwenswarm_exec/` 生成隔离工作区：
+   `.agents/skills/reflact-target/SKILL.md`（`render_skill_md(skill_content)`）、`task.md`、
+   可选 `attachments/` + `ATTACHMENTS.md`（图片）或 `link_dirs`（文档语料）。
+2. `run_jiuwenswarm_cli_exec` 以子进程运行 `jiuwenswarm chat --cwd <ws> --project-dir <ws> --jsonl -- <prompt>`，
+   从 `--jsonl` 事件流中提取最终回答（`chat.final` → 退化到 `chat.delta` 拼接），空回答会带提示重试一次。
+3. 事件流被压成 `[n] tool_call: read_file task.md` 形式写入 `predictions/<id>/jiuwenswarm_trace_steps.txt`
+   （附带 `jiuwenswarm_raw.txt` / `jiuwenswarm_trace_summary.txt`），reflect 阶段通过
+   `REFLACT_JIUWENSWARM_TRACE_TO_OPTIMIZER=1` 把它作为 `JiuwenSwarm Trace Steps` 附件喂给 analyst。
+
+新 env 接入时，在 `process_one` 开头按 `is_target_exec_backend()` 分流即可：
+
+```python
+from openjiuwen.agent_evolving.skill_train.jiuwenswarm_exec import (
+    default_exec_prompt, exec_work_dir_for, prepare_workspace, render_skill_md, run_jiuwenswarm_cli_exec,
+)
+from openjiuwen.agent_evolving.skill_train.model_compat import is_target_exec_backend
+
+def process_one(item, cfg):
+    if is_target_exec_backend():
+        work_dir = exec_work_dir_for(cfg.out_root, str(item["id"]))
+        prepare_workspace(work_dir=work_dir, skill_md=render_skill_md(cfg.skill_content), task_text=build_task(item))
+        response, _raw = run_jiuwenswarm_cli_exec(
+            work_dir=work_dir, prompt=default_exec_prompt("answer the question."), timeout=cfg.exec_timeout,
+        )
+        ...  # 评分、write_prediction_artifacts 与 chat 分支一致
+```
+
+`GatewayUnreachableError`（CLI 退出码 3）应向上抛出，让整批快速失败而不是全部记 0 分。
+三个内置 env 的分支实现见 `searchqa/rollout.py`、`docvqa/rollout.py`（图片附件）、`officeqa/rollout.py`（语料 `docs/` 链接，仅 offline 模式）。
+
 ## 复用 vs 自写
 
 | 自写 | 复用 |

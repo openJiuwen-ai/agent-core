@@ -10,13 +10,14 @@ from typing import Any, Dict, List
 
 @dataclass
 class SessionDigest:
-    """Normalized summary of one OTLP trajectory conversation."""
+    """Normalized summary of one OTLP trajectory conversation.
 
-    session_id: str
+    ``trace_id`` is the OTLP ``traceId`` used to group spans into one complete
+    conversation (not ``session.id`` attributes).
+    """
+
+    trace_id: str
     project: str = ""
-    trajectory_id: str = ""
-    started_at: str = ""
-    ended_at: str = ""
     user_prompts: List[str] = field(default_factory=list)
     assistant_finals: List[str] = field(default_factory=list)
     tools_used: List[str] = field(default_factory=list)
@@ -50,7 +51,7 @@ class TaskRecord:
     reference: str = ""
     judge: Dict[str, Any] = field(default_factory=dict)
     tags: List[str] = field(default_factory=list)
-    source_sessions: List[str] = field(default_factory=list)
+    source_traces: List[str] = field(default_factory=list)
     split: str = "train"
     origin: str = "real"
     derived_from: str = ""
@@ -63,6 +64,9 @@ class TaskRecord:
     def from_dict(cls, data: Dict[str, Any]) -> "TaskRecord":
         allowed = frozenset(cls.__dataclass_fields__)
         payload = {key: value for key, value in data.items() if key in allowed}
+        # Older sleep state used source_sessions for the same OTLP identity.
+        if "source_traces" not in payload and "source_sessions" in data:
+            payload["source_traces"] = list(data.get("source_sessions") or [])
         return cls(**payload)
 
 

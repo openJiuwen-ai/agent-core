@@ -16,11 +16,11 @@ from openjiuwen.agent_evolving.skill_train.sleep.types import SessionDigest
 
 
 def harvest_otlp_trajectories(cfg: SleepConfig) -> List[SessionDigest]:
-    """Load JiuwenSwarm traces into SessionDigest rows, one per ``session.id``.
+    """Load JiuwenSwarm traces into SessionDigest rows, one per OTLP ``traceId``.
 
     ``cfg.trajectory_store_dir`` may be a directory containing
     ``traces-*.jsonl`` or a single trace file. Returns an empty list when no
-    trace files are present.
+    trace files are present. ``SessionDigest.trace_id`` stores the ``traceId``.
     """
     root = Path(cfg.resolved_trajectory_dir())
     if not has_jiuwenswarm_traces(root):
@@ -28,6 +28,6 @@ def harvest_otlp_trajectories(cfg: SleepConfig) -> List[SessionDigest]:
     return load_jiuwenswarm_session_digests(
         root,
         project=cfg.project or "invoked",
-        session_id=cfg.session_id,
+        trace_id=cfg.trace_id,
         max_sessions=cfg.max_trajectories,
     )
