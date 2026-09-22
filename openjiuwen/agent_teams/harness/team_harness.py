@@ -275,6 +275,32 @@ class TeamHarness:
             )
         return self._native.outputs()
 
+    def get_active_steering_request_id(self) -> str | None:
+        """Read the existing native round without starting a run cycle."""
+        return self._native.get_active_steering_request_id() if self._native is not None else None
+
+    async def get_steering_capability(self, *, active_request_id: str) -> dict:
+        """Keep strict admission under the native supervisor's lifecycle checks."""
+        if self._native is None:
+            return {"supported": False, "reason": "not_active"}
+        return await self._native.get_steering_capability(active_request_id=active_request_id)
+
+    async def steer_active(self, *, active_request_id: str, input_id: str, content: str) -> dict:
+        """Forward literal input to the current round, without send or resume."""
+        if self._native is None:
+            return {"active_request_id": active_request_id, "input_id": input_id,
+                    "status": "not_applied", "reason": "not_active"}
+        return await self._native.steer_active(
+            active_request_id=active_request_id, input_id=input_id, content=content,
+        )
+
+    async def get_steering_status(self, *, active_request_id: str, input_id: str) -> dict:
+        """Keep completed receipts readable from a stopped native runtime."""
+        if self._native is None:
+            return {"active_request_id": active_request_id, "input_id": input_id,
+                    "status": "unknown", "reason": "not_active"}
+        return await self._native.get_steering_status(active_request_id=active_request_id, input_id=input_id)
+
     async def send(self, content: Any, *, immediate: bool = False) -> Any:
         """Submit input to the native; ``immediate`` steers the active round."""
         if self._native is None:

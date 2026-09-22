@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-import importlib
 import os
 import sys
 import uuid
@@ -25,6 +24,9 @@ from typing import (
 )
 
 import anyio
+
+from openjiuwen.core.single_agent.schema.steering import SteeringInbox
+from openjiuwen.core.single_agent.interrupt.state import INTERRUPTION_KEY
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
@@ -234,6 +236,7 @@ class DeepAgent(BaseAgent):
         self._interaction_round_forwarded: Optional[asyncio.Event] = None
         self._interaction_start_lock = asyncio.Lock()
         self._interaction_control_lock = asyncio.Lock()
+        self._steering_inbox = SteeringInbox()
         self._interaction_send_lock = asyncio.Lock()
         self._interaction_wakeup = asyncio.Event()
         self._interaction_lease_hold = False
@@ -3078,6 +3081,45 @@ class DeepAgent(BaseAgent):
                         self._notify_work()
                 return stream
 
+    def get_active_steering_request_id(self) -> str | None:
+        """Return the active request identity without creating or resuming work."""
+        active = self._active_interaction_round
+        return active.work.request_id if active is not None else None
+
+    def _steering_unavailable_reason(self, active_request_id: str) -> str | None:
+        if (not self._interaction_started or self._interaction_phase is not InteractionPhase.RUNNING
+                or self.get_active_steering_request_id() != active_request_id
+                or not self._steering_inbox.accepting or self._steering_inbox.queue is None):
+            return "not_active"
+        if self._interaction_session is not None and self._interaction_session.get_state(INTERRUPTION_KEY):
+            return "waiting_input"
+        return None
+
+    async def get_steering_capability(self, *, active_request_id: str) -> dict:
+        """Read current active-only admission capability; no input is enqueued."""
+        async with self._interaction_control_lock:
+            reason = self._steering_unavailable_reason(active_request_id)
+            return {"supported": reason is None, **({"reason": reason} if reason else {})}
+
+    async def steer_active(self, *, active_request_id: str, input_id: str, content: str) -> dict:
+        """Append text only to this exact active request, preserving its output.
+
+        Retries with the same input ID return its existing receipt. This API
+        never creates a round, resumes an interrupt, or attaches an output reader.
+        """
+        async with self._interaction_control_lock:
+            previous = self._steering_inbox.previous(active_request_id, input_id, content)
+            if previous is not None:
+                return previous
+            reason = self._steering_unavailable_reason(active_request_id)
+            if reason:
+                return self._steering_inbox.result(active_request_id, input_id, "not_applied", reason)
+            return self._steering_inbox.accept(active_request_id, input_id, content)
+
+    async def get_steering_status(self, *, active_request_id: str, input_id: str) -> dict:
+        """Read a bounded in-memory receipt, including after the round has ended."""
+        return self._steering_inbox.lookup(active_request_id, input_id)
+
     async def send_input(self, request: SendInputRequest) -> None:
         """Dispatch user text or interrupt-resume input.
 
@@ -3259,6 +3301,7 @@ class DeepAgent(BaseAgent):
         controller = self.loop_controller
         scheduler = getattr(controller, "task_scheduler", None) if controller else None
 
+        self._steering_inbox.finish("execution_cancelled")
         # 1) Signal abort before waiting on scheduler cancel.
         with suppress(Exception):
             await self.abort(self._interaction_session)
@@ -3482,6 +3525,7 @@ class DeepAgent(BaseAgent):
         self._active_interaction_round = ActiveInteractionRound(work=work, task_id=task_id)
         self._event_manager.mark_started(work)
         self._interaction_phase = InteractionPhase.RUNNING
+        steering_window = self._steering_inbox.open(work.request_id)
         try:
             if session is None or not self._interaction_output.has_consumer():
                 return
@@ -3519,6 +3563,7 @@ class DeepAgent(BaseAgent):
                 )
             )
         finally:
+            steering_window.finish()
             self._event_manager.mark_finished(work)
             if session is not None:
                 emitted = await self._emit_round_boundary(session)

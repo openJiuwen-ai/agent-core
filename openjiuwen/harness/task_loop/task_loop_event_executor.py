@@ -205,23 +205,29 @@ class TaskLoopEventExecutor(TaskExecutor):
         # Pass steering queue reference so the inner
         # ReAct loop can drain it before each model call.
         handler = agent.event_handler
+        steering_window = None
         if handler is not None:
             queues = getattr(
                 handler, "interaction_queues", None
             )
             if queues is not None:
-                effective["_steering_queue"] = (
-                    queues.steering
-                )
+                effective["_steering_queue"] = queues.steering
+                steering_inbox = getattr(agent, "_steering_inbox", None)
+                if steering_inbox is not None:
+                    steering_window = steering_inbox.bind(queues.steering)
 
         # Tracks whether AFTER_TASK_ITERATION fired on the success path so the
         # error path can fire it exactly once. Round-boundary cleanup rails
         # (snapshot, otel span close, ...) must run even when the round fails.
         after_fired = False
         try:
-            result = await agent.react_agent.invoke(
-                effective, session, _streaming=True
-            )
+            try:
+                result = await agent.react_agent.invoke(
+                    effective, session, _streaming=True
+                )
+            finally:
+                if steering_window is not None:
+                    steering_window.finish()
             is_interrupt = result.get("result_type") == "interrupt"
 
             # Mark completed in TaskPlan (skip for interrupt)

@@ -71,3 +71,6 @@ Core transitions:
 - completed and cancelled are terminal — no further transitions
 
 **Verify gate (reviewers)**: when a task's result needs verification, assign one or more **reviewers** with `create_task(reviewer=[...])` or `update_task(reviewer=[...])` (they musn't be the assignee). A task with reviewers does not complete directly — after the author finishes it enters `in_review` and awaits the reviewer's verdict; the reviewer calls `verify_task` to pass it (→ completed) or send it back (→ in_progress for rework). Tasks that need no verification simply carry no reviewer and behave as before.
+
+## User additions during execution
+User additions received during execution belong to the current task. Assess their impact on remaining work and existing results. Use the existing task and messaging tools to coordinate affected members and arrange verification or rework when needed. Acknowledge only what you have received; do not claim every member has synchronized or every earlier result has been checked against the new requirements.

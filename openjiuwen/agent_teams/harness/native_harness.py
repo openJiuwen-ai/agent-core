@@ -68,6 +68,7 @@ from openjiuwen.agent_teams.harness.control import (
     _CmdResume,
     _CmdRoundFinished,
     _CmdSend,
+    _CmdSteerActive,
     _CmdStop,
 )
 from openjiuwen.agent_teams.harness.async_tools import AsyncToolRuntime
@@ -563,6 +564,54 @@ class NativeHarness(DeepAgent):
         await self._control.put(_CmdSend(msg=msg, ack=ack))
         return await ack
 
+    def get_active_steering_request_id(self) -> str | None:
+        """Opaque current-round handle; callers must also bind their own invocation."""
+        active = self._st.active
+        return active.task_id if active is not None else None
+
+    def _steering_unavailable_reason(self, active_request_id: str) -> str | None:
+        active = self._st.active
+        if self._st.phase in (HarnessState.PAUSED, HarnessState.PAUSING):
+            return "waiting_input"
+        if (self._st.phase is not HarnessState.RUNNING or active is None
+                or active.task_id != active_request_id or active.graceful_abort or active.pause_requested
+                or not self._steering_inbox.accepting or self._steering_inbox.queue is None):
+            return "not_active"
+        if self._session is not None and self._session.get_state(INTERRUPTION_KEY):
+            return "waiting_input"
+        return None
+
+    async def _strict_steering_command(
+        self, active_request_id: str, input_id: str | None = None, content: str | None = None,
+    ) -> dict:
+        supervisor = self._st.supervisor_task
+        if self._st.phase is HarnessState.TERMINATED or supervisor is None or supervisor.done():
+            if input_id is None:
+                return {"supported": False, "reason": "not_active"}
+            previous = self._steering_inbox.previous(active_request_id, input_id, content)
+            return previous or self._steering_inbox.result(active_request_id, input_id, "not_applied", "not_active")
+        ack = asyncio.get_running_loop().create_future()
+        await self._control.put(_CmdSteerActive(active_request_id, input_id, content, ack))
+        return await asyncio.shield(ack)
+
+    async def get_steering_capability(self, *, active_request_id: str) -> dict:
+        return await self._strict_steering_command(active_request_id)
+
+    async def steer_active(self, *, active_request_id: str, input_id: str, content: str) -> dict:
+        """Deliver raw text to the active native leader without routing or resuming."""
+        return await self._strict_steering_command(active_request_id, input_id, content)
+
+    def _on_steer_active(self, cmd: _CmdSteerActive) -> None:
+        reason = self._steering_unavailable_reason(cmd.active_request_id)
+        if cmd.input_id is None:
+            self._ack(cmd.ack, {"supported": reason is None, **({"reason": reason} if reason else {})})
+            return
+        result = self._steering_inbox.previous(cmd.active_request_id, cmd.input_id, cmd.content)
+        if result is None:
+            result = (self._steering_inbox.result(cmd.active_request_id, cmd.input_id, "not_applied", reason)
+                      if reason else self._steering_inbox.accept(cmd.active_request_id, cmd.input_id, cmd.content))
+        self._ack(cmd.ack, result)
+
     async def abort(self, *, immediate: bool = False) -> None:
         """Abort the current round; the harness settles to IDLE.
 
@@ -756,6 +805,7 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] supervisor crashed; terminating")
             self._st.phase = HarnessState.TERMINATED
         finally:
+            self._steering_inbox.finish("runtime_stopped")
             # Resolve every ack that will otherwise never be answered, so no
             # external caller hangs forever. Covers the crashed command and
             # anything queued behind it (including commands queued after Stop).
@@ -766,7 +816,9 @@ class NativeHarness(DeepAgent):
 
     async def _dispatch(self, cmd: Any) -> None:
         """Route a non-Stop control event to its handler."""
-        if isinstance(cmd, _CmdSend):
+        if isinstance(cmd, _CmdSteerActive):
+            self._on_steer_active(cmd)
+        elif isinstance(cmd, _CmdSend):
             await self._on_send(cmd)
         elif isinstance(cmd, _CmdAbort):
             await self._on_abort(cmd)
@@ -1340,6 +1392,7 @@ class NativeHarness(DeepAgent):
         task = asyncio.create_task(_runner(), name=f"native_harness_round[{round_id}]")
         active.task = task
         self._st.active = active
+        self._steering_inbox.open(task_id)
         logger.info(
             "[NativeHarness] round_id=%s started query=%r follow_up=%s",
             round_id,
@@ -1370,6 +1423,7 @@ class NativeHarness(DeepAgent):
         """
         error: BaseException | None = None
         result: dict | None = None
+        steering_window = self._steering_inbox.window
         slow_log_task = asyncio.create_task(
             self._log_slow_round_until_done(active),
             name=f"native_harness_slow_round_log[{active.round_id}]",
@@ -1419,6 +1473,8 @@ class NativeHarness(DeepAgent):
             logger.exception("[NativeHarness] round_id=%s crashed", active.round_id)
             error = exc
         finally:
+            if steering_window is not None:
+                steering_window.finish()
             await self._cancel_slow_log_task(slow_log_task)
             await self._control.put(
                 _CmdRoundFinished(

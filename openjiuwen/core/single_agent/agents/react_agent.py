@@ -20,6 +20,7 @@ from typing import Any, AsyncIterator, Dict, Iterable, List, Optional, Tuple, Un
 from pydantic import Field, BaseModel
 
 from openjiuwen.core.common.exception.errors import BaseError, Termination
+from openjiuwen.core.single_agent.schema.steering import SteeringInput
 from openjiuwen.core.common.logging import logger
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
@@ -805,26 +806,59 @@ class ReActAgent(BaseAgent):
                 marker). It is not a part, so a rail prepending at index 0
                 lands after it rather than displacing it.
         """
+        tracked = [part for part in parts if isinstance(part, SteeringInput)]
         previous_inputs = ctx.inputs
         ctx.inputs = UserMessageInputs(parts=parts, source=source)
         try:
-            await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
+            try:
+                await ctx.fire(AgentCallbackEvent.ON_USER_MESSAGE)
+            finally:
+                ctx.inputs = previous_inputs
+            retained = [part for part in tracked if any(part is value for value in parts)]
+            for part in tracked:
+                if not any(part is value for value in retained):
+                    part.settle("not_applied", "filtered_before_context")
+            if not parts:
+                return
+            body = "\n".join(parts)
+            metadata = {
+                OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
+                OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
+            }
+            if retained:
+                metadata["steering_input_ids"] = [part.input_id for part in retained]
+            for part in retained:
+                part.begin_context_write()
+            await context.add_messages(
+                UserMessage(content=f"{prefix}{body}", metadata=metadata),
+                system_messages=ctx.extra.get("_active_system_messages") or [],
+                tools=ctx.extra.get("_active_tools") or [],
+            )
+            for part in retained:
+                part.settle("consumed")
+            if retained and ctx.extra.get("_streaming"):
+                # Keep this boundary on the original output stream, after the
+                # context write and before the next model call. Receipt polling
+                # alone cannot order old/new visible output reliably.
+                try:
+                    await ctx.session.write_stream(OutputSchema(
+                        type="steering_consumed",
+                        index=0,
+                        payload={"input_ids": [part.input_id for part in retained]},
+                    ))
+                except Exception:
+                    # This optional display marker must not fail a task whose
+                    # input is already committed. External cancellation still
+                    # propagates through the normal BaseException path below.
+                    logger.warning("Failed to emit steering display boundary", exc_info=True)
+        except BaseException:
+            # A failed/cancelled write may have partially committed; do not
+            # claim consumption or automatically replay uncertain inputs.
+            for part in tracked:
+                part.settle("unknown", "context_write_unconfirmed")
+            raise
         finally:
             ctx.inputs = previous_inputs
-        if not parts:
-            return
-        body = "\n".join(parts)
-        await context.add_messages(
-            UserMessage(
-                content=f"{prefix}{body}",
-                metadata={
-                    OPENJIUWEN_MESSAGE_ORIGIN_METADATA: OPENJIUWEN_MESSAGE_ORIGIN_EXTERNAL_USER,
-                    OPENJIUWEN_MESSAGE_SOURCE_KIND_METADATA: source,
-                },
-            ),
-            system_messages=ctx.extra.get("_active_system_messages") or [],
-            tools=ctx.extra.get("_active_tools") or [],
-        )
 
     def _extract_user_parts(self, ctx: AgentCallbackContext, user_input: Any) -> List[str]:
         """Normalize a round's query into the input list ON_USER_MESSAGE sees.
@@ -2363,7 +2397,7 @@ class ReActAgent(BaseAgent):
                                 # model was generating, continue
                                 # the loop so the next iteration
                                 # drains and injects it.
-                                if ctx.has_pending_steering():
+                                if not ctx.close_steering_if_empty():
                                     continue
                                 await self.context_engine.save_contexts(session)
                                 content = (getattr(ai_message, "content", None) or "").strip()
