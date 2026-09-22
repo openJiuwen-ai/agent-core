@@ -17,6 +17,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_j
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import (
     JudgeBudgetRail,
     JudgeIterationLimitError,
+    repair_judge_json,
     run_judge_agent,
 )
 from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
@@ -130,6 +131,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
         )
         budget = JudgeBudgetRail(self._config.judge_agent_max_iterations, judge_dir / "tool_events.jsonl")
         raw = ""
+        format_repair_used = False
         # One recovery from complete frozen evidence, never best-of scoring.
         for attempt in range(2):
 
@@ -162,7 +164,16 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 raw = ""
             write_judge_json(judge_dir / f"response_{attempt + 1}.json", {"raw_output": raw})
             try:
-                parsed = parse_judge_output(raw)
+                try:
+                    parsed = parse_judge_output(raw)
+                except json.JSONDecodeError as parse_error:
+                    if format_repair_used:
+                        raise
+                    format_repair_used = True
+                    async with asyncio.timeout(self._config.judge_timeout_sec):
+                        repaired = await repair_judge_json(self._config, raw, str(parse_error))
+                    write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
+                    parsed = parse_judge_output(repaired)
                 if parsed.get("status") == "unavailable":
                     raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
                 if parsed.get("status", "completed") != "completed":

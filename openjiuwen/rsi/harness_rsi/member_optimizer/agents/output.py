@@ -50,6 +50,14 @@ def parse_json_object_response(text: str) -> dict[str, Any]:
 def parse_yaml_or_json_object_response(text: str) -> dict[str, Any]:
     """Extract a YAML or JSON mapping from an agent text response."""
     stripped = text.strip()
+    # Decode JSON before matching fences: quoted evidence can contain its own fences.
+    json_fence = re.match(r"```json\s+", stripped, re.IGNORECASE)
+    if json_fence:
+        payload = stripped[json_fence.end():]
+        parsed, end = json.JSONDecoder().raw_decode(payload)
+        if payload[end:].strip() != "```" or not isinstance(parsed, dict):
+            raise ValueError("agent response must contain one JSON mapping")
+        return parsed
     for pattern in (
         r"```(?:yaml|yml)\s*([\s\S]*?)\s*```",
         r"```json\s*([\s\S]*?)\s*```",
