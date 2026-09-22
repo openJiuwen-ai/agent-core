@@ -12,7 +12,11 @@ bug that previously required a process-global monkey-patch to work around.
 
 import base64
 import json
+import os
 import random
+import subprocess
+import sys
+from pathlib import Path
 
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     DEFAULT_IMAGE_PLACEHOLDER_TOKENS,
@@ -31,6 +35,31 @@ _FAKE_DATA_URL = "data:image/jpeg;base64," + base64.b64encode(random.Random(0).r
 
 def _counter() -> TiktokenCounter:
     return TiktokenCounter()
+
+
+def test_cl100k_base_is_available_without_network() -> None:
+    """Unit tests must not depend on downloading tiktoken's BPE file."""
+    cache_dir = Path(os.environ["TIKTOKEN_CACHE_DIR"])
+    resource_dir = Path(__file__).resolve().parents[3] / "resources" / "tiktoken_cache"
+    assert cache_dir != resource_dir
+    assert (resource_dir / "9b5ad71b2ce5302211f9c61530b329a4922fc6a4").is_file()
+    assert (cache_dir / "9b5ad71b2ce5302211f9c61530b329a4922fc6a4").is_file()
+
+    offline_check = """
+from unittest.mock import patch
+import tiktoken
+
+with patch("tiktoken.load.read_file", side_effect=AssertionError("network access")):
+    assert tiktoken.get_encoding("cl100k_base").encode("hello")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", offline_check],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def _png_data_url(width: int, height: int) -> str:

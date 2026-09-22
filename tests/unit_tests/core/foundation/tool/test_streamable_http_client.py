@@ -9,17 +9,77 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from openjiuwen.core.common.clients.client_registry import get_client_registry
 from openjiuwen.core.foundation.tool import McpServerConfig, McpToolCard
+from openjiuwen.core.foundation.tool.auth.auth import ToolAuthResult
 from openjiuwen.core.foundation.tool.auth.auth_callback import AuthHeaderAndQueryProvider
 from openjiuwen.core.foundation.tool.mcp.base import extract_mcp_tool_result_content
 from openjiuwen.core.foundation.tool.mcp.client.streamable_http_client import (
     StreamableHttpClient,
 )
-
+from openjiuwen.core.runner import Runner
 from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMgr
 
 
 class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
+    async def test_connect_with_new_streamable_http_client_signature(self):
+        provider = AuthHeaderAndQueryProvider({"Authorization": "Bearer token"}, {"ak": "key"})
+        captured = {}
+
+        class FakeTransportContext:
+            async def __aenter__(self):
+                return "reader", "writer", "unused"
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeClientSession:
+            def __init__(self, read, write, sampling_callback=None):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def initialize(self):
+                pass
+
+        def fake_streamable_http_client(url, *, http_client=None, terminate_on_close=True):
+            captured.update(url=url, http_client=http_client, terminate_on_close=terminate_on_close)
+            return FakeTransportContext()
+
+        fake_mcp = types.ModuleType("mcp")
+        fake_mcp.ClientSession = FakeClientSession
+        fake_mcp_client = types.ModuleType("mcp.client")
+        fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
+        fake_streamable_http.streamable_http_client = fake_streamable_http_client
+        fake_mcp_client.streamable_http = fake_streamable_http
+
+        with (
+            patch.dict(sys.modules, {
+                "mcp": fake_mcp,
+                "mcp.client": fake_mcp_client,
+                "mcp.client.streamable_http": fake_streamable_http,
+            }),
+            patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=[
+                ToolAuthResult(success=True, auth_data={"auth_provider": provider})
+            ])),
+        ):
+            client = StreamableHttpClient("http://127.0.0.1:8930/mcp", "test-server")
+            self.assertTrue(await client.connect(timeout=12.5))
+            self.assertEqual(captured["url"], "http://127.0.0.1:8930/mcp")
+            http_client = captured["http_client"]
+            self.assertIsInstance(http_client, httpx.AsyncClient)
+            self.assertIs(http_client.auth, provider)
+            self.assertEqual(http_client.timeout.connect, 12.5)
+            self.assertEqual(http_client.timeout.read, 300.0)
+            self.assertTrue(http_client.follow_redirects)
+            self.assertTrue(captured["terminate_on_close"])
+            self.assertTrue(await client.disconnect())
+            self.assertTrue(http_client.is_closed)
+
     async def test_connect_list_call_disconnect_lifecycle(self):
         call_args = {}
 
@@ -79,17 +139,20 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
         fake_mcp.ClientSession = FakeClientSession
         fake_mcp_client = types.ModuleType("mcp.client")
         fake_streamable_http = types.ModuleType("mcp.client.streamable_http")
-        fake_streamable_http.streamable_http_client = fake_streamablehttp_client
+        fake_streamable_http.streamablehttp_client = fake_streamablehttp_client
         fake_mcp_client.streamable_http = fake_streamable_http
 
-        with patch.dict(
-            sys.modules,
-            {
+        with (
+            patch.dict(sys.modules, {
                 "mcp": fake_mcp,
                 "mcp.client": fake_mcp_client,
                 "mcp.client.streamable_http": fake_streamable_http,
-            },
-            clear=False,
+            }),
+            patch.object(Runner.callback_framework, "trigger", AsyncMock(return_value=[
+                ToolAuthResult(success=True, auth_data={"auth_provider": AuthHeaderAndQueryProvider(
+                    {"Authorization": "Bearer token"}, {"ak": "demo-ak"}
+                )})
+            ])),
         ):
             client = StreamableHttpClient(
                 "http://127.0.0.1:8930/mcp",
@@ -164,6 +227,15 @@ class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
 class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.resource_mgr = ResourceMgr()
+        self.client_class = type(get_client_registry().get_client(
+            name="streamable-http",
+            client_type="mcp",
+            config=McpServerConfig(
+                server_name="streamable-server",
+                server_path="http://127.0.0.1:8930/mcp",
+                client_type="streamable-http",
+            ),
+        ))
 
     async def asyncTearDown(self):
         await self.resource_mgr.release()
@@ -195,10 +267,10 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
         test_inputs = {"url": "https://example.com"}
 
         with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool,
+            patch.object(self.client_class, "connect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "disconnect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "list_tools", AsyncMock(return_value=mock_tools)),
+            patch.object(self.client_class, "call_tool", AsyncMock(return_value=mock_tool_result)) as mock_call_tool,
         ):
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",
@@ -248,10 +320,10 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
         ]
 
         with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="typed")) as mock_call_tool,
+            patch.object(self.client_class, "connect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "disconnect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "list_tools", AsyncMock(return_value=mock_tools)),
+            patch.object(self.client_class, "call_tool", AsyncMock(return_value="typed")) as mock_call_tool,
         ):
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",
@@ -289,10 +361,10 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
         ]
 
         with (
-            patch.object(StreamableHttpClient, "connect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "disconnect", AsyncMock(return_value=True)),
-            patch.object(StreamableHttpClient, "list_tools", AsyncMock(return_value=mock_tools)),
-            patch.object(StreamableHttpClient, "call_tool", AsyncMock(return_value="snapshotted")) as mock_call_tool,
+            patch.object(self.client_class, "connect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "disconnect", AsyncMock(return_value=True)),
+            patch.object(self.client_class, "list_tools", AsyncMock(return_value=mock_tools)),
+            patch.object(self.client_class, "call_tool", AsyncMock(return_value="snapshotted")) as mock_call_tool,
         ):
             mcp_server_config = McpServerConfig(
                 server_name="streamable-server",

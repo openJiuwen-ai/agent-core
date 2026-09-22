@@ -11,7 +11,7 @@ import os
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from openjiuwen.core.foundation.tool import McpServerConfig
 from openjiuwen.harness.tools.browser_move.clients.streamable_http_client import (
@@ -305,6 +305,92 @@ def test_browser_move_streamable_http_client_accepts_config_constructor() -> Non
 
     assert client.server_path == "http://127.0.0.1:8940/mcp"
     assert client.name == "playwright-runtime-wrapper"
+
+
+def test_browser_move_streamable_http_client_reuses_core_transport_connect() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    with patch(
+        "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
+        new_callable=AsyncMock,
+        return_value=True,
+    ) as core_connect:
+        assert _run(client.connect(retry_times=1, timeout=5.0)) is True
+
+    core_connect.assert_awaited_once_with(timeout=5.0)
+
+
+def test_browser_move_streamable_http_client_retries_core_transport_connect() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    with patch(
+        "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
+        new_callable=AsyncMock,
+        side_effect=[False, True],
+    ) as core_connect:
+        assert _run(client.connect(retry_times=2, timeout=5.0)) is True
+
+    assert core_connect.await_count == 2
+
+
+def test_browser_move_streamable_http_client_closes_transport_in_connect_task() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+
+    class TaskBoundTransport:
+        async def __aenter__(self):
+            self.task = asyncio.current_task()
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            assert asyncio.current_task() is self.task
+
+    async def fake_core_connect(self, *, timeout):
+        await self._exit_stack.enter_async_context(TaskBoundTransport())
+        return True
+
+    async def check_lifecycle():
+        with patch(
+            "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
+            new=fake_core_connect,
+        ):
+            assert await client.connect(timeout=5.0)
+            assert await client.disconnect()
+
+    _run(check_lifecycle())
+
+
+def test_browser_move_streamable_http_client_cleans_up_timed_out_retry() -> None:
+    client = BrowserMoveStreamableHttpClient("http://127.0.0.1:8940/mcp")
+    attempts = 0
+    closed = []
+
+    class TaskBoundTransport:
+        async def __aenter__(self):
+            self.task = asyncio.current_task()
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            assert asyncio.current_task() is self.task
+            closed.append(self)
+
+    async def fake_core_connect(self, *, timeout):
+        nonlocal attempts
+        attempts += 1
+        await self._exit_stack.enter_async_context(TaskBoundTransport())
+        if attempts == 1:
+            await asyncio.Event().wait()
+        return True
+
+    async def check_retries():
+        with patch(
+            "openjiuwen.harness.tools.browser_move.clients.streamable_http_client.StreamableHttpClient.connect",
+            new=fake_core_connect,
+        ):
+            assert await client.connect(retry_times=2, timeout=1.0)
+            assert attempts == 2
+            assert len(closed) == 1
+            assert await client.disconnect()
+            assert len(closed) == 2
+
+    _run(check_retries())
 
 
 def test_execute_wrapper_raises_timeout_error() -> None:
