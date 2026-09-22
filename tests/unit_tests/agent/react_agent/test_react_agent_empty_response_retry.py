@@ -118,7 +118,8 @@ class TestInjectEmptyResponseNotice(unittest.IsolatedAsyncioTestCase):
         user_msg = context.add_messages.call_args[0][0]
         self.assertIsInstance(user_msg, UserMessage)
         self.assertIn("[EMPTY_RESPONSE_NOTICE]", user_msg.content)
-        self.assertIn("member_complete_task", user_msg.content)
+        self.assertIn("tool", user_msg.content.lower())
+        self.assertNotIn("member_complete_task", user_msg.content)
 
 
 class TestEmptyResponseRetryIntegration(unittest.IsolatedAsyncioTestCase):

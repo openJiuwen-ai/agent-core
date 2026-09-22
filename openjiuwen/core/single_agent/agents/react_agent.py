@@ -1939,10 +1939,9 @@ class ReActAgent(BaseAgent):
             UserMessage(
                 content=(
                     "[EMPTY_RESPONSE_NOTICE] Your previous response had no "
-                    "assistant text and no tool calls. Continue the task: "
-                    "call the appropriate tool(s), or provide a clear text "
-                    "answer. If you finished a claimed team task, call "
-                    "member_complete_task."
+                    "assistant text and no tool calls. Continue the current "
+                    "task: call the appropriate tool(s) if action is needed, "
+                    "or provide a clear text answer if you are done."
                 ),
             )
         )
@@ -2393,9 +2392,9 @@ class ReActAgent(BaseAgent):
                                     getattr(ai_message, "reasoning_content", None) or ""
                                 ).strip()
                                 # Empty text + no tools (reasoning-only
-                                # included): one in-loop retry so teammates
-                                # do not idle with claimed board tasks still
-                                # open. Cap at 1 to avoid infinite loops.
+                                # included): one in-loop retry so the agent
+                                # does not exit the ReAct round with no
+                                # actionable output. Cap at 1 to avoid loops.
                                 if (
                                     not content
                                     and _empty_response_retry_count < 1
