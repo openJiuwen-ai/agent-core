@@ -218,6 +218,9 @@ class ToolCallInputs:
     tool_args: Any = None
     tool_result: Optional[Any] = None
     tool_msg: Optional[Any] = None
+    # False for before-hook denial/interruption; true even when invocation
+    # returns None or raises. Output observers need this distinction.
+    execution_started: bool = False
 
 
 @dataclass

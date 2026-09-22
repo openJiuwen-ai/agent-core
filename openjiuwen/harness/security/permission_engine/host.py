@@ -59,6 +59,25 @@ RequestPermissionConfirmationHook = Callable[
 """
 
 
+@dataclass(frozen=True)
+class PermissionEvaluationRequest:
+    """Effective local decision before execution/confirmation; also used for observation."""
+
+    ctx: Any
+    tool_call: Any
+    result: PermissionResult
+
+
+PermissionEvaluatedHook = Callable[
+    [PermissionEvaluationRequest], Awaitable[PermissionResult | None],
+]
+"""Observe every initial local decision. Only UNDETERMINED may be replaced.
+
+No result, an invalid result or a failure resolving UNDETERMINED falls back to
+ASK. Explicit local decisions are never overridden by the observer.
+"""
+
+
 @dataclass
 class ToolPermissionHost:
     """由 Agent 服务或 CLI 在构造 DeepAgent / PermissionInterruptRail 时注入。"""
@@ -109,8 +128,13 @@ class ToolPermissionHost:
     permission_scene_hook: PermissionSceneHook | None = None
     """宿主场景钩子（如数字分身）；见 :data:`PermissionSceneHook`。"""
 
+    on_permission_evaluated: PermissionEvaluatedHook | None = None
+    """Optional policy resolution/observation hook; cloud protocols belong to the host."""
+
 
 __all__ = [
+    "PermissionEvaluatedHook",
+    "PermissionEvaluationRequest",
     "PermissionConfirmationRequest",
     "PermissionConfirmationResult",
     "PermissionSceneHook",

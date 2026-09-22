@@ -22,10 +22,12 @@ class PermissionLevel(str, Enum):
     - ALLOW: 直接执行，无需确认
     - ASK:   弹出确认框，用户决定
     - DENY:  拒绝执行，返回错误
+    - UNDETERMINED: 未命中专门规则，交给宿主决策（可选）
     """
     ALLOW = "allow"
     ASK = "ask"
     DENY = "deny"
+    UNDETERMINED = "undetermined"
 
 
 @dataclass
@@ -46,6 +48,10 @@ class PermissionResult:
     @property
     def needs_approval(self) -> bool:
         return self.permission == PermissionLevel.ASK
+
+    @property
+    def is_undetermined(self) -> bool:
+        return self.permission == PermissionLevel.UNDETERMINED
 
 
 @dataclass(frozen=True)
@@ -168,6 +174,7 @@ class PermissionsSection(TypedDict, total=False):
 
     enabled: bool
     package_builtin_rules: NotRequired[bool]
+    defer_unmatched: NotRequired[bool]  # Host resolves rules not covered by an explicit policy.
     schema: NotRequired[str]
     defaults: NotRequired[dict[str, Any]]
     tools: NotRequired[dict[str, Any]]
