@@ -1050,13 +1050,17 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
             tool_call_id="call_valid",
         )
 
-    async def test_execute_rejects_unrepairable_tool_call_arguments(self):
+    @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
+    async def test_execute_rejects_unrepairable_tool_call_arguments(self, mock_get_tool):
+        # '{"query": "unterminated}' was previously unrepairable, but the repairer
+        # now closes a dangling string, so use an unterminated escape instead —
+        # the trailing backslash would escape the injected closing quote.
         self.ability_manager.add(ToolCard(id="bad_tool", name="bad_tool", description="bad"))
         tool_call = ToolCall(
             id="call_bad",
             type="function",
             name="bad_tool",
-            arguments='{"query": "unterminated}',
+            arguments='{"query": "unterminated\\',
         )
 
         with self.assertRaises(Exception) as exc_info:
@@ -1066,7 +1070,7 @@ class TestAbilityManagerFixes(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIn("Invalid tool arguments JSON", str(exc_info.exception))
-        self.assertEqual(tool_call.arguments, '{"query": "unterminated}')
+        self.assertEqual(tool_call.arguments, '{"query": "unterminated\\')
 
     @patch('openjiuwen.core.runner.Runner.resource_mgr.get_tool')
     async def test_fallback_tool_receives_tool_call_id(self, mock_get_tool):

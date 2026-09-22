@@ -333,7 +333,12 @@ class AbilityManager:
                     return None
                 stack.pop()
 
-        if in_string:
+        # A dangling string (stream cut mid-value) is recoverable: close the
+        # string, then balance the still-open brackets. An unterminated escape
+        # is not — the trailing backslash would escape the injected quote.
+        if in_string and not escape:
+            text += '"'
+        elif in_string and escape:
             return None
         if not stack:
             return text

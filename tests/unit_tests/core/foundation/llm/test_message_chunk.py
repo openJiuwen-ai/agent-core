@@ -223,6 +223,77 @@ def test_assistant_add_renumbers_appended_stream_tool_calls():
     assert [tool_call.index for tool_call in result.tool_calls] == [0, 1]
 
 
+def test_assistant_add_separates_indexless_id_second_call_by_index():
+    """Regression: a parallel second call whose first fragment lacks an id must
+    not be concatenated onto the first call's arguments (some OpenAI-compatible
+    gateways strip the id on call boundaries but keep distinct indexes)."""
+    chunk1 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="call_1", type="function", name="cron",
+                             arguments='{"action": "add", "name": "a"}', index=0)],
+    )
+    chunk2 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="", type="function", name="",
+                             arguments='{"action": "add", "name": "b"}', index=1)],
+    )
+
+    result = chunk1 + chunk2
+
+    assert [tool_call.id for tool_call in result.tool_calls] == ["call_1", ""]
+    assert result.tool_calls[0].arguments == '{"action": "add", "name": "a"}'
+    assert result.tool_calls[1].arguments == '{"action": "add", "name": "b"}'
+    assert [tool_call.index for tool_call in result.tool_calls] == [0, 1]
+
+
+def test_assistant_add_merges_continuation_fragment_with_matching_index():
+    """Standard OpenAI streaming: continuation fragments carry no id but the
+    same index — they must still merge into the originating call."""
+    chunk1 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="call_1", type="function", name="cron",
+                             arguments='{"a', index=0)],
+    )
+    chunk2 = AssistantMessageChunk(
+        role="assistant",
+        content="",
+        tool_calls=[ToolCall(id="", type="function", name="",
+                             arguments='": 1}', index=0)],
+    )
+
+    result = chunk1 + chunk2
+
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].id == "call_1"
+    assert result.tool_calls[0].arguments == '{"a": 1}'
+
+
+def test_assistant_add_interleaves_parallel_stream_fragments():
+    """Full parallel-call stream: fragments route by (id, index), never by
+    'whatever call happens to be last'."""
+    accumulated = None
+    fragments = [
+        ToolCall(id="call_1", type="function", name="cron", arguments='{"a', index=0),
+        ToolCall(id="", type="function", name="", arguments='": 1}', index=0),
+        ToolCall(id="call_2", type="function", name="cron", arguments='{"b', index=1),
+        ToolCall(id="", type="function", name="", arguments='": 2}', index=1),
+    ]
+    for fragment in fragments:
+        chunk = AssistantMessageChunk(
+            role="assistant", content="", tool_calls=[fragment],
+        )
+        accumulated = chunk if accumulated is None else accumulated + chunk
+
+    assert accumulated is not None
+    assert [tool_call.id for tool_call in accumulated.tool_calls] == ["call_1", "call_2"]
+    assert [tool_call.arguments for tool_call in accumulated.tool_calls] == [
+        '{"a": 1}', '{"b": 2}']
+    assert [tool_call.index for tool_call in accumulated.tool_calls] == [0, 1]
+
+
 def test_assistant_add_merges_tool_calls_without_id():
     """Test that __add__ merges tool calls without ID."""
     tc1 = ToolCall(id=None, type="function", name="func", arguments="{", index=0)
