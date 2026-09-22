@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/security/`（14 文件）、`openjiuwen/harness/rails/security/` |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-09-22 |
+| 关联 feature | F_04_permission-mode-honored |
 
 ## 范围 / 边界
 
@@ -19,11 +19,17 @@
 - `security/models.py`：`PermissionLevel`（ALLOW / ASK / DENY）、`PermissionResult`、
   `PermissionsSection` / `FileGuardSection` / `FileGuardPathEntry` / `FileGuardDefaults` /
   `ApprovalOverrideEntry`。
-- `security/core.py`：`PermissionEngine`（`check_permission` / 全局策略求值 / trusted dirs /
-  config 更新）。
-- `security/file_guard.py`：`FileGuardChecker` + 路径规则编译 + action 提取。
-- `security/tiered_policy.py`：内置规则 YAML + `severity_to_decision` / `strictest` /
-  `_tool_category`。
+- `security/permission_engine/core.py`：`PermissionEngine`（`check_permission` /
+  全局策略求值 / trusted dirs / config 更新）+ `prepare_permissions_for_engine` /
+  `_fill_legacy_host_rule_actions`（legacy YAML host 路径，mode-aware）。
+- `security/permission_engine/file_guard/`：路径规则编译 + action 提取（迁移自旧
+  `security/file_guard.py`）。
+- `security/permission_engine/toolguard/tool_policy.py`：`severity_to_decision` /
+  `strictest` / `_tool_category` / `_shell_ast_floor` / `_has_interpreter_sink` /
+  `evaluate_tiered_policy` 等策略内核（迁移自旧 `security/tiered_policy.py`，
+  `security/tiered_policy.py` 保留为 shim 重导出）。
+- `security/permission_engine/toolguard/builtin_rules.py`：内置 YAML rule 装配 +
+  `inline_package_command_rules` / `get_package_builtin_rules_path`。
 - `security/checker.py`：`ExternalDirectoryChecker`（外部路径校验）。
 - `security/host.py`：`ToolPermissionHost` / `PermissionConfirmationRequest` / `PermissionSceneHookInput`
   / `RequestPermissionConfirmationHook`。
@@ -55,10 +61,15 @@
 5. **外部目录校验**：`ExternalDirectoryChecker.check_external_paths` 校验 shell 命令引用的
    外部路径；`merge_external_directory_allow_into_permissions` 把放行合并回权限。shell AST
    解析（`security/shell_ast.py`）是**唯一**从命令文本抽路径的途径。
-6. **层级策略**：`tiered_policy.get_builtin_security_rules()` 从内置 YAML（`resources/
+6. **层级策略**：`builtin_rules.get_builtin_security_rules()` 从内置 YAML（`resources/
    builtin_rules.yaml` 同类机制）读取规则；`severity_to_decision(severity, permission_mode)`
-   把严重度折成 `PermissionLevel`；`_tool_category` 给工具分类。内置规则路径经
-   `get_package_builtin_rules_path()` 解析。
+   把严重度折成 `PermissionLevel`（contract 见接口契约 §A.1）；`_tool_category` 给工具分类。
+   内置规则路径经 `get_package_builtin_rules_path()` 解析。`permission_mode` 字段
+   （`normal` / `strict`）由 `_effective_permission_mode(cfg)` 归一（缺省 / 未知 / 空串都
+   落 `normal`），再传给所有 `severity → action` 映射点。
+7. **`permission_mode` 全链路贯穿**：配置层 `permissions.permission_mode`（`config.yaml` /
+   `PermissionsSection`）→ `prepare_permissions_for_engine` 把 mode 注入归一后的 cfg →
+   所有规则填充 / 解析路径读取同一份 mode。任何只读 severity 不用 mode 映射的代码路径是 bug。
 7. **宿主接口**：`ToolPermissionHost` 是工具的权限宿主协议；`RequestPermissionConfirmationHook`
    （`PermissionSceneHookInput` → `PermissionConfirmationResult`）是确认回调契约；
    `PermissionConfirmationRequest` 携带确认请求。
@@ -107,6 +118,47 @@ def persist_cli_trusted_directory(...) -> None
 def write_permissions_section_to_agent_config_yaml(...) -> None
 ```
 
+### A.1 `severity_to_decision` 契约
+
+```python
+def severity_to_decision(severity: str | None, permission_mode: str | None) -> str | None:
+    """severity + permission_mode → PermissionLevel value (allow / ask / deny) / None.
+
+    行为（核心真值表，F_04 锁定）：
+
+      | severity \ mode | normal            | strict            |
+      | LOW             | allow             | allow             |
+      | MEDIUM          | allow             | ask               |
+      | HIGH            | ask               | ask               |
+      | CRITICAL        | ask               | deny              |
+      | <未知 / None>   | ask（fail-safe）  | ask（fail-safe）  |
+      | <空 severity>   | None（不动 caller）| None             |
+
+    - `severity` 自动 `.strip().upper()`（接受 `" medium "` / `"high"` 等大小写混合）。
+    - `permission_mode` 自动 `.strip().lower()`；`None` / 空 / 未知字符串 → `"normal"`。
+    - 返回 `None`（仅空 severity）= caller 保留规则原 `action`，不强行覆盖。
+    - 实现位于 `permission_engine/toolguard/tool_policy.py`；jiuwenswarm compose 层
+      通过 `permission_compose._severity_to_decision` 复用同一张表（缺 openjiuwen 时
+      本地 fallback）。
+    - 调用点：
+      - `_fill_legacy_host_rule_actions(cfg, permission_mode="normal")`（`core.py`）
+      - `_apply_product_p1_rule_actions(rules, permission_mode="normal")`
+        （jiuwenswarm `permission_compose.py`）
+```
+
+#### `permission_mode` 已知取值
+
+| 值 | 含义 |
+|---|---|
+| `normal`（缺省） | LOW/MEDIUM 直接放行；HIGH/CRITICAL 弹窗（ASK） |
+| `strict` | LOW 直接放行；MEDIUM 起弹窗；CRITICAL 直接拒绝 |
+
+#### 显式 `action` 优先于 severity 映射
+
+规则若已显式写 `action: allow / ask / deny`，任何 severity-to-action 映射都不得覆盖；只
+有 `action` 字段缺失或非三态字符串时，才用 `severity_to_decision` 补齐。这是 compose 层
+的硬约束，由 `_apply_product_p1_rule_actions` / `_fill_legacy_host_rule_actions` 一致实现。
+
 错误 / 返回语义：
 
 - `check_permission` 决出 `PermissionResult`（级别 + 原因），不抛业务异常。
@@ -132,7 +184,8 @@ def write_permissions_section_to_agent_config_yaml(...) -> None
 | 工具权限 | `PermissionEngine.check_permission` | `PermissionResult` |
 | 文件路径 | `FileGuardChecker.evaluate` | `PermissionLevel` |
 | 外部路径 | `ExternalDirectoryChecker.check_external_paths` | 放行集 / 拒绝 |
-| 内置规则 | `tiered_policy` YAML | `severity → PermissionLevel` |
+| 内置规则 | `toolguard/builtin_rules` YAML | `severity + permission_mode → PermissionLevel`（§A.1） |
+| Shell AST 提升 | `tool_policy._shell_ast_floor` + `_has_interpreter_sink` | `PermissionLevel`（正交于 severity） |
 | 宿主确认 | `RequestPermissionConfirmationHook` | `PermissionConfirmationResult` |
 
 ## 与其它 spec 的关系
