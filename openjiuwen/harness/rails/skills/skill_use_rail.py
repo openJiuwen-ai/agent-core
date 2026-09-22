@@ -177,9 +177,16 @@ def _load_frontmatter_mapping(yaml_block: str) -> Optional[dict]:
     """Parse a YAML frontmatter block; return None on malformed YAML."""
     try:
         yaml_data = yaml.safe_load(yaml_block) or {}
-    except yaml.YAMLError:
+    except yaml.YAMLError as exc:
+        logger.debug("[SkillUseRail] YAML parse failed: %s", exc)
         return None
-    return yaml_data if isinstance(yaml_data, dict) else None
+    if not isinstance(yaml_data, dict):
+        logger.debug(
+            "[SkillUseRail] frontmatter is not a mapping: %s",
+            type(yaml_data).__name__,
+        )
+        return None
+    return yaml_data
 
 
 def _parse_frontmatter_yaml(text: str) -> Optional[dict]:
