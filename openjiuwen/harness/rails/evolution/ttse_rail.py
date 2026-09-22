@@ -83,6 +83,7 @@ from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
+_TTSE_PROMPT_PRIORITY = 43
 
 
 @dataclass(frozen=True)
@@ -144,6 +145,7 @@ class TTSERail(EvolutionRail):
         self._agent = agent
         self._attachment_manager = getattr(agent, "prompt_attachment_manager", None)
         self._sync_consult_tool(agent)
+        self._apply_catalog_guidance(getattr(agent, "system_prompt_builder", None))
 
     def uninit(self, agent) -> None:
         task = self._dream_task
@@ -152,6 +154,9 @@ class TTSERail(EvolutionRail):
             task.cancel()
         self._drop_consult_tool(agent)
         self._consult_tools = []
+        builder = getattr(agent, "system_prompt_builder", None)
+        if builder is not None:
+            builder.remove_section(SectionName.TTSE_FACTS_TIPS)
         self._agent = None
         self._attachment_manager = None
         super().uninit(agent)
@@ -181,6 +186,10 @@ class TTSERail(EvolutionRail):
         if old_path != store_path:
             self._ttse_store.reload()
         self.sync_inject_mode()
+        agent = self._agent
+        self._apply_catalog_guidance(
+            getattr(agent, "system_prompt_builder", None) if agent is not None else None
+        )
 
     def sync_inject_mode(self) -> None:
         """Register or drop ``ttse_consult`` after a live ``inject_enabled`` change."""
@@ -720,24 +729,31 @@ class TTSERail(EvolutionRail):
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         await super().before_model_call(ctx)
-        if not self._ttse_config.inject_enabled:
-            return
         builder = getattr(getattr(ctx, "inputs", None), "system_prompt_builder", None)
         if builder is None:
             builder = getattr(getattr(ctx, "agent", None), "system_prompt_builder", None)
+        self._apply_catalog_guidance(builder)
+        if not self._ttse_config.inject_enabled:
+            return
+        await self._attach_disk_catalog(ctx)
+
+    def _catalog_guidance_section(self) -> PromptSection:
+        return PromptSection(
+            name=SectionName.TTSE_FACTS_TIPS,
+            content={
+                "cn": DISK_CATALOG_GUIDANCE_CN,
+                "en": DISK_CATALOG_GUIDANCE_EN,
+            },
+            priority=_TTSE_PROMPT_PRIORITY,
+        )
+
+    def _apply_catalog_guidance(self, builder: Any) -> None:
         if builder is None:
             return
-        builder.add_section(
-            PromptSection(
-                name=SectionName.TTSE_FACTS_TIPS,
-                content={
-                    "cn": DISK_CATALOG_GUIDANCE_CN,
-                    "en": DISK_CATALOG_GUIDANCE_EN,
-                },
-                priority=45,
-            )
-        )
-        await self._attach_disk_catalog(ctx)
+        if not self._ttse_config.inject_enabled:
+            builder.remove_section(SectionName.TTSE_FACTS_TIPS)
+            return
+        builder.add_section(self._catalog_guidance_section())
 
     async def _attach_disk_catalog(self, ctx: AgentCallbackContext) -> None:
         """Trail the category listing as a HISTORY prompt-attachment (not SYSTEM)."""

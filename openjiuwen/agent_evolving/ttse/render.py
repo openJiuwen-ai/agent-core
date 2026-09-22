@@ -34,17 +34,15 @@ def render_facts_md(facts: Optional[Sequence[RuleInput]], *, retrieved: bool = F
     use = _sorted(_coerce(facts))
     if not use:
         return ""
-    header = (
-        "# Environment Facts",
-        "",
-        (
-            "The most relevant confirmed observations for THIS task (retrieved from the full bank). Treat as true."
-            if retrieved
-            else "Confirmed observations about what the environment is like, learned from prior tasks. Treat as true."
-        ),
-        "",
-    )
-    lines = list(header)
+    if retrieved:
+        lines = ["# FACT", ""]
+    else:
+        lines = [
+            "# Environment Facts",
+            "",
+            "Confirmed observations about what the environment is like, learned from prior tasks. Treat as true.",
+            "",
+        ]
     for i, f in enumerate(use, 1):
         lines.append(f"{i}. {f['text']}")
     return "\n".join(lines) + "\n"
@@ -57,6 +55,13 @@ def render_tips_md(
     capabilities_md: str = "",
 ) -> str:
     use = _sorted(_coerce(tips))
+    if retrieved:
+        if not use:
+            return ""
+        lines = ["# TIP", ""]
+        for i, t in enumerate(use, 1):
+            lines.append(f"{i}. {t['text']}")
+        return "\n".join(lines) + "\n"
     lines = [
         "# Task Tactics",
         "",
@@ -70,7 +75,7 @@ def render_tips_md(
     if not use:
         lines += ["## Tactics", "", "(No tactics learned yet.)"]
     else:
-        lines.append("## Tactics" + (" (most relevant to this task)" if retrieved else ""))
+        lines.append("## Tactics")
         lines.append("")
         for i, t in enumerate(use, 1):
             lines.append(f"{i}. {t['text']}")
@@ -104,28 +109,29 @@ def rules_numbered(flat: Sequence[Tuple[str, str]]) -> str:
     return "\n".join(f"{i}. [{rtype.upper()}] {text}" for i, (text, rtype) in enumerate(flat, 1))
 
 
-DISK_CATALOG_GUIDANCE_CN = """\
-## 经验目录（强制）
+QUERY_GUIDANCE_CN = (
+    "把用户问题改写成检索 query：抽出关键词拼在一起，不要整句粘贴原文。"
+    "例：`write_file matplotlib 中文折线图 Open-Meteo Windows`。"
+)
+QUERY_GUIDANCE_EN = (
+    "Rewrite the user request into query by joining keywords; do not paste the full message. "
+    "Example: `write_file matplotlib Chinese line chart Open-Meteo Windows`."
+)
 
-末尾附件是经验类目和条数，不是 FACT/TIP 正文。闲聊可忽略该附件。
-非闲聊任务、在选择 skill、调用 `skill_acceleration_exec` 或动手之前：附件中若有与当前任务相关的类，必须先调用 `ttse_consult(category=该类id, query=经验语义检索句)`，根据返回的 FACT/TIP 再规划。相关类不止一个时，用逗号一次传入（最多 3 个），共用同一个 query。不要打开无关类。
-query 写成 FACT/TIP 口吻（When <处境>: use <能力> … / 环境约束），不要粘贴用户原文或整段包过的任务。类很小或写不出检索句时，可以只传 category 打开整类。
-附件为 `(empty)`，或没有任何相关类时，直接执行。
-不要无参调用 `ttse_consult` 再要一遍目录。
+DISK_CATALOG_GUIDANCE_CN = """\
+## 经验目录
+
+末尾附件是按类目统计的经验目录，不是 FACT/TIP 正文。闲聊可忽略。
+非闲聊且附件中有与当前任务相关的类时，动手前用 `ttse_consult` 取回该类经验再规划；没有相关类或附件为 `(empty)` 时直接执行。
 经验是历史启发式，与当前工具证据冲突时以当前证据为准。
-禁止用 bash 或 `read_file` 读取经验库。
 """
 
 DISK_CATALOG_GUIDANCE_EN = """\
-## Experience catalog (required)
+## Experience catalog
 
-The trailing attachment lists experience categories and counts, not FACT/TIP bodies. Ignore it for chitchat.
-On a non-trivial task, before choosing a skill, calling `skill_acceleration_exec`, or acting: if a listed category applies, you MUST call `ttse_consult(category=<id>, query=<experience-style query>)` and plan from the returned FACT/TIP. If several listed classes apply, pass them in one call as comma-separated ids (max 3) sharing the same query. Do not dump unrelated classes.
-Write query in FACT/TIP language (When <situation>: use <capability> … / an environment constraint). Do not paste the raw user message. If the class is tiny or you cannot form a query, category alone dumps the class.
-If the attachment is `(empty)` or none apply, proceed without it.
-Do not call `ttse_consult` with no arguments to re-list the catalog.
+The trailing attachment is the category listing and counts, not FACT/TIP bodies. Ignore it for chitchat.
+On a non-trivial task, if a listed category applies, call `ttse_consult` before acting and plan from the returned experience. If none apply or the attachment is `(empty)`, proceed.
 These are historical heuristics; if they conflict with current tool evidence, trust the current evidence.
-Do not use bash or `read_file` to read the experience bank.
 """
 
 # Backward-compatible alias (English). Prefer the _CN / _EN constants in new code.
@@ -140,4 +146,6 @@ __all__ = [
     "DISK_CATALOG_GUIDANCE",
     "DISK_CATALOG_GUIDANCE_CN",
     "DISK_CATALOG_GUIDANCE_EN",
+    "QUERY_GUIDANCE_CN",
+    "QUERY_GUIDANCE_EN",
 ]

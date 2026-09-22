@@ -14,13 +14,24 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Literal, Optional
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import LLMInvokePolicy
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     GENERATE_RECORDS_LLM_POLICY,
 )
 from openjiuwen.core.memory.lite.embeddings import EmbeddingProvider
+
+CONSULT_RETRIEVE_MODES = ("hybrid", "embed", "bm25")
+ConsultRetrieveMode = Literal["hybrid", "embed", "bm25"]
+
+
+def normalize_consult_retrieve_mode(value: Any) -> ConsultRetrieveMode:
+    """Map yaml/config text to a scoring mode; unknown values become hybrid."""
+    raw = str(value or "").strip().lower()
+    if raw in CONSULT_RETRIEVE_MODES:
+        return raw  # type: ignore[return-value]
+    return "hybrid"
 
 
 @dataclass
@@ -39,10 +50,10 @@ class TTSEConfig:
             (n <= max_facts or max_tips, default 400). After the process-local
             embedding cache is warm this is CPU cosine only; a cold bank is
             filled with batched ``embed_documents`` (not one RPC per row).
-            An ANN index (faiss et al.) is intentionally not used at this n.
-            The same provider is reused by ``ttse_consult`` for BM25+embedding
-            hybrid recall when ``query`` is set; missing/failed embedding
-            degrades to BM25. Callers typically construct
+            Dedup/dream still scan the in-memory bank at this n. ``ttse_consult``
+            ranks from persisted BM25 sidecars plus Chroma HNSW when embeddings
+            exist. The same provider is reused for BM25+embedding hybrid recall;
+            missing/failed embedding degrades to BM25. Callers typically construct
             ``OpenAICompatibleEmbeddingProvider(api_key=..., base_url=..., model=...)``
             (e.g. Huawei MaaS ``bge-m3`` at ``https://api.modelarts-maas.com/v1``)
             and assign it here; do not put raw url/key strings on TTSEConfig.
@@ -76,7 +87,13 @@ class TTSEConfig:
             flatten. When set, each task's excerpt is capped before the batch
             induce call.
         consult_max_chars / consult_max_rules: Truncation for ``ttse_consult``.
-        consult_top_k: Default per-track hit count when the tool omits ``top_k``.
+        consult_top_k: Per-track FACT/TIP hit count for ``ttse_consult`` (not a
+            tool argument; change this config to tune recall size).
+        consult_retrieve_mode: Scoring path for ``ttse_consult`` when the pool
+            is larger than ``consult_top_k``: ``hybrid`` (BM25+ANN RRF, default),
+            ``embed`` (ANN first), or ``bm25`` (keywords only). Empty pool,
+            ``pool <= top_k``, empty query, and no-score dumps still apply.
+            BM25 sidecars always score; embedding miss/fail falls back to BM25.
         consult_rrf_k: RRF constant for BM25+embedding fusion (KB hybrid uses 60).
         inject_persist_min_secs / inject_persist_min_hits: Consult hits refresh
             ``last_injected_at`` / ``inject_hits`` in memory immediately.
@@ -139,6 +156,7 @@ class TTSEConfig:
     consult_max_chars: int = 8000
     consult_max_rules: int = 40
     consult_top_k: int = 8
+    consult_retrieve_mode: str = "hybrid"
     consult_rrf_k: int = 60
     inject_persist_min_secs: float = 30.0
     inject_persist_min_hits: int = 16
@@ -185,4 +203,9 @@ class TTSEConfig:
         return os.path.join(directory, "dream", "dream-clusters.json")
 
 
-__all__ = ["TTSEConfig"]
+__all__ = [
+    "CONSULT_RETRIEVE_MODES",
+    "ConsultRetrieveMode",
+    "TTSEConfig",
+    "normalize_consult_retrieve_mode",
+]
