@@ -254,7 +254,8 @@ async def _wait_for_fetch_stop(
             )
         except asyncio.TimeoutError:
             logger.warning(
-                "PersonalContext fetch run pipeline cancellation grace exceeded service_id=%s run_id=%s grace_seconds=%.3f",
+                "PersonalContext fetch run pipeline cancellation grace exceeded "
+                "service_id=%s run_id=%s grace_seconds=%.3f",
                 service_id,
                 run_id,
                 min(_PIPELINE_CANCEL_GRACE_SECONDS, _STOP_FINALIZE_TIMEOUT_SECONDS),
@@ -2076,7 +2077,7 @@ class PersonalContext:
             await asyncio.shield(writer)
             if (service_id, cast(str, identity["run_id"])) in self._invalidated_fetch_runs:
                 latest = self._fetch_run_progress.get(service_id)
-                if latest is not None and latest["run_state"] == "failed" and record["run_state"] != "failed":
+                if latest is not None and latest.get("run_state") == "failed" and record.get("run_state") != "failed":
                     retained[0] = {**record, **latest}
                     self._fetch_run_history[service_id] = retained[:5]
                     corrected = asyncio.create_task(
