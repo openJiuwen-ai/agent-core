@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 
 _TIERED_PATH_MATCHER = PathMatcher()
 
-_STRICT_ORDER = {PermissionLevel.DENY: 0, PermissionLevel.ASK: 1, PermissionLevel.ALLOW: 2}
+_STRICT_ORDER = {
+    PermissionLevel.DENY: 0,
+    PermissionLevel.ASK: 1,
+    PermissionLevel.UNDETERMINED: 2,
+    PermissionLevel.ALLOW: 3,
+}
 
 # 规则内 tools 必须同类（与产品设计一致）。shell 名单见 tool_categories。
 _INTERPRETER_SINK_NAMES = frozenset({
@@ -488,6 +493,9 @@ def _evaluate_single_invocation(
 
     if ctx.baseline_level is not None:
         return ctx.baseline_level, ctx.baseline_rule or f"{_MR}:tools"
+
+    if ctx.permission_config.get("defer_unmatched", False):
+        return PermissionLevel.UNDETERMINED, f"{_MR}:unmatched"
 
     if "*" in ctx.defaults_cfg and isinstance(ctx.defaults_cfg["*"], str):
         try:

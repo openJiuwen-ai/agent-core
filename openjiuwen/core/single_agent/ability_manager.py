@@ -1110,6 +1110,8 @@ class AbilityManager:
             if ctx.inputs.tool_args is not None:
                 tool_call.arguments = ctx.inputs.tool_args
 
+        if isinstance(ctx.inputs, ToolCallInputs):
+            ctx.inputs.execution_started = True
         result, tool_msg = await self._execute_single_tool_call(
             tool_call=tool_call,
             session=session,

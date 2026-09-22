@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import json
 from copy import deepcopy
+from dataclasses import replace
 
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -25,6 +26,7 @@ from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.security.core import PermissionEngine
 from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
+    PermissionEvaluationRequest,
     PermissionSceneHookInput,
     ToolPermissionHost,
 )
@@ -413,6 +415,26 @@ class PermissionInterruptRail(ConfirmInterruptRail):
             return False
         return True
 
+    async def _apply_host_evaluation(
+        self, ctx: AgentCallbackContext, tool_call: Optional[ToolCall], result: PermissionResult,
+    ) -> PermissionResult:
+        """Keep explicit local decisions authoritative; unresolved host decisions require approval."""
+        hook = self._host.on_permission_evaluated
+        external = None
+        if hook is not None:
+            try:
+                # The observer cannot mutate the effective local result in place.
+                external = await hook(PermissionEvaluationRequest(ctx, tool_call, deepcopy(result)))
+            except Exception:
+                logger.warning("[PermissionEngine] permission.evaluation_hook.failed", exc_info=True)
+        if result.permission != PermissionLevel.UNDETERMINED:
+            return result
+        if isinstance(external, PermissionResult) and external.permission in (
+            PermissionLevel.ALLOW, PermissionLevel.DENY, PermissionLevel.ASK,
+        ):
+            return external
+        return replace(result, permission=PermissionLevel.ASK, reason="No effective external policy decision")
+
     async def resolve_interrupt(
         self,
         ctx: AgentCallbackContext,
@@ -429,6 +451,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 getattr(tool_call, "id", ""),
                 invalid_reason,
             )
+            if user_input is None:
+                await self._apply_host_evaluation(
+                    ctx, tool_call, PermissionResult(PermissionLevel.DENY, "invalid_tool_call", invalid_reason),
+                )
             return self.reject(tool_result=invalid_reason)
 
         tool_name = tool_call.name if tool_call is not None else ""
@@ -464,9 +490,17 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 scene_out = None
             if scene_out is not None:
                 if scene_out[0] == "approve":
+                    if user_input is None:
+                        await self._apply_host_evaluation(
+                            ctx, tool_call, PermissionResult(PermissionLevel.ALLOW, "host_scene"),
+                        )
                     return self.approve()
                 if scene_out[0] == "reject":
                     msg = scene_out[1] if len(scene_out) > 1 else "[PERMISSION_DENIED]"
+                    if user_input is None:
+                        await self._apply_host_evaluation(
+                            ctx, tool_call, PermissionResult(PermissionLevel.DENY, "host_scene", msg),
+                        )
                     return self.reject(tool_result=msg)
 
         if user_input is None:
@@ -505,6 +539,12 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                     normalized_name,
                 )
                 raise
+
+            if result.permission != PermissionLevel.DENY and self._is_auto_confirmed(
+                auto_confirm_config, auto_confirm_key,
+            ):
+                result = PermissionResult(PermissionLevel.ALLOW, "session_auto_confirm")
+            result = await self._apply_host_evaluation(ctx, tool_call, result)
 
             if result.permission == PermissionLevel.ALLOW:
                 logger.info(

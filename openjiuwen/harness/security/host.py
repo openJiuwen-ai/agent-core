@@ -5,6 +5,8 @@
 from openjiuwen.harness.security.permission_engine.host import *  # noqa: F403
 from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
+    PermissionEvaluationRequest,
+    PermissionEvaluatedHook,
     PermissionConfirmationResult,
     PermissionSceneHook,
     PermissionSceneHookInput,
@@ -13,6 +15,8 @@ from openjiuwen.harness.security.permission_engine.host import (
 )
 
 __all__ = [
+    "PermissionEvaluationRequest",
+    "PermissionEvaluatedHook",
     "PermissionConfirmationRequest",
     "PermissionConfirmationResult",
     "PermissionSceneHook",

@@ -22,6 +22,8 @@ from openjiuwen.harness.security.permission_engine.core import (
 )
 from openjiuwen.harness.security.permission_engine.host import (
     PermissionConfirmationRequest,
+    PermissionEvaluationRequest,
+    PermissionEvaluatedHook,
     PermissionConfirmationResult,
     PermissionSceneHook,
     PermissionSceneHookInput,
@@ -34,6 +36,11 @@ from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
     PermissionResult,
     PermissionsSection,
+)
+from openjiuwen.harness.security.skill_install import (
+    BeforeSkillInstallHook,
+    SkillInstallContext,
+    before_skill_install,
 )
 
 from openjiuwen.harness.security.permission_engine.approve.persist_rule_merge import (
@@ -49,6 +56,11 @@ from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers im
 )
 
 __all__ = [
+    "BeforeSkillInstallHook",
+    "SkillInstallContext",
+    "before_skill_install",
+    "PermissionEvaluationRequest",
+    "PermissionEvaluatedHook",
     "get_package_builtin_rules_path",
     "inline_package_command_rules",
     "load_package_command_rules",
