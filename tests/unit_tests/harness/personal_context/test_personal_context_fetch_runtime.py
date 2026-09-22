@@ -2797,6 +2797,11 @@ class _PartialStopProvider(ContextFetchService):
         self.abort_calls.append(run_id)
 
 
+def test_stop_fetch_run_total_budget_is_sixty_seconds() -> None:
+    assert personal_context_module._STOP_FINALIZE_TIMEOUT_SECONDS == 60.0
+    assert personal_context_module._PIPELINE_CANCEL_GRACE_SECONDS == 5.0
+
+
 @pytest.mark.asyncio
 async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
     tmp_path: Path,
@@ -2866,6 +2871,66 @@ async def test_stop_fetch_run_keeps_completed_batch_and_discards_inflight_batch(
 
 
 @pytest.mark.asyncio
+async def test_stop_timeout_during_retain_fences_late_cursor_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _PartialStopProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _PartialStopProvider)
+    personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    personal_context._write_cursor("notes", {"n": 0})
+    before = (tmp_path / "state" / "cursors" / "notes.json").read_bytes()
+    second_entered = asyncio.Event()
+    retain_entered = asyncio.Event()
+    release_retain = asyncio.Event()
+
+    async def submit(
+        _service_id: str,
+        _run_id: str,
+        batch: FetchBatch,
+        *,
+        enqueued: asyncio.Event | None = None,
+    ) -> None:
+        if enqueued is not None:
+            enqueued.set()
+        if batch.batch_id == "partial-2":
+            second_entered.set()
+            await asyncio.Event().wait()
+
+    async def retain(_service_id: str, _run_id: str) -> None:
+        retain_entered.set()
+        await release_retain.wait()
+
+    async def no_op(_service_id: str, _run_id: str) -> None:
+        return None
+
+    personal_context._submit_batch = submit  # type: ignore[method-assign]
+    personal_context._retain_pipeline_run = retain  # type: ignore[method-assign]
+    personal_context._rollback_pipeline_run = no_op  # type: ignore[method-assign]
+    personal_context._cancel_pipeline_run = no_op  # type: ignore[method-assign]
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+
+    await personal_context.run_fetch(service_id="notes")
+    await asyncio.wait_for(second_entered.wait(), timeout=1)
+    task = personal_context._active_fetch_run_tasks["notes"]
+    try:
+        with pytest.raises(BaseError, match="stage=retain_pipeline"):
+            await personal_context.stop_fetch_run("notes")
+        await asyncio.wait_for(retain_entered.wait(), timeout=1)
+        assert (await personal_context.snapshot()).fetch_run_progress["notes"]["run_state"] == "failed"
+    finally:
+        release_retain.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
+    assert progress["run_state"] == "failed"
+    assert "stage=retain_pipeline" in progress["last_error"]
+    assert personal_context._read_run_history("notes")[0]["run_state"] == "failed"
+    assert (tmp_path / "state" / "cursors" / "notes.json").read_bytes() == before
+    assert _PartialStopProvider.instances["notes"].commit_calls == []
+
+
+@pytest.mark.asyncio
 async def test_stop_fetch_run_before_first_completed_batch_preserves_cursor(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2912,6 +2977,7 @@ async def test_stop_fetch_run_immediately_after_acceptance_reports_cancelled(
 async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     personal_context = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
     release = asyncio.Event()
@@ -2952,16 +3018,28 @@ async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
 
     personal_context._cancel_pipeline_run = ignore_pipeline_cancel  # type: ignore[method-assign]
     try:
-        with pytest.raises(BaseError):
+        with pytest.raises(BaseError, match="stage=cancel_requested"):
             await asyncio.wait_for(personal_context.stop_fetch_run("notes"), timeout=0.5)
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
         progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
         assert progress["run_state"] == "failed"
+        assert "stage=cancel_requested" in progress["last_error"]
         assert progress["progress_percent"] == 25
         assert personal_context._fetch_states["notes"] == "FAILED"
+        assert "pipeline cancellation grace exceeded" in caplog.text
     finally:
         release.set()
         await asyncio.wait_for(task, timeout=1)
+
+
+def test_runtime_timeout_message_has_no_missing_template_parameter() -> None:
+    error = personal_context_module._error(
+        personal_context_module.StatusCode.CONTEXT_PROACTIVE_RUNTIME_TIMEOUT,
+        "fetch run stop finalization timed out",
+    )
+
+    assert "fetch run stop finalization timed out" in str(error)
+    assert "<missing:" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -3648,6 +3726,41 @@ async def test_retained_run_history_stop_during_result_write_keeps_success(tmp_p
     assert progress["run_state"] == "succeeded"
     result = await core.get_fetch_run_status("notes", run_id=accepted["runs"][0]["run_id"])
     assert result["run_state"] == "succeeded"
+
+
+@pytest.mark.asyncio
+async def test_stop_timeout_during_history_write_keeps_failed_history(tmp_path, monkeypatch):
+    import threading
+
+    _BlockingManualProvider.instances = {}
+    monkeypatch.setitem(personal_context_module._PROVIDER_TYPES, "local_files", _BlockingManualProvider)
+    core = await _ready_manual_personal_context(tmp_path, _manual_config(tmp_path))
+    writing = threading.Event()
+    release = threading.Event()
+    original_write = core._write_run_history
+
+    def blocked_write(service_id, records):
+        writing.set()
+        assert release.wait(3)
+        original_write(service_id, records)
+
+    monkeypatch.setattr(core, "_write_run_history", blocked_write)
+    monkeypatch.setattr(personal_context_module, "_STOP_FINALIZE_TIMEOUT_SECONDS", 0.05)
+    await core.run_fetch(service_id="notes")
+    provider = _BlockingManualProvider.instances["notes"]
+    await asyncio.wait_for(provider.started.wait(), timeout=1)
+    task = core._active_fetch_run_tasks["notes"]
+    stop_task = asyncio.create_task(core.stop_fetch_run("notes"))
+    try:
+        assert await asyncio.to_thread(writing.wait, 1)
+        with pytest.raises(BaseError, match="stage=history_write"):
+            await asyncio.wait_for(stop_task, timeout=1)
+        assert (await core.snapshot()).fetch_run_progress["notes"]["run_state"] == "failed"
+    finally:
+        release.set()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert core._read_run_history("notes")[0]["run_state"] == "failed"
 
 
 @pytest.mark.asyncio

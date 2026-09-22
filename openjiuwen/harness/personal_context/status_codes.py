@@ -56,7 +56,7 @@ StatusCode = SimpleNamespace(
     CONTEXT_PROACTIVE_RUNTIME_TIMEOUT=_personal_context_status(
         "CONTEXT_PROACTIVE_RUNTIME_TIMEOUT",
         154006,
-        "context proactive_runtime timeout ({timeout}s), reason: {error_msg}",
+        "context proactive_runtime timeout, reason: {error_msg}",
     ),
 )
 
