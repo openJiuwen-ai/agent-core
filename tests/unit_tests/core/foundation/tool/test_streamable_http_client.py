@@ -20,7 +20,6 @@ from openjiuwen.core.runner.resources_manager.resource_manager import ResourceMg
 
 
 class TestStreamableHttpClient(unittest.IsolatedAsyncioTestCase):
-    @unittest.skip("CI mcp 1.26 streamable-http API compatibility is pending")
     async def test_connect_list_call_disconnect_lifecycle(self):
         call_args = {}
 
@@ -169,7 +168,6 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
     async def asyncTearDown(self):
         await self.resource_mgr.release()
 
-    @unittest.skip("CI mcp 1.26 streamable-http API compatibility is pending")
     async def test_mcp_server_streamable_http_lifecycle(self):
         mock_tools = [
             McpToolCard(
@@ -230,7 +228,6 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
             remaining_infos = await self.resource_mgr.get_mcp_tool_infos(server_name="streamable-server")
             self.assertEqual(remaining_infos, [])
 
-    @unittest.skip("CI mcp 1.26 streamable-http API compatibility is pending")
     async def test_mcp_tool_drops_missing_optional_arguments(self):
         mock_tools = [
             McpToolCard(
@@ -274,7 +271,6 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
                 arguments={"ref": "q", "text": "wireless mouse"},
             )
 
-    @unittest.skip("CI mcp 1.26 streamable-http API compatibility is pending")
     async def test_mcp_tool_preserves_empty_object_arguments(self):
         mock_tools = [
             McpToolCard(

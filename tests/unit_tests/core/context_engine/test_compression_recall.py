@@ -35,8 +35,6 @@ from openjiuwen.core.context_engine.processor.forked.compressor.support.compress
 )
 from openjiuwen.core.foundation.llm import AssistantMessage, ToolMessage, UserMessage
 
-_TIKTOKEN_CI_SKIP_REASON = "CI cannot initialize cl100k_base without network access"
-
 
 def _context(
     tmp_path: Path,
@@ -80,7 +78,6 @@ async def test_context_exposes_engine_wide_compression_recall_config():
     assert context.compression_recall_config() is not recall_config
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
     messages = [
         UserMessage(content="How should database retries work?"),
@@ -107,7 +104,6 @@ def test_archive_writes_turn_index_raw_messages_and_readable_chunks(tmp_path):
     assert raw_messages[0]["content"] == "How should database retries work?"
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_extracts_query_text_from_structured_user_content(tmp_path):
     messages = [
         UserMessage(content=[{"type": "text", "text": "How should database retries work?"}]),
@@ -125,7 +121,6 @@ def test_archive_extracts_query_text_from_structured_user_content(tmp_path):
     assert archive_path.name == f"{archive.memory_id}_如何配置缓存淘汰策略"
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
     messages = [
         AssistantMessage(content="Working on it."),
@@ -140,7 +135,6 @@ def test_archive_structured_content_without_text_yields_no_query_slug(tmp_path):
     assert Path(archive.path).name == f"{archive.memory_id}_no-query"
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_unwraps_channel_envelope_for_query(tmp_path):
     messages = [
         UserMessage(content='你收到一条消息：\n{"content": "帮我查一下昨天的报错", "source": "wecom"}'),
@@ -155,7 +149,6 @@ def test_archive_unwraps_channel_envelope_for_query(tmp_path):
     assert archive_path.name == f"{archive.memory_id}_帮我查一下昨天的报错"
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_keeps_json_first_line_as_genuine_user_text(tmp_path):
     messages = [
         UserMessage(content='{"content": "这不是信封"}'),
@@ -168,7 +161,6 @@ def test_archive_keeps_json_first_line_as_genuine_user_text(tmp_path):
     assert turns[0]["query"] == '{"content": "这不是信封"}'
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_ignores_session_memory_block_when_picking_query(tmp_path):
     messages = [
         UserMessage(content="real user question"),
@@ -184,7 +176,6 @@ def test_archive_ignores_session_memory_block_when_picking_query(tmp_path):
     assert turns[0]["query"] == "real user question"
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path):
     messages = [
         AssistantMessage(content="Investigating the failing request."),
@@ -204,7 +195,6 @@ def test_current_round_style_archive_uses_preceding_user_as_turn_query(tmp_path)
     assert "database timeout in worker" in chunk
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_archive_chunk_filenames_carry_content_summary(tmp_path):
     messages = [
         UserMessage(content="How should database retries work?"),
@@ -233,7 +223,6 @@ def test_archive_chunk_filenames_carry_content_summary(tmp_path):
     assert result["chunks"]
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_selects_one_turn_and_at_most_two_chunks(tmp_path):
     messages = [
         UserMessage(content="database timeout"),
@@ -281,7 +270,6 @@ raise RuntimeError("database timeout")
     assert 'RuntimeError("database timeout")' in normalized
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_is_strictly_isolated_between_colliding_session_names(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "openjiuwen.core.context_engine.processor.forked.compressor.recall.archive._new_memory_id",
@@ -317,7 +305,6 @@ def test_recall_is_strictly_isolated_between_colliding_session_names(tmp_path, m
     assert "beta private answer" not in first_result["chunks"][0]["content"]
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_across_archives_finds_content_in_older_archive(tmp_path):
     older = _archive(
         tmp_path,
@@ -352,7 +339,6 @@ def test_recall_across_archives_finds_content_in_older_archive(tmp_path):
     assert result["matched_turn"]["memory_id"] == older.memory_id
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_across_archives_miss_still_reports_archives(tmp_path):
     _archive(
         tmp_path,
@@ -371,7 +357,6 @@ def test_recall_across_archives_miss_still_reports_archives(tmp_path):
     assert result["recall_root"]
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_rejects_manifest_from_another_session(tmp_path):
     archive = _archive(
         tmp_path,
@@ -391,7 +376,6 @@ def test_recall_rejects_manifest_from_another_session(tmp_path):
         )
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_returns_archive_path_when_bm25_has_no_match(tmp_path):
     archive = _archive(
         tmp_path,
@@ -413,7 +397,6 @@ def test_recall_returns_archive_path_when_bm25_has_no_match(tmp_path):
     assert result["archive_path"] == archive.path
 
 
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 def test_recall_rejects_chunk_symlink_escape(tmp_path):
     archive = _archive(
         tmp_path,

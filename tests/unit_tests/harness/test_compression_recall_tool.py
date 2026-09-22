@@ -27,8 +27,6 @@ from openjiuwen.harness.prompts.sections.compression_recall import build_compres
 from openjiuwen.harness.rails.context_engineer.context_processor_rail import ContextProcessorRail
 from openjiuwen.harness.tools.compression_recall import CompressionRecallTool
 
-_TIKTOKEN_CI_SKIP_REASON = "CI cannot initialize cl100k_base without network access"
-
 
 def _context(tmp_path, session_id: str = "session-1"):
     context = MagicMock()
@@ -69,7 +67,6 @@ def _make_agent(tmp_path, *, recall_enabled: bool = False):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_requires_runtime_session_and_recalls_current_session(tmp_path):
     messages = [
         UserMessage(content="database timeout"),
@@ -135,7 +132,6 @@ def test_recall_tool_result_is_added_to_existing_offloader_protection():
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_renders_compact_content_for_model(tmp_path):
     messages = [
         UserMessage(content="database timeout"),
@@ -169,7 +165,6 @@ async def test_tool_renders_compact_content_for_model(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_renders_hint_as_content_on_miss(tmp_path):
     archive = archive_compression_messages(
         context=_context(tmp_path),
@@ -192,7 +187,6 @@ async def test_tool_renders_hint_as_content_on_miss(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_searches_across_archives_when_memory_id_omitted(tmp_path):
     older = archive_compression_messages(
         context=_context(tmp_path),
@@ -247,7 +241,6 @@ async def test_tool_searches_across_archives_when_memory_id_omitted(tmp_path):
         ("en", ["synonyms", "another language", "identifiers", "turns.jsonl", "chunks/"]),
     ],
 )
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_returns_retry_hint_with_archive_path_on_miss(tmp_path, language, expected_keywords):
     archive = archive_compression_messages(
         context=_context(tmp_path),
@@ -290,7 +283,6 @@ async def test_rail_registers_recall_tool_for_session_memory_compressor(tmp_path
 
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason=_TIKTOKEN_CI_SKIP_REASON)
 async def test_tool_omits_hint_when_chunks_match(tmp_path):
     messages = [
         UserMessage(content="database timeout"),

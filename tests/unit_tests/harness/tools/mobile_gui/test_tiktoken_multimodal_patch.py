@@ -8,8 +8,6 @@ and calling it must NOT swap methods on the class — the process-global
 first-caller-wins method swap was the hazard that motivated the core fix.
 """
 
-import pytest
-
 from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
 from openjiuwen.core.foundation.llm import UserMessage
 from openjiuwen.harness.tools.mobile_gui.tiktoken_multimodal_patch import (
@@ -18,7 +16,6 @@ from openjiuwen.harness.tools.mobile_gui.tiktoken_multimodal_patch import (
 )
 
 
-@pytest.mark.skip(reason="CI cannot initialize cl100k_base without network access")
 def test_apply_is_a_no_op_and_multimodal_counting_needs_no_patch() -> None:
     original = TiktokenCounter.count_messages
 
