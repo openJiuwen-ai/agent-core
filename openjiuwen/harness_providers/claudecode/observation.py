@@ -194,6 +194,11 @@ class ClaudeRequestObserver:
         # from a reply is the reply's conversation plus its own delta.
         self._threads: dict[str, tuple[TurnMessage, ...]] = {}
         self._thread_tools: Any = None
+        # The system prompt the thread was opened with. Claude Code states it
+        # on the call that opens a thread and on any call that changes it, and
+        # leaves it out of every continuation, so the last one stated is the
+        # one in force.
+        self._thread_system: tuple[ContentBlock, ...] = ()
         self._last_output_identity = ""
         self._emit: EmitFn | None = None
         self._drain_task: asyncio.Task[None] | None = None
@@ -676,7 +681,9 @@ class ClaudeRequestObserver:
             prefix, prefix_known = self._thread_prefix(request)
             input_messages = prefix + tuple(self._conversation(request.get("messages")))
             input_observed = prefix_known
-            system_instructions, billing_header = _system_instructions(request.get("system"))
+            if "system" in request:
+                self._thread_system, billing_header = _system_instructions(request.get("system"))
+            system_instructions = self._thread_system
             tools = request.get("tools")
             if isinstance(tools, list):
                 # Only the call that opens a thread carries the catalogue; the
@@ -817,12 +824,10 @@ def _content_block(block_id: str, block: dict[str, Any]) -> ContentBlock | None:
     if block_type == "thinking":
         thinking = str(block.get("thinking") or "")
         if not thinking or thinking == _REDACTED_CONTENT:
-            # The CLI redacts thinking before logging it; an empty reasoning
-            # block would only add a row saying nothing.
-            return None
+            return _withheld_reasoning(block_id)
         return ContentBlock(block_id=block_id, kind="reasoning", content=thinking)
     if block_type == "redacted_thinking":
-        return None
+        return _withheld_reasoning(block_id)
     if block_type in ("tool_use", "server_tool_use", "mcp_tool_use"):
         return ContentBlock(
             block_id=block_id,
@@ -844,6 +849,23 @@ def _tool_result_content(content: Any) -> Any:
     if isinstance(content, list) and all(isinstance(item, dict) and item.get("type") == "text" for item in content):
         return "\n".join(str(item.get("text") or "") for item in content)
     return _sanitize(content)
+
+
+def _withheld_reasoning(block_id: str) -> ContentBlock:
+    """State that the model reasoned here and the CLI withheld the text.
+
+    Claude Code redacts thinking everywhere it can be read -- the raw body log
+    writes ``<REDACTED>`` and keeps only the signature, and the SDK stream
+    hands over an empty ``ThinkingBlock`` -- while the token count survives in
+    usage. Dropping the block made a turn that reasoned look like one that did
+    not; this states which it was without inventing the text.
+    """
+    return ContentBlock(
+        block_id=block_id,
+        kind="reasoning",
+        content=_REDACTED_CONTENT,
+        data={"redacted": True},
+    )
 
 
 def _system_instructions(system: Any) -> tuple[tuple[ContentBlock, ...], str]:

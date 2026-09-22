@@ -92,6 +92,16 @@ _TOOL_CATALOGUE_TYPE = "additional_tools"
 # member claims its own events out of the process-wide receiver.
 _OTEL_ENV_RESOURCE_KEY = "env"
 _TOOL_RESULT_EVENT = "codex.tool_result"
+# The CLI states one of these per model response, and it is the only place it
+# says how long that response took to its first token.
+_SSE_EVENT = "codex.sse_event"
+_RESPONSE_COMPLETED_KIND = "response.completed"
+# How long after an inference ends its completion report may still arrive.
+_RESPONSE_FACT_TOLERANCE_S = 2.0
+# How long a finished inference waits for that report before being reported
+# without it. The rollout record lands the moment the response ends while the
+# telemetry event is batched, so the two always race by a fraction of a second.
+_RESPONSE_FACT_WAIT_S = 1.5
 _TOOL_DECISION_EVENT = "codex.tool_decision"
 _CONVERSATION_STARTS_EVENT = "codex.conversation_starts"
 # Settings the session resolved to, worth stating once per turn.
@@ -149,6 +159,14 @@ class _ToolFacts:
                 setattr(self, entry.name, value)
 
 
+@dataclass(frozen=True, slots=True)
+class _ResponseFacts:
+    """What the CLI reported about one finished model response."""
+
+    time_ns: int
+    ttft_ms: int
+
+
 @dataclass
 class _Inference:
     """One rollout inference of the current turn."""
@@ -203,6 +221,13 @@ class CodexRequestObserver:
         self._incoming_facts: list[Any] = []
         self._tool_facts: dict[str, _ToolFacts] = {}
         self._session_facts: dict[str, Any] = {}
+        # Reported at completion and joined to the inference whose window they
+        # land in; the CLI names no response id on them.
+        self._response_facts: list[_ResponseFacts] = []
+        # Whether this session's telemetry has ever reached us. A CLI build
+        # that reports nothing must not make every inference wait for a report
+        # that is never coming.
+        self._telemetry_live = False
         self._lock = asyncio.Lock()
         self._changed = asyncio.Event()
         self._emit: EmitFn | None = None
@@ -303,12 +328,13 @@ class CodexRequestObserver:
 
         Args:
             wait: Give the rollout trace until the turn's end record (or the
-                wait budget) to deliver its last inferences.
+                wait budget) to deliver its last inferences, and those
+                inferences until their completion reports arrive.
         """
         await self._stop_drain()
         if wait and self.rollout_attached:
             deadline = time.time() + self._wait_s
-            while not self._rollout_turn_ended and time.time() < deadline:
+            while (not self._rollout_turn_ended or self._pending_response_facts()) and time.time() < deadline:
                 async with self._lock:
                     await self._flush(force=False)
                 with contextlib.suppress(asyncio.TimeoutError):
@@ -349,10 +375,11 @@ class CodexRequestObserver:
         resource = event.get("resource_attributes")
         if not isinstance(resource, dict) or resource.get(_OTEL_ENV_RESOURCE_KEY) != self._source_id:
             return
+        self._telemetry_live = True
         raw = event.get("attributes")
         attributes = dict(raw) if isinstance(raw, dict) else {}
         name = str(attributes.get("event.name") or "")
-        accepted = _telemetry_observation(name, attributes)
+        accepted = _telemetry_observation(name, attributes, int(event.get("time_ns") or 0))
         if accepted is None:
             return
         loop = self._loop
@@ -374,6 +401,8 @@ class CodexRequestObserver:
                     self._tool_facts[observation.call_id] = observation
                 else:
                     known.merge(observation)
+            elif isinstance(observation, _ResponseFacts):
+                self._response_facts.append(observation)
             else:
                 self._session_facts.update(observation)
 
@@ -502,6 +531,10 @@ class CodexRequestObserver:
                     # earlier one that is still running.
                     return
                 continue
+            if not force and self._awaiting_response_facts(inference):
+                # Reporting now would state a request with no first-token
+                # latency while the CLI is about to say what it was.
+                return
             inference.emitted = True
             terminal_payload = inference.terminal.get("payload")
             response_id = str(terminal_payload.get("response_id") or "") if isinstance(terminal_payload, dict) else ""
@@ -757,6 +790,7 @@ class CodexRequestObserver:
             )
         usage = response_payload.get("token_usage") if isinstance(response_payload, dict) else None
         return ModelRequestEvent(
+            time_to_first_chunk=self._time_to_first_chunk(started_at, ended_at),
             request_id=inference.call_id,
             status=status,
             started_at=started_at,
@@ -790,6 +824,48 @@ class CodexRequestObserver:
         )
 
 
+    def _pending_response_facts(self) -> bool:
+        """Return whether any finished inference still awaits its report.
+
+        The turn's last inference ends and the turn ends with it, so without
+        this the terminal flush would report that one without the first-token
+        latency every other inference of the turn carries.
+        """
+        return any(
+            not inference.emitted and inference.terminal is not None and self._awaiting_response_facts(inference)
+            for inference in self._inferences.values()
+        )
+
+    def _awaiting_response_facts(self, inference: _Inference) -> bool:
+        """Return whether this inference's completion report may still arrive."""
+        if not self._telemetry_live:
+            return False
+        ended_at = int(inference.terminal.get("wall_time_unix_ms") or 0) / 1000 if inference.terminal else 0.0
+        if not ended_at or time.time() >= ended_at + _RESPONSE_FACT_WAIT_S:
+            return False
+        started_at = inference.started_ms / 1000
+        return self._time_to_first_chunk(started_at, ended_at, consume=False) is None
+
+    def _time_to_first_chunk(self, started_at: float, ended_at: float, *, consume: bool = True) -> float | None:
+        """Return the CLI's own first-token latency for one inference.
+
+        The CLI reports it when the response completes, without naming which
+        response, so the report is claimed by the inference whose window it
+        lands in. Reports that arrive outside every window -- a warm-up call
+        before the turn's first inference, say -- are left alone.
+        """
+        deadline = ended_at + _RESPONSE_FACT_TOLERANCE_S
+        for index, facts in enumerate(self._response_facts):
+            seconds = facts.time_ns / 1e9
+            if seconds < started_at:
+                continue
+            if seconds > deadline:
+                break
+            if consume:
+                self._response_facts.pop(index)
+            return facts.ttft_ms / 1000
+        return None
+
     def _full_conversation(self, request: dict[str, Any], response_id: str, output_items: list[Any]) -> list[Any] | None:
         """Return the whole conversation a request continued, or ``None`` when unknown.
 
@@ -815,13 +891,17 @@ class CodexRequestObserver:
         return conversation
 
 
-def _telemetry_observation(name: str, attributes: dict[str, Any]) -> Any:
+def _telemetry_observation(name: str, attributes: dict[str, Any], time_ns: int = 0) -> Any:
     """Read one CLI telemetry event; ``None`` for events we observe nothing from.
 
     The CLI stamps the signed-in account and the terminal on every event. A
     trajectory records what the agent did, never who was logged in, so only
     the named fields below are taken.
     """
+    if name == _SSE_EVENT and attributes.get("event.kind") == _RESPONSE_COMPLETED_KIND:
+        ttft_ms = _int_attribute(attributes.get("ttft_ms"))
+        # A response that generated nothing states no first token.
+        return _ResponseFacts(time_ns=time_ns, ttft_ms=ttft_ms) if ttft_ms is not None else None
     if name in (_TOOL_RESULT_EVENT, _TOOL_DECISION_EVENT):
         call_id = str(attributes.get("call_id") or "")
         if not call_id:

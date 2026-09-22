@@ -83,9 +83,20 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    (`input_observed=False`). A tool call the vendor never announces as an item
    (Codex answers its own tool search, and a code cell that invokes nothing) is
    reported from the response that made it and the request that read its
-   result, between those two requests. Codex states no per-request TTFT
-   (`codex.turn_ttft` is one turn-level number) and no cost, so neither is
-   reported rather than derived. Hosts record trajectories with
+   result, between those two requests. Codex states first-token latency on
+   `codex.sse_event` when a response completes, naming no response, so it is
+   claimed by the inference whose window it lands in and a finished inference
+   waits briefly for it (`codex.turn_ttft` is a different, turn-level number
+   measured from the turn's start, and is not that latency). Codex states no
+   cost at all, so none is reported rather than derived. What a vendor states
+   once and then omits is remembered: Claude Code threads a conversation
+   server-side, and a continuation states neither the system prompt nor the
+   tool catalogue, so both are carried forward from the call that opened the
+   thread — reporting the continuation without them reads as the prompt having
+   been cleared mid-turn. Reasoning the vendor withheld is reported as
+   withheld, never dropped: Claude Code redacts thinking in both the body log
+   and the SDK stream while its token count survives, and a dropped block made
+   a turn that reasoned look like one that did not. Hosts record trajectories with
    `HarnessTrajectoryRecorder`, never by reading vendor data. The recorder
    marks the user messages carrying a turn's host inputs as the external
    user's and remembers those message ids: whose a message is does not change

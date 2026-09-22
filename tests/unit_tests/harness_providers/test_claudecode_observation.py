@@ -257,11 +257,10 @@ def _script(sdk: ModuleType, receiver: _FakeReceiver) -> list[Any]:
         )
 
     async def second_request(client: Any) -> None:
-        # A threaded call states only what is new; the tool catalogue is not
-        # repeated either.
+        # A threaded call states only what is new: neither the system prompt
+        # nor the tool catalogue is repeated.
         body = {
             "model": "claude-x",
-            "system": _SYSTEM,
             "messages": [_TOOL_RESULT],
             "thread": {"type": "continue", "previous_message_id": "msg-1"},
         }
@@ -380,6 +379,10 @@ async def test_request_logs_become_ordered_model_request_events(monkeypatch: pyt
         "stream": True,
         "reasoning_level": "high",
     }
+    # The thread was opened with these; a continuation restates neither, and
+    # reporting it without them would read as the prompt having been cleared.
+    assert second.system_instructions == first.system_instructions
+    assert second.tool_definitions == first.tool_definitions
     assert first.response_id == "msg-1" and first.finish_reasons == ("tool_use",)
     # The CLI's own span states the request window and its first-token time.
     assert (first.started_at, first.ended_at) == (1000.1, 1001.9)
@@ -589,3 +592,22 @@ async def test_hosts_without_model_request_observation_get_no_request_events(mon
 
     assert _kinds(events) == ["turn:started", "tool:tool-1:started", "turn:finished"]
     await harness.stop()
+
+
+def test_reasoning_the_cli_withheld_is_still_reported() -> None:
+    from openjiuwen.harness_providers.claudecode.observation import _content_block
+
+    # Claude Code redacts thinking everywhere it can be read: the body log
+    # writes this marker and keeps only the signature, and the SDK stream
+    # hands over an empty block. The token count survives in usage, so a
+    # dropped block made a turn that reasoned look like one that did not.
+    withheld = _content_block("b0", {"type": "thinking", "thinking": "<REDACTED>", "signature": "sig"})
+    assert withheld is not None
+    assert withheld.kind == "reasoning" and withheld.data["redacted"] is True
+    empty = _content_block("b1", {"type": "thinking", "thinking": ""})
+    assert empty is not None and empty.data["redacted"] is True
+    encrypted = _content_block("b2", {"type": "redacted_thinking", "data": "..."})
+    assert encrypted is not None and encrypted.data["redacted"] is True
+    # Reasoning the CLI did state is reported as itself.
+    stated = _content_block("b3", {"type": "thinking", "thinking": "check the tree"})
+    assert stated is not None and stated.content == "check the tree" and not stated.data

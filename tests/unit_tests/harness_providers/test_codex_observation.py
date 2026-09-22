@@ -640,6 +640,65 @@ async def test_an_announced_item_is_named_the_way_the_model_called_it(
     await harness.stop()
 
 
+@pytest.mark.asyncio
+async def test_each_request_carries_the_first_token_latency_the_cli_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The CLI reports it when a response completes, naming no response, so it
+    # is claimed by the inference whose window it lands in. A report from
+    # before the turn's first inference belongs to neither.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    _install_reader(monkeypatch)
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False, cwd="/w"))
+    started_ms = int(time.time() * 1000)
+
+    def sse(offset_ms: int, ttft_ms: int | None) -> dict[str, Any]:
+        attributes: dict[str, Any] = {"event.kind": "response.completed"}
+        if ttft_ms is not None:
+            attributes["ttft_ms"] = str(ttft_ms)
+        event = _telemetry(harness._request_observer._source_id, "codex.sse_event", **attributes)
+        event["time_ns"] = (started_ms + offset_ms) * 1_000_000
+        return event
+
+    def record(event_type: str, offset_ms: int, **payload: Any) -> Callable[[Any], Any]:
+        resolved = payload.pop("resolved_payloads", {})
+
+        async def deliver(_handle: Any) -> None:
+            _FakeRolloutReader.instances[-1].callback(
+                {
+                    "wall_time_unix_ms": started_ms + offset_ms,
+                    "thread_id": "thread-1",
+                    "codex_turn_id": "codex-turn-1",
+                    "payload": {"type": event_type, **payload},
+                    "resolved_payloads": resolved,
+                }
+            )
+            return None
+
+        return deliver
+
+    state.scripts.append(
+        [
+            record("codex_turn_started", 0),
+            lambda handle: _deliver_telemetry(harness, sse(-500, 900))(handle),
+            record("inference_started", 100, inference_call_id="inf-1",
+                   resolved_payloads={"request_payload": {"input": [_USER_INPUT]}}),
+            record("inference_completed", 900, inference_call_id="inf-1", response_id="resp-1",
+                   resolved_payloads={"response_payload": {"output_items": []}}),
+            lambda handle: _deliver_telemetry(harness, sse(880, 640))(handle),
+            record("codex_turn_ended", 1000),
+            _turn_completed("turn-hi", _Status.completed),
+        ]
+    )
+    await harness.start(_context(host_capabilities=_OBSERVED))
+
+    receipt = await harness.send(HarnessInput(content="hi"))
+    events = await _turn(harness, receipt.turn_id)
+    request = next(event.event for event in events if isinstance(event.event, ModelRequestEvent))
+    assert request.time_to_first_chunk == 0.64
+    await harness.stop()
+
+
 def test_a_tool_is_named_by_the_namespace_the_model_addressed_it_in() -> None:
     from openjiuwen.harness_providers.codex.observation import (
         _called_tool_name,
