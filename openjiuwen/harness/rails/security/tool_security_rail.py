@@ -7,13 +7,17 @@ for ASK decisions using the built-in interrupt rail flow.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 
 from typing import Any, Iterable, Optional, cast
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.single_agent.interrupt.response import InterruptRequest
-from openjiuwen.core.single_agent.interrupt.state import INTERRUPT_AUTO_CONFIRM_KEY
+from openjiuwen.core.single_agent.interrupt.state import (
+    INTERRUPT_AUTO_CONFIRM_KEY,
+    RESUME_BATCH_ALLOW_KEYS,
+)
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
 from openjiuwen.harness.rails.interrupt.confirm_rail import (
     ConfirmInterruptRail,
@@ -46,6 +50,58 @@ TOOL_NAME_ALIASES = {
     "fetch_webpage": "mcp_fetch_webpage",
     "exec_command": "mcp_exec_command",
 }
+
+
+def compute_auto_confirm_key(tool_call: Optional[ToolCall]) -> str:
+    """Module-level auto-confirm key computation, shared by the rail and the
+    tool-interrupt handler (batch-scoped allow keys).
+
+    Key semantics: bare tool name; shell-like tools use ``tool:subcommand``
+    when the command is simple and single-purpose, else ``""`` (not
+    rememberable). Identical to the rail's historical ``_get_auto_confirm_key``
+    behavior — extracted so resume-time batch computation cannot drift from
+    rail-time matching.
+    """
+    if tool_call is None:
+        return ""
+
+    tool_name = tool_call.name or ""
+    tool_args = PermissionInterruptRail.parse_tool_args(tool_call)
+
+    if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
+        cmd = tool_args.get("command", tool_args.get("cmd", ""))
+        return PermissionInterruptRail.build_shell_auto_confirm_key(tool_name, str(cmd or ""))
+
+    return tool_name
+
+
+def compute_batch_allow_key(tool_call: Optional[ToolCall]) -> str:
+    """Batch-allow key for resume replay (P3-2), scoped to the exact call.
+
+    Unlike session auto_confirm keys (bare tool name / ``tool:subcommand`` —
+    the user explicitly opts in at that granularity), the batch-scoped allow
+    must NOT expand a single allow_once to sibling calls whose arguments the
+    user never reviewed. The key therefore fingerprints the full argument
+    dict: only calls with the same tool name AND identical arguments share a
+    key. Falls back to "" (no batch expansion) on any parse failure —
+    fail-closed for privilege expansion.
+    """
+    if tool_call is None:
+        return ""
+
+    tool_name = (tool_call.name or "").strip()
+    if not tool_name:
+        return ""
+
+    try:
+        tool_args = PermissionInterruptRail.parse_tool_args(tool_call)
+        canonical_args = json.dumps(
+            tool_args, sort_keys=True, ensure_ascii=False, default=str,
+        )
+        args_digest = hashlib.sha256(canonical_args.encode("utf-8")).hexdigest()[:12]
+    except Exception:
+        return ""
+    return f"{tool_name}:{args_digest}"
 
 
 class PermissionInterruptRail(ConfirmInterruptRail):
@@ -144,20 +200,10 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
     def _get_auto_confirm_key(self, tool_call: ToolCall) -> str:
         """Generate a conservative session auto-confirm key for the tool call."""
-        if tool_call is None:
-            return ""
-
-        tool_name = tool_call.name or ""
-        tool_args = self.parse_tool_args(tool_call)
-
-        if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
-            cmd = tool_args.get("command", tool_args.get("cmd", ""))
-            return self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
-
-        return tool_name
+        return compute_auto_confirm_key(tool_call)
 
     @staticmethod
-    def _build_shell_auto_confirm_key(tool_name: str, command: str) -> str:
+    def build_shell_auto_confirm_key(tool_name: str, command: str) -> str:
         text = (command or "").strip()
         if not text:
             return ""
@@ -470,6 +516,27 @@ class PermissionInterruptRail(ConfirmInterruptRail):
                 )
                 return self.approve()
 
+            # Batch-scoped allow (P3-2 批次级授权): during resume replay of an
+            # interrupted parallel batch, an identical sibling call (same tool
+            # name AND same arguments) was already approved by the user
+            # (allow_once) — approve this one too instead of issuing yet
+            # another card. The key is an argument fingerprint, deliberately
+            # NOT the session auto_confirm key: a sibling with different
+            # arguments must not inherit the approval (no silent consent
+            # expansion). Scoped to the replay only; a fresh batch in a later
+            # iteration re-asks.
+            extra = getattr(ctx, "extra", None)
+            batch_allow_keys = extra.get(RESUME_BATCH_ALLOW_KEYS) if isinstance(extra, dict) else None
+            if isinstance(batch_allow_keys, (set, frozenset, dict)) and batch_allow_keys:
+                batch_allow_key = compute_batch_allow_key(tool_call)
+                if batch_allow_key and batch_allow_key in batch_allow_keys:
+                    logger.info(
+                        "[PermissionEngine] permission.batch_allow.hit tool=%s key=%s",
+                        tool_name,
+                        batch_allow_key,
+                    )
+                    return self.approve()
+
             if self._host.request_permission_confirmation is not None:
                 ext_out = await self._host.request_permission_confirmation(
                     PermissionConfirmationRequest(
@@ -765,7 +832,7 @@ class PermissionInterruptRail(ConfirmInterruptRail):
 
         if tool_name in {"bash", "mcp_exec_command", "create_terminal"}:
             cmd = tool_args.get("command", tool_args.get("cmd", ""))
-            shell_key = self._build_shell_auto_confirm_key(tool_name, str(cmd or ""))
+            shell_key = self.build_shell_auto_confirm_key(tool_name, str(cmd or ""))
             if shell_key:
                 return (
                     f'\n\n> 选择「本会话内允许」可在本会话内自动放行 ``{shell_key}`` 类调用；'

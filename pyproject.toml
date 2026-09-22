@@ -25,7 +25,11 @@ dependencies = [
     # Date & time
     "python-dateutil>=2.9.0.post0",
     # File & locking
-    "filelock>=3.25.0",
+    # Upper bound <3.30: filelock 3.32+ (and 4.x) renamed the internal
+    # ReadWriteLock _configure_and_begin signature (start_time -> operation
+    # tuple), which breaks _ManagedReadWriteLock in
+    # openjiuwen.core.sys_operation.local. 3.25.0 and 3.29.0 are verified good.
+    "filelock>=3.25.0,<3.30",
     "portalocker>=3.2.0",
     "aiofiles>=25.1.0",
     # Database ORM

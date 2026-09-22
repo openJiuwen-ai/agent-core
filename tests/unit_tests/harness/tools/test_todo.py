@@ -549,5 +549,128 @@ class TestTodoGetTool(unittest.IsolatedAsyncioTestCase):
             await self.tool.invoke({}, session=self.mock_session)
 
 
+class TestTodoGenerationToken(unittest.IsolatedAsyncioTestCase):
+    """Regression tests for the todo generation-token request isolation (P1).
+
+    TodoCreateTool stamps newly created items with the session's current
+    generation token (bumped by the host on each non-resume round);
+    TodoListTool filters superseded-generation items so the LLM view matches
+    the host broadcast. Unstamped (None) items are never filtered, and a
+    missing/non-string session token is fail-open (no stamping, no filter).
+    """
+
+    def setUp(self):
+        self.mock_operation = MagicMock(spec=SysOperation)
+        self.mock_fs = MagicMock(spec=BaseFsOperation)
+        self.mock_operation.fs.return_value = self.mock_fs
+        self.create_tool = TodoCreateTool(operation=self.mock_operation)
+        self.create_tool.load_todos = AsyncMock(return_value=[])
+        self.create_tool.save_todos = AsyncMock()
+        self.list_tool = TodoListTool(operation=self.mock_operation)
+        self.modify_tool = TodoModifyTool(operation=self.mock_operation)
+        self.modify_tool.load_todos = AsyncMock(return_value=[])
+        self.modify_tool.save_todos = AsyncMock()
+        self.mock_session = MagicMock()
+        self.mock_session.get_session_id.return_value = "test_session_id"
+
+    async def test_create_stamps_items_with_session_token(self):
+        """Session token present: all saved items are stamped with it."""
+        self.mock_session.get_state.return_value = "gen-1"
+        await self.create_tool.invoke({
+            "tasks": [
+                {"content": "Task 1"},
+                {"content": "Task 2"},
+            ]
+        }, session=self.mock_session)
+        saved = self.create_tool.save_todos.call_args[0][1]
+        self.assertEqual([t.generation_token for t in saved], ["gen-1", "gen-1"])
+
+    async def test_create_without_token_leaves_items_unstamped(self):
+        """No session token: items stay unstamped (fail-open)."""
+        self.mock_session.get_state.return_value = None
+        await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        saved = self.create_tool.save_todos.call_args[0][1]
+        self.assertTrue(all(t.generation_token is None for t in saved))
+
+    async def test_create_with_non_string_token_is_fail_open(self):
+        """Non-string session state value is ignored (fail-open)."""
+        self.mock_session.get_state.return_value = 12345
+        await self.create_tool.invoke({"tasks": [{"content": "Task 1"}]}, session=self.mock_session)
+        saved = self.create_tool.save_todos.call_args[0][1]
+        self.assertTrue(all(t.generation_token is None for t in saved))
+
+    async def test_list_filters_superseded_generation(self):
+        """List hides old-generation items; current generation and unstamped
+        items stay visible; completed items are hidden regardless."""
+        self.list_tool.load_todos = AsyncMock(return_value=[
+            TodoItem(id="old", content="old gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
+            TodoItem(id="cur", content="current gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
+            TodoItem(id="legacy", content="unstamped task", status=TodoStatus.PENDING, generation_token=None),
+            TodoItem(id="done_old", content="done old gen", status=TodoStatus.COMPLETED, generation_token="gen-0"),
+        ])
+        self.mock_session.get_state.return_value = "gen-1"
+        result = await self.list_tool.invoke({}, session=self.mock_session)
+        ids = [t["id"] for t in result["tasks"]]
+        self.assertIn("cur", ids)
+        self.assertIn("legacy", ids)
+        self.assertNotIn("old", ids)
+        self.assertNotIn("done_old", ids)
+
+    async def test_list_without_session_token_shows_all_active(self):
+        """No session token: generation filtering is disabled entirely."""
+        self.list_tool.load_todos = AsyncMock(return_value=[
+            TodoItem(id="old", content="old gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
+            TodoItem(id="cur", content="current gen task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
+        ])
+        self.mock_session.get_state.return_value = None
+        result = await self.list_tool.invoke({}, session=self.mock_session)
+        ids = [t["id"] for t in result["tasks"]]
+        self.assertEqual(sorted(ids), ["cur", "old"])
+
+    async def test_modify_append_tolerates_superseded_in_progress(self):
+        """Old-generation in_progress leftovers must not consume the current
+        generation's single in_progress slot (mirrors the List view filter);
+        appending a current-generation in_progress task must succeed."""
+        self.modify_tool.load_todos = AsyncMock(return_value=[
+            TodoItem(id="old", content="superseded task", status=TodoStatus.IN_PROGRESS, generation_token="gen-0"),
+        ])
+        self.mock_session.get_state.return_value = "gen-1"
+        result = await self.modify_tool.invoke({
+            "action": "append",
+            "todos": [{"id": "new", "content": "current task", "status": TodoStatus.IN_PROGRESS.value}],
+        }, session=self.mock_session)
+        self.assertIn("Successfully appended", result["message"])
+        saved = self.modify_tool.save_todos.call_args[0][1]
+        self.assertEqual([t.id for t in saved], ["old", "new"])
+
+    async def test_modify_append_same_generation_in_progress_rejected(self):
+        """The generation pre-filter must not relax the current generation's
+        own single in_progress constraint."""
+        self.modify_tool.load_todos = AsyncMock(return_value=[
+            TodoItem(id="cur", content="current task", status=TodoStatus.IN_PROGRESS, generation_token="gen-1"),
+        ])
+        self.mock_session.get_state.return_value = "gen-1"
+        with self.assertRaises(FrameworkError):
+            await self.modify_tool.invoke({
+                "action": "append",
+                "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
+            }, session=self.mock_session)
+        self.modify_tool.save_todos.assert_not_awaited()
+
+    async def test_modify_append_without_token_keeps_legacy_behavior(self):
+        """No session token: any on-disk in_progress still counts and the
+        append is rejected (legacy behavior preserved)."""
+        self.modify_tool.load_todos = AsyncMock(return_value=[
+            TodoItem(id="old", content="unstamped task", status=TodoStatus.IN_PROGRESS, generation_token=None),
+        ])
+        self.mock_session.get_state.return_value = None
+        with self.assertRaises(FrameworkError):
+            await self.modify_tool.invoke({
+                "action": "append",
+                "todos": [{"id": "new", "content": "another task", "status": TodoStatus.IN_PROGRESS.value}],
+            }, session=self.mock_session)
+        self.modify_tool.save_todos.assert_not_awaited()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

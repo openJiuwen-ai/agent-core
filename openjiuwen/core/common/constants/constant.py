@@ -13,6 +13,12 @@ SYSTEM_FIELDS = "systemFields"
 INTERACTION = sys.intern("__interaction__")
 # for dynamic interaction raised by nodes
 INTERACTIVE_INPUT = sys.intern("__interactive_input__")
+# Explicit resume signal written to the session stream when an interrupted
+# run resumes in-place. Consumed by host adapters (e.g. jiuwenswarm) to clear
+# HITL stream suppression precisely, instead of sniffing the first non-noise
+# chunk. The signal chunk itself carries no user-visible payload and must be
+# dropped by frontend parsers.
+RESUME_SIGNAL = sys.intern("__resume_signal__")
 INPUTS_KEY = "inputs"
 CONFIG_KEY = "config"
 END_FRAME = "all streaming outputs finish"

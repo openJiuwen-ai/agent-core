@@ -63,6 +63,13 @@ class TodoItem(BaseModel):
         default=None,
         description="Optional model ID to use when executing this task.",
     )
+    generation_token: Optional[str] = Field(
+        default=None,
+        description=(
+            "Request-generation token stamped at creation/update time; todos "
+            "from superseded generations are filtered out of broadcasts."
+        ),
+    )
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to JSON-serializable dict."""
@@ -76,6 +83,7 @@ class TodoItem(BaseModel):
             "result_summary": self.result_summary,
             "meta_data": self.meta_data,
             "selected_model_id": self.selected_model_id,
+            "generation_token": self.generation_token,
         }
 
     @classmethod
@@ -91,6 +99,7 @@ class TodoItem(BaseModel):
             result_summary=data.get("result_summary"),
             meta_data=data.get("meta_data"),
             selected_model_id=data.get("selected_model_id"),
+            generation_token=data.get("generation_token"),
         )
 
 

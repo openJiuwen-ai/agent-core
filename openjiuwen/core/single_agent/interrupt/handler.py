@@ -27,6 +27,7 @@ from openjiuwen.core.single_agent.interrupt.state import (
     ToolInterruptEntry,
     ToolInterruptionState,
     RESUME_START_ITERATION_KEY, INTERRUPT_AUTO_CONFIRM_KEY,
+    RESUME_BATCH_ALLOW_KEYS,
 )
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
@@ -371,6 +372,19 @@ class ToolInterruptHandler:
         resume_user_input_keys = self._resume_user_input_keys_for_state(state)
         ctx.extra.update({key: user_input for key in resume_user_input_keys})
 
+        # Batch-scoped allow keys (P3-2 批次级授权): collect the batch-allow
+        # keys (tool name + argument fingerprint) of sibling calls the user
+        # already approved in this batch, so the replay skips re-asking only
+        # for identical un-approved calls. Falls back to no keys on any parse
+        # failure — fail-closed (no privilege expansion).
+        batch_allow_keys = self._collect_batch_allow_keys(state, user_input)
+        if batch_allow_keys:
+            ctx.extra[RESUME_BATCH_ALLOW_KEYS] = batch_allow_keys
+            logger.info(
+                "[ToolInterruptHandler] resume batch allow keys: %s",
+                sorted(batch_allow_keys),
+            )
+
         tools_to_execute = []
         for outer_id, entry in state.interrupted_tools.items():
             tc = copy.deepcopy(entry.tool_call)
@@ -390,6 +404,7 @@ class ToolInterruptHandler:
         finally:
             for resume_user_input_key in resume_user_input_keys:
                 ctx.extra.pop(resume_user_input_key, None)
+            ctx.extra.pop(RESUME_BATCH_ALLOW_KEYS, None)
 
         new_interrupted_tools, sub_agent_outputs, auto_confirm_mapping = self._collect_interrupts(
             results, tools_to_execute
@@ -422,6 +437,56 @@ class ToolInterruptHandler:
         if needs_generic_key or not resume_keys:
             resume_keys.add(RESUME_USER_INPUT_KEY)
         return resume_keys
+
+    @staticmethod
+    def _collect_batch_allow_keys(
+            state: ToolInterruptionState,
+            user_input: Any,
+    ) -> set:
+        """Collect batch-allow keys of sibling calls approved in this batch.
+
+        Scans ``user_input.user_inputs`` (keyed by tool_call_id) for approved
+        confirm payloads, maps each back to its interrupted tool call and
+        computes its batch-allow key (tool name + argument fingerprint, see
+        :func:`compute_batch_allow_key`). Only approved answers contribute —
+        rejected and unanswered siblings keep asking. Returns an empty set on
+        any structural mismatch — fail-closed (no privilege expansion).
+        """
+        if not isinstance(user_input, InteractiveInput):
+            return set()
+        user_inputs = getattr(user_input, "user_inputs", None)
+        if not isinstance(user_inputs, dict) or not user_inputs:
+            return set()
+
+        # Deferred import: harness rail module depends on core interrupt
+        # modules; importing at module level risks circular imports.
+        from openjiuwen.harness.rails.security.tool_security_rail import (
+            compute_batch_allow_key,
+        )
+
+        keys: set = set()
+        for entry in state.interrupted_tools.values():
+            tc = getattr(entry, "tool_call", None)
+            tc_id = getattr(tc, "id", None)
+            if not tc_id:
+                continue
+            value = user_inputs.get(tc_id)
+            if value is None:
+                continue
+            approved = False
+            if isinstance(value, dict):
+                approved = bool(value.get("approved"))
+            else:
+                approved = bool(getattr(value, "approved", False))
+            if not approved:
+                continue
+            try:
+                key = compute_batch_allow_key(tc)
+            except Exception:
+                key = ""
+            if key:
+                keys.add(key)
+        return keys
 
     @staticmethod
     def _save_auto_confirm_from_state(
