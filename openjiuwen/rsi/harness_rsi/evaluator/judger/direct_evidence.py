@@ -3,6 +3,7 @@
 
 import base64
 import json
+import re
 from pathlib import Path
 
 from openjiuwen.rsi.harness_rsi.artifact_io import _io_path
@@ -10,7 +11,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructure
 
 MAX_INLINE_BYTES = 65536
 MAX_CLOSEOUT_BYTES = 262144
-TEXT_SUFFIXES = {".txt", ".md", ".json", ".jsonl", ".py", ".csv", ".yaml", ".yml", ".log"}
+_BINARY_CONTROLS = re.compile(r"[\x00-\x08\x0e-\x1f\x7f]")
 IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
                ".gif": "image/gif", ".webp": "image/webp"}
 
@@ -46,8 +47,6 @@ def _inline_evidence(workspace: Path, max_bytes: int | None, include_images: boo
         if not path.is_relative_to(root):
             raise EvaluationInfrastructureError(f"evidence path escapes snapshot: {name}")
         mime = IMAGE_TYPES.get(path.suffix.lower()) if include_images else None
-        if path.suffix.lower() not in TEXT_SUFFIXES and mime is None:
-            raise EvaluationInfrastructureError(f"unsupported text evidence format: {name}")
         try:
             if not path.is_file():
                 raise EvaluationInfrastructureError(f"evidence file missing or not a regular file: {name}")
@@ -64,7 +63,10 @@ def _inline_evidence(workspace: Path, max_bytes: int | None, include_images: boo
                                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{encoded}"}}])
                 files[name] = "Complete image attached in the following labeled content blocks."
             else:
-                files[name] = path.read_text(encoding="utf-8")
+                text = path.read_text(encoding="utf-8")
+                if _BINARY_CONTROLS.search(text):
+                    raise EvaluationInfrastructureError(f"evidence contains binary control characters: {name}")
+                files[name] = text
         except UnicodeError as exc:
             raise EvaluationInfrastructureError(f"evidence is not valid UTF-8: {name}") from exc
         except OSError as exc:

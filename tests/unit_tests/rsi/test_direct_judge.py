@@ -26,6 +26,7 @@ def test_lossless_route(tmp_path, kind):
         data = b'{"step":1}\n{"step":2}\n'
     if kind == "binary":
         name = "answer.pdf"
+        data = b"%PDF-1.7\n\x00\x01binary"
     elif kind == "large":
         data = b"a" * MAX_INLINE_BYTES
     elif kind == "outside":
@@ -63,7 +64,7 @@ def test_serialized_payload_limit_includes_json_escaping(tmp_path):
 
 @pytest.mark.parametrize("kind, expected", [
     ("large", "exceeds 262144 bytes at evidence.jsonl"),
-    ("binary", "unsupported text evidence format: evidence.pdf"),
+    ("binary", "evidence contains binary control characters: evidence.pdf"),
     ("missing", "evidence file missing or not a regular file: evidence.jsonl"),
     ("utf8", "evidence is not valid UTF-8: evidence.jsonl"),
     ("outside", "evidence path escapes snapshot"),
@@ -76,6 +77,8 @@ def test_required_evidence_reports_specific_failure(tmp_path, kind, expected):
     if kind == "outside":
         name = "../outside.jsonl"
     data = b'{"ok": true}\n'
+    if kind == "binary":
+        data = b"%PDF-1.7\n\x00\x01binary"
     if kind == "large":
         data = b"x" * MAX_CLOSEOUT_BYTES
     elif kind == "utf8":
