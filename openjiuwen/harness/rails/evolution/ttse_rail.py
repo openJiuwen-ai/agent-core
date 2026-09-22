@@ -13,6 +13,13 @@ to the skill-body track:
 Injection happens in ``before_model_call``. The frozen TTSE algorithm lives
 in :mod:`openjiuwen.agent_evolving.ttse`; this rail is the I/O layer
 (trajectory source, capability enumeration, persistence, prompt section).
+
+Evolve (success detect + induction) uses an **invoke-local** clean window:
+each ``before_invoke`` resets this rail's scope window so prior session
+rounds are not fed into detect/induce. Message projection also uses
+``invoke_local=True`` so the first LLM span does not re-import earlier
+rounds from its full request prompt. Other evolution rails keep their own
+windows.
 """
 
 from __future__ import annotations
@@ -23,8 +30,13 @@ import os
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Collection, List, Optional
 
+from openjiuwen.agent_evolving.trajectory.messages import (
+    DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    MessageField,
+    trajectory_to_messages,
+)
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm.model import Model
@@ -203,6 +215,22 @@ class TTSERail(EvolutionRail):
     # Evolution: FACT/meta-TIP induction
     # ------------------------------------------------------------------
 
+    async def _on_before_invoke(self, ctx: AgentCallbackContext) -> None:
+        """Drop prior-round spans so detect/induce see only this invoke."""
+        del ctx
+        self._reset_current_scope()
+
+    @staticmethod
+    def _trajectory_to_messages(
+        trajectory: Optional[Trajectory],
+        *,
+        fields: Collection[MessageField] = DEFAULT_EVOLUTION_MESSAGE_FIELDS,
+    ) -> List[dict]:
+        """Project clean-window spans without re-importing prior-round prompts."""
+        if trajectory is None:
+            return []
+        return trajectory_to_messages(trajectory, fields=fields, invoke_local=True)
+
     def _allow_evolution_trigger(self, trigger_point, ctx: AgentCallbackContext) -> bool:
         """Trigger every invoke: TTSE induces from EVERY task.
 
@@ -241,7 +269,13 @@ class TTSERail(EvolutionRail):
         trajectory: Trajectory,
         ctx: AgentCallbackContext,
     ) -> Optional[_TTSEPreparedEvolutionInput]:
-        """Capture messages and TTSE-local fields while ctx is alive."""
+        """Capture invoke-local messages and TTSE fields while ctx is alive.
+
+        ``trajectory`` / messages are from this invoke's clean window only
+        (see ``_on_before_invoke``); message projection uses ``invoke_local``
+        so the first LLM span does not re-import earlier session rounds from
+        its full request prompt.
+        """
         if not self._ttse_config.evolve_enabled:
             return None
 

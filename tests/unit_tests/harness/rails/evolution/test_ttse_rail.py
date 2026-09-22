@@ -26,7 +26,7 @@ from openjiuwen.agent_evolving.signal import detect_tool_error_signals
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.prompt_attachment_manager import PromptAttachmentManager
@@ -42,7 +42,13 @@ from openjiuwen.harness.rails.evolution import (
     configure_ttse_evolution_runtime,
     unconfigure_ttse_evolution,
 )
-from openjiuwen.agent_evolving.ttse.stores import reset_shared_stores, shared_store, _new_record
+from openjiuwen.agent_evolving.ttse.stores import (
+    reset_shared_stores,
+    shared_store,
+    _new_record,
+    format_ts,
+    parse_ts,
+)
 from openjiuwen.agent_evolving.ttse.catalog import project_catalog
 from openjiuwen.agent_evolving.ttse.dream import load_dream_state
 from openjiuwen.agent_evolving.ttse.classify import parse_assignments
@@ -88,6 +94,44 @@ def _empty_trajectory(*, execution_id: str = "e1", session_id: str = "s1") -> Tr
             ]
         }
     )
+
+
+def _marker_trajectory(marker: str, *, session_id: str) -> Trajectory:
+    """Trajectory with one llm span whose name uniquely identifies the round."""
+    return Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {TRAJECTORY_ID: f"exec-{marker}", SESSION_ID: session_id}
+                        )
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "test"},
+                            "spans": [
+                                {
+                                    "name": f"llm.{marker}",
+                                    "spanId": "01",
+                                    "traceId": "01",
+                                    "startTimeUnixNano": "1",
+                                    "endTimeUnixNano": "2",
+                                    "attributes": [],
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+
+
+def _span_names(trajectory: Trajectory | None) -> set[str]:
+    if trajectory is None:
+        return set()
+    return {str(span.get("name") or "") for span in iter_spans(trajectory)}
 
 
 class ScriptedLLM:
@@ -409,7 +453,8 @@ def test_inject_debounce_reschedules_after_event_loop_replaced(tmp_path):
     _run(on_second_loop())
     reloaded = TTSERecordStore(TTSEConfig(store_path=path))
     assert reloaded.facts[0]["inject_hits"] == 2
-    assert reloaded.facts[0]["last_injected_at"] == pytest.approx(now)
+    assert parse_ts(reloaded.facts[0]["last_injected_at"]) == pytest.approx(now, abs=1)
+    assert reloaded.facts[0]["last_injected_at"] == format_ts(now)
     reset_shared_stores()
 
 
@@ -515,13 +560,16 @@ async def test_rail_success_path_induces_without_blame(tmp_path):
 
 @pytest.mark.asyncio
 async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
+    # Induced FACT text must not substring-collide with seeded bank texts.
+    induced_fact = "large log files require grep before a full read"
+
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: 1\nREASON: rule 1 misled the agent"
         if "review a rule bank" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
-            return "[FACT] lesson fact"
+            return f"[FACT] {induced_fact}"
         return "NONE"
 
     llm = ScriptedLLM(handler)
@@ -539,7 +587,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
 
     assert [r["text"] for r in rail._ttse_store.retired] == ["F1 bad fact"]
     assert "F1 bad fact" not in rail._ttse_store.facts_texts()
-    assert "lesson fact" in rail._ttse_store.facts_texts()
+    assert induced_fact in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
     assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
 
@@ -936,6 +984,124 @@ async def test_signal_detector_gate_passes_when_invoke_tool_calls_meet_min(tmp_p
     assert out.outcome == "partial"
     assert out.reason == "signal:execution_failure"
     assert llm.calls == []
+
+
+@pytest.mark.asyncio
+async def test_ttse_clean_window_is_invoke_local_not_session_cumulative(tmp_path):
+    """Second invoke must not see first-round spans in the TTSE clean window."""
+    llm = ScriptedLLM(lambda p: "NONE")
+    rail = _make_rail(tmp_path, llm)
+    rail._evolution_trigger = EvolutionTriggerPoint.NONE
+    session_id = "sess-per-invoke"
+
+    def _ctx(query: str) -> AgentCallbackContext:
+        return AgentCallbackContext(
+            agent=None,
+            inputs=InvokeInputs(query=query, conversation_id=session_id),
+            session=SimpleNamespace(
+                get_session_id=lambda: session_id,
+                get_agent_id=lambda: None,
+            ),
+        )
+
+    ctx1 = _ctx("round-1")
+    await rail.before_invoke(ctx1)
+    capture1 = rail._current_capture()
+    assert capture1 is not None
+    rail._merge_clean_increment(capture1, _marker_trajectory("round1-only", session_id=session_id))
+    assert "llm.round1-only" in _span_names(rail.get_trajectory(session_id=session_id))
+    await rail.after_invoke(ctx1)
+    # Without reset, the window would still hold round-1 after after_invoke.
+    assert "llm.round1-only" in _span_names(rail.get_trajectory(session_id=session_id))
+
+    ctx2 = _ctx("round-2")
+    await rail.before_invoke(ctx2)
+    assert rail.get_trajectory(session_id=session_id) is None
+    capture2 = rail._current_capture()
+    assert capture2 is not None
+    rail._merge_clean_increment(capture2, _marker_trajectory("round2-only", session_id=session_id))
+    names = _span_names(rail.get_trajectory(session_id=session_id))
+    assert "llm.round1-only" not in names
+    assert "llm.round2-only" in names
+
+    prepared = await rail._prepare_evolution_input(
+        rail.get_trajectory(session_id=session_id),
+        ctx2,
+    )
+    assert prepared is not None
+    prepared_names = _span_names(prepared.trajectory)
+    assert "llm.round1-only" not in prepared_names
+    assert "llm.round2-only" in prepared_names
+    await rail.after_invoke(ctx2)
+
+
+@pytest.mark.asyncio
+async def test_ttse_prepare_messages_drop_prior_round_prompt_history(tmp_path):
+    """LLM request prompts carry session history; TTSE prepare must trim to this invoke."""
+    from openjiuwen.agent_evolving.trajectory.spans import write_llm_exchange
+
+    llm = ScriptedLLM(lambda p: "NONE")
+    rail = _make_rail(tmp_path, llm)
+    session_id = "sess-prompt-trim"
+    traj = Trajectory.from_otlp(
+        {
+            "resourceSpans": [
+                {
+                    "resource": {
+                        "attributes": attributes_from_map(
+                            {TRAJECTORY_ID: "exec-hello", SESSION_ID: session_id}
+                        )
+                    },
+                    "scopeSpans": [
+                        {
+                            "scope": {"name": "test"},
+                            "spans": [
+                                {
+                                    "name": "llm.call",
+                                    "spanId": "01",
+                                    "traceId": "01",
+                                    "startTimeUnixNano": "10",
+                                    "endTimeUnixNano": "11",
+                                    "attributes": attributes_from_map(
+                                        write_llm_exchange(
+                                            [
+                                                {"role": "system", "content": "rules"},
+                                                {"role": "user", "content": "make xlsx"},
+                                                {
+                                                    "role": "tool",
+                                                    "name": "bash",
+                                                    "content": "Error: python3 not found",
+                                                },
+                                                {"role": "user", "content": "你好"},
+                                            ],
+                                            [{"role": "assistant", "content": "你好！"}],
+                                        )
+                                    ),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ]
+        }
+    )
+    ctx = AgentCallbackContext(
+        agent=None,
+        inputs=InvokeInputs(query="你好", conversation_id=session_id),
+        session=SimpleNamespace(
+            get_session_id=lambda: session_id,
+            get_agent_id=lambda: None,
+        ),
+    )
+
+    prepared = await rail._prepare_evolution_input(traj, ctx)
+
+    assert prepared is not None
+    assert prepared.messages == (
+        {"role": "user", "content": "你好"},
+        {"role": "assistant", "content": "你好！"},
+    )
+    assert prepared.ttse_invoke_tool_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1763,10 +1929,10 @@ async def test_run_dream_projects_catalog_after_prune(tmp_path):
     rail = _make_rail(tmp_path, ScriptedLLM(lambda _: "NONE"), cfg=cfg)
     now = time.time()
     stale = _new_record("stale slides fact", now=now - 91 * 86400)
-    stale["last_injected_at"] = now - 91 * 86400
+    stale["last_injected_at"] = format_ts(now - 91 * 86400)
     stale["category"] = "documents-office-and-records"
     keep = _new_record("keep devops fact", now=now - 10 * 86400)
-    keep["last_injected_at"] = now - 10 * 86400
+    keep["last_injected_at"] = format_ts(now - 10 * 86400)
     keep["category"] = "software-engineering-devops"
     rail._ttse_store.facts = [stale, keep]
     await rail._ttse_store.save()

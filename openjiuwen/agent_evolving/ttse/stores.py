@@ -8,15 +8,17 @@ a retired pool, JSON-persisted) onto jiuwen primitives:
 * I/O is async via :func:`asyncio.to_thread` with an atomic ``tmp`` + ``os.replace``.
 * Dedup is **embedding-based** (cosine >= ``dedup_threshold``) when a provider
   is configured, falling back to the reference's substring dedup otherwise.
-  The scan is O(n) in bank size (capped by ``max_facts`` / ``max_tips``);
-  a process-local cache makes repeat adds CPU-only. Cold cache fills with
+  Exact normalized equality is always a hit. The scan is O(n) in bank size
+  (capped by ``max_facts`` / ``max_tips``); a process-local embedding cache
+  makes repeat adds CPU-only when a provider is set. Cold cache fills with
   batched ``embed_documents``, not one RPC per row. n<=400 is a linear
   scan; an ANN index is not used.
 * Embeddings are cached by normalized text so dedup and Auto-dream reuse them.
   The cache is an LRU capped at ``max_facts + max_tips + 100`` and is pruned
   when records leave the bank (retire / delete / cap / reload).
 * Records carry display/TTL metadata (``created_at``, ``updated_at``,
-  ``last_injected_at``, ``inject_hits``) for Auto-dream prune. Consult
+  ``last_injected_at``, ``inject_hits``) for Auto-dream prune, plus
+  ``form_checked`` on tips after the LLM form/over-generic pass. Consult
   hits update those clocks in memory; they flush on bank writes and on a
   debounce (``inject_persist_min_secs`` / ``inject_persist_min_hits``).
   Reloading a newer disk snapshot overlays in-memory inject clocks so a
@@ -40,6 +42,7 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from openjiuwen.core.common.logging import logger
@@ -69,31 +72,81 @@ def _cosine(a: List[float], b: List[float]) -> float:
     return dot / (math.sqrt(na) * math.sqrt(nb))
 
 
+_TS_FMT = "%Y-%m-%d %H:%M:%S"
+
+
 def _now() -> float:
     return time.time()
 
 
-def _as_ts(value: Any) -> Optional[float]:
-    if value is None:
+def format_ts(epoch: float) -> str:
+    """Format an epoch second as local ``YYYY-MM-DD HH:MM:SS``."""
+    return datetime.fromtimestamp(float(epoch)).strftime(_TS_FMT)
+
+
+def parse_ts(value: Any) -> Optional[float]:
+    """Parse a persisted timestamp to epoch seconds.
+
+    Accepts legacy Unix floats/ints and ``YYYY-MM-DD HH:MM:SS`` strings.
+    """
+    if value is None or value == "":
         return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return datetime.strptime(text, _TS_FMT).timestamp()
+        except ValueError:
+            pass
+        try:
+            return float(text)
+        except ValueError:
+            return None
     try:
         return float(value)
     except (TypeError, ValueError):
         return None
 
 
+def _as_ts(value: Any) -> Optional[float]:
+    return parse_ts(value)
+
+
+def _normalize_ts_value(value: Any, *, default_epoch: Optional[float] = None) -> Any:
+    """Rewrite a timestamp field to the display string form when possible."""
+    if value is None:
+        if default_epoch is None:
+            return None
+        return format_ts(default_epoch)
+    parsed = parse_ts(value)
+    if parsed is None:
+        return value
+    return format_ts(parsed)
+
+
 def _later_ts(left: Any, right: Any) -> Any:
-    """Return the later of two timestamps; ``None`` loses to a real value."""
+    """Return the later of two timestamps; ``None`` loses to a real value.
+
+    Prefer the display-string form when both sides parse; otherwise keep the
+    original winner so callers can persist a normalized clock.
+    """
     left_ts, right_ts = _as_ts(left), _as_ts(right)
     if left_ts is None:
-        return right if right_ts is not None else left
+        return _normalize_ts_value(right) if right_ts is not None else left
     if right_ts is None:
-        return left
-    return left if left_ts >= right_ts else right
+        return _normalize_ts_value(left)
+    winner_epoch = left_ts if left_ts >= right_ts else right_ts
+    return format_ts(winner_epoch)
 
 
 def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Dict[str, Any]:
-    ts = now if now is not None else _now()
+    epoch = now if now is not None else _now()
+    ts = format_ts(epoch)
     return {
         "text": text,
         "count": count,
@@ -101,6 +154,8 @@ def _new_record(text: str, *, count: int = 1, now: Optional[float] = None) -> Di
         "updated_at": ts,
         "last_injected_at": None,
         "inject_hits": 0,
+        # Auto-dream LLM form/over-generic check; False until KEEP.
+        "form_checked": False,
     }
 
 
@@ -108,19 +163,31 @@ def _migrate_record(record: Dict[str, Any], default_ts: float) -> Dict[str, Any]
     """Fill missing TTL/display fields for legacy bank entries.
 
     Conservative migration: treat missing ``last_injected_at`` as ``default_ts``
-    (file mtime or now) so an upgrade does not mass-prune overnight.
+    (file mtime or now) so an upgrade does not mass-prune overnight. Legacy
+    Unix-float clocks are rewritten to ``YYYY-MM-DD HH:MM:SS``.
     """
+    default_display = format_ts(default_ts)
     if "count" not in record:
         record["count"] = 1
     if "created_at" not in record:
-        record["created_at"] = default_ts
+        record["created_at"] = default_display
+    else:
+        record["created_at"] = _normalize_ts_value(record["created_at"], default_epoch=default_ts)
     if "updated_at" not in record:
-        record["updated_at"] = record.get("created_at", default_ts)
+        record["updated_at"] = record.get("created_at", default_display)
+    else:
+        record["updated_at"] = _normalize_ts_value(record["updated_at"], default_epoch=default_ts)
     if "last_injected_at" not in record:
         # Legacy banks: assume recently shown to avoid one-shot wipe.
-        record["last_injected_at"] = record.get("created_at", default_ts)
+        record["last_injected_at"] = record.get("created_at", default_display)
+    elif record["last_injected_at"] is not None:
+        record["last_injected_at"] = _normalize_ts_value(record["last_injected_at"])
     if "inject_hits" not in record:
         record["inject_hits"] = 0
+    if "form_checked" not in record:
+        record["form_checked"] = False
+    else:
+        record["form_checked"] = bool(record["form_checked"])
     return record
 
 
@@ -610,20 +677,29 @@ class TTSERecordStore:
         return await self._embedding_of(text)
 
     def has_embedding_provider(self) -> bool:
-        """Whether semantic dedup is enabled (a provider is configured)."""
+        """Whether cosine semantic similarity is enabled (a provider is configured)."""
         return self._embedding is not None
 
     async def _find_duplicate(self, text: str, store: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
         """Return the matching record if ``text`` duplicates an existing rule.
 
-        Semantic match is O(n) in ``store`` (n capped by max_facts/max_tips).
-        Vectors come from the process-local cache; cold misses are batched.
+        Cosine match when an embedding provider is available; otherwise
+        substring match (reference behavior). Exact normalized equality is
+        always treated as a duplicate. Scans are O(n) in ``store`` (n capped
+        by max_facts/max_tips).
         """
+        n = _norm(text)
+        if not n:
+            return None
+        for record in store:
+            if _norm(record.get("text", "")) == n:
+                return record
+
         if self._embedding is not None:
             await self._fill_embedding_cache(
                 [text, *(record.get("text", "") for record in store)]
             )
-            vec = self._cached_embedding(_norm(text))
+            vec = self._cached_embedding(n)
             if vec is not None:
                 best: Optional[Dict[str, Any]] = None
                 best_sim = self._config.dedup_threshold
@@ -635,11 +711,11 @@ class TTSERecordStore:
                     if sim >= best_sim:
                         best, best_sim = record, sim
                 return best
+
         # Substring dedup (reference behavior when no embedding provider).
-        n = _norm(text)
         for record in store:
-            rn = _norm(record["text"])
-            if rn == n or n in rn or rn in n:
+            rn = _norm(record.get("text", ""))
+            if rn and (n in rn or rn in n):
                 return record
         return None
 
@@ -658,6 +734,9 @@ class TTSERecordStore:
 
         Returns only components with ``len >= min_size``. Empty when no
         embedding provider or fewer than ``min_size`` embeddable records.
+
+        Auto-dream merge without an embedding provider uses LLM clustering
+        instead of calling this helper.
         """
         if not self.has_embedding_provider() or len(records) < min_size:
             return []
@@ -731,7 +810,7 @@ class TTSERecordStore:
             if matched is not None:
                 matched["count"] = matched.get("count", 0) + 1
                 # Keep the surviving record's category; do not reclassify on merge.
-                matched["updated_at"] = _now()
+                matched["updated_at"] = format_ts(_now())
                 store.sort(key=lambda x: -x.get("count", 0))
                 return "merged"
             store.append(_new_record(text))
@@ -793,7 +872,8 @@ class TTSERecordStore:
         were updated. Persistence is debounced; call
         :meth:`flush_inject_metadata` to force a write.
         """
-        ts = now if now is not None else _now()
+        epoch = now if now is not None else _now()
+        ts = format_ts(epoch)
         updated = 0
         for record in records:
             if not isinstance(record, dict) or "text" not in record:
@@ -914,6 +994,8 @@ __all__ = [
     "TTSERecordStore",
     "shared_store",
     "reset_shared_stores",
+    "format_ts",
+    "parse_ts",
     "_cosine",
     "_norm",
     "_new_record",
