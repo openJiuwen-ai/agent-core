@@ -58,6 +58,11 @@ StatusCode = SimpleNamespace(
         154006,
         "context proactive_runtime timeout ({timeout}s), reason: {error_msg}",
     ),
+    CONTEXT_PROACTIVE_IM_SEARCH_EXECUTION_ERROR=_personal_context_status(
+        "CONTEXT_PROACTIVE_IM_SEARCH_EXECUTION_ERROR",
+        154007,
+        "context im_search execution error, reason: {error_msg}",
+    ),
 )
 
 
