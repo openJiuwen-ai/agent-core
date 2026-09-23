@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import asyncio
 import fnmatch
 import json
 import os
@@ -156,7 +157,10 @@ class MessageSummaryOffloader(ContextProcessor):
                 max_chars=max_chars,
                 original_content=message.content,
             )
-            compressed = self._rule_pipeline.compress(
+            # Rule compression (esp. json_repair) is CPU-bound; keep it off the
+            # event loop so WebSocket ping/pong can still run during large tool results.
+            compressed = await asyncio.to_thread(
+                self._rule_pipeline.compress,
                 message,
                 context,
                 pass_name="add",
@@ -321,7 +325,8 @@ class MessageSummaryOffloader(ContextProcessor):
             max_chars=max_chars,
             original_content=message.content,
         )
-        processed = self._rule_pipeline.compress(
+        processed = await asyncio.to_thread(
+            self._rule_pipeline.compress,
             message,
             context,
             pass_name="ttl",
