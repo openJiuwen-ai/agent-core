@@ -30,6 +30,7 @@ Swarmflow 脚本要对产物做质量把关时，只能手写"起 N 个验证 ag
 4. **单次判定、返工循环由脚本驱动**：`verify()` 只对一份产物跑一轮，不自动返工；脚本拿到 `feedback` 自行组织执行者重做再 `verify()`。
 5. **产物支持文本与文件路径两形态**：`build_reviewers` 的 `deliverable` 接受 `str`（内联）或 `list[str]`（路径，reviewer 用文件工具读取）。
 6. **Swarmflow 专用 reviewer 模板**（`swarmflow_reviewer_{verifier,inspector,challenger}.md`，cn/en）：参照调度模式同名模板的核心理念/工作流程，但把投票从 `verify_task` 工具改为结构化输出（`decision`/`score` + `feedback`）；challenger 模板额外加 `{instruction}` 槽以支持多视角对抗。composition 引导写入 `swarmflow.md` 工具描述，给 leader 一个"三道门槛"（verifier 最低门槛 / inspector 质量门槛 / challenger 盲点）的决策启发。
+7. **per-reviewer 调优经 spec `options` 透传（2026-09-20 增补）**：`build_reviewers` 读 spec 的 `options` 键（非 dict 抛 `ValueError`）透传到 `Reviewer.options`，在 `_reviewer_call` 与 `verify()` 级 options 合并（reviewer 级覆盖）。典型用途：`{"type": "inspector", "options": {"model": "flash-mini"}}` 让 reviewer 单独指定模型。**不加 `Reviewer.model` 显式字段**——`options` 袋是既有的前向兼容通道，与"用户侧原语不暴露显式 `model=` kwarg"的原则一致；引擎层 `_reviewer_call` 的合并逻辑零改动。
 
 ## 拒绝的方案
 
@@ -41,7 +42,7 @@ Swarmflow 脚本要对产物做质量把关时，只能手写"起 N 个验证 ag
 
 ## 验证
 
-- `test_verify.py`：`settle_verify_tally` 纯函数（一票否决、score 阈值边界、undecided、空池防御）；`verify()` MockBackend 组合（多 reviewer 汇总、fail 聚合、None/畸形投票 → undecided、空列表报错、并行独立 journal 键）；`build_reviewers`（文本/路径、type→kind、未知 type 抛错、inspector 默认打分表、cn/en 渲染）；`swarmflow.md` 指引断言。
+- `test_verify.py`：`settle_verify_tally` 纯函数（一票否决、score 阈值边界、undecided、空池防御）；`verify()` MockBackend 组合（多 reviewer 汇总、fail 聚合、None/畸形投票 → undecided、空列表报错、并行独立 journal 键）；`build_reviewers`（文本/路径、type→kind、未知 type 抛错、inspector 默认打分表、cn/en 渲染、spec `options` 透传 + 非 dict 报错）；`swarmflow.md` 指引断言。
 - `tests/unit_tests/agent_teams/workflow/` 全量通过。
 - `ruff check` / mypy 对改动文件无新增错误。
 

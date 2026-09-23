@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/workflow/` |
-| 最近一次修订日期 | 2026-08-26 |
+| 最近一次修订日期 | 2026-09-20 |
 | 关联 feature | F_86_swarmflow-verify-primitive.md |
 
 ## 范围 / 边界
@@ -23,6 +23,7 @@
 - **I-4 空列表拒绝**：`verify()` 拒绝空 reviewer 列表（抛 `WorkflowError`）；`settle_verify_tally` 的"无池 → pass"是防御性默认，经 `verify()` 不可达。
 - **I-5 中性 tally key**：engine 的 tally dict key 用中性 `score_*`（`score_count`/`score_voted`/`score_avg`），不含业务角色名（如 inspector）。
 - **I-6 组合 `agent()`**：每个 reviewer 是一次带结构化 schema 的 `agent()`，经 `parallel()` 派发，每票独立 journal 结构键；不新增 `Provider.verify` / backend 方法。
+- **I-7 reviewer 走 options 无显式 model 字段**：`Reviewer` 不设 `model` 字段；per-reviewer 调优（含模型）一律经 `options` 袋（spec `options` 键 → `Reviewer.options` → 与 `verify()` 级 options 合并），与用户侧"原语不暴露显式 `model=` kwarg"的原则一致。
 
 ## 接口契约
 
@@ -36,7 +37,7 @@
 ### `build_reviewers(deliverable, specs, *, acceptance=None, language="cn") -> list[Reviewer]`
 
 - `deliverable: str | Sequence[str]`——文本内容（内联）或文件路径清单（reviewer 用文件工具读取）。
-- `specs: Sequence[dict]`——`{type, instruction?, label?}`。`type ∈ {verifier, inspector, challenger}`，未知 type 抛 `ValueError`；缺失 type 默认 `verifier`。
+- `specs: Sequence[dict]`——`{type, instruction?, label?, options?}`。`type ∈ {verifier, inspector, challenger}`，未知 type 抛 `ValueError`；缺失 type 默认 `verifier`。`options` 是该 reviewer 的 `agent()` options 袋（如 `{"model": ...}` 指定模型），非 dict 抛 `ValueError`；透传到 `Reviewer.options`，在 `_reviewer_call` 里覆盖 `verify()` 级 `options`（最具体者胜）。
 - `acceptance`：验收标准，注入每个 reviewer 提示词；`language`：`cn`/`en`。
 
 ### Reviewer 类型 → kind 映射

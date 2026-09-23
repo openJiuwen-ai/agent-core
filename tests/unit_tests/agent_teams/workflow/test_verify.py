@@ -222,6 +222,25 @@ def test_build_reviewers_missing_type_defaults_to_verifier():
     assert reviewers[0].kind == "verdict"
 
 
+def test_build_reviewers_options_passthrough():
+    """A per-reviewer spec options bag rides through to Reviewer.options (per-model routing)."""
+    reviewers = build_reviewers(
+        "x",
+        [
+            {"type": "verifier", "options": {"model": "flash-mini"}},
+            {"type": "inspector"},
+        ],
+    )
+    assert reviewers[0].options == {"model": "flash-mini"}
+    assert reviewers[1].options is None
+
+
+def test_build_reviewers_non_dict_options_raises():
+    """A malformed options value fails fast instead of breaking later inside agent()."""
+    with pytest.raises(ValueError, match="reviewer options must be a dict"):
+        build_reviewers("x", [{"type": "verifier", "options": "flash-mini"}])
+
+
 def test_verify_malformed_decision_is_undecided_not_pass(tmp_path):
     """A reviewer returning a non-pass/fail decision records a None vote and stays undecided."""
     reviewers = [Reviewer(kind="verdict", prompt="check", label="v")]
