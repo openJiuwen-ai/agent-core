@@ -160,8 +160,8 @@ def test_spec_stall_knobs_validation():
     assert spec.stale_claim_idle_timeout == 180
     assert spec.stale_pending_idle_timeout == 600
 
-    tuned = TeamAgentSpec(**base, stale_claim_idle_timeout=180, stale_pending_idle_timeout=300)
-    assert tuned.stale_claim_idle_timeout == 180
+    tuned = TeamAgentSpec(**base, stale_claim_idle_timeout=90, stale_pending_idle_timeout=300)
+    assert tuned.stale_claim_idle_timeout == 90
     assert tuned.stale_pending_idle_timeout == 300
 
     with pytest.raises(ValueError):

@@ -373,10 +373,10 @@ class TeamAgentSpec(BaseModel):
     stall is escalated to the leader, who can reassign or intervene.
     Measured off the member's process-local idle clock
     (``TeamAgentState.idle_since``), never DB ``updated_at`` — see F_65.
-    Defaults to 120s so the first self-nudge lands inside the relay team
-    stream watchdog window (300s, allowing for the 30s POLL_TASK granularity
-    and round wake-up); busy members (``idle_seconds()`` is ``None``
-    mid-round) are never nudged. Ignored under scheduled dispatch. See F_65.
+    Defaults to 180s so the first self-nudge lands inside the relay team
+    stream watchdog window (300s). With 30s POLL_TASK granularity the worst
+    case is about 210s; busy members (idle_seconds() is None mid-round)
+    are never nudged. Ignored under scheduled dispatch. See F_65.
     """
     stale_pending_idle_timeout: int = 600
     """Autonomous dispatch: seconds the leader may sit idle on unclaimed work.
