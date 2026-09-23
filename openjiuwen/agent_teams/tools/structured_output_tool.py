@@ -7,8 +7,10 @@ The harness has no native structured-output / ``response_format`` mechanism, so
 an agent that must produce schema-conforming output is given this tool with its
 ``ToolCard.input_params`` set to the exact JSON Schema the caller requested. The
 LLM is instructed to finish by calling ``structured_output`` with the result
-object; the call's arguments — validated against the schema by the model's
-tool-use machinery — are captured here for the caller to read back.
+object; ``invoke`` validates the arguments against that schema and captures them
+for the caller to read back. A schema violation raises, so the error
+tool_message flows back to the model for a same-turn correction
+(``StructuredOutputFinishRail`` force-finishes only successful calls).
 
 Used by both swarmflow workers/sessions and tiny agents. One instance is
 constructed per call (the schema differs each time), so the captured value is
@@ -17,6 +19,8 @@ single-use and lives on the instance.
 from __future__ import annotations
 
 from typing import Any, AsyncIterator
+
+import jsonschema
 
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.core.foundation.tool import ToolCard
@@ -72,6 +76,7 @@ class StructuredOutputTool(Tool):
         tool_id: str = "swarmflow.structured_output",
     ) -> None:
         translator = t if t is not None else make_translator("cn")
+        translator = t if t is not None else make_translator("cn")
         super().__init__(
             ToolCard(
                 id=tool_id,
@@ -84,7 +89,14 @@ class StructuredOutputTool(Tool):
         self.called: bool = False
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        """Capture the structured result and acknowledge the submission."""
+        """Validate the submission against the schema, then capture it.
+
+        A schema violation raises ``jsonschema.ValidationError`` instead of
+        acknowledging: the failed call leaves ``captured``/``called`` unset and
+        the error tool_message flows back to the model, which can correct and
+        resubmit within the same turn.
+        """
+        jsonschema.validate(inputs, self.card.input_params)
         self.captured = inputs
         self.called = True
         return ToolOutput(success=True, data={"accepted": True})
@@ -132,4 +144,7 @@ class StructuredOutputFinishRail(AgentRail):
         ctx.request_force_finish({"accepted": True})
 
 
-__all__ = ["StructuredOutputTool", "StructuredOutputFinishRail"]
+__all__ = [
+    "StructuredOutputTool",
+    "StructuredOutputFinishRail",
+]
