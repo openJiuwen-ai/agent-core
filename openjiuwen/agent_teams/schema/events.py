@@ -575,6 +575,27 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
             "rounds into one card xN, pairing started/completed by verify id."
         ),
     )
+    cache_tokens: Optional[int] = Field(
+        default=None,
+        description=(
+            "Prompt-cache-hit tokens on agent_completed (AgentResult.cache_tokens); "
+            "a subset of tokens, reported alongside, never billed twice."
+        ),
+    )
+    token_input: Optional[int] = Field(
+        default=None,
+        description=(
+            "Prompt input tokens on agent_completed (AgentResult.input_tokens); "
+            "display split of tokens, None when the provider reported no split."
+        ),
+    )
+    token_output: Optional[int] = Field(
+        default=None,
+        description=(
+            "Completion output tokens on agent_completed (AgentResult.output_tokens); "
+            "display split of tokens, None when the provider reported no split."
+        ),
+    )
 
 
 class WorktreeCreatedEvent(BaseEventMessage):

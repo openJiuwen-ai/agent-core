@@ -26,6 +26,8 @@ class AgentResult:
     * ``structured`` - a JSON-able object conforming to the schema, when one was.
     * ``tokens``     - tokens this one call consumed, for reporting. The engine
       does **not** accumulate it — see :meth:`AgentBackend.bind_budget`.
+    * ``input_tokens`` / ``output_tokens`` - the prompt / completion split of
+      ``tokens`` for display (``None`` when the provider reported no split).
     * ``skipped``    - the backend declined to answer; the call returns ``None``
       (also how a human turn signals a timeout / no answer).
     """
@@ -33,6 +35,9 @@ class AgentResult:
     text: str | None = None
     structured: Any = None
     tokens: int = 0
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     skipped: bool = False
 
 

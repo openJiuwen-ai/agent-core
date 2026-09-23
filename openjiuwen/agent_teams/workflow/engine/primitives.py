@@ -96,6 +96,10 @@ class _BackendCallResult:
         raw_text:      The LLM's original text reply before coercion — used as
                        ``outcome`` in ``AGENT_COMPLETED`` progress events.
         tokens:        Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip / failure.
+        cache_tokens:  Prompt-cache-hit tokens of this call (``AgentResult.cache_tokens``);
+                       ``None`` when the provider reported none.
+        input_tokens / output_tokens: the prompt / completion split of ``tokens``
+                       for display (``AgentResult.input_tokens`` / ``.output_tokens``).
         attempts:      Attempts actually spent when the call failed — the loop can
                        short-circuit (skip / budget fail-fast) before using all
                        ``rt.retries + 1``; ``None`` when no attempt ran (e.g. a
@@ -107,6 +111,9 @@ class _BackendCallResult:
     error_detail: str | None = None
     raw_text: str | None = None
     tokens: int | None = None
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     attempts: int | None = None
 
 
@@ -407,7 +414,8 @@ def _emit_agent_started(
 def _emit_agent_completed(
     rt, opts: dict, outcome_text: str | None, *, agent_id: str | None = None,
     tokens: int | None = None, budget_snapshot: dict | None = None,
-    nested_phase: str | None = None,
+    nested_phase: str | None = None, cache_tokens: int | None = None,
+    token_input: int | None = None, token_output: int | None = None,
 ) -> None:
     """Emit an AGENT_COMPLETED progress event.
 
@@ -415,6 +423,10 @@ def _emit_agent_completed(
     ``tokens``: per-call tokens from ``AgentResult.tokens`` (``None`` on cache-hit).
     ``budget_snapshot``: frozen ``_budget_snapshot(rt.budget)`` at emit time.
     ``nested_phase``: defaults to ``_wf_display_name`` when inside a sub-workflow.
+    ``cache_tokens``: prompt-cache-hit tokens from ``AgentResult.cache_tokens``
+    (``None`` when the provider reported none; a subset of ``tokens``).
+    ``token_input`` / ``token_output``: the prompt / completion split of
+    ``tokens`` for display (``None`` when the provider reported no split).
     """
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
     rt.current_agent = None
@@ -426,6 +438,9 @@ def _emit_agent_completed(
             outcome=_preview(outcome_text),
             agent_id=agent_id,
             tokens=tokens,
+            cache_tokens=cache_tokens,
+            token_input=token_input,
+            token_output=token_output,
             budget=budget_snapshot,
             workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
@@ -583,6 +598,9 @@ async def agent(
         _emit_agent_completed(
             rt, opts, outcome_text, agent_id=ks,
             tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+            cache_tokens=cached.get("cache_tokens"),
+            token_input=cached.get("token_input"),
+            token_output=cached.get("token_output"),
             budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
@@ -646,6 +664,9 @@ async def agent(
                 raw_text=call_result.raw_text,
                 run_id=rt.run_id,
                 tokens=call_result.tokens,
+                cache_tokens=call_result.cache_tokens,
+                input_tokens=call_result.input_tokens,
+                output_tokens=call_result.output_tokens,
             )
         ),
     )
@@ -653,6 +674,9 @@ async def agent(
     _emit_agent_completed(
         rt, opts, outcome_text, agent_id=ks,
         tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+        cache_tokens=call_result.cache_tokens,
+        token_input=call_result.input_tokens,
+        token_output=call_result.output_tokens,
     )
     return call_result.result
 
@@ -768,7 +792,10 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             try:
                 coerced = coerce(res.structured, json_schema, model)
                 return _BackendCallResult(
-                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens
+                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens,
+                    cache_tokens=res.cache_tokens,
+                    input_tokens=res.input_tokens,
+                    output_tokens=res.output_tokens,
                 )
             except Exception as e:  # validation failure -> retry
                 last_err = e
@@ -778,7 +805,10 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 )
                 continue
         return _BackendCallResult(
-            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens
+            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens,
+            cache_tokens=res.cache_tokens,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
@@ -808,6 +838,9 @@ class _JournalRecordInput:
     raw_text: str | None = None
     run_id: str | None = None
     tokens: int | None = None
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def _make_record(spec: _JournalRecordInput) -> dict:
@@ -824,6 +857,9 @@ def _make_record(spec: _JournalRecordInput) -> dict:
         "sig": spec.sig,
         "run_id": spec.run_id,
         "tokens": spec.tokens,
+        "cache_tokens": spec.cache_tokens,
+        "token_input": spec.input_tokens,
+        "token_output": spec.output_tokens,
         "label": spec.opts.get("label"),
         "phase": spec.opts.get("phase"),
         "kind": kind,
@@ -1308,6 +1344,9 @@ class AgentSession:
                 _emit_agent_completed(
                     rt, opts, outcome_text, agent_id=ks,
                     tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+                    cache_tokens=cached.get("cache_tokens"),
+                    token_input=cached.get("token_input"),
+                    token_output=cached.get("token_output"),
                     budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
@@ -1355,6 +1394,9 @@ class AgentSession:
                         raw_text=call_result.raw_text,
                         run_id=rt.run_id,
                         tokens=call_result.tokens,
+                        cache_tokens=call_result.cache_tokens,
+                        input_tokens=call_result.input_tokens,
+                        output_tokens=call_result.output_tokens,
                     )
                 ),
             )
@@ -1363,6 +1405,9 @@ class AgentSession:
             _emit_agent_completed(
                 rt, opts, outcome_text, agent_id=ks,
                 tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+                cache_tokens=call_result.cache_tokens,
+                token_input=call_result.input_tokens,
+                token_output=call_result.output_tokens,
             )
             return None if notify else result
         finally:

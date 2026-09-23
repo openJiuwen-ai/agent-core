@@ -810,6 +810,9 @@ class AvatarSessionManager:
         submit: StructuredOutputTool | None = None
         turn_prompt = prompt
         tokens_before = state.budget_rail.call_tokens
+        cache_before = state.budget_rail.call_cache_tokens
+        input_before = state.budget_rail.call_input_tokens
+        output_before = state.budget_rail.call_output_tokens
         if schema_json is not None:
             # Mount the capture tool only for this turn; the harness is IDLE
             # between turns so add/remove is safe. The ability manager owner-
@@ -828,6 +831,9 @@ class AvatarSessionManager:
 
         state.turns_executed += 1
         turn_tokens = state.budget_rail.call_tokens - tokens_before
+        turn_cache_tokens = state.budget_rail.call_cache_tokens - cache_before
+        turn_input = state.budget_rail.call_input_tokens - input_before
+        turn_output = state.budget_rail.call_output_tokens - output_before
 
         try:
             self._raise_on_interrupt_or_fail(state, result)
@@ -850,9 +856,18 @@ class AvatarSessionManager:
                 text=text,
                 structured=submit.captured,
                 tokens=turn_tokens,
+                cache_tokens=turn_cache_tokens or None,
+                input_tokens=turn_input or None,
+                output_tokens=turn_output or None,
             )
         text = _output_text(result)
-        return AgentResult(text=text, tokens=turn_tokens)
+        return AgentResult(
+            text=text,
+            tokens=turn_tokens,
+            cache_tokens=turn_cache_tokens or None,
+            input_tokens=turn_input or None,
+            output_tokens=turn_output or None,
+        )
 
     @staticmethod
     async def _drive_round(state: _SessionState, prompt: str) -> dict | None:

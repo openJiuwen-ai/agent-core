@@ -142,6 +142,12 @@ class WorkflowProgressEvent:
       ``VERIFY_COMPLETED``), the verify analog of an agent node's ``agent_id``:
       the structural call position. Concurrent same-label rounds stay
       distinct by it; a consumer pairs started/completed by id, never by label.
+    * ``cache_tokens`` — prompt-cache-hit tokens of the call
+      (``AGENT_COMPLETED``), from ``AgentResult.cache_tokens``; ``None`` when
+      the provider reported none. A subset of ``tokens``, never billed twice.
+    * ``token_input`` / ``token_output`` — the prompt / completion split of
+      ``tokens`` for display (``AGENT_COMPLETED``); ``None`` when the provider
+      reported no split.
     """
 
     kind: str
@@ -175,6 +181,9 @@ class WorkflowProgressEvent:
     verify_reviewer_labels: list[str] | None = None
     verify_reviewer_roles: list[str | None] | None = None
     verify_id: str | None = None
+    cache_tokens: int | None = None
+    token_input: int | None = None
+    token_output: int | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has
