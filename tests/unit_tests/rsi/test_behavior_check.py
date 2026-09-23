@@ -1,4 +1,3 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Behavior checks are paired observations, never substitute task scores."""
 
@@ -56,6 +55,65 @@ def test_task_contract_alone_is_not_behavior_evidence():
         evidence,
     )
     assert result["candidate_check"] == "unknown"
+
+
+def test_normalized_trace_quotes_use_decoded_text(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    candidate_dir = tmp_path / "candidate"
+    for root, output in ((source_dir, "Max iterations reached"), (candidate_dir, "Reviewed int8_t sum")):
+        (root / "judge").mkdir(parents=True)
+        (root / "result.json").write_text("{}", encoding="utf-8")
+        (root / "judge" / "normalized_trace.json").write_text(
+            json.dumps({"traces": [{"messages": [{"content": {"output": output + "\nDone"}}]}]}),
+            encoding="utf-8",
+        )
+
+    def read_cases(parent):
+        root = source_dir if "source" in parent else candidate_dir
+        return [SimpleNamespace(
+            case_id="case", input="Review the code", response="", result_path=str(root / "result.json"),
+            evaluation_metadata={},
+        )]
+
+    monkeypatch.setattr(module.CaseReader, "read_case_inputs", read_cases)
+    evidence = {
+        "source": module._evidence(str(source_dir / "eval_ref.yaml"), "case"),
+        "candidate": module._evidence(str(candidate_dir / "eval_ref.yaml"), "case"),
+    }
+    trace_key = "judge/normalized_trace.fields.txt"
+    assert trace_key in evidence["source"]["files"]
+    assert "judge/normalized_trace.json" not in evidence["source"]["files"]
+    assert "$.traces[0].messages[0].content.output: Max iterations reached\nDone" in (
+        evidence["source"]["files"][trace_key]
+    )
+    result = module._validate_observation({
+        "source_check": "no", "candidate_check": "yes", "behavior_changed": "yes",
+        "evidence": [
+            {"side": "source", "file": trace_key, "quote": "Max iterations reached\nDone"},
+            {"side": "candidate", "file": trace_key, "quote": "Reviewed int8_t sum\nDone"},
+        ],
+    }, evidence)
+    assert (result["source_check"], result["candidate_check"], result["behavior_changed"]) == (
+        "no", "yes", "yes",
+    )
+    result = module._validate_observation({
+        "candidate_check": "yes",
+        "evidence": [{"side": "candidate", "file": trace_key, "quote": "Reviewed int64_t sum\nDone"}],
+    }, evidence)
+    assert result["candidate_check"] == "unknown"
+
+
+def test_malformed_normalized_trace_is_omitted_without_using_escaped_text(tmp_path, monkeypatch):
+    (tmp_path / "judge").mkdir()
+    (tmp_path / "result.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "judge" / "normalized_trace.json").write_text('{"messages": [', encoding="utf-8")
+    monkeypatch.setattr(module.CaseReader, "read_case_inputs", lambda _: [SimpleNamespace(
+        case_id="case", input="Review the code", response="", result_path=str(tmp_path / "result.json"),
+        evaluation_metadata={},
+    )])
+    evidence = module._evidence(str(tmp_path / "eval_ref.yaml"), "case")
+    assert "judge/normalized_trace.fields.txt" not in evidence["files"]
+    assert "normalized_trace.json" in evidence["omitted"]
 
 
 @pytest.mark.parametrize("locations,expected", [

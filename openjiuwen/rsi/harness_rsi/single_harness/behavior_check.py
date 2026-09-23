@@ -1,4 +1,3 @@
-# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Bounded paired observation of an intervention, independent of task scoring.
 
@@ -42,6 +41,27 @@ automatically under judge/normalized_trace.json. Do not paraphrase quotations.
 _TEXT_SUFFIXES = {".py", ".json", ".jsonl", ".md", ".txt", ".yaml", ".yml", ".csv", ".diff"}
 
 
+def _readable_trace(raw: str) -> str:
+    """Expose decoded trace values so citations do not depend on JSON escaping."""
+    trace = json.loads(raw)
+    lines: list[str] = []
+
+    def visit(value: Any, path: str) -> None:
+        if isinstance(value, dict):
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+        elif isinstance(value, str):
+            lines.append(f"{path}: {value}")
+        else:
+            lines.append(f"{path}: {json.dumps(value, ensure_ascii=False)}")
+
+    visit(trace, "$")
+    return "\n".join(lines)
+
+
 def _evidence(eval_ref: str, case_id: str) -> dict[str, Any]:
     try:
         rows = CaseReader.read_case_inputs(str(Path(eval_ref).parent / "cases"))
@@ -68,11 +88,17 @@ def _evidence(eval_ref: str, case_id: str) -> dict[str, Any]:
                 omitted.append(name)
                 continue
             text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeError):
+            if name == "judge/normalized_trace.json":
+                text = _readable_trace(text)
+                name = "judge/normalized_trace.fields.txt"
+        except (OSError, UnicodeError, ValueError, TypeError):
             omitted.append(path.name)
             continue
+        if len(text.encode("utf-8")) > budget:
+            text = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+            omitted.append(f"{name}: truncated")
         files[name] = text
-        budget -= size
+        budget -= len(text.encode("utf-8"))
     for name, value in list(files.items()):
         if len(value) > 120_000:
             files[name] = value[:120_000]
