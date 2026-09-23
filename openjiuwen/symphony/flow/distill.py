@@ -226,15 +226,15 @@ def group_by_structure(
 
     groups: dict[str, StructureGroup] = {}
     for record in records:
-        success_edges = sorted(
-            {
-                _edge_key(edge)
-                for edge in record.graph.get("edges") or []
-                if bool((edge.get("metadata") or {}).get("success"))
-                and str(edge.get("source") or "")
-                and str(edge.get("target") or "")
-            }
-        )
+        success_edge_keys: set[tuple[str, str, str]] = set()
+        for edge in record.graph.get("edges") or []:
+            metadata = edge.get("metadata") or {}
+            if not metadata.get("success"):
+                continue
+            if not (edge.get("source") or "") or not (edge.get("target") or ""):
+                continue
+            success_edge_keys.add(_edge_key(edge))
+        success_edges = sorted(success_edge_keys)
         if not success_edges:
             continue
         record_stats = {edge: EdgeStats(support=1, success=1) for edge in success_edges}
@@ -417,7 +417,8 @@ def resolve_status_grade(
     min_pack_success_rate: float,
 ) -> tuple[str, str]:
     """单阈值判级：成功次数与 pack 成功率同时达标 → verified（可弹安装
-    询问），否则 draft。candidate 中间态没有独立消费方，不再产出。"""
+    询问），否则 draft。candidate 中间态没有独立消费方，不再产出。
+    """
 
     success_count = int(quality.get("success_count") or 0)
     pack_success_rate = float(quality.get("pack_success_rate") or 0.0)
