@@ -1,27 +1,10 @@
-"""Cheap, local grounding in the OpenJiuwen SDK surface for the coding agent.
+"""Ground OpenJiuwen references for the coding agent.
 
-Two layers:
-
-Free map — docs/en/SUMMARY.md, giving the agent a lightweight overview of
-available capabilities without search.
-Best-effort filter — gather_reference_excerpts finds a few candidate files via
-word-boundary keyword overlap in agent-core-rsi's real docs/ directory (see
-ASSETS_ROOT). It also flags files that appear to define reusable capabilities
-(Tool/Rail/Skill/Agent) via is_capability. code_implementation uses this to
-distinguish "reuse this" from "nothing fits, write plain code." This avoids
-forcing loosely-related OpenJiuwen imports that can produce worse code; see
-docs/code_implementation_design.md.
-
-This is intentionally not a full index. The coding agent has read/grep/glob
-tools scoped to the same docs/ root (OpenJiuwenReferenceRail), so it can
-inspect promising files on demand rather than relying on the initial filter
-alone.
-
-No example-code corpus: this used to also search a vendored
-assets/openjiuwen/examples/ snapshot, but that was never migrated (see
-docs/agent_core_rsi_migration_risks.md) and agent-core-rsi has no equivalent
-single always-present examples/ directory the way it does for docs/ — dropped
-rather than pointed at something unreliable.
+``gather_reference_excerpts`` is the older docs-only keyword filter. The
+coding agent discovers APIs itself with ``openjiuwen_ref_search`` and
+``openjiuwen_ref_read_file``. ``reference_trace_ok`` checks that a trace
+either read a definition and an import, or searched twice and recorded that
+nothing reusable was found.
 """
 
 from __future__ import annotations
@@ -171,3 +154,53 @@ def gather_reference_excerpts(
 
     scored.sort(key=lambda hit: hit[0], reverse=True)
     return [(rel, excerpt, is_cap) for _, rel, excerpt, is_cap in scored[:max_hits]]
+
+
+def reference_trace_ok(events: list[dict], assumptions: str = "") -> bool:
+    """True when source was explored, or two source searches found nothing reusable.
+
+    A passing explore trace has ``openjiuwen_ref_search`` and at least two
+    distinct ``source/openjiuwen/...`` reads (the definition and an import).
+    A from-scratch trace has two source searches and an assumptions note that
+    nothing reusable was found. Reading only ``SUMMARY.md`` is not enough.
+    """
+    source_searches = sum(1 for event in events if _is_source_search(event))
+    source_reads = {
+        path
+        for event in events
+        for path in _event_paths(event)
+        if path.startswith("source/openjiuwen/")
+    }
+    explored = source_searches >= 1 and len(source_reads) >= 2
+    gave_up = source_searches >= 2 and "nothing reusable" in assumptions.lower()
+    return explored or gave_up
+
+
+def _is_source_search(event: dict) -> bool:
+    name = str(event.get("name") or event.get("tool") or "")
+    if name != "openjiuwen_ref_search":
+        return False
+    scopes = event.get("scopes")
+    data = event.get("data")
+    if scopes is None and isinstance(data, dict):
+        scopes = data.get("scopes")
+    if scopes in (None, "", [], ()):
+        return True
+    if isinstance(scopes, str):
+        scopes = [scopes]
+    return "source" in {str(item) for item in scopes}
+
+
+def _event_paths(event: dict) -> list[str]:
+    paths: list[str] = []
+    for key in ("path", "file_path", "virtual_path"):
+        value = event.get(key)
+        if value:
+            paths.append(str(value).replace("\\", "/"))
+    data = event.get("data")
+    if isinstance(data, dict):
+        for key in ("path", "file_path", "virtual_path"):
+            value = data.get(key)
+            if value:
+                paths.append(str(value).replace("\\", "/"))
+    return paths

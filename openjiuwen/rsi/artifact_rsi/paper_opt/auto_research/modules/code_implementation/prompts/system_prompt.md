@@ -34,32 +34,36 @@ instruction is missing Current Experiment / method / metric detail.
 ## OpenJiuwen SDK reference tools
 
 Beyond your normal read/write/grep tools (scoped to your own workspace), you
-have three read-only tools scoped to OpenJiuwen's own reference
-documentation: `openjiuwen_ref_read_file`, `openjiuwen_ref_glob`,
-`openjiuwen_ref_list_files`. There is no content-search tool in this set — use
-`openjiuwen_ref_glob` to find candidate files by name (e.g. `**/*ReAct*`),
-then `openjiuwen_ref_read_file` to read them. Pass paths relative to the docs
-root (for example `en/SUMMARY.md` or `en/Basic Functions/Connect to LLM.md`).
-Legacy `docs/...` and `assets/openjiuwen/...`-prefixed forms are also
-accepted and rewritten; do not pass a workspace-relative copy of any such
-prefix — the sandbox is the real OpenJiuwen docs directory, not your coding
-workspace. **Do not spawn a subagent to read the SDK.** Subagents cannot use
-`openjiuwen_ref_*` and cannot see the reference docs; you (the parent) must
-call these tools directly. Use them whenever you're about to write an
-OpenJiuwen SDK call you're not certain of, rather than guessing at API shape
-— the task message may also point at a few possibly-relevant files as a
-starting hint, but treat that as a hint, not a substitute for reading the
-file yourself.
+have read-only tools for OpenJiuwen itself: `openjiuwen_ref_search`,
+`openjiuwen_ref_read_file`, `openjiuwen_ref_glob`, and
+`openjiuwen_ref_list_files`. Discover APIs from source. Do not start at
+`en/SUMMARY.md`.
 
-## Reuse before building
+1. When the instruction names a symbol, search that symbol with
+   `openjiuwen_ref_search` and `scopes: ["source"]`. When it does not, infer one short query
+   from the required behavior. Do not paste the whole task into one query.
+2. Open the `public-export` hit with `openjiuwen_ref_read_file` on
+   `source/openjiuwen/...`. Read the signature, return value, and imports.
+   A public export is the API to call. An implementation detail explains
+   behavior and is not copied when a public export is in the hits. Then
+   search and read each imported name until the constructor, invoke method,
+   and result location are known.
+3. If the signature does not show how to unpack a result, open one in-repo
+   caller under `source/openjiuwen/...` or `examples/...`. An example is a
+   usage sample, not a higher authority than the definition.
+4. On an empty source result, search one smaller reusable OpenJiuwen piece
+   (a public model client rather than a full agent, a single tool rather
+   than a workflow) and use only that piece. Do not invent a class from the
+   task wording.
+5. If that also misses, or the public export does not fit, write plain Python.
+   In `ASSUMPTIONS.md`, name the symbol you reused, or write that nothing reusable was found.
 
-Before writing a new Tool/Rail/Agent subclass from scratch, check whether the
-pipeline's own reusable toolbox already has something that fits. Current
-contents of `auto_research/extensions/registry.py`:
-
-```python
-{extensions_registry}
-```
+`openjiuwen_ref_glob` and `openjiuwen_ref_list_files` locate a file once the
+package directory is known. They do not replace a symbol search. Pass virtual
+paths to read: `source/openjiuwen/...`, `examples/...`, or `docs/...`. After
+a smoke error names a missing attribute, search that exact name and read it
+before editing. **Do not spawn a subagent to read the SDK.** Subagents cannot
+use `openjiuwen_ref_*`.
 
 ## Authority order
 
