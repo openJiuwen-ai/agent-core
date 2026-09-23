@@ -72,6 +72,11 @@ _API_REQUEST_EVENT = "claude_code.api_request"
 # The id both body events of one model call carry: what pairs a request log
 # with the response log that answers it.
 _REQUEST_BODY_ID = "request_body_id"
+# What the CLI made a call for. The conversation's own calls and the ones the
+# CLI runs on its own behalf (naming a session, and anything added later) both
+# report here, on the span under one name and on the logs under the other.
+_SPAN_QUERY_SOURCE = "query_source_safe"
+_LOG_QUERY_SOURCE = "query_source"
 # How far a log may sit outside a request span's window and still belong to
 # it. The CLI logs the response body and its accounting microseconds before
 # it closes the span, but the three travel in different OTLP batches, so the
@@ -135,9 +140,23 @@ class _NativeRequestSpan:
     end_ns: int
     attributes: dict[str, Any]
 
-    def covers(self, time_ns: int) -> bool:
-        """Report whether a log written at ``time_ns`` belongs to this span."""
+    @property
+    def query_source(self) -> str:
+        """Return what the CLI made this call for, as the span states it."""
+        return str(self.attributes.get(_SPAN_QUERY_SOURCE) or "")
+
+    def covers(self, time_ns: int, query_source: str) -> bool:
+        """Report whether a log written at ``time_ns`` belongs to this span.
+
+        The window alone does not decide it. The CLI runs the conversation's
+        calls one at a time, but it also runs calls of its own alongside them
+        — naming a new session is one — and those overlap, so a call must not
+        claim a window opened for something the CLI asked on its own behalf.
+        Both sides state what they were for, so that is what is compared.
+        """
         if self.start_ns <= 0 or self.end_ns < self.start_ns:
+            return False
+        if query_source and self.query_source and query_source != self.query_source:
             return False
         return self.start_ns <= time_ns <= self.end_ns + _UNKEYED_MATCH_WINDOW_NS
 
@@ -465,7 +484,7 @@ class ClaudeRequestObserver:
             return request_id in self._spans
         if not self._timed_spans_seen:
             return True
-        return self._covering_span_index(response_event.time_ns) is not None
+        return self._covering_span_index(response_event.time_ns, _query_source(response_event)) is not None
 
     async def _release_items(self, *, force: bool = False) -> None:
         while self._held:
@@ -720,10 +739,10 @@ class ClaudeRequestObserver:
         while len(self._threads) > _THREAD_HISTORY_LIMIT:
             self._threads.pop(next(iter(self._threads)))
 
-    def _covering_span_index(self, time_ns: int) -> int | None:
+    def _covering_span_index(self, time_ns: int, query_source: str) -> int | None:
         """Return the index of the unkeyed span covering a log written then."""
         for index, span in enumerate(self._timed_spans):
-            if span.covers(time_ns):
+            if span.covers(time_ns, query_source):
                 return index
         return None
 
@@ -732,20 +751,24 @@ class ClaudeRequestObserver:
 
         A build stating the API request id on the span and on the response
         body has said which two belong together. Recent builds state it on
-        neither, so the span is found by its window: the CLI closes it just
-        after it logs the body, and its calls run one at a time, so exactly
-        one window covers that log.
+        neither, so the span is found by the window it opened for the same
+        kind of call: the CLI closes it just after it logs the body, and the
+        conversation's calls run one at a time.
         """
         request_id = str(response_event.attributes.get("request_id") or "")
         if request_id:
             return self._spans.pop(request_id, None)
-        index = self._covering_span_index(response_event.time_ns)
+        query_source = _query_source(response_event)
+        index = self._covering_span_index(response_event.time_ns, query_source)
         if index is None:
             return None
         span = self._timed_spans[index]
-        # Spans before it answered calls that logged no body — an attempt the
-        # CLI retried — and no later response can belong to them.
-        del self._timed_spans[: index + 1]
+        # Earlier spans of this same kind answered calls that logged no body —
+        # an attempt the CLI retried — and no later response can belong to
+        # them. One opened for a different kind of call is still waiting for a
+        # reply of its own, so it stays.
+        other_kinds = [kept for kept in self._timed_spans[:index] if kept.query_source != span.query_source]
+        self._timed_spans = other_kinds + self._timed_spans[index + 1 :]
         return span
 
     def _take_accounting(self, response_event: _BodyEvent) -> dict[str, Any]:
@@ -753,14 +776,20 @@ class ClaudeRequestObserver:
 
         The ``claude_code.api_request`` log is written as the call finishes,
         in the same millisecond as the response body, so an unkeyed one is
-        paired with the body it sits closest to.
+        paired with the body it sits closest to — among those written for the
+        same kind of call, since the CLI's own calls finish alongside the
+        conversation's and would otherwise be the nearer one.
         """
         request_id = str(response_event.attributes.get("request_id") or "")
         if request_id:
             return self._api_requests.pop(request_id, {})
+        query_source = _query_source(response_event)
         chosen: int | None = None
         closest = _UNKEYED_MATCH_WINDOW_NS
-        for index, (time_ns, _attributes) in enumerate(self._timed_api_requests):
+        for index, (time_ns, attributes) in enumerate(self._timed_api_requests):
+            stated = str(attributes.get(_LOG_QUERY_SOURCE) or "")
+            if query_source and stated and stated != query_source:
+                continue
             distance = abs(time_ns - response_event.time_ns)
             if distance <= closest:
                 closest = distance
@@ -974,6 +1003,11 @@ def _withheld_reasoning(block_id: str) -> ContentBlock:
         content=_REDACTED_CONTENT,
         data={"redacted": True},
     )
+
+
+def _query_source(event: _BodyEvent) -> str:
+    """Return what the CLI made the call behind this body log for."""
+    return str(event.attributes.get(_LOG_QUERY_SOURCE) or "")
 
 
 def _system_instructions(system: Any) -> tuple[tuple[ContentBlock, ...], str]:

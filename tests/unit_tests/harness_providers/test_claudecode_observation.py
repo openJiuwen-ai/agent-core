@@ -70,12 +70,17 @@ def _body_event(
     time_ns: int,
     request_id: str | None = None,
     request_body_id: str | None = None,
+    query_source: str = "sdk",
 ) -> None:
-    """Write one body file where the CLI would and publish its log event."""
+    """Write one body file where the CLI would and publish its log event.
+
+    ``query_source`` rides on every body log, as it does on a real one: it is
+    what the CLI made the call for, and ``sdk`` is the conversation's own.
+    """
     body_dir = Path(client.options.env["OTEL_LOG_RAW_API_BODIES"].removeprefix("file:"))
     reference = f"{uuid.uuid4().hex}.json"
     (body_dir / reference).write_text(json.dumps(body), encoding="utf-8")
-    attributes: dict[str, Any] = {"body_ref": reference}
+    attributes: dict[str, Any] = {"body_ref": reference, "query_source": query_source}
     if request_id is not None:
         attributes["request_id"] = request_id
     if request_body_id is not None:
@@ -140,17 +145,19 @@ def _api_request_event(
     request_id: str | None = None,
     time_ns: int = 1_002_100_000_000,
     cost_usd_micros: int = 33228,
+    query_source: str = "sdk",
 ) -> None:
     """Publish the CLI's own accounting of one model request.
 
     Builds that name the request keep ``request_id``; recent ones state none
-    and are paired with their response body by ``time_ns``.
+    and are paired with their response body by ``time_ns``. ``query_source``
+    is what the CLI made the call for — ``sdk`` is the conversation's own.
     """
     attributes: dict[str, Any] = {
         "cost_usd_micros": cost_usd_micros,
         "effort": "high",
         "speed": "normal",
-        "query_source": "sdk",
+        "query_source": query_source,
     }
     if request_id is not None:
         attributes["request_id"] = request_id
@@ -173,13 +180,22 @@ def _request_span(
     end_ns: int,
     request_id: str | None = None,
     ttft_ms: int = 400,
+    query_source: str = "sdk",
 ) -> None:
     """Publish the CLI's own per-request span.
 
-    Recent builds state no request id on it, leaving the window it covers as
-    the only thing that ties it to a response body.
+    Recent builds state no request id on it, leaving the window it covers and
+    what the call was for as the only things that tie it to a response body.
+    The span names the latter ``query_source_safe``; the logs name it
+    ``query_source``.
     """
-    attributes: dict[str, Any] = {"ttft_ms": ttft_ms, "attempt": 1, "speed": "normal", "success": True}
+    attributes: dict[str, Any] = {
+        "ttft_ms": ttft_ms,
+        "attempt": 1,
+        "speed": "normal",
+        "success": True,
+        "query_source_safe": query_source,
+    }
     if request_id is not None:
         attributes["request_id"] = request_id
     receiver.publish(
@@ -621,6 +637,24 @@ async def test_request_spans_stating_no_request_id_are_paired_by_their_window(
             time_ns=1_002_000_000_000,
             request_body_id="body-1",
         )
+        # The CLI names the session on its own behalf while the conversation's
+        # first call is in flight: an earlier-starting window that also covers
+        # this body log, and accounting that lands nearer to it.
+        _request_span(
+            receiver,
+            client,
+            start_ns=999_900_000_000,
+            end_ns=1_002_400_000_000,
+            ttft_ms=120,
+            query_source="generate_session_title",
+        )
+        _api_request_event(
+            receiver,
+            client,
+            time_ns=1_002_020_000_000,
+            cost_usd_micros=111,
+            query_source="generate_session_title",
+        )
         _request_span(receiver, client, start_ns=1_000_100_000_000, end_ns=1_001_900_000_000, ttft_ms=400)
         _api_request_event(receiver, client, time_ns=1_002_050_000_000, cost_usd_micros=33228)
 
@@ -719,7 +753,8 @@ async def test_request_spans_stating_no_request_id_are_paired_by_their_window(
         [request.time_to_first_chunk for request in requests],
         [request.cost.micros if request.cost is not None else None for request in requests],
     )
-    # Each call carries its own span window, not the previous call's.
+    # Each call carries its own span window, not the previous call's — and not
+    # the window of a call the CLI ran on its own behalf alongside it.
     assert (first.started_at, first.ended_at) == (1000.1, 1001.9)
     assert (second.started_at, second.ended_at) == (1003.1, 1004.9)
     assert (first.time_to_first_chunk, second.time_to_first_chunk) == (0.4, 0.9)

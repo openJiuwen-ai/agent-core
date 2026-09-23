@@ -70,12 +70,17 @@ Design records: spec `openjiuwen/harness/docs/specs/S_19_harness-providers.md`, 
    carries the **content**, the other the **facts**, and where the CLI states
    a fact that statement wins over one derived from the stream. Claude Code:
    request-body logs plus its tool/request telemetry, both through the shared
-   loopback receiver; its 2.1 builds name no API request id on the request
-   span, on the accounting log or on the body logs, so a span is claimed by
-   the response body its window covers and the accounting by the body it sits
-   closest to — a build that does name one is still paired by that id, and
+   loopback receiver; against a third-party endpoint it names no API request
+   id on the request span, on the accounting log or on the body logs, so a
+   span is claimed by the response body its window covers **and whose
+   `query_source` it shares**, and the accounting by the nearest body of that
+   same source — a build that does name an id is still paired by it, and
    pairing by arrival order instead would hand each call the previous call's
-   first-token latency and cost. Codex: the rollout trace (`CODEX_ROLLOUT_TRACE_ROOT`) for
+   first-token latency and cost. The source is what keeps the windows apart:
+   the CLI runs calls of its own alongside the conversation's (naming a
+   session is one), they overlap, and a conversation call that claimed such a
+   window reported a start time before its own request and made the turn's
+   inferences read out of order. Codex: the rollout trace (`CODEX_ROLLOUT_TRACE_ROOT`) for
    bodies, because its telemetry carries none, plus that telemetry's OTLP *log*
    events for tool arguments/output/duration/success/truncation, approval
    decisions and the session's resolved settings. Codex's endpoint is used
