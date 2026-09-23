@@ -211,6 +211,24 @@ class LegacyReActAgent(BaseAgent):
                 "output": "Exceeded max iteration",
                 "result_type": "error"
             }
+        except asyncio.CancelledError:
+            context = self.context_engine.get_context(session_id=session.get_session_id())
+            if context is not None:
+                messages = context.get_messages(with_history=False)
+                for index in range(len(messages) - 1, -1, -1):
+                    message = messages[index]
+                    if isinstance(message, AssistantMessage) and message.tool_calls:
+                        expected_ids = {tool_call.id for tool_call in message.tool_calls}
+                        received_ids = {
+                            tool_message.tool_call_id for tool_message in messages[index + 1:]
+                            if isinstance(tool_message, ToolMessage)
+                        }
+                        if not expected_ids.issubset(received_ids):
+                            # Drop the interrupted call and any partial results together.
+                            context.set_messages(messages[:index], with_history=False)
+                        break
+            await asyncio.shield(self.context_engine.save_contexts(session))
+            raise
         finally:
             if session_created:
                 await session.close_stream()
