@@ -7,7 +7,7 @@ from __future__ import annotations
 import io
 import tarfile
 import uuid
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterable, Set, Tuple
 
 from openjiuwen.agent_evolving.utils import parse_top_level_frontmatter
@@ -98,22 +98,41 @@ def pack_skill_directory(
     return buffer.getvalue()
 
 
+def _is_unsafe_arcname(name: str) -> bool:
+    """Return True if a tar entry name is absolute or contains a ``..`` segment."""
+    path = PurePosixPath(name)
+    return path.is_absolute() or ".." in path.parts
+
+
 def _safe_extract_tar(archive: tarfile.TarFile, dest_dir: Path) -> None:
     """Extract ``archive`` into ``dest_dir``, rejecting unsafe members.
 
     Fallback for interpreters without ``tarfile.data_filter`` (Python < 3.12),
-    where ``extractall`` does not sanitize member names and would follow ``..``
-    or absolute paths outside ``dest_dir``.
+    where ``extractall`` does not sanitize member names and would follow ``..``,
+    absolute paths or escaping links outside ``dest_dir``.
     """
-    root = dest_dir.resolve()
+    root = dest_dir.resolve(strict=True)
+    if not root.is_dir():
+        raise NotADirectoryError(dest_dir)
+
     for member in archive.getmembers():
+        if _is_unsafe_arcname(member.name):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+
         member_path = (root / member.name).resolve()
         if not member_path.is_relative_to(root):
             raise ValueError(f"Unsafe tar member path: {member.name}")
+
         if member.issym() or member.islnk():
-            link_target = (member_path.parent / member.linkname).resolve()
+            if PurePosixPath(member.linkname).is_absolute():
+                raise ValueError(f"Unsafe tar link target: {member.linkname}")
+            # Symlink targets resolve relative to the link's own directory,
+            # while hard link targets are relative to the archive root.
+            link_base = member_path.parent if member.issym() else root
+            link_target = (link_base / member.linkname).resolve()
             if not link_target.is_relative_to(root):
                 raise ValueError(f"Unsafe tar link target: {member.linkname}")
+
     archive.extractall(root)
 
 
