@@ -170,6 +170,7 @@ def build_default_logger_config(logging_config: Dict[str, Any], log_type: str) -
             "backup_file_pattern",
             DEFAULT_INNER_LOG_CONFIG.get("backup_file_pattern"),
         ),
+        "propagate": logging_config.get("propagate", DEFAULT_INNER_LOG_CONFIG.get("propagate", True)),
     }
 
     level_override = _get_logger_level_override(logging_config, log_type)

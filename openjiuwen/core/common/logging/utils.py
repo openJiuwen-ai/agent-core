@@ -21,25 +21,66 @@ from openjiuwen.core.common.security.path_checker import is_sensitive_path
 
 # Use ContextVar instead of threading.local() to support async environments
 # ContextVar maintains context isolation in async call chains, each coroutine has independent context
-_trace_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default="default_trace_id")
+
+# Internal sentinel marking "no trace_id set". The contextvar keeps this value when
+# unset, but it must NOT leak into formal log output — the fixed outer layer requires an
+# empty slot when there is no request context. ContextFilter normalizes it at the
+# output boundary (see default/default_impl.py).
+_DEFAULT_TRACE_ID = "default_trace_id"
+_trace_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("trace_id", default=_DEFAULT_TRACE_ID)
 _member_id_context: contextvars.ContextVar[str] = contextvars.ContextVar("member_id", default="")
 
 
-def set_session_id(trace_id: str = "default_trace_id") -> None:
+def set_session_id(trace_id: str = _DEFAULT_TRACE_ID) -> contextvars.Token[str]:
     """
-    Set trace_id in current context
+    Set trace_id in current context and return a reset token.
 
     In async environments, this sets trace_id in current coroutine and its child coroutines.
     Each coroutine has an independent context copy that does not interfere with each other.
 
+    The returned token must be passed to :func:`reset_session_id` to restore the
+    previous value. Callers that ignore the return value keep the previous behavior
+    (the value is set but cannot be precisely reset); for new code, always pair
+    ``set`` with ``reset`` in a ``finally`` block.
+
     Args:
         trace_id: Trace ID for log correlation and tracing
+
+    Returns:
+        ``contextvars.Token`` that can be passed to :func:`reset_session_id` to
+        restore the value bound before this call.
 
     Note:
         Function name remains "thread_session" for backward compatibility,
         but actual implementation uses contextvars to support async environments.
     """
-    _trace_id_context.set(trace_id)
+    return _trace_id_context.set(trace_id)
+
+
+def reset_session_id(token: contextvars.Token[str]) -> None:
+    """Reset trace_id to the value bound before the matching :func:`set_session_id`.
+
+    The token must come from the same :class:`~contextvars.ContextVar`
+    (``_trace_id_context``) and the same :class:`~contextvars.Context` that
+    produced it. Reset must happen exactly once per token, in LIFO order
+    relative to other ``set``/``reset`` pairs.
+
+    Caller-contract violations are not caught here — they propagate from the stdlib:
+
+    - Reusing an already-reset token raises ``RuntimeError``.
+    - Passing a token from a different ``ContextVar`` or a different ``Context``
+      raises ``ValueError``.
+
+    Non-LIFO reset (resetting an outer token before an inner one) is **not**
+    detected by ``contextvars`` and is therefore undefined caller behavior;
+    do not rely on it.
+
+    Note:
+        This is the logging-layer trace_id API, distinct from
+        :mod:`openjiuwen.agent_teams.context`'s same-named session API
+        (different package, different contextvar, tokens not interchangeable).
+    """
+    _trace_id_context.reset(token)
 
 
 def get_session_id() -> Optional[str]:
@@ -60,7 +101,7 @@ def get_session_id() -> Optional[str]:
         return _trace_id_context.get()
     except LookupError:
         # If no value in context, return default value
-        return "default_trace_id"
+        return _DEFAULT_TRACE_ID
 
 
 def set_member_id(member_id: str) -> None:
