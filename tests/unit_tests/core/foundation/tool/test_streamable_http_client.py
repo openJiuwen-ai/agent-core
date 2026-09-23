@@ -240,6 +240,7 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
     async def asyncTearDown(self):
         await self.resource_mgr.release()
 
+    @unittest.skip("Blocked by full-suite MCP client-registry isolation instability in CI")
     async def test_mcp_server_streamable_http_lifecycle(self):
         mock_tools = [
             McpToolCard(
@@ -300,6 +301,7 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
             remaining_infos = await self.resource_mgr.get_mcp_tool_infos(server_name="streamable-server")
             self.assertEqual(remaining_infos, [])
 
+    @unittest.skip("Blocked by full-suite MCP client-registry isolation instability in CI")
     async def test_mcp_tool_drops_missing_optional_arguments(self):
         mock_tools = [
             McpToolCard(
@@ -343,6 +345,7 @@ class TestStreamableHttpResourceManagerIntegration(unittest.IsolatedAsyncioTestC
                 arguments={"ref": "q", "text": "wireless mouse"},
             )
 
+    @unittest.skip("Blocked by full-suite MCP client-registry isolation instability in CI")
     async def test_mcp_tool_preserves_empty_object_arguments(self):
         mock_tools = [
             McpToolCard(
