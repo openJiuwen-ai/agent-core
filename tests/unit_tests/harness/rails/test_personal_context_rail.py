@@ -11,7 +11,17 @@ from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall, ToolMessa
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, ModelCallInputs
 from openjiuwen.harness.prompts import PromptAttachmentKind, PromptAttachmentManager
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.harness.rails.personal_context import PersonalContextRail
+from openjiuwen.core.foundation.tool import LocalFunction, ToolCard
+from openjiuwen.core.runner import Runner
+from openjiuwen.core.single_agent.ability_manager import AbilityManager
+from openjiuwen.harness.personal_context.distill import (
+    activate_profile_version,
+    publish_distilled,
+)
+from openjiuwen.harness.rails.personal_context import (
+    PersonalContextRail,
+    register_im_search_tools,
+)
 
 
 def _context(
@@ -523,3 +533,185 @@ async def test_invalid_utf8_description_is_fail_open(tmp_path: Path) -> None:
     await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
 
     assert await manager.collect_for_session("session-1") == []
+
+
+def _activate_profile(home: Path, job_id: str, *, persona: str, work: str) -> None:
+    publish_distilled(
+        str(home),
+        job_id,
+        persona_md=persona,
+        work_md=work,
+        meta={"job_id": job_id},
+        merge_with_existing=False,
+    )
+    activate_profile_version(str(home), job_id, source="distill")
+
+
+@pytest.mark.asyncio
+async def test_wiki_only_injection_has_no_profile_section(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    context_root = tmp_path / "workspace" / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Wiki\n\nhello", encoding="utf-8")
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    [item] = await manager.collect_for_session("session-1")
+    content = item.content or ""
+    assert "## 当前上下文说明" in content
+    assert "# Wiki" in content
+    assert "## 现行用户画像" not in content
+
+
+@pytest.mark.asyncio
+async def test_wiki_and_profile_injection_includes_job_id(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    context_root = tmp_path / "workspace" / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("# Wiki\n\nbody", encoding="utf-8")
+    _activate_profile(tmp_path, "job-rail", persona="persona-text", work="work-text")
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    [item] = await manager.collect_for_session("session-1")
+    content = item.content or ""
+    assert "## 当前上下文说明" in content
+    assert "## 现行用户画像" in content
+    assert "job_id: `job-rail`" in content
+    assert "source: `distill`" in content
+    assert "persona-text" in content
+    assert "work-text" in content
+
+
+@pytest.mark.asyncio
+async def test_profile_only_when_description_missing(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    (tmp_path / "workspace" / "context").mkdir(parents=True)
+    _activate_profile(tmp_path, "job-only", persona="p", work="w")
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    [item] = await manager.collect_for_session("session-1")
+    content = item.content or ""
+    assert "## 现行用户画像" in content
+    assert "job_id: `job-only`" in content
+    assert "## 当前上下文说明" not in content
+
+
+@pytest.mark.asyncio
+async def test_neither_wiki_nor_profile_skips_add_section(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    (tmp_path / "workspace" / "context").mkdir(parents=True)
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    assert await manager.collect_for_session("session-1") == []
+
+
+@pytest.mark.asyncio
+async def test_incomplete_version_does_not_inject_profile(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    context_root = tmp_path / "workspace" / "context"
+    context_root.mkdir(parents=True)
+    (context_root / "description.md").write_text("wiki-only", encoding="utf-8")
+    version = tmp_path / "im" / "profiles" / "versions" / "broken"
+    version.mkdir(parents=True)
+    (version / "persona.md").write_text("only-persona", encoding="utf-8")
+    (tmp_path / "im" / "profiles" / "current.json").write_text(
+        '{"job_id": "broken", "published_at_ms": 1, "source": "distill"}\n',
+        encoding="utf-8",
+    )
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    [item] = await manager.collect_for_session("session-1")
+    content = item.content or ""
+    assert "wiki-only" in content
+    assert "## 现行用户画像" not in content
+    assert "only-persona" not in content
+
+
+@pytest.mark.asyncio
+async def test_profile_sections_capped_at_3000_chars(tmp_path: Path) -> None:
+    _write_runtime_config(tmp_path)
+    (tmp_path / "workspace" / "context").mkdir(parents=True)
+    _activate_profile(
+        tmp_path,
+        "job-long",
+        persona="P" * 3001,
+        work="W" * 3001,
+    )
+    manager = PromptAttachmentManager()
+    agent = SimpleNamespace(prompt_attachment_manager=manager)
+    rail = PersonalContextRail(tmp_path)
+    rail.init(agent)
+
+    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
+
+    [item] = await manager.collect_for_session("session-1")
+    content = item.content or ""
+    assert "P" * 3000 in content
+    assert "P" * 3001 not in content
+    assert "W" * 3000 in content
+    assert "W" * 3001 not in content
+    assert "本次仅载入前 3000 个字符" in content
+
+
+def _stub_search_tool(name: str = "im_search_messages") -> LocalFunction:
+    card = ToolCard(id=name, name=name, description=f"{name} stub", stateless=True)
+
+    async def _func(**_):
+        return []
+
+    return LocalFunction(card=card, func=_func)
+
+
+@pytest.mark.asyncio
+async def test_register_im_search_tools_mounts_stub_tools() -> None:
+    await Runner.start()
+    try:
+        am = AbilityManager(owner_id="pc-register")
+        agent = SimpleNamespace(ability_manager=am)
+        tool = _stub_search_tool()
+        register_im_search_tools(agent, [tool])
+        assert am.get("im_search_messages") is not None
+        assert Runner.resource_mgr.get_tool(tool.card.id) is tool
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_register_im_search_tools_empty_is_noop() -> None:
+    await Runner.start()
+    try:
+        am = AbilityManager(owner_id="pc-register-empty")
+        agent = SimpleNamespace(ability_manager=am)
+        register_im_search_tools(agent, [])
+        assert am.get("im_search_messages") is None
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_register_im_search_tools_without_ability_manager_is_fail_open() -> None:
+    register_im_search_tools(SimpleNamespace(), [_stub_search_tool()])
