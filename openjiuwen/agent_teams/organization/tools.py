@@ -599,7 +599,9 @@ class OrgUpdateTaskTool(_OrgLeaderTool):
             name="org_update_task",
             description=(
                 "Start, complete, or fail an assigned task; set_aggregation_mode lets the Root Leader "
-                "choose HIERARCHICAL or SUMMARY_TEAM immediately after claiming a root task; "
+                "explicitly choose HIERARCHICAL or SUMMARY_TEAM after claiming a root task; "
+                "SUMMARY_TEAM is preferred unless other Teams supply only small supporting pieces "
+                "and this Team owns the root's core work and final judgment; "
                 "revise_description lets the creator "
                 "supplement an unclaimed task once when requested by the organization."
             ),

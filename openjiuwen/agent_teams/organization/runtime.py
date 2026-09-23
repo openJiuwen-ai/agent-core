@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
@@ -89,9 +90,11 @@ _ORG_COLLABORATION_PROMPT = {
         "正在负责处理；暂未出现 output_context 或 output_abstract 不代表失败。不得重新委派、"
         "认领、启动、完成该任务，也不得为绕过等待创建内容重复的替代子任务。结束当前回合并等待 "
         "完成事件；只有 FAILED、REJECTED 或 NEEDS_REVISION 时，才按既有修复流程创建修复子任务。\n"
-        "认领根任务后，先按职责选择汇总模式：本 Team 能独立作最终判断、其他 Team 仅提供佐证时选 "
-        "HIERARCHICAL；财务、法律、技术、市场等独立领域需要跨域形成最终判断，或本 Team 只负责其中 "
-        "一部分时选 SUMMARY_TEAM。选择并启动根任务后，所有拆分工作都必须以该根任务为直接父任务，"
+        "认领根任务后，必须在拆分前显式选择汇总模式；默认倾向 SUMMARY_TEAM。只有本 Team 能完成根任务的"
+        "主体工作并独立作最终判断，其他 Team 的子任务仅提供完成该根任务所需的一小部分局部支持材料时，"
+        "才选 HIERARCHICAL。若多个 Team 各自负责不同领域的一部分，成果相互独立且需要跨域形成最终结论，"
+        "或本 Team 只负责其中一部分，则选 SUMMARY_TEAM；投资、法律、技术、市场等并列尽调即属此类。"
+        "选择并启动根任务后，所有拆分工作都必须以该根任务为直接父任务，"
         "不能创建并列根任务；禁止对根任务调用 org_delegate_task，跨 Team 只通过子任务的 "
         "delegated_to_team_id 或对子任务 org_delegate_task。SUMMARY_TEAM 下，本 Team 自己的贡献也必须写成 "
         "根任务的直接子任务并完成验收，才能作为最终汇总来源；不要只留在 Team 内部任务中。"
@@ -109,10 +112,13 @@ _ORG_COLLABORATION_PROMPT = {
         "owns its execution; missing output does not mean failure. Do not re-delegate, claim, start, or complete "
         "it, and do not create a duplicate replacement merely to bypass waiting. End the current turn and wait "
         "for its completion event. Create a repair child only after FAILED, REJECTED, or NEEDS_REVISION.\n"
-        "After claiming a root, choose its aggregation mode before decomposition: use HIERARCHICAL only when "
-        "your Team can independently make the final judgment and other Teams supply supporting evidence. "
-        "Use SUMMARY_TEAM for independent specialist domains requiring a cross-domain final judgment, or when "
-        "your Team handles only one part. After choosing and starting the root, create every work item as "
+        "After claiming a root, explicitly choose its aggregation mode before decomposition; prefer "
+        "SUMMARY_TEAM by default. Use HIERARCHICAL only when your Team performs the substantial core of "
+        "the root task and can independently make the final judgment, while other Teams' child tasks "
+        "supply only small, local supporting pieces. Use SUMMARY_TEAM when multiple Teams each own a "
+        "distinct domain or part whose independent results require a cross-domain final judgment, or "
+        "when your Team handles only one part; parallel investment, legal, technical, and market due "
+        "diligence is an example. After choosing and starting the root, create every work item as "
         "its direct child, never as a parallel root; never org_delegate_task the root—cross-team work uses "
         "child delegated_to_team_id or org_delegate_task on that child only. In SUMMARY_TEAM mode, record your "
         "own contribution as a direct root child and have it accepted; an internal Team task alone is not a "
@@ -1723,15 +1729,20 @@ class OrganizationRuntimeManager:
             self._ensure_leader_turn_worker(team_id, session_id)
             return
         self._scheduled_summary_executions.add(summary_key)
+        logger.info(
+            "Summary turn queued: task={} team={} execution={}", task_id, team_id, execution_id
+        )
 
         prompt = (
             f"Summary Task {task_id} (execution_id={execution_id}, root_task_id={root_task_id}) in "
             f"organization {organization_id} is ready for final aggregation. "
             f"Call org_summary_get_inputs(summary_task_id='{task_id}') before doing any synthesis. "
             "Use only those bound, accepted source outputs. Do NOT create child tasks, delegate, "
-            "claim, review, or modify any source task. Delegate only the two internal analysis/drafting "
-            f"tasks to the fixed Summary Team teammates and prefix their internal task titles with {execution_id}, "
-            "then produce the final user-facing result. After those two internal tasks report, immediately call "
+            "claim, review, or modify any source task. Send the bound source facts to the two fixed "
+            "Summary Team teammates through internal Team messages for source integration and drafting; "
+            "use the execution_id in their messages and intermediate artifact names. "
+            "Do not explore unrelated workspace directories. After both teammates report, verify their "
+            "work against the bound sources and then call "
             "org_summary_complete in the same leader turn. Internal task completion, Team idle, or Team pause is "
             "not Summary Task completion: do not start another internal task cycle, wait, or poll instead. "
             "A Root Leader message may add delivery requirements, but it does not change this Team's two-tool "
@@ -1847,14 +1858,15 @@ class OrganizationRuntimeManager:
 
         prompt = (
             f"Your team claimed organization task {task_id} in {organization_id}. "
-            "Inspect it with org_view_tasks(action='get'). If it is a root task and still CLAIMED, first "
-            "choose its aggregation mode before starting it. Choose HIERARCHICAL only when your Team can "
-            "independently make the final decision and other Teams provide supporting evidence or dependent "
-            "work. Choose SUMMARY_TEAM when the root needs independent, orthogonal conclusions from two or "
-            "more specialist domains, or when your Team can complete only one part and cannot reasonably "
-            "represent the final cross-domain judgment. Do not choose HIERARCHICAL merely because it is the "
-            "default, shorter, or because your Team coordinates the work; prefer SUMMARY_TEAM for independent "
-            "multi-domain due diligence unless your Team truly owns the final integration. Call "
+            "Inspect it with org_view_tasks(action='get'). If it is a root task whose mode has not yet been "
+            "explicitly selected, choose its aggregation mode before decomposition; SUMMARY_TEAM is the "
+            "default preference. Choose "
+            "HIERARCHICAL only if your Team performs the substantial core of the root task, can independently "
+            "make the final decision, and other Teams' child tasks provide only small, local supporting "
+            "pieces. Choose SUMMARY_TEAM when multiple Teams own distinct parts or specialist domains "
+            "whose results need a cross-domain final judgment, including parallel finance, legal, technical, "
+            "and market due diligence, or when your Team can complete only one part. Coordination alone does "
+            "not make your Team the final integrator. Call "
             "org_update_task(action='set_aggregation_mode') with that choice. "
             "Then call org_update_task(action='start') and execute the "
             "defined scope through your Team workflow. If an independent part requires another organization "
@@ -1912,6 +1924,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+            review_task_id=child_task_id,
             relay_source="org_root_background",
         )
 
@@ -1977,6 +1990,7 @@ class OrganizationRuntimeManager:
             session_id=session_id,
             prompt=prompt,
             review_key=review_key,
+            ready_parent_task_id=parent_task_id,
             relay_source="org_root_background",
         )
 
@@ -2061,6 +2075,8 @@ class OrganizationRuntimeManager:
         summary_key: tuple[str, str, str] | None = None,
         claimed_task_id: str | None = None,
         open_claim_task_id: str | None = None,
+        review_task_id: str | None = None,
+        ready_parent_task_id: str | None = None,
         relay_source: str | None = None,
         unclaimed_notification: tuple[tuple[str, str], dict[str, Any]] | None = None,
     ) -> None:
@@ -2074,6 +2090,9 @@ class OrganizationRuntimeManager:
                 "_org_summary_key": summary_key,
                 "_org_claimed_task_id": claimed_task_id,
                 "_org_open_claim_task_id": open_claim_task_id,
+                "_org_review_task_id": review_task_id,
+                "_org_ready_parent_task_id": ready_parent_task_id,
+                "_org_queued_at": time.monotonic() if summary_key is not None else None,
                 "_org_relay_source": relay_source,
                 "_org_unclaimed_notification": unclaimed_notification,
             }
@@ -2122,6 +2141,9 @@ class OrganizationRuntimeManager:
                 summary_key = None
                 claimed_task_id = None
                 open_claim_task_id = None
+                review_task_id = None
+                ready_parent_task_id = None
+                queued_at = None
                 turn_failed = False
                 if isinstance(inputs, dict):
                     message_key = inputs.pop("_org_message_key", None)
@@ -2129,6 +2151,9 @@ class OrganizationRuntimeManager:
                     summary_key = inputs.pop("_org_summary_key", None)
                     claimed_task_id = inputs.pop("_org_claimed_task_id", None)
                     open_claim_task_id = inputs.pop("_org_open_claim_task_id", None)
+                    review_task_id = inputs.pop("_org_review_task_id", None)
+                    ready_parent_task_id = inputs.pop("_org_ready_parent_task_id", None)
+                    queued_at = inputs.pop("_org_queued_at", None)
                 try:
                     task_manager = getattr(getattr(entry.agent, "team_backend", None), "org_task_manager", None)
                     if open_claim_task_id is not None and task_manager is not None:
@@ -2154,6 +2179,19 @@ class OrganizationRuntimeManager:
                     if claimed_task_id is not None and task_manager is not None:
                         claimed_task = await task_manager.get_task(claimed_task_id)
                         if claimed_task is None or claimed_task.status in _PARENT_RESUME_TERMINAL_STATUSES:
+                            continue
+                        if self._summary_root_handed_off(claimed_task):
+                            continue
+                    if review_task_id is not None and task_manager is not None:
+                        review = await task_manager.get_task_review(review_task_id)
+                        if review is not None and review.review_status is not OrgTaskReviewStatus.PENDING:
+                            continue
+                    if ready_parent_task_id is not None and task_manager is not None:
+                        parent = await task_manager.get_task(ready_parent_task_id)
+                        if parent is not None and (
+                            parent.status in _PARENT_RESUME_TERMINAL_STATUSES
+                            or self._summary_root_handed_off(parent)
+                        ):
                             continue
                     notification = inputs.pop("_org_unclaimed_notification", None) if isinstance(inputs, dict) else None
                     if notification is not None:
@@ -2188,6 +2226,12 @@ class OrganizationRuntimeManager:
                             )
                             .content
                         )
+                    started_at = time.monotonic()
+                    if summary_key is not None:
+                        logger.info(
+                            "Summary turn starting: task={} team={} queue_wait_s={:.2f}",
+                            summary_key[2], team_id, started_at - queued_at if queued_at is not None else 0.0,
+                        )
                     if not await self._run_leader_turn(team_id, session_id, inputs):
                         turn_failed = True
                         queue.appendleft(original_inputs)
@@ -2197,6 +2241,11 @@ class OrganizationRuntimeManager:
                             session_id,
                         )
                         return
+                    if summary_key is not None:
+                        logger.info(
+                            "Summary turn returned: task={} team={} duration_s={:.2f}",
+                            summary_key[2], team_id, time.monotonic() - started_at,
+                        )
                 except Exception:
                     turn_failed = True
                     queue.appendleft(original_inputs)
@@ -2215,6 +2264,16 @@ class OrganizationRuntimeManager:
             self._leader_turn_workers.pop(key, None)
             if not self._leader_turn_queues.get(key):
                 self._leader_turn_queues.pop(key, None)
+
+    @staticmethod
+    def _summary_root_handed_off(task: Any) -> bool:
+        """Return whether a root already has a Summary Task owning its final step."""
+        if getattr(task, "parent_task_id", None):
+            return False
+        aggregation = getattr(task, "aggregation", None)
+        if aggregation is None or aggregation.mode != OrgTaskAggregationMode.SUMMARY_TEAM:
+            return False
+        return bool(aggregation.summary_task_id)
 
     def _clear_leader_turn_queue(self, queue: deque[object]) -> None:
         for inputs in queue:

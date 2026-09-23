@@ -318,7 +318,8 @@ async def _emit_team_task_event(agents, session_id: str, org_id: str, event, *, 
         handler for topic, handler in agents[team_id].team_backend.messager.subscriptions if topic == topic_id
     )
     await handler(OrgEventMessage.from_event(event))
-    await asyncio.sleep(0)
+    # A wake now re-reads durable task/review state before running its turn.
+    await asyncio.sleep(0.05)
 
 
 async def _rebind_owner_after_clear(runtime, agents, session_id: str):
@@ -348,7 +349,7 @@ async def _rebind_owner_after_clear(runtime, agents, session_id: str):
         session_id=session_id,
         agent=recovered_agent,
     )
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.05)
     return turns
 
 
@@ -834,7 +835,7 @@ async def test_only_assigned_team_can_create_child_tasks(org_manager):
 
 
 @pytest.mark.asyncio
-async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
+async def test_root_task_gets_default_summary_team_aggregation(org_manager):
     manager, _ = org_manager
     creator = OrgTaskCreator(
         creator_type="team_leader",
@@ -872,9 +873,12 @@ async def test_root_task_gets_default_hierarchical_aggregation(org_manager):
     assert root.ok and root.task is not None
     assert child.ok and child.task is not None
     assert root.task.aggregation is not None
-    assert root.task.aggregation.mode == OrgTaskAggregationMode.HIERARCHICAL
+    assert root.task.aggregation.mode == OrgTaskAggregationMode.SUMMARY_TEAM
     assert root.task.aggregation.final_output_task_id == "root-task-1"
     assert child.task.aggregation is None
+    selected_root = await manager.get_task("root-task-1")
+    assert selected_root is not None
+    assert selected_root.aggregation.mode == OrgTaskAggregationMode.HIERARCHICAL
 
 
 @pytest.mark.asyncio
@@ -1840,7 +1844,7 @@ async def test_root_leader_selects_aggregation_mode_through_update_task_tool(org
         }
     )
     assert created.success
-    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.HIERARCHICAL
+    assert created.data["aggregation_mode"] == OrgTaskAggregationMode.SUMMARY_TEAM
     assert (await manager.claim_task(task_id="tool-root-agg", team_id="team-a")).ok
 
     unauthorized = await OrgUpdateTaskTool(manager, team_id="team-b", leader_id="leader-b").invoke(
@@ -3237,10 +3241,11 @@ def test_claimed_root_prompt_distinguishes_aggregation_modes(active_organization
     assert len(scheduled) == 1
     prompt = scheduled[0]["prompt"]
     assert "HIERARCHICAL" in prompt
-    assert "supporting evidence or dependent work" in prompt
+    assert "small, local supporting pieces" in prompt
     assert "complete the root yourself" in prompt
     assert "SUMMARY_TEAM" in prompt
-    assert "independent, orthogonal conclusions" in prompt
+    assert "default preference" in prompt
+    assert "distinct parts or specialist domains" in prompt
     assert "org_create_summary_execution" in prompt
     assert "Do not directly complete a SUMMARY_TEAM root" in prompt
     assert scheduled[0]["relay_source"] == "org_root_background"
@@ -4327,6 +4332,78 @@ async def test_drain_leader_turns_drops_stale_open_claim(active_organization_run
     assert turns == []
     assert key not in org_runtime._leader_turn_queues
     assert key not in org_runtime._leader_turn_workers
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_drops_stale_owner_wakes_after_summary_handoff(
+    active_organization_runtime, monkeypatch
+):
+    """Old claim/review/ready wakes must not restart an Owner after Summary handoff."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-summary-stale-wakes")
+    root = SimpleNamespace(
+        status=OrgTaskStatus.IN_PROGRESS,
+        parent_task_id=None,
+        aggregation=SimpleNamespace(mode=OrgTaskAggregationMode.SUMMARY_TEAM, summary_task_id="summary-task"),
+    )
+    tasks = {"root-task": root}
+
+    async def get_task(task_id):
+        return tasks.get(task_id)
+
+    async def get_task_review(task_id):
+        return SimpleNamespace(review_status=OrgTaskReviewStatus.ACCEPTED)
+
+    monkeypatch.setattr(manager, "get_task", get_task)
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    key = (session_id, "team-a")
+    org_runtime._leader_turn_queues[key] = deque([
+        {"query": "old claim", "_org_claimed_task_id": "root-task"},
+        {"query": "old review", "_org_review_task_id": "child-task"},
+        {"query": "old ready", "_org_ready_parent_task_id": "root-task"},
+        {"query": "deliver summary", "_org_relay_source": "org_root_delivery"},
+    ])
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["deliver summary"]
+
+
+@pytest.mark.asyncio
+async def test_drain_leader_turns_keeps_pending_review(active_organization_runtime, monkeypatch):
+    """Stale-review filtering must not discard a review that still needs a verdict."""
+    org_runtime, agents, session_id = active_organization_runtime
+    manager, _ = await _seed_two_team_org(org_runtime, agents, session_id, "org-pending-review-wake")
+
+    async def get_task_review(task_id):
+        return SimpleNamespace(review_status=OrgTaskReviewStatus.PENDING)
+
+    monkeypatch.setattr(manager, "get_task_review", get_task_review)
+    entry = await org_runtime._team_runtime_manager.pool.get("team-a")
+    entry.state = RuntimeState.PAUSED
+    turns = []
+
+    async def run_organization_turn(**kwargs):
+        turns.append(kwargs["inputs"]["query"])
+        return True
+
+    org_runtime._team_runtime_manager.run_organization_turn = run_organization_turn
+    org_runtime._leader_turn_queues[(session_id, "team-a")] = deque([
+        {"query": "review pending child", "_org_review_task_id": "child-task"},
+    ])
+
+    await org_runtime._drain_leader_turns("team-a", session_id)
+
+    assert turns == ["review pending child"]
 
 
 @pytest.mark.asyncio
