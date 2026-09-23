@@ -621,6 +621,8 @@ class SwarmflowTool(AsyncTool):
                 phase_type=progress.phase_type,
                 nested_phase=progress.nested_phase,
                 parent_phase=progress.parent_phase,
+                parent_session_id=progress.parent_session_id,
+                member_name=progress.member_name,
                 verify_reviewers=progress.verify_reviewers,
                 verify_verdict=progress.verify_verdict,
                 verify_threshold=progress.verify_threshold,

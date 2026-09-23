@@ -168,6 +168,30 @@ def test_agent_session_reuses_one_harness_across_turns(monkeypatch):
     assert "be brief" in (h.spec.system_prompt or "")
 
 
+def test_session_member_name_is_run_scoped():
+    """Session avatar names carry the run prefix, mirroring worker member names.
+
+    Without the prefix, two runs of the same script mint the same member name
+    and their avatars share one NativeHarness session id, one workspace dir
+    and one owner-qualified resource-manager key (the "Tool instance not
+    found" cross-run collision). Without a run id (direct construction) the
+    legacy ``wf-sess-`` form is kept.
+    """
+    scoped = _mgr(run_id="wf_57e978bddb2e")
+    legacy = _mgr()
+
+    async def scenario():
+        a = await scoped.ensure_member_name(kind="agent", opts={"label": "analyst"})
+        h = await scoped.ensure_member_name(kind="human", opts={"label": "lead"})
+        c = await legacy.ensure_member_name(kind="agent", opts={"label": "analyst"})
+        return a, h, c
+
+    a, h, c = asyncio.run(scenario())
+    assert a == "wf-57e978bddb2e-sess-analyst-0"
+    assert h == "wf-57e978bddb2e-human-lead-1"
+    assert c == "wf-sess-analyst-0"
+
+
 def test_agent_session_schema_turn_mounts_and_unmounts_tool(monkeypatch):
     """A schema turn mounts structured_output for that turn and removes it after."""
     harnesses: list = []
