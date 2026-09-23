@@ -226,7 +226,7 @@ class SkillManifestParser:
             )
         else:
             try:
-                raw_frontmatter = _load_unique_yaml(frontmatter_text)
+                raw_frontmatter = _load_strict_yaml(frontmatter_text)
             except (RecursionError, yaml.YAMLError) as exc:
                 return ParsedSkillManifest(
                     descriptor=None,
@@ -396,51 +396,49 @@ class SkillManifestParser:
         )
 
 
-class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """SafeLoader variant that rejects ambiguous duplicate mapping keys."""
+class _DistinctKeySafeLoader(yaml.SafeLoader):
+    """SafeLoader variant that fails on mappings that repeat a key."""
 
 
-def _construct_unique_mapping(
-    loader: _UniqueKeySafeLoader,
+def _construct_mapping_without_repeats(
+    loader: _DistinctKeySafeLoader,
     node: yaml.nodes.MappingNode,
     deep: bool = False,
 ) -> dict[Any, Any]:
     loader.flatten_mapping(node)
-    mapping: dict[Any, Any] = {}
+    entries: list[tuple[object, yaml.nodes.Node]] = []
+    seen_keys: set[object] = set()
     for key_node, value_node in node.value:
         key = loader.construct_object(key_node, deep=deep)
         try:
-            duplicate = key in mapping
+            hash(key)
         except TypeError as exc:
             raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
+                "while building a mapping",
                 node.start_mark,
-                "found an unhashable mapping key",
+                "mapping key is not hashable",
                 key_node.start_mark,
             ) from exc
-        if duplicate:
+        if key in seen_keys:
             raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
+                "while building a mapping",
                 node.start_mark,
-                "found a duplicate mapping key",
+                f"repeated mapping key: {key}",
                 key_node.start_mark,
             )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
+        seen_keys.add(key)
+        entries.append((key, value_node))
+    return {key: loader.construct_object(value_node, deep=deep) for key, value_node in entries}
 
 
-_UniqueKeySafeLoader.add_constructor(
+_DistinctKeySafeLoader.add_constructor(
     yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
+    _construct_mapping_without_repeats,
 )
 
 
-def _load_unique_yaml(content: str) -> object:
-    loader = _UniqueKeySafeLoader(content)
-    try:
-        return loader.get_single_data()
-    finally:
-        loader.dispose()
+def _load_strict_yaml(content: str) -> object:
+    return yaml.load(content, Loader=_DistinctKeySafeLoader)
 
 
 def _split_frontmatter(text: str) -> tuple[str, str, str]:
