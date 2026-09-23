@@ -48,6 +48,11 @@ class ProgressKind:
     AGENT_ACTIVITY = "agent_activity"
     HUMAN_PROMPT = "human_prompt"
     HUMAN_REPLIED = "human_replied"
+    VERIFY_STARTED = "verify_started"
+    VERIFY_COMPLETED = "verify_completed"
+    #: Back-compat alias for ``VERIFY_COMPLETED`` — old runs in flight after an
+    #: upgrade still replay ``verify_settled``; consumers route both to one handler.
+    VERIFY_SETTLED = "verify_settled"
     LOG = "log"
     WORKFLOW_COMPLETED = "workflow_completed"
     WORKFLOW_FAILED = "workflow_failed"
@@ -106,6 +111,27 @@ class WorkflowProgressEvent:
       ``parallel``.
     * ``answer``              — the person's raw reply text (``HUMAN_REPLIED``).
       Absent on all other kinds.
+    * ``verify_reviewers`` / ``verify_threshold`` — the reviewer count and the
+      score threshold (``VERIFY_STARTED`` / ``VERIFY_COMPLETED``).
+    * ``verify_reviewer_labels`` — the reviewers' unique label roster
+      (``VERIFY_STARTED``): one label per reviewer, in fan-out order. Labels are
+      normalized inside ``verify()`` to carry the round's base label as a
+      prefix, so they are globally unique across rounds and match both the
+      reviewer agent nodes' labels and the settled votes' ``name``.
+    * ``verify_reviewer_roles`` — the reviewers' business role roster
+      (``VERIFY_STARTED``), same fan-out order as ``verify_reviewer_labels``:
+      ``verifier`` / ``inspector`` / ``challenger``. Display-only — judgement
+      reads the vote ``kind``, never a role.
+    * ``verify_verdict`` / ``verify_votes`` — the round verdict (``"pass"`` /
+      ``"fail"`` / ``None`` = undecided) and per-reviewer vote dicts
+      ``{name, agent_id, kind, role, decision, score, feedback, voted}``
+      (``VERIFY_COMPLETED``); ``agent_id`` is the reviewer ``agent()`` call's
+      deterministic node id — a second, name-independent join key. The complete
+      round output (``VerifyResult`` JSON) rides the generic ``outcome`` field.
+    * ``verify_id`` — the verify() call's own node id (``VERIFY_STARTED`` /
+      ``VERIFY_COMPLETED``), the verify analog of an agent node's ``agent_id``:
+      the structural call position. Concurrent same-label rounds stay
+      distinct by it; a consumer pairs started/completed by id, never by label.
     """
 
     kind: str
@@ -130,6 +156,13 @@ class WorkflowProgressEvent:
     nested_phase: str | None = None
     parent_phase: str | None = None
     script_path: str | None = None
+    verify_reviewers: int | None = None
+    verify_verdict: str | None = None
+    verify_threshold: float | None = None
+    verify_votes: list[dict] | None = None
+    verify_reviewer_labels: list[str] | None = None
+    verify_reviewer_roles: list[str | None] | None = None
+    verify_id: str | None = None
 
 
 #: Signature of ``Runtime.progress_sink``. Default is a no-op so the engine has
