@@ -55,7 +55,8 @@ def _is_output_write(tool_name: str, tool_args: Any) -> bool:
 
 class ExplorationBudgetRail(DeepAgentRail):
     """Reminds the agent to attempt an implementation after too much
-    exploration with no deliverable progress. See module docstring."""
+    exploration with no deliverable progress. See module docstring.
+    """
 
     priority = 90
 
