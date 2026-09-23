@@ -23,6 +23,13 @@ from .compressors.log_compressor import LogCompressor
 from .compressors.plain_text_compressor import PlainTextCompressor
 from .compressors.search_results_compressor import SearchResultsCompressor
 
+# json_repair walks character-by-character (skip_to_character). Oversized tool
+# blobs (e.g. fetch_webpage wrapping CDN JS / multi-page API JSON in a `[...]`
+# envelope) can block the asyncio event loop for minutes and drop WebSocket
+# heartbeats (OA.05000010). Skip repair above this size and fall through to
+# cheaper detectors / PLAIN_TEXT truncation+offload.
+_JSON_REPAIR_MAX_CHARS = 65_536
+
 
 class RuleCompressor(Protocol):
     def compress(self, content: str, ctx: RuleContext) -> RuleCompressionResult:
@@ -131,6 +138,8 @@ class RuleContentRouter:
     @staticmethod
     def _repair_json_array(content: str) -> object | None:
         if not content.lstrip().startswith("["):
+            return None
+        if len(content) > _JSON_REPAIR_MAX_CHARS:
             return None
         try:
             return repair_json_loads(content)
