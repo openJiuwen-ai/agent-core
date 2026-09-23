@@ -730,6 +730,9 @@ class CodeImplementationAgent:
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.design_reference_rail import (
             DesignReferenceRail,
         )
+        from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.exploration_budget_rail import (
+            ExplorationBudgetRail,
+        )
         from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.extensions.rails.guarded_sys_operation_rail import (
             GuardedSysOperationRail,
         )
@@ -783,6 +786,12 @@ class CodeImplementationAgent:
                 GuardedSysOperationRail(bash_deny_patterns=_GIT_DENY_PATTERNS),
                 OpenJiuwenReferenceRail(),
                 DesignReferenceRail(design_root=design_root),
+                # Nudges toward attempting an implementation once too many
+                # tool calls have passed with no write under output/ — see
+                # module docstring for the repeated failure pattern this
+                # addresses (environment/SDK exploration burning the whole
+                # attempt's budget before run.py ever gets written).
+                ExplorationBudgetRail(),
                 # Inner ReAct stays unbounded when max_iterations is omitted.
                 # The pipeline's configured cap is applied to the outer loop
                 # via TaskCompletionRail, otherwise a stuck tool/model session

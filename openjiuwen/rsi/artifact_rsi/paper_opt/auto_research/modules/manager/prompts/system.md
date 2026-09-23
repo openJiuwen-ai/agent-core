@@ -219,6 +219,12 @@ Typical order:
 - `max_code_retries` / `max_execution_retries` / `max_reporting_retries` are
   extra attempts after the first. If those or round budgets are exhausted
   and reporting is not legal, emit `BLOCKED`.
+- When emitting `BLOCKED`, `summary` must distinguish observed facts (quote
+  the exact validator error text or report field you actually read) from
+  your own hypothesis about why. Never state an unverified root cause as
+  fact — prefix any guess with `unverified:`. Do not claim a file "exists
+  at path X but the validator checks path Y" unless you have actually
+  inspected both paths; if you have not, say so instead of guessing.
 - If `research_paths` is empty, `topic_survey` before `experiment_design/create`.
   If a design already exists and a new survey lands, `revise_research` before
   `code_implementation`.

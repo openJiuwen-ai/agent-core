@@ -467,7 +467,19 @@ class TerminalReport(BaseModel):
     rounds_run: int = 0
     abort_reason: str = ""
     failure_reason: str = ""
-    summary: str = ""
+    summary: str = Field(
+        default="",
+        description=(
+            "Only state what you have directly observed in routing/reports "
+            "(e.g. the exact validator error text, an exact file list you "
+            "actually inspected). If you have not verified where a file "
+            "actually is or why a step failed, do not assert a specific "
+            "root cause as fact -- prefix the sentence with 'unverified:' "
+            "instead. Never claim a file 'exists at path X but the "
+            "validator checks path Y' unless you have actually inspected "
+            "both paths yourself."
+        ),
+    )
     completion_satisfied: bool = False
 
 
