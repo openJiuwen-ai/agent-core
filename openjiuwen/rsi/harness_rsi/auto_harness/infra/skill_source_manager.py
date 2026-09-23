@@ -88,6 +88,7 @@ async def _download_github_zip(
             prefix_end = len(prefix)
 
             # Extract, stripping the prefix
+            target_root = target.resolve()
             for name in names:
                 if not name.startswith(prefix):
                     continue
@@ -95,6 +96,13 @@ async def _download_github_zip(
                 if not rel_path:  # Skip the root folder itself
                     continue
                 dest_path = target / rel_path
+                # Guard against ZipSlip: reject entries that escape the target dir
+                if not dest_path.resolve().is_relative_to(target_root):
+                    logger.warning(
+                        "[SkillSourceManager] skip unsafe zip member %s (path traversal)",
+                        name,
+                    )
+                    continue
                 if name.endswith("/"):  # Directory
                     dest_path.mkdir(parents=True, exist_ok=True)
                 else:  # File
