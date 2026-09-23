@@ -39,6 +39,10 @@ def test_lossless_route(tmp_path, kind):
     result = inline_evidence(tmp_path)
     if kind in {"text", "jsonl"}:
         assert json.loads(result)["evidence_files"][name] == data.decode()
+    elif kind in {"binary", "missing", "invalid_utf8"}:
+        payload = json.loads(result)
+        assert payload["evidence_files"] == {}
+        assert payload["unavailable_evidence_files"][0]["path"] == name
     else:
         assert result is None
 
@@ -64,9 +68,6 @@ def test_serialized_payload_limit_includes_json_escaping(tmp_path):
 
 @pytest.mark.parametrize("kind, expected", [
     ("large", "exceeds 262144 bytes at evidence.jsonl"),
-    ("binary", "evidence contains binary control characters: evidence.pdf"),
-    ("missing", "evidence file missing or not a regular file: evidence.jsonl"),
-    ("utf8", "evidence is not valid UTF-8: evidence.jsonl"),
     ("outside", "evidence path escapes snapshot"),
     ("request", "cannot read request.json"),
     ("request_utf8", "cannot read request.json \\(UnicodeDecodeError\\)"),
@@ -96,6 +97,23 @@ def test_required_evidence_reports_specific_failure(tmp_path, kind, expected):
         inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES, required=True)
 
 
+@pytest.mark.parametrize("kind, reason", [
+    ("binary", "binary content"),
+    ("missing", "missing or not a regular file"),
+    ("utf8", "not valid UTF-8"),
+])
+def test_required_closeout_preserves_individual_evidence_failures(tmp_path, kind, reason):
+    name = "evidence.pdf" if kind == "binary" else "evidence.jsonl"
+    if kind == "binary":
+        (tmp_path / name).write_bytes(b"%PDF-1.7\n\x00\x01binary")
+    elif kind == "utf8":
+        (tmp_path / name).write_bytes(b"\xff")
+    (tmp_path / "request.json").write_text(json.dumps({"evidence_files": [name]}), encoding="utf-8")
+    payload = json.loads(inline_evidence(tmp_path, max_bytes=MAX_CLOSEOUT_BYTES, required=True))
+    assert payload["evidence_files"] == {}
+    assert payload["unavailable_evidence_files"] == [{"path": name, "reason": reason}]
+
+
 def test_unreadable_file_names_the_file_without_exposing_exception_details(tmp_path, monkeypatch):
     target = tmp_path / "evidence.jsonl"
     target.write_text("{}\n", encoding="utf-8")
@@ -108,11 +126,11 @@ def test_unreadable_file_names_the_file_without_exposing_exception_details(tmp_p
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(type(target), "read_text", read_text)
-    assert inline_evidence(tmp_path) is None
-    with pytest.raises(EvaluationInfrastructureError, match="evidence.jsonl") as error:
-        inline_evidence(tmp_path, required=True)
-    assert "PermissionError" in str(error.value)
-    assert "private detail" not in str(error.value)
+    payload = json.loads(inline_evidence(tmp_path, required=True))
+    assert payload["unavailable_evidence_files"] == [
+        {"path": "evidence.jsonl", "reason": "cannot read file (PermissionError)"},
+    ]
+    assert "private detail" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio
