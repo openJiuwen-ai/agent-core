@@ -36,10 +36,6 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementa
     seed_output_from_head,
     sync_tree_into_repo,
 )
-from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.grounding import (
-    docs_index_path,
-    gather_reference_excerpts,
-)
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.schemas import (
     CodeImplementationInput,
     CodeImplementationManifest,
@@ -60,7 +56,6 @@ _CONVENTIONS_PATH = (
     / "prompts"
     / "openjiuwen_conventions.md"
 )
-_EXTENSIONS_REGISTRY_PATH = Path("auto_research/extensions/registry.py")
 _PROMPT_TEMPLATE_PATH = Path(__file__).parent / "prompts" / "system_prompt.md"
 
 _ENTRY_POINT = "run.py"
@@ -886,12 +881,7 @@ class CodeImplementationAgent:
         conventions = (
             _CONVENTIONS_PATH.read_text(encoding="utf-8") if _CONVENTIONS_PATH.exists() else ""
         )
-        registry = (
-            _EXTENSIONS_REGISTRY_PATH.read_text(encoding="utf-8")
-            if _EXTENSIONS_REGISTRY_PATH.exists()
-            else "(auto_research/extensions/registry.py not found)"
-        )
-        return template.format(openjiuwen_conventions=conventions, extensions_registry=registry)
+        return template.format(openjiuwen_conventions=conventions)
 
     # -- task prompt ---------------------------------------------------------
 
@@ -1030,14 +1020,6 @@ class CodeImplementationAgent:
         )
 
     def _build_task_prompt(self, plan: ExperimentPlan, design_context: str) -> str:
-        docs_index = docs_index_path()
-        reference = gather_reference_excerpts(plan)
-        reference_block = "\n".join(
-            f"- {'[reusable capability]' if is_capability else '[reference/example]'} "
-            f"`{path}` — {' '.join(excerpt.split())[:160]}..."
-            for path, excerpt, is_capability in reference
-        ) or "(no starting-point candidates matched this plan's keywords)"
-
         living = self._living_design_note(plan)
         return (
             "Implement the following experiment design as a runnable OpenJiuwen codebase.\n\n"
@@ -1181,33 +1163,32 @@ class CodeImplementationAgent:
             "context or the first dataset row, but must not skip construction or "
             "substitute a parser-only stub. The non-smoke path must actually run the "
             "method on the full requested set.\n\n"
-            "## OpenJiuwen reference map\n\n"
-            + (
-                f"Docs table of contents: `{docs_index}` — open it with your "
-                "openjiuwen_ref_read_file tool first (path relative to the OpenJiuwen "
-                "docs root, e.g. `en/SUMMARY.md`) for how OpenJiuwen APIs actually "
-                "work, before writing custom code that reimplements something the SDK "
-                "already documents.\n\n"
-                if docs_index
-                else "\n"
-            )
-            + "## OpenJiuwen SDK reference — possibly-relevant starting points\n\n"
-            "A local keyword search turned up these candidates (may or may not actually be "
-            "useful — read the full file/example with your openjiuwen_ref_read_file tool "
-            f"before trusting it):\n\n{reference_block}\n\n"
-            "SDK-reading **subagents cannot access the OpenJiuwen reference docs**. Their "
-            "workspace sandbox hides `openjiuwen_ref_*`. You (the parent) must call "
-            "`openjiuwen_ref_read_file`, `openjiuwen_ref_glob`, and "
-            "`openjiuwen_ref_list_files` directly.\n\n"
-            "**Decision policy:** check the map and the candidates above before writing code "
-            "for a given piece of functionality. Reuse a `[reusable capability]` hit only "
-            "after actually opening it and confirming it's a genuine, direct fit — not just "
-            "related vocabulary. If nothing above fits, including if the candidate list is "
-            "empty, write plain Python instead of importing an OpenJiuwen class that only "
-            "loosely relates; forcing a mismatched abstraction into the design produces worse "
-            "code than a clean custom implementation. `[reference/example]` hits are context "
-            "for how OpenJiuwen is used elsewhere, not something to import just because it "
-            "showed up in this search.\n\n"
+            "## Explore OpenJiuwen source before writing SDK calls\n\n"
+            "You choose the files. The host does not inject a preselected file list. "
+            "Do not start at `en/SUMMARY.md`.\n\n"
+            "1. When the instruction names a symbol, search that symbol with "
+            "`openjiuwen_ref_search` and `scopes: [\"source\"]`. When it does not, "
+            "infer one short query from the required behavior. Do not paste the "
+            "whole task into one query.\n"
+            "2. Open the `public-export` hit with `openjiuwen_ref_read_file` on "
+            "`source/openjiuwen/...`. Read the signature, return value, and imports. "
+            "A public export is the API to call. An implementation detail explains "
+            "behavior and is not copied when a public export is in the hits. Then "
+            "search and read each imported name until the constructor, invoke method, "
+            "and result location are known.\n"
+            "3. If the signature does not show how to unpack a result, open one "
+            "in-repo caller. An example is a usage sample, not a higher authority "
+            "than the definition.\n"
+            "4. On an empty source result, search one smaller reusable OpenJiuwen "
+            "piece (a public model client rather than a full agent, a single tool "
+            "rather than a workflow) and use only that piece. Do not invent a class "
+            "from the task wording.\n"
+            "5. If that also misses, or the public export does not fit, write plain "
+            "Python.\n\n"
+            "Call `openjiuwen_ref_search` and `openjiuwen_ref_read_file` yourself. "
+            "SDK-reading **subagents cannot access these tools**. After a smoke "
+            "error names a missing attribute, search that exact name and read it "
+            "before editing.\n\n"
             "## Before you stop\n\n"
             f"1. Optional: from inside `{_OUTPUT_SUBDIR}/`, run a local "
             f"`python {_ENTRY_POINT} --method <name> --smoke-test` check. The host will "
@@ -1220,9 +1201,8 @@ class CodeImplementationAgent:
             f"3. Inside `{_OUTPUT_SUBDIR}/`, write `{_ASSUMPTIONS_FILE}` as a bullet list of the "
             "judgment calls you made to turn the abstract design above into concrete code (library "
             "choices, synthetic data shape, hyperparameter defaults, anything not fully specified "
-            "by the report) — including, for each variant, which OpenJiuwen capability (if any) "
-            "you reused from the reference map/candidates above and why, or that you checked and "
-            "nothing fit so you wrote it directly.\n"
+            "by the report) — including, for each variant, which OpenJiuwen symbol you reused "
+            "and why, or that source search found nothing reusable.\n"
         )
 
     # -- acceptance gate -------------------------------------------------
