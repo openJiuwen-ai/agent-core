@@ -262,7 +262,7 @@ def build_interactive_probe_js(
     }
     params_json = json.dumps(params, ensure_ascii=False)
 
-    return f"""
+    return rf"""
 async (page) => {{
   const params = {params_json};
 
