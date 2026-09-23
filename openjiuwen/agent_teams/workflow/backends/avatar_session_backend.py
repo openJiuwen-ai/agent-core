@@ -819,7 +819,10 @@ class AvatarSessionManager:
             # qualifies the id, so concurrent sessions never collide.
             submit = StructuredOutputTool(schema_json, self._t)
             state.harness.add_tool(submit)
-            turn_prompt = f"{prompt}\n\n{_SCHEMA_TURN_NUDGE}"
+            nudge = _SCHEMA_TURN_NUDGE
+            if submit.required_structure:
+                nudge = f"{nudge}\n{submit.required_structure}"
+            turn_prompt = f"{prompt}\n\n{nudge}"
         try:
             result = await self._drive_round(state, turn_prompt)
         finally:

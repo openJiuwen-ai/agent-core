@@ -715,12 +715,37 @@ async def _call_backend(rt, spec: _BackendCallSpec) -> _BackendCallResult:
         opts = {**opts, "agent_id": spec.agent_id}
     return await _attempt_calls(
         rt, opts, spec.json_schema, spec.model,
-        lambda: rt.backend.run(spec.prompt, opts, spec.json_schema, call_key=spec.call_key),
+        lambda feedback=None: rt.backend.run(
+            _with_retry_feedback(spec.prompt, feedback), opts, spec.json_schema, call_key=spec.call_key,
+        ),
     )
 
 
+def _validation_retry_feedback(error: str) -> str:
+    """Feedback appended to the next attempt's prompt after a schema failure.
+
+    A blind retry replays the same prompt, so a model that misread the schema
+    (missing required property, wrong nesting) repeats the exact mistake until
+    attempts run out. Carrying the validator's error tells the next attempt
+    exactly what to fix.
+    """
+    return (
+        "[RETRY FEEDBACK] Your previous structured_output submission was rejected: "
+        f"it failed schema validation ({error}). Submit again via structured_output "
+        "with a JSON object that satisfies the input schema exactly: include every "
+        "required property at every nesting level (including each item inside "
+        "arrays), keep the exact property names and structure the schema defines, "
+        "and do not wrap or reshape the result."
+    )
+
+
+def _with_retry_feedback(prompt: str, feedback: str | None) -> str:
+    """Append retry feedback to a prompt (no-op when there is none)."""
+    return f"{prompt}\n\n{feedback}" if feedback else prompt
+
+
 async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
-    """Run ``make_call()`` with retries + schema validation.
+    """Run ``make_call(feedback)`` with retries + schema validation.
 
     Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
     session path (``backend.send_turn``); the only difference between them is the
@@ -730,11 +755,18 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     non-success with no retry, and so does a failed attempt that leaves a
     token ledger dry — the budget never refunds, so a retry can only fail
     again (and a human turn would re-ask the person).
+
+    ``make_call(feedback)`` receives the previous attempt's schema-validation
+    error (``None`` on the first attempt and after backend errors) so a retry
+    is not blind: a model that misread the schema gets told which property
+    failed and can self-correct instead of repeating the same malformed
+    submission until attempts run out.
     """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
     label = opts.get("label") or "agent"
+    feedback: str | None = None
     # Accumulate tokens burned across every retry attempt: each failed call
     # attaches its budget_rail tally to the raised BackendError (backend) or
     # turn delta (session), so a budget-exhausted/failed agent's real
@@ -750,9 +782,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
-                    res = await make_call()
+                    res = await make_call(feedback)
             else:
-                res = await make_call()
+                res = await make_call(feedback)
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
             # This attempt burned real tokens before failing (budget-exhausted,
@@ -797,8 +829,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                     input_tokens=res.input_tokens,
                     output_tokens=res.output_tokens,
                 )
-            except Exception as e:  # validation failure -> retry
+            except Exception as e:  # validation failure -> retry with feedback
                 last_err = e
+                feedback = _validation_retry_feedback(str(e))
                 rt.log_sink(
                     f"[wf] agent {label!r} attempt {attempt}/{attempts} "
                     f"validation failed: {str(e)}"
@@ -1508,9 +1541,9 @@ class AgentSession:
         sid = self._sid
         return await _attempt_calls(
             rt, req.opts, req.json_schema, req.model_cls,
-            lambda: rt.backend.send_turn(
+            lambda feedback=None: rt.backend.send_turn(
                 sid,
-                req.prompt,
+                _with_retry_feedback(req.prompt, feedback),
                 req.opts,
                 req.json_schema,
                 history=hist,

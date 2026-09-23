@@ -197,6 +197,8 @@ class TinyAgent:
             # lifecycle. Keep a reference to read ``captured`` after the run.
             capture = next(t for t in spec.tools if isinstance(t, StructuredOutputTool))
             prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+            if capture.required_structure:
+                prompt = f"{prompt}\n\n{capture.required_structure}"
         # Own the session so ``run_once`` skips its pre_run / post_run pair: a
         # single-shot run has nothing to restore and nothing worth persisting,
         # and the checkpointer round-trip is pure cost here. That also skips the
@@ -286,6 +288,8 @@ class TinyAgent:
                 capture = StructuredOutputTool(json_schema, self._t)
                 harness.ability_manager.add_ability(capture.card, capture)
                 turn_prompt = f"{content}\n\n{self._t('structured_output', key='reminder')}"
+                if capture.required_structure:
+                    turn_prompt = f"{turn_prompt}\n\n{capture.required_structure}"
             result: Any = None
             try:
                 for attempt in range(_STRUCTURED_OUTPUT_MAX_ATTEMPTS):

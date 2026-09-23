@@ -232,6 +232,8 @@ class TeamWorkerBackend(AgentBackend):
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
                 # never collide and no per-call id is needed here.
                 submit_tool = StructuredOutputTool(schema_json, self._t)
+                if submit_tool.required_structure:
+                    prompt = f"{prompt}\n\n{submit_tool.required_structure}"
                 text = await self._execute_worker(
                     prompt,
                     [submit_tool],
