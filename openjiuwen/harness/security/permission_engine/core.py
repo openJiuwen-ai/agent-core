@@ -21,7 +21,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -35,10 +34,10 @@ from openjiuwen.harness.security.permission_engine.fileguard.sensitive_paths imp
     merge_package_sensitive_paths,
 )
 from openjiuwen.harness.security.permission_engine.host import ToolPermissionHost
+from openjiuwen.harness.security.permission_engine.models import PermissionsSection
 from openjiuwen.harness.security.permission_engine.models import (
     PermissionLevel,
     PermissionResult,
-    PermissionsSection,
 )
 from openjiuwen.harness.security.permission_engine.netguard.net_guard import (
     NetGuardChecker,
@@ -56,9 +55,6 @@ from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import 
     evaluate_tiered_policy,
     matched_rule_uses_approval_override,
     maybe_escalate_shell_operators,
-    severity_to_decision,
-)
-from openjiuwen.harness.security.permission_engine.toolguard.tool_policy import (
     strictest as tiered_policy_strictest,
 )
 
@@ -74,9 +70,17 @@ def _has_builtin_layer(items: Any) -> bool:
     return any(isinstance(item, dict) and item.get("layer") == "builtin" for item in items)
 
 
-def _fill_legacy_host_rule_actions(
-    cfg: dict[str, Any], permission_mode: str = "normal",
-) -> dict[str, Any]:
+# Old swarm product YAML often has severity without action. Map like
+# permission_mode=normal: LOW/MEDIUM→allow, HIGH/CRITICAL→ask.
+_LEGACY_SEVERITY_TO_ACTION = {
+    "LOW": "allow",
+    "MEDIUM": "allow",
+    "HIGH": "ask",
+    "CRITICAL": "ask",
+}
+
+
+def _fill_legacy_host_rule_actions(cfg: dict[str, Any]) -> dict[str, Any]:
     rules = cfg.get("rules")
     if not isinstance(rules, list):
         return cfg
@@ -90,7 +94,8 @@ def _fill_legacy_host_rule_actions(
         if isinstance(action, str) and action.strip():
             filled.append(item)
             continue
-        mapped = severity_to_decision(item.get("severity"), permission_mode)
+        sev = str(item.get("severity") or "").strip().upper()
+        mapped = _LEGACY_SEVERITY_TO_ACTION.get(sev)
         if mapped:
             item["action"] = mapped
         filled.append(item)
@@ -113,7 +118,7 @@ def prepare_permissions_for_engine(
 
     if not package_builtin_rules_enabled(cfg):
         logger.info("[PermissionEngine] permission.builtin_rules.skip_package_builtin_rules")
-        return _fill_legacy_host_rule_actions(cfg, _effective_permission_mode(cfg))
+        return _fill_legacy_host_rule_actions(cfg)
 
     if not _has_builtin_layer(cfg.get("rules")):
         logger.info("[PermissionEngine] permission.builtin_rules.legacy_host.inline_command_rules")
@@ -128,15 +133,8 @@ def prepare_permissions_for_engine(
     if isinstance(ng, dict) and ng.get("enabled") and not _has_package_net_urls(ng.get("urls")):
         logger.info("[PermissionEngine] permission.builtin_rules.legacy_host.merge_net_urls")
         cfg = merge_package_net_urls(cfg)
-    cfg = _fill_legacy_host_rule_actions(cfg, _effective_permission_mode(cfg))
+    cfg = _fill_legacy_host_rule_actions(cfg)
     return cfg
-
-
-def _effective_permission_mode(cfg: Mapping[str, Any]) -> str:
-    mode = cfg.get("permission_mode") if isinstance(cfg, Mapping) else None
-    if not isinstance(mode, str) or not mode.strip():
-        return "normal"
-    return mode.strip().lower()
 
 
 class PermissionEngine:

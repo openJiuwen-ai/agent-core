@@ -7,8 +7,8 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from collections.abc import Mapping
 from dataclasses import dataclass
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -86,39 +86,6 @@ def strictest(*levels: PermissionLevel) -> PermissionLevel:
     if not levels:
         return PermissionLevel.ASK
     return min(levels, key=lambda p: _STRICT_ORDER[p])
-
-
-# Spec contract: docs/specs/S_08_security-engine.md — severity → action per mode.
-_SEVERITY_TO_ACTION: dict[str, dict[str, str]] = {
-    "normal": {
-        "LOW": "allow",
-        "MEDIUM": "allow",
-        "HIGH": "ask",
-        "CRITICAL": "ask",
-    },
-    "strict": {
-        "LOW": "allow",
-        "MEDIUM": "ask",
-        "HIGH": "ask",
-        "CRITICAL": "deny",
-    },
-}
-
-
-def severity_to_decision(severity: str | None, permission_mode: str | None) -> str | None:
-    """Map a rule severity to its default action under the active permission_mode.
-
-    Returns ``None`` for empty severity (caller should leave ``action`` alone);
-    returns ``"ask"`` for unknown severity strings (spec-mandated fail-safe).
-    """
-    sev = (severity or "").strip().upper()
-    mode = (permission_mode or "normal").strip().lower() or "normal"
-    table = _SEVERITY_TO_ACTION.get(mode, _SEVERITY_TO_ACTION["normal"])
-    if sev in table:
-        return table[sev]
-    if not sev:
-        return None
-    return "ask"
 
 
 def _tool_category(
