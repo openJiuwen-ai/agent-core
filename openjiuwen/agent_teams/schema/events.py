@@ -512,6 +512,23 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     parent_phase: Optional[str] = Field(
         default=None, description="Parent author phase name when this is a child phase declaration."
     )
+    parent_session_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Parent session's avatar member name on agent_started turns of a "
+            "fork child (node_type=agent_session_fork), so a UI can draw the "
+            "parent→child fork edge. Unique per session, so chained and "
+            "same-label forks resolve to the exact parent. None on non-fork nodes."
+        ),
+    )
+    member_name: Optional[str] = Field(
+        default=None,
+        description=(
+            "The session's avatar member name on session-node agent_started "
+            "turns (agent_session / agent_session_fork / human_session); the "
+            "join key for parent_session_id. None on one-shot agent()/human()."
+        ),
+    )
     verify_reviewers: Optional[int] = Field(
         default=None, description="Reviewer count, on verify_started / verify_completed (verify_settled alias)."
     )

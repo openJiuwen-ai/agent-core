@@ -378,6 +378,8 @@ def _emit_agent_started(
     node_type: str,
     agent_id: str | None = None,
     correlation_id: str | None = None,
+    parent_session_id: str | None = None,
+    member_name: str | None = None,
     nested_phase: str | None = None,
 ) -> None:
     rt.current_agent = {
@@ -394,6 +396,8 @@ def _emit_agent_started(
             model=opts.get("model"),
             agent_id=agent_id,
             node_type=node_type,
+            parent_session_id=parent_session_id,
+            member_name=member_name,
             correlation_id=correlation_id,
             nested_phase=_resolved_nested_phase(nested_phase),
         )
@@ -1195,6 +1199,7 @@ class AgentSession:
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
+        "_parent_session_id",
     )
 
     def __init__(
@@ -1208,6 +1213,7 @@ class AgentSession:
         _node_type: str = "agent_session",
         _fork_data: dict | None = None,
         _history: list[dict] | None = None,
+        _parent_session_id: str | None = None,
     ) -> None:
         self._label = label
         self._phase = phase
@@ -1220,6 +1226,7 @@ class AgentSession:
         self._member_name: str | None = None
         self._in_flight = False
         self._fork_data = _fork_data
+        self._parent_session_id = _parent_session_id
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -1271,19 +1278,22 @@ class AgentSession:
             _warn_concurrent_session(rt)
         self._in_flight = True
         try:
+            # Reserve the member identity on the FIRST turn regardless of cache
+            # hit, so a fully-hit resume still knows this session's member name
+            # (fork() needs it to locate the parent's persisted context) and the
+            # AGENT_STARTED event can carry it as the session's stable UI key.
+            # Only runs once — no avatar, no LLM, no spawn/budget slot.
+            if self._member_name is None and not self._human:
+                await self._ensure_member_name(rt, opts)
+
             _emit_agent_started(
                 rt, opts, prompt,
                 node_type=self._node_type,
                 agent_id=ks,
                 correlation_id=correlation_id,
+                parent_session_id=self._parent_session_id,
+                member_name=self._member_name,
             )
-
-            # Reserve the member identity on the FIRST turn regardless of cache
-            # hit, so a fully-hit resume still knows this session's member name
-            # (fork() needs it to locate the parent's persisted context). Only
-            # runs once — no avatar, no LLM, no spawn/budget slot.
-            if self._member_name is None and not self._human:
-                await self._ensure_member_name(rt, opts)
 
             cached = rt.journal.get_cached(ks, sig, rt.run_id)
             if cached is not None:  # resume hit — no backend, no harness, no person
@@ -1422,6 +1432,11 @@ class AgentSession:
             _node_type="agent_session_fork" if self._history else "agent_session",
             _history=[dict(m) for m in self._history],
             _fork_data=fork_data,
+            # The parent's avatar member name (unique per session), not the
+            # label: fork() inherits the parent label by default, so label-keyed
+            # lineage would cross-link chained or same-label forks. None when
+            # the parent never sent (the child is then a plain agent_session).
+            _parent_session_id=self._member_name,
         )
 
     async def _drive(self, rt, req: _TurnRequest):

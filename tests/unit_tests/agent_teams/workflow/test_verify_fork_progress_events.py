@@ -1,11 +1,12 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Tests for verify() structured progress events (SDD-0017 / SDD-0014).
+"""Tests for verify()/fork() structured progress events (SDD-0017 / SDD-0014).
 
 Covers the engine's VERIFY_STARTED / VERIFY_COMPLETED progress events (round
-boundary, verdict, per-reviewer votes with node-matching names and ids). Runs
-offline against MockBackend with pinned fixtures; events are captured via
+boundary, verdict, per-reviewer votes with node-matching names) and the
+``parent_session_id`` / ``member_name`` carried by session AGENT_STARTED turns.
+Runs offline against MockBackend with pinned fixtures; events are captured via
 ``run_workflow(progress_sink=...)``.
 """
 from __future__ import annotations
@@ -24,6 +25,24 @@ META = {"name": "verify-events", "description": "verify progress events", "phase
 
 async def run(args):
     return await verify(args["reviewers"], **args.get("kwargs", {}))
+"""
+
+_FORK_SCRIPT = """
+from swarmflow import agent_session
+
+META = {"name": "fork-events", "description": "fork progress events", "phases": []}
+
+_ANSWER = {
+    "type": "object", "additionalProperties": False, "required": ["answer"],
+    "properties": {"answer": {"type": "string"}},
+}
+
+async def run(args):
+    parent = agent_session(label="arch")
+    await parent.send("baseline", schema=_ANSWER)
+    child = await parent.fork(fork_mode="full", label="child")
+    reply = await child.send("deepen", schema=_ANSWER)
+    return {"child": reply}
 """
 
 
@@ -240,3 +259,48 @@ def test_verify_fail_decision_mapped(tmp_path):
     settled = next(e for e in events if e.kind == ProgressKind.VERIFY_COMPLETED)
     assert settled.verify_verdict == "fail"
     assert settled.verify_votes[0]["decision"] == "fail"
+
+
+# ─────────────────── fork parent_session_id ───────────────────
+def test_fork_child_started_carries_parent_member_name(tmp_path):
+    """A fork child's AGENT_STARTED carries the parent's member_name (unique key)."""
+    events = []
+    result = _run(
+        _write(tmp_path, "fork.py", _FORK_SCRIPT),
+        {},
+        {
+            "arch": {"answer": "base"},
+            "child": {"answer": "branch"},
+        },
+        events,
+    )
+    assert result["child"] == {"answer": "branch"}
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    assert [e.node_type for e in started] == ["agent_session", "agent_session_fork"]
+    assert started[0].parent_session_id is None  # the parent turn itself
+    assert started[1].parent_session_id == "mock-arch"  # parent's member_name
+    assert started[1].label == "child"
+    # Session turns carry their member_name as the stable UI join key.
+    assert started[0].member_name == "mock-arch"
+    assert started[1].member_name == "mock-child"
+
+
+def test_plain_session_turns_have_no_parent(tmp_path):
+    """agent_session turns outside a fork never carry parent_session_id."""
+    script = """
+from swarmflow import agent_session
+
+META = {"name": "plain-session", "description": "plain session", "phases": []}
+
+async def run(args):
+    s = agent_session(label="solo")
+    reply = await s.send("hi")
+    return {"reply": reply}
+"""
+    events = []
+    _run(_write(tmp_path, "plain.py", script), {}, {"solo": "hello"}, events)
+    started = [e for e in events if e.kind == ProgressKind.AGENT_STARTED]
+    assert len(started) == 1
+    assert started[0].node_type == "agent_session"
+    assert started[0].parent_session_id is None
+    assert started[0].member_name == "mock-solo"

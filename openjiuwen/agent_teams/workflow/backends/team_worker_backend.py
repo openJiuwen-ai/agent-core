@@ -310,6 +310,7 @@ class TeamWorkerBackend(AgentBackend):
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
                 kv_cache_runtime=self._kv_cache_runtime,
+                skill_visibility_fn=self._apply_worker_skill_visibility,
             )
         return self._session_mgr
 

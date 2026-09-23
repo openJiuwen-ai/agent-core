@@ -173,6 +173,13 @@ class AbilityManager:
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
         self._owner_id: Optional[str] = owner_id
+        # Qualified tool id -> the concrete instance this manager registered.
+        # Removal is identity-gated against this map: add_ability's refresh
+        # path lets a later owner of the same qualified id (e.g. a relaunched
+        # run re-minting the same session member name) replace our instance,
+        # and tearing down by bare id would then drop that later owner's live
+        # instance ("Tool instance not found in resource_mgr").
+        self._owned_tool_instances: Dict[str, Tool] = {}
 
     @property
     def registry_revision(self) -> int:
@@ -803,6 +810,7 @@ class AbilityManager:
         if self._owner_id:
             card.id = self.qualify_tool_id(card, self._owner_id)
         Runner.resource_mgr.add_tool(resource, refresh=True)
+        self._owned_tool_instances[card.id] = resource
         return self.add(card)
 
     def remove_ability(self, name: Union[str, List[str]]) -> None:
@@ -821,7 +829,25 @@ class AbilityManager:
             self.remove(item)
             if card is None or card.stateless:
                 continue
-            Runner.resource_mgr.remove_tool(card.id)
+            self._remove_owned_tool_instance(card.id)
+
+    def _remove_owned_tool_instance(self, tool_id: str) -> None:
+        """Drop our resource-manager registration for ``tool_id``, identity-gated.
+
+        Only removes when the resource manager still holds the instance this
+        manager registered. When a later owner refreshed the same qualified id,
+        its live instance is left alone — removing by bare id here is what made
+        an overlapping avatar's model calls fail with "Tool instance not found".
+        """
+        from openjiuwen.core.runner import Runner
+
+        ours = self._owned_tool_instances.pop(tool_id, None)
+        if ours is None:
+            return
+        current = Runner.resource_mgr.get_tool(tool_id=tool_id)
+        if current is not ours:
+            return
+        Runner.resource_mgr.remove_tool(tool_id)
 
     def teardown_tools(self) -> None:
         """Drop this owner's agent-qualified stateful tools from the resource manager.
@@ -845,7 +871,7 @@ class AbilityManager:
             if card.stateless or card.id != f"{name}_{self._owner_id}":
                 continue
             self.remove(name)
-            Runner.resource_mgr.remove_tool(card.id)
+            self._remove_owned_tool_instance(card.id)
 
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name

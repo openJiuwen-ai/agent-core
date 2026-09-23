@@ -58,10 +58,21 @@ from openjiuwen.core.session.vcs.codec import encode_message
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 # Multi-turn role prompt — the session counterpart of the worker's single-shot prompt.
+# Mirrors the worker prompt's "do the work, THEN submit" semantics: a turn that
+# carries a task must be executed with tools (observing each result) before the
+# reply; only plain no-tool questions may be answered directly. The previous
+# "answer each new message directly and concisely" wording made execution-style
+# turns (e.g. an AppWorld writer) reply with intentions instead of running
+# tools — reproduced across GLM-5.3-Flash and deepseek-v4-flash.
 _SESSION_SYS_PROMPT_AGENT = (
     "You are a stateful swarmflow session agent in a multi-turn conversation. "
-    "You remember every prior turn; answer each new message directly and "
-    "concisely, using the accumulated context. Do not restate the whole history."
+    "You remember every prior turn and can use the accumulated context. "
+    "When a message gives you a task to perform or asks you to change anything "
+    "in the world, DO the work first with your tools — execute every step, "
+    "observe each result, and only then reply with the outcome. Never answer "
+    "with intentions, plans, or \"starting now\" narrations instead of executed "
+    "work. Reply directly and concisely only for plain questions that need no "
+    "tool work. Do not restate the whole history."
 )
 # Role prompt for a human session's avatar: it does NOT invent answers — it renders a
 # real person's reply faithfully into the form the turn asked for.
@@ -74,8 +85,9 @@ _SESSION_SYS_PROMPT_HUMAN = (
 )
 # Appended to a turn's user prompt when that turn requested structured output.
 _SCHEMA_TURN_NUDGE = (
-    "When you have the answer for THIS message, call the `structured_output` tool "
-    "EXACTLY ONCE with the result conforming to its schema. Do NOT write the "
+    "When the work of THIS message is DONE and you have the result, call the "
+    "`structured_output` tool EXACTLY ONCE with the result conforming to its "
+    "schema. Do NOT call it before the work is executed, and do NOT write the "
     "result as plain text — it is captured only through that tool call."
 )
 # Default ceiling on how long a human turn waits for a person before giving up.
@@ -169,6 +181,7 @@ class AvatarSessionManager:
         budget: BudgetLedger | None = None,
         workflow_budget: BudgetLedger | None = None,
         kv_cache_runtime: KVCacheRuntimeProtocol | None = None,
+        skill_visibility_fn: Callable[[Any, str], Any] | None = None,
     ) -> None:
         self._budget = budget if budget is not None else BudgetLedger()
         self._workflow_budget = workflow_budget
@@ -201,6 +214,10 @@ class AvatarSessionManager:
         self._run_id = run_id
         self._workflow_name = workflow_name
         self._kv_cache_runtime = kv_cache_runtime
+        # Worker-equivalent Skill-rail applier: without the TEAM_SKILL_USE
+        # rail (include_tools=True) a session avatar built from a tools=None
+        # base spec mounts no filesystem/shell toolset at all.
+        self._skill_visibility_fn = skill_visibility_fn
         self._reply_topic_subscribed = False
 
     # ------------------------------------------------------------------
@@ -572,13 +589,17 @@ class AvatarSessionManager:
         self._pending_human.clear()
         self._pending_reply_buffer.clear()
         live = [state for state in list(self._sessions.values()) if state.harness is not None]
-        results = await asyncio.gather(
-            *(state.harness.abort(immediate=True) for state in live),
-            return_exceptions=True,
-        )
-        for state, exc in zip(live, results):
-            if isinstance(exc, Exception):  # noqa: BLE001 - best effort during pause
-                team_logger.debug("[swarmflow] session abort failed for %s", state.member_name)
+
+        async def _abort_one_session(state: _SessionState) -> None:
+            try:
+                await state.harness.abort(immediate=True)
+            except Exception as exc:  # best effort during pause
+                team_logger.debug(
+                    "[swarmflow] session abort failed member=%s err=%s",
+                    state.member_name, exc,
+                )
+
+        await asyncio.gather(*(_abort_one_session(state) for state in live))
 
     def submit_human_reply(self, correlation_id: str, answer: str) -> bool:
         """Resolve a pending human turn with the person's raw reply.
@@ -624,6 +645,35 @@ class AvatarSessionManager:
             model=model,
             description="swarmflow session",
         )
+        # Mount the avatar's own workspace, mirroring the single-shot worker's
+        # `_setup_worker_workspace`: the file/shell toolset is mounted on a spec
+        # that carries a WorkspaceSpec, and a minimal team spec (no workspace on
+        # the teammate) would otherwise leave the session avatar with no tools
+        # at all — able to answer text but never execute anything.
+        from openjiuwen.agent_teams.schema.deep_agent_spec import WorkspaceSpec
+        from openjiuwen.agent_teams.workspace_layout import (
+            ensure_team_member_workspace_link,
+        )
+
+        avatar_ws_root = ensure_team_member_workspace_link(self._team_name, state.member_name)
+        if state.spec_base.workspace is not None:
+            avatar_workspace = state.spec_base.workspace.model_copy(
+                update={"root_path": avatar_ws_root, "stable_base": True}
+            )
+        else:
+            avatar_workspace = WorkspaceSpec(
+                root_path=avatar_ws_root,
+                language=self._language,
+                stable_base=True,
+            )
+        spec = spec.model_copy(update={"workspace": avatar_workspace})
+        # Same Skill-rail treatment as the single-shot worker path: the
+        # TEAM_SKILL_USE rail's include_tools fallback registers the
+        # read_file / bash / code toolset into the avatar's ability
+        # manager, which is the model-visible tool surface. Skipping this
+        # left sessions with zero tools while one-shot workers had them.
+        if self._skill_visibility_fn is not None:
+            spec = self._skill_visibility_fn(spec, state.member_name)
         build_context = derive_member_build_context(
             self._build_context,
             team_name=self._team_name,
@@ -993,17 +1043,27 @@ class AvatarSessionManager:
     def _next_member_name(self, kind: str, opts: dict) -> str:
         """Mint a unique, pattern-valid session member name from the call label.
 
-        ``wf-sess-<label-slug>-<n>`` (or ``wf-human-...``) — lowercase ASCII with a
-        leading letter, so it satisfies member-name routing constraints. ``n`` is a
-        per-manager counter; the synchronous read-increment keeps it collision-free
-        under the engine's concurrent fan-out.
+        ``{run_prefix}-sess-<label-slug>-<n>`` (or ``wf-sess-...`` /
+        ``wf-human-...`` when no run id is set) — lowercase ASCII with a leading
+        letter, so it satisfies member-name routing constraints. The run prefix
+        mirrors TeamWorkerBackend's worker names: without it two runs of the
+        same script mint the same member name, and the avatars then share one
+        NativeHarness session id, one workspace dir and one owner-qualified
+        resource-manager key — the "Tool instance not found" cross-run
+        collision. ``n`` is a per-manager counter; the synchronous
+        read-increment keeps it collision-free under the engine's concurrent
+        fan-out, and a resumed run replays identical names because fan-out
+        order is deterministic.
         """
         n = self._counter
         self._counter += 1
         label = str(opts.get("label") or kind)
         slug = _SLUG_RE.sub("-", label.lower()).strip("-") or kind
-        prefix = "wf-human" if kind == "human" else "wf-sess"
-        return f"{prefix}-{slug}-{n}"
+        kind_prefix = "human" if kind == "human" else "sess"
+        run_prefix = "wf"
+        if self._run_id:
+            run_prefix = _SLUG_RE.sub("-", self._run_id.lower()).strip("-") or "wf"
+        return f"{run_prefix}-{kind_prefix}-{slug}-{n}"
 
 
 def _output_text(result: Any) -> str:

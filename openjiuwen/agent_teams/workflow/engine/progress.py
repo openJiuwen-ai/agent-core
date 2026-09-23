@@ -111,6 +111,16 @@ class WorkflowProgressEvent:
       ``parallel``.
     * ``answer``              — the person's raw reply text (``HUMAN_REPLIED``).
       Absent on all other kinds.
+    * ``parent_session_id`` — the parent session's avatar member name carried
+      by a fork child's ``AGENT_STARTED`` turns (``node_type="agent_session_fork"``),
+      so a UI can draw the parent→child fork edge. Unique per session (unlike
+      the label, which a fork inherits by default), so chained and same-label
+      forks resolve to the exact parent. ``None`` on non-fork nodes.
+    * ``member_name`` — the session's avatar member name on session-node
+      ``AGENT_STARTED`` turns (``agent_session`` / ``agent_session_fork`` /
+      ``human_session``); constant across a session's turns. The join key a
+      UI uses to map ``parent_session_id`` back to the parent session card.
+      ``None`` on one-shot ``agent()`` / ``human()`` turns.
     * ``verify_reviewers`` / ``verify_threshold`` — the reviewer count and the
       score threshold (``VERIFY_STARTED`` / ``VERIFY_COMPLETED``).
     * ``verify_reviewer_labels`` — the reviewers' unique label roster
@@ -156,6 +166,8 @@ class WorkflowProgressEvent:
     nested_phase: str | None = None
     parent_phase: str | None = None
     script_path: str | None = None
+    parent_session_id: str | None = None
+    member_name: str | None = None
     verify_reviewers: int | None = None
     verify_verdict: str | None = None
     verify_threshold: float | None = None
