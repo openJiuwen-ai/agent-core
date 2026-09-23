@@ -230,6 +230,8 @@ async def _fetch_article_list(
             },
             headers={"Referer": referer},
         )
+        if payload == {} and articles:
+            return articles
         page, next_token = _list_page(payload)
         if not page:
             return articles
