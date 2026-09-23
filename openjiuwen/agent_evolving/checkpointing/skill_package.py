@@ -98,6 +98,25 @@ def pack_skill_directory(
     return buffer.getvalue()
 
 
+def _safe_extract_tar(archive: tarfile.TarFile, dest_dir: Path) -> None:
+    """Extract ``archive`` into ``dest_dir``, rejecting unsafe members.
+
+    Fallback for interpreters without ``tarfile.data_filter`` (Python < 3.12),
+    where ``extractall`` does not sanitize member names and would follow ``..``
+    or absolute paths outside ``dest_dir``.
+    """
+    root = dest_dir.resolve()
+    for member in archive.getmembers():
+        member_path = (root / member.name).resolve()
+        if not member_path.is_relative_to(root):
+            raise ValueError(f"Unsafe tar member path: {member.name}")
+        if member.issym() or member.islnk():
+            link_target = (member_path.parent / member.linkname).resolve()
+            if not link_target.is_relative_to(root):
+                raise ValueError(f"Unsafe tar link target: {member.linkname}")
+    archive.extractall(root)
+
+
 def unpack_skill_package(package_bytes: bytes, dest_dir: Path) -> None:
     """Extract a skill package tarball into ``dest_dir`` (created if needed)."""
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -106,7 +125,7 @@ def unpack_skill_package(package_bytes: bytes, dest_dir: Path) -> None:
         if hasattr(tarfile, "data_filter"):
             archive.extractall(dest_dir, filter="data")
         else:
-            archive.extractall(dest_dir)
+            _safe_extract_tar(archive, dest_dir)
 
 
 def list_packable_files(skill_dir: Path) -> Iterable[Path]:
