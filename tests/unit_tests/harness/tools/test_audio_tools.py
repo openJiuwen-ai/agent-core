@@ -4,8 +4,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import wave
+from email.parser import BytesParser
+from email.policy import default
 from pathlib import Path
+
+import httpx
+import pytest
+from openai import OpenAI
 
 from openjiuwen.core.runner import Runner
 from openjiuwen.harness.schema.config import AudioModelConfig
@@ -107,6 +115,101 @@ def test_audio_transcription_tool_uses_chat_audio_for_non_endpoint_model(
     assert result.success is True
     assert result.data["text"] == "chat audio transcript"
     assert result.data["model"] == "gemini-2.5-flash"
+
+
+@pytest.mark.parametrize("audio_mime_type", ["audio/wav", "audio/x-wav", "audio/wave"])
+@pytest.mark.parametrize(
+    ("model_name", "endpoint"),
+    [
+        ("FunAudioLLM/SenseVoiceSmall", "/v1/audio/transcriptions"),
+        ("funaudiollm/sensevoicesmall", "/v1/audio/transcriptions"),
+        ("FUNAUDIOLLM/SENSEVOICESMALL", "/v1/audio/transcriptions"),
+        ("gpt-4o-transcribe", "/v1/audio/transcriptions"),
+        ("gpt-4o-mini-transcribe", "/v1/audio/transcriptions"),
+        ("whisper-1", "/v1/audio/transcriptions"),
+        ("xiaomi/mimo-v2.6-flash", "/v1/chat/completions"),
+        ("gemini-2.5-flash", "/v1/chat/completions"),
+        ("other/SenseVoiceSmall", "/v1/chat/completions"),
+        ("FunAudioLLM/SenseVoiceSmall-custom", "/v1/chat/completions"),
+    ],
+)
+def test_audio_transcription_routes_exact_model_with_correct_payload(
+    tmp_path: Path,
+    monkeypatch,
+    model_name: str,
+    endpoint: str,
+    audio_mime_type: str,
+):
+    audio_path = tmp_path / "sample.wav"
+    _write_test_wav(audio_path)
+    audio_bytes = audio_path.read_bytes()
+    monkeypatch.setattr(
+        "openjiuwen.harness.tools.multimodal.audio.mimetypes.guess_type",
+        lambda _path: (audio_mime_type, None),
+    )
+    config = AudioModelConfig(
+        api_key="test-key",
+        base_url="https://audio.example/v1",
+        transcription_model=model_name,
+        max_retries=1,
+    )
+    requests_seen = []
+
+    def handle_request(request: httpx.Request) -> httpx.Response:
+        requests_seen.append(request)
+        if endpoint == "/v1/audio/transcriptions":
+            return httpx.Response(200, json={"text": "test transcript"})
+
+        return httpx.Response(
+            200,
+            json={
+                "id": "test-completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "test transcript"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handle_request)) as http_client:
+        monkeypatch.setattr(
+            "openjiuwen.harness.tools.multimodal.audio.OpenAI",
+            lambda **kwargs: OpenAI(**kwargs, http_client=http_client, max_retries=0),
+        )
+        tool = AudioTranscriptionTool(audio_model_config=config)
+        result = asyncio.run(tool.invoke({"audio_path_or_url": str(audio_path)}))
+
+    assert [request.url.path for request in requests_seen] == [endpoint]
+    request = requests_seen[0]
+    assert request.method == "POST"
+    if endpoint == "/v1/audio/transcriptions":
+        content_type = request.headers["content-type"]
+        assert content_type.startswith("multipart/form-data;")
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {content_type}\r\n\r\n".encode("ascii") + request.read()
+        )
+        parts = {part.get_param("name", header="content-disposition"): part for part in message.iter_parts()}
+        assert set(parts) == {"model", "file"}
+        assert parts["model"].get_payload(decode=True).decode("utf-8") == model_name
+        assert parts["file"].get_filename() == "sample.wav"
+        assert parts["file"].get_payload(decode=True) == audio_bytes
+    else:
+        assert request.headers["content-type"] == "application/json"
+        payload = json.loads(request.read())
+        assert payload["model"] == model_name
+        content = payload["messages"][-1]["content"]
+        assert "Transcribe all speech" in content[0]["text"]
+        assert content[1]["type"] == "input_audio"
+        assert content[1]["input_audio"]["format"] == "wav"
+        assert base64.b64decode(content[1]["input_audio"]["data"]) == audio_bytes
+    assert result.success is True, result.error
+    assert result.data == {"text": "test transcript", "model": model_name}
 
 
 def test_audio_question_answering_tool_returns_answer_and_duration(
