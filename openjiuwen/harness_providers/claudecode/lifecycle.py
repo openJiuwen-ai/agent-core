@@ -162,7 +162,8 @@ class TurnCycleTracker:
     def _abandon(self, reason: str) -> None:
         if not self._outstanding:
             return
-        self._diagnostics.append(f"{reason} {len(self._outstanding)} message(s): {', '.join(sorted(self._outstanding))}")
+        outstanding = ", ".join(sorted(self._outstanding))
+        self._diagnostics.append(f"{reason} {len(self._outstanding)} message(s): {outstanding}")
         self._outstanding = {}
         self._ack_deadline = None
 
@@ -288,8 +289,6 @@ class LifecycleTap:
         try:
             async for frame in self._inner.read_messages():
                 queue.put_nowait((frame, None))
-        except asyncio.CancelledError:
-            raise
         except Exception as exc:
             # Raised again on the consumer side, so the SDK sees the transport
             # failure exactly as it would without the tap.

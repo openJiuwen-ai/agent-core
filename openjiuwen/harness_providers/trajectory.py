@@ -729,7 +729,8 @@ def _message_dicts(message: TurnMessage) -> list[dict[str, Any]]:
             parts.append(_content_part(block))
     metadata = _message_metadata(message)
     result: list[dict[str, Any]] = []
-    if parts or reasoning or tool_calls or not tool_results:
+    carries_own_content = bool(parts or reasoning or tool_calls)
+    if carries_own_content or not tool_results:
         item: dict[str, Any] = {
             "role": role,
             "message_id": message.message_id,

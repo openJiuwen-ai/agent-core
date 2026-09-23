@@ -22,6 +22,11 @@ _PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "don
 DEFAULT_CLAUDE_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
 
+def _is_number(value: object) -> bool:
+    """Return whether ``value`` is an int or float; ``bool`` does not count."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeModelConfig:
     """Model endpoint used by the Claude CLI.
@@ -126,11 +131,11 @@ class ClaudeCodeHarnessConfig:
             raise TypeError("Claude event_buffer_capacity must be an integer")
         if self.event_buffer_capacity <= 0:
             raise ValueError("Claude event_buffer_capacity must be positive")
-        if isinstance(self.request_observation_wait_s, bool) or not isinstance(self.request_observation_wait_s, (int, float)):
+        if not _is_number(self.request_observation_wait_s):
             raise TypeError("Claude request_observation_wait_s must be a number")
         if self.request_observation_wait_s < 0:
             raise ValueError("Claude request_observation_wait_s must not be negative")
-        if isinstance(self.lifecycle_ack_timeout_s, bool) or not isinstance(self.lifecycle_ack_timeout_s, (int, float)):
+        if not _is_number(self.lifecycle_ack_timeout_s):
             raise TypeError("Claude lifecycle_ack_timeout_s must be a number")
         if self.lifecycle_ack_timeout_s <= 0:
             raise ValueError("Claude lifecycle_ack_timeout_s must be positive")

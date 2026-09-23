@@ -287,3 +287,7 @@ tests/unit_tests/extensions/context_evolver/memory_file/
 
 /.codex/
 /.agents/
+/sub_agents/
+/records/
+/auto_harness/
+/.idea_bak/

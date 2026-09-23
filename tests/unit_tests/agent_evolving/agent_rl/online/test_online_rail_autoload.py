@@ -1,10 +1,29 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+
 from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
+from openjiuwen.extensions.observability.setup import shutdown_observability
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig
+
+
+@pytest.fixture(autouse=True)
+def _isolate_shared_observability(monkeypatch, tmp_path):
+    """Keep the env-built rail's shared runtime out of later tests.
+
+    Building an online rail from env initializes the process-global
+    observability runtime when none exists. Left running, it makes a later
+    ``init_observability`` in the same worker a no-op that ignores its config.
+    """
+    monkeypatch.setenv("ONLINE_RL_OBSERVABILITY_TRACES_DIR", str(tmp_path / "observability_traces"))
+    yield
+    shutdown_observability()
 
 
 def _enable_online_training(monkeypatch, *, backend: str = "") -> None:

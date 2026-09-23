@@ -18,7 +18,17 @@ import dataclasses
 import inspect
 import json
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Optional, Protocol, Sequence, runtime_checkable
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Optional,
+    Protocol,
+    Sequence,
+    runtime_checkable,
+)
 
 from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.harness.turn import MemberTurn, resolve_member_turn

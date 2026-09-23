@@ -72,7 +72,6 @@ def get_or_create_team_span(team_name: str, tracer, *, session_id: str | None = 
 
     from opentelemetry.trace import SpanKind
     from openjiuwen.agent_teams.context import get_session_id
-    from openjiuwen.extensions.observability.span_context import get_current_session_id
     from openjiuwen.extensions.observability.semconv import (
         AT_TEAM_ID,
         AT_TEAM_NAME,

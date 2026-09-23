@@ -52,7 +52,11 @@ from openjiuwen.harness_protocol import (
 )
 from openjiuwen.harness_providers.base import logger
 from openjiuwen.harness_providers.codex.mapping import MappedCodexEvent
-from openjiuwen.harness_providers.codex.options import codex_otel_config_overrides, codex_telemetry_env, namespaced_tool_name
+from openjiuwen.harness_providers.codex.options import (
+    codex_otel_config_overrides,
+    codex_telemetry_env,
+    namespaced_tool_name,
+)
 from openjiuwen.harness_providers.codex.rollout_trace import CodexRolloutTraceReader
 from openjiuwen.harness_providers.jsonsafe import to_json_object, to_json_safe
 from openjiuwen.harness_providers.telemetry.otlp_receiver import get_shared_otlp_receiver
@@ -500,8 +504,6 @@ class CodexRequestObserver:
             try:
                 async with self._lock:
                     await self._flush(force=False)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 logger.debug("[codex] model request observation flush failed", exc_info=True)
 
@@ -579,8 +581,8 @@ class CodexRequestObserver:
         while self._held:
             head = self._held[0]
             owner = self._owner_of(head)
-            waiting = owner is None and head.payload.kind is ItemEventKind.STARTED
-            if waiting and self.rollout_attached and not force and time.time() < head.observed_at + self._wait_s:
+            waiting = owner is None and head.payload.kind is ItemEventKind.STARTED and self.rollout_attached
+            if waiting and not force and time.time() < head.observed_at + self._wait_s:
                 return
             self._held.popleft()
             if head.payload.kind is ItemEventKind.STARTED:
@@ -871,7 +873,12 @@ class CodexRequestObserver:
             return facts.ttft_ms / 1000
         return None
 
-    def _full_conversation(self, request: dict[str, Any], response_id: str, output_items: list[Any]) -> list[Any] | None:
+    def _full_conversation(
+        self,
+        request: dict[str, Any],
+        response_id: str,
+        output_items: list[Any],
+    ) -> list[Any] | None:
         """Return the whole conversation a request continued, or ``None`` when unknown.
 
         A request chained on ``previous_response_id`` only sends the input
@@ -991,12 +998,7 @@ def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -
     """
     offered = request.get("tools")
     if not isinstance(offered, list) or not offered:
-        offered = [
-            tool
-            for item in (conversation or [])
-            if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE
-            for tool in (item.get("tools") or [])
-        ]
+        offered = _catalogue_tools(conversation or [])
     definitions = _flatten_tools(offered)
     known = {definition["name"] for definition in definitions}
     for item in conversation or ():
@@ -1007,6 +1009,15 @@ def _tool_definitions(request: dict[str, Any], conversation: list[Any] | None) -
                 known.add(definition["name"])
                 definitions.append(definition)
     return definitions or None
+
+
+def _catalogue_tools(conversation: list[Any]) -> list[Any]:
+    """Return the tools stated by the conversation's catalogue input items."""
+    tools: list[Any] = []
+    for item in conversation:
+        if isinstance(item, dict) and item.get("type") == _TOOL_CATALOGUE_TYPE:
+            tools.extend(item.get("tools") or [])
+    return tools
 
 
 def _flatten_tools(tools: Any, *, namespace: str = "") -> list[dict[str, Any]]:
@@ -1190,7 +1201,8 @@ def _item_blocks(message_id: str, item: dict[str, Any]) -> list[ContentBlock]:
             elif isinstance(part, str):
                 blocks.append(ContentBlock(block_id=block_id, kind="text", content=part))
             elif isinstance(part, dict):
-                blocks.append(ContentBlock(block_id=block_id, kind=str(part.get("type") or "unknown"), content=to_json_safe(part)))
+                kind = str(part.get("type") or "unknown")
+                blocks.append(ContentBlock(block_id=block_id, kind=kind, content=to_json_safe(part)))
         return blocks
     return [ContentBlock(block_id=f"{message_id}:0", kind=item_type, content=to_json_safe(item))]
 

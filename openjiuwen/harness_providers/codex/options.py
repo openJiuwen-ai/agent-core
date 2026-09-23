@@ -122,7 +122,7 @@ def codex_otel_config_overrides(*, endpoint: str, source_id: str) -> tuple[str, 
         endpoint: Base URL of the loopback receiver.
         source_id: This session's identity, echoed back in the resource.
     """
-    url = json.dumps(endpoint.rstrip("/") + "/v1/logs")
+    url = json.dumps(f"{endpoint.rstrip('/')}/v1/logs")
     exporter = f'{{ otlp-http = {{ endpoint = {url}, protocol = "binary" }} }}'
     return (
         f"otel.environment={json.dumps(source_id)}",

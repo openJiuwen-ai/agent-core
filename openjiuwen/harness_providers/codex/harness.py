@@ -330,7 +330,12 @@ class CodexHarness(SerializedTurnHarness):
         if observer is None:
             return await self._drive_turn(turn)
 
-        async def emit(payload: Any, item_id: str | None, causation_ids: tuple[str, ...], timestamp: float | None) -> None:
+        async def emit(
+            payload: Any,
+            item_id: str | None,
+            causation_ids: tuple[str, ...],
+            timestamp: float | None,
+        ) -> None:
             await self._emit(payload, turn=turn, item_id=item_id, causation_ids=causation_ids, timestamp=timestamp)
 
         observer.begin_turn(emit)

@@ -330,7 +330,12 @@ class ClaudeRequestObserver:
                 payload = event.payload
                 if isinstance(payload, ItemLifecycleEvent):
                     self._held.append(
-                        _HeldItem(payload=payload, item_id=event.item_id, owner=self._item_owner(event), observed_at=now)
+                        _HeldItem(
+                            payload=payload,
+                            item_id=event.item_id,
+                            owner=self._item_owner(event),
+                            observed_at=now,
+                        )
                     )
                 else:
                     await self._emit_event(payload, event.item_id, (), None)
@@ -426,8 +431,6 @@ class ClaudeRequestObserver:
             try:
                 async with self._lock:
                     await self._flush(force=False)
-            except asyncio.CancelledError:
-                raise
             except Exception:
                 logger.debug("[claude-code] model request observation flush failed", exc_info=True)
 
@@ -494,7 +497,8 @@ class ClaudeRequestObserver:
                 return
             facts = self._tool_facts.get(head.item_id or "")
             completing = head.payload.kind is ItemEventKind.COMPLETED
-            if completing and not force and (facts is None or not facts.settled):
+            settled = facts is not None and facts.settled
+            if completing and not force and not settled:
                 # The CLI states the execution window and the outcome on its
                 # own span; wait for them rather than timing the SDK stream.
                 if time.time() < head.observed_at + self._wait_s:
@@ -504,7 +508,8 @@ class ClaudeRequestObserver:
             payload, timestamp = self._tool_observation(head, facts)
             await self._emit_event(payload, head.item_id, causes, timestamp)
 
-    def _tool_observation(self, held: _HeldItem, facts: _ToolFacts | None) -> tuple[ItemLifecycleEvent, float]:
+    @staticmethod
+    def _tool_observation(held: _HeldItem, facts: _ToolFacts | None) -> tuple[ItemLifecycleEvent, float]:
         """State a tool item the way Claude Code accounted for it."""
         payload = held.payload
         if facts is None:
@@ -768,7 +773,7 @@ class ClaudeRequestObserver:
         # them. One opened for a different kind of call is still waiting for a
         # reply of its own, so it stays.
         other_kinds = [kept for kept in self._timed_spans[:index] if kept.query_source != span.query_source]
-        self._timed_spans = other_kinds + self._timed_spans[index + 1 :]
+        self._timed_spans = other_kinds + self._timed_spans[index + 1:]
         return span
 
     def _take_accounting(self, response_event: _BodyEvent) -> dict[str, Any]:
@@ -879,7 +884,8 @@ class ClaudeRequestObserver:
             },
         )
 
-    def _stream_request(self, snapshot: _ReplySnapshot) -> ModelRequestEvent:
+    @staticmethod
+    def _stream_request(snapshot: _ReplySnapshot) -> ModelRequestEvent:
         failed = snapshot.error is not None
         return ModelRequestEvent(
             request_id=snapshot.message_id,

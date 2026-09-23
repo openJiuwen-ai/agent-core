@@ -287,7 +287,10 @@ class SharedOtlpReceiver:
             logs_service_pb2_grpc.add_LogsServiceServicer_to_server(_LogsServicer(), server)
             port = server.add_insecure_port("127.0.0.1:0")
             if port == 0:
-                logger.warning("otel: shared OTLP gRPC listener could not bind; native model-request observation disabled")
+                logger.warning(
+                    "otel: shared OTLP gRPC listener could not bind; "
+                    "native model-request observation disabled"
+                )
                 return
             server.start()
             self._grpc_server = server
