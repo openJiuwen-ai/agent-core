@@ -91,7 +91,7 @@ def _evidence(eval_ref: str, case_id: str) -> dict[str, Any]:
             if name == "judge/normalized_trace.json":
                 text = _readable_trace(text)
                 name = "judge/normalized_trace.fields.txt"
-        except (OSError, UnicodeError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError):
             omitted.append(path.name)
             continue
         if len(text.encode("utf-8")) > budget:
