@@ -655,6 +655,9 @@ async def test_attempt_calls_threads_tokens_on_success():
         text = "hello"
         structured = None
         tokens = 4321
+        cache_tokens = None
+        input_tokens = None
+        output_tokens = None
 
     async def make_call():
         return _Res()
@@ -673,6 +676,7 @@ async def test_attempt_calls_skipped_branch_keeps_tokens_none():
         text = ""
         structured = None
         tokens = 0  # not meaningful on a skip
+        cache_tokens = None
 
     async def make_call():
         return _Res()

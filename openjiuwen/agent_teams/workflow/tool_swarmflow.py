@@ -630,6 +630,9 @@ class SwarmflowTool(AsyncTool):
                 verify_reviewer_labels=progress.verify_reviewer_labels,
                 verify_reviewer_roles=progress.verify_reviewer_roles,
                 verify_id=progress.verify_id,
+                cache_tokens=progress.cache_tokens,
+                token_input=progress.token_input,
+                token_output=progress.token_output,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,

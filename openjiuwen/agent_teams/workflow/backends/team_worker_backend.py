@@ -253,6 +253,9 @@ class TeamWorkerBackend(AgentBackend):
                     text=text,
                     structured=submit_tool.captured,
                     tokens=budget_rail.call_tokens,
+                    cache_tokens=budget_rail.call_cache_tokens or None,
+                    input_tokens=budget_rail.call_input_tokens or None,
+                    output_tokens=budget_rail.call_output_tokens or None,
                 )
             text = await self._execute_worker(
                 prompt,
@@ -265,7 +268,13 @@ class TeamWorkerBackend(AgentBackend):
                 phase=phase,
                 label=label,
             )
-            return AgentResult(text=text, tokens=budget_rail.call_tokens)
+            return AgentResult(
+                text=text,
+                tokens=budget_rail.call_tokens,
+                cache_tokens=budget_rail.call_cache_tokens or None,
+                input_tokens=budget_rail.call_input_tokens or None,
+                output_tokens=budget_rail.call_output_tokens or None,
+            )
         except Exception as e:
             # Attach this call's rail tally so a failed/budget-exhausted agent's
             # real consumption still reaches the AGENT_FAILED event tokens (the

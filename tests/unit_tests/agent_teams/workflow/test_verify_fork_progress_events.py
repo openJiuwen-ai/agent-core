@@ -304,3 +304,40 @@ async def run(args):
     assert started[0].node_type == "agent_session"
     assert started[0].parent_session_id is None
     assert started[0].member_name == "mock-solo"
+
+
+# ─────────────────── agent_completed cache_tokens ───────────────────
+def test_agent_completed_carries_cache_tokens(tmp_path):
+    """AGENT_COMPLETED passes the backend's cache/token split through to the sink."""
+    from openjiuwen.agent_teams.workflow.engine.backends.base import AgentResult
+
+    script = """
+from swarmflow import agent
+
+META = {"name": "cache-tokens", "description": "cache passthrough", "phases": []}
+
+async def run(args):
+    return await agent("hi", label="greeter")
+"""
+    events = []
+
+    class _CacheBackend(MockBackend):
+        async def run(self, prompt, opts, schema_json, *, call_key=None):
+            return AgentResult(
+                text="hello", tokens=100, cache_tokens=64,
+                input_tokens=80, output_tokens=20,
+            )
+
+    asyncio.run(
+        run_workflow(
+            _write(tmp_path, "cache.py", script),
+            args={},
+            backend=_CacheBackend(),
+            progress_sink=events.append,
+        )
+    )
+    completed = next(e for e in events if e.kind == ProgressKind.AGENT_COMPLETED)
+    assert completed.tokens == 100
+    assert completed.cache_tokens == 64
+    assert completed.token_input == 80
+    assert completed.token_output == 20
