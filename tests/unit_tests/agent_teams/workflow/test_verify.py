@@ -102,8 +102,8 @@ def test_verify_all_pass(tmp_path):
         Reviewer(kind="score", prompt="score", label="s"),
     ]
     fixtures = {
-        "v": {"decision": "pass", "feedback": "good"},
-        "s": {"score": 0.92, "feedback": "solid"},
+        "verify-v": {"decision": "pass", "feedback": "good"},
+        "verify-s": {"score": 0.92, "feedback": "solid"},
     }
     result = _run_verify(tmp_path, reviewers, fixtures)
     assert result.passed is True
@@ -116,7 +116,7 @@ def test_verify_all_pass(tmp_path):
 def test_verify_fail_aggregates_feedback(tmp_path):
     """A verdict fail fails the round and aggregates non-empty feedback."""
     reviewers = [Reviewer(kind="verdict", prompt="check", label="v")]
-    fixtures = {"v": {"decision": "fail", "feedback": "edge case broken"}}
+    fixtures = {"verify-v": {"decision": "fail", "feedback": "edge case broken"}}
     result = _run_verify(tmp_path, reviewers, fixtures)
     assert result.passed is False
     assert result.verdict == "fail"
@@ -127,7 +127,7 @@ def test_verify_fail_aggregates_feedback(tmp_path):
 def test_verify_undecided_when_reviewer_did_not_vote(tmp_path):
     """A reviewer whose agent() is skipped yields undecided, not a silent pass."""
     reviewers = [Reviewer(kind="verdict", prompt="check", label="v")]
-    result = _run_verify(tmp_path, reviewers, {"v": SKIP})
+    result = _run_verify(tmp_path, reviewers, {"verify-v": SKIP})
     assert result.verdict is None
     assert result.passed is False
     assert result.votes[0].decision is None
@@ -155,7 +155,7 @@ def test_verify_parallel_reviewers_get_unique_ids(tmp_path):
             str(script),
             args={"reviewers": reviewers},
             backend=MockBackend(
-                fixtures={"va": {"decision": "pass", "feedback": ""}, "vb": {"decision": "pass", "feedback": ""}}
+                fixtures={"verify-va": {"decision": "pass", "feedback": ""}, "verify-vb": {"decision": "pass", "feedback": ""}}
             ),
             progress_sink=events.append,
         )
@@ -226,7 +226,7 @@ def test_verify_malformed_decision_is_undecided_not_pass(tmp_path):
     """A reviewer returning a non-pass/fail decision records a None vote and stays undecided."""
     reviewers = [Reviewer(kind="verdict", prompt="check", label="v")]
     # A malformed decision (not a real backend path, but the defensive branch must be consistent).
-    result = _run_verify(tmp_path, reviewers, {"v": {"decision": "banana", "feedback": "?"}})
+    result = _run_verify(tmp_path, reviewers, {"verify-v": {"decision": "banana", "feedback": "?"}})
     assert result.verdict is None
     assert result.passed is False
     assert result.votes[0].decision is None
@@ -235,7 +235,7 @@ def test_verify_malformed_decision_is_undecided_not_pass(tmp_path):
 def test_verify_score_reviewer_not_voted_is_undecided(tmp_path):
     """A score reviewer that did not vote (SKIP) yields undecided, not a silent pass."""
     reviewers = [Reviewer(kind="score", prompt="score", label="s")]
-    result = _run_verify(tmp_path, reviewers, {"s": SKIP})
+    result = _run_verify(tmp_path, reviewers, {"verify-s": SKIP})
     assert result.verdict is None
     assert result.passed is False
     assert result.votes[0].score is None
@@ -244,10 +244,44 @@ def test_verify_score_reviewer_not_voted_is_undecided(tmp_path):
 def test_verify_malformed_score_is_undecided_not_crash(tmp_path):
     """A non-numeric score (fixture bypassing schema) does not crash; it reads undecided."""
     reviewers = [Reviewer(kind="score", prompt="score", label="s")]
-    result = _run_verify(tmp_path, reviewers, {"s": {"score": "high", "feedback": "?"}})
+    result = _run_verify(tmp_path, reviewers, {"verify-s": {"score": "high", "feedback": "?"}})
     assert result.verdict is None
     assert result.passed is False
     assert result.votes[0].score is None
+
+
+# ─────────────────── reviewer label normalization ───────────────────
+def test_is_default_reviewer_label_exact_shape():
+    """Only {type}-{digits} over the known reviewer types reads as a default label."""
+    from openjiuwen.agent_teams.workflow.engine.primitives import _is_default_reviewer_label
+
+    assert _is_default_reviewer_label("verifier-0") is True
+    assert _is_default_reviewer_label("inspector-12") is True
+    assert _is_default_reviewer_label("challenger-3") is True
+    assert _is_default_reviewer_label(None) is False
+    assert _is_default_reviewer_label("custom-challenger") is False  # no digit tail
+    assert _is_default_reviewer_label("verifier-clone") is False
+    assert _is_default_reviewer_label("analyst-0") is False  # not a reviewer type
+
+
+def test_normalize_reviewer_labels_prefixes_default_and_custom():
+    """Defaults are replaced, customs prefixed; an already-prefixed label stays put."""
+    from openjiuwen.agent_teams.workflow.engine.primitives import _normalize_reviewer_labels
+
+    reviewers = [
+        Reviewer(kind="verdict", prompt="a", label=None),
+        Reviewer(kind="verdict", prompt="b", label="verifier-0"),  # default shape
+        Reviewer(kind="score", prompt="c", label="custom-inspector"),  # custom
+    ]
+    _normalize_reviewer_labels(reviewers, "verify:V1")
+    assert [r.label for r in reviewers] == [
+        "verify:V1-verdict-0",
+        "verify:V1-verdict-1",
+        "verify:V1-custom-inspector",
+    ]
+    # idempotent: a second pass over an already-prefixed label does not double-prefix
+    _normalize_reviewer_labels(reviewers, "verify:V1")
+    assert reviewers[2].label == "verify:V1-custom-inspector"
 
 
 # ─────────────────── swarmflow.md guidance assertion ───────────────────

@@ -98,7 +98,7 @@ def build_reviewers(
             deliverable=deliverable_text,
             acceptance=acceptance or "",
         )
-        reviewers.append(Reviewer(kind=_TYPE_KIND[rtype], prompt=prompt, label=label))
+        reviewers.append(Reviewer(kind=_TYPE_KIND[rtype], prompt=prompt, label=label, role=rtype))
     return reviewers
 
 

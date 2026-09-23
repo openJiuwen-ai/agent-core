@@ -59,6 +59,9 @@ class Reviewer:
     prompt: str
     label: str | None = None
     options: dict | None = None
+    #: Display-only business role (``verifier`` / ``inspector`` / ``challenger``);
+    #: judgement reads ``kind`` only, never this.
+    role: str | None = None
 
 
 @dataclass
@@ -69,6 +72,8 @@ class VerifyVote:
     decision: bool | None = None  # verdict kind: True = pass
     score: float | None = None  # score kind: 0-1
     feedback: str = ""  # reason / scoring report / threat list
+    #: Display-only business role carried from the reviewer; judgement ignores it.
+    role: str | None = None
 
 
 @dataclass

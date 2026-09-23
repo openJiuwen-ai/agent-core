@@ -39,7 +39,7 @@ import asyncio
 import inspect
 import json
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
 from .errors import BudgetExhausted, EngineError, WorkflowAborted
@@ -170,8 +170,8 @@ def _preview(value: Any) -> str | None:
     """A text preview of an agent result for progress events.
 
     For strings: returns the full text. For structured results (dicts,
-    pydantic models): renders a fixed preamble + complete JSON. No
-    truncation — the full data is provided to downstream consumers.
+    pydantic models, dataclasses): renders a fixed preamble + complete JSON.
+    No truncation — the full data is provided to downstream consumers.
     """
     if value is None:
         return None
@@ -180,6 +180,8 @@ def _preview(value: Any) -> str | None:
     try:
         if hasattr(value, "model_dump") and callable(value.model_dump):
             body = json.dumps(value.model_dump(mode="json"), ensure_ascii=False, default=str)
+        elif is_dataclass(value) and not isinstance(value, type):
+            body = json.dumps(asdict(value), ensure_ascii=False, default=str)
         else:
             body = json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
@@ -834,6 +836,7 @@ def _reviewer_call(
     base: str,
     phase: str | None,  # pylint: disable=huawei-redefined-outer-name
     options: dict | None,
+    agent_ids: list,
 ):
     """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
 
@@ -841,12 +844,24 @@ def _reviewer_call(
     a score reviewer against ``SCORE_SCHEMA`` (0-1 + feedback). Reviewer-level
     options override the ``verify()``-level ones. The thunk is meant for
     :func:`parallel`, which gives each reviewer its own structural journal key.
+
+    On start the thunk records its ``agent()`` call's journal key (the
+    deterministic node id) into the shared ``agent_ids`` list at index ``i``,
+    so ``verify()`` can attach it to the settled votes without exposing the
+    key through the call's public result.
     """
     schema = VERDICT_SCHEMA if reviewer.kind == "verdict" else SCORE_SCHEMA
     rlabel = reviewer.label or f"{base}-{i}"
     merged = {**(options or {}), **(reviewer.options or {})} or None
 
     async def _call():
+        # Predict the call key agent() will take, without consuming the ordinal:
+        # this thunk's only structural child is the agent() call, so it takes
+        # the branch's current ordinal. Recorded so the settled vote can carry
+        # the same deterministic id as the reviewer's own agent node.
+        seq = _seq.get()
+        if seq is not None:
+            agent_ids[i] = key_str(_path.get() + (("call", seq["n"]),))
         return await agent(
             reviewer.prompt,
             label=rlabel,
@@ -856,6 +871,41 @@ def _reviewer_call(
         )
 
     return _call
+
+
+def _is_default_reviewer_label(label: str | None) -> bool:
+    """True when ``label`` looks like ``build_reviewers``' default ``{type}-{i}``.
+
+    ``verify()`` replaces such labels with a base-prefixed unique form; the
+    exact-shape check (known reviewer type prefix, numeric suffix) keeps a
+    user-chosen label like ``inspector-clone`` from being mistaken for a default.
+    """
+    if not label:
+        return False
+    _, _, tail = label.rpartition("-")
+    return tail.isdigit() and label.rsplit(f"-{tail}", 1)[0] in _DEFAULT_LABEL_TYPES
+
+
+#: Reviewer ``type`` names whose ``{type}-{i}`` form is a generated default label.
+_DEFAULT_LABEL_TYPES = frozenset({"verifier", "inspector", "challenger"})
+
+
+def _normalize_reviewer_labels(reviewers: list[Reviewer], base: str) -> None:
+    """Give every reviewer a label unique across the whole run, prefixed by ``base``.
+
+    A default ``{type}-{i}`` label (re-issued per ``verify()`` round by the
+    business layer) is replaced by ``{base}-{kind}-{i}``; a custom label keeps
+    its readable part and gains the prefix (``{base}-{label}``). The label is a
+    display/join key only — journal identity stays the structural call path —
+    so this changes what the UI shows, not what resume replays (the sig hash
+    does fold ``label`` in, so a resumed pre-upgrade run re-runs its reviewers
+    once; same-version resume is unaffected).
+    """
+    for i, r in enumerate(reviewers):
+        if r.label is None or _is_default_reviewer_label(r.label):
+            r.label = f"{base}-{r.kind}-{i}"
+        elif not r.label.startswith(f"{base}-"):
+            r.label = f"{base}-{r.label}"
 
 
 def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[VerifyVote], dict]:
@@ -874,7 +924,7 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
         if reviewer.kind == "verdict":
             verdict_total += 1
             if raw is None:
-                votes.append(VerifyVote(kind="verdict"))
+                votes.append(VerifyVote(kind="verdict", role=reviewer.role))
                 continue
             decision = raw.get("decision")
             fail = decision == "fail"
@@ -885,11 +935,11 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
                 decision_pass = not fail
             else:
                 decision_pass = None  # malformed decision: not counted, vote reads undecided
-            votes.append(VerifyVote(kind="verdict", decision=decision_pass, feedback=raw.get("feedback", "")))
+            votes.append(VerifyVote(kind="verdict", role=reviewer.role, decision=decision_pass, feedback=raw.get("feedback", "")))
         else:
             score_total += 1
             if raw is None:
-                votes.append(VerifyVote(kind="score"))
+                votes.append(VerifyVote(kind="score", role=reviewer.role))
                 continue
             score = raw.get("score")
             if isinstance(score, (int, float)):
@@ -897,7 +947,7 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
                 score_sum += float(score)
             else:
                 score = None  # malformed score: not counted, vote reads undecided
-            votes.append(VerifyVote(kind="score", score=score, feedback=raw.get("feedback", "")))
+            votes.append(VerifyVote(kind="score", role=reviewer.role, score=score, feedback=raw.get("feedback", "")))
 
     tally = {
         "verdict_total": verdict_total,
@@ -908,6 +958,92 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
         "score_avg": (score_sum / score_voted) if score_voted else None,
     }
     return votes, tally
+
+
+def _emit_verify_started(
+    rt, base: str, phase: str | None, reviewers: Sequence[Reviewer], threshold: float,
+    verify_id: str | None = None,
+) -> None:
+    """Emit ``VERIFY_STARTED``: a review round begins (label roster + threshold).
+
+    The label roster is the fan-out order of the reviewers' labels (already
+    normalized by ``verify()``), so a consumer can build its container and
+    pre-attach child rows before the first reviewer's AGENT_STARTED lands.
+    ``verify_id`` identifies the round among same-label concurrent calls (the
+    structural branch scope — parallel calls differ, serial rework rounds
+    repeat the label and fold as ×N rounds).
+    """
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.VERIFY_STARTED,
+            phase=phase or _current_phase.get(),
+            label=base,
+            nested_phase=_resolved_nested_phase(None),
+            verify_reviewers=len(reviewers),
+            verify_threshold=threshold,
+            verify_reviewer_labels=[r.label or f"{base}-{i}" for i, r in enumerate(reviewers)],
+            verify_reviewer_roles=[r.role for r in reviewers],
+            verify_id=verify_id,
+        )
+    )
+
+
+def _emit_verify_settled(
+    rt,
+    base: str,
+    phase: str | None,
+    reviewers: Sequence[Reviewer],
+    result: VerifyResult,
+    threshold: float,
+    agent_ids: Sequence[str | None],
+    verify_id: str | None = None,
+) -> None:
+    """Emit ``VERIFY_COMPLETED`` (``verify_settled`` kept as compat alias).
+
+    Carries the round verdict, per-reviewer votes and the **complete output**
+    as the generic ``outcome`` — ``VerifyResult`` serialised by :func:`_preview`
+    (same JSON-string channel as an agent node's outcome, not hand-built here).
+
+    Each vote dict mirrors :func:`_reviewer_call`'s label rule
+    (``reviewer.label or f"{base}-{i}"``) in ``name`` and carries the
+    reviewer ``agent()`` call's deterministic ``agent_id`` (``None`` when the
+    thunk never started its call), so a consumer can match votes to reviewer
+    agent nodes by either key. ``role`` is display-only.
+    """
+    votes = []
+    for i, (reviewer, vote) in enumerate(zip(reviewers, result.votes)):
+        decision = None
+        if vote.kind == "verdict":
+            if vote.decision is True:
+                decision = "pass"
+            elif vote.decision is False:
+                decision = "fail"
+        votes.append(
+            {
+                "name": reviewer.label or f"{base}-{i}",
+                "agent_id": agent_ids[i] if i < len(agent_ids) else None,
+                "kind": vote.kind,
+                "role": vote.role,
+                "decision": decision,
+                "score": vote.score,
+                "feedback": vote.feedback,
+                "voted": vote.decision is not None or vote.score is not None,
+            }
+        )
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.VERIFY_COMPLETED,
+            phase=phase or _current_phase.get(),
+            label=base,
+            nested_phase=_resolved_nested_phase(None),
+            outcome=_preview(result),
+            verify_reviewers=len(votes),
+            verify_verdict=result.verdict,
+            verify_threshold=threshold,
+            verify_votes=votes,
+            verify_id=verify_id,
+        )
+    )
 
 
 def _aggregate_feedback(reviewers: Sequence[Reviewer], votes: Sequence[VerifyVote]) -> str:
@@ -966,10 +1102,29 @@ async def verify(
     if not reviewers:
         raise EngineError("verify() requires at least one reviewer")
     base = label or "verify"
+    # Node id — the verify() analog of an agent node's agent_id: the
+    # structural position of this call. PEeks the ordinal its own parallel()
+    # block is about to consume (consuming one would shift every later sibling
+    # key in this scope and invalidate journal cache hits on resume). Parallel
+    # verify() calls live in different branch scopes (distinct paths); sequential
+    # same-scope rounds advance the counter via their own parallel blocks, so
+    # every round gets a distinct, resume-stable id.
+    seq = _seq.get()
+    verify_id = key_str(_path.get() + (("verify", seq["n"] if seq is not None else 0),))
+    # Normalize labels BEFORE fan-out so the STARTED roster, the reviewer agent
+    # nodes' labels, and the SETTLED votes' names all agree (and are unique
+    # across rounds — the business layer's default {type}-{i} restarts at 0
+    # each round).
+    _normalize_reviewer_labels(reviewers, base)
 
     _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
+    _emit_verify_started(rt, base, phase, reviewers, threshold, verify_id)
+    agent_ids: list = [None] * len(reviewers)
     raws = await parallel(
-        [_reviewer_call(i, r, base=base, phase=phase, options=options) for i, r in enumerate(reviewers)]
+        [
+            _reviewer_call(i, r, base=base, phase=phase, options=options, agent_ids=agent_ids)
+            for i, r in enumerate(reviewers)
+        ]
     )
 
     votes, tally = _collect(reviewers, raws)
@@ -980,6 +1135,7 @@ async def verify(
         feedback=_aggregate_feedback(reviewers, votes),
         passed=verdict == "pass",
     )
+    _emit_verify_settled(rt, base, phase, reviewers, result, threshold, agent_ids, verify_id)
     _emit_log(rt, f"verify: verdict={verdict} (threshold={threshold})")
     return result
 

@@ -512,6 +512,52 @@ class WorkflowProgressTeamEvent(BaseEventMessage):
     parent_phase: Optional[str] = Field(
         default=None, description="Parent author phase name when this is a child phase declaration."
     )
+    verify_reviewers: Optional[int] = Field(
+        default=None, description="Reviewer count, on verify_started / verify_completed (verify_settled alias)."
+    )
+    verify_verdict: Optional[str] = Field(
+        default=None,
+        description=(
+            "Verify round verdict on verify_completed: 'pass' / 'fail' / None "
+            "(undecided — a reviewer did not vote; never a silent pass)."
+        ),
+    )
+    verify_threshold: Optional[float] = Field(
+        default=None, description="Score-pool threshold, on verify_started / verify_completed."
+    )
+    verify_votes: Optional[list[dict]] = Field(
+        default=None,
+        description=(
+            "Per-reviewer votes on verify_completed: "
+            "[{name, agent_id, kind, role, decision, score, feedback, voted}]; name mirrors the "
+            "reviewer agent node's label, agent_id its deterministic node id, role is display-only."
+        ),
+    )
+    verify_reviewer_labels: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "Reviewer label roster on verify_started, in fan-out order — unique across "
+            "rounds (verify() prefixes each label with the round's base label). A UI "
+            "builds its verify container and pre-attaches child rows from this."
+        ),
+    )
+    verify_reviewer_roles: Optional[list[Optional[str]]] = Field(
+        default=None,
+        description=(
+            "Reviewer business role roster on verify_started, same fan-out order as "
+            "verify_reviewer_labels: verifier / inspector / challenger. Display-only — "
+            "judgement reads the vote kind, never a role."
+        ),
+    )
+    verify_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "Node id on verify_started / verify_completed — the verify analog of "
+            "an agent node's agent_id (structural call position). Concurrent "
+            "same-label rounds stay distinct by this id; a UI folds same-label "
+            "rounds into one card xN, pairing started/completed by verify id."
+        ),
+    )
 
 
 class WorktreeCreatedEvent(BaseEventMessage):
