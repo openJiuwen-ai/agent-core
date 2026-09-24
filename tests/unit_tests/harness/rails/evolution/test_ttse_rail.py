@@ -592,7 +592,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: 1\nREASON: rule 1 misled the agent"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
             return f"[FACT] {induced_fact}"
@@ -600,9 +600,12 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
 
     llm = ScriptedLLM(handler)
     rail = _make_rail(tmp_path, llm)
+    # Pre-retire one rule so synthesize sees >=2 retired after blame removes F1.
+    await rail._ttse_store.add_fact("old conflicting fact")
+    await rail._ttse_store.retire("old conflicting fact", "fact", "earlier", "")
     await rail._ttse_store.add_fact("F1 bad fact")
     await rail._ttse_store.add_fact("F2 keeper fact")
-    await rail._ttse_store.add_tip("T1 keeper tip")  # so >= 2 rules remain after retire
+    await rail._ttse_store.add_tip("T1 keeper tip")
     snap = {
         "messages": [{"role": "user", "content": "q"}],
         "ttse_capabilities": "- grep",
@@ -611,10 +614,19 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
 
-    assert [r["text"] for r in rail._ttse_store.retired] == ["F1 bad fact"]
+    assert [r["text"] for r in rail._ttse_store.retired] == [
+        "old conflicting fact",
+        "F1 bad fact",
+    ]
     assert "F1 bad fact" not in rail._ttse_store.facts_texts()
+    assert "F2 keeper fact" in rail._ttse_store.facts_texts()
     assert induced_fact in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
+    synth = next(call for call in llm.calls if "RETIRED rules" in call)
+    assert "old conflicting fact" in synth
+    assert "F1 bad fact" in synth
+    assert "F2 keeper fact" not in synth
+    assert "T1 keeper tip" not in synth
     assert len(llm.calls) == 7  # blame -> dedup tip -> synth -> classify tip -> induce -> dedup fact -> classify fact
 
 
@@ -623,7 +635,7 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: NONE\nREASON: no rule is at fault"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "NONE"
         if "extracting" in p:
             return "[FACT] lesson"
