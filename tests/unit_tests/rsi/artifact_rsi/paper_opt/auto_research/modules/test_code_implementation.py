@@ -11,6 +11,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementa
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
     CodeImplementationAgent,
     _extract_stdout_metrics,
+    _pyright_lsp_command,
     _ReferencedPath,
 )
 
@@ -265,3 +266,71 @@ def test_resolve_smoke_metrics_marker_malformed_reports_invalid_json_without_tou
     assert state == "invalid_json"
     assert metrics == {}
     assert not metrics_path.exists()
+
+
+# -- _pyright_lsp_command -------------------------------------------------------
+# On the packaged desktop host, sys.executable is the launcher binary itself,
+# which has no -m module-runner (same class of failure _compile_staged_python
+# hit with -m compileall). harness.lsp.servers.servers.python's own pyright
+# resolution already handles both an npm-global install (spawned via node,
+# no Python involved) and a Windows .cmd shim by parsing it -- reuse that
+# instead of re-deriving a weaker version here, and only fall back to the
+# pip-installed `-m pyright.langserver` path when it finds nothing. The
+# delegation itself must be exception-safe: a broken/renamed harness resolver
+# should degrade to "no pyright found", not crash agent construction.
+
+_HARNESS_RESOLVE_PYRIGHT_PATH = "openjiuwen.harness.lsp.servers.servers.python._resolve_pyright_command"
+
+
+def test_pyright_lsp_command_prefers_harness_resolution(monkeypatch):
+    resolved = ("/usr/bin/node", ["/opt/pyright/langserver.index.js", "--stdio"])
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: resolved)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == resolved
+
+
+def test_pyright_lsp_command_falls_back_to_module_when_harness_finds_nothing(monkeypatch):
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: None)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == (agent_module.sys.executable, ["-m", "pyright.langserver", "--stdio"])
+
+
+def test_pyright_lsp_command_none_when_nothing_available(monkeypatch):
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, lambda: None)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: None)
+
+    assert _pyright_lsp_command() is None
+
+
+def test_pyright_lsp_command_survives_harness_resolver_raising(monkeypatch):
+    def _boom():
+        raise RuntimeError("npm list blew up")
+
+    monkeypatch.setattr(_HARNESS_RESOLVE_PYRIGHT_PATH, _boom)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: object())
+
+    command = _pyright_lsp_command()
+
+    assert command == (agent_module.sys.executable, ["-m", "pyright.langserver", "--stdio"])
+
+
+def test_pyright_lsp_command_survives_harness_import_failure(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fail_on_harness_python(name, *args, **kwargs):
+        if name == "openjiuwen.harness.lsp.servers.servers.python":
+            raise ImportError("simulated import failure")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fail_on_harness_python)
+    monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: None)
+
+    assert _pyright_lsp_command() is None

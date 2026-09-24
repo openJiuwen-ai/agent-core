@@ -44,6 +44,7 @@ from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementa
 )
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.checkpoint import (
     current_commit,
+    filesystem_copy_fingerprint,
     restore_commit,
     seed_output_from_head,
 )
@@ -1596,6 +1597,7 @@ class CodeImplementationAdapter:
             seed_output_from_head(code_dir, output_dir)
         except Exception as exc:  # noqa: BLE001
             summary = str(exc)
+            fingerprint = filesystem_copy_fingerprint(exc)
             return _report(
                 module=self.module,
                 mode="run",
@@ -1612,7 +1614,8 @@ class CodeImplementationAdapter:
                     readiness="failed",
                     notes=summary,
                     workspace_dir=_safe_rel(str(code_dir)),
-                    code_commit="",
+                    code_commit=sha,
+                    fingerprint=fingerprint,
                 ),
             )
         names = _discover_variant_names(code_dir)

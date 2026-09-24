@@ -326,6 +326,7 @@ class CodeHandoff(BaseModel):
     log_paths: list[str] = Field(default_factory=list)
     failure_excerpts: list[str] = Field(default_factory=list)
     code_commit: str = ""
+    fingerprint: str = ""
 
 
 class ExecutionHandoff(BaseModel):

@@ -8,6 +8,7 @@ reseeding of ``output/`` with no agent ``.git``.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import stat
@@ -20,13 +21,19 @@ _HOST_NAME = "rsi-host"
 _HOST_EMAIL = "rsi-host@localhost"
 _SKIP_NAMES = {".git", "__pycache__", "logs"}
 _KEEP_IN_DEST = {".git", ".gitignore"}
+_HOST_IGNORE_LINES = (
+    "logs/",
+    "__pycache__/",
+    "*.pyc",
+    "*.pyo",
+    ".pytest_cache/",
+    "artifacts/browser_workspace/",
+    "**/context/**/offload/",
+)
 _HOST_GITIGNORE = (
     "# Host-owned: do not commit execution or bytecode noise.\n"
-    "logs/\n"
-    "__pycache__/\n"
-    "*.pyc\n"
-    "*.pyo\n"
-    ".pytest_cache/\n"
+    + "\n".join(_HOST_IGNORE_LINES)
+    + "\n"
 )
 
 
@@ -34,25 +41,102 @@ class CheckpointError(RuntimeError):
     """Host git checkpoint/restore failed."""
 
 
+def _extended_path(path: Path) -> Path:
+    """Return a path Windows can open past the 260-character MAX_PATH limit."""
+    if os.name != "nt":
+        return path
+    raw = os.path.abspath(str(path))
+    if raw.startswith("\\\\?\\"):
+        return Path(raw)
+    if raw.startswith("\\\\"):
+        return Path(ntpath.join("\\\\?\\UNC", raw[2:]))
+    drive, tail = ntpath.splitdrive(raw)
+    return Path(ntpath.join(f"\\\\?\\{drive}\\", tail.lstrip("\\/")))
+
+
+def _path_parts(path: Path) -> tuple[str, ...]:
+    return Path(os.path.abspath(str(path))).parts
+
+
+def _is_runtime_dump(path: Path) -> bool:
+    """Browser execution state that must stay out of host checkpoints."""
+    parts = _path_parts(path)
+    for index in range(len(parts) - 1):
+        if parts[index] == "artifacts" and parts[index + 1] == "browser_workspace":
+            return True
+    if "context" not in parts:
+        return False
+    context_at = parts.index("context")
+    offload_at = context_at + 1
+    return "offload" in parts[offload_at:]
+
+
+def _skip_copy_path(path: Path) -> bool:
+    if path.name in _SKIP_NAMES or path.suffix == ".pyc":
+        return True
+    return _is_runtime_dump(path)
+
+
+def _fingerprint_path(raw: str) -> str:
+    cleaned = raw.replace("\\", "/").rstrip("/")
+    if not cleaned:
+        return ""
+    parts = [part for part in cleaned.split("/") if part]
+    return "/".join(parts[-3:])
+
+
+def filesystem_copy_fingerprint(exc: BaseException) -> str:
+    """Stable id for a deterministic copy/delete filesystem error. Empty otherwise."""
+    if isinstance(exc, shutil.Error):
+        entries = exc.args[0] if exc.args else []
+        if not isinstance(entries, list):
+            return "shutil.Error"
+        pieces: list[str] = []
+        for item in entries:
+            if not isinstance(item, tuple) or len(item) < 3:
+                continue
+            dest = _fingerprint_path(str(item[1]))
+            detail = str(item[2]).strip().replace("\n", " ")
+            if len(detail) > 120:
+                detail = detail[:119] + "…"
+            pieces.append(f"{dest}:{detail}")
+        if not pieces:
+            return "shutil.Error"
+        return "shutil.Error:" + "|".join(pieces[:8])
+    if isinstance(exc, OSError):
+        code = getattr(exc, "winerror", None)
+        if code is None:
+            code = exc.errno
+        dest = _fingerprint_path(
+            str(getattr(exc, "filename2", None) or getattr(exc, "filename", None) or "")
+        )
+        return f"{type(exc).__name__}:{code}:{dest}"
+    return ""
+
+
 def force_rmtree(path: Path) -> None:
     """Delete a tree that may contain read-only Git objects (Windows)."""
 
     def _unlock_and_retry(func, target, exc):
         error = exc if isinstance(exc, BaseException) else exc[1]
+        unlocked = str(_extended_path(Path(target)))
         try:
-            os.chmod(target, stat.S_IWRITE)
-            func(target)
+            os.chmod(unlocked, stat.S_IWRITE)
+            func(unlocked)
         except OSError as retry_exc:
             raise error from retry_exc
 
-    if not path.exists():
+    target = _extended_path(path)
+    if not target.exists():
         return
     if sys.version_info >= (3, 12):
-        shutil.rmtree(path, onexc=_unlock_and_retry)
+        shutil.rmtree(target, onexc=_unlock_and_retry)
     else:
         shutil.rmtree(
-            path,
-            onerror=lambda func, target, exc_info: _unlock_and_retry(func, target, exc_info),
+            target,
+            onerror=lambda func, target_path, exc_info: _unlock_and_retry(
+                func, target_path, exc_info
+            ),
         )
 
 
@@ -123,11 +207,7 @@ def ensure_gitignore(code_dir: Path) -> None:
     code_dir.mkdir(parents=True, exist_ok=True)
     path = code_dir / ".gitignore"
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
-    missing = [
-        line
-        for line in ("logs/", "__pycache__/", "*.pyc", "*.pyo", ".pytest_cache/")
-        if line not in existing.splitlines()
-    ]
+    missing = [line for line in _HOST_IGNORE_LINES if line not in existing.splitlines()]
     if not existing:
         path.write_text(_HOST_GITIGNORE, encoding="utf-8")
         return
@@ -198,35 +278,62 @@ def restore_commit(code_dir: Path, sha: str) -> str:
     return current_commit(code_dir)
 
 
-def _copy_ignore(_directory: str, names: list[str]) -> list[str]:
-    return [name for name in names if name in _SKIP_NAMES or name.endswith(".pyc")]
-
-
 def _remove_path(path: Path) -> None:
-    if not path.exists() and not path.is_symlink():
+    target = _extended_path(path)
+    if not target.exists() and not target.is_symlink():
         return
-    if path.is_dir() and not path.is_symlink():
+    if target.is_dir() and not target.is_symlink():
         force_rmtree(path)
         return
     try:
-        os.chmod(path, stat.S_IWRITE)
+        os.chmod(target, stat.S_IWRITE)
     except OSError:
         pass
-    path.unlink()
+    target.unlink()
+
+
+def _copy_tree(source: Path, dest: Path) -> None:
+    src = _extended_path(source)
+    dst = _extended_path(dest)
+    dst.mkdir(parents=True, exist_ok=True)
+    if not src.exists():
+        return
+    for item in src.iterdir():
+        if _skip_copy_path(item):
+            continue
+        destination = dst / item.name
+        if item.is_dir() and not item.is_symlink():
+            _copy_tree(item, destination)
+        else:
+            shutil.copy2(item, destination)
 
 
 def _copy_tree_excluding_git(source: Path, dest: Path) -> None:
     dest.mkdir(parents=True, exist_ok=True)
     if not source.exists():
         return
-    for item in source.iterdir():
-        if item.name in _SKIP_NAMES or item.suffix == ".pyc":
-            continue
-        destination = dest / item.name
-        if item.is_dir():
-            shutil.copytree(item, destination, ignore=_copy_ignore)
-        else:
-            shutil.copy2(item, destination)
+    _copy_tree(source, dest)
+
+
+def _purge_runtime_dumps(root: Path) -> None:
+    """Delete skipped browser dumps from dest so ``git add -A`` stages removals."""
+    target = _extended_path(root)
+    if not target.exists():
+        return
+    for dirpath, dirnames, filenames in os.walk(target, topdown=True):
+        current = Path(dirpath)
+        retained: list[str] = []
+        for name in dirnames:
+            child = current / name
+            if _is_runtime_dump(child):
+                _remove_path(child)
+            else:
+                retained.append(name)
+        dirnames[:] = retained
+        for name in filenames:
+            child = current / name
+            if _is_runtime_dump(child):
+                _remove_path(child)
 
 
 def seed_output_from_head(code_dir: Path, output_dir: Path) -> None:
@@ -246,33 +353,33 @@ def sync_tree_into_repo(source: Path, dest: Path) -> list[str]:
     """Copy ``source`` onto ``dest`` without moving ``dest/.git``.
 
     Files in ``dest`` that are not in ``source`` are removed, except ``.git``
-    and ``.gitignore``. Execution ``logs/`` is never copied and is deleted
-    from the destination before commit.
+    and ``.gitignore``. Execution ``logs/`` and browser workspace dumps are
+    never copied and are deleted from the destination before commit.
     """
     skipped: list[str] = []
     dest.mkdir(parents=True, exist_ok=True)
     recover_host_git(dest)
     ensure_repo(dest)
-    for item in source.iterdir():
-        if item.name in _SKIP_NAMES or item.suffix == ".pyc":
+    src = _extended_path(source)
+    for item in src.iterdir():
+        if _skip_copy_path(item):
             skipped.append(item.name)
             continue
         destination = dest / item.name
         _remove_path(destination)
-        if item.is_dir():
-            shutil.copytree(item, destination, ignore=_copy_ignore)
+        if item.is_dir() and not item.is_symlink():
+            _copy_tree(item, destination)
         else:
-            shutil.copy2(item, destination)
+            shutil.copy2(item, _extended_path(destination))
     source_names = {
-        item.name
-        for item in source.iterdir()
-        if item.name not in _SKIP_NAMES and item.suffix != ".pyc"
+        item.name for item in src.iterdir() if not _skip_copy_path(item)
     }
     for item in list(dest.iterdir()):
         if item.name in _KEEP_IN_DEST:
             continue
-        if item.name in _SKIP_NAMES or item.suffix == ".pyc" or item.name not in source_names:
+        if _skip_copy_path(item) or item.name not in source_names:
             _remove_path(item)
+    _purge_runtime_dumps(dest)
     ensure_gitignore(dest)
     return skipped
 

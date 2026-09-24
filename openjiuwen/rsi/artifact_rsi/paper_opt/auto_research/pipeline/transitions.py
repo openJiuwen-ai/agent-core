@@ -75,6 +75,23 @@ def _round_index(report: SubagentReport | None) -> int:
     return report.round_index if report is not None else -1
 
 
+def _prior_restore_copy_fingerprint(reports: list[SubagentReport], sha: str) -> str:
+    """Return the filesystem-copy fingerprint of a prior failed restore of ``sha``."""
+    cleaned = sha.strip()
+    if not cleaned:
+        return ""
+    for item in reports:
+        if item.module != "code_implementation" or item.outcome != "failed":
+            continue
+        handoff = item.handoff
+        if not isinstance(handoff, CodeHandoff):
+            continue
+        if handoff.code_commit != cleaned or not handoff.fingerprint:
+            continue
+        return handoff.fingerprint
+    return ""
+
+
 def _code_is_ready(state: TaskState, reports: list[SubagentReport]) -> bool:
     last = _latest_module_report(reports, "code_implementation")
     if last is not None and last.outcome == "failed":
@@ -521,6 +538,12 @@ def validate_contract(
             raise DecisionValidationError("terminal design has no further implementation work")
         restoring = bool(contract.restore_code_commit.strip())
         if restoring:
+            prior = _prior_restore_copy_fingerprint(reports, contract.restore_code_commit)
+            if prior:
+                raise DecisionValidationError(
+                    f"restore of {contract.restore_code_commit.strip()} already failed "
+                    f"with filesystem error {prior}"
+                )
             return
         if remaining_code_retries(state) <= 0 and state.counters.code_attempts > 0:
             raise DecisionValidationError("code retry budget exhausted")
