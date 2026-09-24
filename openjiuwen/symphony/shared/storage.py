@@ -165,11 +165,15 @@ def materialize_s3_dir(
     names = list(relative_paths or _DEFAULT_DOWNLOAD_NAMES)
     if "manifest.json" not in names:
         names = ["manifest.json", *names]
+    resolved_cache_dir = local_dir.resolve()
     for relative in names:
+        target = (local_dir / relative).resolve()
+        if not target.is_relative_to(resolved_cache_dir):
+            raise ValueError(f"relative path escapes cache dir: {relative}")
         download_s3_relative_object_if_exists(
             base_uri=normalized_base,
             relative_path=relative,
-            destination_path=local_dir / relative,
+            destination_path=target,
         )
     manifest_path = local_dir / "manifest.json"
     if not manifest_path.exists():

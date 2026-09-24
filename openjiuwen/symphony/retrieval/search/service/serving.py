@@ -155,8 +155,15 @@ class RetriverTest:
             logger.info("model_object_id: %s", model_object_id)
             logger.info("model_sfs_path: %s", model_sfs_path)
 
-            if model_object_id or model_sfs_path:
-                parentdir = json.loads(model_sfs_path).get("sfsBasePath") + "/" + model_object_id
+            if model_object_id and model_sfs_path:
+                try:
+                    payload = json.loads(model_sfs_path)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("MODEL_SFS must be a JSON object string") from exc
+                base = payload.get("sfsBasePath") if isinstance(payload, dict) else None
+                if not base:
+                    raise ValueError("MODEL_SFS must contain sfsBasePath when MODEL_OBJECT_ID is set")
+                parentdir = str(base).rstrip("/") + "/" + model_object_id
             else:
                 parentdir = os.path.abspath(os.path.join(currentdir, os.pardir))
 
@@ -237,9 +244,12 @@ class RetriverTest:
                 raise
 
     def calc(self, req_data: Mapping[str, Any] | None) -> str:
+        if not isinstance(req_data, Mapping):
+            logger.info("service calc skipped because request payload is not a mapping")
+            return json.dumps([], ensure_ascii=False)
         data = req_data.get("data", {})
         request = dict(data) if isinstance(data, dict) else {}
-        query = str(request.get("query", "查天气")).strip()
+        query = str(request.get("query", "")).strip()
         if not query:
             logger.info("service calc skipped because query is empty")
             return json.dumps([], ensure_ascii=False)
