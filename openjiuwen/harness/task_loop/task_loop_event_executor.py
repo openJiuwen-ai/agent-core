@@ -219,6 +219,12 @@ class TaskLoopEventExecutor(TaskExecutor):
         # (snapshot, otel span close, ...) must run even when the round fails.
         after_fired = False
         try:
+            # Flush any rails queued by a hot-reload configure() before the
+            # inner agent runs this round.  A host-side permission/policy
+            # change (e.g. full-access -> default) rebuilds the permission
+            # rail and queues it in _pending_rails; skipping this step would
+            # leave the round executing without the rebuilt rail.
+            await agent._ensure_initialized()
             result = await agent.react_agent.invoke(
                 effective, session, _streaming=True
             )
