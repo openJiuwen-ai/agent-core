@@ -22,8 +22,8 @@
 - `security/core.py`：`PermissionEngine`（`check_permission` / 全局策略求值 / trusted dirs /
   config 更新）。
 - `security/file_guard.py`：`FileGuardChecker` + 路径规则编译 + action 提取。
-- `security/tiered_policy.py`：内置规则 YAML + `severity_to_decision` / `strictest` /
-  `_tool_category`。
+- `security/tiered_policy.py`（shim → `permission_engine/toolguard/tool_policy.py`）：内置规则 YAML
+  + `strictest` / `_tool_category` / `tiered_policy_rule_matches` / `evaluate_tiered_policy`。
 - `security/checker.py`：`ExternalDirectoryChecker`（外部路径校验）。
 - `security/host.py`：`ToolPermissionHost` / `PermissionConfirmationRequest` / `PermissionSceneHookInput`
   / `RequestPermissionConfirmationHook`。
@@ -39,8 +39,8 @@
 ## 不变量
 
 1. **权限三态唯一**：`PermissionLevel.ALLOW`（直接执行，无需确认）/ `ASK`（弹确认框，用户决定）/
-   `DENY`（拒绝执行，返回错误）。任何权限决策最终落到这三态；`severity_to_decision` /
-   `strictest` 是把规则 / 多轴折成单态的唯一工具。
+   `DENY`（拒绝执行，返回错误）。任何权限决策最终落到这三态；`strictest` 是把规则 / 多轴折成
+   单态的唯一工具。
 2. **`PermissionEngine` 是权限求值唯一入口**：`async check_permission(...)` 返回
    `PermissionResult`；`check_tool_permission_directly` / `evaluate_global_policy_directly`
    是同步直查；`enabled()` 门控；`update_config` / `update_trusted_dirs` / `update_llm`
@@ -56,9 +56,9 @@
    外部路径；`merge_external_directory_allow_into_permissions` 把放行合并回权限。shell AST
    解析（`security/shell_ast.py`）是**唯一**从命令文本抽路径的途径。
 6. **层级策略**：`tiered_policy.get_builtin_security_rules()` 从内置 YAML（`resources/
-   builtin_rules.yaml` 同类机制）读取规则；`severity_to_decision(severity, permission_mode)`
-   把严重度折成 `PermissionLevel`；`_tool_category` 给工具分类。内置规则路径经
-   `get_package_builtin_rules_path()` 解析。
+   builtin_rules.yaml` 同类机制）读取规则；legacy `severity` 缺 `action` 时由
+   `core._fill_legacy_host_rule_actions` 按 `_LEGACY_SEVERITY_TO_ACTION` 折成 allow/ask；
+   `_tool_category` 给工具分类。内置规则路径经 `get_package_builtin_rules_path()` 解析。
 7. **宿主接口**：`ToolPermissionHost` 是工具的权限宿主协议；`RequestPermissionConfirmationHook`
    （`PermissionSceneHookInput` → `PermissionConfirmationResult`）是确认回调契约；
    `PermissionConfirmationRequest` 携带确认请求。
