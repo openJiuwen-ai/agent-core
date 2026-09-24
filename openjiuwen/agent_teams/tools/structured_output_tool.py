@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Any, AsyncIterator
 
+from jsonschema import validate as validate_json_schema
+
 from openjiuwen.agent_teams.tools.locales import Translator, make_translator
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool.base import Tool
@@ -54,8 +56,9 @@ class StructuredOutputTool(Tool):
     Args:
         schema_json: The JSON Schema the engine requested for this ``agent()``
             call. Becomes the tool's ``input_params`` so the model's tool-use
-            layer constrains the arguments to the schema. ``None`` falls back to
-            a generic ``{"result": str}`` schema.
+            layer exposes the schema, while ``invoke`` performs authoritative
+            runtime validation. ``None`` falls back to a generic
+            ``{"result": str}`` schema.
         t: The language-bound translator used to resolve the description. When
             omitted a default (``cn``) translator is created.
         tool_id: Resource-manager id for the tool. Defaults to a stable id; when
@@ -84,7 +87,16 @@ class StructuredOutputTool(Tool):
         self.called: bool = False
 
     async def invoke(self, inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
-        """Capture the structured result and acknowledge the submission."""
+        """Validate and capture a schema-conforming structured result.
+
+        Tool schemas guide providers but do not guarantee valid arguments on
+        every OpenAI-compatible endpoint. Raising on invalid input routes the
+        validation error through the normal tool-exception path, where the
+        model can repair its payload on a later ReAct turn. State is latched
+        only after validation succeeds, so the finish rail cannot end a worker
+        with an invalid capture.
+        """
+        validate_json_schema(instance=inputs, schema=self.card.input_params)
         self.captured = inputs
         self.called = True
         return ToolOutput(success=True, data={"accepted": True})

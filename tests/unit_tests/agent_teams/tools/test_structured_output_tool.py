@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+from jsonschema import ValidationError
+
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -49,6 +52,27 @@ def test_invoke_captures_arguments():
     assert out.success is True
     assert tool.called is True
     assert tool.captured == {"answer": "42"}
+
+
+def test_invoke_rejects_invalid_arguments_without_latching_state():
+    """Runtime validation leaves room for a later corrected submission."""
+    schema = {
+        "type": "object",
+        "properties": {"query_coverage": {"type": "object"}},
+        "required": ["query_coverage"],
+    }
+    tool = StructuredOutputTool(schema)
+
+    with pytest.raises(ValidationError, match="is not of type 'object'"):
+        asyncio.run(tool.invoke({"query_coverage": ""}))
+
+    assert tool.called is False
+    assert tool.captured is None
+
+    asyncio.run(tool.invoke({"query_coverage": {}}))
+
+    assert tool.called is True
+    assert tool.captured == {"query_coverage": {}}
 
 
 def test_default_schema_when_none():
