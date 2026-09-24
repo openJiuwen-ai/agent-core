@@ -244,13 +244,34 @@ async def main():
 
 ### 注册工具
 
-为了使用 Agent Skills，ReActAgent 需要额外具备以下 tools 的访问权限：
+为了使用 Agent Skills，ReActAgent 需要额外具备以下系统操作 tools 的访问权限：
 
-- `view_file`：查看文件内容
-- `execute_python_code`：执行 Python 代码
-- `run_command`：在 Terminal / Shell 中执行 bash 命令
+- `read_file`：读取文件内容（包括 `SKILL.md` 与待处理的图片等）
+- `execute_code`：执行 Python 代码
+- `execute_cmd`：在 Terminal / Shell 中执行命令
 
-注册 skill 时会自动将这些 tools 添加到 agent 中。
+`register_skill` 不会自动挂载这些 tools，需要在配置 Agent 后，手动从 `SysOperation` 取出对应的 ToolCard 并加入 `ability_manager`：
+
+```python
+async def main():
+    # ...
+    cfg.sys_operation_id = sysop_card.id
+    agent.configure(cfg)
+
+    # 将 sys_operation 工具挂到 ability_manager，供 skill 使用
+    for operation_name, tool_name in (
+        ("fs", "read_file"),
+        ("code", "execute_code"),
+        ("shell", "execute_cmd"),
+    ):
+        tool_card = Runner.resource_mgr.get_sys_op_tool_cards(
+            sys_operation_id=sysop_card.id,
+            operation_name=operation_name,
+            tool_name=tool_name,
+        )
+        if tool_card is not None:
+            agent.ability_manager.add(tool_card)
+```
 
 ## 运行 Agent
 
@@ -334,6 +355,20 @@ async def main():
         )
     cfg.sys_operation_id = sysop_card.id
     agent.configure(cfg)
+
+    # 将 sys_operation 工具挂到 ability_manager，供 skill 使用
+    for operation_name, tool_name in (
+        ("fs", "read_file"),
+        ("code", "execute_code"),
+        ("shell", "execute_cmd"),
+    ):
+        tool_card = Runner.resource_mgr.get_sys_op_tool_cards(
+            sys_operation_id=sysop_card.id,
+            operation_name=operation_name,
+            tool_name=tool_name,
+        )
+        if tool_card is not None:
+            agent.ability_manager.add(tool_card)
 
     # Add skills to the agent
     if skills_dir.exists():
