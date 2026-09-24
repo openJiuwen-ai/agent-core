@@ -25,7 +25,7 @@ from typing import List, AsyncIterator, Tuple
 from collections import Counter
 import pytest
 
-from openjiuwen.core.controller.modules.task_manager import TaskFilter
+from openjiuwen.core.controller.modules.task_manager import TaskFilter, TaskManager
 from openjiuwen.core.single_agent import AgentCard
 from openjiuwen.core.controller.base import Controller, ControllerConfig
 from openjiuwen.core.controller.modules import (
@@ -503,6 +503,104 @@ async def collect_stream_output(stream: AsyncIterator[ControllerOutputChunk]) ->
 
 class TestConcurrentSessionIsolation:
     """Test concurrent session isolation"""
+
+    @pytest.mark.asyncio
+    async def test_late_session_preserves_active_session_tasks(self):
+        """Starting another session must not replace an active session's tasks."""
+        a_created = asyncio.Event()
+        b_created = asyncio.Event()
+        release_tasks = asyncio.Event()
+
+        class SignalingHandler(ConcurrentSessionEventHandler):
+            async def handle_input(self, inputs: EventHandlerInput):
+                result = await super().handle_input(inputs)
+                if inputs.session.get_session_id() == "session_a":
+                    a_created.set()
+                else:
+                    b_created.set()
+                return result
+
+        class GatedExecutor(NormalTaskExecutor):
+            async def execute_ability(self, task_id: str, session: Session) -> AsyncIterator[ControllerOutputChunk]:
+                await release_tasks.wait()
+                async for chunk in super().execute_ability(task_id, session):
+                    yield chunk
+
+        agent = await build_test_agent(
+            agent_id="test_late_session",
+            event_handler=SignalingHandler(),
+            task_executors={"normal": GatedExecutor},
+        )
+        session_a = Session(session_id="session_a")
+        session_b = Session(session_id="session_b")
+        event = InputEvent(event_type=EventType.INPUT, content={"query": "run"})
+        stream_a = asyncio.create_task(collect_stream_output(agent.stream(event, session_a)))
+        stream_b = None
+
+        try:
+            await asyncio.wait_for(a_created.wait(), timeout=5)
+            stream_b = asyncio.create_task(collect_stream_output(agent.stream(event, session_b)))
+            await asyncio.wait_for(b_created.wait(), timeout=5)
+
+            tasks_a = await agent.controller.task_manager.get_task(TaskFilter(session_id="session_a"))
+            tasks_b = await agent.controller.task_manager.get_task(TaskFilter(session_id="session_b"))
+            assert [task.task_id for task in tasks_a] == ["task_session_a"]
+            assert [task.task_id for task in tasks_b] == ["task_session_b"]
+
+            release_tasks.set()
+            outputs_a, outputs_b = await asyncio.wait_for(asyncio.gather(stream_a, stream_b), timeout=5)
+            assert any("completed in session session_a" in text for text in outputs_a)
+            assert any("completed in session session_b" in text for text in outputs_b)
+            assert set(session_a.get_state("controller")["task_manager_state"]["tasks"]) == {"task_session_a"}
+            assert set(session_b.get_state("controller")["task_manager_state"]["tasks"]) == {"task_session_b"}
+        finally:
+            release_tasks.set()
+            for stream in (stream_a, stream_b):
+                if stream is not None and not stream.done():
+                    stream.cancel()
+            await asyncio.gather(
+                *(stream for stream in (stream_a, stream_b) if stream is not None),
+                return_exceptions=True,
+            )
+            await agent.controller.stop()
+
+    @pytest.mark.asyncio
+    async def test_saved_and_invalid_session_state_preserves_other_sessions(self):
+        """Restoration and its fallback must operate on the requested session."""
+        controller = Controller()
+        controller._config = ControllerConfig(enable_task_persistence=True)
+        controller._task_manager = TaskManager(controller._config)
+        session_b = Session(session_id="session_b")
+        tasks = [
+            Task(session_id="session_a", task_id="a", task_type="normal", status=TaskStatus.SUBMITTED),
+            Task(session_id="session_b", task_id="b", task_type="normal", status=TaskStatus.SUBMITTED),
+            Task(session_id="session_b", task_id="b_child", task_type="normal", parent_task_id="b"),
+        ]
+        await controller.task_manager.add_task(tasks)
+        # Simulate an older snapshot that contains tasks from multiple sessions.
+        old_state = await controller.task_manager.get_state()
+        session_b.update_state({"controller": {"task_manager_state": old_state.model_dump()}})
+        await controller.task_manager.remove_task(TaskFilter(session_id="session_b"))
+
+        assert await controller._restore_task_manager_state(session_b)
+        all_tasks = await controller.task_manager.get_state()
+        assert set(all_tasks.tasks) == {"a", "b", "b_child"}
+        assert all_tasks.parent_to_children["b"] == {"b_child"}
+        await controller._save_task_manager_state(session_b)
+        saved = session_b.get_state("controller")["task_manager_state"]
+        assert set(saved["tasks"]) == {"b", "b_child"}
+        assert saved["priority_index"][1] == ["b", "b_child"]
+        assert saved["root_tasks"] == {"b"}
+        assert saved["parent_to_children"]["b"] == {"b_child"}
+
+        session_b.update_state({"controller": None})
+        session_b.update_state({"controller": {"task_manager_state": {"invalid": True}}})
+        assert not await controller._restore_task_manager_state(session_b)
+        remaining = await controller.task_manager.get_state()
+        assert set(remaining.tasks) == {"a"}
+        assert remaining.priority_index[1] == ["a"]
+        assert remaining.root_tasks == {"a"}
+        assert "b" not in remaining.parent_to_children
 
     @pytest.mark.asyncio
     async def test_concurrent_sessions_isolation(self):

@@ -16,7 +16,6 @@ Supports eight chunk types:
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from dataclasses import dataclass, field
@@ -40,16 +39,10 @@ from openjiuwen.harness.cli.ui.todo_render import (
 
 
 def _write_terminal(text: str) -> None:
-    """Write *text* directly to the terminal (stdout).
-
-    This is intentional CLI user-facing output, not
-    diagnostic logging. Uses the active stdout encoding
-    while writing directly to file descriptor 1.
-    """
+    """Write user-facing text through stdout and flush streaming output."""
     stdout = sys.stdout
-    encoding = stdout.encoding or "utf-8"
-    errors = stdout.errors or "strict"
-    os.write(1, text.encode(encoding, errors=errors))
+    stdout.write(text)
+    stdout.flush()
 
 # Chunk type constants (aligned with SDK OutputSchema.type)
 CHUNK_LLM_OUTPUT = "llm_output"

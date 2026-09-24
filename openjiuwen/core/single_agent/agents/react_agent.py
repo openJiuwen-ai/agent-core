@@ -3231,6 +3231,13 @@ class ReActAgent(BaseAgent):
                     commit_session=self.is_agent_session,
                 )
                 raise
+            except BaseError:
+                abort_persisted = await self._handle_context_abort(
+                    session,
+                    marker="[Request interrupted by an unexpected error]",
+                    commit_session=self.is_agent_session,
+                )
+                raise
             except Exception as e:
                 logger.error("ReActAgent stream error: %s", e, exc_info=True)
                 abort_persisted = await self._handle_context_abort(

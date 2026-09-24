@@ -14,6 +14,7 @@ from openjiuwen.harness.tools.web import (
     is_free_search_enabled,
     is_paid_search_enabled,
 )
+from openjiuwen.harness.tools.web import _http
 from openjiuwen.harness.tools.web._common import _domain_allowed, _resolve_proxy
 from openjiuwen.harness.tools.web._decode import _decode_response_text
 from openjiuwen.harness.tools.web._http import _read_capped
@@ -101,6 +102,20 @@ def test_domain_allowlist_is_subdomain_aware():
 def test_explicit_proxy_takes_precedence_over_environment(monkeypatch):
     monkeypatch.setenv("WEB_PROXY_URL", "http://env-proxy:8080")
     assert _resolve_proxy("https://example.org", "http://task-proxy:7890") == "http://task-proxy:7890"
+
+
+@pytest.mark.parametrize(
+    ("configured_verify", "expected_ssl"),
+    [(None, True), ("true", True), ("false", False)],
+)
+def test_web_connector_verifies_tls_by_default(monkeypatch, configured_verify, expected_ssl):
+    if configured_verify is None:
+        monkeypatch.delenv("FREE_SEARCH_SSL_VERIFY", raising=False)
+    else:
+        monkeypatch.setenv("FREE_SEARCH_SSL_VERIFY", configured_verify)
+    monkeypatch.setattr(_http.aiohttp, "TCPConnector", lambda *, ssl: ssl)
+
+    assert _http._make_connector() is expected_ssl
 
 
 # --------------------------------------------------------------------------- #

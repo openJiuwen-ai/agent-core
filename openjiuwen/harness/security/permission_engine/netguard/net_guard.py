@@ -77,7 +77,12 @@ def match_net_pattern(pattern: str, url: str) -> bool:
     if "://" in pat:
         if "*" in pat or "?" in pat:
             return _match_url_glob(normalized, pat)
-        return normalized == pat or normalized.startswith(pat)
+        if not normalized.startswith(pat):
+            return False
+        try:
+            return urlparse(normalized).netloc == urlparse(pat).netloc
+        except ValueError:
+            return False
     host = _hostname(normalized)
     if not host:
         return False
