@@ -9,6 +9,10 @@ The layers solve different problems. The first controls whether a coordination t
 
 > `openjiuwen.agent_teams.tools.tool_permissions` is an internal role-to-tool definition, not a YAML section named `tool_permissions`. Applications configure policies through `permissions` and enable team orchestration through `TeamAgentSpec.enable_permissions`.
 
+## Outbound source files
+
+FileGuard checks read access to every path in `send_file_to_user.abs_file_path_list` and to local paths in `save_media_to_gallery.url` and `save_file_to_file_manager.url`. HTTP/HTTPS URLs are excluded from local path checks. Policies support allow/ask/deny, and approval records read access to the actual files rather than their parent directories. Relative paths resolve against the agent's current working directory. Applications must use that same resolved path for actual reads through the member's SysOperation and for delivery.
+
 ## Permission Decisions
 
 | Level | Behavior |
@@ -123,6 +127,8 @@ These sets are framework invariants. Applications should not mutate `LEADER_TOOL
 4. Show the complete tool name, normalized arguments, and matched rule before Leader approval; redact sensitive values in the UI and logs.
 5. Audit `decided_by`, call ID, matched rule, decision, and session ID.
 6. Enable `file_guard` to enforce file read, write, and execution boundaries independently of tool-level policy.
+
+For `glob`, read permission is checked on the search root `path`, with `allow`, `ask`, and `deny` supported. Relative paths resolve against the agent's current working directory; an omitted, empty, or `null` path checks that directory itself. The `pattern` is only a search filter, not a permission path. Both FileGuard (when enabled) and the tool reject absolute patterns and patterns containing `..` path segments. Relative backend results resolve against the search root, and normalized results must remain within it. Individual results are not evaluated against FileGuard rules: a child path's read deny does not hide its filename from an allowed parent search; reading its contents still requires a separate permission check.
 
 ## FAQ
 

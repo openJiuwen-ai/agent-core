@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from openjiuwen.harness.security.permission_engine.fileguard.glob_patterns import validated_glob_patterns
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel, PermissionResult
 from openjiuwen.harness.security.permission_engine.toolguard.pattern_matchers import contains_path
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
@@ -501,7 +502,15 @@ def extract_paths_legacy(
 ) -> list[Path]:
     """develop 抽取：仅路径字符串，无 R/W/X（供 Legacy 投影锁定现网行为）。"""
     paths: list[Path] = []
+    if tool_name in {"send_file_to_user", "save_media_to_gallery", "save_file_to_file_manager"}:
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
+
+        return [p for p, _action, _source in extract_accesses_native(tool_name, tool_args, workspace)]
     if is_shell_tool(tool_name, shell_tools_from_config(permission_config)):
+        from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
+            extract_accesses_native, shell_type_for_file_access,
+        )
+
         workdir = tool_args.get("workdir", "")
         try:
             workdir_resolved = (workspace / str(workdir)).resolve()
@@ -509,6 +518,10 @@ def extract_paths_legacy(
             workdir_resolved = workspace
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         paths = _extract_paths_from_command(cmd, workdir_resolved)
+        if shell_type_for_file_access(tool_name, tool_args) in {"cmd", "powershell"}:
+            paths.extend(p for p, _action, _source in extract_accesses_native(
+                tool_name, tool_args, workspace, permission_config,
+            ) if p not in paths)
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")
@@ -600,6 +613,16 @@ class FileGuardChecker:
         """评估路径层；无意见或全部 ALLOW 时返回 ``None``（不抬升 Pipeline A）。"""
         if not self._effective.enabled:
             return None
+        pattern = tool_args.get("pattern")
+        if tool_name == "glob" and isinstance(pattern, str) and pattern:
+            try:
+                validated_glob_patterns(pattern)
+            except ValueError as exc:
+                return PermissionResult(
+                    permission=PermissionLevel.DENY,
+                    reason=str(exc),
+                    matched_rule="file_guard:glob_pattern",
+                )
         workspace = self._effective.workspace_root
         if workspace is None:
             logger.debug("[file_guard] skip reason=no_workspace")

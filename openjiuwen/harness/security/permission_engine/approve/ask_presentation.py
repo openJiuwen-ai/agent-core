@@ -333,11 +333,13 @@ def _shell_file_access_summary(
         return ""
     from openjiuwen.harness.security.permission_engine.fileguard.path_extract import (
         extract_shell_path_accesses,
+        shell_type_for_file_access,
     )
 
     try:
         accesses = extract_shell_path_accesses(
             cmd, _workdir(tool_args), include_cd_reads=False,
+            shell_type=shell_type_for_file_access(tool_name, tool_args),
         )
     except (OSError, RuntimeError, ValueError):
         return ""

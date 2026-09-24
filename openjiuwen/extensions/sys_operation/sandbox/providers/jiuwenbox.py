@@ -1790,6 +1790,21 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         super().__init__(endpoint, config)
         self._init_jiuwenbox(endpoint, config)
 
+    @staticmethod
+    def _shell_argv(command: str, shell_type: Optional[str]) -> list[str]:
+        shell_type = str(shell_type or "auto").strip().lower()
+        # Use executable names so the execution host resolves its own PATH.
+        if shell_type in ("auto", "bash"):
+            return ["bash", "-lc", command]
+        if shell_type == "sh":
+            return ["sh", "-c", command]
+        if shell_type == "powershell":
+            executable = "powershell" if os.name == "nt" else "pwsh"
+            return [executable, "-NoProfile", "-NonInteractive", "-Command", command]
+        if shell_type == "cmd":
+            return ["cmd", "/d", "/s", "/c", command]
+        raise ValueError(f"Unsupported shell_type: {shell_type}")
+
     async def execute_cmd(
         self,
         command: str,
@@ -1802,6 +1817,10 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
             return _build_shell_error_result("execute_cmd", "command can not be empty", ExecuteCmdResult)
         exec_timeout = _normalize_exec_timeout(timeout)
         workdir = None if not cwd or cwd == "." else cwd
+        try:
+            argv = self._shell_argv(command, kwargs.get("shell_type", "auto"))
+        except ValueError as exc:
+            return _build_shell_error_result("execute_cmd", str(exc), ExecuteCmdResult)
 
         extra = self._launcher_extra_params()
         exclude_patterns = _read_excluded_commands(extra)
@@ -1814,7 +1833,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 command,
             )
             local_result = await _run_local_subprocess(
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,
@@ -1824,13 +1843,13 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         result, pipeline_error = await self._run_exec_pipeline(
             sandbox_op=lambda sid: self._get_client().exec(
                 sid,
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 timeout=exec_timeout,
                 environment=environment,
             ),
             local_op=lambda: _run_local_subprocess(
-                ["bash", "-lc", command],
+                argv,
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,
@@ -1897,7 +1916,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         environment: Optional[Dict[str, str]] = None,
         **kwargs,
     ) -> AsyncIterator[ExecuteCmdStreamResult]:
-        result = await self.execute_cmd(command, cwd=cwd, timeout=timeout, environment=environment)
+        result = await self.execute_cmd(command, cwd=cwd, timeout=timeout, environment=environment, **kwargs)
         if result.code != StatusCode.SUCCESS.code:
             yield _build_shell_error_result(
                 "execute_cmd_stream",
