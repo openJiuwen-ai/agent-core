@@ -27,10 +27,11 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from copy import copy, deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Collection, List, Optional
+from typing import Any, Collection, List, Optional, Sequence, Tuple
 
 from openjiuwen.agent_evolving.trajectory.messages import (
     DEFAULT_EVOLUTION_MESSAGE_FIELDS,
@@ -70,7 +71,7 @@ from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_EN,
     rules_numbered,
 )
-from openjiuwen.agent_evolving.ttse.stores import shared_store
+from openjiuwen.agent_evolving.ttse.stores import _norm, shared_store
 from openjiuwen.agent_evolving.ttse.success import (
     SignalBasedSuccessDetector,
     SuccessDetector,
@@ -84,6 +85,48 @@ from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
 _TTSE_PROMPT_PRIORITY = 43
+_CONSULT_RULE_LINE = re.compile(r"^\d+\.\s+(.+)$")
+_CONSULT_TRUNCATED = "… [truncated]"
+
+
+def _consulted_rules(messages: Sequence[Any], flat: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Bank rules whose text appeared in this task's ``ttse_consult`` results.
+
+    Consult numbers are local to each response, so identity is normalized rule
+    text. Truncated lines are dropped and cannot match a bank record.
+    """
+    seen: set[tuple[str, str]] = set()
+    for raw in messages or []:
+        msg = raw if isinstance(raw, dict) else {
+            "role": getattr(raw, "role", ""),
+            "name": getattr(raw, "name", None),
+            "content": getattr(raw, "content", ""),
+        }
+        if (msg.get("role") or "") != "tool" or (msg.get("name") or "") != TTSE_CONSULT_TOOL_NAME:
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            content = "" if content is None else str(content)
+        section = ""
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or _CONSULT_TRUNCATED in stripped:
+                continue
+            if stripped == "# FACT":
+                section = "fact"
+                continue
+            if stripped == "# TIP":
+                section = "tip"
+                continue
+            if not section:
+                continue
+            match = _CONSULT_RULE_LINE.match(stripped)
+            if match is None:
+                continue
+            seen.add((section, _norm(match.group(1))))
+    if not seen:
+        return []
+    return [(text, rtype) for text, rtype in flat if (rtype, _norm(text)) in seen]
 
 
 @dataclass(frozen=True)
@@ -428,7 +471,7 @@ class TTSERail(EvolutionRail):
                 # success -> tactics; fail -> blame/retire/synthesize -> induce.
                 # partial induces without blame.
                 if outcome == "fail":
-                    await self._blame_and_resolve(task_query, traj_text, capabilities)
+                    await self._blame_and_resolve(task_query, traj_text, capabilities, messages)
                 facts, tips = await induce(
                     llm=self._ttse_llm,
                     model=self._ttse_model,
@@ -467,21 +510,27 @@ class TTSERail(EvolutionRail):
                 }
             )
             if outcome == "fail":
-                await self._blame_and_retire(task_query, traj_text)
+                await self._blame_and_retire(task_query, traj_text, messages)
             if len(self._batch_buffer) >= self._ttse_config.batch_size:
                 await self._flush_batch(capabilities)
 
-    async def _blame_and_retire(self, task_query: str, traj_text: str) -> None:
+    async def _blame_and_retire(self, task_query: str, traj_text: str, messages: Sequence[Any]) -> None:
         """Fail path step 1: blame -> retire (no synthesize).
 
         Shared by the per-task and batch paths so blame/retire can run per
         failed task while synthesize is deferred to once-per-batch.
+        Candidates are the bank rules this task actually retrieved via
+        ``ttse_consult``, not the whole bank.
         """
         flat = self._ttse_store.snapshot_flat()
         if not flat:
             logger.info("[TTSERail] blame skipped: bank is empty")
             return
-        logger.info("[TTSERail] blaming %s rule(s)", len(flat))
+        flat = _consulted_rules(messages, flat)
+        if not flat:
+            logger.info("[TTSERail] blame skipped: this task consulted no bank rules")
+            return
+        logger.info("[TTSERail] blaming %s consulted rule(s)", len(flat))
         numbered = rules_numbered(flat)
         idx, reason = await blame(
             llm=self._ttse_llm,
@@ -525,10 +574,16 @@ class TTSERail(EvolutionRail):
             logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
             await self._classify_added_rules([(new_tip, "tip")])
 
-    async def _blame_and_resolve(self, task_query: str, traj_text: str, capabilities: str) -> None:
+    async def _blame_and_resolve(
+        self,
+        task_query: str,
+        traj_text: str,
+        capabilities: str,
+        messages: Sequence[Any],
+    ) -> None:
         """Per-task fail path: blame -> retire -> synthesize (before induce)."""
         logger.info("[TTSERail] starting blame and resolve query=%s", (task_query or "")[:80])
-        await self._blame_and_retire(task_query, traj_text)
+        await self._blame_and_retire(task_query, traj_text, messages)
         await self._synthesize_resolving(capabilities)
 
     async def _add_rules(self, facts: List[str], tips: List[str]) -> int:
