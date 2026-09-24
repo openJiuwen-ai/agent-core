@@ -379,6 +379,18 @@ class TeamSpec(BaseModel):
     ``TeamBackend.is_team_completed`` always returns the correct snapshot
     regardless of this value (it never reads it).
     """
+    enable_round_failed_recovery: bool = True
+    """Emergency-rollback switch for the round-failed recovery path.
+
+    Defaults to ``True``: a member whose DeepAgent round failed releases its
+    claimed task back to the pool via the existing ``IN_PROGRESS → PENDING``
+    reset edge (bounded per-task retries, then the existing ``CANCELLED``
+    terminal status with automatic downstream unblocking), and a session-level
+    breaker cancels all non-terminal tasks when task failures flood within
+    the 5-minute window. Set to ``False`` to restore the pre-fix behavior
+    (the failed task keeps its claim, the board never settles, and the
+    session hangs until the relay stall watchdog cancels it).
+    """
     metadata: dict = Field(default_factory=dict)
     model_pool: list[ModelPoolEntry] = Field(default_factory=list)
     """Optional pool of LLM endpoints shared by every team member.
