@@ -156,6 +156,29 @@ def test_browser_bookmarks_reads_edge_json_and_filters_folders(tmp_path: Path):
     assert items[0].metadata["folder_path"] == "收藏夹栏/AI"
 
 
+def test_browser_bookmarks_accepts_short_name_for_favorites_bar(tmp_path: Path):
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "Example", "https://example.com/")])
+    service = BrowserBookmarksFetchService(
+        _config(path, folders=["收藏栏"]),
+        home=tmp_path / "home",
+    )
+
+    assert [item.title for item in _items(asyncio.run(_batches(service)))] == ["Example"]
+
+
+@pytest.mark.parametrize("separator", [",", "，"])
+def test_browser_bookmarks_reads_existing_comma_separated_folder_config(tmp_path: Path, separator: str):
+    path = tmp_path / "Bookmarks"
+    _write_bookmarks(path, [_bookmark("1", "Example", "https://example.com/")])
+    service = BrowserBookmarksFetchService(
+        _config(path, folders=[f"收藏栏{separator}收藏栏"]),
+        home=tmp_path / "home",
+    )
+
+    assert [item.title for item in _items(asyncio.run(_batches(service)))] == ["Example"]
+
+
 def test_browser_bookmarks_retries_transient_invalid_json(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "Bookmarks"
     _write_bookmarks(path, [_bookmark("1", "One", "https://example.com/one")])

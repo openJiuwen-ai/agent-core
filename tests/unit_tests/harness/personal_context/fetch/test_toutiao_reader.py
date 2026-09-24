@@ -526,6 +526,68 @@ async def test_toutiao_empty_page_stops_discovery(
 
 
 @pytest.mark.asyncio
+async def test_toutiao_empty_object_after_valid_page_stops_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_started_at = datetime(2026, 9, 23, 12, tzinfo=UTC)
+    recent = _article("recent", int((run_started_at - timedelta(days=18)).timestamp()))
+    old = _article("old", int((run_started_at - timedelta(days=90)).timestamp()))
+    profile_url = "https://www.toutiao.com/c/user/token/demo"
+    feed_url = "https://www.toutiao.com/api/pc/feed/"
+    _set_responses(
+        monkeypatch,
+        {
+            profile_url: [Response({"data": {"name": "Demo"}})],
+            feed_url: [
+                Response({"data": [recent, old], "next": {"max_behot_time": "1"}}),
+                Response({}),
+            ],
+        },
+    )
+    service = ToutiaoReaderFetchService(
+        _config(time_range={"mode": "recent", "recent_days": 30}),
+        home=tmp_path,
+    )
+
+    candidates = await service.prepare_run(run_id="empty-object", run_started_at=run_started_at, cursor=None)
+
+    assert [candidate["stable_id"] for candidate in candidates] == ["recent"]
+    assert sum(url == feed_url for url, _ in Session.calls) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "feed_payloads",
+    [
+        [{}],
+        [
+            {"data": [_article("first", 1)], "next": {"max_behot_time": "1"}},
+            {"error": "blocked"},
+        ],
+    ],
+)
+async def test_toutiao_empty_object_only_ends_after_valid_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    feed_payloads: list[dict[str, object]],
+) -> None:
+    _set_responses(
+        monkeypatch,
+        {
+            "https://www.toutiao.com/c/user/token/demo": [Response({"data": {"name": "Demo"}})],
+            "https://www.toutiao.com/api/pc/feed/": [Response(payload) for payload in feed_payloads],
+        },
+    )
+    service = ToutiaoReaderFetchService(_config(), home=tmp_path)
+
+    with pytest.raises(BaseError) as caught:
+        await service.prepare_run(run_id="invalid-empty-object", run_started_at=datetime.now(UTC), cursor=None)
+
+    assert caught.value.status is StatusCode.CONTEXT_PROACTIVE_FETCH_EXECUTION_ERROR
+
+
+@pytest.mark.asyncio
 async def test_toutiao_uses_latest_published_or_updated_time_for_ranges(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -119,7 +119,10 @@ def _redact_userinfo_url(url: str) -> str | None:
 def _normalize_folder_path(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("bookmark folder path must be a string")
-    return "/".join(part.strip() for part in value.replace("\\", "/").split("/") if part.strip())
+    parts = [part.strip() for part in value.replace("\\", "/").split("/") if part.strip()]
+    if parts and parts[0] == "收藏栏":
+        parts[0] = _ROOT_NAMES["bookmark_bar"]
+    return "/".join(parts)
 
 
 def _folder_matches(path: str, filters: tuple[str, ...], *, include_subfolders: bool) -> bool:
@@ -182,9 +185,12 @@ def _source_values(config: Any) -> tuple[Path, str, tuple[str, ...], bool, bool]
     try:
         normalized_filters: list[str] = []
         for item in raw_filters:
-            filter_path = _normalize_folder_path(item)
-            if filter_path:
-                normalized_filters.append(filter_path)
+            if not isinstance(item, str):
+                raise ValueError("bookmark folder path must be a string")
+            for path in re.split(r"[,，]", item):
+                filter_path = _normalize_folder_path(path)
+                if filter_path and filter_path not in normalized_filters:
+                    normalized_filters.append(filter_path)
         filters = tuple(normalized_filters)
     except ValueError as exc:
         raise _fetch_error("bookmark folder path is invalid", exc) from None
