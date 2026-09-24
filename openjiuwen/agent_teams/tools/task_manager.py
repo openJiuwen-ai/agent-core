@@ -8,7 +8,9 @@ This module provides task management functionality for agent teams.
 
 import json
 import shutil
-from collections import defaultdict
+import time
+from collections import defaultdict, deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 import re
@@ -93,6 +95,34 @@ def _json_write(path: Path, data: dict[str, Any]) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+# ── round failed 回池 + 会话级熔断 ──
+# 任务级失败预算：回池重派次数上限，达到后收敛到既有 CANCELLED 终态
+# （取消级联自动解除下游依赖，不新增枚举、不改转移表）。
+_ROUND_FAILED_RESET_LIMIT = 3
+# 会话级熔断：滑动窗口内任务失败次数达到阈值 → 停止一切重派并取消全部非终态任务。
+_BREAKER_WINDOW_SECONDS = 300.0
+_BREAKER_FAILURE_THRESHOLD = 3
+# 成员持有任务的三个非终态 owned 状态（与 DAO 的 _RESETTABLE_STATUSES 同口径）。
+_ROUND_FAILED_ACTIVE_STATUSES = (
+    TaskStatus.PLANNING.value,
+    TaskStatus.IN_PROGRESS.value,
+    TaskStatus.IN_REVIEW.value,
+)
+
+
+@dataclass
+class RoundFailedOutcome:
+    """Result of :meth:`TeamTaskManager.handle_member_round_failed`.
+
+    Surfaced so the caller (TeamAgent round-failed recovery hook) and tests
+    can assert what the recovery path did without probing the DB.
+    """
+
+    released_task_id: Optional[str] = None
+    cancelled_task_ids: List[str] = field(default_factory=list)
+    breaker_open: bool = False
+
+
 class TeamTaskManager:
     """Manager for team tasks
 
@@ -142,6 +172,11 @@ class TeamTaskManager:
         self.team_plan_id = _safe_token(team_plan_id or get_session_id() or team_name, "team_plan")
         self.leader_member_name = str(leader_member_name or "").strip()
         self._dispatch_mode = dispatch_mode
+        # 任务级失败计数与熔断滑动窗口（进程内状态，
+        # 生命周期与 TeamTaskManager 一致；重启清零是可接受的降级——窗口语义
+        # 本就只针对短时故障风暴）。
+        self._task_failure_counts: dict[str, int] = {}
+        self._round_failure_times: deque[float] = deque()
 
     def configure_plan_storage(
         self,
@@ -1258,6 +1293,104 @@ class TeamTaskManager:
         await self._handle_unblocked_tasks(unblocked_tasks)
         await self._maybe_publish_task_list_drained()
         return cancelled_tasks
+
+    async def handle_member_round_failed(
+        self,
+        member_name: str,
+        *,
+        reason: str = "",
+        _now: Optional[float] = None,
+    ) -> RoundFailedOutcome:
+        """Release a failed member's claimed task back to the pool, with a
+        bounded retry budget and a session-level failure breaker.
+
+        a member whose DeepAgent
+        round failed used to keep its claim — the task stayed IN_PROGRESS, the
+        board never settled, and the session hung until the relay stall
+        watchdog cancelled it. Now:
+
+        * The claimed task (PLANNING / IN_PROGRESS / IN_REVIEW) is released
+          via the existing :meth:`reset` (``→ PENDING``, publishes
+          TASK_RELEASED so idle members / the leader scheduler re-dispatch
+          it), up to ``_ROUND_FAILED_RESET_LIMIT`` failures per task; at the
+          limit the task converges to the existing CANCELLED terminal status
+          via :meth:`cancel` (downstream dependencies auto-resolve in the
+          cancel cascade).
+        * When ``_BREAKER_FAILURE_THRESHOLD`` task failures accumulate within
+          ``_BREAKER_WINDOW_SECONDS`` (session-level sliding window), the
+          breaker opens: no further re-dispatch, and every non-terminal task
+          is cancelled via the existing :meth:`cancel_all_tasks` — the team
+          settles with explicit errors plus partial results instead of
+          hanging or retry-storming.
+
+        Leader-owned failures do not go through this path (the existing
+        leader-failure close path already ends the round).
+
+        Args:
+            member_name: Member whose round just failed.
+            reason: Free-text context for logs (e.g. the failure summary).
+            _now: Test hook overriding ``time.monotonic()``.
+
+        Returns:
+            :class:`RoundFailedOutcome` describing what happened.
+        """
+        outcome = RoundFailedOutcome()
+        now = time.monotonic() if _now is None else _now
+        if self._record_round_failure(now):
+            # 会话熔断：停止一切重派，取消剩余非终态任务（含本次失败任务）。
+            cancelled = await self.cancel_all_tasks()
+            outcome.breaker_open = True
+            outcome.cancelled_task_ids = [task.task_id for task in cancelled]
+            team_logger.warning(
+                "Session breaker OPEN after %d task failures within %.0fs; "
+                "cancelled %d non-terminal task(s)%s",
+                _BREAKER_FAILURE_THRESHOLD,
+                _BREAKER_WINDOW_SECONDS,
+                len(outcome.cancelled_task_ids),
+                f" (reason: {reason})" if reason else "",
+            )
+            return outcome
+
+        tasks = await self.db.task.get_tasks_by_assignee(self.team_name, member_name)
+        active = [t for t in tasks if t.status in _ROUND_FAILED_ACTIVE_STATUSES]
+        for task in active:  # one-active-task invariant: at most one; loop is defensive
+            failure_count = self._task_failure_counts.get(task.task_id, 0) + 1
+            self._task_failure_counts[task.task_id] = failure_count
+            if failure_count >= _ROUND_FAILED_RESET_LIMIT:
+                cancelled = await self.cancel(task.task_id)
+                if cancelled is not None:
+                    outcome.cancelled_task_ids.append(task.task_id)
+                    team_logger.warning(
+                        "Task %s failed %d time(s); converged to CANCELLED%s",
+                        task.task_id,
+                        failure_count,
+                        f" ({reason})" if reason else "",
+                    )
+            else:
+                result = await self.reset(task.task_id)
+                if result.ok:
+                    outcome.released_task_id = task.task_id
+                    team_logger.info(
+                        "Task %s released back to pool after round failure (%d/%d)%s",
+                        task.task_id,
+                        failure_count,
+                        _ROUND_FAILED_RESET_LIMIT,
+                        f" ({reason})" if reason else "",
+                    )
+        return outcome
+
+    def _record_round_failure(self, now: float) -> bool:
+        """Record one task-round failure; return whether the breaker is open.
+
+        Sliding window over ``_BREAKER_WINDOW_SECONDS``: entries older than
+        the window are pruned on every record, so scattered single failures
+        never trip the breaker while a burst does.
+        """
+        self._round_failure_times.append(now)
+        cutoff = now - _BREAKER_WINDOW_SECONDS
+        while self._round_failure_times and self._round_failure_times[0] <= cutoff:
+            self._round_failure_times.popleft()
+        return len(self._round_failure_times) >= _BREAKER_FAILURE_THRESHOLD
 
     async def _publish_task_event(self, event, *, error_label: str) -> None:
         """Publish a task event on the team task topic; log on failure."""

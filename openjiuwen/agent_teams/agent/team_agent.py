@@ -974,8 +974,46 @@ class TeamAgent(BaseAgent):
             await self._state.team_member.update_status(status)
 
     async def _update_execution(self, status: ExecutionStatus) -> None:
+        if status is ExecutionStatus.FAILED:
+            await self._handle_round_failed_recovery()
         if self._state.team_member:
             await self._state.team_member.update_execution_status(status)
+
+    async def _handle_round_failed_recovery(self) -> None:
+        """成员 round failed 后的收敛钩子。
+
+        调用任务管理器释放失败成员的 claim（既有 IN_PROGRESS → PENDING reset
+        边回池，有界重派，达上限收敛 CANCELLED）并评估会话级熔断。仅 teammate
+        生效——leader 失败已有收尾路径（chat.error + chat.final + team.completed）。
+        钩子绝不阻断既有的执行状态上报，任何异常都吞掉并记日志。
+        """
+        try:
+            spec = self.team_spec
+            if spec is None or not spec.enable_round_failed_recovery:
+                return
+            if self.role == TeamRole.LEADER:
+                return
+            member_name = self._member_name()
+            backend = self.team_backend
+            if not member_name or backend is None or backend.task_manager is None:
+                return
+            outcome = await backend.task_manager.handle_member_round_failed(
+                member_name,
+                reason="member round failed",
+            )
+            if outcome.breaker_open:
+                team_logger.warning(
+                    "Round-failed recovery: session breaker open, cancelled tasks %s",
+                    outcome.cancelled_task_ids,
+                )
+            elif outcome.released_task_id is not None:
+                team_logger.info(
+                    "Round-failed recovery: task %s released back to pool by %s",
+                    outcome.released_task_id,
+                    member_name,
+                )
+        except Exception:
+            team_logger.exception("Round-failed recovery hook failed; ignoring")
 
     async def _wake_mailbox_if_interrupt_cleared(self) -> None:
         await self._coordination.wake_mailbox_if_interrupt_cleared()
