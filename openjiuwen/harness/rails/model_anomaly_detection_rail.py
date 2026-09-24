@@ -5,8 +5,10 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from email.utils import parsedate_to_datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from pydantic import BaseModel, Field
 
@@ -20,7 +22,10 @@ from openjiuwen.core.foundation.llm import (
     UserMessage,
 )
 from openjiuwen.core.runner.callback.errors import AbortError
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import (
+    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
+    AgentCallbackContext,
+)
 from openjiuwen.harness.rails.base import DeepAgentRail
 
 _STREAM_CHUNK_INSPECTORS_KEY = "_stream_chunk_inspectors"
@@ -33,6 +38,178 @@ _STREAM_TIMEOUT_MARKERS = (
 # Whole-call retry backoff (seconds) before the 1st/2nd/... retry attempt.
 # The last value is reused if there are more retries than entries.
 _DEFAULT_BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+_DEFAULT_TRANSIENT_MAX_RETRIES = 3
+_DEFAULT_TRANSIENT_BASE_DELAY_SECONDS = 2.0
+_MAX_RETRY_AFTER_SECONDS = 60.0
+_RETRYABLE_STATUS_CODES = frozenset({408, 409, 429})
+_NON_RETRYABLE_TEXT_MARKERS = (
+    "insufficient_quota",
+    "out of budget",
+    "quota exceeded",
+    "billing",
+    "invalid api key",
+    "context length",
+    "maximum context",
+)
+
+
+@dataclass(frozen=True)
+class _TransientDecision:
+    retryable: bool
+    status_code: Optional[int] = None
+    retry_after_seconds: Optional[float] = None
+
+
+def _exception_chain(exc: Optional[BaseException]) -> List[BaseException]:
+    chain: List[BaseException] = []
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while isinstance(current, BaseException) and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        cause = getattr(current, "__cause__", None)
+        if not isinstance(cause, BaseException):
+            cause = getattr(current, "cause", None)
+        if not isinstance(cause, BaseException) and not getattr(current, "__suppress_context__", False):
+            context = getattr(current, "__context__", None)
+            cause = context if isinstance(context, BaseException) else None
+        current = cause if isinstance(cause, BaseException) else None
+    return chain
+
+
+def _coerce_status_code(value: Any) -> Optional[int]:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.strip().isdigit():
+        parsed = int(value.strip())
+        return parsed if parsed > 0 else None
+    return None
+
+
+def _header_value(headers: Any, name: str) -> Optional[str]:
+    if headers is None:
+        return None
+    wanted = name.lower()
+    getter = getattr(headers, "get", None)
+    if callable(getter):
+        for key in (name, wanted):
+            try:
+                value = getter(key)
+            except Exception:
+                value = None
+            if value not in (None, ""):
+                return str(value).strip()
+    items = getattr(headers, "items", None)
+    if not callable(items):
+        return None
+    try:
+        pairs = list(items())
+    except Exception:
+        return None
+    for key, value in pairs:
+        if str(key).lower() == wanted and value not in (None, ""):
+            return str(value).strip()
+    return None
+
+
+def _headers_of(exc: BaseException) -> Any:
+    headers = getattr(exc, "headers", None)
+    if headers is not None:
+        return headers
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+    return getattr(response, "headers", None)
+
+
+def _status_code_of(exc: BaseException) -> Optional[int]:
+    for attr in ("status_code", "status"):
+        code = _coerce_status_code(getattr(exc, attr, None))
+        if code is not None:
+            return code
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        for key in ("status_code", "provider_code"):
+            code = _coerce_status_code(details.get(key))
+            if code is not None:
+                return code
+    return None
+
+
+def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
+    retry_after_ms = _header_value(headers, "retry-after-ms")
+    if retry_after_ms is not None:
+        try:
+            return max(0.0, float(retry_after_ms) / 1000.0)
+        except ValueError:
+            pass
+    retry_after = _header_value(headers, "retry-after")
+    if retry_after is None:
+        return None
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        pass
+    try:
+        parsed = parsedate_to_datetime(retry_after)
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return None
+    if parsed is None:
+        return None
+    try:
+        delay = parsed.timestamp() - time.time()
+    except (OSError, OverflowError, ValueError):
+        return None
+    return max(0.0, delay)
+
+
+def _classify_transient_failure(exc: Optional[BaseException]) -> _TransientDecision:
+    """Classify a provider failure that is neither a repeat nor a stream timeout."""
+    if exc is None:
+        return _TransientDecision(retryable=False)
+    chain = _exception_chain(exc)
+    message = " ".join(str(item) for item in chain).lower()
+    if any(marker in message for marker in _NON_RETRYABLE_TEXT_MARKERS):
+        return _TransientDecision(retryable=False)
+
+    should_retry: Optional[str] = None
+    status_code: Optional[int] = None
+    retry_after_seconds: Optional[float] = None
+    for item in chain:
+        headers = _headers_of(item)
+        if should_retry is None:
+            header = _header_value(headers, "x-should-retry")
+            if header is not None:
+                should_retry = header.lower()
+        if retry_after_seconds is None:
+            retry_after_seconds = _parse_retry_after_seconds(headers)
+        if status_code is None:
+            status_code = _status_code_of(item)
+
+    if should_retry == "false":
+        return _TransientDecision(retryable=False, status_code=status_code)
+    if retry_after_seconds is not None and retry_after_seconds > _MAX_RETRY_AFTER_SECONDS:
+        return _TransientDecision(
+            retryable=False,
+            status_code=status_code,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    if should_retry == "true":
+        retryable = True
+    elif status_code is None:
+        retryable = True
+    elif status_code in _RETRYABLE_STATUS_CODES or status_code >= 500:
+        retryable = True
+    else:
+        retryable = False
+    return _TransientDecision(
+        retryable=retryable,
+        status_code=status_code,
+        retry_after_seconds=retry_after_seconds,
+    )
 
 _TOOL_LOOP_WARNING_TEMPLATE_CN = """\
 检测到连续多轮调用了相同的工具集，且每个工具的入参也相同。
@@ -110,9 +287,10 @@ class _ToolRound:
 class ModelAnomalyDetectionRail(DeepAgentRail):
     """Detect and handle selected model anomalies.
 
-    Handles three failure modes:
+    Handles four failure modes:
       - repeated output suffixes in reasoning/content streams
       - stream frame timeout errors raised by ``Model.stream``
+      - transient provider failures (429, 408, 409, 5xx, connection drops)
       - consecutive identical tool-call/args loops (compact or bail out)
     """
 
@@ -130,10 +308,16 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
         single_char_repeat_count: int = 100,
         backoff_seconds: Optional[List[float]] = None,
         tool_loop_compact: ToolLoopCompactConfig | Dict[str, Any] | None = None,
+        transient_max_retries: int = _DEFAULT_TRANSIENT_MAX_RETRIES,
+        transient_base_delay_seconds: float = _DEFAULT_TRANSIENT_BASE_DELAY_SECONDS,
     ) -> None:
         super().__init__()
         if max_retries < 0:
             raise ValueError("max_retries must be >= 0")
+        if transient_max_retries < 0:
+            raise ValueError("transient_max_retries must be >= 0")
+        if transient_base_delay_seconds < 0:
+            raise ValueError("transient_base_delay_seconds must be >= 0")
         backoff = list(backoff_seconds) if backoff_seconds is not None else list(_DEFAULT_BACKOFF_SECONDS)
         if any(delay < 0 for delay in backoff):
             raise ValueError("backoff_seconds entries must be >= 0")
@@ -165,8 +349,11 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
         self.repeat_window_chars = repeat_window_chars
         self.single_char_repeat_count = single_char_repeat_count
         self.backoff_seconds = backoff
+        self.transient_max_retries = transient_max_retries
+        self.transient_base_delay_seconds = float(transient_base_delay_seconds)
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.transient_retry_count = 0
 
         self._tool_loop_compact = self._normalize_tool_loop_compact_config(tool_loop_compact)
         # Per-session, per-invoke counters. Keyed by session id because the same
@@ -201,6 +388,7 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
         """Reset per-invoke anomaly counters."""
         self.repeat_retry_count = 0
         self.stream_timeout_retry_count = 0
+        self.transient_retry_count = 0
         self._reset_tool_loop_compact_counter(ctx)
 
     async def after_invoke(self, ctx: AgentCallbackContext) -> None:
@@ -241,6 +429,26 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
 
         if self._is_stream_timeout_exception(ctx.exception):
             self._request_retry_or_reset(ctx, "stream_timeout")
+            return
+
+        if ctx.extra.get(MODEL_VISIBLE_OUTPUT_EMITTED_KEY):
+            return
+
+        decision = _classify_transient_failure(ctx.exception)
+        if (
+            not decision.retryable
+            and decision.retry_after_seconds is not None
+            and decision.retry_after_seconds > _MAX_RETRY_AFTER_SECONDS
+        ):
+            logger.warning(
+                "[ModelAnomalyDetectionRail] server requested %.2fs retry delay "
+                "(max %.0fs); not retrying",
+                decision.retry_after_seconds,
+                _MAX_RETRY_AFTER_SECONDS,
+            )
+            return
+        if decision.retryable:
+            self._request_transient_retry(ctx, decision)
 
     def _append_and_check(self, state: Dict[str, str], field_name: str, text: str) -> None:
         tail = (state.get(field_name, "") + text)[-self.repeat_window_chars:]
@@ -336,6 +544,30 @@ class ModelAnomalyDetectionRail(DeepAgentRail):
             ctx.request_retry(delay_seconds=delay)
         else:
             setattr(self, counter_attr, 0)
+
+    def _request_transient_retry(
+        self,
+        ctx: AgentCallbackContext,
+        decision: _TransientDecision,
+    ) -> None:
+        current = self.transient_retry_count
+        if current >= self.transient_max_retries:
+            self.transient_retry_count = 0
+            return
+        if decision.retry_after_seconds is not None:
+            delay = decision.retry_after_seconds
+        else:
+            delay = self.transient_base_delay_seconds * (2 ** current)
+        self.transient_retry_count = current + 1
+        logger.warning(
+            "[ModelAnomalyDetectionRail] retrying model call after transient "
+            "provider failure status=%s (%d/%d) after %.2fs backoff",
+            decision.status_code if decision.status_code is not None else "none",
+            current + 1,
+            self.transient_max_retries,
+            delay,
+        )
+        ctx.request_retry(delay_seconds=delay)
 
     @staticmethod
     def _is_repeat_exception(exc: Optional[BaseException]) -> bool:

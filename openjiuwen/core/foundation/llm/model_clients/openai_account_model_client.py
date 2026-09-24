@@ -493,7 +493,7 @@ class OpenAIAccountModelClient(BaseModelClient):
             timeout_seconds=timeout,
             verify=verify,
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
         )
 
     def _get_model_catalog(self) -> OpenAIAccountModelCatalog:
