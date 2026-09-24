@@ -101,6 +101,15 @@ MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT: float = float(
     os.getenv("MAX_TOOL_CALL_TIMEOUT_HARD_LIMIT", "3600.0")
 )
 
+#: 未知工具名错误附加给 LLM 的自纠提示,仅改错误文案、不改执行行为.
+_UNKNOWN_TOOL_NAME_HINT = (
+    " The tool name does not match any registered ability. Check the tools "
+    "list of this request: if a tool with a similar name exists, retry with "
+    "its exact name (this is a name mismatch, NOT a tool failure or an "
+    "environment issue); if no such tool exists, proceed with a different "
+    "approach."
+)
+
 
 class AbilityManager:
     """Agent Ability Manager
@@ -1506,7 +1515,7 @@ class AbilityManager:
             if not tool:
                 raise self._build_execution_error(
                     tool_call,
-                    f"Ability not found in resource_mgr: {tool_name}",
+                    f"Ability not found in resource_mgr: {tool_name}.{_UNKNOWN_TOOL_NAME_HINT}",
                 )
             # Resolve timeout from the tool's own card so non-idempotent
             # tools are exempt on this path too (Layer 0 reads
