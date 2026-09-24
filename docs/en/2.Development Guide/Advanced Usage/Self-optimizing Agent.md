@@ -144,11 +144,12 @@ score: 1.0, reason: The model's answer matches the standard answer in both names
 ### Build the Optimizer
 
 With the preparation done, you can use the openJiuwen optimizer to optimize and correct the Agent's prompt via a run–evaluate–optimize process.
-The openJiuwen framework currently provides three types of optimizers:
+The openJiuwen framework currently provides four types of optimizers:
 
 - InstructionOptimizer: Instruction prompt optimizer that refines prompt content based on dataset evaluation feedback.
 - ExampleOptimizer: Example prompt optimizer that extracts the best examples from the dataset and adds them to the prompt.
 - JointOptimizer: Instruction/example joint optimizer that optimizes the prompt content and adds examples to the prompt simultaneously.
+- PromptSearchOptimizer (RLAF-P): generates *multiple* candidate prompts per round instead of one, scores each with a composite reward (correctness, completeness, latency, token usage, cost), penalizes semantic drift from the objective, and detects overfitting via held-out cases. See below.
 
 Here we use the joint optimizer to optimize the Agent. Creating and running the JointOptimizer involves:
 
@@ -347,3 +348,76 @@ score: 0.0, reason: The model's answer includes names of consorts (e.g., 窦皇�
 score: 1.0, reason: The model output exactly matches the standard answer, including both names and count. Although the model's answer contains an extra 'tool_calls' field, it is empty and does not affect output consistency., answer: {'output': '[郭造卿, 郭遇卿]', 'tool_calls': []}, label: {'output': '[郭造卿, 郭遇卿]'}
 score: 1.0, reason: The model output exactly matches the standard answer. Although tool calls are missing, according to the problem and validation rules, only the consistency of the output content matters., answer: {'output': '[沈自邠]', 'tool_calls': []}, label: {'output': '[沈自邠]'}
 ```
+
+## PromptSearchOptimizer (RLAF-P): multi-candidate prompt search
+
+The optimizers above generate one rewritten prompt per epoch. `PromptSearchOptimizer`
+generates several candidates per round, executes and scores each with a composite
+reward, and keeps the best — an RL-style search loop rather than a single textual
+gradient step. No model weights are trained.
+
+It's built on the same scaffolding as the other optimizers (`Case`, `BaseEvaluator` /
+`DefaultEvaluator`, `Model`) and works two ways:
+
+**Standalone** — no `LLMCall`, Agent, or `Trainer` required:
+
+```python
+from openjiuwen.dev_tools.tune.optimizer.prompt_search import (
+    PromptTaskCase, PromptTaskSpec, optimize_prompt,
+)
+
+task = PromptTaskSpec(
+    objective="Summarize a support ticket into at most 3 action items.",
+    constraints=["Output a markdown bullet list", "At most 3 bullets"],
+    cases=[
+        PromptTaskCase.from_text(
+            "My invoice is wrong and the app keeps crashing on login.",
+            "- Fix invoice\n- Investigate login crash",
+        ),
+        PromptTaskCase.from_text(
+            "Password reset email never arrives; also dark mode is broken.",
+            "- Fix password reset email\n- Fix dark mode",
+            hidden=True,  # held out to catch a candidate that overfits the visible cases
+        ),
+    ],
+)
+
+result = await optimize_prompt(task, model_config, model_client_config)
+print(result.best_score, result.best_prompt)
+```
+
+**Bound to a Trainer**, like the other optimizers, plus a multi-candidate search step:
+
+```python
+from openjiuwen.dev_tools.tune.optimizer.prompt_search import PromptSearchOptimizer
+from openjiuwen.dev_tools.tune.trainer.trainer import Trainer
+
+optimizer = PromptSearchOptimizer(
+    model_config, model_client_config,
+    parameters=agent.get_llm_calls(),
+    candidate_prompts=5,  # candidates generated per round
+)
+trainer = Trainer(optimizer=optimizer, evaluator=evaluator)
+trainer.train(agent, case_loader, num_iterations=3)
+
+# search_prompt_candidates evaluates every candidate PromptSearchOptimizer tried
+# for a parameter — not only the single one update() applied — and leaves the
+# agent set to whichever scores best. A no-op for optimizers that don't record
+# multiple candidates (InstructionOptimizer, ExampleOptimizer, JointOptimizer).
+trainer.search_prompt_candidates(agent, "llm_call_name", case_loader)
+```
+
+Anti-reward-hacking guards, on by default: a **min-correctness gate** caps the
+reward at correctness when correctness falls below a floor, so latency/token gains
+can't buy a bad answer a high score; a **drift penalty** (LLM-judged semantic
+deviation from the objective) subtracts from the reward; and **hidden cases**
+(`PromptTaskCase(..., hidden=True)`) catch a candidate whose visible-case score is
+much higher than its held-out score — the signature of overfitting to the visible
+set rather than solving the task.
+
+`optimize_prompt` / `PromptSearchOptimizer` accept `policy`, `environment`,
+`reward_model`, `drift_judge`, and `memory` overrides — see the module docstrings
+in `openjiuwen.dev_tools.tune.optimizer.prompt_search` for the full extension
+surface (custom reward components, a `WorkflowEnvironment`/`CallableEnvironment`
+to score against a real workflow or agent instead of a bare LLM call, a persistent
+`PromptMemory` to warm-start future runs on similar objectives).
