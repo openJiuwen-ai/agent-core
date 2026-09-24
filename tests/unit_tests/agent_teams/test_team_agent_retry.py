@@ -282,3 +282,136 @@ def test_detect_task_failed_handles_empty_data() -> None:
     )
     result = stream_controller_module._detect_task_failed(chunk)
     assert result == (None, "")
+
+
+# ─── 认证类快速失败 + 瞬时类退避封顶 ───
+
+
+# 复刻故障现场的 401 文本（APIG.1009 AppKey or AppSecret is invalid）。
+_AUTH_401_TEXT = (
+    "[181001] model call failed, reason: openAI API async stream error: "
+    "AuthenticationError: Error code: 401 - {'error_msg': 'AppKey or AppSecret "
+    "is invalid', 'error_code': 'APIG.1009', "
+    "'request_id': '80b4ca451577df88cbbb39380c6facd6'}"
+)
+
+
+def test_is_auth_failure_classification() -> None:
+    """认证类判定：401/403 状态、AuthenticationError、APIG.1009 命中；普通瞬时错误不命中。"""
+    is_auth = stream_controller_module._is_auth_failure
+    assert is_auth(_AUTH_401_TEXT) is True
+    assert is_auth("[181001] Error code: 403 - forbidden") is True
+    assert is_auth("[181001] AuthenticationError: invalid credentials") is True
+    assert is_auth("[181001] model call failed, reason: timeout") is False
+    assert is_auth("[181001] still timing out") is False
+    # 请求 id 等上下文里的 401 子串不得误判（\b 边界）。
+    assert is_auth("[181001] request_id=ab401c timeout") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_auth_failure_short_backoff_then_fast_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """认证类失败：len(_AUTH_RETRY_DELAYS) 次短退避重试后快速失败转发，不再 10 连重试。"""
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(stream_controller_module.team_logger, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(stream_controller_module.team_logger, "error", lambda *a, **k: None)
+
+    failed = _make_failed_chunk_raw(_AUTH_401_TEXT)
+    runtime = _RetryRuntime([failed])
+    sc = _make_controller(runtime)
+
+    # 第 1、2 次：吞掉 + 短退避（5s/10s）重驱
+    await sc._forward_outputs()
+    assert len(runtime.sent) == 1
+    assert sc._auth_retry_attempt == 1
+    retry_chunks = await _drain_queue(sc.stream_queue)
+    assert retry_chunks[0].payload["max_attempts"] == 2
+    assert retry_chunks[0].payload["attempt"] == 1
+
+    await sc._map_round("started")  # 重驱轮开始 → 清 swallow 锁存
+    runtime.set_chunks([failed])
+    await sc._forward_outputs()
+    assert sc._auth_retry_attempt == 2
+    await _drain_queue(sc.stream_queue)
+
+    # 第 3 次：认证预算耗尽 → 快速失败转发，不再重驱
+    await sc._map_round("started")
+    runtime.set_chunks([failed])
+    await sc._forward_outputs()
+
+    assert sleeps == [5.0, 10.0]
+    assert len(runtime.sent) == 2  # 只有前两次重驱
+    forwarded = await _drain_queue(sc.stream_queue)
+    assert forwarded == [failed]  # 原始 task_failed 直达消费者
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_auth_budget_pre_spent_forwards_immediately(monkeypatch: pytest.MonkeyPatch) -> None:
+    """认证预算已耗尽时，下一条认证失败立即转发（零重试、零退避）。"""
+    monkeypatch.setattr(stream_controller_module.team_logger, "error", lambda *a, **k: None)
+
+    failed = _make_failed_chunk_raw(_AUTH_401_TEXT)
+    runtime = _RetryRuntime([failed])
+    sc = _make_controller(runtime)
+    sc._auth_retry_attempt = len(stream_controller_module._AUTH_RETRY_DELAYS)
+
+    await sc._forward_outputs()
+
+    assert await _drain_queue(sc.stream_queue) == [failed]
+    assert runtime.sent == []
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_transient_first_retry_is_immediate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """瞬时类（非认证）失败首次重试零延迟：单次抖动保持透明恢复（兼容既有契约）。"""
+    sleeps: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", _fake_sleep)
+    monkeypatch.setattr(stream_controller_module.team_logger, "warning", lambda *a, **k: None)
+
+    runtime = _RetryRuntime([_make_failed_chunk(181001, "model call failed, reason: timeout")])
+    sc = _make_controller(runtime)
+
+    await sc._forward_outputs()
+
+    assert sleeps == [0.0]
+    assert runtime.sent == [(stream_controller_module._RETRY_QUERY, False)]
+
+
+def test_transient_backoff_sequence_and_window_cap() -> None:
+    """退避序列：首次 0s，之后 1,2,4,... 指数递增；累计等待硬上限 _TRANSIENT_BACKOFF_CAP_S。"""
+    cap = stream_controller_module._TRANSIENT_BACKOFF_CAP_S
+    sc = _make_controller(_RetryRuntime([]))
+
+    delays: list[float] = []
+    while True:
+        delay = sc._transient_backoff_delay_s()
+        if delay is None:
+            break
+        delays.append(delay)
+        sc._retry_attempt += 1
+        if len(delays) > 32:  # 防御性熔断
+            raise AssertionError("backoff window did not exhaust")
+
+    assert delays[0] == 0.0
+    assert delays[1] == 1.0
+    assert delays[2] == 2.0
+    assert delays[3] == 4.0
+    # 累计等待不超过窗口上限；末次被截断到剩余预算。
+    assert sum(delays) <= cap + 1e-9
+    assert sc._transient_backoff_waited_s <= cap + 1e-9
+    # 次数预算仍为 10，窗口预算先耗尽（120s < 10 次满额退避总和）。
+    assert len(delays) < stream_controller_module._MAX_RETRY_ATTEMPTS
+    # 窗口耗尽后返回 None（快速失败）。
+    assert sc._transient_backoff_delay_s() is None

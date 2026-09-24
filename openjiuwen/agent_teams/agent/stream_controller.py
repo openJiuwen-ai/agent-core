@@ -55,11 +55,33 @@ ChunkObserver = Callable[[OutputSchema], Awaitable[None]]
 # swallows the failed round's remaining chunks, and re-drives the round with a
 # retry query. Exhausted / non-retryable failures are forwarded so the consumer
 # sees the error (the supervisor model removed the old raise-based exhaustion).
+#
+# retryable 失败按错误文本分两类预算——
+# 认证类（401/403、AuthenticationError、APIG.1009）是确定性失败，10 连无退避
+# 重试只会在 ~2s 内空烧配额并把真实根因埋进错误日志；改为保留少量短退避重试
+# （覆盖网关 token 轮换类秒级抖动）后快速失败转发。其余瞬时类保持首次零延迟
+# 重试（单次抖动透明恢复），自第二次起指数退避，总等待窗口硬上限 120s——
+# 低于 relay 客户端 300s stall 看门狗与成员 600s completion_timeout，
+# 避免把"上游故障挂死"换成"退避挂死"。
 _MAX_RETRY_ATTEMPTS = 10
 _RETRYABLE_ERROR_CODES = {181001}
 _RETRY_QUERY = "刚才有异常状况，继续执行"
 _TASK_FAILED_PAYLOAD_TYPE = "task_failed"
 _ERROR_CODE_PATTERN = re.compile(r"^\[(\d+)\]")
+# 认证类失败特征：结构化 provider 码优先，HTTP 状态与 AuthenticationError 兜底。
+_AUTH_ERROR_MARKERS = ("AuthenticationError", "APIG.1009")
+_AUTH_HTTP_STATUS_PATTERN = re.compile(r"\b(?:401|403)\b")
+_AUTH_RETRY_DELAYS: tuple[float, ...] = (5.0, 10.0)
+_TRANSIENT_BACKOFF_BASE_S = 1.0
+_TRANSIENT_BACKOFF_CAP_S = 120.0
+
+
+def _is_auth_failure(text: str) -> bool:
+    """认证类失败判定（401/403、AuthenticationError、APIG 鉴权码）。"""
+    return (
+        any(marker in text for marker in _AUTH_ERROR_MARKERS)
+        or _AUTH_HTTP_STATUS_PATTERN.search(text) is not None
+    )
 
 
 def _detect_task_failed(chunk: Any) -> "tuple[int | None, str] | None":
@@ -137,6 +159,11 @@ class StreamController:
         # task_failed (reset when the next round starts).
         self._retry_attempt: int = 0
         self._swallow_failed_round: bool = False
+        # 认证类已重试次数（预算 = len(_AUTH_RETRY_DELAYS)）与瞬时类退避累计
+        # 等待秒数（预算 = _TRANSIENT_BACKOFF_CAP_S）；与 _retry_attempt 一样
+        # 在 start() 按周期重置。
+        self._auth_retry_attempt: int = 0
+        self._transient_backoff_waited_s: float = 0.0
 
     def _member_name(self) -> Optional[str]:
         bp = self._get_blueprint()
@@ -206,6 +233,8 @@ class StreamController:
         self._terminal_interrupt_resume_closed = False
         self._retry_attempt = 0
         self._swallow_failed_round = False
+        self._auth_retry_attempt = 0
+        self._transient_backoff_waited_s = 0.0
         await harness.subscribe(on_state=self._map_state, on_round=self._map_round)
         if self._forward_task is None or self._forward_task.done():
             self._forward_task = asyncio.create_task(self._forward_outputs())
@@ -292,7 +321,12 @@ class StreamController:
         except Exception:
             team_logger.exception("[{}] output forwarder crashed", member_name or "?")
 
-    async def _emit_retry_output(self, code: int | None, text: str) -> None:
+    async def _emit_retry_output(
+        self,
+        code: int | None,
+        text: str,
+        max_attempts: int = _MAX_RETRY_ATTEMPTS,
+    ) -> None:
         """Expose a retryable failure as visible streamed model output."""
         retry_chunk = self._tag_chunk(
             OutputSchema(
@@ -300,12 +334,12 @@ class StreamController:
                 index=0,
                 payload={
                     "content": (
-                        f"\n\n[Retry {self._retry_attempt}/{_MAX_RETRY_ATTEMPTS}] "
+                        f"\n\n[Retry {self._retry_attempt}/{max_attempts}] "
                         f"{text}\n\n"
                     ),
                     "retrying": True,
                     "attempt": self._retry_attempt,
-                    "max_attempts": _MAX_RETRY_ATTEMPTS,
+                    "max_attempts": max_attempts,
                     "error_code": code,
                 },
             )
@@ -322,6 +356,26 @@ class StreamController:
                 )
                 self.remove_chunk_observer(observer)
 
+    def _transient_backoff_delay_s(self) -> Optional[float]:
+        """计算下一次瞬时类重试的退避秒数；窗口耗尽返回 None（快速失败）。
+
+        首次重试零延迟（单次抖动透明恢复，兼容既有契约）；自第二次起
+        1, 2, 4, ... 指数递增，末次截断到剩余预算，累计等待上限
+        _TRANSIENT_BACKOFF_CAP_S。
+        """
+        if self._transient_backoff_waited_s >= _TRANSIENT_BACKOFF_CAP_S:
+            return None
+        if self._retry_attempt == 0:
+            return 0.0
+        delay_s = min(
+            _TRANSIENT_BACKOFF_BASE_S * (2 ** (self._retry_attempt - 1)),
+            _TRANSIENT_BACKOFF_CAP_S - self._transient_backoff_waited_s,
+        )
+        if delay_s <= 0:
+            return None
+        self._transient_backoff_waited_s += delay_s
+        return delay_s
+
     async def _handle_retry(self, chunk: Any) -> bool:
         """Detect a task_failed chunk and drive transient retry.
 
@@ -330,25 +384,60 @@ class StreamController:
         failed round and re-drives it with a retry query (a follow-up round); an
         exhausted / non-retryable failure falls through (returns False) so the
         task_failed chunk reaches the consumer.
+
+        retryable 失败按错误文本分两类预算。
+        认证类（_is_auth_failure，如 401/APIG.1009）是确定性失败，仅保留
+        len(_AUTH_RETRY_DELAYS) 次短退避重试（覆盖网关 token 轮换类秒级抖动）
+        后快速失败；其余瞬时类首次零延迟、之后指数退避且总等待 ≤
+        _TRANSIENT_BACKOFF_CAP_S。两类预算（次数 / 窗口）任一耗尽即转发失败。
         """
         detected = _detect_task_failed(chunk)
         if detected is None:
             return False
         code, text = detected
         harness = self._resources.harness
-        if harness is not None and code in _RETRYABLE_ERROR_CODES and self._retry_attempt < _MAX_RETRY_ATTEMPTS:
-            self._retry_attempt += 1
-            team_logger.warning(
-                "DeepAgent round transient error (code=%s, attempt=%d/%d): %s",
-                code,
-                self._retry_attempt,
-                _MAX_RETRY_ATTEMPTS,
-                text,
-            )
-            self._swallow_failed_round = True
-            await self._emit_retry_output(code, text)
-            await harness.send(_RETRY_QUERY)
-            return True
+        if harness is not None and code in _RETRYABLE_ERROR_CODES:
+            if _is_auth_failure(text):
+                if self._auth_retry_attempt < len(_AUTH_RETRY_DELAYS):
+                    delay_s = _AUTH_RETRY_DELAYS[self._auth_retry_attempt]
+                    self._auth_retry_attempt += 1
+                    self._retry_attempt += 1
+                    team_logger.warning(
+                        "DeepAgent round auth error (code=%s, retry=%d/%d, backoff=%.1fs): %s",
+                        code,
+                        self._auth_retry_attempt,
+                        len(_AUTH_RETRY_DELAYS),
+                        delay_s,
+                        text,
+                    )
+                    self._swallow_failed_round = True
+                    await self._emit_retry_output(
+                        code, text, max_attempts=len(_AUTH_RETRY_DELAYS)
+                    )
+                    await asyncio.sleep(delay_s)
+                    await harness.send(_RETRY_QUERY)
+                    return True
+                # 认证预算耗尽 → 落到下方快速失败转发
+            else:
+                # 先查次数预算再算退避，避免窗口累计在预算已耗尽时被污染。
+                if self._retry_attempt < _MAX_RETRY_ATTEMPTS:
+                    delay_s = self._transient_backoff_delay_s()
+                    if delay_s is not None:
+                        self._retry_attempt += 1
+                        team_logger.warning(
+                            "DeepAgent round transient error (code=%s, attempt=%d/%d, backoff=%.1fs): %s",
+                            code,
+                            self._retry_attempt,
+                            _MAX_RETRY_ATTEMPTS,
+                            delay_s,
+                            text,
+                        )
+                        self._swallow_failed_round = True
+                        await self._emit_retry_output(code, text)
+                        await asyncio.sleep(delay_s)
+                        await harness.send(_RETRY_QUERY)
+                        return True
+                # 次数预算 / 退避窗口耗尽 → 落到下方快速失败转发
         team_logger.error(
             "DeepAgent round failed (code=%s, attempts=%d): %s",
             code,
