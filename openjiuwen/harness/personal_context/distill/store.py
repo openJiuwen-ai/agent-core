@@ -70,7 +70,7 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         return None
     return raw if isinstance(raw, dict) else None
 

@@ -55,7 +55,8 @@ class DistillRunnerPort(Protocol):
         learning_since_ms: int | None = None,
         max_messages: int = 800,
         force_full_window: bool = False,
-    ) -> DistillRunResult: ...
+    ) -> DistillRunResult:
+        ...
 
 
 def evaluate_distill_due(
@@ -146,7 +147,5 @@ async def run_distill_scheduler_loop(
                 run_job=get_runner(),
                 config=config,
             )
-        except asyncio.CancelledError:
-            raise
         except Exception:
             logger.exception("distill schedule tick failed home=%s", home)

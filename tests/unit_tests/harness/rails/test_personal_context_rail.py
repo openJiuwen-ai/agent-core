@@ -18,6 +18,7 @@ from openjiuwen.harness.personal_context.distill import (
     activate_profile_version,
     publish_distilled,
 )
+from openjiuwen.harness.personal_context.im import ImSearchTool, SqliteImSearchStore
 from openjiuwen.harness.rails.personal_context import (
     PersonalContextRail,
     register_im_search_tools,
@@ -695,6 +696,32 @@ async def test_register_im_search_tools_mounts_stub_tools() -> None:
         tool = _stub_search_tool()
         register_im_search_tools(agent, [tool])
         assert am.get("im_search_messages") is not None
+        assert Runner.resource_mgr.get_tool(tool.card.id) is tool
+    finally:
+        await Runner.stop()
+
+
+@pytest.mark.asyncio
+async def test_register_im_search_tools_mounts_im_search_tool(tmp_path: Path) -> None:
+    """Real ImSearchTool + SqliteImSearchStore share the same home as the rail."""
+    await Runner.start()
+    try:
+        home = tmp_path / "pc_home"
+        home.mkdir()
+        store = SqliteImSearchStore(home)
+        tool = ImSearchTool(store)
+        assert tool.card.name == "im_search"
+
+        rail = PersonalContextRail(home)
+        assert rail._home == store._home.resolve()
+
+        am = AbilityManager(owner_id="pc-register-im-search")
+        agent = SimpleNamespace(ability_manager=am)
+        register_im_search_tools(agent, [tool])
+
+        ability = am.get("im_search")
+        assert ability is not None
+        assert ability.name == "im_search"
         assert Runner.resource_mgr.get_tool(tool.card.id) is tool
     finally:
         await Runner.stop()

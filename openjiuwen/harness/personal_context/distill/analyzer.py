@@ -74,7 +74,8 @@ def _materials_user_message(block: str, *, subject_name: str) -> str:
 
 
 class AnalyzerPort(Protocol):
-    async def analyze(self, messages: list[CorpusMessage]) -> DistillCandidates: ...
+    async def analyze(self, messages: list[CorpusMessage]) -> DistillCandidates:
+        ...
 
 
 class LlmAnalyzer:
