@@ -215,19 +215,30 @@ def qualified_edges(
 
 def group_by_structure(
     records: list[RecipeEvidence],
-    qualified: list[tuple[str, str, str]],
 ) -> dict[str, StructureGroup]:
-    """按合格成功边结构分组；没有任何合格成功边的轨迹不进任何组。"""
+    """按轨迹全部成功边结构分组；没有成功边的轨迹不进任何组。
 
-    qualified_set = set(qualified)
+    分组签名只依赖轨迹自身内容（不依赖全局边统计），同一条轨迹永远属于
+    同一个组——新轨迹到来最多改变一个组的成员，蒸馏可以只处理变化的组。
+    环拆除用的统计也取自轨迹自身（每条边 support=1、成功），保证签名
+    对单条轨迹是纯函数。
+    """
+
     groups: dict[str, StructureGroup] = {}
     for record in records:
-        success_edges = {
-            _edge_key(edge)
-            for edge in record.graph.get("edges") or []
-            if bool((edge.get("metadata") or {}).get("success"))
-        }
-        key_edges = tuple(sorted(success_edges & qualified_set))
+        success_edge_keys: set[tuple[str, str, str]] = set()
+        for edge in record.graph.get("edges") or []:
+            metadata = edge.get("metadata") or {}
+            if not metadata.get("success"):
+                continue
+            if not (edge.get("source") or "") or not (edge.get("target") or ""):
+                continue
+            success_edge_keys.add(_edge_key(edge))
+        success_edges = sorted(success_edge_keys)
+        if not success_edges:
+            continue
+        record_stats = {edge: EdgeStats(support=1, success=1) for edge in success_edges}
+        key_edges = tuple(sorted(break_cycles(success_edges, record_stats)))
         if not key_edges:
             continue
         signature = structure_signature(key_edges)
@@ -402,26 +413,54 @@ def compute_quality(
 def resolve_status_grade(
     quality: dict[str, Any],
     *,
-    min_successes_candidate: int,
-    min_successes_verified: int,
-    min_pack_success_rate_verified: float,
+    min_successes: int,
+    min_pack_success_rate: float,
 ) -> tuple[str, str]:
+    """单阈值判级：成功次数与 pack 成功率同时达标 → verified（可弹安装
+    询问），否则 draft。candidate 中间态没有独立消费方，不再产出。
+    """
+
     success_count = int(quality.get("success_count") or 0)
     pack_success_rate = float(quality.get("pack_success_rate") or 0.0)
-    if success_count >= min_successes_verified and pack_success_rate >= min_pack_success_rate_verified:
+    if success_count >= min_successes and pack_success_rate >= min_pack_success_rate:
         return RECIPE_STATUS_ACTIVE, RECIPE_GRADE_VERIFIED
-    if success_count >= min_successes_candidate:
-        return RECIPE_STATUS_ACTIVE, RECIPE_GRADE_CANDIDATE
     return RECIPE_STATUS_DRAFT, RECIPE_GRADE_CANDIDATE
+
+
+def structure_unchanged(
+    existing_combination_structure: Any,
+    member_ids: list[str],
+    edges: tuple[tuple[str, str, str], ...],
+) -> bool:
+    """判断既有 recipe 的组合结构与蒸馏结果是否一致。
+
+    只比较成员集与边三元组（source, target, relation），忽略随统计变化的
+    support / success_rate 元数据——结构未变时蒸馏只需刷新计数，无需重建
+    叙事或升版本。
+    """
+
+    structure = (
+        existing_combination_structure
+        if isinstance(existing_combination_structure, dict)
+        else {}
+    )
+    nodes = structure.get("nodes")
+    if not isinstance(nodes, dict) or sorted(str(node) for node in nodes) != member_ids:
+        return False
+    stored_edges = {
+        _edge_key(edge)
+        for edge in structure.get("edges") or []
+        if isinstance(edge, dict)
+    }
+    return stored_edges == set(edges)
 
 
 def distill_group(
     group: StructureGroup,
     stats: dict[tuple[str, str, str], EdgeStats],
     *,
-    min_successes_candidate: int,
-    min_successes_verified: int,
-    min_pack_success_rate_verified: float,
+    min_successes: int,
+    min_pack_success_rate: float,
 ) -> DistillResult:
     """蒸馏一个结构分组：pack = 组结构本身，质量用全局边统计。"""
 
@@ -447,9 +486,8 @@ def distill_group(
     quality = compute_quality(records, pack_edges)
     status, grade = resolve_status_grade(
         quality,
-        min_successes_candidate=min_successes_candidate,
-        min_successes_verified=min_successes_verified,
-        min_pack_success_rate_verified=min_pack_success_rate_verified,
+        min_successes=min_successes,
+        min_pack_success_rate=min_pack_success_rate,
     )
     return DistillResult(
         recipe_id=f"recipe_{group.signature}",

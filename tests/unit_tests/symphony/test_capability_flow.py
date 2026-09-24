@@ -138,11 +138,8 @@ def _execution_graph(
 
 def _engine(tmp_path: Path) -> SymphonyFlowEngine:
     config = SymphonyFlowConfig(
-        min_edge_support=2,
-        min_edge_success_rate=0.8,
-        min_successes_candidate=3,
-        min_successes_verified=5,
-        min_pack_success_rate_verified=0.8,
+        min_successes=5,
+        min_pack_success_rate=0.8,
     )
     return SymphonyFlowEngine(tmp_path / "flow", config=config)
 
@@ -281,6 +278,50 @@ def test_unchanged_recipe_updates_current_quality_without_new_version(tmp_path: 
     assert packaged_recipe["provenance"]["evidence_count"] == 2
 
 
+def test_narrative_deferred_until_verified_threshold(tmp_path: Path) -> None:
+    """未达 min_successes 只落模板草稿（零 LLM）；首次达标才补叙事并升版本。"""
+
+    response = json.dumps(
+        {
+            "task_description": "research and write",
+            "trigger_conditions": "research task",
+            "example_requests": ["prepare a review"],
+            "execution_narrative": "search, summarize, then write",
+        }
+    )
+    llm = Mock(invoke=AsyncMock(return_value=response))
+    config = SymphonyFlowConfig(min_successes=3, min_pack_success_rate=0.8)
+    engine = SymphonyFlowEngine(tmp_path / "flow", config=config, llm_client=llm)
+
+    assert engine.ingest(_execution_graph("trace-1", query="first task"))
+    first = asyncio.run(engine.distill())
+    recipe_id = first.recipes_saved[0]
+    draft = engine.get_recipe(recipe_id)
+    assert draft is not None
+    assert draft.status == RECIPE_STATUS_DRAFT
+    assert draft.version == 1
+    assert draft.provenance["narrative_source"] == "template"
+    assert llm.invoke.await_count == 0
+    assert engine.list_candidates() == ()
+
+    assert engine.ingest(_execution_graph("trace-2", query="second task"))
+    second = asyncio.run(engine.distill())
+    assert second.recipes_saved == []  # 计数增长但仍未达标：仅刷新，无 LLM
+    assert llm.invoke.await_count == 0
+
+    assert engine.ingest(_execution_graph("trace-3", query="third task"))
+    third = asyncio.run(engine.distill())
+    verified = engine.get_recipe(recipe_id)
+    assert verified is not None
+    assert verified.status == RECIPE_STATUS_ACTIVE
+    assert verified.grade == RECIPE_GRADE_VERIFIED
+    assert verified.provenance["narrative_source"] == "llm"
+    assert llm.invoke.await_count == 1
+    candidates = engine.list_candidates()
+    assert len(candidates) == 1
+    assert candidates[0].version == 2
+
+
 def test_submit_replays_candidate_until_explicit_ack(tmp_path: Path) -> None:
     engine = SymphonyFlowEngine(tmp_path / "flow")
 
@@ -358,11 +399,12 @@ def test_restart_distills_new_evidence_before_replaying_unacknowledged_candidate
     assert refreshed[0].execution_count == 2
     assert restarted.get_recipe(refreshed[0].recipe_id).version == 1
     assert restarted.store.read_distillation_fingerprint() == restarted.store.evidence_fingerprint()
-    assert llm.invoke.await_count == 2
+    # 结构未变：刷新计数不重跑 LLM 叙事
+    assert llm.invoke.await_count == 1
 
     replayed = asyncio.run(restarted.submit(_execution_graph("trace-2")))
     assert replayed == refreshed
-    assert llm.invoke.await_count == 2
+    assert llm.invoke.await_count == 1
     assert not restarted.store.recipe_version_path(refreshed[0].recipe_id, 2).exists()
 
 
@@ -406,11 +448,8 @@ def test_legacy_delivery_acknowledgement_does_not_hide_candidate(tmp_path: Path)
 
 def test_ack_uses_current_verified_state_when_immutable_version_was_candidate(tmp_path: Path) -> None:
     config = SymphonyFlowConfig(
-        min_edge_support=1,
-        min_edge_success_rate=0.8,
-        min_successes_candidate=1,
-        min_successes_verified=2,
-        min_pack_success_rate_verified=0.8,
+        min_successes=2,
+        min_pack_success_rate=0.8,
     )
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
@@ -903,11 +942,15 @@ def test_review_and_prepare_install_rejections(tmp_path: Path) -> None:
     plugin = asyncio.run(engine.review_and_prepare_install(recipe_id, recipe_version=1, target_kind=TARGET_KIND_PLUGIN))
     assert plugin.verdict == VERDICT_REJECTED
 
-    # 证据不足：结构无法达到 active/verified，install 准备必须拒绝
+    # 证据不足：低于 min_successes 只产出 draft，不会成为可安装候选
     lone = _engine(tmp_path / "lone")
     lone.ingest(_execution_graph("trace-lone"))
     report = asyncio.run(lone.distill())
-    assert report.recipes_saved == []  # support < 2 → 无合格结构
+    assert len(report.recipes_saved) == 1
+    lone_recipe = lone.get_recipe(report.recipes_saved[0])
+    assert lone_recipe is not None
+    assert lone_recipe.status == RECIPE_STATUS_DRAFT
+    assert lone.list_candidates() == ()
 
 
 def test_review_agent_rejection_never_calls_target_adapter(tmp_path: Path) -> None:
@@ -1023,28 +1066,28 @@ def test_static_review_requires_permissions_and_license(tmp_path: Path) -> None:
 
 
 def test_stale_recipe_version_is_rejected(tmp_path: Path) -> None:
+    """结构未变时 recipe 内容恒定、版本不前进；请求不存在的版本被拒。"""
+
     engine = SymphonyFlowEngine(tmp_path / "flow")
     engine.ingest(_execution_graph("trace-1", query="first wording"))
     first = asyncio.run(engine.distill())
     recipe_id = first.recipes_saved[0]
     engine.ingest(_execution_graph("trace-2", query="second wording"))
     asyncio.run(engine.distill())
-    assert engine.get_recipe(recipe_id).version == 2
+    assert engine.get_recipe(recipe_id).version == 1
 
-    preparation = asyncio.run(engine.review_and_prepare_install(recipe_id, recipe_version=1))
+    preparation = asyncio.run(engine.review_and_prepare_install(recipe_id, recipe_version=2))
 
     assert preparation.verdict == VERDICT_REJECTED
-    assert "stale recipe version" in preparation.reasons[0]
+    # v2 从未产生过（结构未变不升版本），按不存在处理
+    assert "recipe not found" in preparation.reasons[0]
     assert preparation.package is None
 
 
 def test_branching_recipe_is_not_installable_in_v1(tmp_path: Path) -> None:
     config = SymphonyFlowConfig(
-        min_edge_support=1,
-        min_edge_success_rate=0.5,
-        min_successes_candidate=1,
-        min_successes_verified=1,
-        min_pack_success_rate_verified=0.5,
+        min_successes=1,
+        min_pack_success_rate=0.5,
     )
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("branch", [("s1", "s2", True), ("s1", "s3", True)]))
@@ -1295,11 +1338,8 @@ def test_ingest_accepts_documented_execution_graph(tmp_path: Path) -> None:
     """4.3.1 文档格式的执行图可直接接入：失败边剔除成员、分支边保留。"""
 
     config = SymphonyFlowConfig(
-        min_edge_support=1,
-        min_edge_success_rate=0.5,
-        min_successes_candidate=1,
-        min_successes_verified=1,
-        min_pack_success_rate_verified=0.5,
+        min_successes=1,
+        min_pack_success_rate=0.5,
     )
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
 
@@ -1328,11 +1368,8 @@ def test_non_success_evidence_does_not_reduce_pack_success_rate(tmp_path: Path) 
     """Flow only distills overall-success executions."""
 
     config = SymphonyFlowConfig(
-        min_edge_support=1,
-        min_edge_success_rate=0.5,
-        min_successes_candidate=1,
-        min_successes_verified=3,
-        min_pack_success_rate_verified=0.8,
+        min_successes=3,
+        min_pack_success_rate=0.8,
     )
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     for index in range(6):
@@ -1406,11 +1443,8 @@ def test_same_nodes_different_structures_split_groups(tmp_path: Path) -> None:
     """
 
     config = SymphonyFlowConfig(
-        min_edge_support=2,
-        min_edge_success_rate=0.8,
-        min_successes_candidate=2,
-        min_successes_verified=3,
-        min_pack_success_rate_verified=0.8,
+        min_successes=3,
+        min_pack_success_rate=0.8,
     )
     engine = SymphonyFlowEngine(tmp_path / "flow", config=config)
     engine.ingest(_graph_with_edges("t1", [("s1", "s2", True), ("s2", "s5", True)]))

@@ -390,6 +390,8 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     system_prompt = call["messages"][0]["content"].casefold()
     assert "names" in system_prompt and "order" in system_prompt and "planned" in system_prompt
     assert "do not infer" in system_prompt
+    assert "earlier target event failed" in system_prompt
+    assert "intermediate setup or dependency error is not the outcome" in system_prompt
     assert "512 utf-8 bytes" in system_prompt
 
 
