@@ -65,7 +65,13 @@ from openjiuwen.agent_evolving.ttse.dream import (
     load_dream_state,
     run_dream_pass,
 )
-from openjiuwen.agent_evolving.ttse.induction import blame, induce, induce_batch, synthesize
+from openjiuwen.agent_evolving.ttse.induction import (
+    blame,
+    induce,
+    induce_batch,
+    match_duplicate_rule,
+    synthesize,
+)
 from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_CN,
     DISK_CATALOG_GUIDANCE_EN,
@@ -575,7 +581,7 @@ class TTSERail(EvolutionRail):
             rules_numbered=rules_numbered(retired),
             capabilities=capabilities,
         )
-        if new_tip and await self._ttse_store.add_tip(new_tip):
+        if new_tip and not await self._llm_same_rule(new_tip, "tip") and await self._ttse_store.add_tip(new_tip):
             logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
             await self._classify_added_rules([(new_tip, "tip")])
 
@@ -591,14 +597,58 @@ class TTSERail(EvolutionRail):
         await self._blame_and_retire(task_query, traj_text, messages)
         await self._synthesize_resolving(capabilities)
 
+    async def _llm_same_rule(self, text: str, rtype: str) -> bool:
+        """Bump count when the model says this wording is an existing rule.
+
+        Exact normalized equality still merges inside ``add_fact`` / ``add_tip``
+        and does not call the model. Empty bank skips the call.
+        """
+        records = self._ttse_store.facts_records() if rtype == "fact" else self._ttse_store.tips_records()
+        if not records:
+            return False
+        target = _norm(text)
+        if any(_norm(record.get("text", "")) == target for record in records):
+            return False
+        shown = records[:40]
+        try:
+            index = await match_duplicate_rule(
+                llm=self._ttse_llm,
+                model=self._ttse_model,
+                policy=self._ttse_config.induce_llm_policy,
+                kind=rtype,
+                existing=[str(record.get("text") or "") for record in shown],
+                new_text=text,
+            )
+        except Exception as exc:  # noqa: BLE001 - fall through to ordinary add
+            logger.warning("[TTSERail] dedup judge failed: %s", exc)
+            return False
+        if index is None:
+            return False
+        kept = str(shown[index].get("text") or "")
+        count = await self._ttse_store.bump_count(rtype, kept)
+        if not count:
+            return False
+        logger.info(
+            "[TTSERail] merged %s via dedup judge count=%s kept=%s new=%s",
+            rtype,
+            count,
+            kept[:80],
+            text[:80],
+        )
+        return True
+
     async def _add_rules(self, facts: List[str], tips: List[str]) -> int:
         added_items: list[tuple[str, str]] = []
         added = 0
         for fact in facts:
+            if await self._llm_same_rule(fact, "fact"):
+                continue
             if await self._ttse_store.add_fact(fact):
                 added += 1
                 added_items.append((fact, "fact"))
         for tip in tips:
+            if await self._llm_same_rule(tip, "tip"):
+                continue
             if await self._ttse_store.add_tip(tip):
                 added += 1
                 added_items.append((tip, "tip"))

@@ -577,6 +577,29 @@ async def test_rail_success_path_induces_without_blame(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rail_dedup_judge_bumps_count_for_paraphrase(tmp_path):
+    def handler(p: str) -> str:
+        if "SAME reusable experience" in p:
+            return "MATCH: 0"
+        if "extracting" in p:
+            return "[FACT] CSV 评分器区分列名大小写"
+        return "NONE"
+
+    llm = ScriptedLLM(handler)
+    rail = _make_rail(tmp_path, llm)
+    await rail._ttse_store.add_fact("the csv grader is case-sensitive")
+    snap = {
+        "messages": [{"role": "user", "content": "grade csv"}, {"role": "assistant", "content": "done"}],
+        "ttse_capabilities": "- python_exec",
+        "ttse_task_query": "grade csv",
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    facts = rail._ttse_store.facts_records()
+    assert [record["text"] for record in facts] == ["the csv grader is case-sensitive"]
+    assert facts[0]["count"] == 2
+
+
+@pytest.mark.asyncio
 async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
@@ -619,7 +642,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     assert "the grader rejects lowercase column names" in synth
     assert "PresentBench expects slides.md on disk" not in synth
     assert "T1 keeper tip" not in synth
-    assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
+    assert len(llm.calls) == 7  # blame -> dedup tip -> synth -> classify tip -> induce -> dedup fact -> classify fact
 
 
 def test_consulted_rules_intersect_bank_and_drop_truncated():
@@ -873,7 +896,7 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
         "ttse_task_query": "q2",
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=ok_snap)  # buffer 2/2 -> flush
-    assert len(llm.calls) == 3  # blame + induce_batch + classify
+    assert len(llm.calls) == 4  # blame + induce_batch + dedup fact + classify
     assert "lesson" in rail._ttse_store.facts_texts()
 
 
