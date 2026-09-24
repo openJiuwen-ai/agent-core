@@ -122,3 +122,14 @@ jiuwenswarm 用群 manifest 中的 `proxy_teams` 绑定大群代理人与目标�
 ## 7. 验证范围
 
 验证重点是：归档去重与内容冲突、team/session 路径隔离、无 @ 只归档、定向通知、按成员时间生成摘录、离线写邮箱及历史清理。成员运行和通知处理复用现有邮箱测试；模拟运行时测试不替代真实模型与平台 UI 的端到端验收。
+
+
+## 2026-09-24：统一输入与群聊模块
+
+当前接口契约以 [S_28](../specs/S_28_group-conversation-and-delegation.md) 为准。
+公开输入使用 `type=group_chat` / `GroupChatMessage`，首条 run 输入和后续 interact
+共用 runtime 派发及 `group_chat/handler.py`。群聊文件实现与工具分别位于
+`group_chat/conversation.py` 和 `group_chat/tools.py`，现有邮箱消费者保持不变。
+两个独立 Runner 投递接口及其离线直写分支已移除，宿主通过现有运行入口启动或恢复团队。
+jiuwenswarm 保存会话的 `conversation_mode`，在两个 Team 输入入口透传结构化消息，
+没有 mentions 的首条请求以归档确认结束，无须等待 Leader 模型输出。

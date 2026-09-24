@@ -431,7 +431,7 @@ class TeamBackend:
         if self.group_chat_spec is None or not self.group_chat_spec.enable_group_chat:
             raise ValueError("Group chat is disabled")
         if self._group_conversation is None:
-            from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+            from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 
             workspace = self.group_chat_spec.workspace
             self._group_conversation = await asyncio.to_thread(
@@ -442,7 +442,10 @@ class TeamBackend:
 
     async def append_group_message(self, sender, content, *, client_message_id, mentions=(), attachments=()):
         conversation = await self.group_conversation()
-        return await conversation.post(
+        from openjiuwen.agent_teams.group_chat.handler import post_message
+
+        return await post_message(
+            conversation,
             self.message_manager, sender, content, client_message_id=client_message_id,
             mentions=mentions, attachments=attachments, tail_count=self.group_chat_spec.group_context_tail,
             language=self.group_chat_spec.language or "cn",

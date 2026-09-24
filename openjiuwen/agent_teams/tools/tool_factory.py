@@ -306,7 +306,7 @@ def create_team_tools(
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
     if getattr(getattr(agent_team, "group_chat_spec", None), "enable_group_chat", False) is True:
-        from openjiuwen.agent_teams.tools.tool_group_chat import create_group_chat_tools
+        from openjiuwen.agent_teams.group_chat.tools import create_group_chat_tools
 
         extra = create_group_chat_tools(agent_team, t)
         all_tools.update({tool.card.name: tool for tool in extra})

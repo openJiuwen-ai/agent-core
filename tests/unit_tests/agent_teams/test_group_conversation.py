@@ -17,7 +17,7 @@ from openjiuwen.agent_teams.context import reset_session_id, set_session_id
 from openjiuwen.agent_teams.paths import reset_task_openjiuwen_home, set_task_openjiuwen_home
 from openjiuwen.agent_teams.schema.conversation import ConversationMessage
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, TeamDatabase
-from openjiuwen.agent_teams.tools.group_conversation import GroupConversationLog
+from openjiuwen.agent_teams.group_chat.conversation import GroupConversationLog
 from openjiuwen.agent_teams.tools.team import TeamBackend
 
 

@@ -363,5 +363,5 @@ class TestDeleteTeamFilesystemCleanup:
 def mock_group_history_cleanup(monkeypatch):
     # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
     )

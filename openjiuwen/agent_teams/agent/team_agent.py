@@ -753,8 +753,12 @@ class TeamAgent(BaseAgent):
         # memory pipeline during start(). ``.get`` default does not cover a
         # present-but-None value, so normalize an empty/None query to "".
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        routed_payloads = self._initial_leader_route_payloads(inputs)
+        # Public discussion reaches the model only through mention notifications.
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+        is_group_input = routed_payloads and isinstance(routed_payloads[0], GroupChatMessage)
+        self._state.pending_user_query = "" if is_group_input else raw_query
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
             try:
@@ -815,8 +819,12 @@ class TeamAgent(BaseAgent):
         # ``.get`` default does not cover a present-but-None value, so
         # normalize an empty/None query to "".
         raw_query = (inputs.get("query") or "") if isinstance(inputs, dict) else str(inputs)
-        self._state.pending_user_query = raw_query
-        routed_payloads = self._initial_leader_route_payloads(raw_query)
+        routed_payloads = self._initial_leader_route_payloads(inputs)
+        # Public discussion reaches the model only through mention notifications.
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+
+        is_group_input = routed_payloads and isinstance(routed_payloads[0], GroupChatMessage)
+        self._state.pending_user_query = "" if is_group_input else raw_query
 
         with self._observability_execution_scope(session):
             await self._coordination.start(session)
@@ -945,13 +953,20 @@ class TeamAgent(BaseAgent):
         if harness is not None:
             await harness.send(initial_message)
 
-    def _initial_leader_route_payloads(self, raw_query: str) -> list["InteractPayload"] | None:
-        """Parse leader initial input when it uses explicit team routing."""
-        if not raw_query or self.role != TeamRole.LEADER or self.team_backend is None:
+    def _initial_leader_route_payloads(self, inputs) -> list["InteractPayload"] | None:
+        """Route initial structured group input and existing text directives."""
+        if self.role != TeamRole.LEADER or self.team_backend is None:
             return None
 
+        from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
         from openjiuwen.agent_teams.interaction.router import parse_interact_str
 
+        raw_query = inputs.get("query", inputs) if isinstance(inputs, dict) else inputs
+        group_input = GroupChatMessage.from_wire(raw_query)
+        if group_input is not None:
+            return [group_input]
+        if not isinstance(raw_query, str) or not raw_query:
+            return None
         parsed = parse_interact_str(raw_query)
         if parsed and any(not isinstance(payload, GodViewMessage) for payload in parsed):
             return parsed
@@ -963,6 +978,15 @@ class TeamAgent(BaseAgent):
 
         result = await TeamRuntimeManager.dispatch_payloads(self, payloads)
         if result.ok:
+            from openjiuwen.agent_teams.interaction.payload import GroupChatMessage
+            from openjiuwen.agent_teams.schema.stream import TeamOutputSchema
+
+            if isinstance(payloads[0], GroupChatMessage):
+                await self._stream_controller.stream_queue.put(TeamOutputSchema(
+                    type="message", index=0,
+                    payload={"event_type": "team.group_message.accepted", **(result.data or {})},
+                    source_member=self._member_name(), role=self.role,
+                ))
             return
 
         await self._emit_interact_failed(result.reason)

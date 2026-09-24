@@ -2363,5 +2363,5 @@ async def test_run_agent_team_base_true_resolves_team_id_via_resource_mgr(isolat
 def mock_group_history_cleanup(monkeypatch):
     # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
     monkeypatch.setattr(
-        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+        "openjiuwen.agent_teams.group_chat.conversation.GroupConversationLog.delete_registered", lambda *a: None,
     )
