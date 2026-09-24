@@ -77,10 +77,26 @@ from openjiuwen.agent_evolving.ttse.induction import (
     parse_verdict,
     synthesize,
 )
-from openjiuwen.harness.rails.evolution.ttse_rail import _TTSEPreparedEvolutionInput
+from openjiuwen.harness.rails.evolution.ttse_rail import _TTSEPreparedEvolutionInput, _consulted_rules
 
 _POLICY = GENERATE_RECORDS_LLM_POLICY
 _PROCESSOR = TrajectorySpanProcessor()
+
+
+def _consult_message(facts: list[str] | None = None, tips: list[str] | None = None, *, category: str = "office") -> dict:
+    """Tool result in the shape ``ttse_consult`` actually returns."""
+    blocks: list[str] = []
+    if facts:
+        lines = ["# FACT", ""]
+        lines.extend(f"{i}. {text}" for i, text in enumerate(facts, 1))
+        blocks.append("\n".join(lines))
+    if tips:
+        lines = ["# TIP", ""]
+        lines.extend(f"{i}. {text}" for i, text in enumerate(tips, 1))
+        blocks.append("\n".join(lines))
+    body = "\n\n".join(blocks)
+    content = f"## `{category}`\n\n{body}\n" if category else body + "\n"
+    return {"role": "tool", "name": "ttse_consult", "tool_call_id": "tc-consult", "content": content}
 
 
 def _empty_trajectory(*, execution_id: str = "e1", session_id: str = "s1") -> Trajectory:
@@ -565,7 +581,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: 1\nREASON: rule 1 misled the agent"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
             return "[FACT] rustc fails when source files are encoded as GBK"
@@ -573,22 +589,87 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
 
     llm = ScriptedLLM(handler)
     rail = _make_rail(tmp_path, llm)
+    await rail._ttse_store.add_fact("old conflicting fact")
+    await rail._ttse_store.retire("old conflicting fact", "fact", "earlier", "")
     await rail._ttse_store.add_fact("the grader rejects lowercase column names")
     await rail._ttse_store.add_fact("PresentBench expects slides.md on disk")
-    await rail._ttse_store.add_tip("T1 keeper tip")  # so >= 2 rules remain after retire
+    await rail._ttse_store.add_tip("T1 keeper tip")
+    blamed = "the grader rejects lowercase column names"
     snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message([blamed, "PresentBench expects slides.md on disk"], ["T1 keeper tip"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,  # force FAIL
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
 
-    assert [r["text"] for r in rail._ttse_store.retired] == ["the grader rejects lowercase column names"]
+    assert [r["text"] for r in rail._ttse_store.retired] == [
+        "old conflicting fact",
+        "the grader rejects lowercase column names",
+    ]
     assert "the grader rejects lowercase column names" not in rail._ttse_store.facts_texts()
+    assert "PresentBench expects slides.md on disk" in rail._ttse_store.facts_texts()
     assert "rustc fails when source files are encoded as GBK" in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
+    synth = next(call for call in llm.calls if "RETIRED rules" in call)
+    assert "old conflicting fact" in synth
+    assert "the grader rejects lowercase column names" in synth
+    assert "PresentBench expects slides.md on disk" not in synth
+    assert "T1 keeper tip" not in synth
     assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
+
+
+def test_consulted_rules_intersect_bank_and_drop_truncated():
+    flat = [
+        ("the grader rejects lowercase column names", "fact"),
+        ("unrelated cpp toolchain fact", "fact"),
+        ("When logs are large: use grep", "tip"),
+    ]
+    messages = [
+        {"role": "user", "content": "q"},
+        _consult_message(
+            ["The Grader   Rejects Lowercase Column Names", "unrelated cpp toolchain fac"],
+            ["When logs are large: use grep"],
+        ),
+        {
+            "role": "tool",
+            "name": "ttse_consult",
+            "content": "# FACT\n\n1. unrelated cpp toolchain fac\n… [truncated]\n",
+        },
+        {"role": "tool", "name": "bash", "content": "# FACT\n\n1. unrelated cpp toolchain fact\n"},
+    ]
+    assert _consulted_rules(messages, flat) == [
+        ("the grader rejects lowercase column names", "fact"),
+        ("When logs are large: use grep", "tip"),
+    ]
+    assert _consulted_rules([{"role": "user", "content": "q"}], flat) == []
+
+
+@pytest.mark.asyncio
+async def test_rail_fail_without_consult_does_not_blame(tmp_path):
+    def handler(p: str) -> str:
+        if "diagnosing" in p:
+            return "VERDICT: 1\nREASON: should not run"
+        if "extracting" in p:
+            return "[FACT] lesson"
+        return "NONE"
+
+    rail = _make_rail(tmp_path, ScriptedLLM(handler))
+    await rail._ttse_store.add_fact("unrelated fact")
+    await rail._ttse_store.add_fact("another fact")
+    snap = {
+        "messages": [{"role": "user", "content": "q"}],
+        "ttse_capabilities": "- grep",
+        "ttse_task_query": "q",
+        "ttse_score": 0.0,
+    }
+    await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
+    assert rail._ttse_store.retired == []
+    assert "unrelated fact" in rail._ttse_store.facts_texts()
+    assert not any("diagnosing" in call for call in rail._ttse_llm.calls)
 
 
 @pytest.mark.asyncio
@@ -596,7 +677,7 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: NONE\nREASON: no rule is at fault"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "NONE"
         if "extracting" in p:
             return "[FACT] lesson"
@@ -606,7 +687,10 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     await rail._ttse_store.add_fact("F1")
     await rail._ttse_store.add_fact("F2")
     snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message(["F1", "F2"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,
@@ -771,7 +855,10 @@ async def test_rail_batch_blame_runs_per_failed_task_before_flush(tmp_path):
     await rail._ttse_store.add_fact("F1 bad fact")
     await rail._ttse_store.add_fact("F2 keeper")
     fail_snap = {
-        "messages": [{"role": "user", "content": "q"}],
+        "messages": [
+            {"role": "user", "content": "q"},
+            _consult_message(["F1 bad fact"]),
+        ],
         "ttse_capabilities": "- grep",
         "ttse_task_query": "q",
         "ttse_score": 0.0,  # FAIL

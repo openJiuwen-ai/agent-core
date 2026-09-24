@@ -183,14 +183,15 @@ REASON: <one sentence tying the rule to a concrete wrong step, or why none apply
 
 
 SYNTH_SYSTEM = (
-    "You review a rule bank for CONTRADICTIONS (two rules that conflict) or near-DUPLICATES. "
+    "You review RETIRED rules removed from the active bank for CONTRADICTIONS "
+    "(two rules that conflict) or near-DUPLICATES. "
     "If you find a contradiction, propose AT MOST ONE synthesized TIP that resolves it. "
     "If there are no contradictions, output NONE."
 )
 
 
 def synthesize_prompt(rules_numbered: str, capabilities: str) -> str:
-    return f"""Current rules in the bank (numbered, facts then tips):
+    return f"""Retired rules removed from the active bank (numbered, facts then tips):
 {rules_numbered}
 
 Available Capabilities (a synthesized TIP may only reference these):
