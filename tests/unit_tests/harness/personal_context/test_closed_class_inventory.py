@@ -17,6 +17,8 @@ LEGACY_PACKAGE = ROOT / "openjiuwen" / "proactive_harness"
 EXPECTED_CLASSES = {
     "PersonalContextFetchServiceConfig",
     "PersonalContextConfig",
+    "ImLearningTargetConfig",
+    "ImLearningConfig",
     "ContextPipelineService",
     "ContextFetchService",
     "BrowserBookmarksFetchService",
@@ -32,6 +34,51 @@ EXPECTED_CLASSES = {
     "FetchBatch",
     "PersonalContext",
     "PersonalContextRail",
+    # im/ learning subpackage (OJ-01..OJ-05)
+    "ImLearningTarget",
+    "ImLearningCursor",
+    "ImLearningMessage",
+    "ImMessageBatch",
+    "ImLearningSource",
+    "ImCorpusSink",
+    "ImLearningFetchProvider",
+    "TargetFetchOutcome",
+    "BackfillState",
+    "StageRunSnapshot",
+    "ChangelogEntry",
+    "ChangelogRepository",
+    "ConsumerCursorRepository",
+    "FtsIndexRepository",
+    "FtsConsumer",
+    "FetchPageRangeResult",
+    "PersistResult",
+    "NormalizedConversation",
+    "NormalizedMessage",
+    "NormalizedBatch",
+    "ImLearningScheduler",
+    "ImLearningSchedulerStatus",
+    # im/ search subpackage (OJ-06)
+    "ImSearchQuery",
+    "ImSearchHit",
+    "ImSearchPort",
+    "SqliteImSearchStore",
+    "ImSearchTool",
+    # distill/ subpackage (OJ-07/08, landed separately)
+    "AnalyzerPort",
+    "CorpusMessage",
+    "CorpusPort",
+    "DistillCandidates",
+    "DistillRunResult",
+    "FixtureCorpus",
+    "LlmAnalyzer",
+    "LlmPort",
+    "OpenJiuwenLlm",
+    # distill/ periodic schedule (f2c85aad4)
+    "DistillScheduleSettings",
+    "DistillScheduleConfig",
+    "DistillDueDecision",
+    "DistillTickResult",
+    "DistillRunnerPort",
 }
 
 
@@ -58,7 +105,10 @@ def test_source_metadata_module_adds_no_production_class() -> None:
 def test_embedded_core_public_surface_and_personal_context_signatures_match_contract() -> None:
     assert personal_context.__all__ == ["PersonalContext"]
     assert not inspect.iscoroutinefunction(PersonalContext.__init__)
-    assert str(inspect.signature(PersonalContext)) == "(*, home: 'str | Path') -> 'None'"
+    assert (
+        str(inspect.signature(PersonalContext))
+        == "(*, home: 'str | Path', im_learning_source: 'ImLearningSource | None' = None) -> 'None'"
+    )
     public_methods = {
         name: method
         for name, method in inspect.getmembers(PersonalContext, inspect.isfunction)
@@ -70,6 +120,8 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "remove_fetch_run_history",
         "shutdown",
         "restore_fetch_run_history",
+        "set_distill_corpus",
+        "set_distill_runner",
     }
     assert all(
         inspect.iscoroutinefunction(method) == (name not in synchronous_host_methods)
@@ -85,6 +137,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "get_fetch_run_status": (
             "(self, service_id: 'str | None' = None, *, run_id: 'str | None' = None) -> 'dict[str, object]'"
         ),
+        "get_im_learning_status": "(self) -> 'dict[str, object]'",
         "remove_fetch_run_history": "(self, service_id: 'str') -> 'list[dict[str, object]]'",
         "shutdown": "(self) -> 'None'",
         "restore_fetch_run_history": "(self, service_id: 'str', records: 'list[dict[str, object]]') -> 'None'",
@@ -93,8 +146,11 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         "remove_fetch_cursor": "(self, service_id: 'str') -> 'bytes | None'",
         "restore_fetch_cursor": "(self, service_id: 'str', payload: 'bytes | None') -> 'None'",
         "run_fetch": "(self, *, service_id: 'str | None' = None) -> 'dict[str, object]'",
+        "run_im_learning_now": "(self) -> 'bool'",
         "search_graph": "(self, query: 'str') -> 'dict[str, object]'",
         "set_configuration": "(self, config: 'PersonalContextConfig') -> 'None'",
+        "set_distill_corpus": "(self, corpus: 'CorpusPort | None') -> 'None'",
+        "set_distill_runner": "(self, runner: 'DistillRunnerPort | None') -> 'None'",
         "set_fetch_service_enabled": "(self, service_id: 'str', enabled: 'bool') -> 'None'",
         "snapshot": "(self) -> 'PersonalContextStatus'",
         "start_agent_use": "(self) -> 'None'",
@@ -112,11 +168,18 @@ def test_legacy_proactive_harness_package_is_removed() -> None:
 
 
 def test_embedded_core_has_no_legacy_transport_or_storage_imports() -> None:
-    source = "\n".join(
-        file.read_text(encoding="utf-8")
-        for root in (PERSONAL_CONTEXT, RAIL)
-        for file in ([root] if root.is_file() else root.rglob("*.py"))
-    )
+    # The im/ learning subpackage owns a dedicated SQLite database by design
+    # (decision D5); everything else stays storage-free.
+    files: list[Path] = []
+    for root in (PERSONAL_CONTEXT, RAIL):
+        if root.is_file():
+            files.append(root)
+            continue
+        for file in sorted(root.rglob("*.py")):
+            if root.name == "personal_context" and file.parent.name == "im":
+                continue  # im/ subpackage: dedicated im_context.db allowed (D5)
+            files.append(file)
+    source = "\n".join(file.read_text(encoding="utf-8") for file in files)
     for forbidden in (
         "openjiuwen.proactive_harness",
         "FastAPI",
@@ -125,4 +188,4 @@ def test_embedded_core_has_no_legacy_transport_or_storage_imports() -> None:
         "apscheduler",
         "subprocess_runner",
     ):
-        assert forbidden not in source
+        assert forbidden not in source, f"{forbidden} must not appear outside the im/ subpackage"

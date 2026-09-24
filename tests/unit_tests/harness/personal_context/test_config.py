@@ -87,6 +87,36 @@ def test_directory_capacity_defaults_are_shared_and_serialized():
     assert dumped["max_subdirectories_per_directory"] == 20
 
 
+def test_distill_schedule_defaults_and_override():
+    config = PersonalContextConfig.from_dict(_valid_config(_local_service()))
+    assert config.distill.enabled is False
+    assert config.distill.interval_seconds == 86_400.0
+    assert config.distill.message_threshold == 50
+    assert config.distill.lease_seconds == 3_600.0
+    assert config.distill.poll_seconds == 60.0
+    assert config.distill.learning_since_ms is None
+    assert config.distill.max_messages == 800
+
+    raw = _valid_config(_local_service())
+    raw["distill"] = {
+        "enabled": True,
+        "interval_seconds": 604_800,
+        "message_threshold": 20,
+        "lease_seconds": 7200,
+        "poll_seconds": 30,
+        "learning_since_ms": 1_700_000_000_000,
+        "max_messages": 400,
+    }
+    configured = PersonalContextConfig.from_dict(raw)
+    assert configured.distill.enabled is True
+    assert configured.distill.interval_seconds == 604_800
+    assert configured.distill.message_threshold == 20
+    assert configured.distill.lease_seconds == 7200
+    assert configured.distill.poll_seconds == 30
+    assert configured.distill.learning_since_ms == 1_700_000_000_000
+    assert configured.distill.max_messages == 400
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
