@@ -1456,10 +1456,18 @@ class OrgTaskManager:
             if _is_normal_root_task_row(row):
                 if row.status != OrgTaskStatus.IN_PROGRESS.value:
                     return OrgTaskOpResult(ok=False, reason="root task must be started before completion")
-            row.status = OrgTaskStatus.COMPLETED.value
             if context_model is not None:
                 row.output_context_json = _json_dumps(context_model.model_dump())
             row.output_abstract = output_abstract if output_abstract is not None else row.output_abstract
+            if row.parent_task_id and not _has_aggregation_source_output(row):
+                return OrgTaskOpResult(
+                    ok=False,
+                    reason=(
+                        "a child task needs output_context.description, result_uri, "
+                        "or output_abstract before completion"
+                    ),
+                )
+            row.status = OrgTaskStatus.COMPLETED.value
             row.updated_at = now
             if row.task_type == "organization.summary":
                 execution = (

@@ -2358,10 +2358,16 @@ async def test_child_task_completion_creates_pending_review(org_manager):
 
 @pytest.mark.asyncio
 async def test_child_review_requires_a_usable_aggregation_output(org_manager):
-    """Prevent an empty child result from becoming an accepted aggregation source."""
+    """Keep an empty child non-terminal so it can be completed with usable output."""
     manager, _ = org_manager
     await _seed_org1_parent_child(manager, parent_id="parent-output", child_id="child-output")
-    assert (await manager.complete_task(task_id="child-output", team_id="team-b")).ok
+    empty = await manager.complete_task(task_id="child-output", team_id="team-b")
+    assert not empty.ok
+    assert "needs output_context.description, result_uri, or output_abstract" in empty.reason
+    assert (await manager.get_task("child-output")).status == OrgTaskStatus.CLAIMED
+    assert (
+        await manager.complete_task(task_id="child-output", team_id="team-b", output_abstract="Usable result")
+    ).ok
 
     accepted = await manager.review_task(
         task_id="child-output",
@@ -2369,8 +2375,7 @@ async def test_child_review_requires_a_usable_aggregation_output(org_manager):
         review_status=OrgTaskReviewStatus.ACCEPTED,
     )
 
-    assert not accepted.ok
-    assert "needs output_context.description, result_uri, or output_abstract" in accepted.reason
+    assert accepted.ok
 
 
 @pytest.mark.asyncio
@@ -2790,7 +2795,7 @@ async def test_superseded_child_unblocks_parent_after_accepted_repair(org_manage
     await _seed_org1_parent_child(manager, parent_id=parent_id, child_id=child_id)
 
     if terminal == "rejected":
-        assert (await manager.complete_task(task_id=child_id, team_id="team-b")).ok
+        assert (await manager.complete_task(task_id=child_id, team_id="team-b", output_abstract="Initial result")).ok
         assert (
             await manager.review_task(
                 task_id=child_id,
@@ -2875,7 +2880,7 @@ async def test_repair_without_repairs_task_id_does_not_unblock_rejected_child(or
     manager, _ = org_manager
     _, leader_creator = _org1_creators()
     await _seed_org1_parent_child(manager, parent_id="parent-no-link", child_id="child-no-link")
-    assert (await manager.complete_task(task_id="child-no-link", team_id="team-b")).ok
+    assert (await manager.complete_task(task_id="child-no-link", team_id="team-b", output_abstract="Initial result")).ok
     assert (
         await manager.review_task(
             task_id="child-no-link",
@@ -2920,7 +2925,7 @@ async def test_abandoned_repair_allows_next_repair_of_original(org_manager):
     manager, _ = org_manager
     _, leader_creator = _org1_creators()
     await _seed_org1_parent_child(manager, parent_id="parent-one-level", child_id="child-a")
-    assert (await manager.complete_task(task_id="child-a", team_id="team-b")).ok
+    assert (await manager.complete_task(task_id="child-a", team_id="team-b", output_abstract="Original result")).ok
     assert (
         await manager.review_task(
             task_id="child-a",
@@ -2940,7 +2945,7 @@ async def test_abandoned_repair_allows_next_repair_of_original(org_manager):
     )
     assert first_repair.ok
     await manager.claim_task(task_id="child-b", team_id="team-b")
-    assert (await manager.complete_task(task_id="child-b", team_id="team-b")).ok
+    assert (await manager.complete_task(task_id="child-b", team_id="team-b", output_abstract="First repair result")).ok
     assert (
         await manager.review_task(
             task_id="child-b",
@@ -3781,7 +3786,7 @@ async def test_rebind_resumes_durable_parent_followups(active_organization_runti
     await _create_claimed_child(manager, creator=leader, parent_id="parent-open", child_id="child-pending")
     await _create_claimed_child(manager, creator=leader, parent_id="parent-open", child_id="child-fail")
     await _create_claimed_child(manager, creator=leader, parent_id="parent-open", child_id="child-rej")
-    assert (await manager.complete_task(task_id="child-pending", team_id="team-b")).ok
+    assert (await manager.complete_task(task_id="child-pending", team_id="team-b", output_abstract="Result")).ok
     assert (
         await manager.fail_task(
             task_id="child-fail",
@@ -3790,7 +3795,7 @@ async def test_rebind_resumes_durable_parent_followups(active_organization_runti
             failure_reason="boom",
         )
     ).ok
-    assert (await manager.complete_task(task_id="child-rej", team_id="team-b")).ok
+    assert (await manager.complete_task(task_id="child-rej", team_id="team-b", output_abstract="Needs revision")).ok
     assert (
         await manager.review_task(
             task_id="child-rej",
@@ -3879,7 +3884,7 @@ async def test_terminal_child_wakes_parent_for_repair(active_organization_runtim
     await _create_claimed_child(manager, creator=leader, parent_id="parent", child_id="child")
 
     if mode == "rejected":
-        assert (await manager.complete_task(task_id="child", team_id="team-b")).ok
+        assert (await manager.complete_task(task_id="child", team_id="team-b", output_abstract="Needs revision")).ok
         event = OrgTaskReviewedEvent(
             organization_id=org_id,
             team_id="team-a",
