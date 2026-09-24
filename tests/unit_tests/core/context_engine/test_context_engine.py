@@ -146,6 +146,84 @@ class TestContextEngine:
         assert ctx1 is ctx2
 
     @pytest.mark.asyncio
+    async def test_create_context_hit_upgrades_empty_processors(self, engine, session):
+        ctx1 = await engine.create_context(context_id="ctx", session=session)
+        await ctx1.add_messages([UserMessage(content="keep me")])
+        assert getattr(ctx1, "_processors") == []
+
+        ctx2 = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+
+        assert ctx2 is ctx1
+        assert len(ctx2._processors) == 1
+        assert ctx2._processors[0].processor_type() == "BlockingCompressor"
+        assert ctx2.get_messages()[0].content == "keep me"
+
+    @pytest.mark.asyncio
+    async def test_create_context_hit_none_does_not_replace_processors(self, engine, session):
+        ctx1 = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+        original = ctx1._processors[0]
+
+        ctx2 = await engine.create_context(context_id="ctx", session=session)
+
+        assert ctx2 is ctx1
+        assert ctx2._processors[0] is original
+
+    @pytest.mark.asyncio
+    async def test_create_context_hit_same_specs_does_not_rebuild(self, engine, session):
+        specs = [("BlockingCompressor", BlockingCompressorConfig())]
+        ctx1 = await engine.create_context(context_id="ctx", session=session, processors=specs)
+        original = ctx1._processors[0]
+
+        ctx2 = await engine.create_context(context_id="ctx", session=session, processors=specs)
+
+        assert ctx2 is ctx1
+        assert ctx2._processors[0] is original
+
+    @pytest.mark.asyncio
+    async def test_create_context_hit_empty_list_does_not_clear_processors(self, engine, session):
+        ctx1 = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+        original = ctx1._processors[0]
+
+        ctx2 = await engine.create_context(context_id="ctx", session=session, processors=[])
+
+        assert ctx2 is ctx1
+        assert ctx2._processors[0] is original
+
+    @pytest.mark.asyncio
+    async def test_create_context_hit_replaces_when_type_sequence_changes(self, engine, session):
+        ctx1 = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[("BlockingCompressor", BlockingCompressorConfig())],
+        )
+        original = ctx1._processors[0]
+
+        ctx2 = await engine.create_context(
+            context_id="ctx",
+            session=session,
+            processors=[(
+                "ActiveCompactingCompressor",
+                ActiveCompactingCompressorConfig(replacement="[COMPRESSED]"),
+            )],
+        )
+
+        assert ctx2 is ctx1
+        assert ctx2._processors[0] is not original
+        assert ctx2._processors[0].processor_type() == "ActiveCompactingCompressor"
+
+    @pytest.mark.asyncio
     async def test_create_context_isolated_per_session(self, engine, session, another_session):
         ctx1 = await engine.create_context(context_id="ctx", session=session)
         ctx2 = await engine.create_context(context_id="ctx", session=another_session)
