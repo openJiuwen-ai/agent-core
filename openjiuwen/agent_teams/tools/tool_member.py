@@ -753,6 +753,25 @@ class SpawnExternalCliTool(_SpawnToolBase):
             if provider_filter is None or provider_filter(entry.api_provider)
         ]
 
+    def _compatible_model_names(self, cli_agent: str) -> list[str]:
+        """Return safe model names visible to one CLI kind.
+
+        IntelliRouter/model-group pools contain one logical ``*`` entry while
+        their real deployment names live in the allocator catalog.  Project
+        that catalog here so fallback validation does not accidentally treat
+        a model group as an empty pool.
+        """
+        provider_filter = _provider_filter_for_cli(cli_agent)
+        if self.team.is_model_group_pool():
+            return sorted(
+                {
+                    item.model
+                    for item in self.team.list_cli_models(provider_filter=provider_filter)
+                    if item.model
+                }
+            )
+        return sorted({entry.model_name for entry in self._compatible_pool_entries(cli_agent)})
+
     def _preferred_current_model(self, cli_agent: str, entries: list["ModelPoolEntry"]) -> str | None:
         """Return the current model when the pool can allocate it compatibly."""
         current_name = self.team.current_model_name
@@ -777,10 +796,18 @@ class SpawnExternalCliTool(_SpawnToolBase):
             }
         compatible_by_cli: dict[str, list[dict[str, str]]] = {}
         for cli_agent in sorted(self.team.external_cli_kinds()):
-            options = {
-                (entry.model_name, _model_api_protocol(entry.api_provider))
-                for entry in self._compatible_pool_entries(cli_agent)
-            }
+            provider_filter = _provider_filter_for_cli(cli_agent)
+            if self.team.is_model_group_pool():
+                options = {
+                    (item.model, _model_api_protocol(item.provider))
+                    for item in self.team.list_cli_models(provider_filter=provider_filter)
+                    if item.model
+                }
+            else:
+                options = {
+                    (entry.model_name, _model_api_protocol(entry.api_provider))
+                    for entry in self._compatible_pool_entries(cli_agent)
+                }
             compatible_by_cli[cli_agent] = [
                 {"model_name": model_name, "protocol": protocol}
                 for model_name, protocol in sorted(options)
@@ -833,18 +860,22 @@ class SpawnExternalCliTool(_SpawnToolBase):
         fallback_allocation = None
         provider_filter = _provider_filter_for_cli(cli_agent)
         compatible_entries = self._compatible_pool_entries(cli_agent)
-        compatible_model_names = sorted(
-            {
-                entry.model_name
-                for entry in compatible_entries
-            }
-        )
+        compatible_model_names = self._compatible_model_names(cli_agent)
         preferred_current_model = self._preferred_current_model(cli_agent, compatible_entries)
         builtin_model, builtin_error = self._resolve_builtin_model(inputs, cli_agent=cli_agent, model_name=model_name)
         if builtin_error:
             return self._fail(builtin_error)
+        if model_name == "*" or fallback_model_name == "*":
+            return self._fail("model_name '*' is a Team logical entry and cannot be passed to an external CLI")
         if model_name:
-            if self._allocate_model_config is None:
+            if self.team.is_model_group_pool():
+                candidates = self.team.resolve_cli_models(model_name, provider_filter=provider_filter)
+                logical = self._allocate_model_config(None) if self._allocate_model_config else None
+                if candidates and logical is not None:
+                    from openjiuwen.agent_teams.models.allocator import Allocation
+
+                    allocation = Allocation(logical.entry, logical.group_index, persistence_model_name=model_name)
+            elif self._allocate_model_config is None:
                 return self._fail(
                     self._model_name_failure(
                         cli_agent=cli_agent,
@@ -853,9 +884,9 @@ class SpawnExternalCliTool(_SpawnToolBase):
                         cause="cannot be resolved without a team model pool",
                     )
                 )
-            if provider_filter is not None:
+            elif provider_filter is not None:
                 allocation = self._allocate_model_config(model_name, provider_filter=provider_filter)
-            else:
+            elif allocation is None:
                 allocation = self._allocate_model_config(model_name)
             if allocation is None:
                 return self._fail(
@@ -880,7 +911,18 @@ class SpawnExternalCliTool(_SpawnToolBase):
         elif self._allocate_model_config is None:
             return self._fail("spawn_external_cli requires a team model pool when 'fallback_model_name' is specified")
         else:
-            if provider_filter is not None:
+            if self.team.is_model_group_pool():
+                candidates = self.team.resolve_cli_models(fallback_model_name, provider_filter=provider_filter)
+                logical = self._allocate_model_config(None)
+                if candidates and logical is not None:
+                    from openjiuwen.agent_teams.models.allocator import Allocation
+
+                    fallback_allocation = Allocation(
+                        logical.entry,
+                        logical.group_index,
+                        persistence_model_name=fallback_model_name,
+                    )
+            elif provider_filter is not None:
                 fallback_allocation = self._allocate_model_config(
                     fallback_model_name,
                     provider_filter=provider_filter,

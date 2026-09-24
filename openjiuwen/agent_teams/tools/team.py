@@ -23,9 +23,9 @@ from typing import (
 if TYPE_CHECKING:
     from openjiuwen.agent_teams.models.allocator import Allocation
     from openjiuwen.agent_teams.schema.team import ModelPoolEntry
-    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
     from openjiuwen.agent_teams.team_workspace.manager import TeamWorkspaceManager
     from openjiuwen.agent_teams.team_workspace.workspace_cache import WorkspaceCache
+    from openjiuwen.agent_teams.tools.member_options import MemberBuiltinModel
 
 from openjiuwen.agent_teams.context import get_session_id
 from openjiuwen.agent_teams.i18n import t
@@ -134,6 +134,7 @@ class TeamBackend:
         plan_id: str | None = None,
         leader_member_name: str | None = None,
         leader_prompt: str = "",
+        model_allocator: Any | None = None,
     ):
         """Initialize agent team manager.
 
@@ -246,6 +247,7 @@ class TeamBackend:
         self.messager = messager
         self.teammate_mode = teammate_mode
         self.predefined_members = predefined_members or []
+        self._model_allocator = model_allocator
         self._allocate_model_config = model_config_allocator
         self._model_pool_provider = model_pool_provider
         self.current_model_name = str(current_model_name or "").strip() or None
@@ -392,6 +394,43 @@ class TeamBackend:
         if self._model_pool_provider is None:
             return []
         return list(self._model_pool_provider())
+
+    def allocate_model(self, model_name=None, **kwargs):
+        """Allocate through the current allocator (kept stable across updates)."""
+        if self._model_allocator is not None:
+            return self._model_allocator.allocate(model_name, **kwargs)
+        if self._allocate_model_config is None:
+            return None
+        return self._allocate_model_config(model_name, **kwargs)
+
+    def is_model_group_pool(self) -> bool:
+        pool = self.get_model_pool()
+        return bool(
+            pool
+            and len(pool) == 1
+            and pool[0].model_name == "*"
+            and pool[0].api_provider == "intelli_router"
+            and isinstance((pool[0].metadata.get("client") or {}).get("intelli_router"), dict)
+        )
+
+    def update_model_allocator(self, allocator: Any | None) -> None:
+        """Replace the allocator without rebuilding team tools."""
+        self._model_allocator = allocator
+        self._allocate_model_config = allocator.allocate if allocator is not None else None
+
+    def list_cli_models(self, provider_filter=None) -> list[Any]:
+        from openjiuwen.agent_teams.models.allocator import CliModelCatalog
+
+        if isinstance(self._model_allocator, CliModelCatalog):
+            return list(self._model_allocator.list_cli_models(provider_filter=provider_filter))
+        return []
+
+    def resolve_cli_models(self, model_name: str, provider_filter=None) -> list[Any]:
+        from openjiuwen.agent_teams.models.allocator import CliModelCatalog
+
+        if isinstance(self._model_allocator, CliModelCatalog):
+            return list(self._model_allocator.resolve_cli_models(model_name, provider_filter=provider_filter))
+        return []
 
     def register_cleanup_path(self, path: Optional[str]) -> None:
         """Register a filesystem path to remove on ``clean_team``.
@@ -2092,7 +2131,7 @@ class TeamBackend:
                 name=member_spec.display_name,
                 description=member_spec.desc,
             )
-            allocation = self._allocate_model_config(member_spec.model_name) if self._allocate_model_config else None
+            allocation = self.allocate_model(member_spec.model_name)
             cli_agent = (
                 member_spec.external_cli.cli_agent
                 if isinstance(member_spec, ExternalCliMemberSpec)
@@ -2665,7 +2704,7 @@ class TeamBackend:
             name=display_name,
             description=desc,
         )
-        allocation = self._allocate_model_config(model_name) if self._allocate_model_config else None
+        allocation = self.allocate_model(model_name)
         result = await self.spawn_member(
             member_name=member_name,
             display_name=display_name,

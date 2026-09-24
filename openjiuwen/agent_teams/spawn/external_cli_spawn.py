@@ -43,7 +43,7 @@ if TYPE_CHECKING:
 _JIUWEN_EXTERNAL_PROVIDER = "jiuwen"
 
 
-def _external_cli_provider_name(client_config: Any) -> str:
+def _external_cli_provider_name(client_config: Any, *, cli_agent: str | None = None) -> str:
     """Resolve the CLI-side provider identity for a model client config.
 
     Codex-style CLI runtimes gate server-side behaviors (remote compaction,
@@ -53,26 +53,29 @@ def _external_cli_provider_name(client_config: Any) -> str:
     passing it through verbatim makes every external gateway look official and
     breaks the gated protocols against endpoints that do not implement them.
 
-    Every explicitly configured external endpoint is exposed to the CLI under
-    the stable ``jiuwen`` provider identity. The raw ``client_provider``
-    survives only when no api_base is configured, which is the official-endpoint
-    case where the name remains accurate.
+    Codex's OpenAI-compatible non-official endpoints use ``jiuwen``; other
+    CLI backends retain their configured provider identity.
     """
     api_base = str(getattr(client_config, "api_base", "") or "").strip()
-    if api_base:
+    provider = str(getattr(client_config, "client_provider", "") or "").strip()
+    if cli_agent == "codex" and provider.lower() == "openai" and api_base:
         return _JIUWEN_EXTERNAL_PROVIDER
-    return str(getattr(client_config, "client_provider", "") or "").strip()
+    return provider
 
 
 def _team_model_config_to_external(
     member_model: Any,
+    *,
+    cli_agent: str | None = None,
 ) -> Optional[ExternalCliModelConfig]:
     """Convert a pool-allocated TeamModelConfig to ExternalCliModelConfig."""
     client_config = getattr(member_model, "model_client_config", None)
     request_config = getattr(member_model, "model_request_config", None)
     if client_config is None:
         return None
-    provider = _external_cli_provider_name(client_config)
+    if str(getattr(client_config, "client_provider", "")) == "intelli_router":
+        return None
+    provider = _external_cli_provider_name(client_config, cli_agent=cli_agent)
     model = ""
     if request_config is not None:
         model = str(getattr(request_config, "model_name", "") or getattr(request_config, "model", "") or "")
@@ -422,7 +425,7 @@ async def external_cli_spawn(
         )
         external_model_config = ctx.builtin_model
     elif ctx.member_model is not None:
-        pool_model_config = _team_model_config_to_external(ctx.member_model)
+        pool_model_config = _team_model_config_to_external(ctx.member_model, cli_agent=ctx.cli_agent)
         if pool_model_config is not None:
             team_logger.info(
                 "[external-cli] member {} using pool-allocated model: provider={} model={} api_base={}",
@@ -443,7 +446,10 @@ async def external_cli_spawn(
             ctx.member_name,
         )
     if ctx.fallback_member_model is not None:
-        fallback_external_model_config = _team_model_config_to_external(ctx.fallback_member_model)
+        fallback_external_model_config = _team_model_config_to_external(
+            ctx.fallback_member_model,
+            cli_agent=ctx.cli_agent,
+        )
 
     async def promote_fallback_model() -> bool:
         """Persist the fallback model as this member's active model."""
