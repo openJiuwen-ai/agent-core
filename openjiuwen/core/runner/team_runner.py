@@ -240,6 +240,7 @@ class _TeamRunnerMixin:
         spec = await self._resolve_team_agent_spec(agent_team, session=session)
         team_name_for_finally = spec.team_name
         token = self._enter_root_task_group_context()
+        owns_runtime = False
         try:
             activation = await self._get_team_runtime_manager().activate(spec, session, inputs)
             try:
@@ -253,6 +254,7 @@ class _TeamRunnerMixin:
                         action.reason or "",
                     )
                     return
+                owns_runtime = True
                 blueprint = getattr(activation.agent, "blueprint", None)
                 leader_member_name = getattr(blueprint, "member_name", None)
                 leader_role = getattr(blueprint, "role", None)
@@ -278,19 +280,26 @@ class _TeamRunnerMixin:
             finally:
                 if stream_logger is not None:
                     stream_logger.flush()
-                self._maybe_finalize_trace(team_name_for_finally)
-                try:
-                    await self._get_team_runtime_manager().finalize(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await self._close_team_interact_gate(
-                        team_name=spec.team_name,
-                        session_id=activation.session.get_session_id(),
-                    )
-                    await activation.session.post_run()
-                except Exception:
-                    logger.exception("cleanup after stream failed for team=%s", team_name_for_finally)
+                # Rejected activate does not own the pooled team. Finalizing
+                # here pauses the runtime another reset/stop is already
+                # tearing down, and the caller then sees an empty stream.
+                if owns_runtime:
+                    self._maybe_finalize_trace(team_name_for_finally)
+                    try:
+                        await self._get_team_runtime_manager().finalize(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                        await self._close_team_interact_gate(
+                            team_name=spec.team_name,
+                            session_id=activation.session.get_session_id(),
+                        )
+                        await activation.session.post_run()
+                    except Exception:
+                        logger.exception(
+                            "cleanup after stream failed for team=%s",
+                            team_name_for_finally,
+                        )
         finally:
             self._exit_root_task_group_context(token)
 
