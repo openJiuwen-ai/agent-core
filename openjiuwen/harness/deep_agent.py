@@ -31,6 +31,9 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.common.security.user_config import UserConfig
+from openjiuwen.harness.multi_rollout.executor import (
+    MultiRolloutExecutor,
+)
 from openjiuwen.core.context_engine import ContextEngine
 from openjiuwen.core.context_engine.context.context_utils import ContextUtils
 from openjiuwen.core.controller.config import ControllerConfig
@@ -3112,7 +3115,12 @@ class DeepAgent(BaseAgent):
                 AgentCallbackEvent.AFTER_INVOKE,
             ):
                 await self._sync_expert_role_attachment(invoke_inputs, session)
-                if (
+                if self._use_multi_rollout():
+                    executor = MultiRolloutExecutor(
+                        self, self._deep_config.multi_rollout
+                    )
+                    result = await executor.invoke(invoke_inputs, session)
+                elif (
                     self._deep_config is not None
                     and self._deep_config.enable_task_loop
                     and not self._is_resume_input(invoke_inputs)
@@ -3130,6 +3138,18 @@ class DeepAgent(BaseAgent):
             self._invoke_active = False
             if owns_session and session is not None:
                 await session.post_run()
+
+    def _use_multi_rollout(self) -> bool:
+        """Return True when the multi-rollout executor should be used.
+
+        Folds the multi-rollout conditions (config present, multi_rollout
+        configured, enabled, and more than one rollout requested) into one
+        boolean so the invoke() branch stays a single expression.
+        """
+        cfg = self._deep_config
+        if cfg is None or cfg.multi_rollout is None:
+            return False
+        return cfg.multi_rollout.enabled and cfg.multi_rollout.n_rollouts > 1
 
     async def stream(
         self,
