@@ -438,7 +438,11 @@ _DistinctKeySafeLoader.add_constructor(
 
 
 def _load_strict_yaml(content: str) -> object:
-    return yaml.load(content, Loader=_DistinctKeySafeLoader)
+    loader = _DistinctKeySafeLoader(content)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 
 def _split_frontmatter(text: str) -> tuple[str, str, str]:
