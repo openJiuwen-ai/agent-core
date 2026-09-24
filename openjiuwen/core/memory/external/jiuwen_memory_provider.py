@@ -29,9 +29,19 @@ Mem2 write semantics (mirrors the upstream server's three modes):
   history. Not exposed as a tool here; reachable via ``sync_turn`` only when
   the caller opts in through ``write_mode="procedural"``.
 
-Scope mapping: mem2 scopes by ``tenant_id`` + a single ``scope`` string onto
-``Scope(org=tenant_id, user=scope)``. ``user_id`` is the natural ``scope`` and
-``tenant_id`` defaults to ``"default"``.
+Scope mapping:
+- SDK backend: ``Scope(org=tenant_id, user=user_id)`` — the provider calls the
+  in-process kernel with ``legacy_request_context(scope)``, so the target scope
+  doubles as the identity and any org/user pair is writable.
+- Server backend: the HTTP contract takes a five-segment scope object, and the
+  server's permission model requires the **authenticated identity** to cover the
+  target scope (org is a hard boundary). The identity-coverable axes therefore
+  come from ``identity_org``/``identity_user`` config (defaults match the dev
+  authenticator's fixed identity ``org="local"`` / ``user="developer"``; set
+  them to the real authenticated identity in production), while the provider's
+  per-call ``tenant_id``/``user_id`` map onto the ``agent``/``session`` axes
+  underneath — isolation between tenants/users is preserved, and the identity
+  prefix-covers the resulting scope.
 """
 
 from __future__ import annotations
@@ -128,6 +138,8 @@ class _ServerBackend:
         api_key: str = "",
         tenant_id: str = "default",
         user_id: str = "",
+        identity_org: str = "local",
+        identity_user: str = "developer",
         read_timeout: float = _READ_TIMEOUT,
         write_timeout: float = _WRITE_TIMEOUT,
     ):
@@ -135,6 +147,13 @@ class _ServerBackend:
         self._api_key = api_key
         self._tenant_id = tenant_id or "default"
         self._user_id = user_id
+        # Server-side authenticated identity (org/user). The server's permission
+        # model requires the identity to cover the target scope, so these two
+        # axes cannot carry per-call tenant/user data — they must match whoever
+        # the server authenticated. Defaults match the dev authenticator's fixed
+        # identity; point them at the real authenticated identity in production.
+        self._identity_org = identity_org or "local"
+        self._identity_user = identity_user or "developer"
         self._read_timeout = read_timeout
         self._write_timeout = max(write_timeout, _WRITE_TIMEOUT)
         self._http: Any | None = None
@@ -196,22 +215,36 @@ class _ServerBackend:
             headers["Authorization"] = f"Bearer {self._api_key}"
         return headers
 
-    def _scope_payload(self, kwargs: dict[str, Any]) -> dict[str, Any]:
-        """Resolve tenant_id / scope for the current call.
+    def _scope_payload(self, kwargs: dict[str, Any]) -> dict[str, str]:
+        """Build the five-segment target scope object for the current call.
 
-        ``user_id`` maps to mem2's ``scope`` (the per-user/per-session axis);
-        ``tenant_id`` is the org axis. Both default to the backend's configured
-        values, overridable per-call.
+        The server's permission model requires the authenticated identity to
+        cover the target scope (org is a hard boundary). Under the dev
+        authenticator the identity is fixed, so ``org``/``user`` come from the
+        configured ``identity_org``/``identity_user`` — NOT from per-call data —
+        and the per-call ``tenant_id``/``user_id`` isolate onto the ``agent``/
+        ``session`` axes underneath them. The identity prefix-covers the result,
+        so writes succeed while tenants/users stay mutually invisible.
         """
         tenant = kwargs.get("tenant_id", self._tenant_id) or "default"
-        scope = kwargs.get("user_id", self._user_id) or kwargs.get("scope_id", "")
-        return {"tenant_id": tenant, "scope": scope}
+        user = kwargs.get("user_id", self._user_id) or kwargs.get("scope_id", "")
+        return {
+            "org": self._identity_org,
+            "space": "",
+            "user": self._identity_user,
+            "agent": tenant,
+            "session": user,
+        }
 
     async def initialize(self, **kwargs: Any) -> None:
         self._tenant_id = kwargs.get("tenant_id", self._tenant_id) or "default"
         # ``user_id`` (caller convention) is the mem2 ``scope``; accept
         # ``scope_id`` too for parity with the other providers.
         self._user_id = kwargs.get("user_id", self._user_id) or kwargs.get("scope_id", "")
+        if kwargs.get("identity_org"):
+            self._identity_org = str(kwargs["identity_org"])
+        if kwargs.get("identity_user"):
+            self._identity_user = str(kwargs["identity_user"])
 
         if "base_url" in kwargs and kwargs["base_url"]:
             self._base_url = str(kwargs["base_url"]).rstrip("/")
@@ -264,8 +297,12 @@ class _ServerBackend:
         payload: dict[str, Any],
         *,
         write: bool = False,
-    ) -> dict[str, Any] | None:
+    ) -> Any:
         """POST ``/v1/<verb>`` with a JSON body; return the parsed body or None.
+
+        The body is returned as-is — the server's JSON contract is verb-shaped:
+        ``search`` returns an object (``items``/``trajectory``/``errors``) while
+        ``add`` returns a **top-level array** of serialized memory units.
 
         Sets the breaker on failure (raise or non-2xx). Network/parse failures
         return None after recording the failure, so callers can degrade to an
@@ -281,8 +318,7 @@ class _ServerBackend:
             )
             resp.raise_for_status()
             self._record_success()
-            data = resp.json()
-            return data if isinstance(data, dict) else {}
+            return resp.json()
         except Exception as exc:
             self._record_failure()
             logger.debug(
@@ -301,16 +337,30 @@ class _ServerBackend:
     ) -> list[dict[str, Any]]:
         if not query or self._is_breaker_open():
             return []
+        # Server contract (MemoryAPI.search signature): query + context{scope}
+        # + top_k (+ filters/as_of/disclosure/with_trajectory). Field names must
+        # match the signature exactly — unknown fields (e.g. "k") are a 400.
         payload = {
             "query": query,
-            "k": min(int(top_k or _DEFAULT_TOP_K), _MAX_TOP_K),
-            **self._scope_payload(kwargs),
+            "context": {"scope": self._scope_payload(kwargs)},
+            "top_k": min(int(top_k or _DEFAULT_TOP_K), _MAX_TOP_K),
+            "disclosure": "l2",  # full content, parity with the SDK backend
         }
         data = await self._post_verb("search", payload, write=False)
-        if not data:
+        if not isinstance(data, dict):
             return []
-        hits = data.get("hits", [])
-        return hits if isinstance(hits, list) else []
+        items = data.get("items", [])
+        if not isinstance(items, list):
+            return []
+        return [
+            {
+                "item_id": item.get("unit_id", ""),
+                "content": item.get("content", ""),
+                "score": item.get("score", 0.0),
+            }
+            for item in items
+            if isinstance(item, dict)
+        ]
 
     async def prefetch(self, query: str, **kwargs: Any) -> str:
         if not query or self._is_breaker_open():
@@ -342,16 +392,39 @@ class _ServerBackend:
         """Store one content string. ``infer=True`` enables LLM extraction+dedup."""
         if not content or self._is_breaker_open():
             return None
-        metadata: dict[str, str] = {}
+        # Server contract (MemoryAPI.add signature): content + scope object +
+        # tags + system_metadata (+ source/assets/user_metadata/occurred_at).
+        # "metadata" is rejected outright; the infer switch rides in
+        # system_metadata={"infer": "true"}.
+        system_metadata: dict[str, str] = {}
         if infer:
-            metadata["infer"] = "true"
+            system_metadata["infer"] = "true"
         payload: dict[str, Any] = {
             "content": content,
+            "scope": self._scope_payload(kwargs),
             "tags": tags or [],
-            "metadata": metadata,
-            **self._scope_payload(kwargs),
+            "system_metadata": system_metadata or None,
         }
-        return await self._post_verb("add", payload, write=True)
+        units = await self._post_verb("add", payload, write=True)
+        if units is None:
+            return None
+        # The server returns a top-level array of serialized units. With
+        # infer=true it may legally be empty (every derived memory deduped to
+        # update/noop) — report that as item_id=None, not as a failure.
+        if not isinstance(units, list) or not units:
+            return {"item_id": None}
+        unit = units[0] if isinstance(units[0], dict) else {}
+        # Serialized units carry no top-level "content" (it is a property on
+        # MemoryUnit, not a field); rebuild it from segments the same way the
+        # kernel does — newline-joined segment contents.
+        segments = unit.get("segments") or []
+        content_view = "\n".join(
+            seg.get("content", "") for seg in segments if isinstance(seg, dict)
+        )
+        return {
+            "item_id": unit.get("id", ""),
+            "item": {"content": content_view, "tier": unit.get("tier", "")},
+        }
 
     async def sync_turn(
         self,
@@ -759,6 +832,13 @@ class JiuwenMemoryProvider(MemoryProvider):
             overrides go under ``config_dict["globals"]["policies"]``.
         tenant_id: the org axis of ``Scope``. Defaults to ``"default"``.
         user_id: the per-user/per-session axis (mem2 ``scope``).
+        identity_org / identity_user: server mode only — the org/user of the
+            server-side authenticated identity. The server requires the
+            identity to cover the target scope, so these must match whoever
+            the server authenticated (defaults match the dev authenticator's
+            fixed ``local``/``developer``; set to the real identity in
+            production). ``tenant_id``/``user_id`` isolate onto the
+            ``agent``/``session`` axes underneath them.
         read_timeout / write_timeout: HTTP timeouts. Server mode only.
         infer_turns: whether ``sync_turn`` distills user turns into facts via
             the extraction+dedup path (default True). Set False to store raw
@@ -776,6 +856,8 @@ class JiuwenMemoryProvider(MemoryProvider):
         api_key: str = "",
         tenant_id: str = "default",
         user_id: str = "",
+        identity_org: str = "local",
+        identity_user: str = "developer",
         read_timeout: float = _READ_TIMEOUT,
         write_timeout: float = _WRITE_TIMEOUT,
         config_dict: dict[str, Any] | None = None,
@@ -794,6 +876,8 @@ class JiuwenMemoryProvider(MemoryProvider):
                 api_key=api_key,
                 tenant_id=tenant_id,
                 user_id=user_id,
+                identity_org=identity_org,
+                identity_user=identity_user,
                 read_timeout=read_timeout,
                 write_timeout=write_timeout,
             )
