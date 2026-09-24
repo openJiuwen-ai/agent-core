@@ -698,7 +698,7 @@ class AnthropicModelClient(BaseModelClient):
                 "Created shared long-lived AsyncAnthropic client.",
                 event_type=LogEventType.LLM_CALL_START,
                 timeout=self.model_client_config.timeout,
-                max_retries=self.model_client_config.max_retries,
+                max_retries=0,
                 metadata={"base_url": self._normalize_base_url(self.model_client_config.api_base)},
             )
         return client
@@ -733,7 +733,7 @@ class AnthropicModelClient(BaseModelClient):
             "Before create anthropic client, model client config params ready.",
             event_type=LogEventType.LLM_CALL_START,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
             metadata={"base_url": base_url},
         )
 
@@ -742,7 +742,7 @@ class AnthropicModelClient(BaseModelClient):
             base_url=base_url,
             http_client=http_client,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
         )
 
     @classmethod
@@ -773,8 +773,8 @@ class AnthropicModelClient(BaseModelClient):
 
         Closing is immediate even if a call is in flight: a model the user
         removed should stop consuming tokens at once. An in-flight request on a
-        closed client surfaces as a normal model-call failure (not retried by
-        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        closed client surfaces as a normal model-call failure. ModelAnomalyDetectionRail
+        may retry it when no user-visible output has been written.
         """
         keys = {cls.connection_key(cfg) for cfg in configs}
         closed = 0
