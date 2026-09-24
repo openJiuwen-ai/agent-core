@@ -25,6 +25,7 @@ from openjiuwen.agent_evolving.ttse.induction import (
     blame,
     induce,
     induce_batch,
+    parse_dedup_match,
     parse_reason,
     parse_rules,
     parse_synthesis,
@@ -82,6 +83,14 @@ def _tool_msg(name: str, args: dict) -> dict:
 # ----------------------------------------------------------------------
 # induction parse + LLM wrappers
 # ----------------------------------------------------------------------
+
+
+def test_parse_dedup_match_accepts_index_and_rejects_invalid():
+    assert parse_dedup_match("MATCH: 1", 3) == 1
+    assert parse_dedup_match("MATCH: NONE", 3) is None
+    assert parse_dedup_match("MATCH: 9", 3) is None
+    assert parse_dedup_match("thinking\nMATCH: 0", 2) == 0
+    assert parse_dedup_match("NONE", 2) is None
 
 
 def test_parse_rules_extracts_fact_and_tip_edge_cases():

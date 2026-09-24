@@ -506,3 +506,27 @@ For each goal use verdict SATISFIED or UNSATISFIED with a concise justification.
 Output ONLY a single JSON object (no markdown fence):
 {{"goals":[{{"goal":"<short goal>","verdict":"SATISFIED|UNSATISFIED","reason":"<brief evidence>"}}],"delivery":"answer","outcome":"success|partial|fail","reason":"<one-sentence overall justification>"}}
 """
+
+
+def dedup_judge_prompt(kind: str, existing_block: str, new_text: str) -> str:
+    """Ask whether a new rule is the same experience as one existing rule."""
+    return (
+        f"You decide whether a newly extracted {kind} is the SAME reusable "
+        "experience as exactly one existing rule, only worded differently.\n"
+        "\n"
+        "SAME means the claim is the same: same condition and same fact or action. "
+        "Wording, language, and minor phrasing may differ.\n"
+        "NOT the same when the topic is merely related, or when names, numbers, "
+        "paths, or one-off details change what the rule asserts.\n"
+        "\n"
+        "Existing rules (0-based index):\n"
+        f"{existing_block}\n"
+        "\n"
+        "New rule:\n"
+        f"{new_text}\n"
+        "\n"
+        "Reply with EXACTLY one line and no other text:\n"
+        "MATCH: <index>\n"
+        "or\n"
+        "MATCH: NONE\n"
+    )

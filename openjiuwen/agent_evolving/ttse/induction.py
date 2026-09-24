@@ -10,6 +10,7 @@ LLM call swaps ``glm_chat`` (sync HTTP) for jiuwen's async
 
 from __future__ import annotations
 
+import re
 from typing import List, Optional, Tuple
 
 from openjiuwen.agent_evolving.optimizer.llm_resilience import (
@@ -25,6 +26,7 @@ from .prompts import (
     ExistingBank,
     blame_prompt,
     induce_batch_prompt,
+    dedup_judge_prompt,
     induce_prompt,
     synthesize_prompt,
 )
@@ -212,12 +214,53 @@ async def synthesize(
     return parse_synthesis(out)
 
 
+_DEDUP_MATCH_LINE = re.compile(r"^MATCH:\s*(\d+|NONE)\s*$", re.IGNORECASE)
+
+
+def parse_dedup_match(text: str, n_rules: int) -> Optional[int]:
+    """Parse ``MATCH: <index>`` or ``MATCH: NONE``. Invalid output is no match."""
+    if n_rules <= 0:
+        return None
+    for line in reversed(str(text or "").splitlines()):
+        match = _DEDUP_MATCH_LINE.match(line.strip())
+        if match is None:
+            continue
+        token = match.group(1)
+        if token.upper() == "NONE":
+            return None
+        index = int(token)
+        if 0 <= index < n_rules:
+            return index
+        return None
+    return None
+
+
+async def match_duplicate_rule(
+    *,
+    llm: Model,
+    model: str,
+    policy: LLMInvokePolicy,
+    kind: str,
+    existing: List[str],
+    new_text: str,
+) -> Optional[int]:
+    """Return the existing-rule index when the model says the new text is the same experience."""
+    if not existing or not str(new_text or "").strip():
+        return None
+    block = "\n".join(f"{i}. {text}" for i, text in enumerate(existing))
+    prompt = dedup_judge_prompt(kind, block, new_text)
+    out = await invoke_text_with_retry(llm, model, prompt, policy=policy, temperature=0.0)
+    return parse_dedup_match(out, len(existing))
+
+
 __all__ = [
     "parse_rules",
+    "parse_dedup_match",
     "induce",
     "induce_batch",
     "blame",
     "synthesize",
+    "match_duplicate_rule",
     "parse_verdict",
     "parse_reason",
     "parse_synthesis",
