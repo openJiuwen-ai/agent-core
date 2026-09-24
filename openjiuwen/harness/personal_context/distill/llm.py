@@ -21,6 +21,16 @@ _HTTP_STATUS_IN_MESSAGE = re.compile(
     re.I,
 )
 _BARE_RETRYABLE_STATUS_IN_MESSAGE = re.compile(r"\b(429|500|502|503|504)\b")
+_RETRYABLE_MESSAGE_TOKENS = (
+    "timed out",
+    "timeout",
+    "rate limit",
+    "temporarily unavailable",
+    "connection reset",
+    "connection aborted",
+    "connection refused",
+    "connect error",
+)
 
 
 class LlmPort(Protocol):
@@ -83,21 +93,9 @@ def _is_retryable_message(message: str) -> bool:
     lowered = message.lower()
     if "empty content" in lowered or "truncated with empty content" in lowered:
         return True
-    if any(
-        token in lowered
-        for token in ("timed out", "timeout", "rate limit", "temporarily unavailable")
-    ):
-        return True
-    if any(
-        token in lowered
-        for token in (
-            "connection reset",
-            "connection aborted",
-            "connection refused",
-            "connect error",
-        )
-    ):
-        return True
+    for token in _RETRYABLE_MESSAGE_TOKENS:
+        if token in lowered:
+            return True
     status = _status_from_message(lowered)
     if status is None:
         return False
@@ -175,5 +173,6 @@ class OpenJiuwenLlm:
                     exc,
                 )
                 await asyncio.sleep(delay)
-        assert last_error is not None
+        if last_error is None:
+            raise RuntimeError("distill LLM complete exhausted without a captured error")
         raise last_error

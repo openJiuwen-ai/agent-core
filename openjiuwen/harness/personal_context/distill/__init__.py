@@ -22,6 +22,7 @@ from openjiuwen.harness.personal_context.distill.profile import (
     version_dir,
 )
 from openjiuwen.harness.personal_context.distill.runner import DistillRunResult, run_distill_job
+from openjiuwen.harness.personal_context.distill.sqlite_corpus import SqliteImCorpus
 from openjiuwen.harness.personal_context.distill.schedule import (
     DistillDueDecision,
     DistillRunnerPort,
@@ -72,6 +73,7 @@ __all__ = [
     "run_distill_scheduler_loop",
     "save_distilled_profile",
     "set_last_attempt_at_ms",
+    "SqliteImCorpus",
     "tick_distill_schedule",
     "try_claim_distill_lease",
     "version_dir",

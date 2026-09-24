@@ -27,13 +27,15 @@ def _eligible_in_window(
     window_start_ms: int,
     window_end_ms: int,
 ) -> list[CorpusMessage]:
-    selected = [
-        message
-        for message in messages
-        if window_start_ms <= message.sent_at_ms < window_end_ms
-        and message.learning_eligible == 1
-        and str(message.content_text or "").strip()
-    ]
+    selected: list[CorpusMessage] = []
+    for message in messages:
+        if not (window_start_ms <= message.sent_at_ms < window_end_ms):
+            continue
+        if message.learning_eligible != 1:
+            continue
+        if not str(message.content_text or "").strip():
+            continue
+        selected.append(message)
     selected.sort(key=lambda item: item.sent_at_ms)
     return selected
 

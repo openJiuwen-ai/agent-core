@@ -473,12 +473,9 @@ class PersonalContext:
 
     async def _start_distill_scheduler(self) -> None:
         config = self._config
-        if (
-            config is None
-            or not config.distill.enabled
-            or self._distill_corpus is None
-            or self._distill_runner is None
-        ):
+        if config is None or not config.distill.enabled:
+            return
+        if self._distill_corpus is None or self._distill_runner is None:
             return
         if self._distill_task is not None and not self._distill_task.done():
             return

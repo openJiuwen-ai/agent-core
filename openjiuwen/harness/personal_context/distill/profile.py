@@ -68,7 +68,7 @@ def _read_current_pointer(home: str) -> dict[str, Any] | None:
         return None
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         return None
     if not isinstance(raw, dict):
         return None
@@ -167,7 +167,7 @@ def resolve_current_profile(home: str) -> dict[str, Any] | None:
         return None
     try:
         meta_raw = json.loads((root / META_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (OSError, TypeError, ValueError):
         return None
     if not isinstance(meta_raw, dict):
         return None
