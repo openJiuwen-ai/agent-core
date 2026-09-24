@@ -581,7 +581,7 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: 1\nREASON: rule 1 misled the agent"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "[TIP] When logs are large: use grep to scan before reading"
         if "extracting" in p:
             return "[FACT] rustc fails when source files are encoded as GBK"
@@ -589,9 +589,11 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
 
     llm = ScriptedLLM(handler)
     rail = _make_rail(tmp_path, llm)
+    await rail._ttse_store.add_fact("old conflicting fact")
+    await rail._ttse_store.retire("old conflicting fact", "fact", "earlier", "")
     await rail._ttse_store.add_fact("the grader rejects lowercase column names")
     await rail._ttse_store.add_fact("PresentBench expects slides.md on disk")
-    await rail._ttse_store.add_tip("T1 keeper tip")  # so >= 2 rules remain after retire
+    await rail._ttse_store.add_tip("T1 keeper tip")
     blamed = "the grader rejects lowercase column names"
     snap = {
         "messages": [
@@ -604,10 +606,19 @@ async def test_rail_fail_path_blame_retire_synthesize_induce(tmp_path):
     }
     await rail._run_ttse_induction(None, ctx=None, snapshot=snap)
 
-    assert [r["text"] for r in rail._ttse_store.retired] == ["the grader rejects lowercase column names"]
+    assert [r["text"] for r in rail._ttse_store.retired] == [
+        "old conflicting fact",
+        "the grader rejects lowercase column names",
+    ]
     assert "the grader rejects lowercase column names" not in rail._ttse_store.facts_texts()
+    assert "PresentBench expects slides.md on disk" in rail._ttse_store.facts_texts()
     assert "rustc fails when source files are encoded as GBK" in rail._ttse_store.facts_texts()
     assert any("grep" in t for t in rail._ttse_store.tips_texts())
+    synth = next(call for call in llm.calls if "RETIRED rules" in call)
+    assert "old conflicting fact" in synth
+    assert "the grader rejects lowercase column names" in synth
+    assert "PresentBench expects slides.md on disk" not in synth
+    assert "T1 keeper tip" not in synth
     assert len(llm.calls) == 5  # blame -> synth -> classify tip -> induce -> classify fact
 
 
@@ -666,7 +677,7 @@ async def test_rail_blame_none_does_not_retire(tmp_path):
     def handler(p: str) -> str:
         if "diagnosing" in p:
             return "VERDICT: NONE\nREASON: no rule is at fault"
-        if "review a rule bank" in p:
+        if "RETIRED rules" in p:
             return "NONE"
         if "extracting" in p:
             return "[FACT] lesson"

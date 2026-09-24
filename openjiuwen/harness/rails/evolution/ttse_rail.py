@@ -460,6 +460,7 @@ class TTSERail(EvolutionRail):
             result.reason,
             result.score,
         )
+
         if outcome == "skip":
             logger.info("[TTSERail] induction skipped: detect outcome=skip (%s)", result.reason)
             return
@@ -555,19 +556,23 @@ class TTSERail(EvolutionRail):
             await self._maybe_project_catalog()
 
     async def _synthesize_resolving(self, capabilities: str) -> None:
-        """Fail path step 2: propose one resolving TIP when >= 2 rules remain.
+        """Fail path step 2: propose one resolving TIP from retired rules.
 
-        synthesize runs against the bank AFTER retire so a retired bad rule does
-        not seed a contradiction. Below 2 rules there is nothing to contradict.
+        Only rules already removed by blame are visible. Below 2 retired rules
+        there is nothing to contradict.
         """
-        flat_after = self._ttse_store.snapshot_flat()
-        if len(flat_after) < 2:
+        retired = [
+            (str(record.get("text") or ""), str(record.get("rtype") or ""))
+            for record in self._ttse_store.retired
+            if record.get("text") and record.get("rtype") in ("fact", "tip")
+        ]
+        if len(retired) < 2:
             return
         new_tip = await synthesize(
             llm=self._ttse_llm,
             model=self._ttse_model,
             policy=self._ttse_config.induce_llm_policy,
-            rules_numbered=rules_numbered(flat_after),
+            rules_numbered=rules_numbered(retired),
             capabilities=capabilities,
         )
         if new_tip and await self._ttse_store.add_tip(new_tip):
