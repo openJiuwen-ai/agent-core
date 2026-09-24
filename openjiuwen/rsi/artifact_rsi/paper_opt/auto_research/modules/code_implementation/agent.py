@@ -276,25 +276,44 @@ def _discover_variant_names(code_dir: Path, *, timeout: float = 30) -> list[str]
     return [item for item in items if item]
 
 
-def _windows_cmd_shim(path: str) -> bool:
-    return path.lower().endswith((".cmd", ".bat"))
-
-
 def _pyright_lsp_command() -> tuple[str, list[str]] | None:
     """Argv that can be Popen'd without a Windows shell (not a .cmd shim).
 
-    OpenJiuwen's default Pyright spawn uses the `pyright` console script; on
-    Windows that is often `pyright.cmd`, and CreateProcess on a .cmd without
-    `shell=True` fails with WinError 87 — observed as
-    `[LSP] Server 'pyright' failed` while the coding agent kept running with
-    no diagnostics. Prefer `python -m pyright.langserver` when the module is
-    installed; otherwise a non-shim `pyright-langserver` on PATH.
+    Delegates to the harness's own pyright resolution first
+    (`harness.lsp.servers.servers.python._resolve_pyright_command`): it
+    covers both an npm-global install (spawned via `node`, sidestepping
+    Python entirely) and a `pyright-langserver` `.cmd` shim on Windows by
+    parsing the actual `node ... langserver.index.js` invocation out of it
+    -- a bare `.cmd` fails CreateProcess with WinError 87 without
+    `shell=True`, observed as `[LSP] Server 'pyright' failed` while the
+    coding agent kept running with no diagnostics. Reusing it here instead
+    of re-deriving a weaker version keeps the two in sync.
+
+    Only fall back to `sys.executable -m pyright.langserver` (a
+    pip-installed `pyright`) when the harness resolution finds nothing --
+    on the packaged desktop host, `sys.executable` is the launcher binary
+    itself, which has no `-m` module-runner (the same class of failure
+    `_compile_staged_python` hit with `-m compileall`; see that method's
+    docstring). This fallback is kept only because it is harmless when it
+    fails: `_try_lsp_rail` treats a broken LSP as "no diagnostics", not a
+    hard error.
+
+    The delegation itself is wrapped: the harness resolver shells out to
+    `npm`/reads a `.cmd` file, and an import or resolution failure there
+    must degrade to "no pyright found", not crash agent construction --
+    that would turn an optional dev-tooling feature into a hard dependency
+    for the coding agent to even start.
     """
+    try:
+        from openjiuwen.harness.lsp.servers.servers.python import _resolve_pyright_command
+
+        resolved = _resolve_pyright_command()
+    except Exception:
+        resolved = None
+    if resolved is not None:
+        return resolved
     if importlib.util.find_spec("pyright") is not None:
         return sys.executable, ["-m", "pyright.langserver", "--stdio"]
-    found = shutil.which("pyright-langserver")
-    if found and not _windows_cmd_shim(found):
-        return found, ["--stdio"]
     return None
 
 
