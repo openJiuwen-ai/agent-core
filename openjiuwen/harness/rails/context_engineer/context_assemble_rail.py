@@ -8,7 +8,7 @@ from typing import Any, Iterable, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.harness.rails.base import DeepAgentRail
-from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
+from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, RunKind
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
 )
@@ -135,6 +135,23 @@ class ContextAssembleRail(DeepAgentRail):
             logger.warning("[ContextAssembleRail] skip clearing prompt attachment section=%s: %s", section, exc)
 
     @staticmethod
+    def _is_heartbeat_run(ctx: AgentCallbackContext) -> bool:
+        """Return True only for heartbeat runs.
+
+        HEARTBEAT.md is injected as an attachment for heartbeat runs; normal
+        user runs already receive it through the heartbeat query, so keeping it
+        as an attachment there only makes the model echo it back.
+        """
+        run_kind = getattr(ctx, "extra", {}).get("run_kind")
+        if run_kind == RunKind.HEARTBEAT:
+            return True
+        if isinstance(run_kind, str) and run_kind == RunKind.HEARTBEAT.value:
+            return True
+        inputs = getattr(ctx, "inputs", None)
+        is_heartbeat = getattr(inputs, "is_heartbeat", None)
+        return bool(callable(is_heartbeat) and is_heartbeat())
+
+    @staticmethod
     def _section_fingerprint(section: Any) -> str:
         content = getattr(section, "content", None)
         if isinstance(content, dict):
@@ -227,9 +244,10 @@ class ContextAssembleRail(DeepAgentRail):
             else:
                 self.system_prompt_builder.remove_section(section_name)
 
+        inject_heartbeat_attachment = self._is_heartbeat_run(ctx)
         for section_name in _ATTACHMENT_CONTEXT_SECTIONS:
             section = context_sections.get(section_name)
-            if section is not None:
+            if section is not None and inject_heartbeat_attachment:
                 if writer is not None:
                     await self._upsert_attachment_section(
                         writer,
