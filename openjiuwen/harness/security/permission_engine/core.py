@@ -70,8 +70,8 @@ def _has_builtin_layer(items: Any) -> bool:
     return any(isinstance(item, dict) and item.get("layer") == "builtin" for item in items)
 
 
-# Old swarm product YAML often has severity without action. Map like
-# permission_mode=normal: LOW/MEDIUM→allow, HIGH/CRITICAL→ask.
+# Old swarm product YAML often has severity without action. Fill from severity:
+# LOW/MEDIUM→allow, HIGH/CRITICAL→ask.
 _LEGACY_SEVERITY_TO_ACTION = {
     "LOW": "allow",
     "MEDIUM": "allow",
