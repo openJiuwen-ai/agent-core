@@ -43,6 +43,13 @@ from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
     extract_output_paths,
     messages_to_trajectory_text,
 )
+from openjiuwen.agent_evolving.ttse.induce_context import (
+    BANK_SECTION_MAX_CHARS,
+    build_induce_evidence,
+    format_bank_section,
+)
+from openjiuwen.agent_evolving.ttse.prompts import ExistingBank, InduceTaskEvidence, induce_prompt
+
 
 _POLICY = LLMInvokePolicy(attempt_timeout_secs=5, total_budget_secs=10, max_attempts=1)
 
@@ -121,7 +128,8 @@ async def test_induce_and_induce_batch_parse_scripted_llm():
         model="m",
         policy=_POLICY,
         task_prompt="compile",
-        traj_text="USER: build\nACTION: bash()",
+        conversation_snippet="[user] build",
+        tool_call_chain="[Turn 1] assistant → bash({})",
         capabilities="- tool `bash`",
         existing_facts=[],
         existing_tips=[],
@@ -129,6 +137,14 @@ async def test_induce_and_induce_batch_parse_scripted_llm():
     assert facts == ["workspace uses utf-8"]
     assert tips == ["When encoding: use cl /utf-8"]
     assert llm.calls
+    prompt = llm.calls[0]
+    assert "User query (task):" in prompt
+    assert "Conversation snippet:" in prompt
+    assert "Tool call chain:" in prompt
+    assert "Existing FACTS:" in prompt
+    assert "Existing TIPS:" in prompt
+    assert "Agent trajectory" not in prompt
+    assert "compile" in prompt
 
     batch_llm = ScriptedLLM(lambda _prompt: "[FACT] batch fact")
     facts, tips = await induce_batch(
@@ -139,7 +155,8 @@ async def test_induce_and_induce_batch_parse_scripted_llm():
             {
                 "task_id": "t1",
                 "task_prompt": "q",
-                "traj_text": "USER: hi",
+                "conversation_snippet": "[user] hi",
+                "tool_call_chain": "(No tool calls; see conversation history)",
                 "outcome": "success",
             }
         ],
@@ -149,6 +166,8 @@ async def test_induce_and_induce_batch_parse_scripted_llm():
     )
     assert facts == ["batch fact"]
     assert tips == []
+    assert "User query (task):" in batch_llm.calls[0]
+    assert "Trajectory excerpt" not in batch_llm.calls[0]
 
 
 @pytest.mark.asyncio
@@ -433,3 +452,59 @@ def test_count_tool_calls_and_extract_output_paths_and_final_reply():
     assert extract_final_reply(messages, max_chars=11) == "wrote slide"
     assert extract_final_reply([_tool_msg("bash", {"cmd": "ls"})]) == ""
     assert count_tool_calls([]) == 0
+
+
+# ----------------------------------------------------------------------
+# induce evidence / bank section bounds
+# ----------------------------------------------------------------------
+
+
+def test_format_bank_section_caps_at_4k_without_splitting_lines():
+    rules = [f"rule-{i}-{'x' * 80}" for i in range(80)]
+    text = format_bank_section(rules, max_chars=BANK_SECTION_MAX_CHARS)
+    assert len(text) <= BANK_SECTION_MAX_CHARS
+    assert text.startswith("- rule-0-")
+    # last line must be a complete "- ..." rule, not a truncated mid-line
+    last = text.splitlines()[-1]
+    assert last.startswith("- rule-")
+    assert last in {f"- {r}" for r in rules}
+    # adding one more character of budget should not be required for integrity
+    assert "\n" not in last
+
+
+def test_induce_prompt_uses_seven_section_layout():
+    prompt = induce_prompt(
+        InduceTaskEvidence(
+            task_query="build slides",
+            conversation_snippet="[user] build slides",
+            tool_call_chain="[Turn 1] assistant → bash({\"cmd\": \"ls\"})",
+            grader_note="[GRADER SCORES] overall=0.50",
+        ),
+        "- `bash`",
+        ExistingBank(facts="- old fact", tips="- old tip"),
+        "fail",
+    )
+    assert "User query (task):" in prompt
+    assert "Conversation snippet:" in prompt
+    assert "Tool call chain:" in prompt
+    assert "Available Capabilities" in prompt
+    assert "Existing FACTS:" in prompt
+    assert "Existing TIPS:" in prompt
+    assert "Outcome: FAILED COMPLETELY" in prompt
+    assert "build slides" in prompt
+    assert "Agent trajectory" not in prompt
+    assert "same language as the User query" in prompt
+    assert "conversation snippet and tool call chain" in prompt
+
+
+def test_build_induce_evidence_empty_without_messages():
+    empty = build_induce_evidence([], task_query="q", language="en")
+    assert empty.is_empty
+    filled = build_induce_evidence(
+        [{"role": "user", "content": "hello"}],
+        task_query="hello",
+        language="en",
+    )
+    assert not filled.is_empty
+    assert "[user] hello" in filled.conversation_snippet
+    assert "User query (task):" in filled.evidence_text

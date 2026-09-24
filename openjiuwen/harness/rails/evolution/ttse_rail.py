@@ -65,6 +65,7 @@ from openjiuwen.agent_evolving.ttse.dream import (
     run_dream_pass,
 )
 from openjiuwen.agent_evolving.ttse.induction import blame, induce, induce_batch, synthesize
+from openjiuwen.agent_evolving.ttse.induce_context import build_induce_evidence
 from openjiuwen.agent_evolving.ttse.render import (
     DISK_CATALOG_GUIDANCE_CN,
     DISK_CATALOG_GUIDANCE_EN,
@@ -76,10 +77,7 @@ from openjiuwen.agent_evolving.ttse.success import (
     SuccessDetector,
     SuccessOutcome,
 )
-from openjiuwen.agent_evolving.ttse.trajectory_adapter import (
-    count_tool_calls,
-    messages_to_trajectory_text,
-)
+from openjiuwen.agent_evolving.ttse.trajectory_adapter import count_tool_calls
 
 _TTSE_CATALOG_SECTION = "ttse_catalog"
 _TTSE_CATALOG_PRIORITY = 200
@@ -369,9 +367,16 @@ class TTSERail(EvolutionRail):
         if not task_query:
             task_query = self._last_user_text(messages)
 
-        traj_text = messages_to_trajectory_text(messages, budget=self._ttse_config.traj_char_budget)
-        if not traj_text:
-            logger.debug("[TTSERail] induction skipped: empty trajectory text")
+        evidence = build_induce_evidence(
+            messages,
+            task_query=task_query or "",
+            dim_scores=snapshot.get("ttse_dim_scores") if isinstance(snapshot.get("ttse_dim_scores"), dict) else None,
+            overall=snapshot.get("ttse_score"),
+            traj_char_budget=self._ttse_config.traj_char_budget,
+            language="en",
+        )
+        if evidence.is_empty:
+            logger.debug("[TTSERail] induction skipped: empty conversation/tool evidence")
             return
         logger.info(
             "[TTSERail] starting induction query=%s batch_size=%s has_capabilities=%s",
@@ -379,23 +384,6 @@ class TTSERail(EvolutionRail):
             self._ttse_config.batch_size,
             bool(capabilities),
         )
-
-        # Inject per-dimension grader scores at the head of the trajectory so
-        # induce sees WHERE the task was strong/weak, not just the pass/fail
-        # outcome label.
-        _dim_scores = snapshot.get("ttse_dim_scores")
-        _overall = snapshot.get("ttse_score")
-        if isinstance(_dim_scores, dict) and _dim_scores:
-            _parts = [f"{k}={float(v):.2f}" for k, v in _dim_scores.items() if v is not None]
-            if _overall is not None:
-                _parts.append(f"overall={float(_overall):.2f}")
-            if _parts:
-                traj_text = (
-                    "[GRADER SCORES 0-1 per dimension, lower = weaker] "
-                    + " ".join(_parts)
-                    + " — account for BOTH high dimensions (what worked) and low "
-                    "dimensions (what was weak / should improve) when extracting rules." + "\n" + traj_text
-                )
 
         # Whole-section lock: the reflection reads the bank (dedup inputs in
         # ``induce``/``induce_batch``, snapshots in ``_blame_and_retire``) and
@@ -416,6 +404,7 @@ class TTSERail(EvolutionRail):
             logger.info("[TTSERail] induction skipped: detect outcome=skip (%s)", result.reason)
             return
 
+        evidence_text = evidence.evidence_text
         async with self._evolution_lock:
             self._ttse_store.reload_if_disk_newer()
             if self._ttse_config.batch_size <= 1:
@@ -423,17 +412,30 @@ class TTSERail(EvolutionRail):
                 # success -> tactics; fail -> blame/retire/synthesize -> induce.
                 # partial induces without blame.
                 if outcome == "fail":
-                    await self._blame_and_resolve(task_query, traj_text, capabilities)
+                    await self._blame_and_resolve(task_query, evidence_text, capabilities)
+                logger.info(
+                    "[TTSERail] induce() start outcome=%s query=%s",
+                    outcome,
+                    (task_query or "")[:80],
+                )
                 facts, tips = await induce(
                     llm=self._ttse_llm,
                     model=self._ttse_model,
                     policy=self._ttse_config.induce_llm_policy,
                     task_prompt=task_query,
-                    traj_text=traj_text,
+                    conversation_snippet=evidence.conversation_snippet,
+                    tool_call_chain=evidence.tool_call_chain,
                     capabilities=capabilities,
                     existing_facts=self._ttse_store.facts_texts(),
                     existing_tips=self._ttse_store.tips_texts(),
                     outcome=outcome,
+                    grader_note=evidence.grader_note,
+                )
+                logger.info(
+                    "[TTSERail] induce() done outcome=%s facts=%s tips=%s",
+                    outcome,
+                    len(facts),
+                    len(tips),
                 )
                 added = await self._add_rules(facts, tips)
                 if added:
@@ -449,24 +451,27 @@ class TTSERail(EvolutionRail):
             # Batch mode (reference ``learn_batch``): buffer this task. blame/retire
             # still run per failed task (concentrated here); synthesize + induce
             # run ONCE per batch -> N tasks amortize to a single induce LLM call.
+            buffered_evidence = evidence_text
+            if self._ttse_config.batch_traj_budget and self._ttse_config.batch_traj_budget > 0:
+                buffered_evidence = buffered_evidence[: self._ttse_config.batch_traj_budget]
             self._batch_buffer.append(
                 {
                     "task_id": snapshot.get("task_id") or "",
                     "task_prompt": task_query,
-                    "traj_text": (
-                        traj_text
-                        if not self._ttse_config.batch_traj_budget or self._ttse_config.batch_traj_budget <= 0
-                        else traj_text[: self._ttse_config.batch_traj_budget]
-                    ),
+                    "conversation_snippet": evidence.conversation_snippet,
+                    "tool_call_chain": evidence.tool_call_chain,
+                    "grader_note": evidence.grader_note,
                     "outcome": outcome,
+                    # Keep a bounded evidence blob for per-task blame only.
+                    "_evidence_text": buffered_evidence,
                 }
             )
             if outcome == "fail":
-                await self._blame_and_retire(task_query, traj_text)
+                await self._blame_and_retire(task_query, buffered_evidence)
             if len(self._batch_buffer) >= self._ttse_config.batch_size:
                 await self._flush_batch(capabilities)
 
-    async def _blame_and_retire(self, task_query: str, traj_text: str) -> None:
+    async def _blame_and_retire(self, task_query: str, evidence_text: str) -> None:
         """Fail path step 1: blame -> retire (no synthesize).
 
         Shared by the per-task and batch paths so blame/retire can run per
@@ -483,7 +488,7 @@ class TTSERail(EvolutionRail):
             model=self._ttse_model,
             policy=self._ttse_config.induce_llm_policy,
             task_prompt=task_query,
-            traj_text=traj_text,
+            traj_text=evidence_text,
             rules_numbered=numbered,
             n_rules=len(flat),
         )
@@ -520,10 +525,10 @@ class TTSERail(EvolutionRail):
             logger.info("[TTSERail] synthesized resolving TIP: %s", new_tip[:80])
             await self._classify_added_rules([(new_tip, "tip")])
 
-    async def _blame_and_resolve(self, task_query: str, traj_text: str, capabilities: str) -> None:
+    async def _blame_and_resolve(self, task_query: str, evidence_text: str, capabilities: str) -> None:
         """Per-task fail path: blame -> retire -> synthesize (before induce)."""
         logger.info("[TTSERail] starting blame and resolve query=%s", (task_query or "")[:80])
-        await self._blame_and_retire(task_query, traj_text)
+        await self._blame_and_retire(task_query, evidence_text)
         await self._synthesize_resolving(capabilities)
 
     async def _add_rules(self, facts: List[str], tips: List[str]) -> int:
@@ -575,6 +580,10 @@ class TTSERail(EvolutionRail):
             return
         await self._synthesize_resolving(capabilities)
         group = list(self._batch_buffer)
+        logger.info(
+            "[TTSERail] induce_batch() start tasks=%s",
+            len(group),
+        )
         facts, tips = await induce_batch(
             llm=self._ttse_llm,
             model=self._ttse_model,
@@ -583,6 +592,12 @@ class TTSERail(EvolutionRail):
             capabilities=capabilities,
             existing_facts=self._ttse_store.facts_texts(),
             existing_tips=self._ttse_store.tips_texts(),
+        )
+        logger.info(
+            "[TTSERail] induce_batch() done tasks=%s facts=%s tips=%s",
+            len(group),
+            len(facts),
+            len(tips),
         )
         added = await self._add_rules(facts, tips)
         # Drop only after induce + bank write succeed; otherwise retry flush.

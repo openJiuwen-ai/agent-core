@@ -18,11 +18,13 @@ from openjiuwen.agent_evolving.optimizer.llm_resilience import (
 )
 from openjiuwen.core.foundation.llm.model import Model
 
+from .induce_context import BANK_SECTION_MAX_CHARS, format_bank_section
 from .prompts import (
     BLAME_SYSTEM,
     SYNTH_SYSTEM,
     _OUTCOME_LBL,
     ExistingBank,
+    InduceTaskEvidence,
     blame_prompt,
     induce_batch_prompt,
     induce_prompt,
@@ -58,19 +60,27 @@ async def induce(
     model: str,
     policy: LLMInvokePolicy,
     task_prompt: str,
-    traj_text: str,
+    conversation_snippet: str,
+    tool_call_chain: str,
     capabilities: str,
     existing_facts: List[str],
     existing_tips: List[str],
     outcome: str = "success",
+    grader_note: str = "",
     max_tokens: Optional[int] = None,
 ) -> Tuple[List[str], List[str]]:
-    """Extract new FACT/TIP rules from one trajectory. Returns (facts, tips)."""
+    """Extract new FACT/TIP rules from structured task evidence. Returns (facts, tips)."""
     bank = ExistingBank(
-        facts="\n".join(f"- {f}" for f in existing_facts),
-        tips="\n".join(f"- {t}" for t in existing_tips),
+        facts=format_bank_section(existing_facts, max_chars=BANK_SECTION_MAX_CHARS),
+        tips=format_bank_section(existing_tips, max_chars=BANK_SECTION_MAX_CHARS),
     )
-    user = induce_prompt(task_prompt, traj_text, capabilities, bank, outcome)
+    evidence = InduceTaskEvidence(
+        task_query=task_prompt or "",
+        conversation_snippet=conversation_snippet or "",
+        tool_call_chain=tool_call_chain or "",
+        grader_note=grader_note or "",
+    )
+    user = induce_prompt(evidence, capabilities, bank, outcome)
     kwargs = {}
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
@@ -93,30 +103,26 @@ async def induce_batch(
 
     Cost amortization: N tasks induce via a single LLM call instead of N.
     ``group`` is a list of per-task observations, each a dict with keys
-    ``task_id`` / ``task_prompt`` / ``traj_text`` / ``outcome``. Existing-bank
-    text is still capped so the prompt stays bounded as the bank grows.
-    Trajectory excerpts are used as stored (the rail applies
-    ``batch_traj_budget`` when buffering). Returns (facts, tips).
+    ``task_id`` / ``task_prompt`` / ``conversation_snippet`` / ``tool_call_chain``
+    / ``outcome`` (optional ``grader_note``). Existing-bank text is capped at
+    :data:`BANK_SECTION_MAX_CHARS` per track. Returns (facts, tips).
     """
     prepared = []
     for item in group:
         outcome = item.get("outcome", "success")
         lbl = _OUTCOME_LBL.get(outcome, _OUTCOME_LBL["success"])
-        prepared.append(
-            (
-                item.get("task_id", ""),
-                item.get("task_prompt", ""),
-                item.get("traj_text") or "",
-                lbl,
-            )
+        evidence = InduceTaskEvidence(
+            task_query=item.get("task_prompt", "") or "",
+            conversation_snippet=item.get("conversation_snippet", "") or "",
+            tool_call_chain=item.get("tool_call_chain", "") or "",
+            grader_note=item.get("grader_note", "") or "",
         )
-    existing_facts_top = list(existing_facts)[:40]
-    existing_tips_top = list(existing_tips)[:40]
+        prepared.append((item.get("task_id", ""), evidence, lbl))
     user = induce_batch_prompt(
         prepared,
         capabilities,
-        "\n".join(f"- {f}" for f in existing_facts_top),
-        "\n".join(f"- {t}" for t in existing_tips_top),
+        format_bank_section(existing_facts, max_chars=BANK_SECTION_MAX_CHARS),
+        format_bank_section(existing_tips, max_chars=BANK_SECTION_MAX_CHARS),
     )
     out = await invoke_text_with_retry(llm, model, user, policy=policy, temperature=0.3, max_tokens=max_tokens)
     return parse_rules(out)

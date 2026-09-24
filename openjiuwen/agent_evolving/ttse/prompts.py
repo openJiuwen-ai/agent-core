@@ -3,10 +3,11 @@
 """Prompt building blocks for TTSE (Two-Track Self-Evolution).
 
 Ported from the TTSE reference implementation (``ttseopenclaw/ttse/prompts.py``).
-``FACT_TIP_DEFINITION`` is the frozen dual-judgment core. Induce / blame no
-longer paste a separate task-brief copy: ``traj_text`` already includes the
-USER turn (see ``messages_to_trajectory_text``). ``ExistingBank`` bundles
-correlated ``induce_prompt`` parameters to stay under G.FNM.03.
+``FACT_TIP_DEFINITION`` is the frozen dual-judgment core. Induce feeds a
+SkillEvolution-aligned evidence layout (user query, conversation snippet,
+tool-call chain) rather than a flattened trajectory blob. ``ExistingBank``
+and ``InduceTaskEvidence`` bundle correlated ``induce_prompt`` parameters to
+stay under G.FNM.03.
 
 A FACT is a declarative statement about THIS environment; a TIP is a procedural
 rule of the form ``When <condition>: use <capability> to <action>``.
@@ -51,7 +52,7 @@ When unsure, default to TIP.
 Do NOT extract:
 - this turn's user request restated as a rule
 - names, secrets, account ids, one-off URLs, or ticket numbers
-- guesses not verified in the trajectory"""
+- guesses not verified in the conversation snippet or tool call chain"""
 
 
 @dataclass(frozen=True)
@@ -66,7 +67,22 @@ class ExistingBank:
     tips: str
 
 
-def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: ExistingBank, outcome: str) -> str:
+@dataclass(frozen=True)
+class InduceTaskEvidence:
+    """Per-task evidence slots for :func:`induce_prompt` (G.FNM.03 bundling)."""
+
+    task_query: str
+    conversation_snippet: str
+    tool_call_chain: str
+    grader_note: str = ""
+
+
+def induce_prompt(
+    evidence: InduceTaskEvidence,
+    capabilities: str,
+    bank: ExistingBank,
+    outcome: str,
+) -> str:
     if outcome == "success":
         outcome_lbl = "SOLVED SUCCESSFULLY"
         guidance = "Extract the tactics and environment facts that LED to this success."
@@ -79,31 +95,45 @@ def induce_prompt(_task_prompt: str, traj_text: str, capabilities: str, bank: Ex
             "This task FAILED. Extract LESSONS: (1) FACTS about the environment that CAUSED "
             "or contributed to the failure (a tool that errored, a missing file, an "
             "environmental constraint the agent missed) - only verified observations from "
-            "the trajectory, not guesses; (2) TIPs about what the agent SHOULD have done "
-            "instead, reframing the mistake as the correct positive action: 'When <cond>: "
-            "use <capability> to <correct action>'. Do NOT extract the wrong actions "
-            "themselves as tips."
+            "the conversation snippet and tool call chain, not guesses; (2) TIPs about what "
+            "the agent SHOULD have done instead, reframing the mistake as the correct "
+            "positive action: 'When <cond>: use <capability> to <correct action>'. Do NOT "
+            "extract the wrong actions themselves as tips."
         )
+    grader_block = f"\n{evidence.grader_note}\n" if evidence.grader_note else "\n"
     return f"""You are extracting reusable knowledge from an agent task that was {outcome_lbl}.
 
 {FACT_TIP_DEFINITION}
 
+How to use the evidence sections below:
+- User query = the task goal (do NOT restate it as a rule).
+- Conversation snippet = dialogue intent and reasoning.
+- Tool call chain = verifiable tool evidence; prefer it when checking facts.
+- Existing FACTS / TIPS = dedup boundary; do not repeat or subsume them.
+
+User query (task):
+{evidence.task_query or "(none)"}
+
+Conversation snippet:
+{evidence.conversation_snippet or "(none)"}
+
+Tool call chain:
+{evidence.tool_call_chain or "(none)"}
+
 Available Capabilities (TIPs may only reference these names):
 {capabilities}
 
-Existing bank — do NOT output rules that duplicate or are subsumed by these:
-FACTS:
+Existing FACTS:
 {bank.facts or "(none)"}
-TIPS:
+
+Existing TIPS:
 {bank.tips or "(none)"}
 
-Agent trajectory (USER turn is the task; then what the agent actually did):
-{traj_text}
-
-{guidance}
+Outcome: {outcome_lbl}
+{grader_block}{guidance}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
-Write each rule in the same language as the USER turn.
+Write each rule in the same language as the User query.
 Prefer specific, verified observations over vague generalities. Output ONLY new rules,
 each on its own line, prefixed [FACT] or [TIP]:
 [FACT] <declarative fact about this environment>
@@ -123,30 +153,43 @@ _OUTCOME_LBL = {
 
 
 def induce_batch_prompt(group, capabilities: str, existing_facts: str, existing_tips: str) -> str:
-    """group: list of (task_id, task_prompt, traj_text, outcome_lbl). One GLM call."""
+    """group: list of (task_id, evidence: InduceTaskEvidence, outcome_lbl). One GLM call."""
     n = len(group)
     blocks = []
-    for i, (tid, _prompt, traj, lbl) in enumerate(group, 1):
-        blocks.append(f"=== Task {i}/{n} [{tid}] — {lbl} ===\nTrajectory excerpt:\n{traj}")
+    for i, (tid, evidence, lbl) in enumerate(group, 1):
+        grader = f"\n{evidence.grader_note}" if evidence.grader_note else ""
+        blocks.append(
+            f"=== Task {i}/{n} [{tid}] — {lbl} ===\n"
+            f"User query (task):\n{evidence.task_query or '(none)'}\n\n"
+            f"Conversation snippet:\n{evidence.conversation_snippet or '(none)'}\n\n"
+            f"Tool call chain:\n{evidence.tool_call_chain or '(none)'}\n"
+            f"Outcome: {lbl}{grader}"
+        )
     tasks_block = "\n\n".join(blocks)
     return f"""You are extracting reusable knowledge from a BATCH of {n} agent tasks.
 
 {FACT_TIP_DEFINITION}
 
+How to use the evidence sections below:
+- User query = the task goal (do NOT restate it as a rule).
+- Conversation snippet = dialogue intent and reasoning.
+- Tool call chain = verifiable tool evidence; prefer it when checking facts.
+- Existing FACTS / TIPS = dedup boundary; do not repeat or subsume them.
+
 Available Capabilities (TIPs may only reference these names):
 {capabilities}
 
-Existing bank — do NOT output rules that duplicate or are subsumed by these:
-FACTS:
+Existing FACTS:
 {existing_facts or "(none)"}
-TIPS:
+
+Existing TIPS:
 {existing_tips or "(none)"}
 
-The {n} tasks in this batch (outcome + trajectory excerpt each; USER turn is the task):
+The {n} tasks in this batch (each with User query, conversation snippet, tool call chain, outcome):
 {tasks_block}
 
 Extract NEW rules that would help a future agent on SIMILAR tasks in THIS environment.
-Write each rule in the same language as the USER turn.
+Write each rule in the same language as the User query.
 Prioritize rules that GENERALIZE across tasks. For FAILED tasks, extract the lesson (what
 the environment required or what the agent SHOULD have done), not the wrong action itself.
 
