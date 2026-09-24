@@ -1259,6 +1259,7 @@ class DeepAgent(BaseAgent):
             ),
             "subagents": None,
             "enable_async_subagent": False,
+            "enable_subagent_runtime": False,
             "add_general_purpose_agent": False,
             "enable_plan_mode": spec.enable_plan_mode,
             "parallel_tool_calls": spec.parallel_tool_calls,
@@ -1358,13 +1359,16 @@ class DeepAgent(BaseAgent):
             return None
 
         from openjiuwen.harness.schema.config import SubAgentConfig
+        from openjiuwen.harness.tools.subagent.type_aliases import canonicalize_subagent_type
 
+        wanted = canonicalize_subagent_type(subagent_type)
         for spec in self._deep_config.subagents or []:
-            if isinstance(spec, SubAgentConfig) and spec.agent_card.name == subagent_type:
-                return spec
+            if isinstance(spec, SubAgentConfig):
+                if canonicalize_subagent_type(spec.agent_card.name) == wanted:
+                    return spec
             if isinstance(spec, DeepAgent):
                 card = getattr(spec, "card", None)
-                if getattr(card, "name", None) == subagent_type:
+                if canonicalize_subagent_type(getattr(card, "name", None) or "") == wanted:
                     return spec
 
         return None
@@ -2983,6 +2987,38 @@ class DeepAgent(BaseAgent):
             self._ensure_supervisor_running()
             logger.info("[DeepAgent] Started for session %s", sid)
 
+    async def _release_interaction_subagents(self) -> None:
+        """Cancel cached subagents when the parent interaction session ends."""
+        session = self._interaction_session
+        if session is None:
+            return
+        try:
+            parent_session_id = session.get_session_id()
+        except Exception as exc:
+            logger.warning(
+                "[DeepAgent] Failed to read session id for subagent release: %s",
+                exc,
+            )
+            return
+        if not parent_session_id:
+            return
+        from openjiuwen.harness.tools.subagent._control_registry import (
+            release_subagent_control,
+        )
+
+        try:
+            await release_subagent_control(
+                self,
+                parent_session_id,
+                reason="parent_ended",
+            )
+        except Exception as exc:
+            logger.warning(
+                "[DeepAgent] Failed to release subagent control on stop: %s",
+                exc,
+                exc_info=True,
+            )
+
     async def stop(self) -> None:
         """Terminate the interaction loop and wake any attached output consumer."""
         if not self._interaction_started:
@@ -3009,6 +3045,8 @@ class DeepAgent(BaseAgent):
         for task in emit_tasks:
             with suppress(asyncio.CancelledError, Exception):
                 await task
+
+        await self._release_interaction_subagents()
 
         if self._interaction_session is not None:
             with suppress(Exception):

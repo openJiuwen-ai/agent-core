@@ -113,7 +113,7 @@ class ExpertHarnessConfigSpec(_ExpertSpecModel):
     """ExpertHarness capability policy."""
 
     enable_subagent: bool = False
-    subagent_delegate_type: Literal["sync", "async"] = "sync"
+    subagent_delegate_type: Literal["sync", "async", "runtime"] = "sync"
 
 
 class ExpertHarnessSpec(_ExpertSpecModel):

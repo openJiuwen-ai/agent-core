@@ -90,6 +90,41 @@ class TestTaskTool(unittest.IsolatedAsyncioTestCase):
             ),
         )
 
+    async def test_invoke_uses_invoke_subagent_seam(self) -> None:
+        class FakeSubAgent:
+            def __init__(self):
+                self.card = AgentCard(name="test_agent", description="test", id="test_id")
+
+            async def invoke(self, inputs: dict[str, str]) -> dict[str, str]:
+                return {"output": "done"}
+
+        code_spec = SubAgentConfig(
+            agent_card=AgentCard(name="code", description="code subagent"),
+            system_prompt="sub",
+        )
+        parent_agent = DeepAgent(AgentCard(name="parent", description="test"))
+        parent_agent.configure(
+            DeepAgentConfig(
+                system_prompt="parent",
+                subagents=[code_spec],
+                tools=[],
+                mcps=[],
+                model=None,
+                skills=[],
+            )
+        )
+        card = ToolCard(id="task_tool_seam", name="task_tool", description="test")
+        tool = TaskTool(card=card, parent_agent=parent_agent)
+        session = Session(session_id="parent_session")
+        with patch.object(parent_agent, "create_subagent", return_value=FakeSubAgent()), \
+             patch.object(tool, "_invoke_subagent", wraps=tool._invoke_subagent) as seam:
+            result = await tool.invoke(
+                {"subagent_type": "code", "task_description": "run task"},
+                session=session,
+            )
+        seam.assert_awaited_once()
+        self.assertTrue(result.success)
+
     async def test_repeated_concurrent_calls_get_isolated_execution_subjects(self) -> None:
         observed_subjects = []
 

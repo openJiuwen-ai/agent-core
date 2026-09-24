@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
-from typing import TYPE_CHECKING, Any, AsyncIterator, List, Optional
+from typing import TYPE_CHECKING, Any, Collection, AsyncIterator, List, Optional
 
 
 if TYPE_CHECKING:
@@ -25,6 +25,10 @@ from openjiuwen.harness.execution_subject import (
 from openjiuwen.harness.kv_cache import kv_cache_hooks
 from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
+from openjiuwen.harness.tools.subagent.type_aliases import (
+    canonicalize_subagent_type,
+    subagent_type_allowed,
+)
 try:
     from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging import (
         browser_agent_log_info,
@@ -95,6 +99,7 @@ class TaskTool(Tool):
         card: ToolCard,
         parent_agent: "DeepAgent",
         language: str = "cn",
+        allowed_subagent_types: Collection[str] | None = None,
     ):
         """Initialize TaskTool.
 
@@ -103,11 +108,29 @@ class TaskTool(Tool):
             parent_agent: Parent DeepAgent instance used to clone config
                 and create subagents.
             language: Language for prompts ('cn' or 'en').
+            allowed_subagent_types: Optional restriction on which configured
+                subagents may use synchronous delegation.
         """
         super().__init__(card)
         self.parent_agent = parent_agent
         self.language = language
         self._pending_subagents: dict[str, tuple[Any, bool]] = {}
+        self.set_allowed_subagent_types(allowed_subagent_types)
+
+    def set_allowed_subagent_types(
+        self,
+        allowed_subagent_types: Collection[str] | None,
+    ) -> None:
+        """Restrict which configured subagents may use synchronous delegation."""
+        self._allowed_subagent_types = (
+            None
+            if allowed_subagent_types is None
+            else frozenset(
+                str(name).strip()
+                for name in allowed_subagent_types
+                if str(name).strip()
+            )
+        )
 
     @staticmethod
     def _build_sub_session_id(
@@ -165,6 +188,17 @@ class TaskTool(Tool):
                 reason="Both 'subagent_type' and 'task' are required",
             )
 
+        normalized_type = str(subagent_type).strip()
+        if not subagent_type_allowed(normalized_type, self._allowed_subagent_types):
+            raise build_error(
+                StatusCode.TOOL_TASK_TOOL_INVOKED,
+                reason=(
+                    f"Subagent type '{normalized_type}' is not available through "
+                    "task_tool"
+                ),
+            )
+        create_type = canonicalize_subagent_type(normalized_type)
+
         browser_capabilities: Optional[List[str]] = None
         if str(subagent_type) == "browser_agent":
             raw_capabilities = inputs.get("browser_capabilities")
@@ -205,13 +239,13 @@ class TaskTool(Tool):
             try:
                 if browser_capabilities is None:
                     subagent = self.parent_agent.create_subagent(
-                        subagent_type,
+                        create_type,
                         sub_session_id,
                         **create_kwargs,
                     )
                 else:
                     subagent = self.parent_agent.create_subagent(
-                        subagent_type,
+                        create_type,
                         sub_session_id,
                         browser_capabilities=browser_capabilities,
                         **create_kwargs,
@@ -285,7 +319,12 @@ class TaskTool(Tool):
                 }
                 if affinity_enabled:
                     subagent_inputs["parent_session_id"] = parent_session_id
-                result = await subagent.invoke(subagent_inputs)
+                result = await self._invoke_subagent(
+                    subagent,
+                    subagent_inputs,
+                    parent_session_id=parent_session_id,
+                    session=parent_session,
+                )
                 succeeded = True
                 if (
                     isinstance(result, dict)
@@ -320,6 +359,19 @@ class TaskTool(Tool):
                     except Exception as cleanup_error:
                         logger.warning("[TaskTool] KV-cache cleanup failed: %s", cleanup_error)
 
+    async def _invoke_subagent(
+        self,
+        subagent: Any,
+        subagent_inputs: dict[str, Any],
+        *,
+        parent_session_id: str,
+        session: Session | None = None,
+    ) -> Any:
+        """Narrow dispatch seam for host-side tracing without replacing TaskTool."""
+        del parent_session_id
+        del session
+        return await subagent.invoke(subagent_inputs)
+
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass
 
@@ -329,6 +381,7 @@ def create_task_tool(
     available_agents: str,
     language: str = "cn",
     agent_id: Optional[str] = None,
+    allowed_subagent_types: Collection[str] | None = None,
 ) -> List[Tool]:
     """Create TaskTool instance for the given parent agent.
 
@@ -337,6 +390,8 @@ def create_task_tool(
         available_agents: Formatted string describing available subagent types.
         language: Language for tool parameters ('cn' or 'en').
         agent_id: Optional agent ID for unique tool ID.
+        allowed_subagent_types: Optional restriction on which configured
+            subagents may use this synchronous task tool.
 
     Returns:
         List containing a single TaskTool instance.
@@ -352,7 +407,14 @@ def create_task_tool(
     # 豁免 agent-core 默认 300s tool-call 超时，改由子代理自身 completion_timeout 兜底。
     card.properties["resilience"] = {"timeout_s": None}
 
-    return [TaskTool(card=card, parent_agent=parent_agent, language=language)]
+    return [
+        TaskTool(
+            card=card,
+            parent_agent=parent_agent,
+            language=language,
+            allowed_subagent_types=allowed_subagent_types,
+        )
+    ]
 
 
 __all__ = [

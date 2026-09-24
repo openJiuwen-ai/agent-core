@@ -599,10 +599,12 @@ async def _put_event(
     service_id: str,
     run_id: str,
     payload: FetchBatch | None,
+    *,
+    timeout: float = 2,
 ) -> None:
     completion = asyncio.get_running_loop().create_future()
     await queue.put((tag, service_id, run_id, payload, completion))
-    await asyncio.wait_for(asyncio.shield(completion), timeout=2)
+    await asyncio.wait_for(asyncio.shield(completion), timeout=timeout)
 
 
 async def _submit_run(
@@ -610,10 +612,11 @@ async def _submit_run(
     service_id: str,
     run_id: str,
     *batches: FetchBatch,
+    timeout: float = 2,
 ) -> None:
     for batch in batches:
-        await _put_event(queue, "batch", service_id, run_id, batch)
-    await _put_event(queue, "finish", service_id, run_id, None)
+        await _put_event(queue, "batch", service_id, run_id, batch, timeout=timeout)
+    await _put_event(queue, "finish", service_id, run_id, None, timeout=timeout)
 
 
 async def _cancel_consumer_twice_while_io_is_blocked(
