@@ -734,9 +734,10 @@ class AgentConfigurator:
                 project_dir=member_project_dir,
             )
         # Swarmflow worker-model resolver (leader + enable_swarmflow only). A
-        # positional pool lookup by ``agent(model=...)`` name hint; None when the
-        # team spec is absent so the worker falls back to the leader's model. The
-        # leader-only async ``swarmflow`` tool is gated on this being non-None.
+        # positional pool lookup by ``agent(model=...)`` name hint; no hint
+        # resolves to None so the worker falls back to the leader's model, but
+        # an explicit name that misses the pool raises (no silent downgrade).
+        # The leader-only async ``swarmflow`` tool is gated on this being non-None.
         swarmflow_model_resolver: Optional[Callable[[str], Any]] = None
         swarmflow_worker_base_spec = None
         swarmflow_human_base_spec = None
@@ -750,14 +751,24 @@ class AgentConfigurator:
 
                 Returns a model *config* (not a built ``Model``): swarmflow workers
                 go through the spec build path, where ``DeepAgentSpec.model`` is a
-                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
-                the worker base spec's own model.
-                """
-                if _spec is None:
-                    return None
-                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+                ``TeamModelConfig`` resolved at construction. ``None`` (no hint)
+                falls back to the worker base spec's own model.
 
-                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+                An explicit name that does not resolve RAISES instead of falling
+                back: a typo'd model would otherwise silently run on the default
+                model while the UI keeps showing the requested name.
+                """
+                resolved = None
+                if _spec is not None:
+                    from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                    resolved = resolve_member_model(_spec, model_name=model_name, model_index=None)
+                if resolved is None and model_name:
+                    raise ValueError(
+                        f"swarmflow model {model_name!r} not found in the team model pool; "
+                        "an explicitly requested model never falls back to the default"
+                    )
+                return resolved
 
             # Workers are "a teammate without team tools": derive each worker from
             # the team's teammate spec (or the leader spec when no teammate exists).
