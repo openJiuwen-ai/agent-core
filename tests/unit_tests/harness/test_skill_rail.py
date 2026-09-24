@@ -732,8 +732,13 @@ def test_warmup_process_skill_index_malformed_yaml_does_not_abort(tmp_path: Path
     assert str(bad_dir.resolve()) not in _PROCESS_SKILL_INDEX
 
 
-def test_warmup_process_skill_index_without_frontmatter_fence(tmp_path: Path):
-    """A SKILL.md with no ``---`` is not a skill and is not indexed."""
+def test_warmup_process_skill_index_fallback_without_frontmatter(tmp_path: Path):
+    """No-frontmatter SKILL.md with body still indexes: name ← dir, description ← heading.
+
+    Regression for the "skill confusion" incident: a user-imported skill whose
+    SKILL.md lacked frontmatter was silently invisible to the agent (and to
+    ``skill_tool``), so the model substituted a semantically similar skill.
+    """
     from openjiuwen.harness.rails.skills.skill_use_rail import (
         _PROCESS_SKILL_INDEX,
         warmup_process_skill_index,
@@ -749,9 +754,154 @@ def test_warmup_process_skill_index_without_frontmatter_fence(tmp_path: Path):
     )
 
     stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["filled"] == 1
+    assert stats["failed"] == 0
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "plain-skill"
+    assert skill.description == "Plain skill"
+
+
+def test_warmup_process_skill_index_fallback_name_only_frontmatter(tmp_path: Path):
+    """Frontmatter with only ``name``: name kept, description falls back to body heading."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "name-only-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: my-name\n---\n\n# Body Heading\n",
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["failed"] == 0
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "my-name"
+    assert skill.description == "Body Heading"
+
+
+def test_warmup_process_skill_index_fallback_description_only_frontmatter(tmp_path: Path):
+    """Frontmatter with only ``description``: description kept, name falls back to dir."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "desc-only-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\ndescription: From frontmatter\n---\n\n# Heading\n",
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["failed"] == 0
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "desc-only-skill"
+    assert skill.description == "From frontmatter"
+
+
+def test_warmup_process_skill_index_fallback_description_truncates_and_single_lines(
+    tmp_path: Path,
+):
+    """Fallback description is single-lined and capped at 120 chars."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "long-line-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    long_line = "很长的技能描述" * 30  # 180 chars, exceeds the 120 cap
+    (skill_dir / "SKILL.md").write_text(
+        long_line + "\nsecond line must not leak\n",
+        encoding="utf-8",
+    )
+
+    warmup_process_skill_index(str(skills_root))
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.description == long_line[:120]
+    assert "second line" not in skill.description
+    assert "\n" not in skill.description
+
+
+def test_warmup_process_skill_index_empty_body_still_skipped_and_counted(tmp_path: Path):
+    """No frontmatter and blank body: still skipped, but now counted in stats['failed']."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "blank-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text("   \n\n", encoding="utf-8")
+
+    stats = warmup_process_skill_index(str(skills_root))
     assert stats["kept"] == 0
     assert stats["filled"] == 0
+    assert stats["failed"] == 1
     assert str(skill_dir.resolve()) not in _PROCESS_SKILL_INDEX
+
+
+def test_warmup_process_skill_index_fallback_strips_utf8_bom_fence(tmp_path: Path):
+    """UTF-8 BOM before a frontmatter fence must not corrupt the fallback description."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "bom-skill"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "\ufeff---\nname: shuo-ren-hua\n---\n\n# 说人话使用指南\n",
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["failed"] == 0
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "shuo-ren-hua"
+    assert skill.description == "说人话使用指南"
+
+
+def test_warmup_process_skill_index_fallback_strips_utf8_bom_plain_body(tmp_path: Path):
+    """UTF-8 BOM before plain body: description has no BOM prefix."""
+    from openjiuwen.harness.rails.skills.skill_use_rail import (
+        _PROCESS_SKILL_INDEX,
+        warmup_process_skill_index,
+    )
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skill_dir = skills_root / "bom-plain"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        "\ufeff# 说人话使用指南\n\n正文内容。\n",
+        encoding="utf-8",
+    )
+
+    stats = warmup_process_skill_index(str(skills_root))
+    assert stats["kept"] == 1
+    assert stats["failed"] == 0
+    skill = _PROCESS_SKILL_INDEX[str(skill_dir.resolve())][1]
+    assert skill.name == "bom-plain"
+    assert skill.description == "说人话使用指南"
 
 
 def test_warmup_process_skill_index_prefers_frontmatter_name(tmp_path: Path):
@@ -828,6 +978,99 @@ async def test_skill_rail_load_description_frontmatter_only(tmp_path: Path, monk
         AgentCallbackContext(agent=None, inputs=None, session=None)
     )
     assert skill_rail.skills[0].description == "Parse invoice pdf files"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_fallback_without_frontmatter_indexes_skill(tmp_path: Path):
+    """Rail path (session invoke) indexes no-frontmatter skills like warmup does.
+
+    The fallback skill must be visible in ``get_skills_for_session`` under its
+    directory name so that ``skill_tool(skill_name=<dir name>)`` resolves it.
+    """
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    _write_skill(skills_root, "xlsx-writer", "Write xlsx reports")
+    fallback_dir = skills_root / "shuo-ren-hua"
+    fallback_dir.mkdir(parents=True, exist_ok=True)
+    (fallback_dir / "SKILL.md").write_text(
+        "# 说人话使用指南\n\n把 AI 腔文本改写成口语表达。\n",
+        encoding="utf-8",
+    )
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+
+    await skill_rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+
+    assert _sorted_skill_names(skill_rail.skills) == ["shuo-ren-hua", "xlsx-writer"]
+    visible = {skill.name: skill for skill in skill_rail.get_skills_for_session(None)}
+    assert visible["shuo-ren-hua"].description == "说人话使用指南"
+
+
+@pytest.mark.asyncio
+async def test_skill_rail_failed_load_warns_and_counts(tmp_path: Path, monkeypatch):
+    """Load failures emit a WARNING with the path and a failed= counter in the refresh log."""
+    import openjiuwen.harness.rails.skills.skill_use_rail as rail_module
+
+    SkillUseRail.clear_process_skill_index()
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    blank_dir = skills_root / "blank-skill"
+    blank_dir.mkdir(parents=True, exist_ok=True)
+    (blank_dir / "SKILL.md").write_text("", encoding="utf-8")
+
+    messages: List[str] = []
+
+    class _RecordingLogger:
+        def debug(self, msg, *args, **kwargs):
+            pass
+
+        def info(self, msg, *args, **kwargs):
+            messages.append("INFO " + (msg % args if args else msg))
+
+        def warning(self, msg, *args, **kwargs):
+            messages.append("WARNING " + (msg % args if args else msg))
+
+        def error(self, msg, *args, **kwargs):
+            pass
+
+        def exception(self, msg, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(rail_module, "logger", _RecordingLogger())
+
+    sys_operation = _make_sys_operation(tmp_path)
+    skill_rail = SkillUseRail(
+        skills_dir=str(skills_root),
+        skill_mode="all",
+        include_tools=False,
+    )
+    skill_rail.set_workspace(Workspace(root_path=str(tmp_path)))
+    skill_rail.set_sys_operation(sys_operation)
+
+    await skill_rail.before_invoke(
+        AgentCallbackContext(agent=None, inputs=None, session=None)
+    )
+
+    assert skill_rail.skills == []
+    assert any(
+        message.startswith("WARNING [SkillUseRail] skip skill path=")
+        and "blank-skill" in message
+        for message in messages
+    )
+    assert any(
+        "filter_before_load done" in message and "failed=1" in message
+        for message in messages
+    )
 
 
 @pytest.mark.asyncio
