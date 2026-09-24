@@ -262,7 +262,8 @@ async def test_induce_parses_rules():
         model="m",
         policy=_POLICY,
         task_prompt="t",
-        traj_text="tr",
+        conversation_snippet="[user] t",
+        tool_call_chain="[Turn 1] assistant → grep({})",
         capabilities="- grep",
         existing_facts=[],
         existing_tips=[],
@@ -722,8 +723,20 @@ async def test_configure_and_unconfigure_ttse_evolution(tmp_path):
 async def test_induce_batch_parses_rules():
     llm = ScriptedLLM(lambda p: "[FACT] batch fact\n[TIP] When x: use grep to y" if "BATCH" in p else "NONE")
     group = [
-        {"task_id": "t1", "task_prompt": "q1", "traj_text": "tr1", "outcome": "success"},
-        {"task_id": "t2", "task_prompt": "q2", "traj_text": "tr2", "outcome": "fail"},
+        {
+            "task_id": "t1",
+            "task_prompt": "q1",
+            "conversation_snippet": "[user] q1",
+            "tool_call_chain": "tr1",
+            "outcome": "success",
+        },
+        {
+            "task_id": "t2",
+            "task_prompt": "q2",
+            "conversation_snippet": "[user] q2",
+            "tool_call_chain": "tr2",
+            "outcome": "fail",
+        },
     ]
     facts, tips = await induce_batch(
         llm=llm,

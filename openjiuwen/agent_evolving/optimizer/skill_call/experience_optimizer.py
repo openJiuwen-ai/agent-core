@@ -40,11 +40,13 @@ from openjiuwen.agent_evolving.optimizer.skill_call.templates import (
     SKILL_EXPERIENCE_GENERATE_PROMPT,
     TEAM_EXPERIENCE_GENERATE_PROMPT,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.conversation_snippet import (
+    build_conversation_snippet,
+)
 from openjiuwen.agent_evolving.optimizer.skill_call.tool_call_chain import build_tool_call_chain
 from openjiuwen.agent_evolving.protocols import EXPERIENCES_TARGET
 from openjiuwen.agent_evolving.signal.base import EvolutionSignal
 from openjiuwen.agent_evolving.signal.team import build_team_trajectory_summary
-from openjiuwen.agent_evolving.trajectory.messages import tool_call_name
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
 from openjiuwen.core.common.logging import logger
@@ -85,53 +87,6 @@ def _resolve_max_tokens(llm: Model) -> int | None:
     if _HUAWEI_MODELARTS_KEYWORD in api_base.lower():
         return _HUAWEI_MODELARTS_MAX_TOKENS
     return None
-
-
-def _build_conversation_snippet(
-    messages: List[dict],
-    max_messages: int = 30,
-    content_preview_chars: int = 300,
-    language: str = "cn",
-) -> str:
-    """Build compact dialogue snippet for LLM prompt context."""
-    if not messages:
-        return ""
-
-    def _extract_text(message: dict) -> str:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts = []
-            for block in content:
-                if isinstance(block, dict):
-                    parts.append(block.get("text", ""))
-                elif isinstance(block, str):
-                    parts.append(block)
-            return "\n".join(parts)
-        return str(content)
-
-    lines: List[str] = []
-    recent = messages[-max_messages:]
-    for i, message in enumerate(recent):
-        role = message.get("role", "unknown")
-        text = _extract_text(message).strip() or ("(无文本)" if language == "cn" else "(No text)")
-        budget = content_preview_chars * 2 if i >= len(recent) - 5 else content_preview_chars
-        if len(text) > budget:
-            orig_len = len(text)
-            text = text[:budget] + (
-                f"\n... [已截断，原始长度 {orig_len} 字符]"
-                if language == "cn"
-                else f"\n... [truncated, original {orig_len} chars]"
-            )
-        tool_calls = message.get("tool_calls")
-        if role == "assistant" and tool_calls:
-            names = [str(tool_call_name(tool_call) or "") for tool_call in tool_calls]
-            prefix = f"[assistant] (tool_calls: {', '.join(names)})\n  "
-        else:
-            prefix = f"[{role}] "
-        lines.append(prefix + text)
-    return "\n".join(lines)
 
 
 _SKILL_CONTENT_MAX_CHARS = 6000
@@ -526,7 +481,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
             ctx.messages,
             language=self._language,
         )
-        conversation_snippet = _build_conversation_snippet(ctx.messages, language=self._language)
+        conversation_snippet = build_conversation_snippet(ctx.messages, language=self._language)
         signals_json = json.dumps(
             [signal.to_dict() for signal in ctx.signals],
             ensure_ascii=False,
@@ -555,7 +510,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 ensure_ascii=False,
             ),
             "tool_call_chain": inputs["tool_call_chain"],
-            "conversation_snippet": _build_conversation_snippet(
+            "conversation_snippet": build_conversation_snippet(
                 ctx.messages,
                 max_messages=10,
                 content_preview_chars=100,
@@ -717,7 +672,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
                 skill_content=_summarize_skill_content(ctx.skill_content, max_chars=2500),
                 signals_json=json.dumps([signal.to_dict() for signal in ctx.signals], ensure_ascii=False),
                 tool_call_chain=inputs["tool_call_chain"],
-                conversation_snippet=_build_conversation_snippet(
+                conversation_snippet=build_conversation_snippet(
                     ctx.messages,
                     max_messages=10,
                     content_preview_chars=100,
@@ -902,7 +857,7 @@ class SkillExperienceOptimizer(BaseOptimizer):
         trajectory = ctx.trajectory
         if trajectory is not None:
             return build_team_trajectory_summary(trajectory)
-        return _build_conversation_snippet(ctx.messages, language=self._language)
+        return build_conversation_snippet(ctx.messages, language=self._language)
 
     async def retry_parse(
         self,

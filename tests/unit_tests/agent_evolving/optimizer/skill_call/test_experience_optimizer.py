@@ -24,10 +24,12 @@ from openjiuwen.agent_evolving.optimizer.skill_call.experience_draft_parser impo
     parse_experience_draft,
     parse_experience_drafts_with_error,
 )
+from openjiuwen.agent_evolving.optimizer.skill_call.conversation_snippet import (
+    build_conversation_snippet,
+)
 from openjiuwen.agent_evolving.optimizer.skill_call.experience_optimizer import (
     SkillExperienceOptimizer,
     _build_context,
-    _build_conversation_snippet,
     _extract_json,
     _extract_json_with_error,
     _filter_analyzer_candidates,
@@ -178,7 +180,7 @@ class TestConversationSnippet:
                 "tool_calls": [{"name": "read_file"}, {"name": "bash"}],
             },
         ]
-        snippet = _build_conversation_snippet(messages, language="cn")
+        snippet = build_conversation_snippet(messages, language="cn")
         assert "[user] line1\nline2" in snippet
         assert "(tool_calls: read_file, bash)" in snippet
         assert "无文本" in snippet
@@ -186,7 +188,7 @@ class TestConversationSnippet:
     @staticmethod
     def test_build_conversation_snippet_limits_messages():
         messages = [{"role": "user", "content": f"m{i}"} for i in range(5)]
-        snippet = _build_conversation_snippet(messages, max_messages=2, language="en")
+        snippet = build_conversation_snippet(messages, max_messages=2, language="en")
         assert "[user] m0" not in snippet
         assert "[user] m3" in snippet
         assert "[user] m4" in snippet
@@ -1061,14 +1063,14 @@ class TestConversationSnippetTruncation:
     @staticmethod
     def test_long_content_gets_truncated():
         messages = [{"role": "user", "content": "x" * 1000}]
-        snippet = _build_conversation_snippet(messages, content_preview_chars=50, language="en")
+        snippet = build_conversation_snippet(messages, content_preview_chars=50, language="en")
         assert "truncated" in snippet
         assert len(snippet) < 1000
 
     @staticmethod
     def test_recency_bias_last_messages_get_more_budget():
         messages = [{"role": "user", "content": "x" * 400} for _ in range(10)]
-        snippet = _build_conversation_snippet(
+        snippet = build_conversation_snippet(
             messages,
             content_preview_chars=200,
             language="cn",
