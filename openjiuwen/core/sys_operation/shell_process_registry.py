@@ -1,4 +1,4 @@
-﻿# coding: utf-8
+# coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
 """Track in-flight shell subprocesses so callers can kill them on user interrupt."""
@@ -60,6 +60,7 @@ def resolve_shell_session_id() -> str | None:
     trace = None
     try:
         from openjiuwen.core.common.logging.utils import get_session_id
+
         trace = (get_session_id() or "").strip() or None
     except ImportError:
         trace = None
@@ -119,10 +120,7 @@ class ShellProcessRegistry:
             return 0
         prefix = f"{sid}_"
         with self._lock:
-            matching_keys = [
-                key for key in list(self._processes)
-                if key == sid or key.startswith(prefix)
-            ]
+            matching_keys = [key for key in list(self._processes) if key == sid or key.startswith(prefix)]
             for key in matching_keys:
                 self._cancelled_sessions.add(key)
         killed = 0
@@ -248,7 +246,5 @@ def terminate_shell_process(proc: ProcessHandle) -> bool:
         try:
             proc.wait(timeout=1)
         except subprocess.TimeoutExpired as e:
-            sys_operation_logger.warning(
-                f"Timeout expired waiting for shell process {proc.pid} termination: {e}"
-            )
+            sys_operation_logger.warning(f"Timeout expired waiting for shell process {proc.pid} termination: {e}")
     return True
