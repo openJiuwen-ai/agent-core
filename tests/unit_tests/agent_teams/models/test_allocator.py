@@ -1,4 +1,5 @@
 # coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Unit tests for model allocator behavior.
 
 Covers the four shipped strategies (``RoundRobinModelAllocator``,
@@ -1438,6 +1439,7 @@ def _make_intelli_router_config(
                 api_key="sk-3",
                 api_base="https://b.test",
                 id="smart-1",
+                provider="openai",
             ),
         ],
         model_names=model_names,
@@ -1448,13 +1450,13 @@ def _make_intelli_router_config(
 def test_intelli_router_resolved_names_default_to_wildcard_then_models():
     """No model_names → "*" first, then each distinct deployment name in order."""
     cfg = _make_intelli_router_config()
-    assert cfg.resolved_model_names() == ["*", "fast", "smart"]
+    assert cfg.resolved_model_names() == ["*"]
 
 
 def test_intelli_router_to_pool_entries_one_per_name_all_intelli_provider():
     cfg = _make_intelli_router_config()
     entries = cfg.to_pool_entries()
-    assert [e.model_name for e in entries] == ["*", "fast", "smart"]
+    assert [e.model_name for e in entries] == ["*"]
     assert {e.api_provider for e in entries} == {INTELLI_ROUTER_PROVIDER}
     # Credentials live per-deployment, never on the entry itself.
     assert {e.api_key for e in entries} == {""}
@@ -1465,14 +1467,14 @@ def test_intelli_router_every_entry_carries_full_deployment_list():
     """Availability is the router's job, so each entry sees every deployment."""
     cfg = _make_intelli_router_config()
     for entry in cfg.to_pool_entries():
-        deployments = entry.metadata["client"]["intelli_router_deployments"]
-        assert [d["id"] for d in deployments] == ["fast-1", "fast-2", "smart-1"]
+        deployments = entry.metadata["client"]["intelli_router"]["deployments"]
+        assert [d["route_id"] for d in deployments] == ["fast-1", "fast-2", "smart-1"]
 
 
 def test_intelli_router_deployment_dict_omits_unset_optionals():
     """Unset optionals are omitted so the client applies its own fallbacks."""
     cfg = _make_intelli_router_config()
-    smart = cfg.to_pool_entries()[0].metadata["client"]["intelli_router_deployments"][2]
+    smart = cfg.to_pool_entries()[0].metadata["client"]["intelli_router"]["deployments"][2]
     assert smart["provider"] == "openai"  # documented default
     assert "verify_ssl" not in smart  # falls back to the router-level value
     assert "tpm" not in smart
@@ -1487,6 +1489,7 @@ def test_intelli_router_deployment_dict_keeps_set_optionals():
                 api_key="sk-1",
                 api_base="https://a.test",
                 id="d1",
+                provider="openai",
                 tpm=1000,
                 rpm=60,
                 timeout=12.5,
@@ -1495,17 +1498,21 @@ def test_intelli_router_deployment_dict_keeps_set_optionals():
             )
         ]
     )
-    dep = cfg.to_pool_entries()[0].metadata["client"]["intelli_router_deployments"][0]
+    dep = cfg.to_pool_entries()[0].metadata["client"]["intelli_router"]["deployments"][0]
     assert dep["tpm"] == 1000
     assert dep["rpm"] == 60
     assert dep["timeout"] == 12.5
     assert dep["verify_ssl"] is False
-    assert dep["tags"] == ["primary"]
+    assert dep["fallback_tag"] == "primary"
 
 
 def test_intelli_router_router_knobs_reach_client_metadata():
     cfg = IntelliRouterConfig(
-        deployments=[IntelliRouterDeployment(model_name="m", api_key="k", api_base="https://a.test")],
+        deployments=[
+            IntelliRouterDeployment(
+                model_name="m", api_key="k", api_base="https://a.test", provider="openai"
+            )
+        ],
         strategy="adaptive",
         num_retries=7,
         timeout=42.0,
@@ -1514,11 +1521,12 @@ def test_intelli_router_router_knobs_reach_client_metadata():
         verify_ssl=False,
     )
     client = cfg.to_pool_entries()[0].metadata["client"]
-    assert client["intelli_router_strategy"] == "adaptive"
-    assert client["intelli_router_num_retries"] == 7
-    assert client["intelli_router_timeout"] == 42.0
-    assert client["intelli_router_strategy_kwargs"] == {"w_health": 1.0}
-    assert client["intelli_router_enable_health_check"] is True
+    router = client["intelli_router"]
+    assert router["strategy"] == "adaptive"
+    assert router["num_retries"] == 7
+    assert router["timeout"] == 42.0
+    assert router["strategy_kwargs"] == {"w_health": 1.0}
+    assert router["enable_health_check"] is True
     assert client["verify_ssl"] is False
 
 
@@ -1526,7 +1534,7 @@ def test_intelli_router_generated_keys_win_over_metadata_client():
     """Generated intelli_router_* keys override same-named metadata keys."""
     cfg = _make_intelli_router_config(metadata={"client": {"intelli_router_strategy": "ignored", "timeout": 99}})
     client = cfg.to_pool_entries()[0].metadata["client"]
-    assert client["intelli_router_strategy"] == "simple-shuffle"
+    assert client["intelli_router"]["strategy"] == "simple-shuffle"
     assert client["timeout"] == 99  # untouched passthrough
 
 
@@ -1534,27 +1542,26 @@ def test_intelli_router_metadata_is_isolated_per_entry():
     cfg = _make_intelli_router_config(metadata={"client": {"verify_ssl": False}, "note": "x"})
     entries = cfg.to_pool_entries()
     entries[0].metadata["note"] = "mutated"
-    assert entries[1].metadata["note"] == "x"
+    assert cfg.to_pool_entries()[0].metadata["note"] == "x"
 
 
 def test_intelli_router_explicit_model_names_preserved_in_order():
-    cfg = _make_intelli_router_config(model_names=["smart", "*"])
-    assert cfg.resolved_model_names() == ["smart", "*"]
-    assert [e.model_name for e in cfg.to_pool_entries()] == ["smart", "*"]
+    with pytest.raises(ValueError, match="exactly one logical"):
+        _make_intelli_router_config(model_names=["smart", "*"])
 
 
 def test_intelli_router_rejects_unserved_model_name():
-    with pytest.raises(ValueError, match="unserved"):
+    with pytest.raises(ValueError, match="exactly one logical"):
         _make_intelli_router_config(model_names=["fast", "nope"])
 
 
 def test_intelli_router_rejects_duplicate_model_names():
-    with pytest.raises(ValueError, match="unique"):
+    with pytest.raises(ValueError, match="exactly one logical"):
         _make_intelli_router_config(model_names=["fast", "fast"])
 
 
 def test_intelli_router_rejects_blank_model_name():
-    with pytest.raises(ValueError, match="non-empty"):
+    with pytest.raises(ValueError, match="exactly one logical"):
         _make_intelli_router_config(model_names=["fast", "  "])
 
 
@@ -1568,8 +1575,8 @@ def test_intelli_router_allocator_name_lookup_and_default():
     alloc = IntelliRouterAllocator(cfg.to_pool_entries())
     # No hint → first declared name, i.e. unified routing.
     assert alloc.allocate().entry.model_name == "*"
-    assert alloc.allocate(model_name="smart").entry.model_name == "smart"
-    assert alloc.allocate(model_name="smart").group_index == 0
+    assert alloc.allocate(model_name="").entry.model_name == "*"
+    assert alloc.allocate(model_name="smart") is None
     # Unknown name must not silently route elsewhere.
     assert alloc.allocate(model_name="missing") is None
 
@@ -1585,11 +1592,11 @@ def test_intelli_router_allocator_rejects_wrong_provider():
     """A hand-written pool naming the wrong provider fails at construction."""
     pool = [
         ModelPoolEntry(
-            model_name="m",
+            model_name="*",
             api_key="k",
             api_base_url="https://a.test",
             api_provider="OpenAI",
-            metadata={"client": {"intelli_router_deployments": [{"model_name": "m"}]}},
+            metadata={"client": {"intelli_router": {"deployments": [{"model_name": "m", "provider": "openai"}]}}},
         )
     ]
     with pytest.raises(ValueError, match="api_provider='intelli_router'"):
@@ -1599,13 +1606,13 @@ def test_intelli_router_allocator_rejects_wrong_provider():
 def test_intelli_router_allocator_rejects_missing_deployments():
     pool = [
         ModelPoolEntry(
-            model_name="m",
+            model_name="*",
             api_key="",
             api_base_url="",
             api_provider=INTELLI_ROUTER_PROVIDER,
         )
     ]
-    with pytest.raises(ValueError, match="intelli_router_deployments"):
+    with pytest.raises(ValueError, match="deployments.*list"):
         IntelliRouterAllocator(pool)
 
 
@@ -1638,13 +1645,12 @@ def test_build_model_allocator_dispatches_intelli_router():
 def test_intelli_router_entry_materializes_intelli_router_client_config():
     """Materialization must reach IntelliRouterModelClient, deployments intact."""
     cfg = _make_intelli_router_config()
-    entry = cfg.to_pool_entries()[1]  # "fast"
+    entry = cfg.to_pool_entries()[0]
     tmc = entry.to_team_model_config()
     client_config = tmc.model_client_config
     assert client_config.client_provider == INTELLI_ROUTER_PROVIDER
-    assert tmc.model_request_config.model_name == "fast"
-    extra = client_config.__pydantic_extra__
-    assert [d["id"] for d in extra["intelli_router_deployments"]] == ["fast-1", "fast-2", "smart-1"]
+    assert tmc.model_request_config.model_name == "*"
+    assert [d.route_id for d in client_config.intelli_router.deployments] == ["fast-1", "fast-2", "smart-1"]
 
 
 def test_resolve_member_model_reads_intelli_router_entry():
@@ -1655,8 +1661,8 @@ def test_resolve_member_model_reads_intelli_router_entry():
         model_pool=cfg.to_pool_entries(),
         model_pool_strategy="intelli_router",
     )
-    resolved = resolve_member_model(team_spec, model_name="smart", model_index=0)
-    assert resolved.model_request_config.model_name == "smart"
+    resolved = resolve_member_model(team_spec, model_name="*", model_index=0)
+    assert resolved.model_request_config.model_name == "*"
     assert resolved.model_client_config.client_provider == INTELLI_ROUTER_PROVIDER
 
 
@@ -1667,7 +1673,13 @@ def test_intelli_router_credential_rotation_breaks_model_id_inheritance():
     current = _make_intelli_router_config().to_pool_entries()
     rotated_cfg = _make_intelli_router_config(
         deployments=[
-            IntelliRouterDeployment(model_name="fast", api_key="sk-ROTATED", api_base="https://a.test", id="fast-1"),
+            IntelliRouterDeployment(
+                model_name="fast",
+                api_key="sk-ROTATED",
+                api_base="https://a.test",
+                id="fast-1",
+                provider="openai",
+            ),
         ]
     )
     merged = inherit_pool_ids(current, rotated_cfg.to_pool_entries())
@@ -1707,7 +1719,7 @@ def test_build_intelli_router_expands_pool_and_forces_strategy():
     agent = spec.build()
     team_spec = agent._configurator.ctx.team_spec
     assert team_spec.model_pool_strategy == "intelli_router"
-    assert [e.model_name for e in team_spec.model_pool] == ["*", "fast", "smart"]
+    assert [e.model_name for e in team_spec.model_pool] == ["*"]
 
 
 @_requires_intelli_router
@@ -1734,10 +1746,10 @@ def test_build_intelli_router_honors_explicit_leader_model_name():
         team_name="t",
         spawn_mode="inprocess",
         model_intelli_router=_make_intelli_router_config(),
-        leader=LeaderSpec(member_name="leader", model_name="smart"),
+        leader=LeaderSpec(member_name="leader", model_name="*"),
     )
     agent = spec.build()
-    assert agent._configurator.ctx.member_model.model_request_config.model_name == "smart"
+    assert agent._configurator.ctx.member_model.model_request_config.model_name == "*"
 
 
 def test_build_intelli_router_rejects_unknown_leader_model_name():
@@ -1756,7 +1768,7 @@ def test_build_intelli_router_rejects_unknown_leader_model_name():
 
 
 def test_intelli_router_all_entries_share_one_router_cache_key():
-    """Every entry must produce the SAME router cache key.
+    """The single logical entry carries one shared router snapshot.
 
     This is the load-bearing invariant behind handing each entry the full
     deployment list. ``IntelliRouterModelClient`` caches one
@@ -1775,7 +1787,8 @@ def test_intelli_router_all_entries_share_one_router_cache_key():
 
     cfg = _make_intelli_router_config()
     entries = cfg.to_pool_entries()
-    assert len(entries) > 1
+    assert len(entries) == 1
+    assert entries[0].model_name == "*"
 
     def _router_key_inputs(entry: ModelPoolEntry) -> str:
         # Mirrors IntelliRouterModelClient._make_router_key: only these
@@ -1799,12 +1812,9 @@ def test_intelli_router_all_entries_share_one_router_cache_key():
         )
 
     keys = {_router_key_inputs(e) for e in entries}
-    assert len(keys) == 1, "entries disagree on router cache key -> routers would split per member"
+    assert len(keys) == 1
 
-    # The per-entry difference must live in the request config only.
+    # The Team-facing request is always the logical wildcard. Physical model
+    # names stay inside the deployment snapshot and are never allocator names.
     models = [e.to_team_model_config().model_request_config.model_name for e in entries]
-    assert models == ["*", "fast", "smart"]
-
-    # client_id is per-entry by design, and must NOT feed the router key.
-    client_ids = {e.to_team_model_config().model_client_config.client_id for e in entries}
-    assert len(client_ids) == len(entries)
+    assert models == ["*"]

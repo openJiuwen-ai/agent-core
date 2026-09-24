@@ -1748,6 +1748,88 @@ class TeamAgent(BaseAgent):
         spec.materialize_build_context()
         context = TeamRuntimeContext.model_validate(bucket["context"])
 
+        # A checkpoint contains the model pool that was active when the team
+        # was first built.  The runtime spec is assembled for the current
+        # request, and may carry a newly selected compiler-driven model group.
+        # Keep the conversational/session state from the checkpoint, but use
+        # the current model selection for all newly configured runtimes.
+        # Without this merge a cold recovery silently rebuilt the old
+        # by-model-name allocator even though the UI had selected a model
+        # group for the current request.
+        if runtime_spec is not None and runtime_spec.model_pool:
+            current_pool = list(runtime_spec.model_pool)
+            current_strategy = runtime_spec.model_pool_strategy
+            if context.team_spec is None:
+                raise ValueError(f"No team spec found for '{team_name}' recovery")
+            context.team_spec = context.team_spec.model_copy(
+                update={
+                    "model_pool": current_pool,
+                    "model_pool_strategy": current_strategy,
+                }
+            )
+            # ``TeamAgentSpec.model_pool`` is persisted again at the next
+            # lifecycle boundary.  Clear convenience inputs so the snapshot
+            # cannot contain two competing model sources.
+            spec.model_pool = current_pool
+            spec.model_pool_strategy = current_strategy
+            spec.model_router = None
+            spec.model_intelli_router = None
+            # ``ctx.member_model`` takes precedence over the per-agent model in
+            # AgentConfigurator. Re-materialize it from the current pool
+            # instead of retaining the checkpoint's old client.  Name-routed
+            # strategies need an explicit logical name; IntelliRouter always
+            # uses its single wildcard entry.
+            checkpoint_name = None
+            checkpoint_model = context.member_model
+            if checkpoint_model is not None and checkpoint_model.model_request_config is not None:
+                checkpoint_name = checkpoint_model.model_request_config.model_name
+            allocation_name = checkpoint_name
+            allocation = None
+            resolved_model = None
+            if current_strategy == "intelli_router":
+                allocation_name = "*"
+                spec.leader.model_name = "*"
+            elif current_strategy == "by_model_name" and current_pool:
+                from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+                allocation = (
+                    resolve_member_model(
+                        context.team_spec,
+                        model_name=allocation_name,
+                        model_index=0,
+                    )
+                    if allocation_name
+                    else None
+                )
+                if allocation is None:
+                    allocation_name = current_pool[0].model_name
+                    team_logger.warning(
+                        "[{}] checkpoint model {!r} is unavailable; falling back to pool model {!r}",
+                        team_name,
+                        checkpoint_name,
+                        allocation_name,
+                    )
+                spec.leader.model_name = allocation_name
+                resolved_model = resolve_member_model(
+                    context.team_spec,
+                    model_name=allocation_name,
+                    model_index=0,
+                )
+
+            if current_strategy == "intelli_router":
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(allocation_name) if allocator is not None else None
+            else:
+                from openjiuwen.agent_teams.models.allocator import build_model_allocator
+
+                allocator = build_model_allocator(spec, context.team_spec)
+                allocation = allocator.allocate(None) if allocator is not None else None
+            context.member_model = (
+                allocation.to_team_model_config() if allocation is not None else resolved_model
+            )
+
         agent_spec = spec.agents.get(context.role.value) or spec.agents["leader"]
         card_id = f"{team_name}_{context.member_name}" if context.member_name else "leader"
         card = agent_spec.card or AgentCard(

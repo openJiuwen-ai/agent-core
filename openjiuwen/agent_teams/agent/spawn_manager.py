@@ -384,8 +384,8 @@ class SpawnManager:
         fallback_model_ref = get_member_fallback_model_ref(teammate)
         member_model = None
         fallback_member_model = None
+        team_spec = self._configurator.team_spec
         if model_ref is not None:
-            team_spec = self._configurator.team_spec
             if team_spec is not None:
                 member_model = resolve_member_model(
                     team_spec,
@@ -393,13 +393,44 @@ class SpawnManager:
                     model_index=model_ref.model_index,
                 )
         if fallback_model_ref is not None:
-            team_spec = self._configurator.team_spec
             if team_spec is not None:
                 fallback_member_model = resolve_member_model(
                     team_spec,
                     model_name=fallback_model_ref.model_name,
                     model_index=fallback_model_ref.model_index,
                 )
+
+        persisted_model_missing = model_ref is not None and member_model is None
+        has_model_pool = team_spec is not None and bool(team_spec.model_pool)
+        if has_model_pool and persisted_model_missing:
+            first_entry = team_spec.model_pool[0]
+            member_model = resolve_member_model(
+                team_spec,
+                model_name=first_entry.model_name,
+                model_index=0,
+            )
+            team_logger.warning(
+                "[{}] persisted model for member {!r} is unavailable; "
+                "falling back to pool model {!r}",
+                team_spec.team_name,
+                member_name,
+                first_entry.model_name,
+            )
+        fallback_model_missing = fallback_model_ref is not None and fallback_member_model is None
+        if has_model_pool and fallback_model_missing:
+            first_entry = team_spec.model_pool[0]
+            fallback_member_model = resolve_member_model(
+                team_spec,
+                model_name=first_entry.model_name,
+                model_index=0,
+            )
+            team_logger.warning(
+                "[{}] persisted fallback model for member {!r} is unavailable; "
+                "falling back to pool model {!r}",
+                team_spec.team_name,
+                member_name,
+                first_entry.model_name,
+            )
 
         ctx = self._configurator.ctx
         # Role is persisted on the member row (``TeamMember.role``) so
@@ -419,6 +450,54 @@ class SpawnManager:
         # External-CLI members carry no DeepAgent: the backend registry says
         # which CLI adapter drives them, routing spawn to external_cli_spawn.
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
+        model_group_pool = (
+            team_backend.is_model_group_pool()
+            if hasattr(team_backend, "is_model_group_pool")
+            else False
+        )
+
+        # A member row created by the legacy by-model-name strategy stores a
+        # physical model name.  After the session switches to a compiler-driven
+        # model group, ordinary Team members must use the group's sole logical
+        # wildcard instead of falling through to their old per-agent model.
+        # Keep physical deployment restoration exclusive to external CLI
+        # members below.
+        if model_group_pool and not cli_agent and team_spec is not None:
+            member_model = resolve_member_model(
+                team_spec,
+                model_name="*",
+                model_index=0,
+            )
+            fallback_member_model = None
+
+        # Compiler-driven model groups keep a single logical ``*`` pool entry.
+        # External CLI members persist the real deployment model name, so cold
+        # recovery must resolve that name against the current deployment
+        # catalog instead of converting the logical IntelliRouter config into
+        # CLI credentials.
+        if cli_agent and model_group_pool and team_spec is not None:
+            from openjiuwen.agent_teams.tools.tool_member import _provider_filter_for_cli
+
+            provider_filter = _provider_filter_for_cli(cli_agent)
+            if model_ref is not None and model_ref.model_name != "*":
+                candidates = team_backend.resolve_cli_models(model_ref.model_name, provider_filter=provider_filter)
+                if not candidates:
+                    raise ValueError(
+                        f"model group deployment '{model_ref.model_name}' is unavailable or incompatible "
+                        f"with cli_agent '{cli_agent}' during recovery"
+                    )
+                member_model = candidates[0].to_team_model_config()
+            if fallback_model_ref is not None and fallback_model_ref.model_name != "*":
+                candidates = team_backend.resolve_cli_models(
+                    fallback_model_ref.model_name,
+                    provider_filter=provider_filter,
+                )
+                if not candidates:
+                    raise ValueError(
+                        f"fallback deployment '{fallback_model_ref.model_name}' is unavailable or incompatible "
+                        f"with cli_agent '{cli_agent}' during recovery"
+                    )
+                fallback_member_model = candidates[0].to_team_model_config()
 
         permissions_override = get_member_permissions_override(teammate)
         builtin = get_member_builtin_model(teammate)

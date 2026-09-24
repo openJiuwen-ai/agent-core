@@ -42,6 +42,7 @@ from openjiuwen.agent_teams.interaction.router import (
     parse_interact_str,
     resolve_targets,
 )
+from openjiuwen.agent_teams.models.pool import _entry_signature
 from openjiuwen.agent_teams.monitor import (
     TeamMonitor,
     create_monitor,
@@ -142,6 +143,45 @@ class TeamRuntimeManager:
                 session_id=pool_entry.current_session_id,
             )
             pool_entry = None
+
+        # A paused runtime can outlive the request that selected its model.
+        # If the newly assembled spec carries a different model pool/strategy,
+        # discard that paused Agent so dispatch takes the cold-recovery path
+        # and rebuilds it from the current model selection.  A running team is
+        # intentionally left alone; its request is rejected by the normal
+        # dispatch gate rather than being torn down mid-turn.
+        if (
+            pool_entry is not None
+            and pool_entry.state == RuntimeState.PAUSED
+        ):
+            # Lightweight/fake agents used by integrations may not expose a
+            # runtime context. In that case there is no model selection
+            # metadata to compare, so preserve the normal paused-resume path.
+            live_context = getattr(pool_entry.agent, "runtime_context", None)
+            live_team_spec = getattr(live_context, "team_spec", None)
+            if live_team_spec is None:
+                live_team_spec = getattr(pool_entry.agent, "spec", None)
+            if live_team_spec is None:
+                live_team_spec = spec
+            live_pool = list(live_team_spec.model_pool or []) if live_team_spec is not None else []
+            live_strategy = live_team_spec.model_pool_strategy if live_team_spec is not None else None
+            requested_pool = list(spec.model_pool or [])
+            requested_strategy = spec.model_pool_strategy
+            live_pool_signature = [_entry_signature(entry) for entry in live_pool]
+            requested_pool_signature = [_entry_signature(entry) for entry in requested_pool]
+            selection_changed = live_pool_signature != requested_pool_signature or (
+                (live_pool_signature or requested_pool_signature)
+                and live_strategy != requested_strategy
+            )
+            if selection_changed:
+                change_reason = "pool" if live_pool_signature != requested_pool_signature else "strategy"
+                team_logger.info(
+                    "activate: model %s changed for paused team {}; rebuilding runtime",
+                    change_reason,
+                    team_name,
+                )
+                await self.stop_team(team_name=team_name, session_id=target_session_id)
+                pool_entry = None
         team_in_session, team_in_db, team_db_state = await self._inspect_session(
             spec,
             team_session,

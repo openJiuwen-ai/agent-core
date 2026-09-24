@@ -28,7 +28,7 @@ from __future__ import annotations
 import copy
 import json
 import uuid
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -273,8 +273,16 @@ class IntelliRouterDeployment(BaseModel):
     """
     id: str | None = None
     """Stable deployment identifier surfaced in router stats and logs."""
-    provider: str = "openai"
-    """Upstream provider name interpreted by ``intelli_router``, not by openjiuwen."""
+    model_id: str | None = None
+    """Business model identifier from the compiler snapshot."""
+    provider: str
+    """Upstream provider name interpreted by ``intelli_router``; required."""
+    endpoint_profile: str | None = None
+    custom_headers: dict[str, str] | None = None
+    fallback_tag: str | None = None
+    model_description: str | None = None
+    request_defaults: dict[str, Any] = Field(default_factory=dict)
+    """Deployment-specific request defaults compiled by the model layer."""
     tpm: int | None = None
     """Tokens-per-minute budget used by rate-aware routing strategies."""
     rpm: int | None = None
@@ -298,10 +306,17 @@ class IntelliRouterDeployment(BaseModel):
             "api_key": self.api_key,
             "api_base": self.api_base,
             "provider": self.provider,
-            "tags": list(self.tags),
         }
+        if self.tags:
+            payload["fallback_tag"] = self.tags[0]
         optional = {
             "id": self.id,
+            "model_id": self.model_id,
+            "endpoint_profile": self.endpoint_profile,
+            "custom_headers": self.custom_headers,
+            "fallback_tag": self.fallback_tag,
+            "model_description": self.model_description,
+            "request_defaults": self.request_defaults or None,
             "tpm": self.tpm,
             "rpm": self.rpm,
             "timeout": self.timeout,
@@ -329,8 +344,8 @@ class IntelliRouterConfig(BaseModel):
     the router's job, not the allocator's.
 
     At ``TeamAgentSpec.build()`` time ``to_pool_entries`` expands this
-    into a flat ``model_pool`` (one entry per logical model name, each
-    carrying the full deployment list in ``metadata.client``) and
+    into one logical ``"*"`` entry carrying the complete deployment list in
+    ``metadata.client.intelli_router`` and
     ``model_pool_strategy`` is set to ``"intelli_router"``, so every
     downstream path (``resolve_member_model``, ``inherit_pool_ids``,
     ``update_model_pool``) keeps working against the flat pool view with
@@ -346,18 +361,7 @@ class IntelliRouterConfig(BaseModel):
     """Physical deployments the router may route to. Never empty — a
     router with nothing to route to would fail every request."""
     model_names: list[str] | None = None
-    """Logical model names offered to team members for allocation.
-
-    ``None`` (default) derives the list as ``"*"`` followed by each
-    distinct deployment ``model_name`` in declaration order, so members
-    can either take unified routing or pin a specific model.
-
-    When set explicitly, every name must be either ``"*"`` or the
-    ``model_name`` of a declared deployment — a name no deployment
-    serves would allocate a member a model that cannot be routed.
-    Order matters: the first name is the team default returned by
-    ``IntelliRouterAllocator.allocate()`` with no hint.
-    """
+    """Optional logical Team name; when set it must be exactly ``["*"]``."""
     strategy: str = "simple-shuffle"
     """Routing strategy name passed through to ``ReliableRouter``."""
     num_retries: int = 3
@@ -373,99 +377,63 @@ class IntelliRouterConfig(BaseModel):
     metadata: dict = Field(default_factory=dict)
     """Optional ``ModelPoolEntry.metadata`` payload copied into every
     expanded entry. Reserved ``client`` / ``request`` sub-keys apply as
-    documented on ``ModelPoolEntry.metadata``; the ``intelli_router_*``
-    keys this config generates are merged into ``client`` and win over
-    same-named keys declared here.
+    documented on ``ModelPoolEntry.metadata``. The generated structured
+    ``client.intelli_router`` snapshot and router-level ``verify_ssl`` win
+    over same-named values declared here; legacy flat ``intelli_router_*``
+    metadata is discarded rather than written beside the canonical snapshot.
     """
 
     @model_validator(mode="after")
     def _validate_model_names(self) -> "IntelliRouterConfig":
-        """Reject model names that are blank, duplicated, or unroutable.
-
-        A name no deployment serves (and that isn't the ``"*"`` wildcard)
-        would expand into a pool entry the router cannot resolve, so the
-        member allocated to it fails at request time rather than here.
-        """
+        """Expose exactly one logical Team model name."""
         if self.model_names is None:
             return self
-        if not self.model_names:
-            raise ValueError("IntelliRouterConfig.model_names must not be empty when set")
-        blanks = [i for i, name in enumerate(self.model_names) if not name or not name.strip()]
-        if blanks:
-            raise ValueError(
-                f"IntelliRouterConfig.model_names must contain non-empty strings; blank at indices: {blanks}",
-            )
-        if len(set(self.model_names)) != len(self.model_names):
-            duplicates = sorted({n for n in self.model_names if self.model_names.count(n) > 1})
-            raise ValueError(
-                f"IntelliRouterConfig.model_names must be unique; duplicates: {duplicates}",
-            )
-        served = {dep.model_name for dep in self.deployments}
-        unknown = [n for n in self.model_names if n != INTELLI_ROUTER_UNIFIED_MODEL and n not in served]
-        if unknown:
-            raise ValueError(
-                f"IntelliRouterConfig.model_names entries must be '{INTELLI_ROUTER_UNIFIED_MODEL}' or a declared "
-                f"deployment model_name; unserved: {unknown} (declared: {sorted(served)})",
-            )
+        if self.model_names != [INTELLI_ROUTER_UNIFIED_MODEL]:
+            raise ValueError("IntelliRouterConfig exposes exactly one logical Team model name: '*'")
         return self
 
     def resolved_model_names(self) -> list[str]:
-        """Return the logical model names this router offers, in order.
-
-        Falls back to ``"*"`` plus each distinct deployment model name
-        when ``model_names`` is unset. The first element is the team
-        default.
-        """
-        if self.model_names is not None:
-            return list(self.model_names)
-        names = [INTELLI_ROUTER_UNIFIED_MODEL]
-        for dep in self.deployments:
-            if dep.model_name not in names:
-                names.append(dep.model_name)
-        return names
+        """Return the sole logical Team model name."""
+        return [INTELLI_ROUTER_UNIFIED_MODEL]
 
     def _client_extra(self) -> dict:
-        """Build the ``intelli_router_*`` client kwargs for one pool entry."""
-        return {
-            "intelli_router_deployments": [dep.to_deployment_dict() for dep in self.deployments],
-            "intelli_router_strategy": self.strategy,
-            "intelli_router_num_retries": self.num_retries,
-            "intelli_router_timeout": self.timeout,
-            "intelli_router_strategy_kwargs": copy.deepcopy(self.strategy_kwargs),
-            "intelli_router_enable_health_check": self.enable_health_check,
-            "intelli_router_health_check_interval": self.health_check_interval,
-            "intelli_router_enable_observability": self.enable_observability,
-            "intelli_router_web_dashboard_port": self.web_dashboard_port,
+        """Build the canonical structured IntelliRouter client snapshot."""
+        deployments = []
+        for index, deployment in enumerate(self.deployments):
+            payload = deployment.to_deployment_dict()
+            route_id = payload.pop("id", None) or f"route_{index}"
+            tags = payload.get("tags", [])
+            if tags:
+                payload["fallback_tag"] = tags[0]
+            deployments.append({"route_id": route_id, **payload})
+        result = {
+            "intelli_router": {
+                "deployments": deployments,
+                "strategy": self.strategy,
+                "num_retries": self.num_retries,
+                "timeout": self.timeout,
+                "strategy_kwargs": copy.deepcopy(self.strategy_kwargs),
+                "enable_health_check": self.enable_health_check,
+                "health_check_interval": self.health_check_interval,
+                "enable_observability": self.enable_observability,
+                "web_dashboard_port": self.web_dashboard_port,
+            },
             "verify_ssl": self.verify_ssl,
         }
+        return result
 
     def to_pool_entries(self) -> list[ModelPoolEntry]:
-        """Expand the router into one ``ModelPoolEntry`` per logical model name.
+        """Expand into the single logical ``*`` Team model entry.
 
-        **Every entry carries the identical, complete deployment list.**
-        That looks redundant — each member is handed the whole fleet just
-        to ask for one model name — but it is exactly what makes the fleet
-        shared rather than duplicated:
+        The entry carries the complete deployment list. Physical deployment
+        names remain inside the structured client snapshot and are never
+        exposed to Team allocation:
 
-        ``IntelliRouterModelClient`` caches one ``ReliableRouter`` per
-        client-config key, and that key is derived from the deployment
-        list plus the router knobs, never from ``model_name`` or
-        ``client_id``. Identical deployments across entries therefore
-        collapse to a **single** router instance shared by every member,
-        which is what keeps failover state, health checks, and the
-        per-deployment tpm / rpm budgets global to the team.
-
-        Narrowing each entry to "just the deployments serving my model"
-        would be the intuitive optimization and is precisely the bug: the
-        keys would diverge, every member would build its own router, and
-        each would then count rpm / tpm on its own — a 4-member team
-        silently spending 4x its declared quota, with failover knowledge
-        never shared. ``test_intelli_router_all_entries_share_one_router_cache_key``
-        pins this down.
-
-        Members still differ where they should: the pinned ``model_name``
-        rides on ``ModelRequestConfig``, not on the client config, so the
-        per-member client wrapper is thin and the heavy machinery is not.
+        Every member receives this same logical entry, so the complete
+        deployment list and router knobs produce one shared
+        ``ReliableRouter`` cache key. Failover state, health checks, and
+        per-deployment tpm/rpm budgets therefore stay global to the team;
+        physical deployment names never become Team allocator entries.
 
         ``api_provider`` is fixed to ``"intelli_router"``, which is what
         routes materialization to ``IntelliRouterModelClient``. The entry's
@@ -473,28 +441,79 @@ class IntelliRouterConfig(BaseModel):
         per-deployment, and the foundation layer does not require
         top-level ones for this provider.
         """
-        client_extra = self._client_extra()
-        entries: list[ModelPoolEntry] = []
-        for name in self.resolved_model_names():
-            metadata = copy.deepcopy(self.metadata)
-            metadata["client"] = {**(metadata.get("client") or {}), **client_extra}
-            unified = name == INTELLI_ROUTER_UNIFIED_MODEL
-            description = (
-                f"IntelliRouter unified routing across {len(self.deployments)} deployment(s)"
-                if unified
-                else f"IntelliRouter routing pinned to model '{name}'"
-            )
-            entries.append(
-                ModelPoolEntry(
-                    model_name=name,
-                    api_key="",
-                    api_base_url="",
-                    api_provider=INTELLI_ROUTER_PROVIDER,
-                    description=description,
-                    metadata=metadata,
-                )
-            )
-        return entries
+        metadata = copy.deepcopy(self.metadata)
+        client_metadata = dict(metadata.get("client") or {})
+        for key in list(client_metadata):
+            if key.startswith("intelli_router_"):
+                client_metadata.pop(key)
+        metadata["client"] = {**client_metadata, **self._client_extra()}
+        return [ModelPoolEntry(
+            model_name=INTELLI_ROUTER_UNIFIED_MODEL,
+            api_key="",
+            api_base_url="",
+            api_provider=INTELLI_ROUTER_PROVIDER,
+            description=f"IntelliRouter unified routing across {len(self.deployments)} deployment(s)",
+            metadata=metadata,
+        )]
+
+
+def materialize_model_group(compiled: Any, selection: Any | None = None) -> list[ModelPoolEntry]:
+    """Materialize a compiler result as the canonical Team model-group pool.
+
+    A compiler-driven model group is intentionally represented by exactly one
+    logical ``"*"`` entry.  Physical deployments remain nested in the
+    structured ``metadata.client.intelli_router`` snapshot and are therefore
+    available to the Foundation router without being mistaken for Team
+    allocator endpoints.
+
+    ``compiled`` is duck-typed to keep this helper usable across package
+    boundaries; callers normally pass ``CompiledModelSelection`` and may pass
+    the corresponding ``ModelSelection`` for an additional identity check.
+    """
+    if compiled is None:
+        raise ValueError("compiled model selection is required")
+    selected_type = getattr(compiled, "selected_type", None)
+    selected_id = getattr(compiled, "selected_id", None)
+    if selection is not None:
+        if getattr(selection, "type", None) != selected_type or getattr(selection, "id", None) != selected_id:
+            raise ValueError("model selection does not match compiled selection")
+    if selected_type != "model_group":
+        raise ValueError("materialize_model_group requires selected_type='model_group'")
+    client = getattr(compiled, "model_client_config", None)
+    client_provider = getattr(client, "client_provider", "") if client is not None else ""
+    client_provider = getattr(client_provider, "value", client_provider)
+    if client is None or str(client_provider) != INTELLI_ROUTER_PROVIDER:
+        raise ValueError("model group must use client_provider='intelli_router'")
+    router = getattr(client, "intelli_router", None)
+    deployments = getattr(router, "deployments", None) if router is not None else None
+    if router is None or not deployments:
+        raise ValueError("model group IntelliRouter configuration must contain deployments")
+
+    router_dump = router.model_dump(mode="json", exclude_none=True) if hasattr(router, "model_dump") else dict(router)
+    request = getattr(compiled, "model_request_config", None)
+    request_dump = (
+        request.model_dump(mode="json", exclude_none=True, exclude_unset=True, by_alias=True)
+        if request is not None and hasattr(request, "model_dump")
+        else {}
+    )
+    # ``model`` is a logical Team field; the request model for a model group
+    # must stay unset so deployment-level defaults are not overwritten.
+    request_dump.pop("model", None)
+    request_dump.pop("model_name", None)
+    verify_ssl = getattr(client, "verify_ssl", None)
+    client_metadata = {"intelli_router": router_dump}
+    if verify_ssl is not None:
+        client_metadata["verify_ssl"] = verify_ssl
+    return [
+        ModelPoolEntry(
+            model_name=INTELLI_ROUTER_UNIFIED_MODEL,
+            api_key="",
+            api_base_url="",
+            api_provider=INTELLI_ROUTER_PROVIDER,
+            description=f"IntelliRouter model group {selected_id}",
+            metadata={"client": client_metadata, "request": request_dump},
+        )
+    ]
 
 
 def _entry_signature(entry: ModelPoolEntry) -> str:
@@ -571,4 +590,5 @@ __all__ = [
     "ModelPoolEntry",
     "ModelRouterConfig",
     "inherit_pool_ids",
+    "materialize_model_group",
 ]
