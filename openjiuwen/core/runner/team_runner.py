@@ -196,6 +196,16 @@ class _TeamRunnerMixin:
                 self._maybe_attach_observability(activation.agent, activation.session.get_session_id())
                 return await activation.agent.invoke(inputs, session=activation.session)
             finally:
+                # Run-boundary evolvable-cache drop. Must be sync and ahead of
+                # every await below: a mid-round pause cancels in-flight rounds
+                # and the cancellation cuts the awaits short (CancelledError
+                # bypasses the except Exception), which would leave the cache
+                # serving pre-pause values after resume. A rejected activation
+                # (e.g. REJECT_RUNNING) carries another live stream's agent —
+                # never drop its cache. This is the only drop point —
+                # finalize() no longer drops.
+                if not _is_team_reject_kind(activation.action.kind):
+                    activation.agent.invalidate_workspace_cache()
                 self._maybe_finalize_trace(team_name_for_finally)
                 try:
                     await self._get_team_runtime_manager().finalize(
@@ -277,6 +287,12 @@ class _TeamRunnerMixin:
                         stream_logger.feed(chunk)
                     yield chunk
             finally:
+                # Same run-boundary evolvable-cache drop as run_agent_team's
+                # finally — sync, ahead of every await, the only drop point.
+                # A rejected activation carries another live stream's agent —
+                # never drop its cache.
+                if not _is_team_reject_kind(activation.action.kind):
+                    activation.agent.invalidate_workspace_cache()
                 if stream_logger is not None:
                     stream_logger.flush()
                 self._maybe_finalize_trace(team_name_for_finally)
