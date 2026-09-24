@@ -1,0 +1,5 @@
+datasets>=5.0
+matplotlib>=3.8
+pytest>=8.0
+pytest-html>=4.1
+torch>=2.0
