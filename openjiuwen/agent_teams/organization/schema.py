@@ -145,7 +145,7 @@ class OrgTaskOutputContext(BaseModel):
 
 
 class OrgTaskAggregationConfig(BaseModel):
-    mode: OrgTaskAggregationMode = OrgTaskAggregationMode.HIERARCHICAL
+    mode: OrgTaskAggregationMode = OrgTaskAggregationMode.SUMMARY_TEAM
     summary_task_id: str | None = None
     summary_team_id: str | None = None
     final_output_task_id: str | None = None
@@ -428,10 +428,10 @@ class OrgSummaryExecutionRecord(SQLModel, table=True):
 
 
 def default_root_aggregation(task_id: str) -> OrgTaskAggregationConfig:
-    """Return the default HIERARCHICAL aggregation config for a root task."""
+    """Return the default SUMMARY_TEAM aggregation config for a root task."""
 
     return OrgTaskAggregationConfig(
-        mode=OrgTaskAggregationMode.HIERARCHICAL,
+        mode=OrgTaskAggregationMode.SUMMARY_TEAM,
         final_output_task_id=task_id,
     )
 
