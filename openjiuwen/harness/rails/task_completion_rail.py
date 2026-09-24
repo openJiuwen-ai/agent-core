@@ -33,7 +33,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
-    ToolCallInputs,
 )
 from openjiuwen.harness.prompts.prompt_attachment_manager import (
     PromptAttachmentKind,
@@ -48,6 +47,7 @@ from openjiuwen.harness.schema.stop_condition import (
     MaxRoundsEvaluator,
     StopConditionEvaluator,
     TimeoutEvaluator,
+    TokenBudgetEvaluator,
 )
 
 if TYPE_CHECKING:
@@ -91,6 +91,8 @@ class TaskCompletionRail(DeepAgentRail):
             the loop is force-stopped.
         timeout_seconds: Wall-clock timeout in seconds for the
             entire task loop.
+        max_tokens: Cumulative token budget for the entire task
+            loop; when set, the loop stops once usage reaches it.
         evaluators: Additional custom evaluators appended after
             the built-in ones.
         goal_manager: Optional GoalManager. When set, goal
@@ -108,6 +110,7 @@ class TaskCompletionRail(DeepAgentRail):
         allow_promise_details: bool = False,
         max_rounds: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         evaluators: Optional[
             List[StopConditionEvaluator]
         ] = None,
@@ -123,6 +126,7 @@ class TaskCompletionRail(DeepAgentRail):
         self.allow_promise_details = allow_promise_details
         self.max_rounds = max_rounds
         self.timeout_seconds = timeout_seconds
+        self.max_tokens = max_tokens
         self._extra_evaluators: List[StopConditionEvaluator] = (
             evaluators or []
         )
@@ -177,6 +181,8 @@ class TaskCompletionRail(DeepAgentRail):
             result.append(
                 TimeoutEvaluator(self.timeout_seconds)
             )
+        if self.max_tokens is not None:
+            result.append(TokenBudgetEvaluator(self.max_tokens))
         if self.completion_promise is not None:
             result.append(
                 CompletionPromiseEvaluator(

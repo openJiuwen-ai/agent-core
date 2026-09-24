@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/prompts/`（67 文件） |
-| 最近一次修订日期 | 2026-08-23 |
-| 关联 feature | N/A |
+| 最近一次修订日期 | 2026-09-12 |
+| 关联 feature | `F_04_budget-notice-rail.md` |
 
 ## 范围 / 边界
 
@@ -42,7 +42,7 @@ report。`prompts/` 67 文件是 DeepAgent 的"输入面"，只定义契约，�
 4. **sections 是唯一内容单元**：`prompts/sections/` 每模块定义一个 section（identity /
    safety / skills / memory / goal / todo / task / workspace / agent_mode / subagent_tools /
    session_tools / task_completion / progressive_tool_rail / heartbeat / coding_memory /
-   compression_recall / external_memory / context / offload / reload）。
+   compression_recall / external_memory / context / offload / reload / budget_notice）。
    新增 section = 新模块 + 注册进 builder。
 5. **附件机制契约**：`PromptAttachment`（pydantic）是附件单元；`PromptAttachmentKind` 区分类型；
    `PromptAttachmentManager.bind_context(ctx)` 返回 `PromptAttachmentContextWriter`，按 session
