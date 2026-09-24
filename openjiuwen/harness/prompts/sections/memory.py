@@ -11,7 +11,13 @@ from openjiuwen.harness.prompts.sections import SectionName
 
 MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 
-每轮对话默认不包含历史记忆正文。跨会话信息依赖工作区记忆文件。涉及今天、昨天、之前、上次、继续、历史、偏好、用户画像、长期背景、项目进展等上下文时，先调用 `memory_search` 或 `read_memory` 获取事实，再回答或行动。
+每轮对话默认不包含历史记忆正文。跨会话信息依赖工作区记忆文件。
+
+## 强制检索（最高优先级）
+
+在开始执行任何任务、回答任何问题之前，必须先调用 `memory_search` 检索工作区记忆，确认是否存在与本任务相关的用户偏好、既定规则、约束或历史决策，并以此为依据回答或行动。
+
+**禁止跳过检索**：即使问题看起来很简单、你自认为已经知道答案，也必须先检索。用户可能对此已有个性化要求（如指定来源、镜像、版本、路径、格式、禁忌），不检索就会答错。调用 `memory_search` 是每轮回答前的固定第一步，没有任何例外。检索无结果时再按通用知识回答，且不得向用户提及检索过程。用户的当前指令始终优先于历史记忆。
 
 ## 存储层级
 
@@ -41,7 +47,13 @@ MEMORY_PROMPT_CN = """# 记忆使用策略（主动模式）
 
 MEMORY_PROMPT_EN = """# Memory Usage Policy (Proactive Mode)
 
-Historical memory content is not included in the prompt by default. Cross-session information relies on workspace memory files. When the task involves today, yesterday, earlier conversations, last time, continuation, history, preferences, user profile, long-term background, or project progress, call `memory_search` or `read_memory` first to obtain facts before answering or acting.
+Historical memory content is not included in the prompt by default. Cross-session information relies on workspace memory files.
+
+## Mandatory Retrieval (Highest Priority)
+
+Before starting any task or answering any question, you MUST first call `memory_search` to retrieve workspace memory and check whether there are user preferences, established rules, constraints, or past decisions relevant to the task, then answer or act based on them.
+
+**Never skip the search**: even if the question seems simple or you think you already know the answer, you must search first. The user may have personalized requirements for it (preferred sources, mirrors, versions, paths, formats, restrictions) — skipping the search risks giving a wrong answer. Calling `memory_search` is the mandatory first step before every answer, with no exceptions. Only after the search returns nothing may you answer from general knowledge, and never mention the search process to the user. The user's current instruction always takes priority over historical memory.
 
 ## Storage Hierarchy
 
