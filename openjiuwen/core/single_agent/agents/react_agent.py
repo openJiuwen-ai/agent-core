@@ -2428,12 +2428,29 @@ class ReActAgent(BaseAgent):
                                 # drains and injects it.
                                 if not ctx.close_steering_if_empty():
                                     continue
-                                await self.context_engine.save_contexts(session)
                                 content = (getattr(ai_message, "content", None) or "").strip()
                                 reasoning = (
                                     getattr(ai_message, "reasoning_content", None) or ""
                                 ).strip()
-                                if not content and not reasoning:
+                                # Reasoning-only (or fully blank) no-tool turns are not a
+                                # valid ReAct answer: they deliver nothing to the user /
+                                # team board. Treat as error so callers can retry instead
+                                # of silently ending with empty output (see 2026-09-11
+                                # team stall: OA.05000090). Leave a reject notice in
+                                # context for the next wake (e.g. stale-claim nudge);
+                                # do not call the model again in this same loop.
+                                if not content:
+                                    await context.add_messages(
+                                        UserMessage(
+                                            content=(
+                                                "[EMPTY_RESPONSE] The previous turn had "
+                                                "no content and no tool_calls. Reply "
+                                                "with user-visible content or a tool "
+                                                "call."
+                                            ),
+                                        )
+                                    )
+                                    await self.context_engine.save_contexts(session)
                                     result = {
                                         "output": (
                                             "模型未返回有效内容（空响应），"
@@ -2443,8 +2460,10 @@ class ReActAgent(BaseAgent):
                                         "finish_reason": getattr(
                                             ai_message, "finish_reason", "null"
                                         ),
+                                        "reasoning_present": bool(reasoning),
                                     }
                                 else:
+                                    await self.context_engine.save_contexts(session)
                                     result = {
                                         "output": ai_message.content,
                                         "result_type": "answer",

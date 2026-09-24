@@ -364,7 +364,7 @@ class TeamAgentSpec(BaseModel):
     covering reviewers that never vote, which the round ceiling alone
     cannot catch. Consumed only by the leader-side scheduler. See F_62.
     """
-    stale_claim_idle_timeout: int = 600
+    stale_claim_idle_timeout: int = 180
     """Autonomous dispatch: seconds a member may sit idle holding active work.
 
     A member that stays runtime-IDLE this long while still owning a
@@ -373,7 +373,10 @@ class TeamAgentSpec(BaseModel):
     stall is escalated to the leader, who can reassign or intervene.
     Measured off the member's process-local idle clock
     (``TeamAgentState.idle_since``), never DB ``updated_at`` — see F_65.
-    Ignored under scheduled dispatch. See F_65.
+    Defaults to 180s so the first self-nudge lands inside the relay team
+    stream watchdog window (300s). With 30s POLL_TASK granularity the worst
+    case is about 210s; busy members (idle_seconds() is None mid-round)
+    are never nudged. Ignored under scheduled dispatch. See F_65.
     """
     stale_pending_idle_timeout: int = 600
     """Autonomous dispatch: seconds the leader may sit idle on unclaimed work.
