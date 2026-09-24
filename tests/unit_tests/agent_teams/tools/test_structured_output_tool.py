@@ -11,6 +11,9 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import jsonschema
+import pytest
+
 from openjiuwen.agent_teams.tools.structured_output_tool import (
     StructuredOutputFinishRail,
     StructuredOutputTool,
@@ -49,6 +52,78 @@ def test_invoke_captures_arguments():
     assert out.success is True
     assert tool.called is True
     assert tool.captured == {"answer": "42"}
+
+
+def test_invoke_raises_on_schema_violation():
+    """A schema-violating submission raises instead of being acknowledged.
+
+    The failed call leaves ``captured``/``called`` unset, so a corrected
+    resubmission within the same turn is captured normally.
+    """
+    schema = {
+        "type": "object",
+        "required": ["answers"],
+        "properties": {
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["q_id", "answer"],
+                    "properties": {"q_id": {"type": "string"}, "answer": {"type": "string"}},
+                },
+            },
+        },
+    }
+    tool = StructuredOutputTool(schema)
+    with pytest.raises(jsonschema.ValidationError, match="q_id"):
+        asyncio.run(tool.invoke({"answers": [{"answer": "missing q_id"}]}))
+    assert tool.called is False
+    assert tool.captured is None
+    out = asyncio.run(tool.invoke({"answers": [{"q_id": "q1", "answer": "ok"}]}))
+    assert out.success is True
+    assert tool.called is True
+    assert tool.captured == {"answers": [{"q_id": "q1", "answer": "ok"}]}
+
+
+def test_description_carries_required_structure():
+    """Nested required keys ride the tool description, not just parameters.
+
+    Weak models skim ``parameters``; the required keys of array items (the
+    real-world q_id failure) must be spelled out in the description too, and
+    nested plain objects are covered the same way.
+    """
+    schema = {
+        "type": "object",
+        "required": ["answers"],
+        "properties": {
+            "answers": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "required": ["q_id", "answer"],
+                    "properties": {"q_id": {"type": "string"}, "answer": {"type": "string"}},
+                },
+            },
+            "meta": {
+                "type": "object",
+                "required": ["source"],
+                "properties": {"source": {"type": "string"}},
+            },
+        },
+    }
+    tool = StructuredOutputTool(schema)
+    assert "- top level: required keys: answers" in tool.card.description
+    assert "- answers[]: required keys: q_id, answer" in tool.card.description
+    assert "- meta: required keys: source" in tool.card.description
+    assert tool.required_structure in tool.card.description
+
+
+def test_required_structure_empty_without_required_keys():
+    """A schema declaring no required keys adds nothing to the description."""
+    schema = {"type": "object", "properties": {"a": {"type": "string"}}}
+    tool = StructuredOutputTool(schema)
+    assert tool.required_structure == ""
+    assert "required keys" not in tool.card.description
 
 
 def test_default_schema_when_none():

@@ -135,7 +135,7 @@ async def test_attempt_calls_abort_gate_stops_before_backend_when_paused():
 
     called = asyncio.Event()
 
-    async def make_call():
+    async def make_call(feedback=None):
         called.set()
         return _Res()
 
@@ -160,7 +160,7 @@ async def test_attempt_calls_abort_gate_stops_a_straggler_between_retries():
 
     attempt = 0
 
-    async def make_call():
+    async def make_call(feedback=None):
         nonlocal attempt
         attempt += 1
         if attempt == 1:

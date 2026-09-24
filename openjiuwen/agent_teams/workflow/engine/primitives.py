@@ -39,7 +39,7 @@ import asyncio
 import inspect
 import json
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal, Sequence, TypeVar, overload
 
 from .errors import BudgetExhausted, EngineError, WorkflowAborted
@@ -96,6 +96,10 @@ class _BackendCallResult:
         raw_text:      The LLM's original text reply before coercion — used as
                        ``outcome`` in ``AGENT_COMPLETED`` progress events.
         tokens:        Tokens billed by this call (``AgentResult.tokens``); ``None`` on skip / failure.
+        cache_tokens:  Prompt-cache-hit tokens of this call (``AgentResult.cache_tokens``);
+                       ``None`` when the provider reported none.
+        input_tokens / output_tokens: the prompt / completion split of ``tokens``
+                       for display (``AgentResult.input_tokens`` / ``.output_tokens``).
         attempts:      Attempts actually spent when the call failed — the loop can
                        short-circuit (skip / budget fail-fast) before using all
                        ``rt.retries + 1``; ``None`` when no attempt ran (e.g. a
@@ -107,6 +111,9 @@ class _BackendCallResult:
     error_detail: str | None = None
     raw_text: str | None = None
     tokens: int | None = None
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
     attempts: int | None = None
 
 
@@ -170,8 +177,8 @@ def _preview(value: Any) -> str | None:
     """A text preview of an agent result for progress events.
 
     For strings: returns the full text. For structured results (dicts,
-    pydantic models): renders a fixed preamble + complete JSON. No
-    truncation — the full data is provided to downstream consumers.
+    pydantic models, dataclasses): renders a fixed preamble + complete JSON.
+    No truncation — the full data is provided to downstream consumers.
     """
     if value is None:
         return None
@@ -180,6 +187,8 @@ def _preview(value: Any) -> str | None:
     try:
         if hasattr(value, "model_dump") and callable(value.model_dump):
             body = json.dumps(value.model_dump(mode="json"), ensure_ascii=False, default=str)
+        elif is_dataclass(value) and not isinstance(value, type):
+            body = json.dumps(asdict(value), ensure_ascii=False, default=str)
         else:
             body = json.dumps(value, ensure_ascii=False, default=str)
     except Exception:
@@ -376,6 +385,8 @@ def _emit_agent_started(
     node_type: str,
     agent_id: str | None = None,
     correlation_id: str | None = None,
+    parent_session_id: str | None = None,
+    member_name: str | None = None,
     nested_phase: str | None = None,
 ) -> None:
     rt.current_agent = {
@@ -392,6 +403,8 @@ def _emit_agent_started(
             model=opts.get("model"),
             agent_id=agent_id,
             node_type=node_type,
+            parent_session_id=parent_session_id,
+            member_name=member_name,
             correlation_id=correlation_id,
             nested_phase=_resolved_nested_phase(nested_phase),
         )
@@ -401,7 +414,8 @@ def _emit_agent_started(
 def _emit_agent_completed(
     rt, opts: dict, outcome_text: str | None, *, agent_id: str | None = None,
     tokens: int | None = None, budget_snapshot: dict | None = None,
-    nested_phase: str | None = None,
+    nested_phase: str | None = None, cache_tokens: int | None = None,
+    token_input: int | None = None, token_output: int | None = None,
 ) -> None:
     """Emit an AGENT_COMPLETED progress event.
 
@@ -409,6 +423,10 @@ def _emit_agent_completed(
     ``tokens``: per-call tokens from ``AgentResult.tokens`` (``None`` on cache-hit).
     ``budget_snapshot``: frozen ``_budget_snapshot(rt.budget)`` at emit time.
     ``nested_phase``: defaults to ``_wf_display_name`` when inside a sub-workflow.
+    ``cache_tokens``: prompt-cache-hit tokens from ``AgentResult.cache_tokens``
+    (``None`` when the provider reported none; a subset of ``tokens``).
+    ``token_input`` / ``token_output``: the prompt / completion split of
+    ``tokens`` for display (``None`` when the provider reported no split).
     """
     rt.workflow_budget.add_phase(opts.get("phase") or _current_phase.get() or "?", tokens)
     rt.current_agent = None
@@ -420,6 +438,9 @@ def _emit_agent_completed(
             outcome=_preview(outcome_text),
             agent_id=agent_id,
             tokens=tokens,
+            cache_tokens=cache_tokens,
+            token_input=token_input,
+            token_output=token_output,
             budget=budget_snapshot,
             workflow_budget=_wf_budget_snapshot(rt),
             nested_phase=_resolved_nested_phase(nested_phase),
@@ -577,6 +598,9 @@ async def agent(
         _emit_agent_completed(
             rt, opts, outcome_text, agent_id=ks,
             tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+            cache_tokens=cached.get("cache_tokens"),
+            token_input=cached.get("token_input"),
+            token_output=cached.get("token_output"),
             budget_snapshot=_budget_snapshot(rt.budget),
         )
         return result
@@ -640,6 +664,9 @@ async def agent(
                 raw_text=call_result.raw_text,
                 run_id=rt.run_id,
                 tokens=call_result.tokens,
+                cache_tokens=call_result.cache_tokens,
+                input_tokens=call_result.input_tokens,
+                output_tokens=call_result.output_tokens,
             )
         ),
     )
@@ -647,6 +674,9 @@ async def agent(
     _emit_agent_completed(
         rt, opts, outcome_text, agent_id=ks,
         tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+        cache_tokens=call_result.cache_tokens,
+        token_input=call_result.input_tokens,
+        token_output=call_result.output_tokens,
     )
     return call_result.result
 
@@ -685,12 +715,37 @@ async def _call_backend(rt, spec: _BackendCallSpec) -> _BackendCallResult:
         opts = {**opts, "agent_id": spec.agent_id}
     return await _attempt_calls(
         rt, opts, spec.json_schema, spec.model,
-        lambda: rt.backend.run(spec.prompt, opts, spec.json_schema, call_key=spec.call_key),
+        lambda feedback=None: rt.backend.run(
+            _with_retry_feedback(spec.prompt, feedback), opts, spec.json_schema, call_key=spec.call_key,
+        ),
     )
 
 
+def _validation_retry_feedback(error: str) -> str:
+    """Feedback appended to the next attempt's prompt after a schema failure.
+
+    A blind retry replays the same prompt, so a model that misread the schema
+    (missing required property, wrong nesting) repeats the exact mistake until
+    attempts run out. Carrying the validator's error tells the next attempt
+    exactly what to fix.
+    """
+    return (
+        "[RETRY FEEDBACK] Your previous structured_output submission was rejected: "
+        f"it failed schema validation ({error}). Submit again via structured_output "
+        "with a JSON object that satisfies the input schema exactly: include every "
+        "required property at every nesting level (including each item inside "
+        "arrays), keep the exact property names and structure the schema defines, "
+        "and do not wrap or reshape the result."
+    )
+
+
+def _with_retry_feedback(prompt: str, feedback: str | None) -> str:
+    """Append retry feedback to a prompt (no-op when there is none)."""
+    return f"{prompt}\n\n{feedback}" if feedback else prompt
+
+
 async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
-    """Run ``make_call()`` with retries + schema validation.
+    """Run ``make_call(feedback)`` with retries + schema validation.
 
     Shared by the single-shot ``agent()`` path (``backend.run``) and the stateful
     session path (``backend.send_turn``); the only difference between them is the
@@ -700,11 +755,18 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
     non-success with no retry, and so does a failed attempt that leaves a
     token ledger dry — the budget never refunds, so a retry can only fail
     again (and a human turn would re-ask the person).
+
+    ``make_call(feedback)`` receives the previous attempt's schema-validation
+    error (``None`` on the first attempt and after backend errors) so a retry
+    is not blind: a model that misread the schema gets told which property
+    failed and can self-correct instead of repeating the same malformed
+    submission until attempts run out.
     """
     timeout = opts.get("timeout")
     attempts = rt.retries + 1
     last_err: Exception | None = None
     label = opts.get("label") or "agent"
+    feedback: str | None = None
     # Accumulate tokens burned across every retry attempt: each failed call
     # attaches its budget_rail tally to the raised BackendError (backend) or
     # turn delta (session), so a budget-exhausted/failed agent's real
@@ -720,9 +782,9 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
         try:
             if timeout is not None:
                 async with asyncio.timeout(timeout):  # py3.11+
-                    res = await make_call()
+                    res = await make_call(feedback)
             else:
-                res = await make_call()
+                res = await make_call(feedback)
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
             # This attempt burned real tokens before failing (budget-exhausted,
@@ -762,17 +824,24 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
             try:
                 coerced = coerce(res.structured, json_schema, model)
                 return _BackendCallResult(
-                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens
+                    result=coerced, succeeded=True, raw_text=res.text, tokens=res.tokens,
+                    cache_tokens=res.cache_tokens,
+                    input_tokens=res.input_tokens,
+                    output_tokens=res.output_tokens,
                 )
-            except Exception as e:  # validation failure -> retry
+            except Exception as e:  # validation failure -> retry with feedback
                 last_err = e
+                feedback = _validation_retry_feedback(str(e))
                 rt.log_sink(
                     f"[wf] agent {label!r} attempt {attempt}/{attempts} "
                     f"validation failed: {str(e)}"
                 )
                 continue
         return _BackendCallResult(
-            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens
+            result=res.text, succeeded=True, raw_text=res.text, tokens=res.tokens,
+            cache_tokens=res.cache_tokens,
+            input_tokens=res.input_tokens,
+            output_tokens=res.output_tokens,
         )
     detail = str(last_err) if last_err else "unknown error"
     rt.log_sink(f"[wf] agent {label!r} failed after {attempts} attempts: {detail}")
@@ -802,6 +871,9 @@ class _JournalRecordInput:
     raw_text: str | None = None
     run_id: str | None = None
     tokens: int | None = None
+    cache_tokens: int | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
 
 def _make_record(spec: _JournalRecordInput) -> dict:
@@ -818,6 +890,9 @@ def _make_record(spec: _JournalRecordInput) -> dict:
         "sig": spec.sig,
         "run_id": spec.run_id,
         "tokens": spec.tokens,
+        "cache_tokens": spec.cache_tokens,
+        "token_input": spec.input_tokens,
+        "token_output": spec.output_tokens,
         "label": spec.opts.get("label"),
         "phase": spec.opts.get("phase"),
         "kind": kind,
@@ -834,6 +909,7 @@ def _reviewer_call(
     base: str,
     phase: str | None,  # pylint: disable=huawei-redefined-outer-name
     options: dict | None,
+    agent_ids: list,
 ):
     """Build the zero-arg thunk that runs one reviewer as a structured ``agent()``.
 
@@ -841,12 +917,24 @@ def _reviewer_call(
     a score reviewer against ``SCORE_SCHEMA`` (0-1 + feedback). Reviewer-level
     options override the ``verify()``-level ones. The thunk is meant for
     :func:`parallel`, which gives each reviewer its own structural journal key.
+
+    On start the thunk records its ``agent()`` call's journal key (the
+    deterministic node id) into the shared ``agent_ids`` list at index ``i``,
+    so ``verify()`` can attach it to the settled votes without exposing the
+    key through the call's public result.
     """
     schema = VERDICT_SCHEMA if reviewer.kind == "verdict" else SCORE_SCHEMA
     rlabel = reviewer.label or f"{base}-{i}"
     merged = {**(options or {}), **(reviewer.options or {})} or None
 
     async def _call():
+        # Predict the call key agent() will take, without consuming the ordinal:
+        # this thunk's only structural child is the agent() call, so it takes
+        # the branch's current ordinal. Recorded so the settled vote can carry
+        # the same deterministic id as the reviewer's own agent node.
+        seq = _seq.get()
+        if seq is not None:
+            agent_ids[i] = key_str(_path.get() + (("call", seq["n"]),))
         return await agent(
             reviewer.prompt,
             label=rlabel,
@@ -856,6 +944,41 @@ def _reviewer_call(
         )
 
     return _call
+
+
+def _is_default_reviewer_label(label: str | None) -> bool:
+    """True when ``label`` looks like ``build_reviewers``' default ``{type}-{i}``.
+
+    ``verify()`` replaces such labels with a base-prefixed unique form; the
+    exact-shape check (known reviewer type prefix, numeric suffix) keeps a
+    user-chosen label like ``inspector-clone`` from being mistaken for a default.
+    """
+    if not label:
+        return False
+    _, _, tail = label.rpartition("-")
+    return tail.isdigit() and label.rsplit(f"-{tail}", 1)[0] in _DEFAULT_LABEL_TYPES
+
+
+#: Reviewer ``type`` names whose ``{type}-{i}`` form is a generated default label.
+_DEFAULT_LABEL_TYPES = frozenset({"verifier", "inspector", "challenger"})
+
+
+def _normalize_reviewer_labels(reviewers: list[Reviewer], base: str) -> None:
+    """Give every reviewer a label unique across the whole run, prefixed by ``base``.
+
+    A default ``{type}-{i}`` label (re-issued per ``verify()`` round by the
+    business layer) is replaced by ``{base}-{kind}-{i}``; a custom label keeps
+    its readable part and gains the prefix (``{base}-{label}``). The label is a
+    display/join key only — journal identity stays the structural call path —
+    so this changes what the UI shows, not what resume replays (the sig hash
+    does fold ``label`` in, so a resumed pre-upgrade run re-runs its reviewers
+    once; same-version resume is unaffected).
+    """
+    for i, r in enumerate(reviewers):
+        if r.label is None or _is_default_reviewer_label(r.label):
+            r.label = f"{base}-{r.kind}-{i}"
+        elif not r.label.startswith(f"{base}-"):
+            r.label = f"{base}-{r.label}"
 
 
 def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[VerifyVote], dict]:
@@ -874,7 +997,7 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
         if reviewer.kind == "verdict":
             verdict_total += 1
             if raw is None:
-                votes.append(VerifyVote(kind="verdict"))
+                votes.append(VerifyVote(kind="verdict", role=reviewer.role))
                 continue
             decision = raw.get("decision")
             fail = decision == "fail"
@@ -885,11 +1008,11 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
                 decision_pass = not fail
             else:
                 decision_pass = None  # malformed decision: not counted, vote reads undecided
-            votes.append(VerifyVote(kind="verdict", decision=decision_pass, feedback=raw.get("feedback", "")))
+            votes.append(VerifyVote(kind="verdict", role=reviewer.role, decision=decision_pass, feedback=raw.get("feedback", "")))
         else:
             score_total += 1
             if raw is None:
-                votes.append(VerifyVote(kind="score"))
+                votes.append(VerifyVote(kind="score", role=reviewer.role))
                 continue
             score = raw.get("score")
             if isinstance(score, (int, float)):
@@ -897,7 +1020,7 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
                 score_sum += float(score)
             else:
                 score = None  # malformed score: not counted, vote reads undecided
-            votes.append(VerifyVote(kind="score", score=score, feedback=raw.get("feedback", "")))
+            votes.append(VerifyVote(kind="score", role=reviewer.role, score=score, feedback=raw.get("feedback", "")))
 
     tally = {
         "verdict_total": verdict_total,
@@ -908,6 +1031,92 @@ def _collect(reviewers: Sequence[Reviewer], raws: Sequence) -> tuple[list[Verify
         "score_avg": (score_sum / score_voted) if score_voted else None,
     }
     return votes, tally
+
+
+def _emit_verify_started(
+    rt, base: str, phase: str | None, reviewers: Sequence[Reviewer], threshold: float,
+    verify_id: str | None = None,
+) -> None:
+    """Emit ``VERIFY_STARTED``: a review round begins (label roster + threshold).
+
+    The label roster is the fan-out order of the reviewers' labels (already
+    normalized by ``verify()``), so a consumer can build its container and
+    pre-attach child rows before the first reviewer's AGENT_STARTED lands.
+    ``verify_id`` identifies the round among same-label concurrent calls (the
+    structural branch scope — parallel calls differ, serial rework rounds
+    repeat the label and fold as ×N rounds).
+    """
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.VERIFY_STARTED,
+            phase=phase or _current_phase.get(),
+            label=base,
+            nested_phase=_resolved_nested_phase(None),
+            verify_reviewers=len(reviewers),
+            verify_threshold=threshold,
+            verify_reviewer_labels=[r.label or f"{base}-{i}" for i, r in enumerate(reviewers)],
+            verify_reviewer_roles=[r.role for r in reviewers],
+            verify_id=verify_id,
+        )
+    )
+
+
+def _emit_verify_settled(
+    rt,
+    base: str,
+    phase: str | None,
+    reviewers: Sequence[Reviewer],
+    result: VerifyResult,
+    threshold: float,
+    agent_ids: Sequence[str | None],
+    verify_id: str | None = None,
+) -> None:
+    """Emit ``VERIFY_COMPLETED`` (``verify_settled`` kept as compat alias).
+
+    Carries the round verdict, per-reviewer votes and the **complete output**
+    as the generic ``outcome`` — ``VerifyResult`` serialised by :func:`_preview`
+    (same JSON-string channel as an agent node's outcome, not hand-built here).
+
+    Each vote dict mirrors :func:`_reviewer_call`'s label rule
+    (``reviewer.label or f"{base}-{i}"``) in ``name`` and carries the
+    reviewer ``agent()`` call's deterministic ``agent_id`` (``None`` when the
+    thunk never started its call), so a consumer can match votes to reviewer
+    agent nodes by either key. ``role`` is display-only.
+    """
+    votes = []
+    for i, (reviewer, vote) in enumerate(zip(reviewers, result.votes)):
+        decision = None
+        if vote.kind == "verdict":
+            if vote.decision is True:
+                decision = "pass"
+            elif vote.decision is False:
+                decision = "fail"
+        votes.append(
+            {
+                "name": reviewer.label or f"{base}-{i}",
+                "agent_id": agent_ids[i] if i < len(agent_ids) else None,
+                "kind": vote.kind,
+                "role": vote.role,
+                "decision": decision,
+                "score": vote.score,
+                "feedback": vote.feedback,
+                "voted": vote.decision is not None or vote.score is not None,
+            }
+        )
+    rt.progress_sink(
+        WorkflowProgressEvent(
+            kind=ProgressKind.VERIFY_COMPLETED,
+            phase=phase or _current_phase.get(),
+            label=base,
+            nested_phase=_resolved_nested_phase(None),
+            outcome=_preview(result),
+            verify_reviewers=len(votes),
+            verify_verdict=result.verdict,
+            verify_threshold=threshold,
+            verify_votes=votes,
+            verify_id=verify_id,
+        )
+    )
 
 
 def _aggregate_feedback(reviewers: Sequence[Reviewer], votes: Sequence[VerifyVote]) -> str:
@@ -966,10 +1175,29 @@ async def verify(
     if not reviewers:
         raise EngineError("verify() requires at least one reviewer")
     base = label or "verify"
+    # Node id — the verify() analog of an agent node's agent_id: the
+    # structural position of this call. PEeks the ordinal its own parallel()
+    # block is about to consume (consuming one would shift every later sibling
+    # key in this scope and invalidate journal cache hits on resume). Parallel
+    # verify() calls live in different branch scopes (distinct paths); sequential
+    # same-scope rounds advance the counter via their own parallel blocks, so
+    # every round gets a distinct, resume-stable id.
+    seq = _seq.get()
+    verify_id = key_str(_path.get() + (("verify", seq["n"] if seq is not None else 0),))
+    # Normalize labels BEFORE fan-out so the STARTED roster, the reviewer agent
+    # nodes' labels, and the SETTLED votes' names all agree (and are unique
+    # across rounds — the business layer's default {type}-{i} restarts at 0
+    # each round).
+    _normalize_reviewer_labels(reviewers, base)
 
     _emit_log(rt, f"verify: dispatching {len(reviewers)} reviewer(s)")
+    _emit_verify_started(rt, base, phase, reviewers, threshold, verify_id)
+    agent_ids: list = [None] * len(reviewers)
     raws = await parallel(
-        [_reviewer_call(i, r, base=base, phase=phase, options=options) for i, r in enumerate(reviewers)]
+        [
+            _reviewer_call(i, r, base=base, phase=phase, options=options, agent_ids=agent_ids)
+            for i, r in enumerate(reviewers)
+        ]
     )
 
     votes, tally = _collect(reviewers, raws)
@@ -980,6 +1208,7 @@ async def verify(
         feedback=_aggregate_feedback(reviewers, votes),
         passed=verdict == "pass",
     )
+    _emit_verify_settled(rt, base, phase, reviewers, result, threshold, agent_ids, verify_id)
     _emit_log(rt, f"verify: verdict={verdict} (threshold={threshold})")
     return result
 
@@ -1039,6 +1268,7 @@ class AgentSession:
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
+        "_parent_session_id",
     )
 
     def __init__(
@@ -1052,6 +1282,7 @@ class AgentSession:
         _node_type: str = "agent_session",
         _fork_data: dict | None = None,
         _history: list[dict] | None = None,
+        _parent_session_id: str | None = None,
     ) -> None:
         self._label = label
         self._phase = phase
@@ -1064,6 +1295,7 @@ class AgentSession:
         self._member_name: str | None = None
         self._in_flight = False
         self._fork_data = _fork_data
+        self._parent_session_id = _parent_session_id
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -1115,19 +1347,22 @@ class AgentSession:
             _warn_concurrent_session(rt)
         self._in_flight = True
         try:
+            # Reserve the member identity on the FIRST turn regardless of cache
+            # hit, so a fully-hit resume still knows this session's member name
+            # (fork() needs it to locate the parent's persisted context) and the
+            # AGENT_STARTED event can carry it as the session's stable UI key.
+            # Only runs once — no avatar, no LLM, no spawn/budget slot.
+            if self._member_name is None and not self._human:
+                await self._ensure_member_name(rt, opts)
+
             _emit_agent_started(
                 rt, opts, prompt,
                 node_type=self._node_type,
                 agent_id=ks,
                 correlation_id=correlation_id,
+                parent_session_id=self._parent_session_id,
+                member_name=self._member_name,
             )
-
-            # Reserve the member identity on the FIRST turn regardless of cache
-            # hit, so a fully-hit resume still knows this session's member name
-            # (fork() needs it to locate the parent's persisted context). Only
-            # runs once — no avatar, no LLM, no spawn/budget slot.
-            if self._member_name is None and not self._human:
-                await self._ensure_member_name(rt, opts)
 
             cached = rt.journal.get_cached(ks, sig, rt.run_id)
             if cached is not None:  # resume hit — no backend, no harness, no person
@@ -1142,6 +1377,9 @@ class AgentSession:
                 _emit_agent_completed(
                     rt, opts, outcome_text, agent_id=ks,
                     tokens=cached_tokens if isinstance(cached_tokens, int) else None,
+                    cache_tokens=cached.get("cache_tokens"),
+                    token_input=cached.get("token_input"),
+                    token_output=cached.get("token_output"),
                     budget_snapshot=_budget_snapshot(rt.budget),
                 )
                 return None if notify else result
@@ -1189,6 +1427,9 @@ class AgentSession:
                         raw_text=call_result.raw_text,
                         run_id=rt.run_id,
                         tokens=call_result.tokens,
+                        cache_tokens=call_result.cache_tokens,
+                        input_tokens=call_result.input_tokens,
+                        output_tokens=call_result.output_tokens,
                     )
                 ),
             )
@@ -1197,6 +1438,9 @@ class AgentSession:
             _emit_agent_completed(
                 rt, opts, outcome_text, agent_id=ks,
                 tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
+                cache_tokens=call_result.cache_tokens,
+                token_input=call_result.input_tokens,
+                token_output=call_result.output_tokens,
             )
             return None if notify else result
         finally:
@@ -1266,6 +1510,11 @@ class AgentSession:
             _node_type="agent_session_fork" if self._history else "agent_session",
             _history=[dict(m) for m in self._history],
             _fork_data=fork_data,
+            # The parent's avatar member name (unique per session), not the
+            # label: fork() inherits the parent label by default, so label-keyed
+            # lineage would cross-link chained or same-label forks. None when
+            # the parent never sent (the child is then a plain agent_session).
+            _parent_session_id=self._member_name,
         )
 
     async def _drive(self, rt, req: _TurnRequest):
@@ -1292,9 +1541,9 @@ class AgentSession:
         sid = self._sid
         return await _attempt_calls(
             rt, req.opts, req.json_schema, req.model_cls,
-            lambda: rt.backend.send_turn(
+            lambda feedback=None: rt.backend.send_turn(
                 sid,
-                req.prompt,
+                _with_retry_feedback(req.prompt, feedback),
                 req.opts,
                 req.json_schema,
                 history=hist,

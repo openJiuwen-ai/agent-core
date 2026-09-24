@@ -232,6 +232,8 @@ class TeamWorkerBackend(AgentBackend):
                 # (``structured_output_{worker_owner_id}``), so concurrent workers
                 # never collide and no per-call id is needed here.
                 submit_tool = StructuredOutputTool(schema_json, self._t)
+                if submit_tool.required_structure:
+                    prompt = f"{prompt}\n\n{submit_tool.required_structure}"
                 text = await self._execute_worker(
                     prompt,
                     [submit_tool],
@@ -253,6 +255,9 @@ class TeamWorkerBackend(AgentBackend):
                     text=text,
                     structured=submit_tool.captured,
                     tokens=budget_rail.call_tokens,
+                    cache_tokens=budget_rail.call_cache_tokens or None,
+                    input_tokens=budget_rail.call_input_tokens or None,
+                    output_tokens=budget_rail.call_output_tokens or None,
                 )
             text = await self._execute_worker(
                 prompt,
@@ -265,7 +270,13 @@ class TeamWorkerBackend(AgentBackend):
                 phase=phase,
                 label=label,
             )
-            return AgentResult(text=text, tokens=budget_rail.call_tokens)
+            return AgentResult(
+                text=text,
+                tokens=budget_rail.call_tokens,
+                cache_tokens=budget_rail.call_cache_tokens or None,
+                input_tokens=budget_rail.call_input_tokens or None,
+                output_tokens=budget_rail.call_output_tokens or None,
+            )
         except Exception as e:
             # Attach this call's rail tally so a failed/budget-exhausted agent's
             # real consumption still reaches the AGENT_FAILED event tokens (the
@@ -310,6 +321,7 @@ class TeamWorkerBackend(AgentBackend):
                 on_human_prompt=self._on_human_prompt,
                 on_human_replied=self._on_human_replied,
                 kv_cache_runtime=self._kv_cache_runtime,
+                skill_visibility_fn=self._apply_worker_skill_visibility,
             )
         return self._session_mgr
 

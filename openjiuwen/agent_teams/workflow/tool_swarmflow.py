@@ -621,6 +621,18 @@ class SwarmflowTool(AsyncTool):
                 phase_type=progress.phase_type,
                 nested_phase=progress.nested_phase,
                 parent_phase=progress.parent_phase,
+                parent_session_id=progress.parent_session_id,
+                member_name=progress.member_name,
+                verify_reviewers=progress.verify_reviewers,
+                verify_verdict=progress.verify_verdict,
+                verify_threshold=progress.verify_threshold,
+                verify_votes=progress.verify_votes,
+                verify_reviewer_labels=progress.verify_reviewer_labels,
+                verify_reviewer_roles=progress.verify_reviewer_roles,
+                verify_id=progress.verify_id,
+                cache_tokens=progress.cache_tokens,
+                token_input=progress.token_input,
+                token_output=progress.token_output,
             )
             message = EventMessage(
                 event_type=TeamEvent.WORKFLOW_PROGRESS,

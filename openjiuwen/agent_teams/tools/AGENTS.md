@@ -25,7 +25,7 @@
 | `database/` | `TeamDatabase` + 建立在共享 `DbSessions` 上的按表 DAO（读写 session 分离 —— 见下文 *数据库并发*）。静态表 + 按 session 的动态表的 SQL 层。测试跑在 sqlite `:memory:` 的 `connection_string` 上（快、无文件） |
 | `models.py` | `Team`、`TeamMember` 静态表 + 按 session 动态生成的 `TeamTask*` / `TeamMessage*` 工厂 |
 | `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberBuiltinModel` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_builtin_model/set_member_builtin_model/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列。`builtin_model` 是外部 CLI 成员在自身登录上跑的内置模型与 effort，`promote_member_fallback_model` 提升 fallback 时一并清除（F_113） |
-| `structured_output_tool.py` | `StructuredOutputTool`（`input_params=schema_json`，捕获 `captured`）+ `StructuredOutputFinishRail`（一旦捕获就强制结束本轮）。给任何无原生 `response_format` 的 agent 用的通用结构化输出工具；被 swarmflow worker/session 与 tiny agent（`tiny_agent.py`）复用 |
+| `structured_output_tool.py` | `StructuredOutputTool`（`input_params=schema_json`，捕获 `captured`；描述尾部拼 `describe_schema_requirements` 渲染的逐层必填键摘要，`required_structure` 属性供 backend 复述进 turn prompt）+ `StructuredOutputFinishRail`（一旦捕获就强制结束本轮）。给任何无原生 `response_format` 的 agent 用的通用结构化输出工具；被 swarmflow worker/session 与 tiny agent（`tiny_agent.py`）复用 |
 | `locales/` | i18n 字符串（`cn.py`、`en.py`）与 Markdown 描述文件（`descs/<lang>/<domain>/<tool>.md`，领域目录见下文「Markdown 描述文件」） |
 
 工具从不直接伸手进 `TeamDatabase` —— 一律经 `TeamBackend` 或某个 manager，使事件发布与状态流转保持集中。
