@@ -38,6 +38,13 @@ if TYPE_CHECKING:
     from openjiuwen.core.single_agent.base import AbilityManager
     from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
+# Upper bound for the synchronous per-task event publish. The EventHandler
+# normally acknowledges in milliseconds; reaching seconds means the consumer
+# is stuck or was torn down by the same abort (deadlock chain documented at
+# _publish_task_event) — stop waiting and degrade to fire-and-forget so
+# execute_task can exit.
+_EVENT_PUBLISH_TIMEOUT_S = 3.0
+
 
 @dataclass
 class TaskExecutorDependencies:
@@ -631,9 +638,43 @@ class TaskScheduler:
                 event.metadata = {}
             event.metadata.update(task.metadata)
 
-        await self._event_queue.publish_event(
-            self._card.id, session, event
-        )
+        # Deadlock defense: the synchronous publish waits for an EventHandler
+        # acknowledgement, but the consumer coroutine may already be gone —
+        # torn down by the same abort that cancelled this task. Observed
+        # chain (2026-09-20 swarmflow pause hang): cancel lands while the
+        # worker LLM call is streaming -> the worker takes the
+        # normal-completion path -> the TASK_COMPLETION branch reaches this
+        # publish -> the consumer (TaskLoopEventHandler's dispatch coroutine)
+        # is dead/stuck with the aborted harness -> queue_message.response
+        # never resolves -> execute_task never returns -> the gather in
+        # _wait_all_tasks_complete hangs -> scheduler.stop() blocks -> the
+        # whole swarmflow unwind stalls past 30s. Bound the wait: a timeout
+        # means no consumer — degrade to fire-and-forget. The message is
+        # already on the queue, so a merely slow consumer still processes it
+        # (_resolve_future is idempotent); a dead one could never be waited
+        # on anyway. Either way this coroutine must proceed and exit.
+        try:
+            await asyncio.wait_for(
+                self._event_queue.publish_event(
+                    self._card.id, session, event
+                ),
+                timeout=_EVENT_PUBLISH_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Task %s event %s publish timed out after %ss "
+                "(event handler busy/gone); falling back to fire-and-forget",
+                task_id, payload_type, _EVENT_PUBLISH_TIMEOUT_S,
+            )
+            try:
+                await self._event_queue.publish_event_async(
+                    self._card.id, session, event
+                )
+            except Exception:
+                logger.error(
+                    "Task %s fire-and-forget publish failed", task_id,
+                    exc_info=True,
+                )
         logger.info(f"Published {payload_type} for task {task_id}")
 
     async def pause_task(self, task_id: str) -> bool:
