@@ -431,6 +431,7 @@ class TestContextEngine:
             ]
         )
         context.set_last_context_window_access_at(time.time() - 20)
+        session.commit = AsyncMock()
 
         result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
 
@@ -475,6 +476,7 @@ class TestContextEngine:
             ]
         )
         context.set_last_context_window_access_at(time.time())
+        session.commit = AsyncMock()
 
         result = await engine.compress_context(context_id="ctx", session=session, return_state=True)
 
