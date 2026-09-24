@@ -23,10 +23,10 @@ from openjiuwen.agent_teams.messager import (
     Messager,
     create_messager,
 )
-from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.paths import (
     team_memory_dir as default_team_memory_dir,
 )
+from openjiuwen.agent_teams.paths import team_workspace_dir
 from openjiuwen.agent_teams.runtime.team_plan import is_team_plan_enabled
 from openjiuwen.agent_teams.schema.blueprint import TeamAgentSpec
 from openjiuwen.agent_teams.schema.deep_agent_spec import RailSpec, SysOperationSpec, WorkspaceSpec
@@ -40,8 +40,8 @@ from openjiuwen.agent_teams.skill.rail_spec import (
     build_team_skill_rail_spec,
     complete_declared_team_skill_rails,
 )
-from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
 from openjiuwen.agent_teams.tools.team import TeamBackend
+from openjiuwen.agent_teams.tools.tool_group_chat import group_chat_prompt
 from openjiuwen.core.common.logging import team_logger
 from openjiuwen.core.foundation.llm import ProviderType
 from openjiuwen.core.runner.spawn.agent_config import (
@@ -341,10 +341,10 @@ class AgentConfigurator:
         )
 
     def create_worktree_manager(self, spec: TeamAgentSpec) -> WorktreeManager:
+        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import (
             WorktreeManager,
         )
-        from openjiuwen.harness.tools.worktree import WorktreeCreatedEvent as HarnessWorktreeCreatedEvent
         from openjiuwen.harness.tools.worktree import WorktreeRemovedEvent as HarnessWorktreeRemovedEvent
 
         ws_mgr = self.workspace_manager
@@ -1016,7 +1016,7 @@ class AgentConfigurator:
             messager=messager,
             teammate_mode=MemberMode(str(spec.teammate_mode)),
             predefined_members=spec.predefined_members or None,
-            model_config_allocator=self.model_allocator.allocate if self.model_allocator else None,
+            model_allocator=self.model_allocator,
             leader_allocation=self.leader_allocation if is_leader else None,
             model_pool_provider=lambda: list(ctx.team_spec.model_pool) if ctx.team_spec is not None else [],
             current_model_name=current_model_name,
@@ -1065,8 +1065,13 @@ class AgentConfigurator:
         from openjiuwen.agent_teams.models import build_model_allocator, inherit_pool_ids
 
         merged = inherit_pool_ids(self.ctx.team_spec.model_pool, list(new_pool))
+        # Build and validate the replacement before mutating the live spec.
+        candidate_spec = self.ctx.team_spec.model_copy(update={"model_pool": merged})
+        new_allocator = build_model_allocator(self.spec, candidate_spec)
         self.ctx.team_spec.model_pool = merged
-        self.model_allocator = build_model_allocator(self.spec, self.ctx.team_spec)
+        self.model_allocator = new_allocator
+        if self.team_backend is not None:
+            self.team_backend.update_model_allocator(new_allocator)
 
     def attach_model_allocator(
         self,

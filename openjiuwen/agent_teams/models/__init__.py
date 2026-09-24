@@ -14,6 +14,8 @@ independent from the runtime ``agent/`` and pure ``schema/`` layers.
 from openjiuwen.agent_teams.models.allocator import (
     Allocation,
     ByModelNameAllocator,
+    CliModelAllocation,
+    CliModelCatalog,
     IntelliRouterAllocator,
     ModelAllocator,
     RoundRobinModelAllocator,
@@ -29,12 +31,15 @@ from openjiuwen.agent_teams.models.pool import (
     ModelPoolEntry,
     ModelRouterConfig,
     inherit_pool_ids,
+    materialize_model_group,
 )
 
 __all__ = [
     "INTELLI_ROUTER_PROVIDER",
     "INTELLI_ROUTER_UNIFIED_MODEL",
     "Allocation",
+    "CliModelAllocation",
+    "CliModelCatalog",
     "ByModelNameAllocator",
     "IntelliRouterAllocator",
     "IntelliRouterConfig",
@@ -46,5 +51,6 @@ __all__ = [
     "RouterAllocator",
     "build_model_allocator",
     "inherit_pool_ids",
+    "materialize_model_group",
     "resolve_member_model",
 ]

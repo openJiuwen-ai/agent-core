@@ -107,6 +107,7 @@ class FakeTeamAgent:
         self.team_name = team_name
         self.stream_label = stream_label
         self.spec = spec
+        self.runtime_context = SimpleNamespace(team_spec=spec)
         self.resume_calls: list[str] = []
         self.pause_calls = 0
         self.cancel_calls = 0
