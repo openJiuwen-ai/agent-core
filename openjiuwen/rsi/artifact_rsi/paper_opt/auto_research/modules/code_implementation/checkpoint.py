@@ -8,6 +8,7 @@ reseeding of ``output/`` with no agent ``.git``.
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import stat
@@ -48,8 +49,9 @@ def _extended_path(path: Path) -> Path:
     if raw.startswith("\\\\?\\"):
         return Path(raw)
     if raw.startswith("\\\\"):
-        return Path("\\\\?\\UNC\\" + raw[2:])
-    return Path("\\\\?\\" + raw)
+        return Path(ntpath.join("\\\\?\\UNC", raw[2:]))
+    drive, tail = ntpath.splitdrive(raw)
+    return Path(ntpath.join(f"\\\\?\\{drive}\\", tail.lstrip("\\/")))
 
 
 def _path_parts(path: Path) -> tuple[str, ...]:
@@ -65,7 +67,8 @@ def _is_runtime_dump(path: Path) -> bool:
     if "context" not in parts:
         return False
     context_at = parts.index("context")
-    return "offload" in parts[context_at + 1 :]
+    offload_at = context_at + 1
+    return "offload" in parts[offload_at:]
 
 
 def _skip_copy_path(path: Path) -> bool:

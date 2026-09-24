@@ -165,12 +165,11 @@ def reference_trace_ok(events: list[dict], assumptions: str = "") -> bool:
     nothing reusable was found. Reading only ``SUMMARY.md`` is not enough.
     """
     source_searches = sum(1 for event in events if _is_source_search(event))
-    source_reads = {
-        path
-        for event in events
-        for path in _event_paths(event)
-        if path.startswith("source/openjiuwen/")
-    }
+    source_reads: set[str] = set()
+    for event in events:
+        for path in _event_paths(event):
+            if path.startswith("source/openjiuwen/"):
+                source_reads.add(path)
     explored = source_searches >= 1 and len(source_reads) >= 2
     gave_up = source_searches >= 2 and "nothing reusable" in assumptions.lower()
     return explored or gave_up
