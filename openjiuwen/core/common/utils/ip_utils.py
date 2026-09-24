@@ -6,6 +6,7 @@ import socket
 
 def get_local_ip() -> str:
     """Get local available IPv4 address (excluding 127.0.0.1)"""
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -13,5 +14,6 @@ def get_local_ip() -> str:
     except Exception:
         ip = "127.0.0.1"
     finally:
-        s.close()
+        if s is not None:
+            s.close()
     return ip
