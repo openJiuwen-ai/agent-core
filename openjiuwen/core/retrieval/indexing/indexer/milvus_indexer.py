@@ -245,6 +245,11 @@ class MilvusIndexer(Indexer):
 
             if isinstance(result, dict):
                 delete_count = result.get("delete_count", 0)
+            elif isinstance(result, (list, tuple)):
+                # MilvusLite returns the list of deleted primary keys instead
+                # of a stats dict (openJiuwen/agent-studio#1482): int(list)
+                # raises TypeError, so count the deleted primary keys.
+                delete_count = len(result)
             else:
                 delete_count = int(result) if result else 0
 
