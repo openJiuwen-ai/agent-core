@@ -38,7 +38,10 @@ class DatabaseConfig(BaseModel):
     #
     # Reader connection pool size. Readers run concurrently on WAL, so this
     # caps how many members can read at once without queuing on a checkout.
-    read_pool_size: int = 8
+    # Default 16 leaves headroom for a 6+ member team (leader + teammates +
+    # monitor/completion polls) without QueuePool checkout starvation; keep
+    # write_pool_size small — writes stay app-lock serialised.
+    read_pool_size: int = 16
     # Writer connection pool size. Writes serialise on the app lock, so a
     # small pool suffices — 2 leaves headroom for a DDL ``engine.begin`` while
     # a write session is checked out.

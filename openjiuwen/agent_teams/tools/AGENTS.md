@@ -36,7 +36,7 @@ SQLite 同一时刻只允许一个写者（数据库级锁）。DB 层围绕 SQL
 
 - **读写引擎分离（`initialize_engine` → `SqlEngines`）** —— 文件后端的
   SQLite 在同一文件上跑**两个**引擎：一个小的单写者池（`write_pool_size`，默认 2）
-  和一个较大的读者池（`read_pool_size`，默认 8）。写在应用级锁上串行到写者池；
+  和一个较大的读者池（`read_pool_size`，默认 16）。写在应用级锁上串行到写者池；
   读跑在读者池，因此慢写永远不会饿死读连接的可用性。`:memory:`（一条共享的
   StaticPool 连接）和 PostgreSQL / MySQL 两者共用单引擎 —— `SqlEngines` 的读字段
   别名到写字段。`TeamDatabase.engine` / `session_local` 是**写者**引擎 + 工厂
