@@ -49,10 +49,11 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 from openjiuwen.agent_evolving.trajectory.spans import (
     attributes_from_map,
     iter_spans,
-    merge_trajectories,
+    normalize_otlp,
+    normalize_span,
     span_attributes,
+    span_identity,
     span_sort_key,
-    trim_trajectory,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
 from openjiuwen.extensions.observability import semconv as observability_semconv
@@ -69,6 +70,172 @@ from openjiuwen.core.single_agent.rail.base import (
 )
 from openjiuwen.harness.rails.base import DeepAgentRail
 from openjiuwen.harness.rails.evolution.contracts import EvolutionHostEventMeta
+
+
+# ---------------------------------------------------------------------------
+# Incremental clean-window merge.
+#
+# The accumulated clean window is stored as a mutable, already-normalized OTLP
+# payload.  Each drained increment only normalizes and appends its own (small)
+# span set; the window is never re-normalized or deep-copied in full.  A
+# ``Trajectory`` value object (which deep-copies its payload) is materialized
+# only at the projection boundary.
+# ---------------------------------------------------------------------------
+
+
+def _payload_of(value: Any) -> Mapping[str, Any]:
+    """Return an OTLP payload for a Trajectory value or a raw mapping."""
+
+    to_otlp = getattr(value, "to_otlp", None)
+    if callable(to_otlp):
+        payload = to_otlp()
+        if isinstance(payload, Mapping):
+            return payload
+    if isinstance(value, Mapping):
+        return value
+    raise TypeError("expected a Trajectory or OTLP mapping")
+
+
+def _span_identities(payload: Mapping[str, Any]) -> set[tuple[str, str]]:
+    """Collect native ``(traceId, spanId)`` identities without normalizing spans."""
+
+    identities: set[tuple[str, str]] = set()
+    for resource_span in payload.get("resourceSpans") or []:
+        for scope_span in resource_span.get("scopeSpans") or []:
+            for span in scope_span.get("spans") or []:
+                if not isinstance(span, Mapping):
+                    continue
+                trace_id = span.get("traceId")
+                span_id = span.get("spanId")
+                if trace_id is not None and span_id is not None:
+                    identities.add((str(trace_id).strip(), str(span_id).strip()))
+    return identities
+
+
+def _scope_bucket_key(scope_span: Mapping[str, Any]) -> tuple[Any, ...]:
+    scope = scope_span.get("scope") or {}
+    return tuple(sorted((str(key), repr(value)) for key, value in scope.items()))
+
+
+def _sort_window_spans(payload: dict[str, Any]) -> None:
+    for resource_span in payload.get("resourceSpans") or []:
+        for scope_span in resource_span.get("scopeSpans") or []:
+            scope_span["spans"] = sorted(scope_span.get("spans") or [], key=span_sort_key)
+
+
+def _append_increment(
+    buffer: dict[str, Any],
+    increment: Mapping[str, Any],
+    *,
+    dedup_buffer: bool = True,
+) -> dict[str, Any]:
+    """Append normalized increment spans into an already-normalized window.
+
+    Only the (small) increment is normalized; the accumulated window is never
+    re-serialized.  Span de-duplication mirrors :func:`spans.merge_payloads`;
+    pass ``dedup_buffer=False`` when the caller already filtered the increment
+    against the window (e.g. the execution recorder), which skips the O(window)
+    identity scan and makes the append O(increment).
+    """
+
+    resource_spans = buffer.get("resourceSpans")
+    if not resource_spans:
+        resource_spans = [{"resource": {}, "scopeSpans": []}]
+        buffer["resourceSpans"] = resource_spans
+    head = resource_spans[0]
+    head.setdefault("resource", {})
+    scopes = head.setdefault("scopeSpans", [])
+    seen = _span_identities(buffer) if dedup_buffer else set()
+    for increment_resource in increment.get("resourceSpans") or []:
+        for increment_scope in increment_resource.get("scopeSpans") or []:
+            key = _scope_bucket_key(increment_scope)
+            target = None
+            for existing in scopes:
+                if _scope_bucket_key(existing) == key:
+                    target = existing
+                    break
+            if target is None:
+                target = {"scope": dict(increment_scope.get("scope") or {}), "spans": []}
+                scopes.append(target)
+            spans = target.setdefault("spans", [])
+            for span in increment_scope.get("spans") or []:
+                if not isinstance(span, Mapping):
+                    continue
+                normalized = normalize_span(span)
+                identity = span_identity(normalized)
+                if identity is not None:
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                spans.append(normalized)
+    return buffer
+
+
+def _trim_window(buffer: dict[str, Any], max_spans: int | None) -> dict[str, Any]:
+    """Trim the window in place to the newest ``max_spans`` spans.
+
+    ``max_spans=None`` keeps every span; a non-positive limit yields a bounded
+    empty window (mirrors :func:`spans.trim_trajectory`).
+    """
+
+    if max_spans is None:
+        _sort_window_spans(buffer)
+        return buffer
+    scopes = [
+        scope_span
+        for resource_span in buffer.get("resourceSpans") or []
+        for scope_span in resource_span.get("scopeSpans") or []
+    ]
+    if max_spans <= 0:
+        for scope_span in scopes:
+            scope_span["spans"] = []
+        return buffer
+    total = sum(len(scope_span.get("spans") or []) for scope_span in scopes)
+    if total > max_spans:
+        ranked: list[tuple[tuple[int, int, str, str], int]] = []
+        for scope_span in scopes:
+            for span in scope_span.get("spans") or []:
+                ranked.append((span_sort_key(span), id(span)))
+        ranked.sort(key=lambda item: item[0])
+        keep = {identity for _, identity in ranked[-max_spans:]}
+        for scope_span in scopes:
+            scope_span["spans"] = [
+                span for span in (scope_span.get("spans") or []) if id(span) in keep
+            ]
+    _sort_window_spans(buffer)
+    return buffer
+
+
+def _with_canonical_resource(
+    buffer: Mapping[str, Any],
+    metadata: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a shallow re-wrap of the window carrying canonical metadata.
+
+    The span tree is referenced, not copied: ``Trajectory.from_otlp`` deep-copies
+    the payload, so the returned object never shares state with ``buffer``.
+    """
+
+    resource_spans = buffer.get("resourceSpans") or []
+    if not resource_spans:
+        return {"resourceSpans": []}
+    rewrapped: list[dict[str, Any]] = []
+    for resource_span in resource_spans:
+        resource = dict(resource_span.get("resource") or {})
+        resource["attributes"] = attributes_from_map(metadata)
+        rewrapped.append(
+            {
+                "resource": resource,
+                "scopeSpans": resource_span.get("scopeSpans") or [],
+            }
+        )
+    return {"resourceSpans": rewrapped}
+
+
+def _project_buffer(buffer: Mapping[str, Any], metadata: Mapping[str, Any]) -> Trajectory:
+    """Build the immutable, detached snapshot for one clean window."""
+
+    return Trajectory.from_otlp(_with_canonical_resource(buffer, metadata))
 
 
 def _split_response_token_fields(
@@ -294,7 +461,7 @@ class EvolutionRail(DeepAgentRail):
         self._evolution_trigger = evolution_trigger
         self._disabled_skills: set[str] = _normalize_skill_names(disabled_skills)
         self._member_role: Optional[str] = None
-        self._scope_windows: dict[tuple[str, ...], Trajectory] = {}
+        self._scope_windows: dict[tuple[str, ...], dict[str, Any]] = {}
         self._scope_locks: dict[tuple[str, ...], threading.RLock] = {}
         self._window_lock = threading.RLock()
         self._subscription_lock = threading.RLock()
@@ -546,16 +713,6 @@ class EvolutionRail(DeepAgentRail):
             metadata["agentteam.agent.role"] = self._member_role
         return metadata
 
-    @staticmethod
-    def _with_scope_metadata(trajectory: Trajectory, metadata: Mapping[str, Any]) -> Trajectory:
-        """Replace producer resource attributes with the canonical envelope."""
-
-        payload = trajectory.to_otlp()
-        for resource_span in payload.get("resourceSpans") or []:
-            resource = resource_span.setdefault("resource", {})
-            resource["attributes"] = attributes_from_map(metadata)
-        return Trajectory.from_otlp(payload)
-
     def _project_window(self, capture: _InvokeCapture) -> Trajectory | None:
         """Return an immutable, detached snapshot with canonical metadata."""
 
@@ -563,9 +720,7 @@ class EvolutionRail(DeepAgentRail):
             window = self._scope_windows.get(capture.scope_key)
             if window is None:
                 return None
-            payload = window.to_otlp()
-        projected = Trajectory.from_otlp(payload)
-        return self._with_scope_metadata(projected, self._scope_metadata(capture))
+            return _project_buffer(window, self._scope_metadata(capture))
 
     def get_trajectory(
         self,
@@ -587,15 +742,14 @@ class EvolutionRail(DeepAgentRail):
             window = self._scope_windows.get(key)
             if window is None:
                 return None
-            projected = Trajectory.from_otlp(window.to_otlp())
-        return self._with_scope_metadata(
-            projected,
-            self._trajectory_metadata(
-                session_id=str(session_id),
-                member_id=member_id if team_id is None else None,
-                team_id=team_id,
-            ),
-        )
+            return _project_buffer(
+                window,
+                self._trajectory_metadata(
+                    session_id=str(session_id),
+                    member_id=member_id if team_id is None else None,
+                    team_id=team_id,
+                ),
+            )
 
     def _current_capture(self) -> _InvokeCapture | None:
         return self._invoke_capture.get()
@@ -715,10 +869,19 @@ class EvolutionRail(DeepAgentRail):
         capture: _InvokeCapture,
         increment: Trajectory,
     ) -> Trajectory:
+        # Incremental merge: the clean window is kept as a mutable, already
+        # normalized OTLP payload, so a drained increment only appends its own
+        # (small) span set.  The previous merge_trajectories()+trim_trajectory()
+        # pair re-normalized and deep-copied the *entire* accumulated window on
+        # every increment, starving the event loop on long runs.
         with self._scope_lock(capture.scope_key):
-            current = self._scope_windows.get(capture.scope_key)
-            merged = merge_trajectories(current, increment) if current is not None else increment
-            merged = trim_trajectory(merged, self._max_trajectory_spans)
+            window = self._scope_windows.get(capture.scope_key)
+            increment_payload = normalize_otlp(_payload_of(increment))
+            if window is None:
+                merged = increment_payload
+            else:
+                merged = _append_increment(window, increment_payload)
+            merged = _trim_window(merged, self._max_trajectory_spans)
             self._scope_windows[capture.scope_key] = merged
         return self._project_window(capture)
 
