@@ -846,7 +846,13 @@ class OpenAIModelClient(BaseModelClient):
         )
         self._move_openai_extra_body_extensions(params)
 
-        attempts = self.model_client_config.max_retries if max_attempts is None else max(1, int(max_attempts))
+        # ``ModelClientConfig.max_retries`` no longer drives SDK retries (those
+        # clients are created with max_retries=0). This loop is the KV-cache
+        # management request itself, so a configured 0 still performs one attempt.
+        if max_attempts is None:
+            attempts = max(1, int(self.model_client_config.max_retries or 0))
+        else:
+            attempts = max(1, int(max_attempts))
         last_error = None
         for attempt in range(attempts):
             async_client = None
@@ -1101,7 +1107,7 @@ class OpenAIModelClient(BaseModelClient):
                 "Created shared long-lived AsyncOpenAI client.",
                 event_type=LogEventType.LLM_CALL_START,
                 timeout=self.model_client_config.timeout,
-                max_retries=self.model_client_config.max_retries,
+                max_retries=0,
             )
         return client
 
@@ -1141,7 +1147,7 @@ class OpenAIModelClient(BaseModelClient):
             "Before create openai client, model client config params ready.",
             event_type=LogEventType.LLM_CALL_START,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=0,
         )
 
         return AsyncOpenAI(
@@ -1149,7 +1155,7 @@ class OpenAIModelClient(BaseModelClient):
             base_url=_normalize_openai_base_url(self.model_client_config.api_base),
             http_client=http_client,
             timeout=final_timeout,
-            max_retries=self.model_client_config.max_retries
+            max_retries=0,
         )
 
     @classmethod
@@ -1181,8 +1187,8 @@ class OpenAIModelClient(BaseModelClient):
 
         Closing is immediate even if a call is in flight: a model the user
         removed should stop consuming tokens at once. An in-flight request on a
-        closed client surfaces as a normal model-call failure (not retried by
-        LLMRetryRail, which only retries repetition/stream-timeout markers).
+        closed client surfaces as a normal model-call failure. ModelAnomalyDetectionRail
+        may retry it when no user-visible output has been written.
         """
         keys = {cls.connection_key(cfg) for cfg in configs}
         closed = 0
@@ -1275,7 +1281,7 @@ class OpenAIModelClient(BaseModelClient):
             timeout_seconds=timeout if timeout is not None else self.model_client_config.timeout,
             verify=verify,
             proxy=UrlUtils.get_global_proxy_url(self.model_client_config.api_base),
-            max_retries=self.model_client_config.max_retries,
+            max_retries=0,
         )
 
     async def _parse_responses_content(self, content: str, output_parser: BaseOutputParser) -> Any:

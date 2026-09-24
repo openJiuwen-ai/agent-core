@@ -118,9 +118,11 @@ class ModelClientConfig(BaseModel):
     )
 
     max_retries: int = Field(
-        default=1,
-        description="Maximum number of thin SDK-level retries for transient HTTP failures "
-                    "(connection drops, 429, 5xx). Whole-call retries are handled by LLMRetryRail."
+        default=0,
+        description="Retained for compatibility. OpenAI and Anthropic SDK clients are "
+                    "created with max_retries=0, so this value is not passed to the SDK. "
+                    "Whole-call retries for transient provider failures are handled by "
+                    "ModelAnomalyDetectionRail."
     )
     use_shared_llm_http_client: bool = Field(
         default=True,

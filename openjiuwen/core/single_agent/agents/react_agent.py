@@ -92,6 +92,7 @@ from openjiuwen.core.single_agent.rail.base import (
     current_usage_delegation,
     reset_usage_attribution,
     reset_usage_invocation_id,
+    MODEL_VISIBLE_OUTPUT_EMITTED_KEY,
     rail,
 )
 from openjiuwen.core.single_agent.prompts.builder import (
@@ -1874,6 +1875,7 @@ class ReActAgent(BaseAgent):
         call_last_token_time = None
         call_chunk_count = 0
         ctx.extra["_stream_chunks_emitted"] = 0
+        ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = False
         try:
             async for chunk in llm.stream(
                     model=self._config.model_name,
@@ -1903,6 +1905,7 @@ class ReActAgent(BaseAgent):
                         await inspect_result
 
                 if chunk.reasoning_content:
+                    ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = True
                     await session.write_stream(OutputSchema(
                         type="llm_reasoning",
                         index=chunk_index,
@@ -1910,6 +1913,7 @@ class ReActAgent(BaseAgent):
                     ))
                     chunk_index += 1
                 if chunk.content:
+                    ctx.extra[MODEL_VISIBLE_OUTPUT_EMITTED_KEY] = True
                     await session.write_stream(OutputSchema(
                         type="llm_output",
                         index=chunk_index,
