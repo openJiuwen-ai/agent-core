@@ -32,6 +32,7 @@ from .storage import (
     read_s3_text,
     upload_local_dir_to_s3,
     upload_s3_bytes,
+    user_cache_root,
 )
 
 __all__ = [
@@ -67,4 +68,5 @@ __all__ = [
     "to_pascal_path",
     "upload_local_dir_to_s3",
     "upload_s3_bytes",
+    "user_cache_root",
 ]
