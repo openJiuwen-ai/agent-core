@@ -74,6 +74,7 @@ def test_worker_with_none_allowlist_defaults_to_core() -> None:
 def test_worker_prompt_only_mentions_conditionally_visible_run_code() -> None:
     prompt = build_browser_worker_system_prompt("screenshots", "artifacts")
 
+    assert "evaluate" not in prompt
     assert "browser_run_code_unsafe" not in prompt
     assert "only when it is present" in prompt
     assert "do not create screenshots through run-code" in prompt

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -25,7 +25,6 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_state_cont
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_working_context import (
     BROWSER_TASK_STATE_KEY,
-    BrowserWorkingContextStore,
 )
 from openjiuwen.harness.tools.browser_move.playwright_runtime.probes import (
     build_browser_state_metadata_js,
@@ -116,9 +115,7 @@ def test_rendered_browser_state_is_valid_json_within_configured_limit() -> None:
 
 
 def test_rendered_browser_state_omits_task_progress_duplicates() -> None:
-    processor = BrowserStateContextProcessor(
-        BrowserStateContextProcessorConfig(provider=AsyncMock())
-    )
+    processor = BrowserStateContextProcessor(BrowserStateContextProcessorConfig(provider=AsyncMock()))
     state = _state("https://shop.example/search")
     state["semantic_state"] = {
         "result_count": 10,
@@ -157,6 +154,21 @@ def test_completed_parallel_calls_form_one_refresh_action_group() -> None:
 
     assert group_id
     assert refresh_ids == {"mutate"}
+
+
+@pytest.mark.parametrize("tool_name", [
+    "browser_find", "browser_probe_cards", "browser_probe_interactives", "browser_snapshot",
+])
+@pytest.mark.parametrize("prefix", ["", "playwright-official.", "mcp_playwright-official_"])
+def test_observation_category_recognizes_each_supported_tool_and_mcp_name(tool_name: str, prefix: str) -> None:
+    assert BrowserStateContextProcessor._is_observation_tool_name(prefix + tool_name)
+
+
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_other", "browser_snapshot_extra", "browser_click", "browser_batch_interact", "browser_run_code",
+])
+def test_observation_category_does_not_infer_safety_from_partial_names(tool_name: str) -> None:
+    assert not BrowserStateContextProcessor._is_observation_tool_name(tool_name)
 
 
 @pytest.mark.asyncio
@@ -505,7 +517,7 @@ async def test_context_engine_refreshes_state_after_completed_mutating_tool(
 
 
 @pytest.mark.asyncio
-async def test_context_engine_injects_new_capture_after_evaluate_and_reports_unchanged() -> None:
+async def test_context_engine_injects_new_capture_after_evaluate() -> None:
     provider = AsyncMock()
     provider.capture_browser_state.side_effect = [
         _state("https://same.example"),
@@ -570,7 +582,7 @@ async def test_persisted_prompt_attachments_remain_with_browser_state_tail() -> 
 
 
 @pytest.mark.asyncio
-async def test_no_progress_count_increments_and_resets_after_changed_state() -> None:
+async def test_completed_actions_refresh_state_even_when_page_content_is_unchanged() -> None:
     provider = AsyncMock()
     provider.capture_browser_state.side_effect = [
         _state("https://same.example"),
@@ -679,11 +691,11 @@ async def test_processor_injects_explicit_unavailable_state_without_stale_image(
     assert "browser disconnected" in state_content
     assert '"page_state":{}' in state_content
     assert "image_url" not in state_content
-    assert processor._page_change == "unknown"
+    assert processor.save_state() == {}
 
 
 @pytest.mark.asyncio
-async def test_processor_load_state_resets_page_change_baseline() -> None:
+async def test_processor_load_state_discards_cache_and_captures_fresh_state() -> None:
     provider = AsyncMock()
     provider.capture_browser_state.side_effect = [
         _state("https://first.example"),
@@ -694,12 +706,11 @@ async def test_processor_load_state_resets_page_change_baseline() -> None:
 
     _, first_window = await processor.on_get_context_window(None, window)
     first_state = _window_message(first_window, "current_browser_state")
-    assert processor._page_change == "initial"
+    assert processor.save_state() == {}
     processor.load_state({})
     _, restored_window = await processor.on_get_context_window(None, first_window)
 
     restored_state = _window_message(restored_window, "current_browser_state")
-    assert processor._page_change == "initial"
     assert "https://second.example" in restored_state.content
     assert restored_state is not first_state
     assert provider.capture_browser_state.await_count == 2
@@ -748,14 +759,14 @@ async def test_runtime_combines_snapshot_with_page_metadata() -> None:
 
 
 @pytest.mark.asyncio
-async def test_runtime_timeout_reconciliation_skips_full_snapshot() -> None:
+async def test_runtime_timeout_reconciliation_captures_full_content() -> None:
     runtime = object.__new__(BrowserAgentRuntime)
     runtime._page_generation = 0
     runtime._reference_generations = {}
     runtime._selector_primary_links = {}
     runtime._last_observed_url = "https://example.test/current"
     runtime.ensure_runtime_ready = AsyncMock()
-    runtime._call_playwright_tool = AsyncMock()
+    runtime._call_playwright_tool = AsyncMock(return_value='- heading "Next results" [ref=e1]')
     runtime._call_playwright_run_code_unsafe = AsyncMock(
         return_value={
             "ok": True,
@@ -773,12 +784,13 @@ async def test_runtime_timeout_reconciliation_skips_full_snapshot() -> None:
 
     state = await runtime.capture_reconciliation_browser_state(action_group_id="timeout-group")
 
-    runtime._call_playwright_tool.assert_not_awaited()
+    runtime._call_playwright_tool.assert_awaited_once_with("browser_snapshot", {})
     runtime._call_playwright_run_code_unsafe.assert_awaited_once()
     assert state["ok"] is True
     assert state["reconciliation_only"] is True
     assert state["url"] == "https://example.test/next"
     assert state["semantic_progress"]["action_group_id"] == "timeout-group"
+    assert state["semantic_state"]["page_content_hash"]
 
 
 @pytest.mark.asyncio
@@ -868,7 +880,7 @@ def test_browser_state_metadata_probe_collects_tabs_and_position_without_screens
 
 
 @pytest.mark.asyncio
-async def test_processor_requires_replan_for_semantic_loop_even_when_dom_changes() -> None:
+async def test_processor_forwards_semantic_progress_once_even_when_page_content_changes() -> None:
     state = _state("https://shop.example/search")
     state["dom"] = '- button "Different DOM" [ref=e9]'
     state["semantic_state"] = {
@@ -906,10 +918,24 @@ async def test_processor_requires_replan_for_semantic_loop_even_when_dom_changes
 
     session = Session()
     state["semantic_progress"]["revision"] = 1
-    BrowserWorkingContextStore.sync_semantic_progress(session, state["semantic_progress"])
+    provider = AsyncMock()
+    provider.capture_browser_state.return_value = state
+    processor = BrowserStateContextProcessor(BrowserStateContextProcessorConfig(provider=provider))
+    context = Mock()
+    context.get_messages.return_value = [UserMessage(content="find headphones")]
+    context.get_session_ref.return_value = session
+    window = ContextWindow(context_messages=list(context.get_messages.return_value))
+
+    _, first_window = await processor.on_get_context_window(context, window)
+    _, second_window = await processor.on_get_context_window(context, first_window)
+    provider.capture_browser_state.assert_awaited_once()
+    assert _window_message(first_window, "current_browser_state") is _window_message(
+        second_window, "current_browser_state"
+    )
 
     task_state = session.get_state(BROWSER_TASK_STATE_KEY)
     assert task_state["semantic_progress"]["aba_loop"] is True
+    assert task_state["semantic_revision"] == 1
     assert task_state["replan_required"] is True
     assert task_state["status"] == "replan_required"
     assert task_state["next_action_class"] == "materially_different_strategy"

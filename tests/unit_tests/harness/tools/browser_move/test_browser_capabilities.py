@@ -28,7 +28,8 @@ def test_core_only_selection_exposes_exactly_core_tools() -> None:
     assert resolved.selected_names == ("core",)
     assert resolved.rejected_names == ()
     assert resolved.allowed_tool_names == CORE_BROWSER_TOOL_NAMES
-    assert len(CORE_BROWSER_TOOL_NAMES) == 14
+    assert len(CORE_BROWSER_TOOL_NAMES) == 13
+    assert "browser_evaluate" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_wait_for" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_run_code" not in CORE_BROWSER_TOOL_NAMES
     assert "browser_run_code_unsafe" not in CORE_BROWSER_TOOL_NAMES

@@ -2440,8 +2440,8 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
         when_to_use=(
             "Use for multi-field forms with several known controls, search boxes with autocomplete, "
             "dropdown/date-picker flows, filter panels, and short click/type/wait/extract sequences. "
-            "Prefer this over many separate browser_click, browser_type, condition-wait, and "
-            "browser_evaluate turns when the next actions are already known. Do not use it for a single "
+            "Prefer this over many separate browser_click, browser_type, and condition-wait "
+            "turns when the next actions are already known. Do not use it for a single "
             "uncertain click or when the page state must be inspected first."
         ),
         params={

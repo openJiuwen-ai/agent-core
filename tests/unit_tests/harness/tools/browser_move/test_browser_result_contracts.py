@@ -189,25 +189,38 @@ def _admit(rail, ctx, call):
     return ctx.inputs.tool_result
 
 
-def test_same_group_parallel_reads_use_one_replan_trial():
-    calls = [ToolCall(id=str(index), type="function", name="mcp_playwright-official_browser_find",
-                      arguments=json.dumps({"query": query})) for index, query in enumerate(("humidity", "wind"))]
+@pytest.mark.parametrize("tool_name", [
+    "browser_probe_cards", "browser_probe_interactives",
+    "mcp_playwright-official_browser_snapshot", "mcp_playwright-official_browser_find",
+])
+def test_same_group_parallel_reads_do_not_consume_replan_trials(tool_name):
+    calls = [ToolCall(id=str(index), type="function", name=tool_name,
+                      arguments=json.dumps({"text": query})) for index, query in enumerate(("humidity", "wind"))]
     rail, ctx, state = _admission_context(calls)
     assert _admit(rail, ctx, calls[0]) is None
     assert _admit(rail, ctx, calls[1]) is None
-    assert state["replan_count"] == 1
-    assert state["replan_trial_pending"] is True
+    assert state["replan_count"] == 0
+    assert state["replan_trial_pending"] is False
 
 
-def test_read_trial_does_not_admit_a_mutating_action_in_same_group():
+@pytest.mark.parametrize("exhausted", [False, True])
+def test_read_exemption_does_not_bypass_mutation_gate_in_same_group(exhausted):
     calls = [
-        ToolCall(id="find", type="function", name="mcp_playwright-official_browser_find", arguments='{"query":"wind"}'),
+        ToolCall(id="find", type="function", name="mcp_playwright-official_browser_find", arguments='{"text":"wind"}'),
         ToolCall(id="key", type="function", name="mcp_playwright-official_browser_press_key",
                  arguments='{"key":"End"}'),
     ]
-    rail, ctx, _ = _admission_context(calls)
+    rail, ctx, state = _admission_context(calls)
+    state["replan_count"] = 2 if exhausted else 0
     assert _admit(rail, ctx, calls[0]) is None
-    assert _admit(rail, ctx, calls[1])["executed"] is False
+    result = _admit(rail, ctx, calls[1])
+    if exhausted:
+        assert result["executed"] is False
+        assert state["replan_count"] == 2
+    else:
+        assert result is None
+        assert state["replan_count"] == 1
+        assert state["replan_trial_pending"] is True
 
 
 def test_schema_error_does_not_reserve_or_consume_replan_trial():
@@ -224,7 +237,7 @@ def test_schema_error_does_not_reserve_or_consume_replan_trial():
     repaired = call.model_copy(update={"id": "fixed", "arguments": '{"element":"weather"}'})
     assert _admit(rail, ctx, repaired) is None
     assert json.loads(ctx.inputs.tool_args) == {}
-    assert state["replan_count"] == 1
+    assert state["replan_count"] == 0
 
 
 def test_server_prefixed_local_batch_is_canonicalized_to_registered_runtime_tool():

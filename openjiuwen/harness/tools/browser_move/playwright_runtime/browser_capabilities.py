@@ -14,7 +14,6 @@ CORE_BROWSER_CAPABILITY_NAME = "core"
 # newly introduced Playwright tool before its capability policy is reviewed.
 CORE_BROWSER_TOOL_NAMES: tuple[str, ...] = (
     "browser_click",
-    "browser_evaluate",
     "browser_file_upload",
     "browser_fill_form",
     "browser_find",
@@ -143,7 +142,7 @@ DEFAULT_BROWSER_CAPABILITIES: tuple[BrowserCapability, ...] = (
         name="advanced_code",
         description=(
             "Run a preplanned Playwright code snippet only when deterministic browser tools, "
-            "compact probes, evaluate, snapshot, and batch are insufficient."
+            "compact probes, snapshot, and batch are insufficient."
         ),
         tool_names=ADVANCED_CODE_BROWSER_TOOL_NAMES,
     ),

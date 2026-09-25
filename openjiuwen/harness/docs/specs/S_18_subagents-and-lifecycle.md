@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagents/`（8 文件）、`openjiuwen/harness/subagent_lifecycle.py`、`openjiuwen/harness/manifest/harness_elements.py`（subagent 构建器） |
-| 最近一次修订日期 | 2026-09-03 |
+| 最近一次修订日期 | 2026-09-18 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -63,12 +63,14 @@
 9. **browser 上下文权威边界**：runtime 以 requested evidence slots、已解析 evidence 和
    blockers 计算任务状态；模型负责策略与自然语言结果，不负责维护第二套进度 JSON。模型可见
    PageState 与 WorkingContext 必须先按结构裁剪后序列化，保持合法 JSON。offload 保存可恢复的
-   有界旧结果；预截断的完整原始观察仅在显式开启 raw audit 时进入审计层。PageState 的
+   旧结果；完整原始观察仅在显式开启 raw audit 时进入审计层。PageState 的
    `page_blockers` 仅表示页面启发式信号，不能直接覆盖 runtime 的权威任务终态。
-10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据并将
-    当前结果限制在 12 KB 内，再统一交给 `ToolResultWindowProcessor`；模型只保留最近一个有界结果，
-    并发只读结果的合并结构由 PageState 提供。WorkingContext 默认只投影 runtime 权威状态，
-    不再要求模型维护第二份记忆。
+10. **browser 观察采用统一窗口**：Probe、snapshot、find、evaluate 先由 runtime 提取证据，
+    再统一交给 `ToolResultWindowProcessor`；模型保留最近两个匹配的工具结果，更旧的结果进入 offload。
+    临时恢复路径保留 snapshot/find 的完整工具消息，不替换为 `compact_page_state`，也不执行
+    12,000 字符的首尾预览压缩；目标注册、generation 校验及独立的 PageState 上下文投影继续生效。
+    Probe/evaluate 仍执行 12,000 字符的结果限制。并发只读结果的合并结构由 PageState 提供。
+    WorkingContext 默认只投影 runtime 权威状态，不再要求模型维护第二份记忆。
 
 ## 接口契约
 

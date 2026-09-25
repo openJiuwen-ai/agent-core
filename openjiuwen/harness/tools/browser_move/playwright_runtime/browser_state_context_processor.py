@@ -20,16 +20,13 @@ from openjiuwen.harness.prompts.prompt_attachment_manager import (
 
 from .browser_logging import browser_agent_log_warning
 from .browser_working_context import BrowserWorkingContextStore
+from .tool_categories import is_browser_observation_tool
 
 _BROWSER_STATE_MESSAGE_NAME = "current_browser_state"
 _BROWSER_STATE_METADATA_KEY = "browser_state_context"
 _BROWSER_STATE_MESSAGE_ID = "openjiuwen:browser-state"
 _BROWSER_PROGRESS_MESSAGE_NAME = "browser_state_progress"
 _BROWSER_PROGRESS_METADATA_KEY = "browser_state_progress_context"
-_PAGE_CHANGE_INITIAL = "initial"
-_PAGE_CHANGE_CHANGED = "changed"
-_PAGE_CHANGE_UNCHANGED = "unchanged"
-_PAGE_CHANGE_UNKNOWN = "unknown"
 _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
     {
         # Runtime interaction helpers.
@@ -84,14 +81,6 @@ _BROWSER_STATE_REFRESH_TOOL_NAMES = frozenset(
         "browser_set_storage_state",
     }
 )
-_BROWSER_STATE_OBSERVATION_TOOL_NAMES = frozenset(
-    {
-        "browser_find",
-        "browser_probe_cards",
-        "browser_probe_interactives",
-        "browser_snapshot",
-    }
-)
 
 
 class BrowserStateContextProcessorConfig(BaseModel):
@@ -113,9 +102,6 @@ class BrowserStateContextProcessor(ContextProcessor):
         self._cached_state_message: UserMessage | None = None
         self._seen_refresh_tool_call_ids: set[str] = set()
         self._seen_action_group_ids: set[str] = set()
-        self._last_successful_state_digest: str | None = None
-        self._page_change = _PAGE_CHANGE_INITIAL
-        self._consecutive_no_progress = 0
 
     @property
     def config(self) -> BrowserStateContextProcessorConfig:
@@ -142,7 +128,9 @@ class BrowserStateContextProcessor(ContextProcessor):
         del kwargs
         source_messages = context.get_messages() if context is not None else context_window.context_messages
         action_group_id, refresh_tool_call_ids, observation_only = self._completed_state_action_group(source_messages)
-        reconciliation_only = self._requires_reconciliation(source_messages, refresh_tool_call_ids)
+        reconciliation_only = not observation_only and self._requires_reconciliation(
+            source_messages, refresh_tool_call_ids - self._seen_refresh_tool_call_ids
+        )
         should_refresh = self._cached_state is None or bool(
             action_group_id and action_group_id not in self._seen_action_group_ids
         )
@@ -153,20 +141,14 @@ class BrowserStateContextProcessor(ContextProcessor):
                 captured_state = await self._capture_compact_state(action_group_id=action_group_id)
             else:
                 captured_state = await self._capture_state(action_group_id=action_group_id or "initial")
-            self._page_change = self._classify_page_change(captured_state)
             semantic_progress = captured_state.get("semantic_progress")
             if isinstance(semantic_progress, dict):
-                self._consecutive_no_progress = int(semantic_progress.get("consecutive_no_progress") or 0)
                 session = context.get_session_ref() if context is not None else None
                 recovered = BrowserWorkingContextStore.sync_semantic_progress(session, semantic_progress)
                 if recovered:
                     acknowledge_replan = getattr(self.config.provider, "acknowledge_semantic_replan", None)
                     if callable(acknowledge_replan):
                         acknowledge_replan()
-            elif self._page_change == _PAGE_CHANGE_UNCHANGED:
-                self._consecutive_no_progress += 1
-            else:
-                self._consecutive_no_progress = 0
             self._cached_state = captured_state
             self._cached_state_message = self._build_state_message(captured_state)
         self._seen_refresh_tool_call_ids.update(refresh_tool_call_ids)
@@ -288,9 +270,7 @@ class BrowserStateContextProcessor(ContextProcessor):
         }
         completed_call_ids = set(tool_messages)
         executed_call_ids = {
-            call_id
-            for call_id, message in tool_messages.items()
-            if cls._tool_message_was_executed(message)
+            call_id for call_id, message in tool_messages.items() if cls._tool_message_was_executed(message)
         }
         return completed_call_ids, tool_messages, executed_call_ids
 
@@ -339,9 +319,7 @@ class BrowserStateContextProcessor(ContextProcessor):
                 payload = json.loads(content)
             except (TypeError, ValueError):
                 payload = None
-            if isinstance(payload, dict) and (
-                payload.get("ok") is False or payload.get("success") is False
-            ):
+            if isinstance(payload, dict) and (payload.get("ok") is False or payload.get("success") is False):
                 return False
         return True
 
@@ -360,15 +338,14 @@ class BrowserStateContextProcessor(ContextProcessor):
 
     @staticmethod
     def _is_observation_tool_name(tool_name: str) -> bool:
-        return any(
-            tool_name == expected or tool_name.endswith(f".{expected}") or tool_name.endswith(f"_{expected}")
-            for expected in _BROWSER_STATE_OBSERVATION_TOOL_NAMES
-        )
+        return is_browser_observation_tool(tool_name)
 
-    async def _capture_state(self, *, action_group_id: str) -> Dict[str, Any]:
+    async def _capture_state(self, *, action_group_id: str, observation_only: bool = False) -> Dict[str, Any]:
         try:
             capture = self.config.provider.capture_browser_state
-            if action_group_id == "initial":
+            if observation_only:
+                state = await capture(action_group_id=action_group_id, observation_only=True)
+            elif action_group_id == "initial":
                 state = await capture()
             else:
                 try:
@@ -407,7 +384,7 @@ class BrowserStateContextProcessor(ContextProcessor):
     async def _capture_compact_state(self, *, action_group_id: str) -> Dict[str, Any]:
         capture = getattr(self.config.provider, "capture_compact_browser_state", None)
         if not callable(capture):
-            return await self._capture_state(action_group_id=action_group_id)
+            return await self._capture_state(action_group_id=action_group_id, observation_only=True)
         try:
             state = await capture(action_group_id=action_group_id)
         except Exception as exc:
@@ -415,9 +392,9 @@ class BrowserStateContextProcessor(ContextProcessor):
                 "[BrowserStateContextProcessor] compact browser state merge failed: %s",
                 exc,
             )
-            return await self._capture_state(action_group_id=action_group_id)
+            return await self._capture_state(action_group_id=action_group_id, observation_only=True)
         if not isinstance(state, dict):
-            return await self._capture_state(action_group_id=action_group_id)
+            return await self._capture_state(action_group_id=action_group_id, observation_only=True)
         if self._cached_state:
             if not state.get("tabs"):
                 state["tabs"] = self._cached_state.get("tabs") or []
@@ -441,40 +418,6 @@ class BrowserStateContextProcessor(ContextProcessor):
             return await self._capture_state(action_group_id=action_group_id)
         return state
 
-    def _classify_page_change(self, state: Dict[str, Any]) -> str:
-        """Compare a successful capture with the previous successful capture."""
-        if not bool(state.get("ok")):
-            return _PAGE_CHANGE_UNKNOWN
-
-        state_digest = self._state_digest(state)
-        if self._last_successful_state_digest is None:
-            page_change = _PAGE_CHANGE_INITIAL
-        elif state_digest == self._last_successful_state_digest:
-            page_change = _PAGE_CHANGE_UNCHANGED
-        else:
-            page_change = _PAGE_CHANGE_CHANGED
-        self._last_successful_state_digest = state_digest
-        return page_change
-
-    @staticmethod
-    def _state_digest(state: Dict[str, Any]) -> str:
-        comparable_state = {
-            "url": state.get("url") or "",
-            "title": state.get("title") or "",
-            "tabs": state.get("tabs") or [],
-            "page_position": state.get("page_position") or {},
-            "page_state": state.get("page_state") or {},
-            "semantic_state": state.get("semantic_state") or {},
-        }
-        serialized_state = json.dumps(
-            comparable_state,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-        return hashlib.sha256(serialized_state.encode("utf-8")).hexdigest()
-
     def _build_state_message(self, state: Dict[str, Any]) -> UserMessage:
         text = self._format_state_text(state)
         return UserMessage(
@@ -492,24 +435,26 @@ class BrowserStateContextProcessor(ContextProcessor):
         if not isinstance(page_state, dict):
             page_state = {}
 
-        state_header = self._fit_state_header({
-            "ok": bool(state.get("ok")),
-            "error": state.get("error"),
-            "url": state.get("url") or "",
-            "title": state.get("title") or "",
-            "tabs": state.get("tabs") or [],
-            "page_position": state.get("page_position") or {},
-            "semantic_state": state.get("semantic_state") or {},
-            "dom_error": state.get("dom_error"),
-            "page_state": page_state,
-        })
+        state_header = self._fit_state_header(
+            {
+                "ok": bool(state.get("ok")),
+                "error": state.get("error"),
+                "url": state.get("url") or "",
+                "title": state.get("title") or "",
+                "tabs": state.get("tabs") or [],
+                "page_position": state.get("page_position") or {},
+                "semantic_state": state.get("semantic_state") or {},
+                "dom_error": state.get("dom_error"),
+                "page_state": page_state,
+            }
+        )
         return (
             "<browser_state>\n"
             "This observation was captured initially or after the latest detected browser mutation and "
             "replaces any previous browser state. It is reused until another state-invalidating browser "
             "tool completes; element references may become stale if the page changes independently. "
-            "Change status is provided separately after this compact observation. Raw AX/Card data is "
-            "available only in the browser audit trace.\n"
+            "Task progress is provided in the browser working context. Full snapshot/find "
+            "observations are available in recent tool results.\n"
             f"{json.dumps(state_header, ensure_ascii=False, separators=(',', ':'))}\n"
             "</browser_state>"
         )
@@ -570,8 +515,7 @@ class BrowserStateContextProcessor(ContextProcessor):
                 values = compact_semantic.get(key)
                 if isinstance(values, dict):
                     compact_semantic[key] = {
-                        str(item_key)[:80]: str(item_value)[:160]
-                        for item_key, item_value in list(values.items())[:8]
+                        str(item_key)[:80]: str(item_value)[:160] for item_key, item_value in list(values.items())[:8]
                     }
                 elif isinstance(values, list):
                     compact_semantic[key] = [str(item)[:160] for item in values[:8]]
@@ -642,9 +586,6 @@ class BrowserStateContextProcessor(ContextProcessor):
         self._cached_state_message = None
         self._seen_refresh_tool_call_ids = set()
         self._seen_action_group_ids = set()
-        self._last_successful_state_digest = None
-        self._page_change = _PAGE_CHANGE_INITIAL
-        self._consecutive_no_progress = 0
 
     def save_state(self) -> Dict[str, Any]:
         return {}

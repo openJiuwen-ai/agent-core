@@ -186,6 +186,8 @@ def test_browser_agent_prompt_enforces_convergent_browser_strategy() -> None:
     assert "runtime 要求重新规划" in chinese
     assert "browser_run_code_unsafe" not in english
     assert "browser_run_code_unsafe" not in chinese
+    assert "evaluate" not in english
+    assert "evaluate" not in chinese
     assert "makes a browser_run_code tool visible" in english
     assert "明确暴露 browser_run_code" in chinese
 
