@@ -72,9 +72,6 @@ from openjiuwen.core.runner.callback.models import (
 # ``single_agent``. Keep the two values in step.
 SLOW_CALLBACK_SECONDS = 1.0
 
-# [PERF-CORE] 慢事件门控日志(>5ms)使用的 logger
-_SLOW_TRIGGER_LOGGER = logging.getLogger("jiuwenswarm.perf.core")
-
 # Above this, an event's whole callback chain is reported at INFO with a
 # per-callback split. A dozen-plus rails each doing modest work add up without
 # any one of them crossing ``SLOW_CALLBACK_SECONDS``, which is exactly the case
@@ -1047,13 +1044,15 @@ class AsyncCallbackFramework:
         Returns:
             List of results from all executed callbacks
         """
-        _pt_t0 = time.monotonic()  # [PERF-CORE] 慢事件计时
+        _pt_t0 = time.monotonic()  # [PERF-CORE] 慢事件墙钟计时(含 hooks/filters)
         try:
             return await self.__trigger_inner(event, *args, **kwargs)
         finally:
             _pt_dt = (time.monotonic() - _pt_t0) * 1000
-            if _pt_dt > 5:
-                _SLOW_TRIGGER_LOGGER.info(
+            # 与 [RailChain] 同阈值同 logger:平时零噪音;且墙钟含 BEFORE/AFTER
+            # hooks 与 filters,能暴露 chain_timings 汇总看不见的慢环节。
+            if _pt_dt >= SLOW_CALLBACK_CHAIN_SECONDS * 1000:
+                runner_logger.info(
                     "[PERF-CORE] slow_trigger event=%s ms=%.1f", event, _pt_dt
                 )
 
