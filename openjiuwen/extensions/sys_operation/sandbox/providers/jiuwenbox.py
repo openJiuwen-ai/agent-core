@@ -395,6 +395,28 @@ class _JiuwenBoxClient:
         _raise_for_status(response)
         return dict(response.json())
 
+    async def exec_async(
+        self, sandbox_id: str, command: list[str], *, cwd: str | None = None,
+        timeout: int | None = None, environment: Dict[str, str] | None = None,
+        stdin: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancellable exec; closing this request never closes a shared client."""
+        timeout_seconds = _normalize_exec_timeout(timeout)
+        body = {
+            "command": command, "workdir": cwd, "env": environment,
+            "stdin": stdin, "timeout_seconds": timeout_seconds,
+        }
+        async with httpx.AsyncClient(
+            base_url=self._client.base_url, headers=self._client.headers,
+            timeout=max(timeout_seconds or 30, 30),
+        ) as client:
+            response = await client.post(
+                f"/api/v1/sandboxes/{sandbox_id}/exec",
+                json={key: value for key, value in body.items() if value is not None},
+            )
+            _raise_for_status(response)
+            return dict(response.json())
+
     def upload_bytes(self, sandbox_id: str, sandbox_path: str, content: bytes) -> None:
         response = self._client.post(
             f"/api/v1/sandboxes/{sandbox_id}/upload",
@@ -910,6 +932,7 @@ class _JiuwenBoxProviderMixin:
         sandbox_op: Callable[[str], dict[str, Any]],
         local_op: Callable[[], Awaitable[dict[str, Any]]],
         fallback_on_failure: bool,
+        async_sandbox_op: Callable[[str], Awaitable[dict[str, Any]]] | None = None,
     ) -> Tuple[dict[str, Any], Optional[str]]:
         """Run sandbox exec through the a→b→c→d pipeline.
 
@@ -946,7 +969,10 @@ class _JiuwenBoxProviderMixin:
                     continue
 
             try:
-                result = await asyncio.to_thread(sandbox_op, sandbox_id)
+                result = (
+                    await async_sandbox_op(sandbox_id) if async_sandbox_op is not None
+                    else await asyncio.to_thread(sandbox_op, sandbox_id)
+                )
                 if _is_sandbox_exec_delivered(result, sandbox_id=sandbox_id):
                     return result, None
                 last_error = str(result.get("stderr") or "sandbox exec not delivered")
@@ -1848,6 +1874,9 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 timeout=exec_timeout,
                 environment=environment,
             ),
+            async_sandbox_op=(lambda sid: self._get_client().exec_async(
+                sid, argv, cwd=workdir, timeout=exec_timeout, environment=environment,
+            )),
             local_op=lambda: _run_local_subprocess(
                 argv,
                 cwd=workdir,
@@ -2034,6 +2063,9 @@ class JiuwenBoxCodeProvider(_JiuwenBoxProviderMixin, BaseCodeProvider):
                 timeout=exec_timeout,
                 environment=merged_env,
             ),
+            async_sandbox_op=(lambda sid: self._get_client().exec_async(
+                sid, command, cwd="/tmp", timeout=exec_timeout, environment=merged_env,
+            )),
             local_op=lambda: _run_local_subprocess(
                 command,
                 cwd="/tmp",

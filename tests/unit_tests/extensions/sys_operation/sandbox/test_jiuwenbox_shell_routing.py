@@ -16,6 +16,7 @@ def provider(monkeypatch):
     instance._get_sandbox_id = Mock(return_value="sandbox-a")
     client = Mock()
     client.exec.return_value = {"stdout": "sandbox", "stderr": "", "exit_code": 0}
+    client.exec_async = AsyncMock(side_effect=lambda *a, **kw: client.exec(*a, **kw))
     instance._get_client = Mock(return_value=client)
     local = AsyncMock(return_value={"stdout": "host", "stderr": "", "exit_code": 0, "local": True})
     monkeypatch.setattr(jb, "_run_local_subprocess", local)
