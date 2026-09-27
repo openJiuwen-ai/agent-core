@@ -35,6 +35,7 @@ _FETCH_RUN_PROGRESS_FIELDS = {
     "omitted_item_errors",
     "last_error",
 }
+_FETCH_RUN_RESULT_FIELDS = {"created_node_count", "updated_node_count", "no_new_content"}
 
 
 def _json_size(value: object, *, field_name: str, max_bytes: int | None = None) -> None:
@@ -109,13 +110,28 @@ class PersonalContextStatus(BaseModel):
         value: dict[str, dict[str, object]],
     ) -> dict[str, dict[str, object]]:
         for service_id, progress in value.items():
-            if not service_id or set(progress) != _FETCH_RUN_PROGRESS_FIELDS:
+            if not service_id or set(progress) not in (
+                _FETCH_RUN_PROGRESS_FIELDS,
+                _FETCH_RUN_PROGRESS_FIELDS | _FETCH_RUN_RESULT_FIELDS,
+            ):
                 raise ValueError("fetch run progress has an invalid shape")
             if progress["service_id"] != service_id:
                 raise ValueError("fetch run progress service_id does not match its key")
             run_state = progress["run_state"]
             if run_state not in _FETCH_RUN_STATES:
                 raise ValueError("fetch run progress has an invalid run_state")
+            if "created_node_count" in progress:
+                for field in ("created_node_count", "updated_node_count"):
+                    count = progress[field]
+                    if type(count) is not int or count < 0:
+                        raise ValueError(f"fetch run progress {field} must be a non-negative integer")
+                no_new_content = progress["no_new_content"]
+                if type(no_new_content) is not bool:
+                    raise ValueError("fetch run progress no_new_content must be a boolean")
+                if no_new_content and (
+                    run_state != "succeeded" or progress["created_node_count"] or progress["updated_node_count"]
+                ):
+                    raise ValueError("no_new_content requires a successful run without node changes")
             numeric: dict[str, int] = {}
             for field_name in (
                 "progress_percent",

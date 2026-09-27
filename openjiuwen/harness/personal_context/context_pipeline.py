@@ -15,12 +15,14 @@ import json
 import math
 import ntpath
 import os
+import posixpath
 import re
 import shutil
 import stat
 import tempfile
 import threading
 import unicodedata
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
@@ -59,7 +61,7 @@ from openjiuwen.harness.personal_context.source_link_book import (
     resolve_source_links,
     source_link_preview,
 )
-from openjiuwen.harness.personal_context.source_markdown import markdown_reference_text
+from openjiuwen.harness.personal_context.source_markdown import markdown_reference_text, rewrite_markdown_prose
 from openjiuwen.harness.personal_context.source_metadata import (
     read_source_metadata,
     source_id_for_locator,
@@ -3732,6 +3734,7 @@ def _normalize_context_candidate(
     run_time: datetime,
     max_pages_per_directory: int | None = None,
     max_subdirectories_per_directory: int | None = None,
+    relocations: dict[str, str] | None = None,
 ) -> tuple[dict[str, tuple[int, str]], dict[str, str]]:
     mapping = _plan_context_layout_normalization(
         context_root,
@@ -3750,6 +3753,7 @@ def _normalize_context_candidate(
         max_subdirectories_per_directory=max_subdirectories_per_directory,
         capacity_exempt=True,
     )
+    _record_context_relocations(relocations, mapping)
     baseline = _snapshot_managed_files(context_root)
     baseline_paths = {relative: relative for relative in baseline}
     baseline_paths.update({new: old for old, new in mapping.items()})
@@ -5333,6 +5337,7 @@ def _apply_context_reclustering(
     source_root: Path,
     mapping: Mapping[str, str],
     rebuild_roots: Sequence[str | Path] = (),
+    relocations: dict[str, str] | None = None,
 ) -> set[str]:
     """Apply a preflighted page mapping inside one disposable Context candidate."""
 
@@ -5495,6 +5500,7 @@ def _apply_context_reclustering(
             )
         )
         changed.update(_changed_context_paths(context_root, baseline))
+        _record_context_relocations(relocations, link_mapping)
         return changed
     finally:
         with contextlib.suppress(OSError):
@@ -5513,6 +5519,7 @@ async def _recluster_context_candidate(
     preserve_existing_paths: bool,
     alias_targets: Mapping[str, str] | None = None,
     semantics_by_source: Mapping[str, Mapping[str, object]] | None = None,
+    relocations: dict[str, str] | None = None,
 ) -> set[str]:
     """Plan and apply one semantic remap; fallback to sparse vectors on Encoder failure."""
 
@@ -5603,6 +5610,7 @@ async def _recluster_context_candidate(
         source_root=source_root,
         mapping=mapping,
         rebuild_roots=actual_roots,
+        relocations=relocations,
     )
 
 
@@ -6212,6 +6220,7 @@ async def _agent_recluster_apply(
     scope_paths: Sequence[str],
     *,
     source_root: Path,
+    relocations: dict[str, str] | None = None,
 ) -> set[str]:
     """Preflight and atomically apply one agent-edited reclustering mapping."""
 
@@ -6226,6 +6235,7 @@ async def _agent_recluster_apply(
         source_root=source_root,
         mapping=expanded,
         rebuild_roots=scope_roots,
+        relocations=relocations,
     )
 
 
@@ -6406,6 +6416,10 @@ async def _apply_rules_increment(
                     target_page=target_page,
                     enriched_markdown=page.read_text(encoding="utf-8"),
                 )
+                _record_context_relocations(
+                    cast(dict[str, str] | None, processed.get("_context_relocations")),
+                    {page.relative_to(context_root).as_posix(): target_page.relative_to(context_root).as_posix()},
+                )
                 page = target_page
                 managed_pages[source_id] = page
         if page is None:
@@ -6472,6 +6486,7 @@ async def _apply_rules_increment(
         max_subdirectories_per_directory=max_subdirectories,
         embed_texts=embed_texts,
         preserve_existing_paths=preserve_existing_paths,
+        relocations=cast(dict[str, str] | None, processed.get("_context_relocations")),
         semantics_by_source={
             source_id: cast(Mapping[str, object], document["_balanced_semantics"])
             for source_id, document in documents
@@ -7573,6 +7588,7 @@ class ContextPipelineService:
         embedding_config: EmbeddingConfig | None = None,
         progress_callback: Callable[[str, str, str, int], None] | None = None,
         profile_callback: Callable[[str, str, str], None] | None = None,
+        result_callback: Callable[[str, str, dict[str, object]], None] | None = None,
     ) -> None:
         self._home = home.expanduser().resolve()
         self._config = config
@@ -7591,6 +7607,7 @@ class ContextPipelineService:
         self._publish_lock = asyncio.Lock()
         self._progress_callback = progress_callback
         self._profile_callback = profile_callback
+        self._result_callback = result_callback
         self._embedding: APIEmbedding | None = None
         self._embedding_cache: dict[str, tuple[float, ...]] = {}
         self._embedding_dimension: int | None = None
@@ -8010,6 +8027,11 @@ class ContextPipelineService:
         state = self._run_states.get(key)
         if state is None:
             raise _pipeline_error("run has no processed batches to finish")
+        if retaining and state.get("status") == "published":
+            # Cancellation may have arrived while the commit worker was
+            # settling. Its already-published result must not be overwritten.
+            await self._cleanup_run_state(key)
+            return
         if state.get("status") != "processing":
             await self._cleanup_run_state(key)
             raise _pipeline_error("run has no processed batches to finish")
@@ -8077,8 +8099,9 @@ class ContextPipelineService:
             )
             state["status"] = "published"
         except asyncio.CancelledError:
-            await _cancel_safe_to_thread(self._restore_run_checkpoint, sandbox)
-            state["status"] = "processing"
+            if state.get("status") != "published":
+                await _cancel_safe_to_thread(self._restore_run_checkpoint, sandbox)
+                state["status"] = "processing"
             raise
         except BaseException:
             await self._cleanup_run_state(key)
@@ -8652,7 +8675,9 @@ class ContextPipelineService:
             "source_link_book": collect_source_link_book(documents),
         }
 
-    def _agent_recluster_hooks(self, sandbox: Path) -> tuple[_ReclusterPlan, _ReclusterApply]:
+    def _agent_recluster_hooks(
+        self, sandbox: Path, relocations: dict[str, str] | None = None,
+    ) -> tuple[_ReclusterPlan, _ReclusterApply]:
         """Bind the recluster_context tool to this run's sandbox and embedder."""
 
         context_root = sandbox / "context"
@@ -8680,6 +8705,7 @@ class ContextPipelineService:
                 mapping,
                 scope_paths,
                 source_root=source_root,
+                relocations=relocations,
             )
 
         return plan, apply
@@ -8700,6 +8726,8 @@ class ContextPipelineService:
         retaining: bool = False,
     ) -> str:
         requested = "rules" if retaining else self._config.strategy_profile
+        relocations: dict[str, str] = {}
+        processed["_context_relocations"] = relocations
         if self._embedding is not None:
             self._embedding_fallback_active = False
         effective_service_id = service_id or "local"
@@ -8739,12 +8767,14 @@ class ContextPipelineService:
                 run_time=effective_run_time,
                 max_pages_per_directory=self._config.max_pages_per_directory,
                 max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                relocations=relocations,
             )
 
         async def prepare_rules_candidate(
             *,
             preserve_existing_paths: bool = False,
         ) -> tuple[dict[str, tuple[int, str]], set[str]]:
+            relocations.clear()
             await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
             await _cancel_safe_to_thread(_prepare_agent_candidate, self._context_root, sandbox)
             candidate_context = sandbox / "context"
@@ -8828,6 +8858,7 @@ class ContextPipelineService:
                 preserve_existing_paths = requested == "agent" and candidate in {"balanced", "rules"}
                 processed["_filesystem_preserve_existing_paths"] = preserve_existing_paths
                 processed["_filesystem_capacity_exempt"] = preserve_existing_paths
+                relocations.clear()
                 await _cancel_safe_to_thread(_reset_filesystem_sandbox, sandbox)
                 await _cancel_safe_to_thread(
                     _prepare_agent_candidate,
@@ -9043,7 +9074,7 @@ class ContextPipelineService:
                             "only.\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
                         )
                     )
-                    recluster_plan, recluster_apply = self._agent_recluster_hooks(sandbox)
+                    recluster_plan, recluster_apply = self._agent_recluster_hooks(sandbox, relocations)
                     run_documents = _processed_documents(processed)
                     expected_turns = min(120, max(30, 3 * len(run_documents)))
 
@@ -9497,6 +9528,7 @@ class ContextPipelineService:
     ) -> None:
         del batch
         async with self._publish_lock:
+            relocations = cast(dict[str, str], processed.get("_context_relocations", {}))
             _assert_path_chain_no_symlinks(self._home / "workspace")
             candidate_context = sandbox / "context"
             capacity_exempt = processed.get("_filesystem_capacity_exempt") is True
@@ -9515,6 +9547,7 @@ class ContextPipelineService:
                     run_time=run_time or datetime.now(timezone.utc),
                     max_pages_per_directory=self._config.max_pages_per_directory,
                     max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                    relocations=relocations,
                 )
 
             effective_deleted_source_ids = deleted_source_ids or set()
@@ -9538,7 +9571,7 @@ class ContextPipelineService:
                     candidate_context,
                     source_root=self._source_meta_root,
                     provider=provider or self._provider_for_service(service_id),
-                    processed=processed,
+                    processed={**processed, "_context_relocations": relocations},
                     source_ids_by_logical_id=effective_source_ids,
                     deleted_source_ids=effective_deleted_source_ids,
                     run_time=run_time or datetime.now(timezone.utc),
@@ -9613,7 +9646,29 @@ class ContextPipelineService:
             actual_profile = processed.get("actual_profile")
             if self._profile_callback is not None and isinstance(actual_profile, str):
                 self._profile_callback(service_id, run_id, actual_profile)
-            await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
+            # Measure this publication under the same lock as the commit, not
+            # across the whole fetch (other services can publish in between).
+            before = await _cancel_safe_to_thread(_snapshot_context_nodes, self._context_root, relocations=relocations)
+            after = await _cancel_safe_to_thread(_snapshot_context_nodes, candidate_context)
+            result = _count_published_nodes(before, after, relocations=relocations)
+            committed = False
+
+            def commit() -> None:
+                nonlocal committed
+                _commit_context_tree(candidate_context, self._context_root)
+                committed = True
+
+            try:
+                await _cancel_safe_to_thread(commit)
+            finally:
+                # A cancellation can arrive while the atomic commit is in its
+                # worker thread. Report only after that worker has settled.
+                if committed:
+                    state = self._run_states.get((service_id, run_id))
+                    if state is not None:
+                        state["status"] = "published"
+                    if self._result_callback is not None:
+                        self._result_callback(service_id, run_id, result)
 
     def _fail_active(self, error: BaseError) -> None:
         if self._active_completion is not None and not self._active_completion.done():
@@ -9726,6 +9781,84 @@ def _snapshot_managed_files(root: Path) -> dict[str, tuple[int, str]]:
             raise _publish_error("managed file could not be inspected") from exc
         result[path.relative_to(root).as_posix()] = (size, data_hash)
     return result
+
+
+def _record_context_relocations(relocations: dict[str, str] | None, mapping: Mapping[str, str]) -> None:
+    """Compose successful candidate moves back to their original paths."""
+    if relocations is None:
+        return
+    previous_targets = set(relocations.values())
+    for original, current in list(relocations.items()):
+        relocations[original] = mapping.get(current, current)
+    for old, new in mapping.items():
+        if old not in previous_targets:
+            relocations[old] = new
+
+
+def _snapshot_context_nodes(
+    root: Path, *, relocations: Mapping[str, str] | None = None,
+) -> dict[str, tuple[str, str]]:
+    """Keep exact and relocation fingerprints for graph Markdown nodes."""
+
+    def relocate_link(match: re.Match[str]) -> str:
+        split = _split_markdown_destination(match.group(1))
+        if split is None:
+            return match.group(0)
+        target, suffix, bracketed = split
+        parsed = urlsplit(target)
+        if parsed.scheme or parsed.netloc or not parsed.path.casefold().endswith(".md"):
+            return match.group(0)
+        # Resolve against the page so re-clustering can rebase a link without
+        # losing its target identity, query or anchor (including any slashes).
+        resolved = posixpath.normpath(posixpath.join(posixpath.dirname(relative), parsed.path.replace("\\", "/")))
+        resolved = (relocations or {}).get(resolved, resolved)
+        canonical = urlunsplit(("", "", resolved, parsed.query, parsed.fragment))
+        canonical = (f"<{canonical}>" if bracketed else canonical) + suffix
+        start = match.start(1) - match.start()
+        end = match.end(1) - match.start()
+        return match.group(0)[:start] + canonical + match.group(0)[end:]
+
+    result: dict[str, tuple[str, str]] = {}
+    for relative, (_, fingerprint) in _snapshot_managed_files(root).items():
+        if relative.casefold().endswith(".md"):
+            markdown = _extended_path(root / relative).read_text(encoding="utf-8")
+            relocated = rewrite_markdown_prose(markdown, lambda text: _MARKDOWN_LINK_TOKEN.sub(relocate_link, text))
+            result[relative] = (fingerprint, hashlib.sha256(relocated.encode("utf-8")).hexdigest())
+    return result
+
+
+def _count_published_nodes(
+    before: Mapping[str, tuple[str, str]],
+    after: Mapping[str, tuple[str, str]],
+    *,
+    relocations: Mapping[str, str] | None = None,
+) -> dict[str, object]:
+    """Count published additions/edits without treating unchanged moves as additions."""
+
+    new_paths, old_paths = set(after), set(before)
+    updated = 0
+    # Match identities before comparing paths: a moved page can occupy another
+    # moved page's old path. Unmoved targets own any merged description update.
+    mapping = relocations or {}
+    for old in sorted(before, key=lambda path: (mapping.get(path, path) != path, path)):
+        target = mapping.get(old, old)
+        if target not in after:
+            continue
+        old_paths.remove(old)
+        if target in new_paths:
+            updated += before[old][0] != after[target][0]
+            new_paths.remove(target)
+    added = Counter(after[path][1] for path in new_paths)
+    removed = Counter(before[path][1] for path in old_paths)
+    moved = added & removed
+    unchanged_moves = Counter(after[path] for path in new_paths) & Counter(before[path] for path in old_paths)
+    created = sum((added - moved).values())
+    updated += sum(moved.values()) - sum(unchanged_moves.values())
+    return {
+        "created_node_count": created,
+        "updated_node_count": updated,
+        "no_new_content": created == 0 and updated == 0 and not (removed - moved),
+    }
 
 
 def _changed_context_paths(

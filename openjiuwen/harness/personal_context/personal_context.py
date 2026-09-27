@@ -440,6 +440,7 @@ class PersonalContext:
         self._fetch_run_history: dict[str, list[dict[str, object]]] = {}
         self._fetch_run_identity: dict[str, dict[str, object]] = {}
         self._fetch_run_profile: dict[str, str] = {}
+        self._fetch_run_results: dict[str, dict[str, object]] = {}
         self._fetch_stop_phases: dict[str, str] = {}
         self._invalidated_fetch_runs: set[tuple[str, str]] = set()
         self._query_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="pc-query")
@@ -915,6 +916,11 @@ class PersonalContext:
                 return
             self._fetch_run_profile[service_id] = profile
 
+        def report_pipeline_result(service_id: str, run_id: str, result: dict[str, object]) -> None:
+            identity = self._fetch_run_identity.get(service_id)
+            if identity is not None and identity.get("run_id") == run_id:
+                self._fetch_run_results[service_id] = dict(result)
+
         try:
             # A stopped runtime never reuses its old queue.  The previous
             # pipeline has already drained or failed every item before the
@@ -928,6 +934,7 @@ class PersonalContext:
                 embedding_config=self._embedding_config,
                 progress_callback=report_pipeline_phase,
                 profile_callback=report_pipeline_profile,
+                result_callback=report_pipeline_result,
             )
             await pipeline.start()
             self._pipeline_service = pipeline
@@ -1392,6 +1399,12 @@ class PersonalContext:
                     last_error=_redact_text(timeout_error),
                     progress_percent=cast(int, progress.get("progress_percent", 0)),
                 )
+                if "created_node_count" in progress:
+                    self._fetch_run_progress[safe_id].update(
+                        created_node_count=progress["created_node_count"],
+                        updated_node_count=progress["updated_node_count"],
+                        no_new_content=False,
+                    )
                 self._fetch_states[safe_id] = "FAILED"
                 self._fetch_errors[safe_id] = _redact_text(timeout_error)
         except asyncio.CancelledError:
@@ -1905,7 +1918,7 @@ class PersonalContext:
             if (
                 not isinstance(data, dict)
                 or set(data) != {"schema_version", "runs"}
-                or data["schema_version"] not in {1, 2}
+                or data["schema_version"] not in {1, 2, 3}
             ):
                 raise ValueError("invalid history schema")
             schema_version = data["schema_version"]
@@ -1921,9 +1934,12 @@ class PersonalContext:
                     record.setdefault("quarantined_items", 0)
                     record.setdefault("item_errors", [])
                     record.setdefault("omitted_item_errors", 0)
+                result_fields = {"created_node_count", "updated_node_count", "no_new_content"}
                 if not isinstance(record, dict) or set(record) not in (
                     required_fields,
                     required_fields | {"actual_profile"},
+                    required_fields | result_fields,
+                    required_fields | result_fields | {"actual_profile"},
                 ):
                     raise ValueError("invalid history fields")
                 if record.get("actual_profile") is not None and record["actual_profile"] not in {
@@ -1934,7 +1950,7 @@ class PersonalContext:
                 }:
                     raise ValueError("invalid history profile")
                 PersonalContextStatus.validate_fetch_run_progress(
-                    {service_id: {key: record[key] for key in progress_fields}}
+                    {service_id: {key: record[key] for key in progress_fields | (result_fields & record.keys())}}
                 )
                 if record["run_state"] not in {"succeeded", "partial_succeeded", "failed", "cancelled"}:
                     raise ValueError("history must be terminal")
@@ -1959,7 +1975,7 @@ class PersonalContext:
         temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            encoded = json.dumps({"schema_version": 2, "runs": records}, ensure_ascii=False).encode("utf-8")
+            encoded = json.dumps({"schema_version": 3, "runs": records}, ensure_ascii=False).encode("utf-8")
             if len(encoded) > 128 * 1024:
                 raise ValueError("history exceeds size limit")
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
@@ -2002,6 +2018,11 @@ class PersonalContext:
             identity = {"run_id": run_id, "started_at": _utc_now(), "finished_at": None}
             self._fetch_run_identity[service_id] = identity
         previous_progress = self._fetch_run_progress.get(service_id, {})
+        self._fetch_run_results[service_id] = {
+            "created_node_count": 0,
+            "updated_node_count": 0,
+            "no_new_content": True,
+        }
         self._fetch_run_progress[service_id] = _fetch_run_status(
             service_id,
             run_state="running",
@@ -2064,6 +2085,10 @@ class PersonalContext:
             )
             self._fetch_run_progress[service_id] = progress
         identity["finished_at"] = _utc_now()
+        result = self._fetch_run_results.pop(service_id, None)
+        if result is not None:
+            progress.update(result)
+            progress["no_new_content"] = result["no_new_content"] is True and progress["run_state"] == "succeeded"
         record = {**progress, **identity}
         actual_profile = self._fetch_run_profile.pop(service_id, None)
         if actual_profile is not None:
