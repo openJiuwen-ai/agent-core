@@ -24,8 +24,8 @@ pipeline:
     reporting: true
 
 manager:
-  max_iterations: 30
-  max_rounds: 50
+  max_iterations: 60
+  max_rounds: 100
   max_survey_calls: 3
   max_code_retries: 4
   max_design_revisions: 6
@@ -60,7 +60,7 @@ logging:
 topic_survey:
   max_papers: 1
   max_web_pages: 1
-  max_iterations: 30
+  max_iterations: 60
   # Retrieval is best-effort.  If a public endpoint keeps hanging, finalize
   # the sources already downloaded instead of consuming the Provider watchdog.
   timeout_seconds: 900
@@ -75,7 +75,7 @@ topic_survey:
     bing: false
 
 experiment_design:
-  max_iterations: 20
+  max_iterations: 50
   skills: []
   context:
     enabled: true
@@ -122,7 +122,7 @@ experiment_design:
 code_implementation:
   # Bound on the coding agent's task-loop + LSP fix-loop iterations before it
   # must stop and report status="failed" rather than keep retrying forever.
-  max_iterations: 40
+  max_iterations: 150
   # Per-variant wall-clock budget for `python run.py --method <name> --smoke-test`
   smoke_test_timeout_seconds: 3000
   # Retries *beyond* the first attempt when smoke-test re-run fails
@@ -140,7 +140,7 @@ experiment_execution:
 reflection:
   # Summary is preloaded; grep/read_file pull item records, logs, and code.
   # Cap high enough for a few targeted searches, then submit_reflection.
-  max_iterations: 30
+  max_iterations: 60
 
 reporting:
   # Skills-driven DeepAgent session (ts-plan/ts-write/ts-review/ts-latex)
@@ -150,7 +150,7 @@ reporting:
   # spawn up to 3 isolated paper-reviewer subagent calls per round, up to
   # 3 rounds — real isolation, but real added turns on top of the
   # write/repair loop.
-  max_iterations: 60
+  max_iterations: 120
   # Per-completion timeout (seconds), overriding the shared
   # openjiuwen.timeout default for this module only (see agent.py's
   # _setting). Bumped from the global 600s default: a real run with many
