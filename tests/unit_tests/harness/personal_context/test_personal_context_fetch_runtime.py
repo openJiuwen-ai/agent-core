@@ -1020,6 +1020,9 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
         "progress_percent": 100,
         "total_items": 20,
         "completed_items": 20,
+        "created_node_count": 0,
+        "updated_node_count": 0,
+        "no_new_content": True,
         "failed_items": 0,
         "quarantined_items": 0,
         "item_errors": [],
@@ -1189,6 +1192,9 @@ async def test_empty_run_succeeds_and_next_run_replaces_retained_progress(tmp_pa
         "progress_percent": 100,
         "total_items": 0,
         "completed_items": 0,
+        "created_node_count": 0,
+        "updated_node_count": 0,
+        "no_new_content": True,
         "failed_items": 0,
         "quarantined_items": 0,
         "item_errors": [],
@@ -3749,18 +3755,28 @@ async def test_stop_timeout_during_history_write_keeps_failed_history(tmp_path, 
     await core.run_fetch(service_id="notes")
     provider = _BlockingManualProvider.instances["notes"]
     await asyncio.wait_for(provider.started.wait(), timeout=1)
+    core._fetch_run_results["notes"] = {
+        "created_node_count": 3, "updated_node_count": 1, "no_new_content": False,
+    }
     task = core._active_fetch_run_tasks["notes"]
     stop_task = asyncio.create_task(core.stop_fetch_run("notes"))
     try:
         assert await asyncio.to_thread(writing.wait, 1)
         with pytest.raises(BaseError, match="stage=history_write"):
             await asyncio.wait_for(stop_task, timeout=1)
-        assert (await core.snapshot()).fetch_run_progress["notes"]["run_state"] == "failed"
+        progress = (await core.snapshot()).fetch_run_progress["notes"]
+        assert progress["run_state"] == "failed"
+        assert progress["created_node_count"] == 3
+        assert progress["updated_node_count"] == 1
+        assert progress["no_new_content"] is False
     finally:
         release.set()
         await asyncio.wait_for(task, timeout=1)
 
-    assert core._read_run_history("notes")[0]["run_state"] == "failed"
+    history = core._read_run_history("notes")[0]
+    assert history["run_state"] == "failed"
+    assert history["created_node_count"] == progress["created_node_count"]
+    assert history["updated_node_count"] == progress["updated_node_count"]
 
 
 @pytest.mark.asyncio
