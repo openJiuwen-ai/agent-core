@@ -48,6 +48,15 @@ class ObservabilityConfig(BaseModel):
             span-end does not block the business thread.
         file_retention_days: Trace files older than this (by mtime) are
             lazily deleted by the ``file`` exporter. Default 7 days.
+        global_instrument_enable: Process-wide switch for automatic OTel HTTP
+            instrumentation of ``httpx`` / ``requests`` / ``aiohttp`` (W3C
+            ``traceparent`` propagation on outbound calls). Default False:
+            instrumentation adds per-request overhead and would leak the
+            ``traceparent`` header to third-party APIs. When True, the HTTP
+            instrumentors run right after the global TracerProvider is set.
+            The ``OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE`` environment
+            variable overrides this value; the flag is read once at
+            initialization, so changes require a process restart.
     """
 
     enabled: bool = True
@@ -67,3 +76,5 @@ class ObservabilityConfig(BaseModel):
     # file exporter
     traces_dir: str = "./traces"
     file_retention_days: int = 7
+    # global HTTP instrumentation (traceparent propagation)
+    global_instrument_enable: bool = False
