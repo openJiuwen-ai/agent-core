@@ -49,6 +49,12 @@ The relationship between the two packages is fixed:
 
 - `runtime.py` / `setup.py`: process-wide `TracerProvider` lifecycle and the
   facade (`init_observability`). This stack owns the **global** provider.
+- `instrumentation.py`: the single authority for the process-wide HTTP
+  instrumentation switch (`global_instrument_enable` /
+  `OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE`): patches `httpx` / `requests` /
+  `aiohttp` for W3C traceparent propagation, once per process, always after a
+  global SDK provider exists. `extensions/tracer_otel` delegates here through
+  a provider factory instead of touching global state itself.
 - `demand.py`: acquire/release bookkeeping so one runtime's shutdown never
   tears down a provider another runtime still depends on. OTel allows exactly
   one global provider per process; first initializer wins.
