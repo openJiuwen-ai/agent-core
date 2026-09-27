@@ -13,16 +13,45 @@ Keeping all attribute keys here avoids typo drift between handlers.
 
 from __future__ import annotations
 
-
 # GenAI keys have one authoritative definition for every instrumentation path.
+# Standard keys are re-exported from extensions.observability so the two stacks
+# never drift on a standard name; keys the pinned registry does not carry
+# (gen_ai.usage.cost.*, gen_ai.request.prev_message_count) are defined below.
 from openjiuwen.extensions.observability.semconv import (  # noqa: F401
+    ERROR_TYPE,
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_REQUEST_TOP_K,
+    GEN_AI_REQUEST_TOP_P,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
+    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_TYPE,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
 )
+
+# ---------------------------------------------------------------------------
+# gen_ai.* — request/response facts the pinned GenAI registry does not model
+# (custom keys owned by this package; see AGENTS.md before renaming them)
+# ---------------------------------------------------------------------------
+
+GEN_AI_REQUEST_PREV_MESSAGE_COUNT = "gen_ai.request.prev_message_count"
+GEN_AI_USAGE_COST_TOTAL_USD = "gen_ai.usage.cost.total_usd"
+GEN_AI_USAGE_COST_INPUT_USD = "gen_ai.usage.cost.input_usd"
+GEN_AI_USAGE_COST_OUTPUT_USD = "gen_ai.usage.cost.output_usd"
 
 
 # ---------------------------------------------------------------------------

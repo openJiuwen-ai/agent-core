@@ -28,8 +28,11 @@ facts with different wire formats, and that is intentional:
 
 - GenAI keys (`gen_ai.input.messages`, `gen_ai.operation.name`, ...) are
   re-exported from `extensions.observability.semconv` so there is exactly one
-  authoritative definition per standard key. These six are the only shared
-  symbols; do not grow this list casually.
+  authoritative definition per standard key. Only standard keys carried by the
+  pinned registry in `observability/gen_ai_semconv.py` may be re-exported this
+  way; keys the registry does not model (`gen_ai.usage.cost.*`,
+  `gen_ai.request.prev_message_count`) are defined here as this package's own
+  extensions. Do not grow the re-export list casually.
 - Project keys (`openjiuwen.workflow.*`, `openjiuwen.agent.*`,
   `openjiuwen.invoke_id`, `openjiuwen.session_id` — note the underscore — and
   the base-span block `OJ_INVOKE_ID` … `OJ_META_DATA`) are this package's own
