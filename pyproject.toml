@@ -98,6 +98,15 @@ observability = [
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
     "opentelemetry-exporter-otlp-proto-http>=1.25.0",
 ]
+# HTTP auto-instrumentation for W3C traceparent propagation (off by default;
+# gated by ObservabilityConfig.global_instrument_enable / the
+# OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE environment variable).
+otel-instrument = [
+    "opentelemetry-instrumentation-httpx>=0.44b0",
+    "opentelemetry-instrumentation-requests>=0.44b0",
+    # PyPI name is ``aiohttp-client`` (module opentelemetry.instrumentation.aiohttp_client).
+    "opentelemetry-instrumentation-aiohttp-client>=0.44b0",
+]
 mobile-gui = [
     # Install: pip install 'openjiuwen[mobile-gui]'
     "uiautomator2>=3.2.0",

@@ -187,6 +187,42 @@ init_observability(obs_config)
 # Traces printed as JSON to console
 ```
 
+## HTTP Instrumentation (traceparent propagation)
+
+`global_instrument_enable` is a process-wide switch for automatic OTel HTTP
+instrumentation of `httpx` / `requests` / `aiohttp`: outbound requests carry
+a W3C `traceparent` header, chaining LLM/VLM calls into the current trace.
+It is **off by default** — instrumentation adds per-request overhead and
+would leak the `traceparent` header to third-party APIs.
+
+```python
+obs_config = ObservabilityConfig(
+    enabled=True,
+    exporter="otlp_grpc",
+    global_instrument_enable=True,   # off by default
+)
+init_observability(obs_config)
+```
+
+The environment variable always wins over the config value (read once at
+initialization — a restart is required to change it):
+
+```bash
+export OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE=true
+```
+
+Requirements and behavior:
+
+- Optional dependency: `pip install 'openjiuwen[otel-instrument]'`. When the
+  packages are missing, startup is unaffected — a `RuntimeWarning` is emitted
+  and only the missing library is skipped.
+- The global `TracerProvider` is always set **before** the instrumentors run
+  (they bind their tracer to the process-global provider).
+- The same switch exists on `OtelTracerConfig.global_instrument_enable` for
+  the `tracer-otel` extension (studio-style deployments): when enabled,
+  `init_otel_tracer` delegates to the shared instrumentation helper with a
+  provider factory pointing at the same collector.
+
 ## Configuration Reference
 
 | Field | Type | Default | Description |
@@ -198,6 +234,7 @@ init_observability(obs_config)
 | `sample_rate` | float | 1.0 | Sampling rate (0.0-1.0) |
 | `langfuse_public_key` | str | "" | Required for direct Langfuse connection |
 | `langfuse_secret_key` | str | "" | Required for direct Langfuse connection |
+| `global_instrument_enable` | bool | False | HTTP auto-instrumentation (see above); env `OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE` overrides |
 
 ## Customizing Langfuse Keys
 
