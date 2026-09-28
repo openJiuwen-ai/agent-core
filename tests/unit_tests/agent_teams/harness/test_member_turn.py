@@ -160,6 +160,9 @@ async def test_idle_start_and_follow_up_open_turns_while_steer_keeps_it() -> Non
         # opened a turn of their own.
         assert [turn.turn_number for turn in turns] == [1, 2, 3]
         assert len({turn.turn_id for turn in turns}) == 3
+        assert [invocation["_turn_number"] for invocation in fake.invocations] == [
+            turn.turn_number for turn in turns
+        ]
     finally:
         await Runner.stop()
 
@@ -192,6 +195,10 @@ async def test_pause_and_resume_keep_the_turn() -> None:
 
         assert len(turns) == 2
         assert turns[0] == turns[1]
+        assert [invocation["_turn_number"] for invocation in fake.invocations] == [
+            turns[0].turn_number,
+            turns[0].turn_number,
+        ]
     finally:
         await Runner.stop()
 

@@ -11,6 +11,7 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.session.agent_team import create_agent_team_session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
+from openjiuwen.core.single_agent.kv_cache.kv_cache_react_model_call_hook import KVCacheCallCapabilities
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ModelCallInputs
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 
@@ -99,7 +100,12 @@ async def test_railed_model_call_does_not_emit_pre_call_usage_event() -> None:
     fake_llm.invoke = AsyncMock(return_value=response)
     agent._llm = fake_llm
     agent._sync_prompt_attachments = AsyncMock()
-    agent._kv_cache_model_call_hook.resolve_runtime = MagicMock(return_value=object())
+    agent._kv_cache_model_call_hook.resolve_runtime = MagicMock(
+        return_value=KVCacheCallCapabilities(
+            enable_affinity=False,
+            supports_affinity=False,
+        )
+    )
     agent._kv_cache_model_call_hook.resolve_lineage = MagicMock(
         return_value=(session.get_session_id(), None)
     )

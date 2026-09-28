@@ -748,6 +748,7 @@ class OpenAIModelClient(BaseModelClient):
             *,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             action: Optional[str] = None,
             target: str = "session",
             manage_request: Optional[bool] = None,
@@ -766,6 +767,15 @@ class OpenAIModelClient(BaseModelClient):
             "session_id": session_id,
             "parent_session_id": parent_session_id,
         }
+        if turn_num is not None:
+            if isinstance(turn_num, bool) or not isinstance(turn_num, int) or turn_num < 1:
+                logger.warning(
+                    "Ignore invalid Ascend KV cache turn_num; normal inference will continue. "
+                    "turn_num=%r",
+                    turn_num,
+                )
+            else:
+                hint["turn_num"] = turn_num
 
         if action is None:
             if manage_request is not None:
@@ -795,6 +805,7 @@ class OpenAIModelClient(BaseModelClient):
             session: object = None,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             enable_kv_cache_affinity: bool = False,
             **_: Any,
     ) -> dict:
@@ -804,11 +815,17 @@ class OpenAIModelClient(BaseModelClient):
         if cache_id is None and session is not None and hasattr(session, "get_session_id"):
             cache_id = session.get_session_id()
         if not cache_id:
-            self._raise_kv_cache_error("session_id is required when KV cache affinity is enabled")
-        return {
+            logger.warning(
+                "Ignore KVC affinity because session_id is unavailable; continue normal flow"
+            )
+            return {}
+        invoke_kwargs = {
             "session_id": cache_id,
             "parent_session_id": parent_session_id or cache_id,
         }
+        if turn_num is not None:
+            invoke_kwargs["turn_num"] = turn_num
+        return invoke_kwargs
 
     async def evict_kvc(self, **kwargs) -> bool:
         return await self._invoke_kv_cache_affinity_action("evict", **kwargs)
@@ -926,6 +943,7 @@ class OpenAIModelClient(BaseModelClient):
         """
         session_id = kwargs.pop("session_id", None)
         parent_session_id = kwargs.pop("parent_session_id", None)
+        turn_num = kwargs.pop("turn_num", None)
         kv_action = kwargs.pop("kv_action", None)
         kv_target = kwargs.pop("target", "session")
         manage_request = kwargs.pop("manage_request", None)
@@ -1011,18 +1029,30 @@ class OpenAIModelClient(BaseModelClient):
 
         if kv_mode == "affinity" and session_id:
             kv_cache = self._kv_cache_config()
-            params[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
-                session_id=session_id,
-                parent_session_id=parent_session_id or session_id,
-                action=kv_action,
-                target=kv_target,
-                manage_request=manage_request,
-                msg_start=msg_start,
-                msg_end=msg_end,
-                tools_start=tools_start,
-                tools_end=tools_end,
-                include_tools=include_tools,
-            )
+            try:
+                params[getattr(kv_cache, "affinity_field", "agent_hint")] = self._build_agent_hint(
+                    session_id=session_id,
+                    parent_session_id=parent_session_id or session_id,
+                    turn_num=turn_num,
+                    action=kv_action,
+                    target=kv_target,
+                    manage_request=manage_request,
+                    msg_start=msg_start,
+                    msg_end=msg_end,
+                    tools_start=tools_start,
+                    tools_end=tools_end,
+                    include_tools=include_tools,
+                )
+            except Exception as exc:
+                if kv_action is not None:
+                    # Management calls must not accidentally degrade into an
+                    # ordinary empty chat request. Their public API catches the
+                    # validation error and reports a best-effort False result.
+                    raise
+                logger.warning(
+                    "Ignore invalid KVC affinity hint; continue normal inference: %s",
+                    exc,
+                )
 
         self._apply_openrouter_profile(params)
 

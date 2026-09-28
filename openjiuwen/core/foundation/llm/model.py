@@ -357,18 +357,42 @@ class Model:
             session: object = None,
             session_id: Optional[str] = None,
             parent_session_id: Optional[str] = None,
+            turn_num: Optional[int] = None,
             enable_kv_cache_affinity: bool = False,
     ) -> dict:
         """Build AscendAffinity agent_hint kwargs for normal invoke/stream."""
         build_fn = getattr(self._client, "build_kv_cache_affinity_invoke_kwargs", None)
         if not callable(build_fn):
             return {}
-        return build_fn(
-            session=session,
-            session_id=session_id,
-            parent_session_id=parent_session_id,
-            enable_kv_cache_affinity=enable_kv_cache_affinity,
-        )
+        try:
+            return build_fn(
+                session=session,
+                session_id=session_id,
+                parent_session_id=parent_session_id,
+                turn_num=turn_num,
+                enable_kv_cache_affinity=enable_kv_cache_affinity,
+            )
+        except Exception as exc:
+            llm_logger.warning(
+                "KVC affinity hint construction failed; continue without affinity: %s",
+                exc,
+            )
+            return {}
+
+    async def _run_kv_cache_action(self, action: str, **kwargs) -> bool:
+        """Run an optional KVC action without exposing failures to business code."""
+        action_fn = getattr(self._client, f"{action}_kvc", None)
+        if not callable(action_fn):
+            return False
+        try:
+            return bool(await action_fn(**kwargs))
+        except Exception as exc:
+            llm_logger.warning(
+                "KVC %s failed; continue normal flow: %s",
+                action,
+                exc,
+            )
+            return False
 
     async def evict_kvc(
             self,
@@ -384,13 +408,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Evict KV cache through the underlying affinity-capable client."""
-        evict_fn = getattr(self._client, "evict_kvc", None)
-        if not callable(evict_fn):
-            return False
-        return bool(await evict_fn(
+        return await self._run_kv_cache_action(
+            "evict",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -402,8 +425,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def offload_kvc(
             self,
@@ -419,13 +443,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Offload KV cache through the underlying affinity-capable client."""
-        offload_fn = getattr(self._client, "offload_kvc", None)
-        if not callable(offload_fn):
-            return False
-        return bool(await offload_fn(
+        return await self._run_kv_cache_action(
+            "offload",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -437,8 +460,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def prefetch_kvc(
             self,
@@ -454,13 +478,12 @@ class Model:
             tools_start: Optional[int] = None,
             tools_end: Optional[int] = None,
             include_tools: bool = False,
+            turn_num: Optional[int] = None,
             timeout: Optional[float] = None,
     ) -> bool:
         """Prefetch KV cache through the underlying affinity-capable client."""
-        prefetch_fn = getattr(self._client, "prefetch_kvc", None)
-        if not callable(prefetch_fn):
-            return False
-        return bool(await prefetch_fn(
+        return await self._run_kv_cache_action(
+            "prefetch",
             session_id=session_id,
             parent_session_id=parent_session_id,
             target=target,
@@ -472,8 +495,9 @@ class Model:
             tools_start=tools_start,
             tools_end=tools_end,
             include_tools=include_tools,
+            turn_num=turn_num,
             timeout=timeout,
-        ))
+        )
 
     async def generate_image(
             self,
