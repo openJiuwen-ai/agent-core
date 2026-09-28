@@ -413,7 +413,7 @@ async def test_create_task_assigned_to_human_starts_immediately(built_team, db):
                     "task_id": "t-human-ready",
                     "title": "Human task",
                     "content": "Do the human-owned work.",
-                    "assignee": HUMAN_AGENT_MEMBER_NAME,
+                    "assignee_display_name": "Human",
                 }
             ]
         }
@@ -541,12 +541,18 @@ async def test_cancel_task_owned_by_human_agent_is_refused(built_team, db):
 @pytest.mark.asyncio
 @pytest.mark.level0
 async def test_reassign_task_owned_by_human_agent_is_refused(built_team, db):
+    from openjiuwen.core.single_agent.schema.agent_card import AgentCard
     from openjiuwen.agent_teams.tools.locales import make_translator
     from openjiuwen.agent_teams.tools.team_tools import UpdateTaskTool
 
+    await built_team.spawn_member(
+        member_name="other-member",
+        display_name="Dev",
+        agent_card=AgentCard(name="Dev"),
+    )
     await _create_and_assign(built_team, db, "t-2", HUMAN_AGENT_MEMBER_NAME)
     tool = UpdateTaskTool(built_team, make_translator("cn"))
-    out = await tool.invoke({"task_id": "t-2", "assignee": "other-member"})
+    out = await tool.invoke({"task_id": "t-2", "assignee_display_name": "Dev"})
     assert out.success is False
     assert "人类成员" in out.error
     task = await built_team.task_manager.get("t-2")
@@ -644,7 +650,7 @@ async def test_reassign_task_owned_by_departed_human_agent_is_allowed(built_team
     )
 
     tool = UpdateTaskTool(built_team, make_translator("cn"))
-    out = await tool.invoke({"task_id": "t-gone", "assignee": "dev-1"})
+    out = await tool.invoke({"task_id": "t-gone", "assignee_display_name": "Dev"})
     assert out.success is True, out.error
     assert (await built_team.task_manager.get("t-gone")).assignee == "dev-1"
 
@@ -983,7 +989,7 @@ async def test_task_lock_per_human_member(multi_human_backend, db):
 
     out_designer = await tool.invoke({"task_id": "t-designer", "status": "cancelled"})
     assert out_designer.success is False
-    out_pm = await tool.invoke({"task_id": "t-pm", "assignee": "team_leader"})
+    out_pm = await tool.invoke({"task_id": "t-pm", "assignee_display_name": "Leader"})
     assert out_pm.success is False
 
     designer_task = await multi_human_backend.task_manager.get("t-designer")
