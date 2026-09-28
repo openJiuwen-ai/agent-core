@@ -5,14 +5,14 @@
 | 项 | 值 |
 |---|---|
 | 类型 | spec |
-| 关联模块 | `openjiuwen/harness/personal_context/`（17 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 关联模块 | `openjiuwen/harness/personal_context/` |
+| 最近一次修订日期 | 2026-09-24 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
 
 本规约定义 harness 的 PersonalContext 子系统：设备授权、上下文图、获取服务、
-运行时激活。`personal_context/` 17 文件是嵌入式的个人上下文核心（从
+运行时激活。`personal_context/` 是嵌入式的个人上下文核心（从
 `openjiuwen/core` 相关能力独立而来），DeepAgent 经 rail / prompt 消费。
 
 具体覆盖：
