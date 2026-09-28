@@ -123,14 +123,13 @@ class PersonalContextStatus(BaseModel):
             if "created_node_count" in progress:
                 for field in ("created_node_count", "updated_node_count"):
                     count = progress[field]
-                    if type(count) is not int or count < 0:
+                    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
                         raise ValueError(f"fetch run progress {field} must be a non-negative integer")
                 no_new_content = progress["no_new_content"]
-                if type(no_new_content) is not bool:
+                if not isinstance(no_new_content, bool):
                     raise ValueError("fetch run progress no_new_content must be a boolean")
-                if no_new_content and (
-                    run_state != "succeeded" or progress["created_node_count"] or progress["updated_node_count"]
-                ):
+                has_node_changes = bool(progress["created_node_count"] or progress["updated_node_count"])
+                if no_new_content and (run_state != "succeeded" or has_node_changes):
                     raise ValueError("no_new_content requires a successful run without node changes")
             numeric: dict[str, int] = {}
             for field_name in (
