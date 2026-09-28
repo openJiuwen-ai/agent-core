@@ -20,9 +20,6 @@ from openjiuwen.harness import create_deep_agent
 from openjiuwen.harness.deep_agent import DeepAgent
 from openjiuwen.harness.schema.config import DeepAgentConfig, SubAgentConfig
 from openjiuwen.harness.tools import TaskTool, create_task_tool
-from openjiuwen.harness.tools.subagent.task_tool import (
-    DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
-)
 
 
 def _create_dummy_model() -> Model:
@@ -429,11 +426,11 @@ class TestTaskToolSync(unittest.TestCase):
         self.assertIsInstance(tools[0], TaskTool)
         self.assertEqual(
             tools[0].card.properties["resilience"]["timeout_s"],
-            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+            1800.0,
         )
         self.assertEqual(
             AbilityManager._resolve_call_timeout(tools[0].card),
-            DEFAULT_SUBAGENT_TASK_TIMEOUT_S,
+            1800.0,
         )
 
     def test_create_task_tool_writes_subagent_type_enum(self) -> None:

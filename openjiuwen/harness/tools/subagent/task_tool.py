@@ -41,7 +41,7 @@ except Exception:  # pragma: no cover - browser runtime is optional here
 
 # Keep the delegation deadline above the browser runtime's 600-second task
 # budget so subagent startup and final response assembly are not cut short.
-DEFAULT_SUBAGENT_TASK_TIMEOUT_S = 720.0
+DEFAULT_SUBAGENT_TASK_TIMEOUT_S = 1800.0
 
 
 def _summarize_task_description(task_description: Any) -> dict[str, Any]:
