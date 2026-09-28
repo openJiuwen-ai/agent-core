@@ -6,8 +6,7 @@ One row per (channel_id, target_kind, external_id).  States:
 - ``truncated`` page limit hit before the floor was reached; the next cycle
   resumes from ``oldest_msg_id``;
 - ``complete``  the backfill window is covered; steady-state incremental
-  fetch takes over, driven by ``newest_seen_msg_id`` / ``newest_seen_sent_at``
-  (decision D3).
+  fetch takes over, driven by ``newest_seen_msg_id`` / ``newest_seen_sent_at``.
 
 The ``record_backfill_result`` write happens in the same transaction scope
 as the caller's persist commit path (the provider commits the connection
@@ -83,7 +82,7 @@ def record_backfill_result(
     """Upsert one target's backfill/watermark state; never downgrades ``complete``.
 
     ``newest_seen_*`` columns only advance (max), so an older snapshot can
-    never rewind the watermark (decision D3).
+    never rewind the watermark.
     """
     if status not in ("pending", "complete", "truncated"):
         raise ValueError(f"unsupported backfill status: {status}")

@@ -3,7 +3,7 @@
 This is the only function that writes to ``im_messages`` /
 ``im_conversations`` / ``im_changelog``.  All writes happen in a single
 transaction so either all or none are visible.  Raw platform payloads are
-never stored (decision D2).
+never stored.
 
 Idempotency:
 - im_conversations: upsert on (channel_id, external_id) -> update last_message_at_ms
@@ -137,9 +137,15 @@ def persist_batch(
                     conversation_id = excluded.conversation_id,
                     sender_account = COALESCE(excluded.sender_account, im_messages.sender_account),
                     sender_name = COALESCE(excluded.sender_name, im_messages.sender_name),
-                    content_text = COALESCE(NULLIF(excluded.content_text, ''), im_messages.content_text),
+                    content_text = COALESCE(
+                        NULLIF(excluded.content_text, ''),
+                        im_messages.content_text
+                    ),
                     content_type = COALESCE(excluded.content_type, im_messages.content_type),
-                    sent_at = CASE WHEN excluded.sent_at > im_messages.sent_at THEN excluded.sent_at ELSE im_messages.sent_at END,
+                    sent_at = CASE
+                        WHEN excluded.sent_at > im_messages.sent_at THEN excluded.sent_at
+                        ELSE im_messages.sent_at
+                    END,
                     direction = excluded.direction,
                     is_self = COALESCE(excluded.is_self, im_messages.is_self),
                     learning_eligible = CASE

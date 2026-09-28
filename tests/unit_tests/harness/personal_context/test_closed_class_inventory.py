@@ -34,7 +34,7 @@ EXPECTED_CLASSES = {
     "FetchBatch",
     "PersonalContext",
     "PersonalContextRail",
-    # im/ learning subpackage (OJ-01..OJ-05)
+    # im/ learning subpackage
     "ImLearningTarget",
     "ImLearningCursor",
     "ImLearningMessage",
@@ -57,13 +57,13 @@ EXPECTED_CLASSES = {
     "NormalizedBatch",
     "ImLearningScheduler",
     "ImLearningSchedulerStatus",
-    # im/ search subpackage (OJ-06)
+    # im/ search subpackage
     "ImSearchQuery",
     "ImSearchHit",
     "ImSearchPort",
     "SqliteImSearchStore",
     "ImSearchTool",
-    # distill/ subpackage (OJ-07/08, landed separately)
+    # distill/ subpackage (landed separately)
     "AnalyzerPort",
     "CorpusMessage",
     "CorpusPort",
@@ -79,6 +79,8 @@ EXPECTED_CLASSES = {
     "DistillDueDecision",
     "DistillTickResult",
     "DistillRunnerPort",
+    # distill/ read-only corpus adapter over the im/ database (7a11dd67e)
+    "SqliteImCorpus",
 }
 
 
@@ -167,17 +169,26 @@ def test_legacy_proactive_harness_package_is_removed() -> None:
     assert not any(LEGACY_PACKAGE.rglob("*.py"))
 
 
+def _sqlite_exempt(file: Path) -> bool:
+    # The im/ subpackage owns the dedicated im_context.db, and
+    # distill/sqlite_corpus.py is a read-only corpus adapter over that same
+    # database (re-exported from distill/__init__.py).
+    rel = file.relative_to(PERSONAL_CONTEXT)
+    return rel.parts[0] == "im" or (rel.parts[0] == "distill" and file.name in ("__init__.py", "sqlite_corpus.py"))
+
+
 def test_embedded_core_has_no_legacy_transport_or_storage_imports() -> None:
-    # The im/ learning subpackage owns a dedicated SQLite database by design
-    # (decision D5); everything else stays storage-free.
+    # The im/ learning subpackage owns a dedicated SQLite database by design,
+    # and distill/ reads it through a read-only corpus adapter;
+    # everything else stays storage-free.
     files: list[Path] = []
     for root in (PERSONAL_CONTEXT, RAIL):
         if root.is_file():
             files.append(root)
             continue
         for file in sorted(root.rglob("*.py")):
-            if root.name == "personal_context" and file.parent.name == "im":
-                continue  # im/ subpackage: dedicated im_context.db allowed (D5)
+            if root.name == "personal_context" and _sqlite_exempt(file):
+                continue
             files.append(file)
     source = "\n".join(file.read_text(encoding="utf-8") for file in files)
     for forbidden in (
@@ -188,4 +199,4 @@ def test_embedded_core_has_no_legacy_transport_or_storage_imports() -> None:
         "apscheduler",
         "subprocess_runner",
     ):
-        assert forbidden not in source, f"{forbidden} must not appear outside the im/ subpackage"
+        assert forbidden not in source, f"{forbidden} must not appear outside the sqlite allowlist"

@@ -23,7 +23,7 @@ class ChangelogEntry:
     domain: str  # 'chat'
     occurred_at: int  # business time (sent_at)
     emitted_at: int  # write time
-    payload_ref: Optional[str]  # always None (raw records removed, decision D2)
+    payload_ref: Optional[str]  # always None (raw records removed)
     digest: str  # sha256(content_text)
 
 

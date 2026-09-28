@@ -3,7 +3,7 @@
 The ``seg`` column is the only indexed column; original content lives in
 ``im_messages`` and is fetched back via the state table's rowid mapping.
 
-Search deliberately does NOT filter by ``learning_eligible`` (decision D8):
+Search deliberately does NOT filter by ``learning_eligible``:
 the index stays complete and consumers that need the learning scope filter
 at query time (e.g. the future im_search tool joins ``im_messages`` with
 ``learning_eligible = 1``), because eligibility can only transition 1 -> 0
@@ -109,7 +109,7 @@ class FtsIndexRepository:
             channel_id: str
             conversation_ids: list[str]
 
-        ``learning_eligible_only`` (decision D8): when True, join
+        ``learning_eligible_only``: when True, join
         ``im_messages`` and keep only rows with ``learning_eligible = 1``.
         """
         tiers = to_query_token_tiers(query)
@@ -176,7 +176,7 @@ class FtsIndexRepository:
 
         The FTS table stores only segmented tokens; callers backfill the
         result structure through this method.  ``learning_eligible_only``
-        filters at query time (decision D8).
+        filters at query time.
         """
         if not message_ids:
             return []

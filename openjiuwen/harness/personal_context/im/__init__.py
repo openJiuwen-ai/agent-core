@@ -2,8 +2,9 @@
 
 Host runtimes inject an ``ImLearningSource``. This package does not contain
 CLI binaries or platform connectors.  The scheduler and corpus/FTS modules
-implement OJ-02..OJ-05 over a dedicated ``<home>/im/im_context.db``;
-``ImSearchPort`` and its SQLite implementation implement OJ-06.
+implement the learning pipeline over a dedicated ``<home>/im/im_context.db``;
+``ImSearchPort`` and its SQLite implementation provide read-only keyword
+search over that corpus.
 """
 
 from openjiuwen.harness.personal_context.im.config_targets import build_im_learning_targets

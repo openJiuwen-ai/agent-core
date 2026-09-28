@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Bilingual descriptions and input params for the im_search tool (OJ-06)."""
+"""Bilingual descriptions and input params for the im_search tool."""
 
 from __future__ import annotations
 

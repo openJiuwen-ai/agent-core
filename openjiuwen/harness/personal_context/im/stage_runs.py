@@ -1,9 +1,9 @@
 """Generic staged run/lease state machine over ``im_stage_runs``.
 
 One row per (stage, source_key) run.  Stages: ``fetch`` / ``index`` /
-``distill`` (the distill stage arrives with OJ-08 and reuses this module).
+``distill`` (the distill stage reuses this module).
 
-Guarantees (migration plan §5.3):
+Guarantees:
 
 - single active run per (stage, source_key): a partial unique index rejects
   a second ``running`` row;

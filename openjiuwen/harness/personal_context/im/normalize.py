@@ -2,10 +2,9 @@
 
 Pure function, no DB access.  Channel-agnostic.
 
-Unlike the JiuwenSpirit original (which received full hosting ``ImMessage``
-objects), the openjiuwen wire contract (OJ-01) is a read-only learning
+The openjiuwen wire contract (``ImLearningSource``) is a read-only learning
 projection without ``direction`` / ``learning_eligible`` fields.  This module
-derives them (decision D6):
+derives them:
 
 - ``conversations`` are derived from the ``ImLearningTarget``;
 - ``direction`` is derived from ``is_self`` (True -> outbound);
@@ -70,7 +69,7 @@ def content_digest(content: str) -> str:
 
 
 def derive_direction(is_self: Optional[bool]) -> str:
-    """Derive direction from the tri-state ``is_self`` flag (decision D6)."""
+    """Derive direction from the tri-state ``is_self`` flag."""
     return "outbound" if is_self is True else "inbound"
 
 

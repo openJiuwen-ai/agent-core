@@ -1,16 +1,16 @@
-"""Storage-agnostic search contract for the IM learning corpus (OJ-06).
+"""Storage-agnostic search contract for the IM learning corpus.
 
-This module must stay free of storage imports (decision D10): no sqlite3,
-no SQL.  Implementations live in sibling modules (``sqlite_search.py``);
-the agent-facing tool wraps this port (``search_tool.py``).
+This module must stay free of storage imports: no sqlite3, no SQL.
+Implementations live in sibling modules (``sqlite_search.py``); the
+agent-facing tool wraps this port (``search_tool.py``).
 
-Decisions (see ``DigitalAvatar/OJ06-IM检索方案.md`` §3):
+Contract decisions:
 
-- D9: keyword is required — browse-style queries without a keyword are out
-  of scope for OJ-06.
-- D11: only messages inside the learning scope (``learning_eligible = 1``,
-  decision D8) are ever returned; the switch is not exposed to callers.
-- D12: ``conversation_refs`` are human-facing references (external_id or
+- keyword is required — browse-style queries without a keyword are out
+  of scope.
+- only messages inside the learning scope (``learning_eligible = 1``) are
+  ever returned; the switch is not exposed to callers.
+- ``conversation_refs`` are human-facing references (external_id or
   title substring); resolving them is the implementation's job.
 """
 
@@ -55,18 +55,19 @@ class ImSearchHit:
 
 
 class ImSearchPort(Protocol):
-    """Search the learning-eligible IM corpus (storage-agnostic, D10).
+    """Search the learning-eligible IM corpus (storage-agnostic).
 
     Contract shared by every implementation:
 
-    - only messages inside the learning scope (D11) are returned;
+    - only messages inside the learning scope are returned;
     - an empty ``keyword`` is a caller error;
     - returns ``(hits, total, truncated)``: ``total`` counts all matches of
       the full filter combination, ``truncated`` marks that more matches
       exist beyond the current ``(limit, offset)`` page.
     """
 
-    def search(self, query: ImSearchQuery) -> tuple[list[ImSearchHit], int, bool]: ...
+    def search(self, query: ImSearchQuery) -> tuple[list[ImSearchHit], int, bool]:
+        ...
 
 
 __all__ = ["ImSearchHit", "ImSearchPort", "ImSearchQuery"]

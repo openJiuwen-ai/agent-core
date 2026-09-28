@@ -1,4 +1,4 @@
-"""SQLite/FTS5 implementation of ``ImSearchPort`` (OJ-06, decision D10).
+"""SQLite/FTS5 implementation of ``ImSearchPort``.
 
 All SQL and FTS5 syntax for IM search lives in this module; ``search.py``
 stays storage-agnostic.  Reads use short-lived read-only connections
@@ -52,7 +52,7 @@ class SqliteImSearchStore:
         if not keyword:
             raise build_error(
                 StatusCode.CONTEXT_PROACTIVE_IM_SEARCH_EXECUTION_ERROR,
-                msg="keyword is required (OJ-06 D9)",
+                msg="keyword is required",
             )
         db_path = self._db_path()
         if not db_path.is_file():
@@ -95,7 +95,7 @@ class SqliteImSearchStore:
         match_expr = build_match_expr([tiers[0]])
         rows, total = self._run_match(conn, match_expr, query, conversation_ids)
         if not rows and len(tiers) > 1:
-            # strict tier found nothing: retry with the relaxed tier (D8 strategy).
+            # strict tier found nothing: retry with the relaxed tier.
             match_expr = build_match_expr([tiers[1]])
             rows, total = self._run_match(conn, match_expr, query, conversation_ids)
 
@@ -112,8 +112,8 @@ class SqliteImSearchStore:
         """Resolve ``conversation_refs`` to internal conversation ids.
 
         Returns None when no refs were given (no filter); an empty list when
-        refs were given but none resolved (empty result).  Resolution order
-        (D12): exact ``(channel_id, external_id)`` first, then title LIKE.
+        refs were given but none resolved (empty result).  Resolution order:
+        exact ``(channel_id, external_id)`` first, then title LIKE.
         """
         refs = [ref.strip() for ref in query.conversation_refs if ref and ref.strip()]
         if not refs:

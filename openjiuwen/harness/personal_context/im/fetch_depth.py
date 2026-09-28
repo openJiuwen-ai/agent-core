@@ -1,4 +1,4 @@
-"""Cursor-driven page-range fetch for IM learning (decision D7).
+"""Cursor-driven page-range fetch for IM learning.
 
 The fetch loop is driven by the opaque ``ImLearningCursor``: it never
 inspects whether the host connector pages by WeLink-style
@@ -8,11 +8,11 @@ already normalizes that.  The only termination contract is
 ``ImMessageBatch.next_cursor is None`` ("no more pages") plus a caller
 supplied ``stop_predicate``.
 
-Two stop predicates cover the two fetch modes (see migration plan §5.2):
+Two stop predicates cover the two fetch modes:
 
 - backfill: page down from newest until the oldest page message reaches the
   ``since_ms`` floor (or the platform runs out of pages);
-- steady state (newest_seen, decision D3): page down from newest until the
+- steady state (newest_seen): page down from newest until the
   page contains the previously-seen newest message or reaches its
   ``sent_at`` — one algorithm for every platform, since Feishu/DingTalk
   page tokens can only page towards older messages.

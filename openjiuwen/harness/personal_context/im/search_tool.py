@@ -1,7 +1,7 @@
-"""Read-only IM search tool for agent consumption (OJ-06).
+"""Read-only IM search tool for agent consumption.
 
-Depends only on the storage-agnostic ``ImSearchPort`` (decision D10); the
-host assembles it as ``ImSearchTool(SqliteImSearchStore(home))`` (OJ-10).
+Depends only on the storage-agnostic ``ImSearchPort``; the host assembles
+it as ``ImSearchTool(SqliteImSearchStore(home))``.
 Tool inputs are LLM-facing: ``since``/``until`` accept ISO 8601 strings or
 relative expressions (``7d`` / ``24h`` / ``30m``) instead of epoch
 milliseconds, because raw ms values are error-prone for models.

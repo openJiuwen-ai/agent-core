@@ -5,7 +5,7 @@ IM learning scheduler, as an independent stage with its own lease).  The
 FTS consumer is the simplest consumer; a vector consumer would follow the
 same pattern.
 
-Indexing is deliberately NOT gated by ``learning_eligible`` (decision D8):
+Indexing is deliberately NOT gated by ``learning_eligible``:
 the index stays complete; consumers filter at query time.
 """
 
@@ -60,7 +60,7 @@ class FtsConsumer:
                         # Message row may have been deleted concurrently; skip.
                         last_seq = max(last_seq, entry.seq)
                         continue
-                    # Intentionally no learning_eligible gate here; see module docstring (D8).
+                    # Intentionally no learning_eligible gate here; see module docstring.
                     self._fts.upsert(
                         message_id=entry.entity_id,
                         conversation_id=msg["conversation_id"],

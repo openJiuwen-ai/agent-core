@@ -1,4 +1,4 @@
-"""IM learning scheduler coroutine (OJ-02/04/05 integration point).
+"""IM learning scheduler coroutine (learning pipeline integration point).
 
 One asyncio task owns the whole IM learning pipeline for one PersonalContext
 home:
@@ -9,8 +9,8 @@ home:
    successful fetch run, plus a periodic fallback drain, lease-managed with
    the global source key (stage='index').
 
-Synchronous ``sqlite3`` work is wrapped in ``asyncio.to_thread`` (decision
-D4).  The scheduler never raises: per-target failures are recorded on the
+Synchronous ``sqlite3`` work is wrapped in ``asyncio.to_thread``.
+The scheduler never raises: per-target failures are recorded on the
 run rows and in the status surface; stop is a cooperative ``stop_event``.
 """
 
@@ -196,7 +196,10 @@ class ImLearningScheduler:
     async def _run(self) -> None:
         stop_event = self._stop_event
         wake_event = self._wake_event
-        assert stop_event is not None and wake_event is not None  # noqa: S101 - loop invariant
+        if stop_event is None or wake_event is None:
+            raise RuntimeError(
+                "ImLearningScheduler._run called before start(): stop_event/wake_event not initialized"
+            )
         next_fetch_at = 0.0
         next_index_at = 0.0
         loop = asyncio.get_running_loop()
@@ -232,6 +235,7 @@ class ImLearningScheduler:
                 if stop_event.is_set():
                     return
         except asyncio.CancelledError:
+            im_logger.info("im.scheduler.loop_cancelled")
             raise
         except Exception as exc:  # noqa: BLE001
             im_logger.exception("im.scheduler.loop_failed")

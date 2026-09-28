@@ -1,12 +1,12 @@
-"""Unit tests for the IM learning pipeline (OJ-02..OJ-05).
+"""Unit tests for the IM learning pipeline.
 
-Covers, per the migration plan §7:
+Covers:
 - corpus persist round-trip (normalize + persist + read-back);
 - learning scope tagging (whitelist / since_ms);
 - fetch paging (page_token style, msg_id+direction style, next_cursor=None);
 - newest_seen watermark steady state, truncation/resume;
 - stage run lease state machine (single active, takeover, renewal);
-- FTS consumer drain + query-time eligible filtering (D8);
+- FTS consumer drain + query-time eligible filtering;
 - end-to-end: Fake source -> fetch -> persist -> FTS search.
 """
 
@@ -134,7 +134,7 @@ class MsgIdSource:
 
 
 # ---------------------------------------------------------------------------
-# OJ-03: normalize + persist
+# normalize + persist
 # ---------------------------------------------------------------------------
 
 
@@ -223,7 +223,7 @@ class TestPersist:
 
 
 # ---------------------------------------------------------------------------
-# OJ-02: learning scope
+# learning scope
 # ---------------------------------------------------------------------------
 
 
@@ -253,7 +253,7 @@ class TestLearningScope:
 
 
 # ---------------------------------------------------------------------------
-# OJ-02: fetch paging
+# fetch paging
 # ---------------------------------------------------------------------------
 
 
@@ -316,7 +316,7 @@ class TestFetchPaging:
 
 
 # ---------------------------------------------------------------------------
-# OJ-04: stage runs (lease state machine)
+# stage runs (lease state machine)
 # ---------------------------------------------------------------------------
 
 
@@ -362,7 +362,7 @@ class TestStageRuns:
 
 
 # ---------------------------------------------------------------------------
-# OJ-04: backfill watermark
+# backfill watermark
 # ---------------------------------------------------------------------------
 
 
@@ -403,7 +403,7 @@ class TestBackfill:
 
 
 # ---------------------------------------------------------------------------
-# OJ-05: FTS pipeline
+# FTS pipeline
 # ---------------------------------------------------------------------------
 
 
@@ -426,7 +426,7 @@ class TestFtsPipeline:
         fts = FtsIndexRepository(db_conn)
         hits = fts.search("排期")
         assert len(hits) >= 1
-        # query-time eligible filtering (D8)
+        # query-time eligible filtering
         db_conn.execute("UPDATE im_messages SET learning_eligible = 0 WHERE external_id = 'm2'")
         db_conn.commit()
         eligible_hits = fts.search("收到", learning_eligible_only=True)

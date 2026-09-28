@@ -1,13 +1,13 @@
-"""Unit tests for the IM search port, SQLite implementation, and tool (OJ-06).
+"""Unit tests for the IM search port, SQLite implementation, and tool.
 
-Matrix per ``DigitalAvatar/OJ06-IM检索方案.md`` §11.2:
+Matrix:
 
-- contract purity: ``im/search.py`` has no storage imports (D10);
-- tool layer (FakeSearchPort, no DB): keyword required (D9), time-string
+- contract purity: ``im/search.py`` has no storage imports;
+- tool layer (FakeSearchPort, no DB): keyword required, time-string
   parsing (ISO 8601 / relative), ToolOutput shape, port errors;
 - SQLite implementation: keyword (bigram / English / strict->relaxed),
-  conversation refs (D12: exact, title LIKE, escape, not found), sender
-  filter, closed time interval, learning-eligible invisibility (D11/D8),
+  conversation refs (exact, title LIKE, escape, not found), sender
+  filter, closed time interval, learning-eligible invisibility,
   paging, SQL-side filter semantics, read-only behavior, empty/missing DB,
   content truncation;
 - prompts metadata registration.
@@ -97,7 +97,7 @@ SEED: list[tuple[ImLearningTarget, list[ImLearningMessage], dict[str, int]]] = [
             _msg("m3", sent_at=BASE_MS + 3000, text="排期确认，预算已通", account="me", name="我", is_self=True),
             _msg("m4", sent_at=BASE_MS + 3500, text="机密排期内容", account="alice", name="Alice"),
         ],
-        {"m4": 0},  # out of learning scope (D11)
+        {"m4": 0},  # out of learning scope
     ),
     (
         _target("g2", "闲聊群"),
@@ -146,7 +146,7 @@ def corpus(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# Contract purity (D10)
+# Contract purity
 # ---------------------------------------------------------------------------
 
 
@@ -278,7 +278,7 @@ class TestSqliteFilters:
 
 
 # ---------------------------------------------------------------------------
-# SQLite implementation: semantics (D11 / paging / read-only / truncation)
+# SQLite implementation: semantics (learning-scope filter / paging / read-only / truncation)
 # ---------------------------------------------------------------------------
 
 
@@ -288,7 +288,7 @@ class TestSqliteSemantics:
         hits, total, _ = SqliteImSearchStore(home).search(ImSearchQuery(keyword="机密"))
         assert total == 0
         assert hits == []
-        # D8/D11: the message IS in the FTS index; filtering happens at query time.
+        # The message IS in the FTS index; filtering happens at query time.
         conn = open_im_context_db(home)
         try:
             row = conn.execute(

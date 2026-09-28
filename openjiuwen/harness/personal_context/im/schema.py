@@ -1,19 +1,18 @@
 """DDL for the ``im_*`` table family owned by PersonalContext IM learning.
 
-Design decisions (see ``DigitalAvatar/OJ02-OJ05迁移方案-v2.md``):
+Design decisions:
 
-- No ``im_raw_records`` table (decision D2): the corpus never stores raw
+- No ``im_raw_records`` table: the corpus never stores raw
   platform JSON payloads.  Messages can always be re-fetched through the
   learning source and ``normalize_batch`` is a pure function, so a buggy
   normalize can be fixed and the fetch re-run.
 - No hosting tables (``im_turns`` / ``im_watermarks`` / ``im_panel_messages``):
   those belong to the AgentServer hosting pipeline, not to learning.
 - ``im_learning_backfill`` carries the ``newest_seen_msg_id`` /
-  ``newest_seen_sent_at`` columns (decision D3) used by the steady-state
+  ``newest_seen_sent_at`` columns used by the steady-state
   incremental fetch ("page down from newest until the seen boundary").
 - ``im_stage_runs`` implements the generic staged run/lease state machine
-  (decision in migration plan §5.3) shared by the fetch / index / distill
-  stages.
+  shared by the fetch / index / distill stages.
 
 Tables:
 - im_conversations      Conversation registry (channel_id, external_id)

@@ -1,16 +1,16 @@
 """IM learning fetch provider: whitelist walk + persist + watermark advance.
 
-Per-target flow (migration plan §5.2):
+Per-target flow:
 
-1. read the backfill state of the target (OJ-04 ``backfill.py``);
+1. read the backfill state of the target (``backfill.py``);
 2. pick the fetch mode:
    - ``pending`` / ``truncated`` (backfill window not yet covered): page
      down from newest until the ``since_ms`` floor, resuming from the
      ``oldest_msg_id`` cursor when truncated;
    - ``complete`` (steady state): page down from newest until the
-     newest_seen watermark (decision D3);
-3. tag ``learning_eligible`` (``learning_scope``, decision D6);
-4. persist through ``ImCorpusSink`` (single transaction, OJ-03);
+     newest_seen watermark, which never rewinds;
+3. tag ``learning_eligible`` (``learning_scope``);
+4. persist through ``ImCorpusSink`` in a single transaction;
 5. only after a successful commit, advance the backfill / newest-seen
    state ("each stage advances its own cursor only after commit").
 """
@@ -188,7 +188,7 @@ class ImLearningFetchProvider:
         state: BackfillState,
         now_ms: int,
     ) -> TargetFetchOutcome:
-        """Steady mode (D3): page down from newest until the newest_seen boundary."""
+        """Steady mode: page down from newest until the newest_seen boundary."""
         result = await self._fetch_pages(
             target,
             stop_predicate=newest_seen_stop_predicate(

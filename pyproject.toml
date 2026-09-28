@@ -141,6 +141,8 @@ test = [
     "a2a-sdk[http-server]==1.0.0",
     # sqlite driver for the default agent_teams DB backend used across db tests
     "aiosqlite>=0.22.1",
+    # harness -> rails -> agent_evolving imports opentelemetry.sdk at module import time
+    "opentelemetry-sdk>=1.25.0",
 ]
 
 # Linting & formatting

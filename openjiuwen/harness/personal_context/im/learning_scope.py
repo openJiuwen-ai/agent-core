@@ -1,10 +1,10 @@
 """Learning scope helpers for ``learning_eligible`` tagging at persist time.
 
-The wire DTO (``ImLearningMessage``) carries no ``learning_eligible`` field
-(decision D6): the tag is computed here in openjiuwen, immediately before
+The wire DTO (``ImLearningMessage``) carries no ``learning_eligible`` field:
+the tag is computed here in openjiuwen, immediately before
 ``persist_batch``.  Messages outside the learning window still land in the
 corpus (tagged 0); only new collection stops when a target is removed from
-the whitelist, per the review plan §5.4.
+the whitelist.
 """
 
 from __future__ import annotations
@@ -32,14 +32,14 @@ def compute_learning_eligible(
 ) -> int:
     """Return 1 if the message counts as distill corpus, else 0.
 
-    Rules (mirrors the JiuwenSpirit semantics):
+    Rules:
     - target not in the whitelist -> 0 (kept in corpus, not distilled);
     - ``since_ms`` set and ``sent_at < since_ms`` -> 0;
     - otherwise 1.
 
     Today the fetch provider only walks whitelist targets, so the first
     branch is structurally always True; the computation is kept for the
-    future hosting ∪ learning union collection (Q3 / AS-04).
+    future hosting ∪ learning union collection.
     """
     if target_key(target) not in whitelist_keys:
         return 0
