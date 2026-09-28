@@ -7,6 +7,9 @@ _build_referenced_paths_prompt in modules/code_implementation/agent.py.
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock, patch
+
+from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.common.workspace import set_project_root
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation import agent as agent_module
 from openjiuwen.rsi.artifact_rsi.paper_opt.auto_research.modules.code_implementation.agent import (
     CodeImplementationAgent,
@@ -439,3 +442,44 @@ def test_pyright_lsp_command_survives_harness_import_failure(monkeypatch):
     monkeypatch.setattr(agent_module.importlib.util, "find_spec", lambda name: None)
 
     assert _pyright_lsp_command() is None
+
+
+# -- _build_coding_agent: max_iterations wiring --------------------------------
+#
+# Regression coverage for the 2026-09-22 harness change (`fix(react): Honor
+# configured inner ReAct max_iterations; default to unbounded when unset.`):
+# before that change, DeepAgentConfig.max_iterations was silently ignored
+# whenever enable_task_loop=True (the inner ReAct loop was always forced to
+# sys.maxsize), so omitting the kwarg here was harmless. After that change the
+# value is genuinely honored, but create_code_agent's own default is 15 (not
+# unbounded) -- omitting the kwarg now silently caps every coding session's
+# inner ReAct loop at 15 rounds regardless of this module's own config,
+# reproducing the "code_implementation never writes output/run.py" failure.
+
+
+def test_build_coding_agent_forwards_configured_max_iterations(tmp_path):
+    set_project_root(tmp_path)
+    try:
+        agent = CodeImplementationAgent(
+            config={"code_implementation": {"max_iterations": 77}}, model=MagicMock()
+        )
+        with patch.object(agent_module, "_try_lsp_rail", return_value=None), patch(
+            "openjiuwen.harness.subagents.create_code_agent", return_value=MagicMock()
+        ) as mock_create:
+            agent._build_coding_agent(tmp_path / "agent_workspace", run_id="rsi-test-run", cycle=1)
+        assert mock_create.call_args.kwargs["max_iterations"] == 77
+    finally:
+        set_project_root(None)
+
+
+def test_build_coding_agent_defaults_max_iterations_to_forty(tmp_path):
+    set_project_root(tmp_path)
+    try:
+        agent = CodeImplementationAgent(config={}, model=MagicMock())
+        with patch.object(agent_module, "_try_lsp_rail", return_value=None), patch(
+            "openjiuwen.harness.subagents.create_code_agent", return_value=MagicMock()
+        ) as mock_create:
+            agent._build_coding_agent(tmp_path / "agent_workspace", run_id="rsi-test-run", cycle=1)
+        assert mock_create.call_args.kwargs["max_iterations"] == 40
+    finally:
+        set_project_root(None)

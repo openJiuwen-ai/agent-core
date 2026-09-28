@@ -831,10 +831,10 @@ class CodeImplementationAgent:
                 # addresses (environment/SDK exploration burning the whole
                 # attempt's budget before run.py ever gets written).
                 ExplorationBudgetRail(),
-                # Inner ReAct stays unbounded when max_iterations is omitted.
-                # The pipeline's configured cap is applied to the outer loop
-                # via TaskCompletionRail, otherwise a stuck tool/model session
-                # can run until the Provider's much larger watchdog fires.
+                # The pipeline's configured cap is also applied to the outer
+                # loop via TaskCompletionRail, otherwise a stuck tool/model
+                # session can run until the Provider's much larger watchdog
+                # fires.
                 TaskCompletionRail(max_rounds=max_iterations),
             ]
         )
@@ -850,6 +850,16 @@ class CodeImplementationAgent:
             system_prompt=self._render_system_prompt(),
             rails=rails,
             enable_task_loop=True,
+            # create_code_agent's own signature defaults max_iterations to 15
+            # when omitted -- NOT unbounded (only DeepAgentConfig.max_iterations
+            # =None means unbounded, since the 2026-09-22 harness fix made this
+            # value genuinely enforced even under enable_task_loop=True). Must
+            # pass the pipeline's configured value through explicitly, or every
+            # coding session silently reverts to a 15-round inner ReAct cap
+            # regardless of this module's own config (observed directly: every
+            # retry after 2026-09-22 capped at ~15 rounds / 24-33 tool calls,
+            # never reaching a write_file(output/run.py) call).
+            max_iterations=max_iterations,
             tool_owner_id=f"rsi-code-{run_id}-cycle-{cycle}",
             workspace=str(agent_workspace),
             # Code implementation can legitimately take longer than the
