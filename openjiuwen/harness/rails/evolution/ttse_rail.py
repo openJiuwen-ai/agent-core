@@ -318,7 +318,9 @@ class TTSERail(EvolutionRail):
         if not isinstance(conversation_id, str):
             return False
         cid = conversation_id.strip()
-        return cid in {"heartbeat", "cron"} or cid.startswith(("heartbeat_", "cron_", "heartbeat:", "cron:"))
+        return cid in {"heartbeat", "cron", "__prewarm__", "__prewarm___session"} or cid.startswith(
+            ("heartbeat_", "cron_", "heartbeat:", "cron:", "__prewarm__")
+        )
 
     async def _prepare_evolution_input(
         self,
