@@ -11,10 +11,16 @@ from openjiuwen.harness.prompts.tools.base import (
 )
 
 IM_SEARCH_DESCRIPTION: Dict[str, str] = {
-    "cn": "按关键词检索学习范围内的 IM 原始消息，支持按会话、人员、时间过滤，返回原文与出处（只读）。",
+    "cn": (
+        "按关键词检索学习范围内的 IM 原始消息，支持按会话、人员、时间过滤，返回原文与出处（只读）。"
+        "当用户询问与某人聊过什么、聊天记录、历史消息等个人 IM 内容时，应主动调用本工具检索，无需用户明确要求。"
+    ),
     "en": (
         "Search original IM messages within the learning scope by keyword, "
-        "filterable by conversation, sender, and time; read-only."
+        "filterable by conversation, sender, and time; read-only. "
+        "When the user asks about personal IM content such as past chats with "
+        "someone, chat history, or messages, call this tool proactively "
+        "without waiting for an explicit request."
     ),
 }
 
