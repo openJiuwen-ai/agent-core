@@ -387,7 +387,9 @@ class EvolutionRail(DeepAgentRail):
         )
         if capture is not None and isinstance(inputs, ModelCallInputs):
             if increment is not None and not issues:
-                enriched_increment = self._enrich_latest_llm(increment, inputs.response)
+                enriched_increment = await asyncio.to_thread(
+                    self._enrich_latest_llm, increment, inputs.response
+                )
                 trajectory = self._merge_clean_increment(capture, enriched_increment)
         await self._on_after_model_call(ctx, trajectory)
         if self._evolution_trigger == EvolutionTriggerPoint.AFTER_MODEL_CALL and self._allow_evolution_trigger(
@@ -950,13 +952,14 @@ class EvolutionRail(DeepAgentRail):
         a background task.
         """
         del ctx
-        messages = self._trajectory_to_messages(
+        messages = await asyncio.to_thread(
+            self._trajectory_to_messages,
             trajectory,
             fields=DEFAULT_EVOLUTION_MESSAGE_FIELDS,
         )
         return PreparedEvolutionInput(
             trajectory=trajectory,
-            messages=tuple(deepcopy(messages)),
+            messages=tuple(await asyncio.to_thread(deepcopy, messages)),
         )
 
     @classmethod

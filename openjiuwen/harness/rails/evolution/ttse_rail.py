@@ -299,9 +299,10 @@ class TTSERail(EvolutionRail):
             logger.warning("[TTSERail] capability enumeration failed: %s", exc)
 
         task_query = self._extract_query(ctx)
+        messages_copy = await asyncio.to_thread(deepcopy, messages)
         return _TTSEPreparedEvolutionInput(
             trajectory=prepared.trajectory,
-            messages=tuple(deepcopy(messages)),
+            messages=tuple(messages_copy),
             skill_name="ttse",
             ttse_capabilities=capabilities,
             ttse_task_query=task_query,
@@ -331,11 +332,11 @@ class TTSERail(EvolutionRail):
         logger.info("[TTSERail] run_evolution started")
         try:
             snapshot = (
-                self._snapshot_from_prepared(prepared)
+                await asyncio.to_thread(self._snapshot_from_prepared, prepared)
                 if isinstance(prepared, _TTSEPreparedEvolutionInput)
-                else {
-                    "messages": [deepcopy(message) for message in prepared.messages],
-                }
+                else await asyncio.to_thread(
+                    lambda: {"messages": [deepcopy(message) for message in prepared.messages]}
+                )
             )
             await self._run_ttse_induction(
                 prepared.trajectory,
@@ -355,7 +356,7 @@ class TTSERail(EvolutionRail):
         snapshot = snapshot or {}
         messages = snapshot.get("messages")
         if messages is None:
-            messages = self._trajectory_to_messages(trajectory)
+            messages = await asyncio.to_thread(self._trajectory_to_messages, trajectory)
 
         capabilities = snapshot.get("ttse_capabilities")
         if capabilities is None:
@@ -367,7 +368,8 @@ class TTSERail(EvolutionRail):
         if not task_query:
             task_query = self._last_user_text(messages)
 
-        evidence = build_induce_evidence(
+        evidence = await asyncio.to_thread(
+            build_induce_evidence,
             messages,
             task_query=task_query or "",
             dim_scores=snapshot.get("ttse_dim_scores") if isinstance(snapshot.get("ttse_dim_scores"), dict) else None,
@@ -885,7 +887,11 @@ class TTSERail(EvolutionRail):
             logger.warning("[TTSERail] traj export path must be absolute; skipping: %s", export_path)
             return
         try:
-            messages = self._trajectory_to_messages(trajectory) if trajectory is not None else []
+            messages = (
+                await asyncio.to_thread(self._trajectory_to_messages, trajectory)
+                if trajectory is not None
+                else []
+            )
             if not messages:
                 inputs = getattr(ctx, "inputs", None)
                 raw = getattr(inputs, "messages", None) if inputs is not None else None

@@ -29,6 +29,7 @@ Span tree (the team.{name} root is opened by the Team runner, not here)::
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -109,7 +110,9 @@ class TeamObservabilityRail(DeepAgentRail):
             output_str = (
                 output
                 if isinstance(output, str)
-                else json.dumps(to_json_compatible(output), ensure_ascii=False, default=str)
+                else await asyncio.to_thread(
+                    lambda: json.dumps(to_json_compatible(output), ensure_ascii=False, default=str)
+                )
             )
             redacted = redact_completion(output_str, config) if config else output_str
             team_span.set_attribute(LANGFUSE_OBSERVATION_OUTPUT, redacted)
