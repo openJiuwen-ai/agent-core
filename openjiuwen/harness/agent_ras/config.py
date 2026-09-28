@@ -3,12 +3,24 @@
 """Per-agent Agent RAS configuration (single-Agent)."""
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
 from openjiuwen.harness.agent_ras.models import AnomalyKind, Severity
 from openjiuwen.harness.agent_ras.recovery.engine import (
     DEFAULT_SEVERITY_ACTIONS,
     RecoveryAction,
 )
+
+
+class IgnoredToolCallRule(BaseModel):
+    """Match an outer tool and selected top-level argument values exactly."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tool_name: str = Field(min_length=1)
+    argument_equals: dict[str, Any] = Field(min_length=1)
 
 
 class RepeatToolConfig(BaseModel):
@@ -21,6 +33,10 @@ class RepeatToolConfig(BaseModel):
     critical_threshold: int = Field(default=10, ge=2)
     global_breaker_threshold: int = Field(default=10, ge=2)
     unknown_tool_threshold: int = Field(default=10, ge=2)
+    ignored_tool_calls: list[IgnoredToolCallRule] = Field(
+        default_factory=list,
+        description="Outer tool and top-level argument rules excluded from repeat detection",
+    )
 
     @property
     def history_size(self) -> int:
