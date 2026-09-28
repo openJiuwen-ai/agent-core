@@ -1,5 +1,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 import json
+from pathlib import Path
 
 import pytest
 
@@ -8,6 +9,22 @@ from openjiuwen.harness.security.models import PermissionLevel
 from openjiuwen.harness.security.permission_engine.fileguard.path_extract import extract_accesses_native
 
 TOOLS = ["send_file_to_user", "save_media_to_gallery", "save_file_to_file_manager"]
+
+
+@pytest.mark.parametrize("source", [
+    "C:/outbound/report.pdf", r"C:\outbound\report.pdf",
+    r"\\server\share\report.pdf", "//server/share/report.pdf", "/outbound/report.pdf",
+])
+@pytest.mark.parametrize("name", TOOLS)
+def test_outbound_path_forms_use_native_absolute_target(tmp_path, monkeypatch, source, name):
+    monkeypatch.setattr(
+        "openjiuwen.harness.security.permission_engine.fileguard.outbound_paths.get_cwd",
+        lambda: str(tmp_path),
+    )
+    args = {"abs_file_path_list": [source]} if name == TOOLS[0] else {"url": source}
+    expected = (Path(tmp_path) / source).resolve()
+    assert expected.is_absolute()
+    assert extract_accesses_native(name, args, tmp_path) == [(expected, "read", "tool_arg")]
 
 
 @pytest.mark.asyncio

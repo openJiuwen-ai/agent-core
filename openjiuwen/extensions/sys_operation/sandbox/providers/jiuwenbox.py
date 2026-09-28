@@ -1817,15 +1817,17 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
         self._init_jiuwenbox(endpoint, config)
 
     @staticmethod
-    def _shell_argv(command: str, shell_type: Optional[str]) -> list[str]:
+    def _shell_argv(command: str, shell_type: Optional[str], *, local: bool = False) -> list[str]:
         shell_type = str(shell_type or "auto").strip().lower()
         # Use executable names so the execution host resolves its own PATH.
         if shell_type in ("auto", "bash"):
             return ["bash", "-lc", command]
         if shell_type == "sh":
             return ["sh", "-c", command]
-        if shell_type == "powershell":
-            executable = "powershell" if os.name == "nt" else "pwsh"
+        if shell_type in ("powershell", "pwsh"):
+            # Remote executable names are an explicit contract, independent of
+            # the client OS. Only host execution uses the host's default.
+            executable = "pwsh" if local and shell_type == "powershell" and os.name != "nt" else shell_type
             return [executable, "-NoProfile", "-NonInteractive", "-Command", command]
         if shell_type == "cmd":
             return ["cmd", "/d", "/s", "/c", command]
@@ -1859,7 +1861,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 command,
             )
             local_result = await _run_local_subprocess(
-                argv,
+                self._shell_argv(command, kwargs.get("shell_type", "auto"), local=True),
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,
@@ -1878,7 +1880,7 @@ class JiuwenBoxShellProvider(_JiuwenBoxProviderMixin, BaseShellProvider):
                 sid, argv, cwd=workdir, timeout=exec_timeout, environment=environment,
             )),
             local_op=lambda: _run_local_subprocess(
-                argv,
+                self._shell_argv(command, kwargs.get("shell_type", "auto"), local=True),
                 cwd=workdir,
                 env=environment,
                 timeout=exec_timeout,

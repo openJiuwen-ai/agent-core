@@ -27,12 +27,13 @@ def provider(monkeypatch):
 @pytest.mark.parametrize("shell_type, argv", [
     ("bash", ["bash", "-lc"]),
     ("sh", ["sh", "-c"]),
-    ("powershell", ["powershell" if os.name == "nt" else "pwsh", "-NoProfile", "-NonInteractive", "-Command"]),
+    ("powershell", ["powershell", "-NoProfile", "-NonInteractive", "-Command"]),
+    ("pwsh", ["pwsh", "-NoProfile", "-NonInteractive", "-Command"]),
     ("cmd", ["cmd", "/d", "/s", "/c"]),
     (None, ["bash", "-lc"]),
     (" BASH ", ["bash", "-lc"]),
     (" CMD ", ["cmd", "/d", "/s", "/c"]),
-    (" PowerShell ", ["powershell" if os.name == "nt" else "pwsh", "-NoProfile", "-NonInteractive", "-Command"]),
+    (" PowerShell ", ["powershell", "-NoProfile", "-NonInteractive", "-Command"]),
 ])
 @pytest.mark.parametrize("excluded", [False, True])
 async def test_shell_type_preserved_for_sandbox_and_host_exception(provider, shell_type, argv, excluded):
@@ -42,6 +43,8 @@ async def test_shell_type_preserved_for_sandbox_and_host_exception(provider, she
     result = await instance.execute_cmd("echo test", shell_type=shell_type, cwd="work", timeout=12)
     assert result.code == StatusCode.SUCCESS.code
     if excluded:
+        if argv[0] == "powershell" and os.name != "nt":
+            argv = ["pwsh", *argv[1:]]
         local.assert_awaited_once_with(argv + ["echo test"], cwd="work", env=None, timeout=12)
         client.exec.assert_not_called()
     else:
@@ -71,7 +74,7 @@ async def test_stream_preserves_shell_type(provider):
     instance, client, local = provider
     chunks = [chunk async for chunk in instance.execute_cmd_stream("echo test", shell_type="powershell")]
     assert chunks[-1].data.exit_code == 0
-    assert client.exec.call_args.args[1][0] == ("powershell" if os.name == "nt" else "pwsh")
+    assert client.exec.call_args.args[1][0] == "powershell"
     local.assert_not_awaited()
 
 
@@ -89,4 +92,26 @@ def test_powershell_platform_default(monkeypatch, platform, expected):
     # Keep the patch local to argv construction; don't alter pathlib's platform.
     with monkeypatch.context() as patch:
         patch.setattr(jb.os, "name", platform)
-        assert jb.JiuwenBoxShellProvider._shell_argv("gc file.txt", "powershell")[0] == expected
+        assert jb.JiuwenBoxShellProvider._shell_argv("gc file.txt", "powershell", local=True)[0] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("client_os", ["nt", "posix"])
+@pytest.mark.parametrize("shell", ["powershell", "pwsh", "cmd", "bash", "sh"])
+async def test_remote_shell_does_not_depend_on_client_os(provider, monkeypatch, client_os, shell):
+    instance, client, local = provider
+    with monkeypatch.context() as patch:
+        patch.setattr(jb.os, "name", client_os)
+        await instance.execute_cmd("echo test", shell_type=shell)
+    assert client.exec.call_args.args[1][0] == shell
+    local.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_missing_remote_shell_does_not_retry_another_shell(provider):
+    instance, client, local = provider
+    client.exec.return_value = {"stdout": "", "stderr": "powershell: not found", "exit_code": 127}
+    result = await instance.execute_cmd("echo test", shell_type="powershell")
+    assert result.data.exit_code == 127
+    assert client.exec.call_count == 1
+    local.assert_not_awaited()
