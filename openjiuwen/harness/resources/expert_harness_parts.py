@@ -212,6 +212,7 @@ def canonicalize_expert_harness_spec(spec: ExpertHarnessSpec) -> ExpertHarnessSp
                 type=_SUBAGENT_RAIL_TYPE,
                 params={
                     "enable_async_subagent": spec.config.subagent_delegate_type == "async",
+                    "enable_subagent_runtime": spec.config.subagent_delegate_type == "runtime",
                 },
             )
         )

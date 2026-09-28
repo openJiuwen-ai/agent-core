@@ -97,7 +97,10 @@ def build_task_system_prompt(language: str = "cn") -> str:
     return TASK_SYSTEM_PROMPT.get(language, TASK_SYSTEM_PROMPT["cn"])
 
 
-def build_task_section(language: str = "cn") -> Optional["PromptSection"]:
+def build_task_section(
+    language: str = "cn",
+    extension_content: str | None = None,
+) -> Optional["PromptSection"]:
     """Build a PromptSection for task tool system prompt.
 
     This creates a system prompt section that tells the AI how to use task_tool.
@@ -105,6 +108,7 @@ def build_task_section(language: str = "cn") -> Optional["PromptSection"]:
 
     Args:
         language: 'cn' or 'en'.
+        extension_content: Optional extra guidance appended to the section.
 
     Returns:
         A PromptSection instance for task tool.
@@ -113,6 +117,8 @@ def build_task_section(language: str = "cn") -> Optional["PromptSection"]:
     from openjiuwen.harness.prompts.sections import SectionName
 
     content = build_task_system_prompt(language)
+    if extension_content and extension_content.strip():
+        content = f"{content.rstrip()}\n\n{extension_content.strip()}\n"
 
     return PromptSection(
         name=SectionName.TASK_TOOL,

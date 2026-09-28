@@ -18,6 +18,7 @@ class SectionName:
     PROMPT_ATTACHMENTS = "prompt_attachments"
     MEMORY = "memory"
     SESSION_TOOLS = "session_tools"
+    SUBAGENT_TOOLS = "subagent_tools"
     MODE_INSTRUCTIONS = "mode_instructions"
     WORKSPACE = "workspace"
     HEARTBEAT = "heartbeat"
