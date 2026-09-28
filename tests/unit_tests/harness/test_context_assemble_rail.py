@@ -639,8 +639,8 @@ async def test_before_model_call_injects_filled_identity_in_system(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachment(tmp_path: Path):
-    """Normal turns should replace context written by heartbeat runs."""
+async def test_before_model_call_normal_turn_clears_heartbeat_context_attachment(tmp_path: Path):
+    """Heartbeat attachment is heartbeat-only; normal turns clear it."""
     sys_operation = _make_sys_operation(tmp_path)
     await sys_operation.fs().write_file(f"{tmp_path}/AGENT.md", "# Agent Config\nreal body")
     await sys_operation.fs().write_file(f"{tmp_path}/HEARTBEAT.md", "# Heartbeat Tasks\nreal body")
@@ -665,9 +665,9 @@ async def test_before_model_call_normal_turn_replaces_heartbeat_context_attachme
     await rail.before_invoke(normal_ctx)
     await rail.before_model_call(normal_ctx)
 
-    normal_attachment = await _attachment(agent, "session.sess1.context.heartbeat")
-    assert normal_attachment is not None
-    assert "# Heartbeat Tasks" in (normal_attachment.content or "")
+    # Normal runs must not carry the heartbeat attachment (avoids the model
+    # echoing HEARTBEAT.md back in its visible reply).
+    assert await _attachment(agent, "session.sess1.context.heartbeat") is None
     assert "# Agent Config" in agent.system_prompt_builder.get_section("context.agent").render("cn")
 
 
