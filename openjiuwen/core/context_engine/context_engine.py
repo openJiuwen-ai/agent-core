@@ -52,6 +52,10 @@ class ContextEngine:
         self._window_mutators: List[
             Callable[[ModelContext, ContextWindow], Awaitable[ContextWindow]]
         ] = []
+        # Pre-load the tiktoken vocabulary on a background thread so the
+        # first-use HTTPS download never lands on the event loop.
+        from openjiuwen.core.context_engine.token.tiktoken_counter import start_background_warm_up
+        start_background_warm_up()
 
     def register_window_mutator(
             self,
@@ -111,8 +115,14 @@ class ContextEngine:
         ]
 
         if token_counter is None:
-            from openjiuwen.core.context_engine.token.tiktoken_counter import TiktokenCounter
-            token_counter = TiktokenCounter()
+            from openjiuwen.core.context_engine.token.tiktoken_counter import (
+                TiktokenCounter,
+                start_background_warm_up,
+            )
+            start_background_warm_up()
+            # First use in a process downloads the BPE vocabulary synchronously
+            # (blocking requests.get without timeout); keep it off the event loop.
+            token_counter = await asyncio.to_thread(TiktokenCounter)
 
         if self._config.enable_openrouter_model_context_window_tokens:
             # Scheduled, not awaited: this is the first-turn critical path and the
