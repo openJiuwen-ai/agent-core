@@ -542,24 +542,10 @@ class PersonalContext:
                 raise _state_error("PersonalContext has not been configured")
             if config.collection_enabled:
                 self._config = config.model_copy(update={"collection_enabled": False})
-        async with self._fetch_lock:
-            for event in self._fetch_stop_events.values():
-                event.set()
-            tasks = list(
-                dict.fromkeys(
-                    (
-                        *self._fetch_tasks.values(),
-                        *self._manual_fetch_tasks.values(),
-                        *self._active_fetch_run_tasks.values(),
-                    )
-                )
-            )
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
         await self._deactivate_runtime(
             timeout_seconds=timeout_seconds,
             cancel_authorization=False,
+            cancel_fetch_runs=True,
         )
 
     async def start_agent_use(self) -> None:
@@ -585,6 +571,31 @@ class PersonalContext:
     async def get_authorization_status(self, provider: str) -> dict[str, object]:
         """Read shared provider authorization state without starting authorization."""
 
+        required_scopes, result = await self._authorization_status_snapshot(provider)
+        if result["state"] in {"authorizing", "authorization_failed"}:
+            return result
+        probe_error = None
+        try:
+            _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
+        except Exception as exc:
+            probe_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
+            granted_scopes = set()
+            configured = None
+        _scopes, result = await self._authorization_status_snapshot(
+            provider, granted_scopes=granted_scopes, configured=configured, probe_error=probe_error
+        )
+        return result
+
+    async def _authorization_status_snapshot(
+        self,
+        provider: str,
+        *,
+        granted_scopes: set[str] | None = None,
+        configured: bool | None = None,
+        probe_error: str | None = None,
+    ) -> tuple[tuple[str, ...], dict[str, object]]:
+        """Read current authorization metadata without waiting for external CLI I/O."""
+
         async with self._state_lock:
             required_scopes = await self._required_authorization_scopes(provider)
             async with self._authorization_lock:
@@ -602,39 +613,16 @@ class PersonalContext:
                                     raw_step = challenge.get("authorization_step")
                                     if isinstance(raw_step, str) and raw_step in _AUTHORIZATION_STEPS:
                                         authorization_error_step = raw_step
-                if task is not None and not task.done():
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=set(),
-                        task=task,
-                        challenge=challenge,
-                        error=authorization_error,
-                        error_step=authorization_error_step,
-                    )
-                if authorization_error is not None:
-                    return _authorization_result(
-                        required_scopes=required_scopes,
-                        granted_scopes=set(),
-                        task=task,
-                        challenge=challenge,
-                        error=authorization_error,
-                        error_step=authorization_error_step,
-                    )
-                try:
-                    _ready, granted_scopes, configured = await _lark_cli_auth_status(required_scopes)
-                except Exception as exc:
-                    authorization_error = _authorization_failure_text(_AUTHORIZATION_STATUS_UNAVAILABLE, exc)
-                    granted_scopes = set()
-                    configured = None
-                return _authorization_result(
+                result = _authorization_result(
                     required_scopes=required_scopes,
-                    granted_scopes=granted_scopes,
+                    granted_scopes=granted_scopes or set(),
                     task=task,
                     challenge=challenge,
-                    error=authorization_error,
+                    error=authorization_error or probe_error,
                     configured=configured,
                     error_step=authorization_error_step,
                 )
+                return required_scopes, result
 
     async def authorize_provider(
         self,
@@ -1590,6 +1578,7 @@ class PersonalContext:
         *,
         timeout_seconds: float = 30.0,
         cancel_authorization: bool = True,
+        cancel_fetch_runs: bool = False,
     ) -> None:
         """Stop all provider tasks and the single pipeline under one deadline."""
         if timeout_seconds <= 0:
@@ -1603,6 +1592,35 @@ class PersonalContext:
             self._state = "STOPPING"
             activation = self._activation_task
         stop_error: BaseError | None = None
+        if cancel_fetch_runs:
+            async with self._fetch_lock:
+                active_runs = [
+                    (service_id, cast(str, identity["run_id"]))
+                    for service_id, task in self._active_fetch_run_tasks.items()
+                    if not task.done()
+                    and (identity := self._fetch_run_identity.get(service_id)) is not None
+                ]
+                for event in self._fetch_stop_events.values():
+                    event.set()
+                tasks = set(self._fetch_tasks.values()) | set(self._manual_fetch_tasks.values())
+                tasks.update(self._active_fetch_run_tasks.values())
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+            if active_runs:
+                # Fetch cancellation queues rollback behind the active Pipeline
+                # event. Cancel that event before waiting for fetch cleanup.
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining > 0:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*(self._cancel_pipeline_run(*run) for run in active_runs)),
+                            timeout=min(_PIPELINE_CANCEL_GRACE_SECONDS, remaining),
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("PersonalContext collection pipeline cancellation grace exceeded")
+                    except BaseError as exc:
+                        stop_error = exc
         if activation is not None and not activation.done():
             activation.cancel()
             remaining = deadline - asyncio.get_running_loop().time()
