@@ -40,6 +40,11 @@ class LogManager:
         cls._default_logger_class = logger_class
 
     @classmethod
+    def is_initialized(cls) -> bool:
+        """Return whether the log manager has been initialized."""
+        return cls._initialized
+
+    @classmethod
     def initialize(cls, backend: Optional[str] = None) -> None:
         """
         Initialize log manager
