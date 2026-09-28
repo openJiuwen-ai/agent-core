@@ -36,7 +36,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_REQUEST_PREV_MESSAGE_COUNT,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_K,
     GEN_AI_REQUEST_TOP_P,
@@ -49,9 +48,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_TOOL_TYPE,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
-    GEN_AI_USAGE_COST_INPUT_USD,
-    GEN_AI_USAGE_COST_OUTPUT_USD,
-    GEN_AI_USAGE_COST_TOTAL_USD,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
@@ -61,7 +57,11 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INVOKE_ID,
+    OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -1273,7 +1273,7 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_REQUEST_TOP_P] == 0.9
         assert s.attributes[GEN_AI_REQUEST_TOP_K] == 40
         assert s.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 4096
-        assert s.attributes[GEN_AI_REQUEST_PREV_MESSAGE_COUNT] == 3
+        assert s.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 3
 
     async def test_llm_start_without_params_sets_no_request_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1289,7 +1289,7 @@ class TestGenAiSemconvAttrs:
 
         s = _EXPORTER.get_finished_spans()[0]
         assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
-        assert GEN_AI_REQUEST_PREV_MESSAGE_COUNT not in s.attributes
+        assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
 
     async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1327,9 +1327,9 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
         assert s.attributes[GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS] == 7
         assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
-        assert s.attributes[GEN_AI_USAGE_COST_INPUT_USD] == pytest.approx(0.001)
-        assert s.attributes[GEN_AI_USAGE_COST_OUTPUT_USD] == pytest.approx(0.002)
-        assert s.attributes[GEN_AI_USAGE_COST_TOTAL_USD] == pytest.approx(0.003)
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
 
     async def test_llm_end_unwraps_outputs_container_into_content(self):
         """The {"outputs": AssistantMessage} wrapper must not swallow content."""

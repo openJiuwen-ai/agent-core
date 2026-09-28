@@ -12,7 +12,6 @@ by ``test_handler.py``.
 
 import pytest
 
-from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, UsageMetadata
 from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
@@ -31,7 +30,6 @@ from openjiuwen.extensions.tracer_otel.otel_rail import OtelRail
 from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_AGENT_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
-    GEN_AI_REQUEST_PREV_MESSAGE_COUNT,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
@@ -39,10 +37,12 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
-    GEN_AI_USAGE_COST_TOTAL_USD,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
+    OJ_LLM_PREV_MESSAGE_COUNT,
 )
+from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
 pytestmark = pytest.mark.asyncio
 
@@ -323,12 +323,12 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_REQUEST_TEMPERATURE] == 0.3
             assert llm_span.attributes[GEN_AI_REQUEST_TOP_P] == 0.8
             assert llm_span.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 512
-            assert llm_span.attributes[GEN_AI_REQUEST_PREV_MESSAGE_COUNT] == 2
+            assert llm_span.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 2
             assert llm_span.attributes[GEN_AI_RESPONSE_FINISH_REASONS] == ("stop",)
             assert llm_span.attributes[GEN_AI_RESPONSE_MODEL] == "test-model"
             assert llm_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
             assert llm_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 20
-            assert llm_span.attributes[GEN_AI_USAGE_COST_TOTAL_USD] == pytest.approx(0.3)
+            assert llm_span.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.3)
 
             tool_span = by_name["execute_tool echo"]
             assert tool_span.attributes[GEN_AI_TOOL_NAME] == "echo"

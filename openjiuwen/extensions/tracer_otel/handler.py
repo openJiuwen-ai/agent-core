@@ -45,7 +45,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
-    GEN_AI_REQUEST_PREV_MESSAGE_COUNT,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_K,
     GEN_AI_REQUEST_TOP_P,
@@ -58,9 +57,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_TOOL_TYPE,
     GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
     GEN_AI_USAGE_CACHE_WRITE_INPUT_TOKENS,
-    GEN_AI_USAGE_COST_INPUT_USD,
-    GEN_AI_USAGE_COST_OUTPUT_USD,
-    GEN_AI_USAGE_COST_TOTAL_USD,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
@@ -73,9 +69,13 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
     OJ_INVOKE_ID,
+    OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -269,9 +269,9 @@ def _extract_llm_response_attrs(outputs: Any) -> dict[str, Any]:
         if usage.get("model_name"):
             attrs[GEN_AI_RESPONSE_MODEL] = str(usage["model_name"])
         for source, key in (
-            ("total_cost", GEN_AI_USAGE_COST_TOTAL_USD),
-            ("input_cost", GEN_AI_USAGE_COST_INPUT_USD),
-            ("output_cost", GEN_AI_USAGE_COST_OUTPUT_USD),
+            ("total_cost", OJ_GEN_AI_USAGE_TOTAL_COST),
+            ("input_cost", OJ_GEN_AI_USAGE_INPUT_COST),
+            ("output_cost", OJ_GEN_AI_USAGE_OUTPUT_COST),
         ):
             value = usage.get(source)
             if value is not None:
@@ -435,7 +435,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
                     state.span.set_attribute(key, value)
             message_count = instance_info.get("message_count")
             if message_count is not None:
-                state.span.set_attribute(GEN_AI_REQUEST_PREV_MESSAGE_COUNT, int(message_count))
+                state.span.set_attribute(OJ_LLM_PREV_MESSAGE_COUNT, int(message_count))
             # Agent base fields (use span values if present, otherwise set ourselves)
             invoke_type_val = span.invoke_type or InvokeType.LLM.value
             name_val = span.name or instance_info.get("class_name", "")

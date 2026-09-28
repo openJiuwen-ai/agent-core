@@ -15,8 +15,9 @@ from __future__ import annotations
 
 # GenAI keys have one authoritative definition for every instrumentation path.
 # Standard keys are re-exported from extensions.observability so the two stacks
-# never drift on a standard name; keys the pinned registry does not carry
-# (gen_ai.usage.cost.*, gen_ai.request.prev_message_count) are defined below.
+# never drift on a standard name; keys the pinned registry does not model are
+# defined below as openjiuwen.* project extensions (issue #1833: project
+# extensions must not ride the gen_ai.* prefix).
 from openjiuwen.extensions.observability.semconv import (  # noqa: F401
     ERROR_TYPE,
     GEN_AI_AGENT_ID,
@@ -44,14 +45,15 @@ from openjiuwen.extensions.observability.semconv import (  # noqa: F401
 )
 
 # ---------------------------------------------------------------------------
-# gen_ai.* — request/response facts the pinned GenAI registry does not model
-# (custom keys owned by this package; see AGENTS.md before renaming them)
+# openjiuwen.* — request/response facts the pinned GenAI registry does not
+# model (project extensions owned by this package; 项目扩展，非上游标准.
+# See AGENTS.md before renaming them — these keys are wire format.)
 # ---------------------------------------------------------------------------
 
-GEN_AI_REQUEST_PREV_MESSAGE_COUNT = "gen_ai.request.prev_message_count"
-GEN_AI_USAGE_COST_TOTAL_USD = "gen_ai.usage.cost.total_usd"
-GEN_AI_USAGE_COST_INPUT_USD = "gen_ai.usage.cost.input_usd"
-GEN_AI_USAGE_COST_OUTPUT_USD = "gen_ai.usage.cost.output_usd"
+OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
+OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
+OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 
 
 # ---------------------------------------------------------------------------
