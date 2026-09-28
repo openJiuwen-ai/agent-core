@@ -19,6 +19,178 @@ from openjiuwen.core.session.tracer.span import Span, TraceAgentSpan, TraceWorkf
 from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.graph.pregel import GraphInterrupt
 
+# Bound tracer_agent wire payloads so a single span (e.g. Grep on a huge
+# single-line HTML file) cannot exceed downstream WebSocket send budgets
+# (~6 MiB). Limits apply only to the emitted stream payload, not the live span.
+_TRACER_AGENT_IO_MAX_BYTES = 512 * 1024
+_TRACER_AGENT_STRING_MAX_BYTES = 128 * 1024
+_TRACER_AGENT_TRUNCATE_SUFFIX = "...[truncated]"
+
+
+def _utf8_json_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError, OverflowError):
+        return len(str(value).encode("utf-8"))
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    suffix = _TRACER_AGENT_TRUNCATE_SUFFIX
+    suffix_bytes = suffix.encode("utf-8")
+    if len(suffix_bytes) >= max_bytes:
+        # Budget smaller than marker: emit a pure UTF-8-safe prefix, no suffix.
+        return encoded[:max_bytes].decode("utf-8", errors="ignore")
+    keep = max_bytes - len(suffix_bytes)
+    return encoded[:keep].decode("utf-8", errors="ignore") + suffix
+
+
+def _truncate_string_leaves(value: Any, max_string_bytes: int) -> Any:
+    if isinstance(value, str):
+        return _truncate_utf8(value, max_string_bytes)
+    if isinstance(value, dict):
+        return {key: _truncate_string_leaves(item, max_string_bytes) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_string_leaves(item, max_string_bytes) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_truncate_string_leaves(item, max_string_bytes) for item in value)
+    return value
+
+
+def _build_budget_stub(original_bytes: int, max_bytes: int, *, dropped: int | None = None) -> dict[str, Any]:
+    """Build a truncation stub whose JSON encoding is guaranteed <= max_bytes."""
+    stub: dict[str, Any] = {
+        "_truncated": True,
+        "original_bytes": int(original_bytes),
+        "preview": "",
+    }
+    if dropped is not None:
+        stub["dropped"] = int(dropped)
+
+    if max_bytes <= 0:
+        # Absolute floor: drop optional fields until tiny.
+        return {"_truncated": True, "original_bytes": int(original_bytes)}
+
+    if _utf8_json_size(stub) > max_bytes:
+        return {"_truncated": True, "original_bytes": int(original_bytes)}
+
+    # Grow preview with binary search; re-check JSON size so escapes cannot blow budget.
+    lo, hi = 0, max_bytes
+    best_preview = ""
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = "x" * mid
+        stub["preview"] = candidate
+        if _utf8_json_size(stub) <= max_bytes:
+            best_preview = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    stub["preview"] = best_preview
+    return stub
+
+
+def _fit_list_under_budget(
+    items: list[Any],
+    max_bytes: int,
+    original_bytes: int,
+) -> list[Any]:
+    """Keep a type-stable list: prefix items + trailing truncation marker."""
+    if max_bytes <= 0:
+        return [_build_budget_stub(original_bytes, 0, dropped=len(items))]
+
+    kept: list[Any] = []
+    for item in items:
+        # Reserve a marker slot while scanning so the final frame stays in budget.
+        trial = kept + [item, {
+            "_truncated": True,
+            "original_bytes": original_bytes,
+            "dropped": len(items) - len(kept) - 1,
+        }]
+        if _utf8_json_size(trial) <= max_bytes:
+            kept.append(item)
+            continue
+        break
+
+    dropped = len(items) - len(kept)
+    if dropped <= 0 and _utf8_json_size(kept) <= max_bytes:
+        return kept
+
+    result = kept + [{
+        "_truncated": True,
+        "original_bytes": original_bytes,
+        "dropped": max(dropped, 0),
+    }]
+    while result and _utf8_json_size(result) > max_bytes:
+        if len(result) > 1:
+            result.pop(-2)
+            result[-1] = {
+                "_truncated": True,
+                "original_bytes": original_bytes,
+                "dropped": len(items) - (len(result) - 1),
+            }
+        else:
+            return [_build_budget_stub(original_bytes, max_bytes, dropped=len(items))]
+    return result
+
+
+def bound_tracer_agent_io(
+    value: Any,
+    *,
+    max_bytes: int = _TRACER_AGENT_IO_MAX_BYTES,
+    max_string_bytes: int = _TRACER_AGENT_STRING_MAX_BYTES,
+) -> Any:
+    """Return a size-bounded copy of tracer inputs/outputs for wire emission.
+
+    Prefer truncating oversized string leaves so nested structures used by UI
+    restore (e.g. ``outputs.outputs.data``) stay intact. Fall back to
+    type-preserving shrink (list prefix / dict stub) when still too large.
+    The returned value's JSON encoding is guaranteed ``<= max_bytes`` (when
+    ``max_bytes > 0``).
+    """
+    if value is None:
+        return None
+
+    original_bytes = _utf8_json_size(value)
+    if max_bytes <= 0:
+        if isinstance(value, list):
+            return [_build_budget_stub(original_bytes, 0, dropped=len(value))]
+        if isinstance(value, tuple):
+            return (_build_budget_stub(original_bytes, 0, dropped=len(value)),)
+        return _build_budget_stub(original_bytes, 0)
+
+    string_cap = min(max_string_bytes, max_bytes)
+    bounded = _truncate_string_leaves(value, string_cap)
+    size = _utf8_json_size(bounded)
+    if size <= max_bytes:
+        return bounded
+
+    # Still too large: progressively shrink string leaves.
+    for string_limit in (string_cap // 2, string_cap // 4, 4096, 1024, 256, 64):
+        if string_limit <= 0:
+            continue
+        candidate = _truncate_string_leaves(value, string_limit)
+        if _utf8_json_size(candidate) <= max_bytes:
+            return candidate
+
+    if isinstance(value, str):
+        return _truncate_utf8(value, max_bytes)
+
+    if isinstance(value, list):
+        source = bounded if isinstance(bounded, list) else value
+        return _fit_list_under_budget(source, max_bytes, original_bytes)
+
+    if isinstance(value, tuple):
+        source = list(bounded) if isinstance(bounded, tuple) else list(value)
+        return tuple(_fit_list_under_budget(source, max_bytes, original_bytes))
+
+    # dict / other: budget-safe stub (JSON size re-checked after escapes).
+    return _build_budget_stub(original_bytes, max_bytes)
+
 
 class TracerHandlerName(Enum):
     """
@@ -273,7 +445,14 @@ class TraceAgentHandler(TraceBaseHandler):
     def _format_data(self, span: TraceAgentSpan) -> dict:
         if span.status != NodeStatus.INTERRUPTED.value:
             span.status = self._get_node_status(span)
-        return {"type": self.event_name(), "payload": span.model_dump(by_alias=True)}
+        payload = span.model_dump(by_alias=True)
+        if "inputs" in payload:
+            payload["inputs"] = bound_tracer_agent_io(payload.get("inputs"))
+        if "outputs" in payload:
+            payload["outputs"] = bound_tracer_agent_io(payload.get("outputs"))
+        if "onInvokeData" in payload and payload.get("onInvokeData") is not None:
+            payload["onInvokeData"] = bound_tracer_agent_io(payload.get("onInvokeData"))
+        return {"type": self.event_name(), "payload": payload}
 
     def _get_tracer_agent_span(self, invoke_id: str) -> TraceAgentSpan:
         span = self._span_manager.get_span(invoke_id)
