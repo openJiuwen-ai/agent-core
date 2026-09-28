@@ -569,7 +569,8 @@ async def test_wiki_only_injection_has_no_profile_section(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
-async def test_wiki_and_profile_injection_includes_job_id(tmp_path: Path) -> None:
+async def test_wiki_injection_ignores_existing_profile(tmp_path: Path) -> None:
+    """Profiles on disk are not injected; Wiki still attaches when enabled."""
     _write_runtime_config(tmp_path)
     context_root = tmp_path / "workspace" / "context"
     context_root.mkdir(parents=True)
@@ -585,15 +586,17 @@ async def test_wiki_and_profile_injection_includes_job_id(tmp_path: Path) -> Non
     [item] = await manager.collect_for_session("session-1")
     content = item.content or ""
     assert "## 当前上下文说明" in content
-    assert "## 现行用户画像" in content
-    assert "job_id: `job-rail`" in content
-    assert "source: `distill`" in content
-    assert "persona-text" in content
-    assert "work-text" in content
+    assert "# Wiki" in content
+    assert "body" in content
+    assert "## 现行用户画像" not in content
+    assert "persona-text" not in content
+    assert "work-text" not in content
+    assert "job_id: `job-rail`" not in content
 
 
 @pytest.mark.asyncio
-async def test_profile_only_when_description_missing(tmp_path: Path) -> None:
+async def test_profile_only_on_disk_does_not_inject(tmp_path: Path) -> None:
+    """Without Wiki, a published profile alone does not create a RUNTIME section."""
     _write_runtime_config(tmp_path)
     (tmp_path / "workspace" / "context").mkdir(parents=True)
     _activate_profile(tmp_path, "job-only", persona="p", work="w")
@@ -604,11 +607,7 @@ async def test_profile_only_when_description_missing(tmp_path: Path) -> None:
 
     await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
 
-    [item] = await manager.collect_for_session("session-1")
-    content = item.content or ""
-    assert "## 现行用户画像" in content
-    assert "job_id: `job-only`" in content
-    assert "## 当前上下文说明" not in content
+    assert await manager.collect_for_session("session-1") == []
 
 
 @pytest.mark.asyncio
@@ -650,32 +649,6 @@ async def test_incomplete_version_does_not_inject_profile(tmp_path: Path) -> Non
     assert "wiki-only" in content
     assert "## 现行用户画像" not in content
     assert "only-persona" not in content
-
-
-@pytest.mark.asyncio
-async def test_profile_sections_capped_at_3000_chars(tmp_path: Path) -> None:
-    _write_runtime_config(tmp_path)
-    (tmp_path / "workspace" / "context").mkdir(parents=True)
-    _activate_profile(
-        tmp_path,
-        "job-long",
-        persona="P" * 3001,
-        work="W" * 3001,
-    )
-    manager = PromptAttachmentManager()
-    agent = SimpleNamespace(prompt_attachment_manager=manager)
-    rail = PersonalContextRail(tmp_path)
-    rail.init(agent)
-
-    await rail.before_model_call(_context(agent, [AssistantMessage(content="hello")]))
-
-    [item] = await manager.collect_for_session("session-1")
-    content = item.content or ""
-    assert "P" * 3000 in content
-    assert "P" * 3001 not in content
-    assert "W" * 3000 in content
-    assert "W" * 3001 not in content
-    assert "本次仅载入前 3000 个字符" in content
 
 
 def _stub_search_tool(name: str = "im_search_messages") -> LocalFunction:

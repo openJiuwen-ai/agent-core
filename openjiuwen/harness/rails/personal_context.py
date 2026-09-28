@@ -1,6 +1,6 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""PersonalContext Rail (Wiki + profile inject) and IM Search tool registration."""
+"""PersonalContext Rail (Wiki inject) and IM Search tool registration."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackContext,
     ModelCallInputs,
 )
-from openjiuwen.harness.personal_context.distill import resolve_current_profile
 from openjiuwen.harness.prompts import PromptAttachmentKind, PromptAttachmentManager
 from openjiuwen.harness.rails.base import DeepAgentRail
 
@@ -32,9 +31,7 @@ _SOURCE = "personal_context_rail"
 _CONFIG_FILENAME = "personal_context.yaml"
 _MAX_CONFIG_BYTES = 4 * 1024 * 1024
 _MAX_DESCRIPTION_CHARS = 3000
-_MAX_PROFILE_CHARS = 3000
 _TRUNCATION_NOTICE = "本次仅载入前 3000 个字符；根说明文件更大，请按 description_path 继续读取。"
-_PROFILE_TRUNCATION_NOTICE = "本次仅载入前 3000 个字符。"
 
 
 def _warn(operation: str, exc: BaseException | None = None) -> None:
@@ -131,22 +128,18 @@ def _read_description(path: Path) -> tuple[str, int] | None:
     return content, path_stat.st_size
 
 
-def _clip_profile_text(text: str, *, limit: int = _MAX_PROFILE_CHARS) -> str:
-    value = text or ""
-    if len(value) <= limit:
-        return value
-    return f"{value[:limit]}\n\n[{_PROFILE_TRUNCATION_NOTICE}]"
-
-
 def _render_attachment(
     context_root: Path,
     description_path: Path,
     *,
     description: str | None,
     description_size_bytes: int | None,
-    profile: dict[str, Any] | None,
 ) -> str:
-    """Render Wiki and/or current profile into one RUNTIME attachment."""
+    """Render Wiki description into one RUNTIME attachment.
+
+    Distilled profile injection is intentionally omitted here: persona/work remain
+    on disk under ``im/profiles/`` for a future host-driven selection path.
+    """
 
     parts: list[str] = [
         "# 主动上下文",
@@ -170,29 +163,6 @@ def _render_attachment(
                 "## 当前上下文说明",
                 "",
                 body,
-            ]
-        )
-
-    if profile is not None:
-        if description is not None:
-            parts.append("")
-        job_id = str(profile.get("job_id") or "").strip()
-        source = str(profile.get("source") or "").strip()
-        persona = _clip_profile_text(str(profile.get("persona_md") or ""))
-        work = _clip_profile_text(str(profile.get("work_md") or ""))
-        parts.extend(
-            [
-                "## 现行用户画像",
-                "",
-                f"- job_id: `{job_id}`",
-                f"- source: `{source}`",
-                "",
-                "### Persona",
-                "",
-                persona.rstrip() + ("\n" if persona else ""),
-                "### Work",
-                "",
-                work.rstrip() + ("\n" if work else ""),
             ]
         )
 
@@ -225,7 +195,7 @@ def register_im_search_tools(agent: Any, tools: Sequence[Any]) -> None:
 
 
 class PersonalContextRail(DeepAgentRail):
-    """Attach Wiki description and/or current distilled profile before a model call."""
+    """Attach Wiki description before a model call when agent use is enabled."""
 
     priority = 40
 
@@ -271,7 +241,7 @@ class PersonalContextRail(DeepAgentRail):
             return False
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Clear stale context and attach Wiki and/or current profile when safe."""
+        """Clear stale context and attach Wiki when agent use is enabled."""
 
         manager = self._attachment_manager
         if manager is None:
@@ -308,13 +278,7 @@ class PersonalContextRail(DeepAgentRail):
             if description_result is not None:
                 description, description_size_bytes = description_result
 
-        try:
-            profile = await asyncio.to_thread(resolve_current_profile, str(self._home))
-        except Exception as exc:
-            _warn("resolve current profile", exc)
-            profile = None
-
-        if description is None and profile is None:
+        if description is None:
             return
 
         content = _render_attachment(
@@ -322,7 +286,6 @@ class PersonalContextRail(DeepAgentRail):
             self._description_path,
             description=description,
             description_size_bytes=description_size_bytes,
-            profile=profile,
         )
         try:
             await writer.add_section(
