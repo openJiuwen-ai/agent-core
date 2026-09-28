@@ -2,6 +2,7 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
@@ -10,34 +11,29 @@ import httpx
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ModelError, build_error
-from openjiuwen.core.common.logging import llm_logger, logger, LogEventType
+from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.schema import ImageGenerationResponse, VideoGenerationResponse, \
-    AudioGenerationResponse
-from openjiuwen.core.foundation.llm.schema.message import (
-    BaseMessage,
-    AssistantMessage,
-    UsageMetadata,
-    UserMessage
-)
-from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
-from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
-from openjiuwen.core.foundation.tool import ToolInfo
-from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
     merge_request_headers,
 )
+from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.output_parsers.output_parser import BaseOutputParser
 from openjiuwen.core.foundation.llm.reasoning import (
     UNSET_REASONING,
+    ReasoningPlan,
     apply_reasoning_plan,
     is_reasoning_config_intent,
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
-from openjiuwen.core.foundation.llm.model_clients.base_model_client import BaseModelClient
+from openjiuwen.core.foundation.llm.schema import (
+    AudioGenerationResponse,
+    ImageGenerationResponse,
+    VideoGenerationResponse,
+)
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMApiMode,
     LLMAuthMode,
@@ -45,6 +41,9 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ModelRequestConfig,
     ProviderType,
 )
+from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, BaseMessage, UsageMetadata, UserMessage
+from openjiuwen.core.foundation.llm.schema.message_chunk import AssistantMessageChunk
+from openjiuwen.core.foundation.llm.schema.tool_call import ToolCall
 from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
     _deepseek_reasoning_content,
     apply_message_transforms,
@@ -52,6 +51,7 @@ from openjiuwen.core.foundation.llm.utils.endpoint_profiles import (
 )
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
+from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.runner.callback import trigger
 from openjiuwen.core.runner.callback.events import LLMCallEvents
 
@@ -64,6 +64,26 @@ class ModelParamRule:
     name: str
     predicate: Callable[[str], bool]
     extra_body_fields: Mapping[str, object]
+
+
+class _AffinityGatewayHTTPError(ValueError):
+    """Preserve an affinity gateway's HTTP status and response body for retry policy."""
+
+    def __init__(self, status_code: int, body: str) -> None:
+        super().__init__(f"API returned error {status_code}: {body}")
+        self.status_code = status_code
+        self.body = body
+
+
+@dataclass(frozen=True)
+class _ReasoningFallbackSnapshot:
+    """Only the fields a resolved reasoning plan may overwrite."""
+
+    sdk_fields: dict[str, tuple[bool, Any]]
+    extra_body_fields: dict[str, tuple[bool, Any]]
+    extra_body_present: bool
+    extra_body_was_mapping: bool
+    extra_body_value: Any = None
 
 
 _DEFAULT_MODEL_PARAM_RULES: tuple[ModelParamRule, ...] = (
@@ -110,6 +130,239 @@ _OPENAI_EXTRA_BODY_EXTENSION_FIELDS = {
     "thinking",
     "chat_template_kwargs",
 }
+_DISABLED_REASONING_EFFORTS = {"off", "none"}
+_DISABLED_REASONING_NON_RETRY_STATUSES = {401, 403, 408, 429}
+_UNSUPPORTED_REASONING_MARKERS = (
+    "unsupported",
+    "not support",
+    "does not support",
+    "doesn't support",
+    "cannot",
+    "can't",
+    "only support",
+    "不支持",
+    "不能",
+    "无法",
+    "不允许",
+    "只支持",
+)
+_DISABLED_REASONING_MARKERS = (
+    "disabled",
+    "disable",
+    "关闭",
+    "禁用",
+)
+_REASONING_SUBJECT_MARKERS = ("thinking", "reasoning", "思考", "推理")
+
+
+def _is_false(value: Any) -> bool:
+    return value is False
+
+
+def _is_disabled_effort(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in _DISABLED_REASONING_EFFORTS
+
+
+def _mapping_requests_disabled_reasoning(value: Any) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+
+    thinking = value.get("thinking")
+    if isinstance(thinking, Mapping) and str(thinking.get("type") or "").strip().lower() == "disabled":
+        return True
+    if _is_false(value.get("enable_thinking")):
+        return True
+
+    chat_template_kwargs = value.get("chat_template_kwargs")
+    if isinstance(chat_template_kwargs, Mapping) and _is_false(chat_template_kwargs.get("enable_thinking")):
+        return True
+
+    reasoning = value.get("reasoning")
+    if "reasoning" in value and reasoning is None:
+        return True
+    if isinstance(reasoning, Mapping):
+        if _is_false(reasoning.get("enabled")) or _is_disabled_effort(reasoning.get("effort")):
+            return True
+    return _is_disabled_effort(value.get("reasoning_effort"))
+
+
+def _plan_requests_disabled_reasoning(plan: ReasoningPlan) -> bool:
+    return (
+        _mapping_requests_disabled_reasoning(plan.sdk_params)
+        or _mapping_requests_disabled_reasoning(plan.extra_body)
+    )
+
+
+def _snapshot_reasoning_plan_inputs(
+        params: Mapping[str, Any],
+        plan: ReasoningPlan,
+) -> _ReasoningFallbackSnapshot:
+    """Capture only values that ``plan`` may replace, never the request payload."""
+
+    sdk_fields = {
+        key: (key in params, params[key] if key in params else None)
+        for key in plan.sdk_params
+    }
+    extra_body_present = "extra_body" in params
+    extra_body = params.get("extra_body")
+    extra_body_was_mapping = isinstance(extra_body, Mapping)
+    extra_body_fields = {
+        key: (
+            key in extra_body,
+            extra_body[key] if key in extra_body else None,
+        )
+        for key in plan.extra_body
+    } if extra_body_was_mapping else {}
+    extra_body_value = (
+        None
+        if extra_body_was_mapping or not extra_body_present
+        else extra_body
+    )
+    return _ReasoningFallbackSnapshot(
+        sdk_fields=sdk_fields,
+        extra_body_fields=extra_body_fields,
+        extra_body_present=extra_body_present,
+        extra_body_was_mapping=extra_body_was_mapping,
+        extra_body_value=extra_body_value,
+    )
+
+
+def _field_differs(
+        values: Mapping[str, Any],
+        key: str,
+        snapshot: tuple[bool, Any],
+) -> bool:
+    was_present, previous = snapshot
+    if (key in values) != was_present:
+        return True
+    return was_present and values[key] != previous
+
+
+def _restore_reasoning_plan_inputs(
+        params: Mapping[str, Any],
+        snapshot: _ReasoningFallbackSnapshot,
+        plan: ReasoningPlan,
+) -> Optional[dict[str, Any]]:
+    """Undo only fields written by ``plan`` and preserve caller-owned raw controls."""
+
+    changed = any(
+        _field_differs(params, key, previous)
+        for key, previous in snapshot.sdk_fields.items()
+    )
+    current_extra = params.get("extra_body")
+    if plan.extra_body:
+        if snapshot.extra_body_was_mapping and isinstance(current_extra, Mapping):
+            changed = changed or any(
+                _field_differs(current_extra, key, previous)
+                for key, previous in snapshot.extra_body_fields.items()
+            )
+        else:
+            changed = changed or (
+                ("extra_body" in params) != snapshot.extra_body_present
+                or (
+                    snapshot.extra_body_present
+                    and current_extra != snapshot.extra_body_value
+                )
+            )
+    if not changed:
+        # The caller already supplied an equivalent raw field, so it must not
+        # be removed by the compatibility fallback.
+        return None
+
+    # Shallow-copy the envelope so large messages, images, tool schemas, and
+    # caller-owned extension objects are shared with the first attempt.
+    restored = dict(params)
+    for key, (was_present, previous) in snapshot.sdk_fields.items():
+        if was_present:
+            restored[key] = previous
+        else:
+            restored.pop(key, None)
+
+    if plan.extra_body:
+        if snapshot.extra_body_was_mapping and isinstance(current_extra, Mapping):
+            restored_extra = dict(current_extra)
+            for key, (was_present, previous) in snapshot.extra_body_fields.items():
+                if was_present:
+                    restored_extra[key] = previous
+                else:
+                    restored_extra.pop(key, None)
+            restored["extra_body"] = restored_extra
+        elif snapshot.extra_body_present:
+            restored["extra_body"] = snapshot.extra_body_value
+        else:
+            restored.pop("extra_body", None)
+
+    return restored
+
+
+def _safe_exception_attr(value: Any, name: str) -> Any:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _exception_chain(exc: BaseException) -> Iterable[BaseException]:
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or current.__context__
+
+
+def _exception_status_code(exc: BaseException) -> Optional[int]:
+    for item in _exception_chain(exc):
+        response = _safe_exception_attr(item, "response")
+        for candidate in (item, response):
+            if candidate is None:
+                continue
+            for name in ("status_code", "status"):
+                value = _safe_exception_attr(candidate, name)
+                if isinstance(value, int) and not isinstance(value, bool):
+                    return value
+                if isinstance(value, str) and value.strip().isdigit():
+                    return int(value.strip())
+    return None
+
+
+def _exception_text(exc: BaseException) -> str:
+    parts: list[str] = []
+    for item in _exception_chain(exc):
+        parts.append(str(item))
+        for name in ("message", "body", "code", "type", "param"):
+            value = _safe_exception_attr(item, name)
+            if value is not None:
+                parts.append(str(value))
+        response = _safe_exception_attr(item, "response")
+        response_text = _safe_exception_attr(response, "text")
+        if response_text is not None:
+            parts.append(str(response_text))
+    return "\n".join(part for part in parts if part).lower()
+
+
+def _is_unsupported_disabled_reasoning_error(exc: BaseException) -> bool:
+    status_code = _exception_status_code(exc)
+    is_bad_request = any("badrequest" in type(item).__name__.lower() for item in _exception_chain(exc))
+    if status_code is None:
+        if not is_bad_request:
+            return False
+    elif (
+        status_code in _DISABLED_REASONING_NON_RETRY_STATUSES
+        or status_code not in {400, 422}
+    ):
+        return False
+
+    error_text = _exception_text(exc)
+    mentions_disabled = (
+        any(marker in error_text for marker in _DISABLED_REASONING_MARKERS)
+        or re.search(r"(?<![a-z0-9_])off(?![a-z0-9_])", error_text) is not None
+    )
+    return (
+        any(marker in error_text for marker in _REASONING_SUBJECT_MARKERS)
+        and any(marker in error_text for marker in _UNSUPPORTED_REASONING_MARKERS)
+        and mentions_disabled
+    )
 
 
 def _openrouter_model_provider(model: Optional[str]) -> Optional[str]:
@@ -550,7 +803,7 @@ class OpenAIModelClient(BaseModelClient):
             async with http_client.stream("POST", url, headers=headers, json=body) as response:
                 if response.status_code != 200:
                     error_text = (await response.aread()).decode("utf-8", errors="replace")
-                    raise ValueError(f"API returned error {response.status_code}: {error_text}")
+                    raise _AffinityGatewayHTTPError(response.status_code, error_text)
                 content_type = str(response.headers.get("Content-Type", "")).lower()
                 if "text/event-stream" in content_type:
                     async for raw_line in response.aiter_lines():
@@ -598,6 +851,32 @@ class OpenAIModelClient(BaseModelClient):
                 "affinity stream completed without model output, "
                 f"raw_samples={raw_samples!r}"
             )
+
+    async def _iter_affinity_gateway_stream_with_reasoning_fallback(
+            self,
+            params: dict[str, Any],
+            fallback_params: Optional[dict[str, Any]],
+            *,
+            timeout: Optional[float] = None,
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        yielded_output = False
+        try:
+            async for chunk in self._iter_affinity_gateway_stream(params, timeout=timeout):
+                yielded_output = True
+                yield chunk
+        except Exception as exc:
+            if (
+                yielded_output
+                or fallback_params is None
+                or not _is_unsupported_disabled_reasoning_error(exc)
+            ):
+                raise
+            self._log_reasoning_fallback(params, is_stream=True)
+        else:
+            return
+
+        async for chunk in self._iter_affinity_gateway_stream(fallback_params, timeout=timeout):
+            yield chunk
 
     def supports_kv_cache_affinity(self) -> bool:
         return self._kv_cache_mode() == "affinity"
@@ -812,7 +1091,7 @@ class OpenAIModelClient(BaseModelClient):
         if not self.supports_kv_cache_affinity():
             return False
 
-        params = self._build_request_params(
+        params, reasoning_fallback_params = self._build_request_params_with_reasoning_fallback(
             messages=(
                 messages
                 if messages is not None
@@ -838,6 +1117,12 @@ class OpenAIModelClient(BaseModelClient):
             **kwargs,
         )
         self._move_openai_extra_body_extensions(params)
+        if reasoning_fallback_params is not None:
+            self._move_openai_extra_body_extensions(reasoning_fallback_params)
+        if timeout is not None:
+            params["timeout"] = timeout
+            if reasoning_fallback_params is not None:
+                reasoning_fallback_params["timeout"] = timeout
 
         attempts = self.model_client_config.max_retries if max_attempts is None else max(1, int(max_attempts))
         last_error = None
@@ -845,12 +1130,24 @@ class OpenAIModelClient(BaseModelClient):
             async_client = None
             try:
                 async_client = self._create_async_openai_client(timeout=timeout)
-                if timeout is not None:
-                    params["timeout"] = timeout
                 await async_client.chat.completions.create(**params)
                 return True
             except Exception as exc:
                 last_error = exc
+                if (
+                    async_client is not None
+                    and reasoning_fallback_params is not None
+                    and _is_unsupported_disabled_reasoning_error(exc)
+                ):
+                    self._log_reasoning_fallback(params, is_stream=False)
+                    try:
+                        await async_client.chat.completions.create(**reasoning_fallback_params)
+                        return True
+                    except Exception as fallback_exc:
+                        # A semantic compatibility retry is globally one-shot;
+                        # do not multiply it through action-level retries.
+                        last_error = fallback_exc
+                        break
                 if attempt < attempts - 1:
                     continue
             finally:
@@ -875,8 +1172,34 @@ class OpenAIModelClient(BaseModelClient):
             stream: bool,
             **kwargs
     ) -> dict:
+        params, _ = self._build_request_params_with_reasoning_fallback(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            stop=stop,
+            max_tokens=max_tokens,
+            stream=stream,
+            **kwargs,
+        )
+        return params
+
+    def _build_request_params_with_reasoning_fallback(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            stop: Union[Optional[str], None],
+            max_tokens: Optional[int],
+            stream: bool,
+            **kwargs,
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
         """
-        Build request params with OpenAI-specific adjustments.
+        Build request params and an optional retry snapshot without resolved reasoning controls.
 
         Custom rule:
             For api_base containing "openai.com", keep only one of temperature/top_p:
@@ -898,6 +1221,11 @@ class OpenAIModelClient(BaseModelClient):
         reasoning_kwargs = dict(kwargs)
         if explicit_reasoning is not UNSET_REASONING:
             reasoning_kwargs["reasoning"] = explicit_reasoning
+        neutral_reasoning_intent = is_reasoning_config_intent(
+            explicit_reasoning
+            if explicit_reasoning is not UNSET_REASONING
+            else getattr(self.model_config, "reasoning", None)
+        )
 
         is_session_manage_request = bool(
             kv_action and manage_request is True and kv_target == "session"
@@ -921,14 +1249,20 @@ class OpenAIModelClient(BaseModelClient):
             **kwargs
         )
 
+        reasoning_plan = resolve_reasoning_plan(
+            self.model_client_config,
+            self.model_config,
+            request_model=model,
+            explicit_kwargs=reasoning_kwargs,
+        )
+        fallback_snapshot = (
+            _snapshot_reasoning_plan_inputs(params, reasoning_plan)
+            if neutral_reasoning_intent and _plan_requests_disabled_reasoning(reasoning_plan)
+            else None
+        )
         apply_reasoning_plan(
             params,
-            resolve_reasoning_plan(
-                self.model_client_config,
-                self.model_config,
-                request_model=model,
-                explicit_kwargs=reasoning_kwargs,
-            ),
+            reasoning_plan,
             override=is_reasoning_config_intent(explicit_reasoning),
         )
         reasoning_controls = reasoning_request_controls(params)
@@ -986,7 +1320,16 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_openrouter_profile(params)
 
-        return params
+        fallback_params = (
+            _restore_reasoning_plan_inputs(
+                params,
+                fallback_snapshot,
+                reasoning_plan,
+            )
+            if fallback_snapshot is not None
+            else None
+        )
+        return params, fallback_params
 
     def _apply_openrouter_profile(self, params: dict) -> None:
         if self._endpoint_profile_name() != "openrouter":
@@ -1057,6 +1400,32 @@ class OpenAIModelClient(BaseModelClient):
                 extra_body[key] = params.pop(key)
         if extra_body:
             params["extra_body"] = extra_body
+
+    async def _create_chat_completion_with_reasoning_fallback(
+            self,
+            async_client: "openai.AsyncOpenAI",
+            params: dict[str, Any],
+            fallback_params: Optional[dict[str, Any]],
+            *,
+            is_stream: bool,
+    ) -> Any:
+        try:
+            return await async_client.chat.completions.create(**params)
+        except Exception as exc:
+            if fallback_params is None or not _is_unsupported_disabled_reasoning_error(exc):
+                raise
+            self._log_reasoning_fallback(params, is_stream=is_stream)
+            return await async_client.chat.completions.create(**fallback_params)
+
+    def _log_reasoning_fallback(self, params: Mapping[str, Any], *, is_stream: bool) -> None:
+        llm_logger.warning(
+            "OpenAI-compatible endpoint rejected a resolved disabled-reasoning control; "
+            "retrying once with the model default.",
+            event_type=LogEventType.LLM_CALL_ERROR,
+            model_name=params.get("model"),
+            model_provider=self.model_client_config.client_provider,
+            is_stream=is_stream,
+        )
 
     def _create_async_openai_client(self, timeout: Optional[float] = None) -> "openai.AsyncOpenAI":
         """Acquire an ``AsyncOpenAI`` client for a request.
@@ -1204,11 +1573,44 @@ class OpenAIModelClient(BaseModelClient):
             stop: Union[Optional[str], None],
             **kwargs
     ) -> dict[str, Any]:
+        body, _ = self._build_responses_request_body_with_reasoning_fallback(
+            messages=messages,
+            tools=tools,
+            temperature=temperature,
+            top_p=top_p,
+            model=model,
+            max_tokens=max_tokens,
+            stop=stop,
+            **kwargs,
+        )
+        return body
+
+    def _build_responses_request_body_with_reasoning_fallback(
+            self,
+            *,
+            messages: Union[str, List[BaseMessage], List[dict]],
+            tools: Union[List[ToolInfo], List[dict], None],
+            temperature: Optional[float],
+            top_p: Optional[float],
+            model: Optional[str],
+            max_tokens: Optional[int],
+            stop: Union[Optional[str], None],
+            **kwargs,
+    ) -> tuple[dict[str, Any], Optional[dict[str, Any]]]:
         """Build a Responses API request body from OpenAI client parameters."""
         final_model = model or self.model_config.model_name
         if not final_model:
             raise build_error(StatusCode.MODEL_CONFIG_ERROR, error_msg="The model cannot be empty.")
 
+        explicit_reasoning = kwargs.pop("reasoning", UNSET_REASONING)
+        reasoning_kwargs = dict(kwargs)
+        if explicit_reasoning is not UNSET_REASONING:
+            reasoning_kwargs["reasoning"] = explicit_reasoning
+        neutral_reasoning_intent = is_reasoning_config_intent(
+            explicit_reasoning
+            if explicit_reasoning is not UNSET_REASONING
+            else getattr(self.model_config, "reasoning", None)
+        )
         send_sampling_params = bool(kwargs.pop("send_sampling_params", False))
         send_max_output_tokens = bool(kwargs.pop("send_max_output_tokens", False))
 
@@ -1225,19 +1627,18 @@ class OpenAIModelClient(BaseModelClient):
         configured_max_tokens = max_tokens if max_tokens is not None else self.model_config.max_tokens
         final_stop = stop if stop is not None else self.model_config.stop
 
-        reasoning = kwargs.pop("reasoning", None)
         extra_body = kwargs.pop("extra_body", None)
         tool_choice = kwargs.pop("tool_choice", "auto")
         parallel_tool_calls = kwargs.pop("parallel_tool_calls", True)
         include_reasoning = kwargs.pop("include_reasoning_encrypted_content", False)
 
         request_extra = self.model_config.model_dump(
-            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop"},
+            exclude={"model_name", "model", "temperature", "top_p", "max_tokens", "stop", "reasoning"},
             exclude_none=True,
         )
         request_extra.update(kwargs)
 
-        return build_request_body(
+        body = build_request_body(
             model=final_model,
             messages=messages,
             tools=tools,
@@ -1245,12 +1646,41 @@ class OpenAIModelClient(BaseModelClient):
             top_p=final_top_p,
             max_tokens=configured_max_tokens if send_max_output_tokens else None,
             stop=final_stop,
-            reasoning=reasoning,
+            reasoning=None,
             include_reasoning_encrypted_content=include_reasoning,
             tool_choice=tool_choice,
             parallel_tool_calls=parallel_tool_calls,
             extra_body={**request_extra, **(extra_body or {})} or None,
         )
+        reasoning_plan = resolve_reasoning_plan(
+            self.model_client_config,
+            self.model_config,
+            request_model=model,
+            explicit_kwargs=reasoning_kwargs,
+        )
+        fallback_snapshot = (
+            _snapshot_reasoning_plan_inputs(body, reasoning_plan)
+            if neutral_reasoning_intent and _plan_requests_disabled_reasoning(reasoning_plan)
+            else None
+        )
+        apply_reasoning_plan(
+            body,
+            reasoning_plan,
+            override=is_reasoning_config_intent(explicit_reasoning),
+        )
+        if body.get("reasoning") is None:
+            body.pop("reasoning", None)
+
+        fallback_body = (
+            _restore_reasoning_plan_inputs(
+                body,
+                fallback_snapshot,
+                reasoning_plan,
+            )
+            if fallback_snapshot is not None
+            else None
+        )
+        return body, fallback_body
 
     def _make_responses_transport(self, *, timeout: Optional[float]) -> OpenAIAccountResponsesTransport:
         verify = (
@@ -1286,6 +1716,79 @@ class OpenAIModelClient(BaseModelClient):
         except Exception:
             return None
 
+    async def _create_response_with_reasoning_fallback(
+            self,
+            transport: OpenAIAccountResponsesTransport,
+            *,
+            body: dict[str, Any],
+            fallback_body: Optional[dict[str, Any]],
+            access_token: str,
+            model_name: str,
+            session_id: Optional[str],
+            extra_headers: Mapping[str, str],
+    ) -> AssistantMessage:
+        try:
+            return await transport.create_response(
+                body=body,
+                access_token=access_token,
+                model_name=model_name,
+                session_id=session_id,
+                extra_headers=dict(extra_headers),
+            )
+        except Exception as exc:
+            if fallback_body is None or not _is_unsupported_disabled_reasoning_error(exc):
+                raise
+            self._log_reasoning_fallback(body, is_stream=False)
+            return await transport.create_response(
+                body=fallback_body,
+                access_token=access_token,
+                model_name=model_name,
+                session_id=session_id,
+                extra_headers=dict(extra_headers),
+            )
+
+    async def _iter_responses_with_reasoning_fallback(
+            self,
+            transport: OpenAIAccountResponsesTransport,
+            *,
+            body: dict[str, Any],
+            fallback_body: Optional[dict[str, Any]],
+            access_token: str,
+            model_name: str,
+            session_id: Optional[str],
+            extra_headers: Mapping[str, str],
+    ) -> AsyncIterator[AssistantMessageChunk]:
+        yielded_output = False
+        try:
+            async for chunk in transport.stream_response(
+                body=body,
+                access_token=access_token,
+                model_name=model_name,
+                session_id=session_id,
+                extra_headers=dict(extra_headers),
+            ):
+                yielded_output = True
+                yield chunk
+        except Exception as exc:
+            if (
+                yielded_output
+                or fallback_body is None
+                or not _is_unsupported_disabled_reasoning_error(exc)
+            ):
+                raise
+            self._log_reasoning_fallback(body, is_stream=True)
+        else:
+            return
+
+        async for chunk in transport.stream_response(
+            body=fallback_body,
+            access_token=access_token,
+            model_name=model_name,
+            session_id=session_id,
+            extra_headers=dict(extra_headers),
+        ):
+            yield chunk
+
     async def _invoke_responses_api(
             self,
             *,
@@ -1307,7 +1810,7 @@ class OpenAIModelClient(BaseModelClient):
         kwargs.pop("request_purpose", None)
         kwargs.pop("context_operation_id", None)
 
-        body = self._build_responses_request_body(
+        body, reasoning_fallback_body = self._build_responses_request_body_with_reasoning_fallback(
             messages=messages,
             tools=tools,
             temperature=temperature,
@@ -1334,8 +1837,10 @@ class OpenAIModelClient(BaseModelClient):
         )
 
         try:
-            response = await self._make_responses_transport(timeout=timeout).create_response(
+            response = await self._create_response_with_reasoning_fallback(
+                self._make_responses_transport(timeout=timeout),
                 body=body,
+                fallback_body=reasoning_fallback_body,
                 access_token=self._resolved_api_key(),
                 model_name=str(body.get("model") or ""),
                 session_id=session_id,
@@ -1386,7 +1891,7 @@ class OpenAIModelClient(BaseModelClient):
         kwargs.pop("request_purpose", None)
         kwargs.pop("context_operation_id", None)
 
-        body = self._build_responses_request_body(
+        body, reasoning_fallback_body = self._build_responses_request_body_with_reasoning_fallback(
             messages=messages,
             tools=tools,
             temperature=temperature,
@@ -1415,8 +1920,10 @@ class OpenAIModelClient(BaseModelClient):
         final_message = None
         accumulated_for_parser = ""
         try:
-            async for chunk in self._make_responses_transport(timeout=timeout).stream_response(
+            async for chunk in self._iter_responses_with_reasoning_fallback(
+                self._make_responses_transport(timeout=timeout),
                 body=body,
+                fallback_body=reasoning_fallback_body,
                 access_token=self._resolved_api_key(),
                 model_name=str(body.get("model") or ""),
                 session_id=session_id,
@@ -1541,7 +2048,7 @@ class OpenAIModelClient(BaseModelClient):
             )
 
         # Build request parameters
-        params = self._build_request_params(
+        params, reasoning_fallback_params = self._build_request_params_with_reasoning_fallback(
             messages=messages,
             tools=tools,
             model=model,
@@ -1559,9 +2066,14 @@ class OpenAIModelClient(BaseModelClient):
         )
         if effective_headers:
             params["extra_headers"] = effective_headers
+            if reasoning_fallback_params is not None:
+                reasoning_fallback_params["extra_headers"] = effective_headers
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
+        if reasoning_fallback_params is not None:
+            self._apply_model_specific_params(model, reasoning_fallback_params)
+            self._move_openai_extra_body_extensions(reasoning_fallback_params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1586,9 +2098,16 @@ class OpenAIModelClient(BaseModelClient):
             # just to change the timeout.
             if timeout is not None:
                 params["timeout"] = timeout
+                if reasoning_fallback_params is not None:
+                    reasoning_fallback_params["timeout"] = timeout
 
             # Call API
-            response = await async_client.chat.completions.create(**params)
+            response = await self._create_chat_completion_with_reasoning_fallback(
+                async_client,
+                params,
+                reasoning_fallback_params,
+                is_stream=False,
+            )
             llm_logger.info(
                 "OpenAI API response received.",
                 event_type=LogEventType.LLM_CALL_END,
@@ -1717,7 +2236,7 @@ class OpenAIModelClient(BaseModelClient):
             return
 
         # Build request parameters
-        params = self._build_request_params(
+        params, reasoning_fallback_params = self._build_request_params_with_reasoning_fallback(
             messages=messages,
             tools=tools,
             temperature=temperature,
@@ -1736,6 +2255,8 @@ class OpenAIModelClient(BaseModelClient):
             stream_options.setdefault("include_usage", True)
         elif stream_options is None:
             params["stream_options"] = {"include_usage": True}
+        if reasoning_fallback_params is not None:
+            reasoning_fallback_params["stream_options"] = deepcopy(params["stream_options"])
 
         effective_headers = self._build_request_headers(
             self._base_headers,
@@ -1743,9 +2264,14 @@ class OpenAIModelClient(BaseModelClient):
         )
         if effective_headers:
             params["extra_headers"] = effective_headers
+            if reasoning_fallback_params is not None:
+                reasoning_fallback_params["extra_headers"] = effective_headers
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
+        if reasoning_fallback_params is not None:
+            self._apply_model_specific_params(model, reasoning_fallback_params)
+            self._move_openai_extra_body_extensions(reasoning_fallback_params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
 
@@ -1771,11 +2297,14 @@ class OpenAIModelClient(BaseModelClient):
             # just to change the timeout.
             if timeout is not None:
                 params["timeout"] = timeout
+                if reasoning_fallback_params is not None:
+                    reasoning_fallback_params["timeout"] = timeout
 
             final_message = None
             if self._uses_affinity_gateway() and not output_parser:
-                async for parsed_chunk in self._iter_affinity_gateway_stream(
+                async for parsed_chunk in self._iter_affinity_gateway_stream_with_reasoning_fallback(
                         params,
+                        reasoning_fallback_params,
                         timeout=timeout,
                 ):
                     await trigger(
@@ -1788,7 +2317,12 @@ class OpenAIModelClient(BaseModelClient):
                         final_message = parsed_chunk
                     yield parsed_chunk
             else:
-                response_stream = await async_client.chat.completions.create(**params)
+                response_stream = await self._create_chat_completion_with_reasoning_fallback(
+                    async_client,
+                    params,
+                    reasoning_fallback_params,
+                    is_stream=True,
+                )
                 if output_parser:
                     async for parsed_result in self._astream_with_parser(response_stream, output_parser):
                         await trigger(

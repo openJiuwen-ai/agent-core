@@ -218,7 +218,9 @@ REASONING_PROFILES: tuple[ReasoningProfile, ...] = (
         "always_on",
     ),
 
-    # Zhipu official and Coding Plan.
+    # Zhipu official and Coding Plan. GLM-5.3-Flash is an always-thinking
+    # model: the validated OpenAI-compatible gateway rejects disabling it.
+    ReasoningProfile("zhipu", ("glm-5.3-flash*",), ALWAYS_ON, "always_on", "always_on"),
     ReasoningProfile("zhipu", ("glm-5.2*",), GLM_52, "glm", "glm_anthropic"),
     ReasoningProfile(
         "zhipu",
@@ -338,6 +340,7 @@ MODEL_REASONING_FALLBACKS: tuple[ReasoningProfile, ...] = (
     ReasoningProfile("*", ("kimi-k2.6*", "kimi-k2.5*"), TOGGLE, "thinking_toggle", "anthropic_toggle"),
     ReasoningProfile("*", ("minimax-m3*",), TOGGLE, "minimax_m3", "minimax_m3_anthropic"),
     ReasoningProfile("*", ("minimax-m2*", "minimax-m1*"), ALWAYS_ON, "minimax_m2", "always_on"),
+    ReasoningProfile("*", ("glm-5.3-flash*",), ALWAYS_ON, "always_on", "always_on"),
     ReasoningProfile("*", ("glm-5.2*",), GLM_52, "glm", "glm_anthropic"),
     ReasoningProfile("*", ("glm-5*", "glm-4.7*"), TOGGLE, "thinking_toggle", "anthropic_toggle"),
     ReasoningProfile("*", ("codegeex-4*",), UNSUPPORTED, "unsupported", "unsupported"),

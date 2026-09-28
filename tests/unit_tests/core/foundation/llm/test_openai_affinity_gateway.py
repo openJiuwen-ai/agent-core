@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, ModelClientConfig, ModelRequestConfig
+from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     OpenAIModelClient,
     _chat_completions_url,
@@ -15,6 +15,12 @@ from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     _parse_gateway_stream_line,
     _should_omit_authorization,
 )
+from openjiuwen.core.foundation.llm.schema.config import (
+    LLMAuthMode,
+    ModelClientConfig,
+    ModelRequestConfig,
+    ReasoningConfig,
+)
 
 
 class _Obj:
@@ -22,9 +28,20 @@ class _Obj:
         self.__dict__.update(kwargs)
 
 
-def _affinity_client(api_base: str = "https://example.test") -> OpenAIModelClient:
+class _HTTPError(Exception):
+    def __init__(self, message: str, *, status_code: int):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _affinity_client(
+    api_base: str = "https://example.test",
+    *,
+    model: str = "qwen",
+    reasoning: ReasoningConfig | None = None,
+) -> OpenAIModelClient:
     return OpenAIModelClient(
-        ModelRequestConfig(model="qwen"),
+        ModelRequestConfig(model=model, reasoning=reasoning),
         ModelClientConfig(
             client_provider="OpenAI",
             api_base=api_base,
@@ -179,6 +196,69 @@ async def test_session_affinity_action_builds_one_messages_argument(action):
     }
 
 
+@pytest.mark.asyncio
+async def test_affinity_action_retries_once_without_resolved_disabled_reasoning():
+    client = _affinity_client(
+        model="GLM-5.3",
+        reasoning=ReasoningConfig(mode="disabled"),
+    )
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            _HTTPError(
+                "reasoning model does not support thinking.type=disabled",
+                status_code=400,
+            ),
+            _Obj(),
+        ],
+    )
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        result = await client.evict_kvc(
+            session_id="child",
+            parent_session_id="parent",
+            timeout=12.0,
+            max_attempts=3,
+        )
+
+    assert result is True
+    assert sdk_client.chat.completions.create.call_count == 2
+    first_call, fallback_call = sdk_client.chat.completions.create.call_args_list
+    assert first_call.kwargs["extra_body"]["thinking"] == {"type": "disabled"}
+    assert "thinking" not in fallback_call.kwargs["extra_body"]
+    assert first_call.kwargs["extra_body"]["agent_hint"] == fallback_call.kwargs["extra_body"]["agent_hint"]
+    assert first_call.kwargs["timeout"] == fallback_call.kwargs["timeout"] == 12.0
+
+
+@pytest.mark.asyncio
+async def test_affinity_action_failed_semantic_fallback_does_not_enter_action_retries():
+    client = _affinity_client(
+        model="GLM-5.3",
+        reasoning=ReasoningConfig(mode="disabled"),
+    )
+    sdk_client = AsyncMock()
+    sdk_client.chat.completions.create = AsyncMock(
+        side_effect=[
+            _HTTPError(
+                "该模型始终思考，不支持关闭思考",
+                status_code=400,
+            ),
+            RuntimeError("fallback failed"),
+            _Obj(),
+        ],
+    )
+
+    with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+        with pytest.raises(BaseError, match="fallback failed"):
+            await client.evict_kvc(
+                session_id="child",
+                parent_session_id="parent",
+                max_attempts=3,
+            )
+
+    assert sdk_client.chat.completions.create.call_count == 2
+
+
 def test_gateway_parser_accepts_token_text_and_reasoning():
     line = json.dumps({
         "choices": [{
@@ -312,6 +392,23 @@ def _mock_http_client(response):
     return lambda **_kwargs: _Client()
 
 
+def _mock_http_client_sequence(responses, seen_bodies):
+    remaining = list(responses)
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        def stream(self, *_args, **kwargs):
+            seen_bodies.append(kwargs["json"])
+            return remaining.pop(0)
+
+    return lambda **_kwargs: _Client()
+
+
 class _FakeResponse:
     def __init__(self, *, status_code=200, headers=None, body=b"", lines=None):
         self.status_code = status_code
@@ -374,3 +471,98 @@ async def test_affinity_stream_rejects_usage_only_response(monkeypatch):
             chunk
             async for chunk in client._iter_affinity_gateway_stream({"model": "qwen"})
         ]
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_retries_once_without_resolved_disabled_reasoning(monkeypatch):
+    client = _affinity_client(
+        model="GLM-5.3",
+        reasoning=ReasoningConfig(mode="disabled"),
+    )
+    seen_bodies = []
+    success_body = json.dumps({
+        "choices": [{"message": {"content": "fallback"}, "finish_reason": "stop"}],
+    }).encode()
+    monkeypatch.setattr(client, "_create_async_openai_client", lambda timeout=None: object())
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client_sequence(
+            [
+                _FakeResponse(
+                    status_code=400,
+                    body="该模型始终思考，不支持关闭思考".encode(),
+                ),
+                _FakeResponse(
+                    headers={"Content-Type": "application/json"},
+                    body=success_body,
+                ),
+            ],
+            seen_bodies,
+        ),
+    )
+
+    chunks = [chunk async for chunk in client.stream("hello")]
+
+    assert [chunk.content for chunk in chunks] == ["fallback"]
+    assert len(seen_bodies) == 2
+    assert seen_bodies[0]["thinking"] == {"type": "disabled"}
+    assert "thinking" not in seen_bodies[1]
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_second_failure_is_not_retried_again(monkeypatch):
+    client = _affinity_client(
+        model="GLM-5.3",
+        reasoning=ReasoningConfig(mode="disabled"),
+    )
+    seen_bodies = []
+    monkeypatch.setattr(client, "_create_async_openai_client", lambda timeout=None: object())
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client_sequence(
+            [
+                _FakeResponse(
+                    status_code=400,
+                    body=b"reasoning model does not support thinking.type=disabled",
+                ),
+                _FakeResponse(status_code=400, body=b"fallback failed"),
+            ],
+            seen_bodies,
+        ),
+    )
+
+    with pytest.raises(BaseError, match="fallback failed"):
+        _ = [chunk async for chunk in client.stream("hello")]
+
+    assert len(seen_bodies) == 2
+
+
+@pytest.mark.asyncio
+async def test_affinity_stream_does_not_remove_caller_raw_disabled_reasoning(monkeypatch):
+    client = _affinity_client(model="GLM-5.3")
+    seen_bodies = []
+    monkeypatch.setattr(client, "_create_async_openai_client", lambda timeout=None: object())
+    monkeypatch.setattr(
+        "openjiuwen.core.foundation.llm.model_clients.openai_model_client.httpx.AsyncClient",
+        _mock_http_client_sequence(
+            [
+                _FakeResponse(
+                    status_code=400,
+                    body="该模型始终思考，不支持关闭思考".encode(),
+                ),
+            ],
+            seen_bodies,
+        ),
+    )
+
+    with pytest.raises(BaseError):
+        _ = [
+            chunk
+            async for chunk in client.stream(
+                "hello",
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+        ]
+
+    assert len(seen_bodies) == 1
+    assert seen_bodies[0]["thinking"] == {"type": "disabled"}
