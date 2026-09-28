@@ -201,7 +201,7 @@ async def test_pc_search_posts_to_appapi_search_and_adds_x_chat_user_id(patch_ht
         == "https://mem.example.com/v1/appapi/memory/search"
     )
     headers = _FakeAsyncClient.last["headers"]
-    assert headers["Authorization"] == "Bearer k"
+    assert headers["Authorization"] == "OfficeAceToken k"
     assert headers["X-Chat-User-Id"] == "user-42"
     assert _FakeAsyncClient.last["json"]["query"] == "hello"
     assert "pc-fact" in out
@@ -270,7 +270,7 @@ async def test_pc_sync_turn_posts_messages_to_pc_threads_endpoint(patch_httpx):
         == "https://mem.example.com/v1/appapi/memory/pc-threads/thread-9/messages"
     )
     headers = _FakeAsyncClient.last["headers"]
-    assert headers["Authorization"] == "Bearer k"
+    assert headers["Authorization"] == "OfficeAceToken k"
     assert headers["X-Chat-User-Id"] == "user-42"
     body = _FakeAsyncClient.last["json"]
     assert body["messages"][0]["role"] == "user"
