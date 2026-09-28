@@ -920,6 +920,80 @@ async def test_feishu_scope_set_is_fixed_across_service_configuration_changes(
 
 
 @pytest.mark.asyncio
+async def test_slow_authorization_status_does_not_block_lifecycle_or_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+        started.set()
+        await release.wait()
+        return False, set(), True
+
+    monkeypatch.setattr(personal_context_module, "_lark_cli_auth_status", slow_status)
+    query = asyncio.create_task(personal_context.get_authorization_status("feishu"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        await asyncio.wait_for(personal_context.snapshot(), timeout=0.1)
+        await asyncio.wait_for(personal_context.start_agent_use(), timeout=0.1)
+        await asyncio.wait_for(personal_context.stop_collection(timeout_seconds=0.1), timeout=0.2)
+        await asyncio.wait_for(
+            personal_context.set_configuration(_feishu_config(("docs",), ("calendar",))),
+            timeout=0.1,
+        )
+        assert not query.done()
+        release.set()
+        assert (await asyncio.wait_for(query, timeout=1.0))["state"] == "not_authorized"
+    finally:
+        release.set()
+        await asyncio.gather(query, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_slow_authorization_status_preserves_new_authorization_challenge(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_feishu_config(("docs",)))
+    status, begin, finish = _mock_authorization_io(monkeypatch, granted_scopes=set())
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finish_release = asyncio.Event()
+
+    async def check_status(_scopes: tuple[str, ...]) -> tuple[bool, set[str], bool]:
+        if not started.is_set():
+            started.set()
+            await release.wait()
+        return False, set(), True
+
+    async def finish_authorization(_device_code: str, *, timeout_seconds: float) -> None:
+        del timeout_seconds
+        await finish_release.wait()
+
+    status.side_effect = check_status
+    begin.return_value = (
+        "device-secret", "https://open.feishu.cn/authorize", "2026-09-29T12:00:00Z"
+    )
+    finish.side_effect = finish_authorization
+    query = asyncio.create_task(personal_context.get_authorization_status("feishu"))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        authorization = await asyncio.wait_for(personal_context.authorize_provider("feishu"), timeout=0.1)
+        assert authorization["state"] == "authorizing"
+        release.set()
+        assert await asyncio.wait_for(query, timeout=1.0) == authorization
+    finally:
+        release.set()
+        await asyncio.gather(query, return_exceptions=True)
+        await personal_context._cancel_authorization()
+
+
+@pytest.mark.asyncio
 async def test_authorization_and_configuration_change_are_linearized_without_registering_stale_scope_task(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1418,6 +1492,55 @@ async def test_deactivate_retains_pipeline_when_stop_does_not_finish(tmp_path: P
     await asyncio.sleep(0)
     await personal_context.deactivate_runtime(timeout_seconds=1)
     assert personal_context._pipeline_service is None
+
+
+@pytest.mark.asyncio
+async def test_stop_collection_cancels_pipeline_before_waiting_for_fetch_cleanup(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    pipeline_cancelled = asyncio.Event()
+
+    class BlockingPipeline:
+        def __init__(self) -> None:
+            self.running = True
+            self.cancelled_runs: list[tuple[str, str]] = []
+
+        def is_running(self) -> bool:
+            return self.running
+
+        async def cancel_run(self, service_id: str, run_id: str) -> None:
+            self.cancelled_runs.append((service_id, run_id))
+            pipeline_cancelled.set()
+
+        async def stop(self, *, timeout_seconds: float) -> None:
+            del timeout_seconds
+            self.running = False
+
+    async def fetch_round() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await pipeline_cancelled.wait()
+
+    personal_context = PersonalContext(home=tmp_path)
+    await personal_context.set_configuration(_config())
+    personal_context._state = "RUNNING"
+    pipeline = BlockingPipeline()
+    personal_context._pipeline_service = pipeline  # type: ignore[assignment]
+    task = asyncio.create_task(fetch_round())
+    personal_context._manual_fetch_tasks["notes"] = task
+    personal_context._active_fetch_run_tasks["notes"] = task
+    personal_context._fetch_run_identity["notes"] = {"run_id": "shutdown-run"}
+    await started.wait()
+    try:
+        await personal_context.stop_collection(timeout_seconds=0.1)
+        assert pipeline.cancelled_runs == [("notes", "shutdown-run")]
+        assert task.done()
+        assert (await personal_context.snapshot()).state == "STOPPED"
+    finally:
+        pipeline_cancelled.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await personal_context.deactivate_runtime(timeout_seconds=1)
 
 
 @pytest.mark.asyncio
