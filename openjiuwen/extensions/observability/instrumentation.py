@@ -5,10 +5,12 @@
 
 Single authority for the ``global_instrument_enable`` switch: it patches
 ``httpx`` / ``requests`` / ``aiohttp`` once per process so outbound requests
-carry a valid ``traceparent`` header. Both tracer entry points reach it —
-``ObservabilityRuntime.initialize`` after setting the global TracerProvider,
-and ``extensions.tracer_otel.setup.init_otel_tracer`` through a provider
-factory — so swarm-style and studio-style deployments behave identically.
+carry a valid ``traceparent`` header, and patches ``fastapi`` on the server
+side so inbound requests continue the caller's trace. Both tracer entry
+points reach it — ``ObservabilityRuntime.initialize`` after setting the
+global TracerProvider, and ``extensions.tracer_otel.setup.init_otel_tracer``
+through a provider factory — so swarm-style and agent-runtime deployments
+behave identically.
 
 Instrumentation requires a global SDK ``TracerProvider`` to be in place
 first: the instrumentors resolve their tracer from the process-global
@@ -28,6 +30,7 @@ import os
 import threading
 import warnings
 from collections.abc import Callable
+from typing import Any
 
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -49,6 +52,11 @@ _INSTRUMENTORS: dict[str, str] = {
 
 _lock = threading.Lock()
 _instrumented = False
+
+# FastAPI server patch bookkeeping (installed by ``_instrument_fastapi_server``,
+# restored only by the test-reset helper).
+_patched_fastapi_cls: type | None = None
+_original_fastapi_init: Any = None
 
 
 def resolve_global_instrument_flag(config_value: bool) -> bool:
@@ -86,6 +94,7 @@ def ensure_global_http_instrumentation(
 
         for import_path, library in _INSTRUMENTORS.items():
             _instrument_one(import_path, library)
+        _instrument_fastapi_server()
         _instrumented = True
         return True
 
@@ -134,12 +143,59 @@ def _instrument_one(import_path: str, library: str) -> None:
         logger.warning("otel: {} instrumentation failed - {}", library, exc)
 
 
-def reset_global_http_instrumentation_for_tests() -> None:
-    """Reset the once-per-process latch (test isolation only)."""
+def _instrument_fastapi_server() -> None:
+    """Patch FastAPI app construction in place for inbound trace extraction.
 
-    global _instrumented
+    ``FastAPIInstrumentor().instrument()`` replaces the ``fastapi.FastAPI``
+    module attribute, which misses every module that bound the original class
+    with ``from fastapi import FastAPI`` before this switch ran — i.e. nearly
+    every service module. Wrapping the original class ``__init__`` instead
+    catches every app constructed afterwards, however its name was imported.
+    Apps built before the switch runs stay uninstrumented.
+    """
+
+    try:
+        import fastapi.applications
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    except ImportError as exc:
+        message = f"otel: fastapi instrumentation unavailable - install 'openjiuwen[otel-instrument]' ({exc})"
+        warnings.warn(message, RuntimeWarning, stacklevel=2)
+        logger.warning(message)
+        return
+
+    original_init = fastapi.applications.FastAPI.__init__
+    # The wrapper below is defined in this module, so a ``__module__`` match
+    # means ``__init__`` is already our patch (e.g. this module was reloaded
+    # after patching). Comparing identity via the module avoids stamping a
+    # private marker attribute onto the function (G.CLS.11).
+    if getattr(original_init, "__module__", None) == __name__:
+        return
+
+    def _patched_init(self: object, *args: object, **kwargs: object) -> None:
+        original_init(self, *args, **kwargs)  # type: ignore[call-arg]
+        try:
+            FastAPIInstrumentor.instrument_app(self)  # type: ignore[arg-type]
+        except Exception as exc:
+            # One app's failure must not break its construction, other apps, nor startup.
+            logger.warning("otel: fastapi instrumentation failed - {}", exc)
+
+    global _patched_fastapi_cls, _original_fastapi_init
+    _original_fastapi_init = original_init
+    _patched_fastapi_cls = fastapi.applications.FastAPI
+    fastapi.applications.FastAPI.__init__ = _patched_init  # type: ignore[assignment]
+    logger.info("otel: fastapi instrumentation enabled")
+
+
+def reset_global_http_instrumentation_for_tests() -> None:
+    """Reset the once-per-process latch and FastAPI patch (test isolation only)."""
+
+    global _instrumented, _patched_fastapi_cls, _original_fastapi_init
     with _lock:
         _instrumented = False
+        if _patched_fastapi_cls is not None and _original_fastapi_init is not None:
+            _patched_fastapi_cls.__init__ = _original_fastapi_init  # type: ignore[assignment]
+            _patched_fastapi_cls = None
+            _original_fastapi_init = None
 
 
 __all__ = [
