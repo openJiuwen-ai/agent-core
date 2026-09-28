@@ -470,3 +470,165 @@ async def test_mark_messages_read_batch(file_db: TeamDatabase) -> None:
     marked = await db.message.mark_messages_read(["d1", "b1", "missing"], "dev")
     assert marked == 2
     assert await db.message.has_unread_messages("t1") is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_session_ddl_runs_under_write_lock(
+    file_db: TeamDatabase, monkeypatch
+) -> None:
+    """Bind-time DDL goes through ``DbSessions.write()`` — never ``engine.begin()``.
+
+    Regression guard for the ``QueuePool limit of size 2`` teammate crashes:
+    session-table DDL used to run on ``engine.begin()`` *outside* the write
+    lock, so two teammates binding concurrently could hold BOTH write-pool
+    connections while their DDL parked on the SQLite file lock; the next
+    writer's checkout timed out. Asserted via a spy on the lock route — no
+    real waiting involved.
+    """
+    from contextlib import asynccontextmanager
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    entered: list[bool] = []
+
+    real_write = engine_module.DbSessions.write
+
+    @asynccontextmanager
+    async def spy_write(self):
+        entered.append(True)
+        async with real_write(self) as session:
+            yield session
+
+    monkeypatch.setattr(engine_module.DbSessions, "write", spy_write)
+
+    await file_db.create_cur_session_tables()
+
+    # The DDL must have acquired the process-wide write lock. A regression
+    # back to ``engine.begin()`` never calls ``write()`` and fails here.
+    assert entered == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_new_session_bind_skips_migration_scan(file_db: TeamDatabase, monkeypatch) -> None:
+    """A fresh bind creates session tables on the current scheme.
+
+    The migration pass must treat them as nothing to migrate —
+    ``existing_before_create`` handed to ``_ensure_dynamic_table_indexes``
+    is empty, so per-table ``get_indexes`` / ``get_columns`` PRAGMA calls
+    are never issued.
+    """
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+
+    # Use a session id whose tables were never created: the fixture's
+    # ``initialize()`` built the *fixture* session's tables, not this one.
+    token = set_session_id("newbind_session")
+    try:
+        calls: list[set[str]] = []
+        real_migrate = engine_module._ensure_dynamic_table_indexes
+
+        def spy_migrate(sync_conn, candidates, existing_before_create):
+            calls.append(set(existing_before_create))
+            return real_migrate(sync_conn, candidates, existing_before_create)
+
+        monkeypatch.setattr(engine_module, "_ensure_dynamic_table_indexes", spy_migrate)
+
+        await file_db.create_cur_session_tables()
+
+        # Migrated exactly once; on a fresh bind every candidate is newly
+        # created so the snapshot is empty.
+        assert len(calls) == 1
+        assert calls[0] == set()
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_existing_session_tables_run_migration(file_db: TeamDatabase, monkeypatch) -> None:
+    """Pre-existing session tables still receive legacy-structure migration."""
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+    from sqlalchemy import inspect
+
+    token = set_session_id("oldbind_session")
+    try:
+        suffix = engine_module._current_session_migration_tables()[0].rsplit("_", 1)[-1]
+        task_table = f"team_task_{suffix}"
+
+        # Pre-create the task table on a deliberately old structure.
+        async with file_db.engine.begin() as conn:
+            await conn.execute(
+                text(
+                    f'CREATE TABLE "{task_table}" ('
+                    "task_id TEXT PRIMARY KEY, team_name TEXT, assignee TEXT, "
+                    "status TEXT, updated_at INTEGER)"
+                )
+            )
+            await conn.execute(
+                text(f'CREATE INDEX "ix_{task_table}_assignee" ON "{task_table}" (assignee)')
+            )
+
+        calls: list[set[str]] = []
+        real_migrate = engine_module._ensure_dynamic_table_indexes
+
+        def spy_migrate(sync_conn, candidates, existing_before_create):
+            calls.append(set(existing_before_create))
+            return real_migrate(sync_conn, candidates, existing_before_create)
+
+        monkeypatch.setattr(engine_module, "_ensure_dynamic_table_indexes", spy_migrate)
+
+        await file_db.create_cur_session_tables()
+
+        assert len(calls) == 1
+        assert task_table in calls[0]
+
+        async with file_db.read_session_local() as session:
+            conn = await session.connection()
+            index_names = await conn.run_sync(
+                lambda sc: {idx["name"] for idx in inspect(sc).get_indexes(task_table)}
+            )
+            assert f"ix_{task_table}_assignee_status" in index_names
+            assert f"ix_{task_table}_assignee" not in index_names
+            columns = await conn.run_sync(
+                lambda sc: {c["name"] for c in inspect(sc).get_columns(task_table)}
+            )
+            assert "reviewer" in columns
+    finally:
+        reset_session_id(token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_cur_session_tables_retries_on_watchdog_timeout(
+    file_db: TeamDatabase, monkeypatch
+) -> None:
+    """``create_cur_session_tables`` retries write-lock watchdog ``TimeoutError``."""
+    from contextlib import asynccontextmanager
+
+    import openjiuwen.agent_teams.tools.database.engine as engine_module
+    from sqlalchemy import inspect
+
+    real_write = engine_module.DbSessions.write
+    attempts = {"n": 0}
+
+    @asynccontextmanager
+    async def flaky_write(self):
+        attempts["n"] += 1
+        if attempts["n"] == 1:
+            raise TimeoutError("watchdog")
+        async with real_write(self) as session:
+            yield session
+
+    monkeypatch.setattr(engine_module.DbSessions, "write", flaky_write)
+    monkeypatch.setattr(engine_module, "_DB_RETRY_BASE_DELAY", 0.0)
+
+    await file_db.create_cur_session_tables()  # must not raise
+
+    assert attempts["n"] == 2
+    from openjiuwen.agent_teams.tools.database.engine import _current_session_migration_tables
+
+    task_table = _current_session_migration_tables()[0]
+    async with file_db.read_session_local() as session:
+        conn = await session.connection()
+        assert await conn.run_sync(lambda sc: inspect(sc).has_table(task_table))
