@@ -22,8 +22,8 @@ from openjiuwen.core.graph.pregel import GraphInterrupt
 # Bound tracer_agent wire payloads so a single span (e.g. Grep on a huge
 # single-line HTML file) cannot exceed downstream WebSocket send budgets
 # (~6 MiB). Limits apply only to the emitted stream payload, not the live span.
-_TRACER_AGENT_IO_MAX_BYTES = 256 * 1024
-_TRACER_AGENT_STRING_MAX_BYTES = 64 * 1024
+_TRACER_AGENT_IO_MAX_BYTES = 512 * 1024
+_TRACER_AGENT_STRING_MAX_BYTES = 128 * 1024
 _TRACER_AGENT_TRUNCATE_SUFFIX = "...[truncated]"
 
 
