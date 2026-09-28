@@ -1,7 +1,7 @@
 Create team tasks and assign their owners (Leader only).
 **Tasks should focus on deliverable outcomes and acceptance criteria, not execution steps.**
 
-This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool and members never claim work themselves. **Every task must name its owner via `assignee` — an unassigned task will never be executed.**
+This team runs in **scheduled assignment mode**: tasks never enter a shared claim pool and members never claim work themselves. **Every task must name its owner via `assignee_display_name` (exact roster display name) — an unassigned task will never be executed. Do not pass member_name / agent_key.**
 
 {{create_task_edge_semantics}}
 
@@ -9,7 +9,7 @@ This team runs in **scheduled assignment mode**: tasks never enter a shared clai
 
 - **title**: Concise description of the goal (imperative form, e.g. "Implement user auth")
 - **content**: Goals, acceptance criteria, and constraints — not specific operations
-- **assignee** (required): Member name that will carry this task. **That member must already exist and must not be the leader** — `spawn_teammate` first, then `create_task`
+- **assignee_display_name** (required): Member display name that will carry this task. **That member must already exist and must not be the leader** — `spawn_teammate` first, then `create_task`
 - **reviewer** (at least 1 per task): Reviewer role names (must differ from the assignee — no self-review). Each reviewer represents an independent verification perspective, e.g. "security review", "correctness check", "performance benchmark". A reviewed task enters `in_review` on completion; multiple reviewers decide by vote. Reviewers do NOT need to be pre-spawned — the scheduling framework automatically creates a temporary verification agent for each reviewer name.
 - **max_review_rounds** (optional, requires reviewer): Rework-round ceiling for the verify gate; beyond it a failing round escalates to you instead of looping. Omitted uses the team default
 - **task_id** (required): Custom ID for dependency reference.
@@ -22,5 +22,5 @@ The initial status follows the dependencies: a task with **no dependencies** lan
 
 ## Required Workflow
 
-1. **Before creating**: all `assignee`s must already exist (`spawn_teammate` first), and assignee must not be the leader; reviewers are written directly as role names in the `reviewer` field — the scheduling framework creates temporary verification agents on demand; you MUST call `view_task` to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
+1. **Before creating**: all `assignee_display_name`s must already exist (`spawn_teammate` first), and must not be the leader; reviewers are written directly as role names in the `reviewer` field — the scheduling framework creates temporary verification agents on demand; you MUST call `view_task` to inspect the current task board — prevents duplicates, surfaces missing dependencies, and reveals reusable task IDs
 2. **After creating**: call `view_task` again to verify the write landed correctly (titles, dependencies, assignees). **Do not broadcast to start members** — the scheduling framework notifies and launches each assignee automatically

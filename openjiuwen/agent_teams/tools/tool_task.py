@@ -61,7 +61,10 @@ def _task_node_schema(
 def _autonomous_task_node_schema(t: Translator) -> dict:
     """Build the autonomous create_task node schema."""
     properties = _base_task_node_properties(t)
-    properties["assignee"] = {"type": "string", "description": t("create_task", "task.assignee")}
+    properties["assignee_display_name"] = {
+        "type": "string",
+        "description": t("create_task", "task.assignee_display_name"),
+    }
     return _task_node_schema(properties)
 
 
@@ -70,7 +73,10 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
     properties = _base_task_node_properties(t)
     properties.update(
         {
-            "assignee": {"type": "string", "description": t("create_task", "task.assignee")},
+            "assignee_display_name": {
+                "type": "string",
+                "description": t("create_task", "task.assignee_display_name"),
+            },
             "reviewer": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -83,39 +89,145 @@ def _scheduled_task_node_schema(t: Translator) -> dict:
             },
         }
     )
-    return _task_node_schema(properties, extra_required=["assignee"])
-
-
-async def _validate_assignees(
-    agent_team: TeamBackend,
-    tasks: list[dict],
-    *,
-    required: bool,
-) -> str | None:
-    """Reject assignees that are missing, unknown, or point to the leader."""
-    leader_member_name = await agent_team.resolve_leader_member_name()
-    for spec in tasks:
-        assignee = (spec.get("assignee") or "").strip()
-        if not assignee:
-            if required:
-                return (
-                    f"Task {_spec_label(spec)!r} missing required 'assignee' — "
-                    f"assigned tasks must name a non-leader team member"
-                )
-            continue
-        if leader_member_name and assignee == leader_member_name:
-            return (
-                f"Task {_spec_label(spec)!r}: assignee {assignee!r} is the team leader; "
-                f"assign the task to a non-leader member"
-            )
-        if not await agent_team.member_exists(assignee):
-            return f"Task {_spec_label(spec)!r}: member {assignee!r} not found in the team"
-    return None
+    return _task_node_schema(properties, extra_required=["assignee_display_name"])
 
 
 def _spec_label(spec: dict) -> str:
     """Human-readable label for a task spec in error messages."""
     return spec.get("task_id") or spec.get("title") or "<unnamed>"
+
+
+async def _build_assignee_display_index(
+    agent_team: TeamBackend,
+) -> tuple[dict[str, str], set[str], set[str]]:
+    """Build display_name indexes for assignee resolution.
+
+    Returns:
+        unique: display_name -> member_name (exact, non-ambiguous)
+        ambiguous: display names shared by more than one member
+        leader_labels: leader member_name and display_name (rejected as assignees)
+    """
+    leader_member_name = await agent_team.resolve_leader_member_name()
+    leader_labels: set[str] = set()
+    if leader_member_name:
+        leader_labels.add(leader_member_name)
+        leader_row = await agent_team.db.member.get_member(leader_member_name, agent_team.team_name)
+        if leader_row is not None:
+            leader_display = (leader_row.display_name or "").strip()
+            if leader_display:
+                leader_labels.add(leader_display)
+
+    unique: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for entry in await agent_team.list_member_roster():
+        display = (entry.display_name or "").strip()
+        if not display:
+            continue
+        if display in ambiguous:
+            continue
+        if display in unique:
+            del unique[display]
+            ambiguous.add(display)
+        else:
+            unique[display] = entry.member_name
+    return unique, ambiguous, leader_labels
+
+
+def _lookup_assignee_member_name(
+    display: str,
+    *,
+    unique: dict[str, str],
+    ambiguous: set[str],
+    leader_labels: set[str],
+    label: str,
+) -> tuple[str | None, str | None]:
+    """Resolve one exact display_name. Returns (member_name, error)."""
+    if display in leader_labels:
+        return None, (
+            f"{label}: assignee_display_name {display!r} is the team leader; "
+            f"assign the task to a non-leader member"
+        )
+    if display in ambiguous:
+        return None, (
+            f"{label}: assignee_display_name {display!r} matches multiple members — "
+            f"display names must be unique within the team"
+        )
+    member_name = unique.get(display)
+    if not member_name:
+        return None, f"{label}: assignee_display_name {display!r} not found in the team roster"
+    return member_name, None
+
+
+async def _resolve_assignee_display_names(
+    agent_team: TeamBackend,
+    tasks: list[dict],
+    *,
+    required: bool,
+) -> str | None:
+    """Resolve ``assignee_display_name`` -> ``assignee`` (member_name) in place.
+
+    Rejects the legacy ``assignee`` field (opaque member_name / agent_key),
+    unknown or ambiguous display names, and the team leader. On success each
+    assigned spec has ``assignee`` set for ``add_graph`` / persistence.
+    """
+    for spec in tasks:
+        if "assignee" in spec:
+            legacy = spec.get("assignee")
+            if legacy is not None and str(legacy).strip() != "":
+                return (
+                    f"Task {_spec_label(spec)!r}: field 'assignee' is not accepted; "
+                    f"use 'assignee_display_name' with the member's display name from the team roster"
+                )
+            # null/empty legacy field: treat as omitted (common LLM optional-field habit)
+            spec.pop("assignee", None)
+
+    unique, ambiguous, leader_labels = await _build_assignee_display_index(agent_team)
+    for spec in tasks:
+        raw = spec.get("assignee_display_name")
+        display = (raw or "").strip() if raw is not None else ""
+        if not display:
+            if required:
+                return (
+                    f"Task {_spec_label(spec)!r} missing required 'assignee_display_name' — "
+                    f"assigned tasks must name a non-leader team member by display name"
+                )
+            spec.pop("assignee", None)
+            continue
+        member_name, error = _lookup_assignee_member_name(
+            display,
+            unique=unique,
+            ambiguous=ambiguous,
+            leader_labels=leader_labels,
+            label=f"Task {_spec_label(spec)!r}",
+        )
+        if error:
+            return error
+        spec["assignee"] = member_name
+    return None
+
+
+async def _resolve_one_assignee_display_name(
+    agent_team: TeamBackend,
+    display_name: str,
+) -> tuple[str | None, str | None]:
+    """Resolve a single display name for update_task. Returns (member_name, error)."""
+    display = (display_name or "").strip()
+    if not display:
+        return None, "'assignee_display_name' must be a non-empty member display name"
+    unique, ambiguous, leader_labels = await _build_assignee_display_index(agent_team)
+    return _lookup_assignee_member_name(
+        display,
+        unique=unique,
+        ambiguous=ambiguous,
+        leader_labels=leader_labels,
+        label="update_task",
+    )
+
+
+async def _assignee_display_by_member(agent_team: TeamBackend) -> dict[str, str]:
+    """Reverse map member_name -> display_name for create_task result echo."""
+    unique, _, _ = await _build_assignee_display_index(agent_team)
+    return {member_name: display for display, member_name in unique.items()}
 
 
 def _validate_task_batch(tasks: list[dict]) -> str | None:
@@ -181,9 +293,9 @@ class TaskCreateTool(TeamTool):
     among tasks of the same call are expressed with ``depends_on`` only
     (forward references allowed), while ``depended_by`` is reserved for
     wiring *existing* tasks to depend on a new task. In-batch ``depended_by``
-    targets are rejected at this boundary as redundant. Tasks without an
-    ``assignee`` are claimable from the shared board; tasks with an assignee
-    are reserved for that non-leader member.
+    targets are rejected at this boundary as redundant.     Tasks without an
+    ``assignee_display_name`` are claimable from the shared board; tasks with
+    an assignee are reserved for that non-leader member (DB stores member_name).
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -216,7 +328,7 @@ class TaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await _validate_assignees(self.agent_team, tasks, required=False)
+        error = await _resolve_assignee_display_names(self.agent_team, tasks, required=False)
         if error:
             return ToolOutput(success=False, error=error)
 
@@ -239,7 +351,15 @@ class TaskCreateTool(TeamTool):
         if not result.ok:
             return ToolOutput(success=False, error=result.reason)
 
-        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
+        display_by_member = await _assignee_display_by_member(self.agent_team)
+        briefs = [
+            {
+                **task.brief(),
+                "assignee": task.assignee,
+                "assignee_display_name": display_by_member.get(task.assignee) if task.assignee else None,
+            }
+            for task in result.tasks
+        ]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
         return ToolOutput(
@@ -253,14 +373,16 @@ class TaskCreateTool(TeamTool):
         d = output.data
         if "task_id" in d and "title" in d:
             line = f"Task created: task_id={d['task_id']} title={d['title']}"
-            if d.get("assignee"):
-                line += f" -> {d['assignee']}"
+            label = d.get("assignee_display_name") or d.get("assignee")
+            if label:
+                line += f" -> {label}"
             return line
         lines = []
         for task in d.get("tasks", []):
             line = f"task_id={task['task_id']} title={task['title']}"
-            if task.get("assignee"):
-                line += f" -> {task['assignee']}"
+            label = task.get("assignee_display_name") or task.get("assignee")
+            if label:
+                line += f" -> {label}"
             lines.append(line)
         lines.append(f"Created {d['count']}")
         return "\n".join(lines)
@@ -268,23 +390,25 @@ class TaskCreateTool(TeamTool):
 
 def _owner_phrase(task: dict) -> str:
     """Render a scheduled task's owner and whether it is ready or waiting."""
+    owner = task.get("assignee_display_name") or task.get("assignee")
     if task.get("status") == TaskStatus.BLOCKED.value:
-        return f"-> {task['assignee']} (blocked; starts once its dependencies complete)"
-    return f"-> {task['assignee']} (assigned; the scheduler starts it)"
+        return f"-> {owner} (blocked; starts once its dependencies complete)"
+    return f"-> {owner} (assigned; the scheduler starts it)"
 
 
 class ScheduledTaskCreateTool(TeamTool):
     """Create team tasks, each naming its owner (scheduled dispatch).
 
     Same atomic ``add_graph`` and same edge rules as ``TaskCreateTool``, plus
-    a required ``assignee`` that rides along in the same mutation: the task
-    rests at PENDING (or BLOCKED, if it has dependencies) *with its owner on
-    record*, and the scheduler starts it when execution begins. Members never
-    claim in this mode, so a task without an assignee would never run — hence
-    ``assignee`` is required and the result echoes the owner and landing
-    status. ``max_review_rounds`` optionally caps the verify-gate rework loop
-    of one task (requires ``reviewer``, F_62); beyond it the scheduler
-    escalates to the leader instead of looping.
+    a required ``assignee_display_name`` that is resolved to member_name and
+    rides along in the same mutation: the task rests at PENDING (or BLOCKED,
+    if it has dependencies) *with its owner on record*, and the scheduler
+    starts it when execution begins. Members never claim in this mode, so a
+    task without an assignee would never run — hence ``assignee_display_name``
+    is required and the result echoes the owner and landing status.
+    ``max_review_rounds`` optionally caps the verify-gate rework loop of one
+    task (requires ``reviewer``, F_62); beyond it the scheduler escalates to
+    the leader instead of looping.
     """
 
     def __init__(self, agent_team: TeamBackend, t: Translator):
@@ -333,7 +457,7 @@ class ScheduledTaskCreateTool(TeamTool):
         error = _validate_task_batch(tasks)
         if error:
             return ToolOutput(success=False, error=error)
-        error = await _validate_assignees(self.agent_team, tasks, required=True)
+        error = await _resolve_assignee_display_names(self.agent_team, tasks, required=True)
         if error:
             return ToolOutput(success=False, error=error)
         error = self._validate_review_rounds(tasks)
@@ -365,7 +489,15 @@ class ScheduledTaskCreateTool(TeamTool):
         # contract: the leader must tell "starts now" from "waiting on
         # dependencies" without a follow-up view_task. Autonomous-effective
         # batches carry no assignee and render like the claimable variant.
-        briefs = [{**task.brief(), "assignee": task.assignee} for task in result.tasks]
+        display_by_member = await _assignee_display_by_member(self.agent_team)
+        briefs = [
+            {
+                **task.brief(),
+                "assignee": task.assignee,
+                "assignee_display_name": display_by_member.get(task.assignee) if task.assignee else None,
+            }
+            for task in result.tasks
+        ]
         if len(briefs) == 1:
             return ToolOutput(success=True, data=briefs[0])
         return ToolOutput(success=True, data={"tasks": briefs, "count": len(briefs)})
@@ -520,7 +652,10 @@ class UpdateTaskTool(TeamTool):
                 },
                 "title": {"type": "string", "description": t("update_task", "title")},
                 "content": {"type": "string", "description": t("update_task", "content")},
-                "assignee": {"type": "string", "description": t("update_task", "assignee")},
+                "assignee_display_name": {
+                    "type": "string",
+                    "description": t("update_task", "assignee_display_name"),
+                },
                 "reviewer": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -571,7 +706,6 @@ class UpdateTaskTool(TeamTool):
         status = inputs.get("status")
         title = inputs.get("title")
         content = inputs.get("content")
-        assignee = inputs.get("assignee")
         reviewer = inputs.get("reviewer")
         max_review_rounds = inputs.get("max_review_rounds")
         add_blocked_by = inputs.get("add_blocked_by")
@@ -597,8 +731,8 @@ class UpdateTaskTool(TeamTool):
                 success=False,
                 error=(
                     "update_task cannot mark a task completed. Assign or reassign the task to a non-leader member "
-                    "with update_task(task_id=..., assignee=...), then that member must complete it with their "
-                    "task-completion tool."
+                    "with update_task(task_id=..., assignee_display_name=...), then that member must complete it "
+                    "with their task-completion tool."
                 ),
             )
         if status and status != "cancelled":
@@ -625,6 +759,26 @@ class UpdateTaskTool(TeamTool):
             if not success:
                 return ToolOutput(success=False, error="Failed to cancel task")
             return ToolOutput(success=True, data={"task_id": task_id, "status": "cancelled"})
+
+        # Resolve assignee only on the assign/reassign path (after cancel branches).
+        assignee = None
+        if "assignee" in inputs:
+            legacy = inputs.get("assignee")
+            if legacy is not None and str(legacy).strip() != "":
+                return ToolOutput(
+                    success=False,
+                    error=(
+                        "field 'assignee' is not accepted; use 'assignee_display_name' with the "
+                        "member's display name from the team roster"
+                    ),
+                )
+        assignee_display_name = inputs.get("assignee_display_name")
+        if assignee_display_name is not None and str(assignee_display_name).strip() != "":
+            assignee, resolve_error = await _resolve_one_assignee_display_name(
+                self.agent_team, str(assignee_display_name)
+            )
+            if resolve_error:
+                return ToolOutput(success=False, error=resolve_error)
 
         # Collect all field updates in one pass
         updated: list[str] = []

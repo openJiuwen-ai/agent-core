@@ -7,7 +7,7 @@ A *variant* keeps ``ToolCard.id`` / ``name`` and swaps schema, description,
 and behaviour; selection happens while ``create_team_tools`` builds its tool
 dict, never inside ``invoke``. These tests pin the three things that must
 hold: which tools get registered, that a variant's schema *is* its contract,
-and that ``create_task(assignee=...)`` lands atomically.
+and that ``create_task(assignee_display_name=...)`` lands atomically.
 """
 
 from unittest.mock import AsyncMock
@@ -214,13 +214,13 @@ async def test_create_task_variant_classes_and_schema(db):
     def node(tool):
         return tool.card.input_params["properties"]["tasks"]["items"]
 
-    assert "assignee" in node(autonomous)["properties"]
+    assert "assignee_display_name" in node(autonomous)["properties"]
     assert "reviewer" not in node(autonomous)["properties"]
-    assert "assignee" in node(scheduled)["properties"]
+    assert "assignee_display_name" in node(scheduled)["properties"]
     assert "max_review_rounds" not in node(autonomous)["properties"]
     assert "max_review_rounds" in node(scheduled)["properties"]
-    assert "assignee" not in node(autonomous)["required"]
-    assert "assignee" in node(scheduled)["required"]
+    assert "assignee_display_name" not in node(autonomous)["required"]
+    assert "assignee_display_name" in node(scheduled)["required"]
 
     # Parameter descriptions are shared: same locale key, same string.
     assert (
@@ -350,13 +350,13 @@ async def test_scheduled_create_task_rejects_unknown_or_missing_assignee(db):
 
     missing = await create_task.invoke({"tasks": [{"title": "t", "content": "c"}]})
     assert not missing.success
-    assert "assignee" in missing.error
+    assert "assignee_display_name" in missing.error
 
-    unknown = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee": "ghost"}]})
+    unknown = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee_display_name": "ghost"}]})
     assert not unknown.success
     assert "not found" in unknown.error
 
-    leader = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee": LEADER_NAME}]})
+    leader = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee_display_name": LEADER_NAME}]})
     assert not leader.success
     assert "team leader" in leader.error
 
@@ -378,8 +378,8 @@ async def test_scheduled_create_task_lands_assignee_atomically(db):
     result = await create_task.invoke(
         {
             "tasks": [
-                {"task_id": "t1", "title": "first", "content": "c", "assignee": DEV_1},
-                {"task_id": "t2", "title": "second", "content": "c", "assignee": DEV_2, "depends_on": ["t1"]},
+                {"task_id": "t1", "title": "first", "content": "c", "assignee_display_name": DEV_1},
+                {"task_id": "t2", "title": "second", "content": "c", "assignee_display_name": DEV_2, "depends_on": ["t1"]},
             ]
         }
     )
@@ -413,7 +413,7 @@ async def test_scheduled_task_starts_and_completes(db):
     create_task = _by_name(tools, "create_task")
 
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "s1", "title": "solo", "content": "c", "assignee": DEV_1}]}
+        {"tasks": [{"task_id": "s1", "title": "solo", "content": "c", "assignee_display_name": DEV_1}]}
     )
     assert result.success, result.error
     assert (await tm.get("s1")).status == TaskStatus.PENDING.value
@@ -445,8 +445,8 @@ async def test_scheduled_start_enforces_one_active_task(db):
     await create_task.invoke(
         {
             "tasks": [
-                {"task_id": "a", "title": "a", "content": "c", "assignee": DEV_1},
-                {"task_id": "b", "title": "b", "content": "c", "assignee": DEV_1},
+                {"task_id": "a", "title": "a", "content": "c", "assignee_display_name": DEV_1},
+                {"task_id": "b", "title": "b", "content": "c", "assignee_display_name": DEV_1},
             ]
         }
     )
@@ -498,7 +498,7 @@ async def test_autonomous_create_task_can_preassign_existing_non_leader(db):
     create_task = _by_name(tools, "create_task")
 
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "a2", "title": "assigned", "content": "c", "assignee": DEV_1}]}
+        {"tasks": [{"task_id": "a2", "title": "assigned", "content": "c", "assignee_display_name": DEV_1}]}
     )
     assert result.success, result.error
 
@@ -515,11 +515,11 @@ async def test_autonomous_create_task_rejects_leader_or_unknown_assignee(db):
     tools = create_team_tools(role="leader", agent_team=_backend(db, LEADER_NAME, True))
     create_task = _by_name(tools, "create_task")
 
-    leader = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee": LEADER_NAME}]})
+    leader = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee_display_name": LEADER_NAME}]})
     assert not leader.success
     assert "team leader" in leader.error
 
-    unknown = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee": "ghost"}]})
+    unknown = await create_task.invoke({"tasks": [{"title": "t", "content": "c", "assignee_display_name": "ghost"}]})
     assert not unknown.success
     assert "not found" in unknown.error
 
@@ -531,7 +531,7 @@ async def test_autonomous_member_claims_task_preassigned_to_self(db):
     leader_backend = _backend(db, LEADER_NAME, True)
     create_task = _by_name(create_team_tools(role="leader", agent_team=leader_backend), "create_task")
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "a3", "title": "assigned", "content": "c", "assignee": DEV_1}]}
+        {"tasks": [{"task_id": "a3", "title": "assigned", "content": "c", "assignee_display_name": DEV_1}]}
     )
     assert result.success, result.error
 
@@ -675,7 +675,7 @@ async def test_create_task_carries_reviewer(db):
     create_task = _by_name(tools, "create_task")
 
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee": DEV_1, "reviewer": [DEV_2]}]}
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee_display_name": DEV_1, "reviewer": [DEV_2]}]}
     )
     assert result.success, result.error
     task = await backend.task_manager.get("r1")
@@ -691,7 +691,7 @@ async def test_create_task_rejects_reviewer_equal_assignee(db):
     create_task = _by_name(tools, "create_task")
 
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee": DEV_1, "reviewer": [DEV_1]}]}
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee_display_name": DEV_1, "reviewer": [DEV_1]}]}
     )
     assert not result.success
     assert "their own task" in result.error
@@ -706,7 +706,7 @@ async def test_create_task_allows_role_based_reviewer(db):
     create_task = _by_name(tools, "create_task")
 
     result = await create_task.invoke(
-        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee": DEV_1, "reviewer": ["ghost"]}]}
+        {"tasks": [{"task_id": "r1", "title": "t", "content": "c", "assignee_display_name": DEV_1, "reviewer": ["ghost"]}]}
     )
     assert result.success
 
@@ -755,3 +755,189 @@ async def test_view_task_in_review_lists_reviewers_tasks(db):
     result = await view.invoke({"action": "in_review"})
     assert result.success
     assert [task["task_id"] for task in result.data["tasks"]] == ["v1"]
+
+
+# ---------------------------------------------------------------------------
+# assignee_display_name resolution (opaque member_name must not be accepted)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_resolves_display_name_not_member_name(db):
+    """Display names map to opaque member_names; raw agent keys are rejected."""
+    await db.member.create_member(
+        member_name="mtgioim320ez0x",
+        team_name=TEAM_NAME,
+        display_name="欧冶",
+        agent_card=AgentCard().model_dump_json(),
+        status="READY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    await db.member.create_member(
+        member_name="mtgipco4ngwxyf",
+        team_name=TEAM_NAME,
+        display_name="张衡",
+        agent_card=AgentCard().model_dump_json(),
+        status="READY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    await db.member.create_member(
+        member_name="mtgio52rlsgiyy",
+        team_name=TEAM_NAME,
+        display_name="墨翟",
+        agent_card=AgentCard().model_dump_json(),
+        status="READY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+
+    backend = _backend(db, LEADER_NAME, True)
+    create_task = _by_name(create_team_tools(role="leader", agent_team=backend), "create_task")
+
+    ok = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-zhangheng",
+                    "title": "draft",
+                    "content": "c",
+                    "assignee_display_name": "张衡",
+                }
+            ]
+        }
+    )
+    assert ok.success, ok.error
+    assert (await backend.task_manager.get("t-zhangheng")).assignee == "mtgipco4ngwxyf"
+    assert ok.data.get("assignee_display_name") == "张衡"
+    assert "张衡" in create_task.map_result(ok)
+
+    # Opaque member_name / agent_key must not be accepted as assignee.
+    legacy = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-legacy",
+                    "title": "bad",
+                    "content": "c",
+                    "assignee": "mtgipco4ngwxyf",
+                }
+            ]
+        }
+    )
+    assert not legacy.success
+    assert "assignee_display_name" in legacy.error
+
+    # Passing the opaque key as display name also fails (exact display match only).
+    by_key = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-key",
+                    "title": "bad",
+                    "content": "c",
+                    "assignee_display_name": "mtgipco4ngwxyf",
+                }
+            ]
+        }
+    )
+    assert not by_key.success
+    assert "not found" in by_key.error
+
+    # Batch: one bad name rejects the whole call; no partial writes.
+    batch = await create_task.invoke(
+        {
+            "tasks": [
+                {
+                    "task_id": "t-ok",
+                    "title": "ok",
+                    "content": "c",
+                    "assignee_display_name": "欧冶",
+                },
+                {
+                    "task_id": "t-bad",
+                    "title": "bad",
+                    "content": "c",
+                    "assignee_display_name": "mtgio52rlsgiyy",
+                },
+            ]
+        }
+    )
+    assert not batch.success
+    assert await backend.task_manager.get("t-ok") is None
+    assert await backend.task_manager.get("t-bad") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_resolves_assignee_display_name(db):
+    """update_task assigns via display_name and rejects legacy assignee."""
+    await db.member.create_member(
+        member_name="mtgipco4ngwxyf",
+        team_name=TEAM_NAME,
+        display_name="张衡",
+        agent_card=AgentCard().model_dump_json(),
+        status="READY",
+        mode=MemberMode.BUILD_MODE.value,
+    )
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create_task = _by_name(tools, "create_task")
+    update_task = _by_name(tools, "update_task")
+
+    created = await create_task.invoke({"tasks": [{"task_id": "u1", "title": "x", "content": "c"}]})
+    assert created.success, created.error
+
+    legacy = await update_task.invoke({"task_id": "u1", "assignee": "mtgipco4ngwxyf"})
+    assert not legacy.success
+    assert "assignee_display_name" in legacy.error
+
+    result = await update_task.invoke({"task_id": "u1", "assignee_display_name": "张衡"})
+    assert result.success, result.error
+    assert (await backend.task_manager.get("u1")).assignee == "mtgipco4ngwxyf"
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_create_task_ignores_empty_legacy_assignee(db):
+    """null/empty legacy assignee is treated as omitted, not a hard reject."""
+    backend = _backend(db, LEADER_NAME, True)
+    create_task = _by_name(create_team_tools(role="leader", agent_team=backend), "create_task")
+
+    for legacy in (None, "", "  "):
+        result = await create_task.invoke(
+            {
+                "tasks": [
+                    {
+                        "task_id": f"empty-{legacy!r}",
+                        "title": "x",
+                        "content": "c",
+                        "assignee": legacy,
+                    }
+                ]
+            }
+        )
+        assert result.success, result.error
+        assert (await backend.task_manager.get(f"empty-{legacy!r}")).assignee is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_update_task_cancel_all_ignores_assignee_display_name(db):
+    """cancel_all must not fail because an unrelated assignee_display_name is present."""
+    backend = _backend(db, LEADER_NAME, True)
+    tools = create_team_tools(role="leader", agent_team=backend)
+    create_task = _by_name(tools, "create_task")
+    update_task = _by_name(tools, "update_task")
+
+    created = await create_task.invoke({"tasks": [{"task_id": "c1", "title": "x", "content": "c"}]})
+    assert created.success, created.error
+
+    result = await update_task.invoke(
+        {
+            "task_id": "*",
+            "status": "cancelled",
+            "assignee_display_name": "ghost-not-on-roster",
+        }
+    )
+    assert result.success, result.error
+    assert result.data["cancelled_count"] == 1

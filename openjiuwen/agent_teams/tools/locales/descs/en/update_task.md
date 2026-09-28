@@ -7,7 +7,7 @@ Update task content, dependencies, assignee, or cancel tasks (Leader only).
 - Pass title and/or content to update. If the task is being executed by a member, ownership is unchanged; the system tells that member to re-read the latest content via view_task and continue (the assignee is no longer cancelled or reset)
 
 **Assign / reassign a task:**
-- Set assignee to a member name to assign the task
+- Set assignee_display_name to a member **display name** (exact roster match) to assign the task; do not pass member_name / agent_key
 - If the target task is currently unclaimed, it is assigned to that member directly
 - If the target task is already claimed by someone else, this is a reassignment: the system tells the former owner to stop this task and hands it to the new member, without disturbing the former owner's other work or in-flight task
 - **Each member can hold only ONE in-progress (in_progress) task at a time**: if the target member already has a task in progress, the assign/reassign is refused — wait for it to complete before assigning another
@@ -33,7 +33,7 @@ Update task content:
 {"task_id": "task-1", "title": "New title", "content": "New content"}
 
 Assign a task:
-{"task_id": "task-1", "assignee": "backend-dev"}
+{"task_id": "task-1", "assignee_display_name": "Backend Dev"}
 
 Add dependencies:
 {"task_id": "task-2", "add_blocked_by": ["task-1"]}

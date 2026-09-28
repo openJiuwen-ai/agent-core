@@ -7,7 +7,7 @@
 - 传 title 和/或 content 修改。若任务正被某成员执行，任务归属保持不变，系统会通知该成员通过 view_task 重看最新内容后继续（不再取消或重置该成员）
 
 **指派 / 改派任务：**
-- 设置 assignee 为成员名称来指派任务
+- 设置 assignee_display_name 为成员**展示名**（须与花名册完全一致）来指派任务；禁止传 member_name / agent_key
 - 若目标任务当前无人认领，直接指派给该成员
 - 若目标任务已被他人认领，视为改派：系统通知原成员停止该任务、把任务转交给新成员，不影响原成员的其它工作或正在执行的其它任务
 - **每个成员同一时刻只能有一个进行中（in_progress）的任务**：若目标成员已有在做的任务，指派/改派会被拒绝，需等其完成后再派新任务
@@ -33,7 +33,7 @@
 {"task_id": "task-1", "title": "新标题", "content": "新内容"}
 
 指派任务：
-{"task_id": "task-1", "assignee": "backend-dev"}
+{"task_id": "task-1", "assignee_display_name": "后端开发"}
 
 添加依赖：
 {"task_id": "task-2", "add_blocked_by": ["task-1"]}

@@ -996,7 +996,7 @@ class TestUpdateTaskTool:
         result = await tool.invoke(
             {
                 "task_id": task.task_id,
-                "assignee": "dev-1",
+                "assignee_display_name": "Dev",
             }
         )
 
@@ -1029,7 +1029,7 @@ class TestUpdateTaskTool:
         result = await tool.invoke(
             {
                 "task_id": task.task_id,
-                "assignee": "dev-2",
+                "assignee_display_name": "dev-2",
             }
         )
 
@@ -2157,7 +2157,7 @@ async def test_update_task_rejects_assign_to_member_with_active_claim(agent_team
     await db.task.claim_task(task_a.task_id, "dev-1")
 
     tool = UpdateTaskTool(agent_team, t)
-    result = await tool.invoke({"task_id": task_b.task_id, "assignee": "dev-1"})
+    result = await tool.invoke({"task_id": task_b.task_id, "assignee_display_name": "dev-1"})
 
     assert result.success is False
     assert task_a.task_id in result.error

@@ -250,10 +250,11 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "Custom task ID for dependency reference (auto-generated if omitted)",
     "create_task.task.title": "Task title — concise description of the goal",
     "create_task.task.content": "Task details including goals and acceptance criteria",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
-    "create_task.task.assignee": (
-        "Member name that carries this task; the member must already exist and must not be the leader. "
+    # Both create_task variants expose assignee_display_name. Autonomous treats
+    # it as optional; scheduled requires it. DB still stores member_name.
+    "create_task.task.assignee_display_name": (
+        "Member display name that carries this task (exact match to the team roster); "
+        "the member must already exist and must not be the leader. Do not pass member_name / agent_key. "
         "Optional in autonomous mode (omitted tasks enter the shared claim pool); required in scheduled mode "
         "because members never claim there"
     ),
@@ -297,8 +298,9 @@ STRINGS: dict[str, str] = {
     "update_task.status": "Set to 'cancelled' to cancel the task",
     "update_task.title": "New task title",
     "update_task.content": "New task content",
-    "update_task.assignee": (
-        "member_name to assign or reassign this task to; the target must already exist and must not be the leader. "
+    "update_task.assignee_display_name": (
+        "Member display name to assign or reassign this task to (exact match to the team roster); "
+        "the target must already exist and must not be the leader. Do not pass member_name / agent_key. "
         "A notification is sent to the assignee"
     ),
     "update_task.reviewer": (

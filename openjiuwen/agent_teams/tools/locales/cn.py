@@ -173,11 +173,12 @@ STRINGS: dict[str, str] = {
     "create_task.task.task_id": "自定义任务 ID，便于依赖引用（不提供则自动生成）",
     "create_task.task.title": "任务标题，简明描述任务目标",
     "create_task.task.content": "任务详细内容，包含目标和验收标准",
-    # Both create_task variants expose assignee. Autonomous treats it as
-    # optional; scheduled requires it.
-    "create_task.task.assignee": (
-        "承担该任务的成员名称；该成员必须已存在且不能是 leader。自主模式可选，未填写则进入公共认领池；"
-        "调度模式必填，成员不会自主认领"
+    # Both create_task variants expose assignee_display_name. Autonomous treats
+    # it as optional; scheduled requires it. DB still stores member_name.
+    "create_task.task.assignee_display_name": (
+        "承担该任务的成员展示名（display_name，须与花名册完全一致）；该成员必须已存在且不能是 leader。"
+        "自主模式可选，未填写则进入公共认领池；调度模式必填，成员不会自主认领。"
+        "禁止传 member_name / agent_key"
     ),
     "create_task.task.depends_on": "前置依赖的任务 ID 列表；可引用本次调用中一起创建的任务或已有任务",
     "create_task.task.depended_by": "需要等待本任务完成的已有任务 ID 列表（反向依赖）；不得引用本次调用创建的任务——批内依赖一律用对方的 depends_on 表示",
@@ -206,7 +207,10 @@ STRINGS: dict[str, str] = {
     "update_task.status": "设为 'cancelled' 取消任务",
     "update_task.title": "新任务标题",
     "update_task.content": "新任务内容",
-    "update_task.assignee": "指派任务的目标 member_name（仅当任务当前无 assignee 时生效）。系统会向被指派成员发送通知",
+    "update_task.assignee_display_name": (
+        "指派或改派任务的目标成员展示名（display_name，须与花名册完全一致）；"
+        "目标必须已存在且不能是 leader。禁止传 member_name / agent_key。系统会向被指派成员发送通知"
+    ),
     "update_task.reviewer": (
         "设置该任务的验证者 member_name 列表（传空列表清除验证）；验证者必须已存在且不能是 assignee。"
         "配了验证者后，assignee 完成任务会进入 in_review 等验证"

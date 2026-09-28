@@ -95,7 +95,7 @@ def test_param_descriptions_are_shared_across_variants(lang):
     t = make_translator(lang)
     # Same key namespace: the scheduled create_task variant reads these too.
     assert t("create_task", "task.title")
-    assert t("create_task", "task.assignee")
+    assert t("create_task", "task.assignee_display_name")
     # send_message_scheduled redefines only ``to``; content/summary are reused.
     assert t("send_message_scheduled", "to") != t("send_message", "to")
 
