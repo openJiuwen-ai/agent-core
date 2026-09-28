@@ -116,7 +116,7 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
         request_body = self._build_search_request_body(query, args)
         url = f"{self._base_url}{_APPAPI_SEARCH_PATH}"
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"OfficeAceToken {self._api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
@@ -249,7 +249,7 @@ class OfficeAceMemoryPcProvider(MemoryProvider):
             user_msg, assistant_msg, user_id=user_id, assistant_id=kwargs.get("scope_id")
         )
         headers = {
-            "Authorization": f"Bearer {self._api_key}",
+            "Authorization": f"OfficeAceToken {self._api_key}",
             "Content-Type": "application/json",
             "Accept": "application/json",
         }
