@@ -60,7 +60,15 @@ class BackgroundTask:
         await self._ready.wait()
         if self._manager_task is not None:
             return await self._manager_task.wait()
-        return await self._asyncio_task
+        task = self._asyncio_task
+        if task is None:
+            return None
+        # asyncio.wait does not make the task this waiter's _fut_waiter.
+        # On Python 3.13, cancelling a task forwards cancel() to _fut_waiter,
+        # so a direct await would cancel in-flight evolution. Explicit cancel()
+        # still stops the work.
+        await asyncio.wait({task})
+        return task.result()
 
     async def cancel(self, *, reason: str = "background_task_cancelled", timeout: float = 1.0) -> None:
         await self._ready.wait()

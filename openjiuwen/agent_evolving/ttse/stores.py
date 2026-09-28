@@ -852,6 +852,29 @@ class TTSERecordStore:
             logger.debug("[TTSERail] merged duplicate fact: %s", text[:80])
         return result == "added"
 
+    async def bump_count(self, rtype: str, text: str) -> int:
+        """Increment ``count`` on the rule whose normalized text equals ``text``.
+
+        Returns the new count, or 0 when no rule matches. Does not insert.
+        """
+        store = self.facts if rtype == "fact" else self.tips
+        target = _norm(text)
+        if not target:
+            return 0
+        new_count = 0
+        async with self._lock:
+            for record in store:
+                if _norm(record.get("text", "")) != target:
+                    continue
+                record["count"] = int(record.get("count") or 0) + 1
+                record["updated_at"] = format_ts(_now())
+                new_count = int(record["count"])
+                store.sort(key=lambda item: -item.get("count", 0))
+                break
+        if new_count:
+            await self.save()
+        return new_count
+
     async def add_tip(self, text: str) -> bool:
         result = await self._add(self.tips, text, self._config.max_tips)
         if result is not None:
