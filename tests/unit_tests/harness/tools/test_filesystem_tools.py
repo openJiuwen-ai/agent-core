@@ -1354,3 +1354,50 @@ async def test_read_file_tool_rejects_office_docx_without_utf8_codec(sys_op, tem
     assert res.success is False
     assert "codec can't decode" not in (res.error or "")
     assert "Cannot read" in (res.error or "") or "Office" in (res.error or "") or "binary" in (res.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_read_pdf_offloads_extract_text_to_thread(sys_op, temp_dir, monkeypatch):
+    import time
+
+    read_tool = ReadFileTool(sys_op)
+    file_path = os.path.join(temp_dir, "slow.pdf")
+    with open(file_path, "wb") as fh:
+        fh.write(b"%PDF-1.4 fake content\n")
+
+    extraction_duration_s = 0.5
+
+    class _SlowPage:
+        def extract_text(self):
+            time.sleep(extraction_duration_s)
+            return "page text"
+
+    class _SlowPdf:
+        def __init__(self):
+            self.pages = [_SlowPage()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+    monkeypatch.setattr(
+        filesystem_module.pdfplumber, "open", lambda *_a, **_kw: _SlowPdf()
+    )
+
+    async def _watchdog() -> float:
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        await asyncio.sleep(0.05)
+        return loop.time() - started
+
+    _, elapsed = await asyncio.gather(
+        read_tool.invoke({"file_path": file_path}),
+        _watchdog(),
+    )
+
+    assert elapsed < extraction_duration_s, (
+        f"pdfplumber.extract_text blocked the event loop for {elapsed:.2f}s; "
+        "it must run in a worker thread so WS ping/pong can proceed."
+    )

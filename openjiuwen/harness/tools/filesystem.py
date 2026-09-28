@@ -1032,47 +1032,50 @@ class ReadFileTool(Tool):
         if not isinstance(content, bytes):
             raise RuntimeError("PDF content is not bytes")
 
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
-            total_pages = len(pdf.pages)
+        def _extract_sync() -> str:
+            with pdfplumber.open(io.BytesIO(content)) as pdf:
+                total_pages = len(pdf.pages)
 
-            # Require pages param when document is too long to inline safely.
-            if not pages and total_pages > self.PDF_AT_MENTION_INLINE_THRESHOLD:
-                raise RuntimeError(
-                    f"This PDF has {total_pages} pages, which is too many to read at once. "
-                    f"Use the pages parameter to specify a range (e.g., pages='1-10'). "
-                    f"Maximum {self.PDF_MAX_PAGES_PER_READ} pages per request."
-                )
-
-            result = self._parse_pdf_page_range(pages, total_pages)
-            if result is None:
-                raise RuntimeError(f"Invalid or empty PDF page range: '{pages}'")
-            start, end = result
-
-            page_count = end - start + 1
-            if page_count > self.PDF_MAX_PAGES_PER_READ:
-                raise RuntimeError(
-                    f"Requested {page_count} pages exceeds the maximum of "
-                    f"{self.PDF_MAX_PAGES_PER_READ} pages per read. "
-                    "Narrow the pages parameter range."
-                )
-
-            budget = _TokenBudget(self.MAX_TOKENS)
-            parts = []
-            extracted_count = 0
-            for page_no in range(start, end + 1):
-                page_text = pdf.pages[page_no - 1].extract_text() or ""
-                page_block = f"## Page {page_no}\n{page_text}".rstrip()
-                page_tokens = self._estimate_tokens(page_block)
-                if extracted_count > 0 and not budget.can_fit(page_tokens):
-                    parts.append(
-                        f"… (truncated — {extracted_count}/{page_count} pages extracted, "
-                        f"{self.MAX_TOKENS}-token budget reached)"
+                # Require pages param when document is too long to inline safely.
+                if not pages and total_pages > self.PDF_AT_MENTION_INLINE_THRESHOLD:
+                    raise RuntimeError(
+                        f"This PDF has {total_pages} pages, which is too many to read at once. "
+                        f"Use the pages parameter to specify a range (e.g., pages='1-10'). "
+                        f"Maximum {self.PDF_MAX_PAGES_PER_READ} pages per request."
                     )
-                    break
-                budget.spend(page_tokens)
-                parts.append(page_block)
-                extracted_count += 1
-            return "\n\n".join(parts).strip()
+
+                result = self._parse_pdf_page_range(pages, total_pages)
+                if result is None:
+                    raise RuntimeError(f"Invalid or empty PDF page range: '{pages}'")
+                start, end = result
+
+                page_count = end - start + 1
+                if page_count > self.PDF_MAX_PAGES_PER_READ:
+                    raise RuntimeError(
+                        f"Requested {page_count} pages exceeds the maximum of "
+                        f"{self.PDF_MAX_PAGES_PER_READ} pages per read. "
+                        "Narrow the pages parameter range."
+                    )
+
+                budget = _TokenBudget(self.MAX_TOKENS)
+                parts = []
+                extracted_count = 0
+                for page_no in range(start, end + 1):
+                    page_text = pdf.pages[page_no - 1].extract_text() or ""
+                    page_block = f"## Page {page_no}\n{page_text}".rstrip()
+                    page_tokens = self._estimate_tokens(page_block)
+                    if extracted_count > 0 and not budget.can_fit(page_tokens):
+                        parts.append(
+                            f"… (truncated — {extracted_count}/{page_count} pages extracted, "
+                            f"{self.MAX_TOKENS}-token budget reached)"
+                        )
+                        break
+                    budget.spend(page_tokens)
+                    parts.append(page_block)
+                    extracted_count += 1
+                return "\n\n".join(parts).strip()
+
+        return await asyncio.to_thread(_extract_sync)
 
     @staticmethod
     def _estimate_base64_tokens(byte_length: int) -> int:
