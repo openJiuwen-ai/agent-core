@@ -10,39 +10,59 @@ relationships, and error marking.
 import json
 
 import pytest
-
 from opentelemetry import trace
 
-from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
+from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
+from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.llm.schema.message import (
     AssistantMessage,
     SystemMessage,
+    UsageMetadata,
     UserMessage,
 )
 from openjiuwen.core.graph.pregel import GraphInterrupt, Interrupt
-from openjiuwen.core.session.tracer.handler import TracerHandlerName
 from openjiuwen.core.session.tracer.data import InvokeType, NodeStatus
-from openjiuwen.core.session.tracer.span import TraceAgentSpan, SpanManager
+from openjiuwen.core.session.tracer.handler import TracerHandlerName
+from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.session.tracer.tracer import Tracer, TracerHandlerRegistry
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_COMPLETION,
+    ERROR_TYPE,
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_PROMPT,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_PROVIDER_NAME,
+    GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_REQUEST_TOP_K,
+    GEN_AI_REQUEST_TOP_P,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM,
     GEN_AI_SYSTEM_VALUE,
+    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_TYPE,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     OJ_AGENT_ERROR_MESSAGE,
-    OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
     OJ_AGENT_NAME,
-    OJ_CHILD_INVOKE_IDS,
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INVOKE_ID,
+    OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -57,6 +77,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_WORKFLOW_ID,
     OJ_WORKFLOW_INVOKE_DATA,
 )
+from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,6 +122,7 @@ class TestOtelAgentHandler:
         assert s.name == "llm.TestModel"
         assert s.kind == trace.SpanKind.CLIENT
         assert s.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == GEN_AI_SYSTEM_VALUE
         assert s.attributes[GEN_AI_REQUEST_MODEL] == "TestModel"
         assert s.attributes[GEN_AI_OPERATION_NAME] == "chat"
         # Span base attributes (field-completion)
@@ -149,7 +171,7 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_COMPLETION] == "world"
+        assert finished[0].attributes[GEN_AI_OUTPUT_MESSAGES] == "world"
 
         # End-time base attributes should be present
         s = finished[0]
@@ -250,8 +272,8 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        assert finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_INPUT_MESSAGES].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_OUTPUT_MESSAGES].startswith("sha256:")
 
     async def test_agent_llm_prompt_completion_split_redaction(self):
         """redact_prompts=False, redact_completions=True: prompt not hashed, completion hashed."""
@@ -267,14 +289,14 @@ class TestOtelAgentHandler:
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
         # Prompt not hashed (redact_prompts=False overrides redaction_enabled=True)
-        assert not finished[0].attributes[GEN_AI_PROMPT].startswith("sha256:")
+        assert not finished[0].attributes[GEN_AI_INPUT_MESSAGES].startswith("sha256:")
         # Completion hashed (redact_completions=True)
-        assert finished[0].attributes[GEN_AI_COMPLETION].startswith("sha256:")
+        assert finished[0].attributes[GEN_AI_OUTPUT_MESSAGES].startswith("sha256:")
 
     async def test_agent_llm_inputs_normalized_to_dict(self):
         """Message objects are converted to plain dicts via model_dump().
 
-        Without normalization, GEN_AI_PROMPT would contain class repr like
+        Without normalization, GEN_AI_INPUT_MESSAGES would contain class repr like
         ``SystemMessage(role='system', ...)``.  After normalization it should
         be standard JSON with ``{"role": "...", "content": "..."}`` entries.
         """
@@ -295,7 +317,7 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        prompt_attr = finished[0].attributes[GEN_AI_PROMPT]
+        prompt_attr = finished[0].attributes[GEN_AI_INPUT_MESSAGES]
 
         # Should be valid JSON, not a Python repr
         parsed = json.loads(prompt_attr)
@@ -328,7 +350,7 @@ class TestOtelAgentHandler:
 
         finished = _EXPORTER.get_finished_spans()
         assert len(finished) == 1
-        completion_attr = finished[0].attributes[GEN_AI_COMPLETION]
+        completion_attr = finished[0].attributes[GEN_AI_OUTPUT_MESSAGES]
 
         parsed = json.loads(completion_attr)
         assert parsed["role"] == "assistant"
@@ -1187,5 +1209,260 @@ class TestMultiRoundConversationTraceContinuity:
         # Different sessions get different traces
         assert s1_spans[0].context.trace_id != s2_spans[0].context.trace_id, \
             "Different sessions should have different OTel traces"
+
+
+# ===========================================================================
+# GenAI semantic-convention attributes (issue #1833)
+# ===========================================================================
+
+
+class TestGenAiSemconvAttrs:
+    """Covers request params, response/usage/cost, tool, error.type, agent.id.
+
+    Hotfix variant: UsageMetadata exposes ``cache_tokens`` only (no
+    cache_read/cache_creation split) and defaults costs to 0.0.
+    """
+
+    async def test_llm_start_sets_request_params_and_message_count(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs={"messages": ["m1", "m2"]},
+            instance_info={
+                "class_name": "TestModel",
+                "request_params": {
+                    "temperature": 0.7,
+                    "top_p": 0.9,
+                    "top_k": 40,
+                    "max_tokens": 4096,
+                },
+                "message_count": 3,
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_REQUEST_TEMPERATURE] == 0.7
+        assert s.attributes[GEN_AI_REQUEST_TOP_P] == 0.9
+        assert s.attributes[GEN_AI_REQUEST_TOP_K] == 40
+        assert s.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 4096
+        assert s.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 3
+
+    async def test_llm_start_without_params_sets_no_request_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert GEN_AI_REQUEST_TEMPERATURE not in s.attributes
+        assert OJ_LLM_PREV_MESSAGE_COUNT not in s.attributes
+
+    async def test_llm_end_extracts_response_usage_and_cost_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="answer",
+            finish_reason="stop",
+            usage_metadata=UsageMetadata(
+                model_name="claude-test",
+                input_tokens=11,
+                output_tokens=22,
+                cache_tokens=5,
+                reasoning_tokens=3,
+                input_cost=0.001,
+                output_cost=0.002,
+                total_cost=0.003,
+            ),
+        )
+        # OtelRail wraps the response in {"outputs": ...}
+        await handler.on_llm_end(span=agent_span, outputs={"outputs": message})
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert list(s.attributes[GEN_AI_RESPONSE_FINISH_REASONS]) == ["stop"]
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == "claude-test"
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 11
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 22
+        assert s.attributes[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] == 5
+        assert s.attributes[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] == 3
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == pytest.approx(0.001)
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == pytest.approx(0.002)
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.003)
+
+    async def test_llm_end_omits_zero_default_costs(self):
+        """Hotfix UsageMetadata defaults costs to 0.0 — absent data must not
+        surface as openjiuwen.gen_ai.usage.*_cost = 0.0 attributes."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(content="x", usage_metadata=UsageMetadata())
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert OJ_GEN_AI_USAGE_TOTAL_COST not in s.attributes
+        assert OJ_GEN_AI_USAGE_INPUT_COST not in s.attributes
+        assert OJ_GEN_AI_USAGE_OUTPUT_COST not in s.attributes
+
+    async def test_llm_end_unwraps_outputs_container_into_content(self):
+        """The {"outputs": AssistantMessage} wrapper must not swallow content."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(content="final answer")
+        await handler.on_llm_end(span=agent_span, outputs={"outputs": message})
+
+        s = _EXPORTER.get_finished_spans()[0]
+        payload = json.loads(s.attributes[GEN_AI_OUTPUT_MESSAGES])
+        assert payload["role"] == "assistant"
+        assert payload["content"] == "final answer"
+        assert "outputs" not in payload
+
+    async def test_plugin_start_sets_tool_semconv_attrs(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        tool_span = span_manager.create_agent_span()
+
+        await handler.on_plugin_start(
+            span=tool_span,
+            inputs={"id": "call-1", "name": "echo", "type": "function"},
+            instance_info={
+                "class_name": "echo",
+                "tool_type": "function",
+                "agent_name": "HelperAgent",
+            },
+        )
+        await handler.on_plugin_end(span=tool_span, outputs="ok")
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "tool.echo"
+        assert s.attributes[GEN_AI_TOOL_NAME] == "echo"
+        assert s.attributes[GEN_AI_TOOL_TYPE] == "function"
+        assert s.attributes[GEN_AI_TOOL_CALL_ID] == "call-1"
+        assert s.attributes[GEN_AI_AGENT_NAME] == "HelperAgent"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "execute_tool"
+
+    async def test_error_type_set_for_plain_and_base_error(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_error(span=agent_span, error=RuntimeError("boom"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
+
+        # BaseError carries its own classification code
+        _EXPORTER.clear()
+        base_error = build_error(OJStatusCode.AGENT_TOOL_EXECUTION_ERROR, reason="tool failed")
+        agent_span2 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span2, inputs=None, instance_info={"class_name": "M"},
+        )
+        await handler.on_llm_error(span=agent_span2, error=base_error)
+
+        s2 = _EXPORTER.get_finished_spans()[0]
+        assert s2.attributes[ERROR_TYPE] == OJStatusCode.AGENT_TOOL_EXECUTION_ERROR.code
+
+    async def test_chain_start_sets_agent_id(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyAgent", "type": "agent", "agent_id": "abc123"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_AGENT_ID] == "abc123"
+
+    async def test_chain_start_without_agent_id_omits_attr(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyAgent", "type": "agent"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert GEN_AI_AGENT_ID not in s.attributes
+
+    async def test_retriever_start_sets_top_k(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        retriever_span = span_manager.create_agent_span()
+
+        await handler.on_retriever_start(
+            span=retriever_span,
+            inputs={"query": "hello", "top_k": 5},
+            instance_info={"class_name": "kb"},
+        )
+        await handler.on_retriever_end(span=retriever_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RETRIEVAL_TOP_K] == 5
+
+    async def test_workflow_invoke_error_sets_error_type(self):
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelWorkflowHandler(_OTEL_TRACER, config)
+
+        await handler.on_call_start(
+            invoke_id="wf_root",
+            metadata={"workflow_id": "wf1"},
+            parent_node_id="",
+        )
+        await handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[ERROR_TYPE] == OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
 
 
