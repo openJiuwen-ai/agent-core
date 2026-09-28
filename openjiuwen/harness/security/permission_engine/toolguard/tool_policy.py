@@ -439,6 +439,18 @@ def _apply_shell_ast_floor(
     return final, shell_floor_rule or matched_rule
 
 
+def _allow_overrides_unless_denied(
+        permission: PermissionLevel,
+        matched_rule: str,
+        override_hits: list[str],
+) -> tuple[PermissionLevel, str]:
+    """Full-command HITL remember may relax ASK, never DENY."""
+    if permission == PermissionLevel.DENY or not override_hits:
+        return permission, matched_rule
+    contributing = sorted(set(override_hits))
+    return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
+
+
 def _with_shell_command(tool_args: dict[str, Any], command: str) -> dict[str, Any]:
     sub_args = dict(tool_args)
     if "command" in sub_args or "cmd" not in sub_args:
@@ -593,6 +605,8 @@ def evaluate_tiered_policy(
     """返回 (最终权限, matched_rule 摘要).
 
     - 整工具 ``deny`` 优先于参数级放行。
+    - 内置 / 用户参数规则 ``deny`` 优先于 ``approval_overrides``。
+    - 全命令 ``approval_overrides`` 可放宽 ASK（含 shell_guard），不可放宽 DENY。
     - 内置参数规则一旦命中则不再看用户 ``rules``。
     - 有参数级命中时结果仅来自该层（内置或用户）。
     - 无参数级命中时：仅有整工具则用整工具；否则仅用默认（整工具存在则忽略默认）。
@@ -653,9 +667,6 @@ def evaluate_tiered_policy(
         override_hits = _collect_approval_override_hits(
             approval_overrides, tool_name, canon_args, permission_config,
         )
-    if override_hits:
-        contributing = sorted(set(override_hits))
-        return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
 
     if (
             _tool_category(tool_name, permission_config) == "shell"
@@ -698,7 +709,10 @@ def evaluate_tiered_policy(
                 matched_rule = (
                     f"{sink_rule}|{matched_rule}" if matched_rule else sink_rule
                 )
-        return _apply_shell_ast_floor(permission, matched_rule, shell_floor, shell_floor_rule)
+        return _allow_overrides_unless_denied(
+            *_apply_shell_ast_floor(permission, matched_rule, shell_floor, shell_floor_rule),
+            override_hits,
+        )
 
     eval_args = canon_args if _tool_category(tool_name, permission_config) == "shell" else tool_args
     result = _evaluate_single_invocation(
@@ -706,7 +720,10 @@ def evaluate_tiered_policy(
         eval_args,
         invocation_ctx,
     )
-    return _apply_shell_ast_floor(*result, shell_floor, shell_floor_rule)
+    return _allow_overrides_unless_denied(
+        *_apply_shell_ast_floor(*result, shell_floor, shell_floor_rule),
+        override_hits,
+    )
 
 
 def maybe_escalate_shell_operators(
