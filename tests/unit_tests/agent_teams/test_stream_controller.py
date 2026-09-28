@@ -412,6 +412,24 @@ async def test_handle_retry_stops_after_attempt_budget_exhausted() -> None:
 
     assert consumed is False
     assert runtime.sent == []
+    assert sc._swallow_failed_round is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_handle_retry_exhaustion_after_prior_retry_unswallows() -> None:
+    """重试过一次后再耗尽：终结性失败帧必须放行。"""
+    from openjiuwen.agent_teams.agent.stream_controller import _MAX_RETRY_ATTEMPTS
+
+    runtime = _FakeRuntime()
+    sc = _make_controller(runtime)
+    sc._swallow_failed_round = True
+    sc._retry_attempt = _MAX_RETRY_ATTEMPTS
+
+    consumed = await sc._handle_retry(_task_failed_chunk("[181001] transient"))
+
+    assert consumed is False
+    assert sc._swallow_failed_round is False
 
 
 # ----------------------------------------------------------------------
