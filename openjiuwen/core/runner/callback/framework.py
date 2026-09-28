@@ -1044,6 +1044,19 @@ class AsyncCallbackFramework:
         Returns:
             List of results from all executed callbacks
         """
+        _pt_t0 = time.monotonic()  # [PERF-CORE] 慢事件墙钟计时(含 hooks/filters)
+        try:
+            return await self.__trigger_inner(event, *args, **kwargs)
+        finally:
+            _pt_dt = (time.monotonic() - _pt_t0) * 1000
+            # 与 [RailChain] 同阈值同 logger:平时零噪音;且墙钟含 BEFORE/AFTER
+            # hooks 与 filters,能暴露 chain_timings 汇总看不见的慢环节。
+            if _pt_dt >= SLOW_CALLBACK_CHAIN_SECONDS * 1000:
+                runner_logger.info(
+                    "[PERF-CORE] slow_trigger event=%s ms=%.1f", event, _pt_dt
+                )
+
+    async def __trigger_inner(self, event: str, *args, **kwargs) -> List[Any]:
         results = []
 
         # Record history

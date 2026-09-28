@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from contextvars import ContextVar, Token
 from pathlib import Path
@@ -424,6 +425,16 @@ class SkillUseRail(DeepAgentRail):
 
         # Snapshot of visible skill directories and SKILL.md mtimes.
         self._skills_snapshot_signature: Optional[Tuple[Tuple[str, float], ...]] = None
+        # [PERF] before_invoke 目录扫描 TTL 缓存:默认 0(关闭,保持每轮增量
+        # 刷新的既有语义);性能敏感部署经 SKILL_REFRESH_TTL_SECONDS 显式开启
+        # (如 30),窗口内复用上次扫描结果,新装技能最迟 TTL 秒后可见。
+        self._last_full_refresh_ts: Optional[float] = None
+        try:
+            self._skill_refresh_ttl_s = max(
+                0.0, float(os.environ.get("SKILL_REFRESH_TTL_SECONDS", "0") or 0)
+            )
+        except ValueError:
+            self._skill_refresh_ttl_s = 0.0
 
     @staticmethod
     def clear_process_skill_index() -> None:
@@ -448,6 +459,7 @@ class SkillUseRail(DeepAgentRail):
         self._skill_order.clear()
         self.skills = []
         self._skills_snapshot_signature = None
+        self._last_full_refresh_ts = None
 
     async def _prepare_skills(self) -> None:
         """Refresh skills incrementally from skills_dir and apply filters.
@@ -777,8 +789,27 @@ class SkillUseRail(DeepAgentRail):
         self._skills_snapshot_signature = self._build_skills_snapshot_signature()
 
     async def before_invoke(self, ctx: AgentCallbackContext) -> None:
-        """Prepare skills before invoke."""
-        await self.refresh_skill_prompt(ctx)
+        """Prepare skills before invoke.
+
+        [PERF] 技能目录扫描+签名实测 ~150ms/轮(即使 skills 为空)。技能安装
+        是稀有事件,目录不可能每轮变化:会话内按 TTL 做全量刷新(默认 0=关闭,
+        每轮全刷;性能敏感部署经 env SKILL_REFRESH_TTL_SECONDS 显式设 30 等
+        值开启),窗口内直接复用上次结果。skill_tool 安装路径若主动失效缓存
+        不受影响(只跳过目录扫描);刷新失败不推进 TTL,下一轮立即重试。
+        """
+        _ttl = self._skill_refresh_ttl_s
+        now = time.monotonic()
+        if _ttl > 0 and self._last_full_refresh_ts is not None and (now - self._last_full_refresh_ts) < _ttl:
+            self._ensure_session_baseline(ctx)
+            return
+        try:
+            await self.refresh_skill_prompt(ctx)
+        except Exception:
+            # 失败不得推进 TTL:否则整个窗口命中缓存,拿旧 self.skills 当
+            # 会话基线且不再重试。置空让下一轮立即重新扫描(与 TTL=0 语义一致)。
+            self._last_full_refresh_ts = None
+            raise
+        self._last_full_refresh_ts = time.monotonic()
         self._ensure_session_baseline(ctx)
 
     async def _fetch_evolution_texts(self, skills: Optional[List[Skill]] = None) -> None:
