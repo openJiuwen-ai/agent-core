@@ -8,6 +8,7 @@ from typing import Any
 
 from openjiuwen.core.sys_operation.cwd import get_cwd
 
+
 def normalize_file_path_list(value: Any) -> list[str]:
     if value is None:
         return []

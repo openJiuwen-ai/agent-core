@@ -10,8 +10,8 @@ def expand_brace_pattern(pattern: str) -> list[str]:
     match = re.search(r"\{([^{}]*)\}", pattern)
     if not match:
         return [pattern]
-    prefix = pattern[: match.start()]
-    suffix = pattern[match.end() :]
+    prefix = pattern[:match.start()]
+    suffix = pattern[match.end():]
     results = []
     for option in match.group(1).split(","):
         results.extend(expand_brace_pattern(prefix + option.strip() + suffix))
@@ -27,7 +27,8 @@ def validated_glob_patterns(pattern: str) -> list[str]:
             PurePosixPath(item).is_absolute()
             or windows_path.drive
             or windows_path.root
-            or ".." in item.replace("\\", "/").split("/")
         ):
+            raise ValueError("pattern must stay within the search root")
+        if ".." in item.replace("\\", "/").split("/"):
             raise ValueError("pattern must stay within the search root")
     return patterns

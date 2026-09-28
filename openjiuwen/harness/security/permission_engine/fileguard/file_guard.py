@@ -512,9 +512,12 @@ def extract_paths_legacy(
         cmd = str(tool_args.get("command", "") or tool_args.get("cmd", ""))
         paths = _extract_paths_from_command(cmd, workdir_resolved)
         if shell_type_for_file_access(tool_name, tool_args) in {"cmd", "powershell"}:
-            paths.extend(p for p, _action, _source in extract_accesses_native(
+            accesses = extract_accesses_native(
                 tool_name, tool_args, workspace, permission_config,
-            ) if p not in paths)
+            )
+            for path, _action, _source in accesses:
+                if path not in paths:
+                    paths.append(path)
     elif tool_name in _PATH_TOOLS:
         for s in _iter_path_strings(tool_name, tool_args):
             raw = s.strip().strip('"').strip("'")
