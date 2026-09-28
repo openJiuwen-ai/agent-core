@@ -65,6 +65,7 @@ class ToolInterruptHandler:
             ai_message: AssistantMessage,
             iteration: int,
             original_query: str = "",
+            request_id: str = "",
     ) -> tuple[Optional[ToolInterruptionState], list]:
 
         interrupted_tools, payloads, auto_confirm_mapping = self._collect_interrupts(
@@ -80,6 +81,7 @@ class ToolInterruptHandler:
             interrupted_tools=interrupted_tools,
             original_query=original_query,
             auto_confirm_mapping=auto_confirm_mapping,
+            trigger_invocation_id=request_id,
         )
 
         return state, payloads
@@ -283,8 +285,13 @@ class ToolInterruptHandler:
             session: Optional[Session],
             invoke_inputs: InvokeInputs,
             sub_agent_outputs: list = None,
+            request_id: str = "",
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
+        # Stamp the current invoke's request_id so the next invoke can detect
+        # this interrupt belongs to a prior cycle (bug #4756).
+        if request_id and not state.trigger_invocation_id:
+            state.trigger_invocation_id = request_id
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
         result = self.build_interrupt_result(sub_agent_outputs)

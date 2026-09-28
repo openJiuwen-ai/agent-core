@@ -2503,9 +2503,11 @@ class ReActAgent(BaseAgent):
             ai_message: AssistantMessage,
             iteration: int,
             original_query: str = "",
+            request_id: str = "",
     ) -> tuple[Optional['ToolInterruptionState'], list]:
         return self._hitl_handler.build_interrupt_state(
-            results, tool_calls, ai_message, iteration, original_query=original_query
+            results, tool_calls, ai_message, iteration,
+            original_query=original_query, request_id=request_id,
         )
 
     def _save_interruption_state(self, state: InterruptionState, session) -> None:
@@ -2537,6 +2539,7 @@ class ReActAgent(BaseAgent):
             session: Optional[Session],
             invoke_inputs: InvokeInputs,
             sub_agent_outputs: list = None,
+            request_id: str = "",
     ) -> Dict[str, Any]:
         """Persist interruption state and return the interrupt result dict.
 
@@ -2544,7 +2547,8 @@ class ReActAgent(BaseAgent):
         """
         if isinstance(interrupt, ToolInterruptionState):
             return await self._hitl_handler.commit_interrupt(
-                interrupt, context, session, invoke_inputs, sub_agent_outputs
+                interrupt, context, session, invoke_inputs,
+                sub_agent_outputs, request_id=request_id,
             )
 
         pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
@@ -2611,7 +2615,10 @@ class ReActAgent(BaseAgent):
                     next_comp_id = entry.component_ids[0] if entry.component_ids else ""
                     interruption_state.pending_workflow_id = wf_id
                     interruption_state.pending_component_id = next_comp_id
-                    return await self._commit_interrupt(interruption_state, context, session, invoke_inputs)
+                    return await self._commit_interrupt(
+                        interruption_state, context, session, invoke_inputs,
+                        request_id=invoke_inputs.invocation_id,
+                    )
 
         # Step 3: all feedbacks collected — write ai_message and concurrently resume all workflows
         resume_ai_message = copy.deepcopy(interruption_state.ai_message)
@@ -2629,7 +2636,10 @@ class ReActAgent(BaseAgent):
             original_query=interruption_state.original_query,
         )
         if workflow_interrupt:
-            return await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
+            return await self._commit_interrupt(
+                workflow_interrupt, context, session, invoke_inputs,
+                request_id=invoke_inputs.invocation_id,
+            )
 
         # All workflows completed — continue ReAct loop from next iteration
         ctx.extra[RESUME_START_ITERATION_KEY] = resume_iteration + 1
@@ -2871,12 +2881,47 @@ class ReActAgent(BaseAgent):
                 hitl_state = self._hitl_handler.load(session)
                 interruption_state = hitl_state or self._load_interruption_state(session)
                 if interruption_state is not None:
-                    if hitl_state is not None:
-                        self._hitl_handler.clear(session)
+                    # Bug #4756: if this interrupt was committed in a prior
+                    # invoke cycle (e.g. user closed workswarm mid-interrupt
+                    # and reopened) and the new user input is NOT an auth
+                    # response, drop the interrupt so the NEW user query runs
+                    # as a fresh turn instead of replaying the OLD tool_call.
+                    # The user_input type is the canonical discriminator for
+                    # tool interrupts: an InteractiveInput is an auth reply
+                    # (legitimate resume); a plain string is a fresh query and
+                    # any persisted tool interrupt from a previous cycle must
+                    # be discarded. Workflow interrupts (InterruptionState)
+                    # use string feedback to collect input round-by-round, so
+                    # they keep the legacy resume path.
+                    from openjiuwen.core.session import InteractiveInput
+                    is_auth_response = isinstance(user_input, InteractiveInput)
+                    drop_tool_interrupt = (
+                        isinstance(interruption_state, ToolInterruptionState)
+                        and not is_auth_response
+                    )
+                    if drop_tool_interrupt:
+                        if hitl_state is not None:
+                            self._hitl_handler.clear(session)
+                        else:
+                            self._clear_interruption_state(session)
+                        # Force-flush so the cleared state lands on disk
+                        # immediately, preventing the next recovery from
+                        # resurrecting the stale interrupt.
+                        await self.context_engine.save_contexts(session)
+                        logger.warning(
+                            "[StaleInterrupt] dropping persisted tool interrupt: "
+                            "trigger=%s user_input_type=%s",
+                            getattr(interruption_state, "trigger_invocation_id", ""),
+                            type(user_input).__name__,
+                        )
+                        interruption_state = None
                     else:
-                        self._clear_interruption_state(session)
-                    # Restore original query so MemoryRail.after_invoke writes the right UserMessage
-                    ctx.extra["_original_query"] = interruption_state.original_query
+                        if hitl_state is not None:
+                            self._hitl_handler.clear(session)
+                        else:
+                            self._clear_interruption_state(session)
+                        # Restore original query so MemoryRail.after_invoke writes the right UserMessage
+                        ctx.extra["_original_query"] = interruption_state.original_query
 
                 state_loaded_at = time.monotonic()
 
@@ -3039,10 +3084,12 @@ class ReActAgent(BaseAgent):
                         hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
                             results, ai_message.tool_calls, ai_message, iteration,
                             original_query=ctx.extra.get("_original_query", ""),
+                            request_id=invoke_inputs.invocation_id,
                         )
                         if hitl_interrupt:
                             await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
-                                                         sub_agent_outputs)
+                                                         sub_agent_outputs,
+                                                         request_id=invoke_inputs.invocation_id)
                             break
 
                         workflow_interrupt = self._after_execute_tool_call(
@@ -3050,7 +3097,10 @@ class ReActAgent(BaseAgent):
                             original_query=ctx.extra.get("_original_query", ""),
                         )
                         if workflow_interrupt:
-                            await self._commit_interrupt(workflow_interrupt, context, session, invoke_inputs)
+                            await self._commit_interrupt(
+                                workflow_interrupt, context, session, invoke_inputs,
+                                request_id=invoke_inputs.invocation_id,
+                            )
                             break
 
                         # Iteration fully succeeded (LLM + all tools + ToolMessages
