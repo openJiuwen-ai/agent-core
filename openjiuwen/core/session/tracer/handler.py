@@ -19,6 +19,82 @@ from openjiuwen.core.session.tracer.span import Span, TraceAgentSpan, TraceWorkf
 from openjiuwen.core.session.tracer.span import SpanManager
 from openjiuwen.core.graph.pregel import GraphInterrupt
 
+# Bound tracer_agent wire payloads so a single span (e.g. Grep on a huge
+# single-line HTML file) cannot exceed downstream WebSocket send budgets
+# (~6 MiB). Limits apply only to the emitted stream payload, not the live span.
+_TRACER_AGENT_IO_MAX_BYTES = 256 * 1024
+_TRACER_AGENT_STRING_MAX_BYTES = 64 * 1024
+_TRACER_AGENT_TRUNCATE_SUFFIX = "...[truncated]"
+
+
+def _utf8_json_size(value: Any) -> int:
+    try:
+        return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
+    except (TypeError, ValueError, OverflowError):
+        return len(str(value).encode("utf-8"))
+
+
+def _truncate_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text
+    suffix = _TRACER_AGENT_TRUNCATE_SUFFIX
+    suffix_bytes = suffix.encode("utf-8")
+    keep = max(0, max_bytes - len(suffix_bytes))
+    return encoded[:keep].decode("utf-8", errors="ignore") + suffix
+
+
+def _truncate_string_leaves(value: Any, max_string_bytes: int) -> Any:
+    if isinstance(value, str):
+        return _truncate_utf8(value, max_string_bytes)
+    if isinstance(value, dict):
+        return {key: _truncate_string_leaves(item, max_string_bytes) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_truncate_string_leaves(item, max_string_bytes) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_truncate_string_leaves(item, max_string_bytes) for item in value)
+    return value
+
+
+def bound_tracer_agent_io(
+    value: Any,
+    *,
+    max_bytes: int = _TRACER_AGENT_IO_MAX_BYTES,
+    max_string_bytes: int = _TRACER_AGENT_STRING_MAX_BYTES,
+) -> Any:
+    """Return a size-bounded copy of tracer inputs/outputs for wire emission.
+
+    Prefer truncating oversized string leaves so nested structures used by UI
+    restore (e.g. ``outputs.outputs.data``) stay intact. Fall back to a stub
+    when the value is still too large after leaf truncation.
+    """
+    if value is None:
+        return None
+    if max_bytes <= 0:
+        return {
+            "_truncated": True,
+            "original_bytes": _utf8_json_size(value),
+            "preview": "",
+        }
+
+    bounded = _truncate_string_leaves(value, max_string_bytes)
+    size = _utf8_json_size(bounded)
+    if size <= max_bytes:
+        return bounded
+
+    preview_budget = max(0, max_bytes - 96)
+    preview = _truncate_utf8(
+        json.dumps(bounded, ensure_ascii=False, default=str),
+        preview_budget,
+    )
+    return {
+        "_truncated": True,
+        "original_bytes": size,
+        "preview": preview,
+    }
+
 
 class TracerHandlerName(Enum):
     """
@@ -273,7 +349,14 @@ class TraceAgentHandler(TraceBaseHandler):
     def _format_data(self, span: TraceAgentSpan) -> dict:
         if span.status != NodeStatus.INTERRUPTED.value:
             span.status = self._get_node_status(span)
-        return {"type": self.event_name(), "payload": span.model_dump(by_alias=True)}
+        payload = span.model_dump(by_alias=True)
+        if "inputs" in payload:
+            payload["inputs"] = bound_tracer_agent_io(payload.get("inputs"))
+        if "outputs" in payload:
+            payload["outputs"] = bound_tracer_agent_io(payload.get("outputs"))
+        if "onInvokeData" in payload and payload.get("onInvokeData") is not None:
+            payload["onInvokeData"] = bound_tracer_agent_io(payload.get("onInvokeData"))
+        return {"type": self.event_name(), "payload": payload}
 
     def _get_tracer_agent_span(self, invoke_id: str) -> TraceAgentSpan:
         span = self._span_manager.get_span(invoke_id)
