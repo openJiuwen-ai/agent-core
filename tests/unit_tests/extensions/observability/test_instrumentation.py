@@ -195,6 +195,43 @@ def test_instrumentor_failure_does_not_break_remaining_libraries(monkeypatch: py
     assert len(_FakeInstrumentor.instances) == len(instrumentation._INSTRUMENTORS)
 
 
+# --- FastAPI server-side (inbound trace extraction) --------------------------
+
+
+def test_fastapi_missing_dependency_warns_but_clients_proceed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _install_fake_instrumentors(monkeypatch)
+    # fastapi itself is a test dependency; block only the OTel instrumentor.
+    monkeypatch.setitem(sys.modules, "opentelemetry.instrumentation.fastapi", None)
+    _stub_global_provider(monkeypatch, provider=TracerProvider())
+
+    with pytest.warns(RuntimeWarning, match="fastapi"):
+        result = ensure_global_http_instrumentation()
+
+    assert result is True
+    assert all(instance.instrumented for instance in _FakeInstrumentor.instances)
+
+
+def test_fastapi_apps_created_after_instrumentation_are_covered(monkeypatch: pytest.MonkeyPatch) -> None:
+    fastapi_module = pytest.importorskip("fastapi")
+    pytest.importorskip("opentelemetry.instrumentation.fastapi")
+    _install_fake_instrumentors(monkeypatch)
+    _stub_global_provider(monkeypatch, provider=TracerProvider())
+
+    # Service modules bind the class like this before the switch runs; the
+    # patched __init__ must still catch apps they build afterwards.
+    FastAPI = fastapi_module.FastAPI  # noqa: N813 - bound before instrumentation
+    early_app = FastAPI()
+
+    assert ensure_global_http_instrumentation() is True
+    late_app = FastAPI()
+
+    # Only apps constructed after the switch runs extract inbound trace
+    # context (documented limitation). The instrumentor marks covered apps
+    # itself via ``_is_instrumented_by_opentelemetry``.
+    assert not getattr(early_app, "_is_instrumented_by_opentelemetry", False)
+    assert late_app._is_instrumented_by_opentelemetry is True
+
+
 # --- ObservabilityRuntime.initialize integration ----------------------------
 
 

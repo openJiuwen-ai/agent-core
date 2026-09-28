@@ -192,6 +192,8 @@ init_observability(obs_config)
 `global_instrument_enable` is a process-wide switch for automatic OTel HTTP
 instrumentation of `httpx` / `requests` / `aiohttp`: outbound requests carry
 a W3C `traceparent` header, chaining LLM/VLM calls into the current trace.
+The same switch also instruments `fastapi` on the **server side** — inbound
+requests extract the caller's `traceparent` and continue the remote trace.
 It is **off by default** — instrumentation adds per-request overhead and
 would leak the `traceparent` header to third-party APIs.
 
@@ -219,9 +221,17 @@ Requirements and behavior:
 - The global `TracerProvider` is always set **before** the instrumentors run
   (they bind their tracer to the process-global provider).
 - The same switch exists on `OtelTracerConfig.global_instrument_enable` for
-  the `tracer-otel` extension (studio-style deployments): when enabled,
+  the `tracer-otel` extension (agent-runtime deployments): when enabled,
   `init_otel_tracer` delegates to the shared instrumentation helper with a
   provider factory pointing at the same collector.
+- FastAPI server-side coverage wraps the original `FastAPI.__init__`: every
+  app constructed *after* the switch runs extracts inbound trace context,
+  however the class was imported (the upstream `FastAPIInstrumentor`
+  class-replacement patch misses modules that bound `FastAPI` before the
+  switch ran). Apps built earlier in the process — e.g. a service entry app
+  created at import time, before observability initializes — keep running
+  uninstrumented; covering them requires creating the app after
+  initialization.
 
 ## Configuration Reference
 
