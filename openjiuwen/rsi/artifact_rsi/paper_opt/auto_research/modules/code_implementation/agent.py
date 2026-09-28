@@ -113,6 +113,22 @@ _ARGPARSE_CHOICES_RE = re.compile(r"choose from ([^\n)]+)")
 # user home directory -- see _extract_path_candidates/_stage_referenced_paths.
 _WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:[\\/][^\s\"'<>|]+")
 _POSIX_ABS_PATH_RE = re.compile(r"(?<![:\w])/(?:[^\s\"'<>|]+)")
+# A dataset path is often named without a drive letter (e.g.
+# "demo-input\sentiment_icl_v1.json") -- the two absolute-path patterns above
+# never match that, so the pre-verification/staging below silently skips it
+# and the coding agent has to rediscover it itself via an unbounded
+# find/grep across every drive (observed directly: several tool calls per
+# retry spent on `find`/`ls` across C:\ and other drives before the dataset
+# was located). Resolved against _referenced_path_roots, not treated as a
+# host-relative path on its own.
+_RELATIVE_PATH_RE = re.compile(r"(?<![:/\\\w.])[\w.-]+(?:[\\/][\w.-]+)+\.[A-Za-z0-9]{1,8}\b")
+# Candidates are extracted from free text that may have been authored on a
+# different OS than the one this runs on (e.g. a "\"-separated path mentioned
+# in a design doc, staged on a Linux/Mac sandbox). pathlib splits only on the
+# host's own separator(s), so joining a raw candidate onto a root via `/`
+# silently fails to resolve on the "other" platform. Split on both
+# separators ourselves before rejoining with the host's own Path semantics.
+_PATH_SEP_RE = re.compile(r"[\\/]+")
 _REFERENCED_PATH_TRAILING_PUNCT = ".,;:)]'\"\\"
 _MAX_REFERENCED_CANDIDATES = 8
 _MAX_REFERENCED_FILE_BYTES = 50 * 1024 * 1024
@@ -390,7 +406,8 @@ class CodeImplementationAgent:
         seed_output_from_head(code_dir, output_dir)
         agent_artifact_path = self._stage_artifact_input(inputs.artifact_path, agent_workspace)
         referenced_candidates = self._extract_path_candidates(design_context, inputs.extra_host_instructions)
-        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace)
+        referenced_roots = self._referenced_path_roots(inputs.artifact_path)
+        referenced_paths = self._stage_referenced_paths(referenced_candidates, agent_workspace, roots=referenced_roots)
         referenced_prompt = self._build_referenced_paths_prompt(referenced_paths)
 
         # Only a last-resort fallback now — see _build_output, which discovers
@@ -528,13 +545,21 @@ class CodeImplementationAgent:
                 agent_message,
                 validation=validation,
             )
+        # workspace_dir must name the same directory `files` was just listed
+        # from (output_dir, on any failure where the agent wrote something) —
+        # not generated_code/, which was never touched this cycle. This field
+        # flows verbatim into the manager's CodeHandoff and gets echoed into
+        # the next repair contract; reporting generated_code/ here previously
+        # sent repair instructions at a directory the coding agent's own
+        # prompt forbids writing to and the sandbox denies access to
+        # (observed directly: retries burning tool calls probing write access
+        # to generated_code/ instead of fixing output/run.py).
         return self._build_output(
             plan,
             output_dir if output_dir.exists() else code_dir,
             variant_names,
             agent_message,
             validation=validation,
-            workspace_dir=str(code_dir),
         )
 
     # -- promoting the deliverable out of the agent's scratch workspace ------
@@ -956,7 +981,7 @@ class CodeImplementationAgent:
         for text in texts:
             if not text:
                 continue
-            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE):
+            for pattern in (_WINDOWS_ABS_PATH_RE, _POSIX_ABS_PATH_RE, _RELATIVE_PATH_RE):
                 for match in pattern.finditer(text):
                     candidate = match.group(0).rstrip(_REFERENCED_PATH_TRAILING_PUNCT)
                     if candidate and candidate not in seen:
@@ -966,7 +991,44 @@ class CodeImplementationAgent:
         return list(seen)
 
     @staticmethod
-    def _stage_referenced_paths(candidates: list[str], agent_workspace: Path) -> list["_ReferencedPath"]:
+    def _referenced_path_roots(artifact_path: str | None, *, max_levels: int = 3) -> list[Path]:
+        """Ancestor directories of the staged artifact_path, used to resolve
+        a relative path token (e.g. "demo-input/sentiment_icl_v1.json")
+        named in the instructions without a drive letter. A same-run dataset
+        file has been observed sitting a couple of levels above artifact_path
+        (artifact_path itself pointing at a paper/ subfolder, the dataset at
+        a demo-input/ sibling of that subfolder's parent), so climbing a
+        bounded number of ancestors covers that layout without an unbounded
+        filesystem walk.
+        """
+        if not artifact_path:
+            return []
+        roots: list[Path] = []
+        try:
+            current = Path(artifact_path).expanduser().resolve()
+        except (OSError, ValueError):
+            return []
+        if current.is_file():
+            current = current.parent
+        for _ in range(max_levels + 1):
+            roots.append(current)
+            parent = current.parent
+            if parent == current:
+                break
+            current = parent
+        return roots
+
+    @staticmethod
+    def _split_relative_candidate(candidate: str) -> list[str]:
+        """Split a possibly foreign-separator relative path into components,
+        dropping empty segments and any ``..`` so a root can only resolve to
+        a descendant of itself, never escape it."""
+        return [part for part in _PATH_SEP_RE.split(candidate) if part and part != ".." and part != "."]
+
+    @staticmethod
+    def _stage_referenced_paths(
+        candidates: list[str], agent_workspace: Path, *, roots: list[Path] | None = None
+    ) -> list["_ReferencedPath"]:
         """Verify each candidate path actually exists on the host, and stage
         existing files into the sandbox (mirroring _stage_artifact_input) so
         the coding agent can read them without depending on whether its
@@ -976,12 +1038,35 @@ class CodeImplementationAgent:
         string can raise almost anything when handed to Path()/.exists() on
         Windows, and continuing past one bad candidate matters more than
         being precise about which exception type to catch.
+
+        A candidate that is not itself absolute (see _RELATIVE_PATH_RE) is
+        tried against each of ``roots`` in order and resolved to the first
+        hit; it is dropped, not passed through as a host-relative path, if
+        none of them contain it.
         """
         results: list[_ReferencedPath] = []
         referenced_root = agent_workspace / _REFERENCED_PATHS_SUBDIR
+        search_roots = roots or []
         for candidate in candidates:
             try:
                 path = Path(candidate)
+                if not path.is_absolute():
+                    parts = CodeImplementationAgent._split_relative_candidate(candidate)
+                    resolved = (
+                        next(
+                            (
+                                root.joinpath(*parts)
+                                for root in search_roots
+                                if root.joinpath(*parts).is_file()
+                            ),
+                            None,
+                        )
+                        if parts
+                        else None
+                    )
+                    if resolved is None:
+                        continue
+                    path = resolved
                 if not path.exists():
                     continue
                 if path.is_dir():

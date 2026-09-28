@@ -129,6 +129,111 @@ def test_stage_referenced_paths_is_idempotent_across_repeated_calls(tmp_path):
     assert staged.read_text(encoding="utf-8") == "v2"
 
 
+def test_extract_path_candidates_finds_relative_path_with_backslash():
+    text = "The dataset is at demo-input\\sentiment_icl_v1.json for this run."
+    candidates = CodeImplementationAgent._extract_path_candidates(text)
+    assert "demo-input\\sentiment_icl_v1.json" in candidates
+
+
+def test_extract_path_candidates_finds_relative_path_with_forward_slash():
+    text = "The dataset is at demo-input/sentiment_icl_v1.json for this run."
+    candidates = CodeImplementationAgent._extract_path_candidates(text)
+    assert "demo-input/sentiment_icl_v1.json" in candidates
+
+
+# -- _referenced_path_roots ----------------------------------------------------
+
+
+def test_referenced_path_roots_climbs_ancestors_of_artifact_path(tmp_path):
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+
+    assert artifact_path in roots
+    assert (tmp_path / "demo-input-pkg" / "demo-input") in roots
+    assert (tmp_path / "demo-input-pkg") in roots
+
+
+def test_referenced_path_roots_empty_for_no_artifact_path():
+    assert CodeImplementationAgent._referenced_path_roots(None) == []
+    assert CodeImplementationAgent._referenced_path_roots("") == []
+
+
+def test_stage_referenced_paths_resolves_relative_candidate_against_roots(tmp_path):
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+    dataset = tmp_path / "demo-input-pkg" / "demo-input" / "sentiment_icl_v1.json"
+    dataset.write_text('{"items": []}', encoding="utf-8")
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input\\sentiment_icl_v1.json"], agent_workspace, roots=roots
+    )
+
+    assert len(results) == 1
+    assert results[0].kind == "file"
+    assert results[0].host_path == str(dataset)
+
+
+def test_stage_referenced_paths_drops_relative_candidate_with_no_matching_root(tmp_path):
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input\\sentiment_icl_v1.json"], agent_workspace, roots=[tmp_path]
+    )
+
+    assert results == []
+
+
+# -- _split_relative_candidate (cross-platform separators) -------------------
+
+
+def test_split_relative_candidate_accepts_backslash_forwardslash_and_mixed():
+    assert CodeImplementationAgent._split_relative_candidate(
+        "demo-input\\sentiment_icl_v1.json"
+    ) == ["demo-input", "sentiment_icl_v1.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        "demo-input/sentiment_icl_v1.json"
+    ) == ["demo-input", "sentiment_icl_v1.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        "a\\b/c.json"
+    ) == ["a", "b", "c.json"]
+
+
+def test_split_relative_candidate_drops_dot_and_dotdot_segments():
+    assert CodeImplementationAgent._split_relative_candidate(
+        "..\\..\\etc\\passwd.json"
+    ) == ["etc", "passwd.json"]
+    assert CodeImplementationAgent._split_relative_candidate(
+        ".\\demo-input\\x.json"
+    ) == ["demo-input", "x.json"]
+
+
+def test_stage_referenced_paths_resolves_forward_slash_candidate_against_roots(tmp_path):
+    """The candidate's separator style must resolve the same way regardless
+    of which separator the coding host itself uses (Windows dev box vs a
+    Linux/Mac sandbox in production)."""
+    artifact_path = tmp_path / "demo-input-pkg" / "demo-input" / "paper"
+    artifact_path.mkdir(parents=True)
+    dataset = tmp_path / "demo-input-pkg" / "demo-input" / "sentiment_icl_v1.json"
+    dataset.write_text('{"items": []}', encoding="utf-8")
+    agent_workspace = tmp_path / "agent_workspace"
+    agent_workspace.mkdir()
+
+    roots = CodeImplementationAgent._referenced_path_roots(str(artifact_path))
+    results = CodeImplementationAgent._stage_referenced_paths(
+        ["demo-input/sentiment_icl_v1.json"], agent_workspace, roots=roots
+    )
+
+    assert len(results) == 1
+    assert results[0].kind == "file"
+    assert results[0].host_path == str(dataset)
+
+
 def test_stage_referenced_paths_skips_malformed_candidate_without_raising(tmp_path):
     agent_workspace = tmp_path / "agent_workspace"
     agent_workspace.mkdir()
