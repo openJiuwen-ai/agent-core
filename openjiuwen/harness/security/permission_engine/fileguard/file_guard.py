@@ -116,17 +116,10 @@ def _apply_implications(
     *,
     path_label: str,
 ) -> tuple[PermissionLevel, PermissionLevel, PermissionLevel]:
-    """Write⇒Read / Exec⇒Read；显式更严的 read（deny）优先于蕴含，并 WARN。"""
+    """Read deny forbids all axes; otherwise Write/Exec imply Read."""
+    if read == PermissionLevel.DENY:
+        return read, PermissionLevel.DENY, PermissionLevel.DENY
     if write == PermissionLevel.ALLOW or exec_ == PermissionLevel.ALLOW:
-        if read == PermissionLevel.DENY:
-            logger.warning(
-                "[file_guard] implication.conflict path=%s write=%s exec=%s read=deny "
-                "(explicit deny wins over Write/Exec⇒Read)",
-                path_label,
-                write.value,
-                exec_.value,
-            )
-            return read, write, exec_
         return PermissionLevel.ALLOW, write, exec_
     return read, write, exec_
 
@@ -394,9 +387,9 @@ def _normalize_native(
             match: FileGuardMatch = "glob" if match_v == "glob" else "prefix"
             rule = _compile_path_entry(
                 path_v,
-                read=item.get("read"),
-                write=item.get("write"),
-                exec_=item.get("exec"),
+                read=item.get("read", defaults.read.value),
+                write=item.get("write", defaults.write.value),
+                exec_=item.get("exec", defaults.exec.value),
                 match=match,
                 default_level=PermissionLevel.ASK,
             )

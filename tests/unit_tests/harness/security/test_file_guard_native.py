@@ -29,6 +29,23 @@ def _native_cfg(paths: list[dict], *, defaults: dict | None = None, enabled: boo
     }
 
 
+def test_native_path_inherits_axis_defaults(tmp_path: Path) -> None:
+    config = _native_cfg(
+        [{"path": str(tmp_path), "read": "allow"}],
+        defaults={"read": "ask", "write": "allow", "exec": "deny"},
+    )
+    effective = normalize_path_guard_config(config, workspace_root=tmp_path / "ws")
+    rule = effective.paths[0]
+    assert rule.read == PermissionLevel.ALLOW
+    assert rule.write == PermissionLevel.ALLOW
+    assert rule.exec == PermissionLevel.DENY
+    checker = FileGuardChecker(effective)
+    assert checker.evaluate("write_file", {"file_path": str(tmp_path / "test.txt")}) is None
+    config["file_guard"]["paths"][0]["write"] = "deny"
+    checker = FileGuardChecker(normalize_path_guard_config(config, workspace_root=tmp_path / "ws"))
+    assert checker.evaluate("write_file", {"file_path": str(tmp_path / "test.txt")}).permission == PermissionLevel.DENY
+
+
 def test_native_mode_when_paths_present(tmp_path: Path) -> None:
     effective = normalize_path_guard_config(
         _native_cfg([{"path": str(tmp_path / "data"), "read": "allow", "write": "ask", "exec": "deny"}]),
@@ -242,11 +259,26 @@ def test_native_explicit_read_deny_wins_over_write_allow_implication(tmp_path: P
     )
     rule = next(r for r in effective.paths if "data" in r.path.replace("\\", "/"))
     assert rule.read == PermissionLevel.DENY
-    assert rule.write == PermissionLevel.ALLOW
+    assert rule.write == PermissionLevel.DENY
+    assert rule.exec == PermissionLevel.DENY
     checker = FileGuardChecker(effective)
     result = checker.evaluate("read_file", {"file_path": str(target)})
     assert result is not None
     assert result.permission == PermissionLevel.DENY
+
+
+def test_read_deny_blocks_inherited_write_and_exec(tmp_path: Path) -> None:
+    effective = normalize_path_guard_config(
+        _native_cfg([{"path": str(tmp_path), "read": "deny"}],
+                    defaults={"read": "allow", "write": "allow", "exec": "allow"}),
+        workspace_root=tmp_path / "ws",
+    )
+    assert effective.paths[0].write == PermissionLevel.DENY
+    assert effective.paths[0].exec == PermissionLevel.DENY
+    checker = FileGuardChecker(effective)
+    target = str(tmp_path / "script.py")
+    assert checker.evaluate("write_file", {"file_path": target}).permission == PermissionLevel.DENY
+    assert checker.evaluate("bash", {"command": f'python "{target}"'}).permission == PermissionLevel.DENY
 
 
 def test_native_glob_ssh_and_env(tmp_path: Path) -> None:
