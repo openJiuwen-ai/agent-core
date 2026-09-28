@@ -97,7 +97,7 @@ def model_identity(model: Model) -> dict[str, Any]:
 
 
 def thinking_disabled_request_overrides() -> dict[str, Any]:
-    return {"extra_body": {"thinking": {"type": "disabled"}}}
+    return {"reasoning": {"mode": "disabled"}}
 
 
 async def _observe_response(

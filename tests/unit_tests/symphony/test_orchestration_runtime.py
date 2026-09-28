@@ -228,7 +228,8 @@ async def test_fast_planner_requests_minimal_reasoning_and_disables_thinking(tmp
     system_prompt = planning_call["messages"][0]["content"]
     assert "Prioritize low latency" in system_prompt
     assert "minimum internal reasoning" in system_prompt
-    assert planning_call["kwargs"]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert planning_call["kwargs"]["reasoning"] == {"mode": "disabled"}
+    assert "extra_body" not in planning_call["kwargs"]
 
 
 @pytest.mark.asyncio

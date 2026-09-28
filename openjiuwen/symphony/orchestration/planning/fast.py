@@ -13,7 +13,12 @@ from openjiuwen.symphony.orchestration.language import (
     default_fast_no_plan_title,
     planner_language_instruction,
 )
-from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.model import (
+    ModelResponseObserver,
+    invoke_json,
+    model_usage_context,
+    thinking_disabled_request_overrides,
+)
 from openjiuwen.symphony.orchestration.planning.plan_builder import edge_plan_item
 from openjiuwen.symphony.orchestration.planning.runtime import RuntimeEdgeResolver, edge_weight
 from openjiuwen.symphony.orchestration.planning.utils import (
@@ -118,9 +123,7 @@ class FastOneShotPlanner:
                 system_prompt=(f"{FAST_PLANNER_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
                 user_content=json.dumps(prompt_payload, ensure_ascii=False),
                 error_context="Symphony one-shot fast planning",
-                request_overrides={
-                    "extra_body": {"thinking": {"type": "disabled"}},
-                },
+                request_overrides=thinking_disabled_request_overrides(),
                 response_observer=self.model_response_observer,
             )
 
