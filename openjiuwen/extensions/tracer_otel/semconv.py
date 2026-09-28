@@ -13,22 +13,52 @@ Keeping all attribute keys here avoids typo drift between handlers.
 
 from __future__ import annotations
 
-
 # ---------------------------------------------------------------------------
 # GenAI standard attributes (aligned with observability/semconv.py)
+# LLM payload keys renamed gen_ai.prompt/completion → gen_ai.input.messages/
+# gen_ai.output.messages to unify the naming with develop (issue #1833).
 # ---------------------------------------------------------------------------
 
 GEN_AI_SYSTEM = "gen_ai.system"
 GEN_AI_SYSTEM_VALUE = "openjiuwen"
+# Standard registry key for the same fact (gen_ai.system predates it and is
+# kept as frozen wire format; both carry GEN_AI_SYSTEM_VALUE).
+GEN_AI_PROVIDER_NAME = "gen_ai.provider.name"
 GEN_AI_REQUEST_MODEL = "gen_ai.request.model"
 GEN_AI_OPERATION_NAME = "gen_ai.operation.name"
-GEN_AI_PROMPT = "gen_ai.prompt"
-GEN_AI_COMPLETION = "gen_ai.completion"
+GEN_AI_INPUT_MESSAGES = "gen_ai.input.messages"
+GEN_AI_OUTPUT_MESSAGES = "gen_ai.output.messages"
 
-GEN_AI_USAGE_PROMPT_TOKENS = "gen_ai.usage.prompt_tokens"
-GEN_AI_USAGE_COMPLETION_TOKENS = "gen_ai.usage.completion_tokens"
+GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
+GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
+GEN_AI_REQUEST_TOP_K = "gen_ai.request.top_k"
+GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
+GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+
+GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
+GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS = "gen_ai.usage.cache_read.input_tokens"
+GEN_AI_USAGE_REASONING_OUTPUT_TOKENS = "gen_ai.usage.reasoning.output_tokens"
 
 GEN_AI_TOOL_NAME = "gen_ai.tool.name"
+GEN_AI_TOOL_TYPE = "gen_ai.tool.type"
+GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
+
+GEN_AI_AGENT_NAME = "gen_ai.agent.name"
+GEN_AI_AGENT_ID = "gen_ai.agent.id"
+
+GEN_AI_RETRIEVAL_TOP_K = "gen_ai.retrieval.top_k"
+
+ERROR_TYPE = "error.type"
+
+# Request/response facts the GenAI standard does not model.  These are
+# project extensions (项目扩展，非上游标准) and use the openjiuwen.* namespace
+# — aligned with the observability extension — never gen_ai.* (issue #1833).
+OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
+OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
+OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
+OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 
 
 # ---------------------------------------------------------------------------

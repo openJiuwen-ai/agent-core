@@ -21,7 +21,8 @@ from dateutil.tz import tzlocal
 # Windows registry reads on every datetime.now() call.
 _CACHED_TZLOCAL = tzlocal()
 
-from opentelemetry import context as otel_context, trace
+from opentelemetry import context as otel_context
+from opentelemetry import trace
 from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from openjiuwen.core.common.exception.codes import StatusCode as OJStatusCode
@@ -37,13 +38,30 @@ from openjiuwen.core.session.tracer.span import TraceAgentSpan
 from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.redaction import redact
 from openjiuwen.extensions.tracer_otel.semconv import (
-    GEN_AI_COMPLETION,
+    ERROR_TYPE,
+    GEN_AI_AGENT_ID,
+    GEN_AI_AGENT_NAME,
+    GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
-    GEN_AI_PROMPT,
+    GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_PROVIDER_NAME,
+    GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_TEMPERATURE,
+    GEN_AI_REQUEST_TOP_K,
+    GEN_AI_REQUEST_TOP_P,
+    GEN_AI_RESPONSE_FINISH_REASONS,
+    GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM,
     GEN_AI_SYSTEM_VALUE,
+    GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
+    GEN_AI_TOOL_TYPE,
+    GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS,
+    GEN_AI_USAGE_INPUT_TOKENS,
+    GEN_AI_USAGE_OUTPUT_TOKENS,
+    GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
     OJ_AGENT_ERROR_MESSAGE,
     OJ_AGENT_INPUTS,
     OJ_AGENT_INVOKE_TYPE,
@@ -53,8 +71,13 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_USAGE_INPUT_COST,
+    OJ_GEN_AI_USAGE_OUTPUT_COST,
+    OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_INNER_ERROR,
+    OJ_INTERACTIVE_INPUTS,
     OJ_INVOKE_ID,
+    OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
     OJ_PARENT_NODE_ID,
     OJ_SESSION_ID,
@@ -63,7 +86,6 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_STATUS,
     OJ_STREAM_INPUTS,
     OJ_STREAM_OUTPUTS,
-    OJ_INTERACTIVE_INPUTS,
     OJ_TRACE_ID,
     OJ_WORKFLOW_COMPONENT_ID,
     OJ_WORKFLOW_COMPONENT_NAME,
@@ -141,6 +163,57 @@ def _normalize_llm_payload(value: Any) -> Any:
     return value
 
 
+def _unwrap_llm_payload(value: Any) -> Any:
+    """Unwrap single-key containers (``{"messages": ...}`` / ``{"outputs": ...}``)
+    that OtelRail wraps around LLM inputs/outputs payloads."""
+    normalized = _normalize_llm_payload(value)
+    if isinstance(normalized, dict):
+        for container_key in ("messages", "outputs", "inputs"):
+            inner = normalized.get(container_key)
+            if inner is not None:
+                return inner
+    return normalized
+
+
+def _extract_llm_response_attrs(outputs: Any) -> dict[str, Any]:
+    """Extract GenAI response / usage / cost attributes from an LLM output payload.
+
+    Reads ``finish_reason`` and ``usage_metadata`` (input/output tokens, cache
+    read tokens, reasoning tokens, response model, per-kind costs) off an
+    ``AssistantMessage`` payload, normalized via ``model_dump`` semantics.
+    """
+    attrs: dict[str, Any] = {}
+    obj = _unwrap_llm_payload(outputs)
+    if not isinstance(obj, dict):
+        return attrs
+    finish_reason = obj.get("finish_reason")
+    if finish_reason and str(finish_reason) != "null":
+        attrs[GEN_AI_RESPONSE_FINISH_REASONS] = [str(finish_reason)]
+    usage = obj.get("usage_metadata")
+    if isinstance(usage, dict):
+        if usage.get("input_tokens"):
+            attrs[GEN_AI_USAGE_INPUT_TOKENS] = int(usage["input_tokens"])
+        if usage.get("output_tokens"):
+            attrs[GEN_AI_USAGE_OUTPUT_TOKENS] = int(usage["output_tokens"])
+        if usage.get("cache_tokens"):
+            attrs[GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS] = int(usage["cache_tokens"])
+        if usage.get("reasoning_tokens"):
+            attrs[GEN_AI_USAGE_REASONING_OUTPUT_TOKENS] = int(usage["reasoning_tokens"])
+        if usage.get("model_name"):
+            attrs[GEN_AI_RESPONSE_MODEL] = str(usage["model_name"])
+        for source, key in (
+            ("total_cost", OJ_GEN_AI_USAGE_TOTAL_COST),
+            ("input_cost", OJ_GEN_AI_USAGE_INPUT_COST),
+            ("output_cost", OJ_GEN_AI_USAGE_OUTPUT_COST),
+        ):
+            # Hotfix UsageMetadata defaults costs to 0.0 (not None), so a
+            # truthiness check distinguishes real costs from absent data.
+            value = usage.get(source)
+            if value:
+                attrs[key] = float(value)
+    return attrs
+
+
 # ---------------------------------------------------------------------------
 # OtelAgentHandler
 # ---------------------------------------------------------------------------
@@ -177,8 +250,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         agent_span: TraceAgentSpan,
     ) -> OtelSpanState:
         otel_span = self._otel_tracer.start_span(name=name, kind=kind, context=parent_ctx)
-        # OTel standard attribute
+        # OTel standard attributes (gen_ai.system is the legacy pre-registry
+        # key kept as frozen wire format; provider.name is the standard one)
         otel_span.set_attribute(GEN_AI_SYSTEM, GEN_AI_SYSTEM_VALUE)
+        otel_span.set_attribute(GEN_AI_PROVIDER_NAME, GEN_AI_SYSTEM_VALUE)
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
         # Absent for tracers not bound to a Session, so old consumers see no new key.
@@ -239,11 +314,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
         otel_span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
         # Complete error dict with error_code
         if isinstance(error, BaseError):
-            otel_span.set_attribute(OJ_ERROR, _serialize({"error_code": error.status.code, "message": error.message}))
+            error_code = error.status.code
+            otel_span.set_attribute(OJ_ERROR, _serialize({"error_code": error_code, "message": error.message}))
         else:
+            error_code = OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
             otel_span.set_attribute(
-                OJ_ERROR, _serialize({"error_code": OJStatusCode.WORKFLOW_EXECUTION_ERROR.code, "message": str(error)})
+                OJ_ERROR, _serialize({"error_code": error_code, "message": str(error)})
             )
+        otel_span.set_attribute(ERROR_TYPE, int(error_code))
         otel_span.record_exception(error)
         otel_span.end()
         otel_context.detach(state.context_token)
@@ -261,6 +339,10 @@ class OtelAgentHandler(TraceExtAgentHandler):
         name_val = agent_span.name or (instance_info.get("class_name", "") if instance_info else "")
         otel_span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
         otel_span.set_attribute(OJ_AGENT_NAME, name_val)
+        # Agent identity on the root span, forwarded by OtelRail.before_invoke
+        agent_id = (instance_info or {}).get("agent_id")
+        if agent_id:
+            otel_span.set_attribute(GEN_AI_AGENT_ID, str(agent_id))
 
     # ================================================================
     # LLM events — SpanKind.CLIENT, gen_ai.* attributes
@@ -280,6 +362,19 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
             state.span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
+            # GenAI request parameters, forwarded by OtelRail.before_model_call
+            for param, key in (
+                ("temperature", GEN_AI_REQUEST_TEMPERATURE),
+                ("top_p", GEN_AI_REQUEST_TOP_P),
+                ("top_k", GEN_AI_REQUEST_TOP_K),
+                ("max_tokens", GEN_AI_REQUEST_MAX_TOKENS),
+            ):
+                value = (instance_info.get("request_params") or {}).get(param)
+                if value is not None:
+                    state.span.set_attribute(key, value)
+            message_count = instance_info.get("message_count")
+            if message_count is not None:
+                state.span.set_attribute(OJ_LLM_PREV_MESSAGE_COUNT, int(message_count))
             # Agent base fields (use span values if present, otherwise set ourselves)
             invoke_type_val = span.invoke_type or InvokeType.LLM.value
             name_val = span.name or instance_info.get("class_name", "")
@@ -287,9 +382,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
             state.span.set_attribute(OJ_AGENT_NAME, name_val)
             if inputs is not None:
                 # Normalize message objects to plain dicts before serialization,
-                # so GEN_AI_PROMPT carries standard JSON instead of class repr.
+                # so GEN_AI_INPUT_MESSAGES carries standard JSON instead of class repr.
                 payload = _serialize(_normalize_llm_payload(inputs))
-                state.span.set_attribute(GEN_AI_PROMPT, redact(payload, self._config, field="prompts"))
+                state.span.set_attribute(GEN_AI_INPUT_MESSAGES, redact(payload, self._config, field="prompts"))
         except Exception as exc:
             session_logger.warning("otel agent handler: on_llm_start failed: %s", exc)
 
@@ -309,9 +404,13 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 return
             if state.recorded:
                 if outputs is not None:
-                    # Normalize message objects (e.g. AssistantMessage) to plain dicts.
-                    payload = _serialize(_normalize_llm_payload(outputs))
-                    state.span.set_attribute(GEN_AI_COMPLETION, redact(payload, self._config, field="completions"))
+                    # Unwrap the {"outputs": AssistantMessage} container OtelRail
+                    # sends and normalize message objects to plain dicts, so the
+                    # completion payload carries real content as standard JSON.
+                    payload = _serialize(_unwrap_llm_payload(outputs))
+                    state.span.set_attribute(GEN_AI_OUTPUT_MESSAGES, redact(payload, self._config, field="completions"))
+                    for key, value in _extract_llm_response_attrs(outputs).items():
+                        state.span.set_attribute(key, value)
                 self._set_end_attrs(state.span, span)
             self._end_and_pop(span.invoke_id)
         except Exception as exc:
@@ -376,13 +475,41 @@ class OtelAgentHandler(TraceExtAgentHandler):
 
     async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
+            extra_attrs: dict[str, Any] = {
+                GEN_AI_OPERATION_NAME: "execute_tool",
+                GEN_AI_TOOL_NAME: instance_info.get("class_name", ""),
+            }
+            tool_type = instance_info.get("tool_type")
+            if tool_type:
+                extra_attrs[GEN_AI_TOOL_TYPE] = str(tool_type)
+            # Agent executing the tool; OtelRail forwards it, fall back to the
+            # tool name for direct on_plugin_start callers.
+            agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
+            extra_attrs[GEN_AI_AGENT_NAME] = str(agent_name)
+            tool_call_id = self._extract_tool_call_id(inputs) or kwargs.get("id") or kwargs.get("tool_call_id")
+            if tool_call_id:
+                extra_attrs[GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
             self._start_non_llm_span(
                 span, inputs, instance_info, InvokeType.PLUGIN.value, "tool",
-                extra_attrs={GEN_AI_OPERATION_NAME: "execute_tool",
-                             GEN_AI_TOOL_NAME: instance_info.get("class_name", "")},
+                extra_attrs=extra_attrs,
             )
         except Exception as exc:
             session_logger.warning("otel agent handler: on_plugin_start failed: %s", exc)
+
+    @staticmethod
+    def _extract_tool_call_id(inputs: Any) -> str:
+        """Read the tool-call id from the plugin inputs payload."""
+        if isinstance(inputs, dict):
+            for key in ("id", "tool_call_id", "call_id"):
+                value = inputs.get(key)
+                if value:
+                    return str(value)
+            tool_call = inputs.get("tool_call")
+            if tool_call is not None:
+                return str(getattr(tool_call, "id", "") or "")
+        else:
+            return str(getattr(inputs, "id", "") or "")
+        return ""
 
     async def on_plugin_end(self, span: TraceAgentSpan, outputs, **kwargs):
         try:
@@ -447,6 +574,14 @@ class OtelAgentHandler(TraceExtAgentHandler):
     async def on_retriever_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
             self._start_non_llm_span(span, inputs, instance_info, InvokeType.RETRIEVER.value, "retriever")
+            state = self._span_manager.get(span.invoke_id)
+            if state is None or not state.recorded:
+                return
+            normalized = _normalize_llm_payload(inputs)
+            if isinstance(normalized, dict):
+                top_k = normalized.get("top_k") or normalized.get("k")
+                if top_k is not None:
+                    state.span.set_attribute(GEN_AI_RETRIEVAL_TOP_K, int(top_k))
         except Exception as exc:
             session_logger.warning("otel agent handler: on_retriever_start failed: %s", exc)
 
@@ -784,6 +919,7 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
             # OTel standard + base attributes
             start_time = datetime.now(tz=_CACHED_TZLOCAL).replace(tzinfo=None)
             otel_span.set_attribute(GEN_AI_SYSTEM, GEN_AI_SYSTEM_VALUE)
+            otel_span.set_attribute(GEN_AI_PROVIDER_NAME, GEN_AI_SYSTEM_VALUE)
             otel_span.set_attribute(OJ_TRACE_ID, self._trace_id)
             # Workflow events carry no TraceWorkflowSpan, so the session id arrives
             # per-event; fall back to the tracer-injected one for direct callers.
@@ -920,20 +1056,23 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                         state.span.set_attribute(OJ_WORKFLOW_ERROR_MESSAGE, str(exception))
                         state.span.set_attribute(OJ_STATUS, NodeStatus.ERROR.value)
                         if isinstance(exception, BaseError):
+                            error_code = exception.status.code
                             state.span.set_attribute(
                                 OJ_ERROR,
-                                _serialize({"error_code": exception.status.code, "message": exception.message}),
+                                _serialize({"error_code": error_code, "message": exception.message}),
                             )
                         else:
+                            error_code = OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
                             state.span.set_attribute(
                                 OJ_ERROR,
                                 _serialize(
                                     {
-                                        "error_code": OJStatusCode.WORKFLOW_EXECUTION_ERROR.code,
+                                        "error_code": error_code,
                                         "message": str(exception),
                                     }
                                 ),
                             )
+                        state.span.set_attribute(ERROR_TYPE, int(error_code))
                         state.span.record_exception(exception)
                     # inner_error from on_invoke_data (applies to both interrupt and error paths)
                     if on_invoke_data and isinstance(on_invoke_data, dict) and "inner_error" in on_invoke_data:
