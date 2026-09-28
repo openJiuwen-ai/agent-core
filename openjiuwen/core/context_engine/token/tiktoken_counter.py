@@ -2,12 +2,63 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
 
 import json
-from typing import List, Dict
+import threading
+from typing import List, Dict, Optional
 
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.llm import BaseMessage, AssistantMessage
 from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.context_engine.token.base import TokenCounter
+
+#: Serializes first-use loads of tiktoken encodings. The very first
+#: ``tiktoken.get_encoding`` in a process downloads the BPE vocabulary file
+#: over HTTPS through a blocking ``requests.get`` without timeout, which can
+#: stall for tens of seconds; the lock keeps concurrent loaders single-flight.
+_ENCODING_LOAD_LOCK = threading.Lock()
+
+#: Background warm-up thread handle (see :func:`start_background_warm_up`).
+_warm_up_thread: Optional[threading.Thread] = None
+_warm_up_lock = threading.Lock()
+
+#: Default encoding used when a model name has no explicit mapping.
+_DEFAULT_ENCODING_NAME = "cl100k_base"
+
+
+def warm_up_default_encoding() -> None:
+    """Load the default tiktoken encoding in the caller's thread.
+
+    Intended to run on a background thread: the first load in a process may
+    download the vocabulary synchronously, and doing that on the event loop
+    stalls every WebSocket/heartbeat on it. Failures are swallowed so the
+    warm-up can never break startup; the first real use simply retries.
+    """
+    try:
+        import tiktoken
+
+        with _ENCODING_LOAD_LOCK:
+            tiktoken.get_encoding(_DEFAULT_ENCODING_NAME)
+    except Exception:
+        logger.debug("tiktoken encoding warm-up failed; first use will retry", exc_info=True)
+
+
+def start_background_warm_up() -> None:
+    """Start a one-shot daemon thread that pre-loads the default encoding.
+
+    Idempotent and single-flight: repeated calls while the warm-up is still
+    running are no-ops, and once loaded the encoding stays in tiktoken's
+    process-wide cache, so every later ``get_encoding`` is instant.
+    """
+    global _warm_up_thread
+
+    with _warm_up_lock:
+        if _warm_up_thread is not None and _warm_up_thread.is_alive():
+            return
+        _warm_up_thread = threading.Thread(
+            target=warm_up_default_encoding,
+            name="tiktoken-encoding-warmup",
+            daemon=True,
+        )
+        _warm_up_thread.start()
 
 
 class TiktokenCounter(TokenCounter):
@@ -33,10 +84,11 @@ class TiktokenCounter(TokenCounter):
 
     def __init__(self, model: str = "gpt-4") -> None:
         self._model = model
-        enc_name = self._MODEL2ENC.get(model, "cl100k_base")
+        enc_name = self._MODEL2ENC.get(model, _DEFAULT_ENCODING_NAME)
         try:
             import tiktoken
-            self._enc = tiktoken.get_encoding(enc_name)
+            with _ENCODING_LOAD_LOCK:
+                self._enc = tiktoken.get_encoding(enc_name)
             self._fallback_warning_printed = False
         except Exception:
             self._enc = None
