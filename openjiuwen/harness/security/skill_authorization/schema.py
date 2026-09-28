@@ -14,7 +14,7 @@ from typing import Any
 # list in the generic authorization schema so agent-core does not depend on a
 # product's credential-injection rail.
 SHELL_PERMISSION_TOOLS = frozenset(
-    {"bash", "shell", "mcp_exec_command", "create_terminal", "exec_command"}
+    {"bash", "powershell", "shell", "mcp_exec_command", "create_terminal", "exec_command"}
 )
 
 SKILL_PERMISSION_FILENAME = "skill_permissions.json"

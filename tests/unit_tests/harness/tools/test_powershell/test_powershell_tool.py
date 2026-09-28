@@ -59,6 +59,24 @@ async def test_read_only_blocks_write_commands() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_process_by_name_is_blocked_before_execute() -> None:
+    shell = MagicMock()
+    shell.execute_cmd = AsyncMock(return_value=_mock_result(stdout="Processes killed\n"))
+    sys_op = MagicMock()
+    sys_op.work_dir = None
+    sys_op.shell.return_value = shell
+
+    tool = PowerShellTool(sys_op)
+    res = await tool.invoke({
+        "command": "Stop-Process -Name python -Force -ErrorAction SilentlyContinue",
+    })
+
+    assert res.success is False
+    assert "broad process termination" in (res.error or "")
+    shell.execute_cmd.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_injection_pattern_blocked() -> None:
     sys_op = MagicMock()
     sys_op.work_dir = None

@@ -25,6 +25,7 @@ from openjiuwen.core.sys_operation.result import (
     ExecuteCmdBackgroundData, ExecuteCmdBackgroundResult
 )
 from openjiuwen.core.sys_operation.shell_process_registry import (
+    note_spawned_process,
     register_shell_process,
     resolve_shell_session_id,
     unregister_shell_process,
@@ -156,6 +157,7 @@ _NUL_REDIRECT_PATTERN = re.compile(r"(?i)([12&]?>>?)(\s*)\bnul\b(?![\w./\\-])")
 
 
 def _track_shell_process(proc: asyncio.subprocess.Process) -> str | None:
+    note_spawned_process(proc)
     sid = resolve_shell_session_id()
     if sid:
         register_shell_process(sid, proc)
@@ -1026,6 +1028,11 @@ class ShellOperation(BaseShellOperation):
 
     def _check_command_safety(self, command: str) -> Optional[str]:
         """Check command against dangerous patterns. Returns matched label/pattern or None if safe."""
+        from openjiuwen.harness.tools.shell.process_guard import check_process_termination
+
+        termination = check_process_termination(command)
+        if termination.blocked:
+            return termination.reason
         custom_patterns = getattr(self._run_config, 'dangerous_patterns', None)
         if custom_patterns is not None:
             for raw_pattern in custom_patterns:

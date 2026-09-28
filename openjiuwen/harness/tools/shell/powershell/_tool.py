@@ -34,6 +34,7 @@ from openjiuwen.harness.tools.shell.powershell._security import (
     check_injection,
     get_destructive_warning,
 )
+from openjiuwen.harness.tools.shell.process_guard import check_process_termination
 from openjiuwen.harness.tools.shell.powershell._semantics import interpret_exit_code
 from openjiuwen.core.session import get_current_session
 from openjiuwen.harness.tools.filesystem import (
@@ -140,6 +141,10 @@ class PowerShellTool(Tool):
         if not p.command:
             return ToolOutput(success=False, error="command cannot be empty")
 
+        termination = check_process_termination(p.command)
+        if termination.blocked:
+            return ToolOutput(success=False, error=termination.reason)
+
         current_cwd = get_cwd()
         resolved_cwd = p.workdir or current_cwd
 
@@ -230,6 +235,11 @@ class PowerShellTool(Tool):
 
         if not p.command:
             yield ToolOutput(success=False, error="command cannot be empty")
+            return
+
+        termination = check_process_termination(p.command)
+        if termination.blocked:
+            yield ToolOutput(success=False, error=termination.reason)
             return
 
         current_cwd = get_cwd()

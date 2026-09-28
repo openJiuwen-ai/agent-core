@@ -60,6 +60,7 @@ class ShellProcessRegistry:
         self._lock = threading.Lock()
         self._processes: dict[str, set[ProcessHandle]] = {}
         self._cancelled_sessions: set[str] = set()
+        self._spawned: set[ProcessHandle] = set()
 
     def register(self, session_id: str, proc: ProcessHandle) -> None:
         sid = (session_id or "").strip()
@@ -115,6 +116,32 @@ class ShellProcessRegistry:
                     killed += 1
         return killed
 
+    def note_spawned_process(self, proc: ProcessHandle) -> None:
+        """Remember a process the shell layer started, until it exits."""
+        if getattr(proc, "pid", None) is None:
+            return
+        with self._lock:
+            self._spawned.add(proc)
+
+    def forget_spawned_process(self, proc: ProcessHandle) -> None:
+        with self._lock:
+            self._spawned.discard(proc)
+
+    def live_spawned_pids(self) -> set[int]:
+        """PIDs of shell-spawned processes that are still running."""
+        with self._lock:
+            dead: list[ProcessHandle] = []
+            pids: set[int] = set()
+            for proc in self._spawned:
+                pid = _pid_if_alive(proc)
+                if pid is None:
+                    dead.append(proc)
+                else:
+                    pids.add(pid)
+            for proc in dead:
+                self._spawned.discard(proc)
+            return pids
+
     def consume_cancelled(self, session_id: str) -> bool:
         sid = (session_id or "").strip()
         if not sid:
@@ -127,6 +154,19 @@ class ShellProcessRegistry:
 
 
 SHELL_PROCESS_REGISTRY = ShellProcessRegistry()
+
+
+def note_spawned_process(proc: ProcessHandle) -> None:
+    """Record a shell-spawned process so later PID kills can recognize it."""
+    SHELL_PROCESS_REGISTRY.note_spawned_process(proc)
+
+
+def forget_spawned_process(proc: ProcessHandle) -> None:
+    SHELL_PROCESS_REGISTRY.forget_spawned_process(proc)
+
+
+def live_spawned_pids() -> set[int]:
+    return SHELL_PROCESS_REGISTRY.live_spawned_pids()
 
 
 def register_shell_process(session_id: str, proc: ProcessHandle) -> None:
@@ -149,6 +189,22 @@ def kill_shell_processes_for_session_tree(session_id: str) -> int:
 
 def consume_shell_session_cancelled(session_id: str) -> bool:
     return SHELL_PROCESS_REGISTRY.consume_cancelled(session_id)
+
+
+def _pid_if_alive(proc: ProcessHandle) -> int | None:
+    pid = getattr(proc, "pid", None)
+    if not isinstance(pid, int) or pid <= 0:
+        return None
+    poll = getattr(proc, "poll", None)
+    if callable(poll):
+        try:
+            if poll() is not None:
+                return None
+        except OSError:
+            return None
+    elif getattr(proc, "returncode", None) is not None:
+        return None
+    return pid
 
 
 def terminate_shell_process(proc: ProcessHandle) -> bool:

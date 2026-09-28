@@ -193,6 +193,7 @@ include = ["openjiuwen*"]
 openjiuwen = [
     "**/prompts/**/*.md",
     "**/locales/**/*.md",
+    "**/harness/resources/*.yaml",
     "**/auto_harness/resources/*.yaml",
     "**/auto_harness/skills/**/*.md",
     "**/agent_ras/**/*.md",
