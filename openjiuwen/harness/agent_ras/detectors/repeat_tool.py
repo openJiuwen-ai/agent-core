@@ -398,10 +398,26 @@ class RepeatToolCallDetector:
             return signal.member_name
         return "default"
 
+    def _is_ignored_tool_call(self, signal: Signal) -> bool:
+        """Ignore calls whose outer tool and specified arguments match a rule."""
+        if not isinstance(signal.tool_args, dict):
+            return False
+        return any(
+            rule.tool_name == signal.tool_name
+            and all(
+                key in signal.tool_args and signal.tool_args[key] == value
+                for key, value in rule.argument_equals.items()
+            )
+            for rule in self._config.ignored_tool_calls
+        )
+
     async def observe(self, signal: Signal) -> Anomaly | None:
+        """Return a repeat anomaly for eligible calls, skipping configured calls."""
         if signal.kind not in (SignalKind.AFTER_TOOL_CALL, SignalKind.TOOL_EXCEPTION):
             return None
         if not signal.tool_name:
+            return None
+        if self._is_ignored_tool_call(signal):
             return None
         if signal.interrupt_kind is not None:
             logger.debug(

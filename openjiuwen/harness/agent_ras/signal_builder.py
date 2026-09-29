@@ -121,6 +121,7 @@ def build_tool_exception_signal(
         kind=SignalKind.TOOL_EXCEPTION,
         member_name=member_name,
         tool_name=getattr(inputs, "tool_name", "") or "",
+        tool_args=tool_args_as_dict(getattr(inputs, "tool_args", None)),
         error=error_text(exc),
         tool_msg_content=tool_msg_content_from_inputs(inputs),
         interrupt_kind=_resolve_interrupt_kind(exc),

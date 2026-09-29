@@ -153,6 +153,96 @@ class TestSchemaArgHash:
         assert det._schema_key_cache.get("read_file") == ("file_path",)
 
 
+class TestIgnoredToolCallRules:
+    """Rules match the outer tool and selected top-level argument values."""
+
+    @pytest.mark.asyncio
+    async def test_multiple_tools_skip_matching_successes_and_exceptions(self):
+        config = RepeatToolConfig.model_validate({
+            "warning_threshold": 2,
+            "ignored_tool_calls": [
+                {
+                    "tool_name": "invoke_tool",
+                    "argument_equals": {"tool_name": "image_get_run"},
+                },
+                {
+                    "tool_name": "poll_job",
+                    "argument_equals": {"operation": "status"},
+                },
+            ],
+        })
+        detector = RepeatToolCallDetector(config)
+
+        for outer_name, args in (
+            ("invoke_tool", {"tool_name": "image_get_run", "arguments": {}}),
+            ("poll_job", {"operation": "status", "job_id": "image-1"}),
+        ):
+            for _ in range(12):
+                assert await detector.observe(
+                    _after_tool(outer_name, args, tool_result={"status": "running"})
+                ) is None
+                assert await detector.observe(
+                    _tool_exc(outer_name, args, error="temporary timeout")
+                ) is None
+
+        assert detector._histories == {}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("outer_name", "args"),
+        [
+            ("invoke_tool", {"tool_name": "image_create_run", "arguments": {}}),
+            ("invoke_tool", {"arguments": {"tool_name": "image_get_run"}}),
+            ("image_get_run", {"run_id": "image-1"}),
+            ("poll_job", {"operation": "cancel", "job_id": "image-1"}),
+        ],
+    )
+    async def test_nonmatching_calls_still_warn(self, outer_name, args):
+        detector = RepeatToolCallDetector(
+            RepeatToolConfig.model_validate({
+                "warning_threshold": 2,
+                "ignored_tool_calls": [
+                    {
+                        "tool_name": "invoke_tool",
+                        "argument_equals": {"tool_name": "image_get_run"},
+                    },
+                    {
+                        "tool_name": "poll_job",
+                        "argument_equals": {"operation": "status"},
+                    },
+                ],
+            })
+        )
+
+        assert await detector.observe(_after_tool(outer_name, args)) is None
+        anomaly = await detector.observe(_after_tool(outer_name, args))
+
+        assert anomaly is not None
+        assert anomaly.evidence["detector_kind"] == "generic_repeat"
+
+    @pytest.mark.asyncio
+    async def test_unconfigured_call_still_warns(self):
+        detector = RepeatToolCallDetector(RepeatToolConfig(warning_threshold=2))
+        args = {"tool_name": "image_get_run", "arguments": {"run_id": "image-1"}}
+
+        assert await detector.observe(_after_tool("invoke_tool", args)) is None
+        assert await detector.observe(_after_tool("invoke_tool", args)) is not None
+
+    def test_exception_builder_preserves_target_tool_name(self):
+        inputs = SimpleNamespace(
+            tool_name="invoke_tool",
+            tool_args='{"tool_name":"image_get_run","arguments":{"run_id":"image-1"}}',
+            tool_msg=None,
+        )
+
+        signal = build_tool_exception_signal("main", inputs, RuntimeError("timeout"))
+
+        assert signal.tool_args == {
+            "tool_name": "image_get_run",
+            "arguments": {"run_id": "image-1"},
+        }
+
+
 class TestRepeatWithinInvoke:
     @pytest.mark.asyncio
     async def test_generic_repeat_with_varying_call_goal(self):
