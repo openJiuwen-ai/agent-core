@@ -493,6 +493,26 @@ def _build_opts(rt, explicit: dict, options: dict | None = None) -> dict:
     return merged
 
 
+def _validate_model_hint(rt, opts: dict) -> None:
+    """Fail fast on a ``model`` hint the backend cannot honor.
+
+    Symmetric with ``_build_opts``' unknown-KEY fail-fast: an untrusted
+    script's option VALUE gets the same treatment. Runs before the signature
+    and the start event, so the journal and the UI never see a call that
+    would silently fall back to the base spec's model.
+    """
+    name = opts.get("model")
+    if name is None:
+        return
+    names = rt.backend.model_pool_names()
+    if names is None or name in names:
+        return
+    raise EngineError(
+        f"agent(options={{'model': {name!r}}}) is not in the model pool; "
+        f"available: {sorted(names) or '(empty — no model pool configured)'}"
+    )
+
+
 def _resolve_agent_gate(rt):
     """Return the active admission gate, lazily constructing the default sem."""
     from .admission import SemaphoreAdmission
@@ -553,6 +573,7 @@ async def agent(
     opts = _build_opts(rt, {"label": label, "phase": phase, "schema": schema}, options)
     if opts.get("isolation") not in (None, "worktree"):
         raise EngineError("agent(options={'isolation': ...}) only supports 'worktree'")
+    _validate_model_hint(rt, opts)
     json_schema, model_cls = resolve_schema(opts.get("schema"))
 
     ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -678,6 +699,10 @@ async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCal
                 res = await make_call()
         except Exception as e:  # backend / timeout error -> retry, then skip
             last_err = e
+            if isinstance(e, TimeoutError) and timeout is not None:
+                # py3.11 bare TimeoutError str() is empty; inject the budget so
+                # the existing error_detail pipeline carries it to AGENT_FAILED.
+                last_err = TimeoutError(f"timed out after {timeout}s")
             # This attempt burned real tokens before failing (budget-exhausted,
             # backend error, etc.). Accumulate so the final failed result can
             # attribute the agent's full cost, not just the last attempt's.
@@ -992,6 +1017,7 @@ class AgentSession:
     __slots__ = (
         "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
         "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
+        "_opened_model",
     )
 
     def __init__(
@@ -1017,6 +1043,9 @@ class AgentSession:
         self._member_name: str | None = None
         self._in_flight = False
         self._fork_data = _fork_data
+        # Model hint the session was opened with (recorded in _ensure_open).
+        # The avatar resolves it once; later turns are checked against it.
+        self._opened_model: str | None = None
 
     @overload
     async def send(self, prompt: str, *, notify: Literal[True], options: dict | None = ...) -> None:
@@ -1057,6 +1086,22 @@ class AgentSession:
             {"label": self._label, "phase": phase_val, "schema": schema},
             {**self._options, **(options or {})},
         )
+        _validate_model_hint(rt, opts)
+        # A session's model is fixed at its first cache-miss turn (the avatar
+        # resolves it once and bakes it into the harness). A later different
+        # hint used to be silently ignored while still folding into the call
+        # signature — a cache MISS and a paid rerun on the old model. Fail
+        # fast instead and point at fork(), the sanctioned way to switch.
+        model_hint = opts.get("model")
+        if (
+            self._sid is not None
+            and model_hint is not None
+            and model_hint != self._opened_model
+        ):
+            raise EngineError(
+                f"session model is fixed at the first turn ({self._opened_model!r}); "
+                f"fork() a new session to use {model_hint!r}"
+            )
         json_schema, model_cls = resolve_schema(opts.get("schema"))
 
         ks = key_str(_path.get() + (("call", _next_ordinal()),))
@@ -1302,6 +1347,7 @@ class AgentSession:
             fork_data=self._fork_data,
             member_name=self._member_name,
         )
+        self._opened_model = opts.get("model")
 
     def _append_history(self, prompt: str, result: Any, model_cls) -> None:
         """Append the ``(user, assistant)`` pair so the next turn carries context."""

@@ -142,6 +142,51 @@ def _has_team_worktree_shell_guard(rails: list[Any]) -> bool:
     return False
 
 
+class _SwarmflowModelResolver:
+    """Resolves ``agent(model=...)`` hints against the live team pool.
+
+    Callable (same contract as the historical closure) so it flows unchanged
+    through inject_team_handles → rails → tool_factory → runner → backend.
+    ``pool_names`` exposes accepted names so the engine can fail fast on an
+    unknown hint before the start event is emitted.
+    """
+
+    def __init__(self, team_spec: Any) -> None:
+        self._spec = team_spec
+        self._warned: set[str] = set()
+
+    def __call__(self, model_name: str) -> Any:
+        """Resolve a ``model`` hint to a worker ``TeamModelConfig``.
+
+        Returns a model *config* (not a built ``Model``): swarmflow workers
+        go through the spec build path, where ``DeepAgentSpec.model`` is a
+        ``TeamModelConfig`` resolved at construction. ``None`` falls back to
+        the worker base spec's own model.
+        """
+        if self._spec is None:
+            return None
+        from openjiuwen.agent_teams.models.allocator import resolve_member_model
+
+        resolved = resolve_member_model(self._spec, model_name=model_name, model_index=None)
+        if resolved is None and model_name and model_name not in self._warned:
+            # Defense-in-depth: the engine fails fast on unknown hints, so this
+            # only fires if the pool shrank between validation and resolution.
+            self._warned.add(model_name)
+            team_logger.warning(
+                "[swarmflow] agent(model=%r) left the pool after validation; "
+                "worker inherits base spec model (pool now: %s)",
+                model_name,
+                self.pool_names(),
+            )
+        return resolved
+
+    def pool_names(self) -> list[str]:
+        """Accepted ``model`` hint names (live read; pool refresh stays visible)."""
+        if self._spec is None:
+            return []
+        return [e.model_name for e in (self._spec.model_pool or [])]
+
+
 class AgentConfigurator:
     """Handles agent configuration, setup, and initialization.
 
@@ -762,21 +807,10 @@ class AgentConfigurator:
         swarmflow_concurrency_governor = None
         swarmflow_budget = None
         if ctx.role == TeamRole.LEADER and spec.enable_swarmflow:
-            team_spec_for_models = ctx.team_spec
-
-            def swarmflow_model_resolver(model_name: str, _spec=team_spec_for_models) -> Any:
-                """Resolve an ``agent(model=...)`` name hint to a worker ``TeamModelConfig``.
-
-                Returns a model *config* (not a built ``Model``): swarmflow workers
-                go through the spec build path, where ``DeepAgentSpec.model`` is a
-                ``TeamModelConfig`` resolved at construction. ``None`` falls back to
-                the worker base spec's own model.
-                """
-                if _spec is None:
-                    return None
-                from openjiuwen.agent_teams.models.allocator import resolve_member_model
-
-                return resolve_member_model(_spec, model_name=model_name, model_index=None)
+            # Callable class (same call contract as the historical closure) so
+            # the inject chain stays unchanged, plus ``pool_names`` for the
+            # engine's fail-fast model-hint check.
+            swarmflow_model_resolver = _SwarmflowModelResolver(ctx.team_spec)
 
             # Workers are "a teammate without team tools": derive each worker from
             # the team's teammate spec (or the leader spec when no teammate exists).

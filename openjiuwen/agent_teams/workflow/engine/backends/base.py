@@ -53,6 +53,16 @@ class AgentBackend(abc.ABC):
     #: else, so a typo never silently no-ops. Empty by default.
     KNOWN_OPTIONS: frozenset[str] = frozenset()
 
+    def model_pool_names(self) -> list[str] | None:
+        """Names this backend accepts for the ``model`` option hint.
+
+        ``None`` (default) means the backend has no model-pool concept and
+        hints pass unvalidated (MockBackend, test stubs). A list means the
+        engine fails fast on a hint not in it — symmetric with
+        ``KNOWN_OPTIONS``' unknown-KEY fail-fast, applied to the VALUE.
+        """
+        return None
+
     def __init__(self) -> None:
         self._budget = BudgetLedger()
         self._workflow_budget: BudgetLedger | None = None

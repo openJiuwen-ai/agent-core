@@ -336,6 +336,19 @@ class TeamWorkerBackend(AgentBackend):
             return None
         return self._model_resolver(model_name) if model_name else self._model_resolver(None)
 
+    def model_pool_names(self) -> list[str] | None:
+        """Accepted ``model`` hint names, for the engine's fail-fast check.
+
+        Probes the injected resolver for a ``pool_names`` capability (the
+        configurator's ``_SwarmflowModelResolver`` exposes one). An old-style
+        closure resolver has no such attribute and degrades to ``None`` —
+        no validation, exactly the pre-validation behavior.
+        """
+        if self._model_resolver is None:
+            return None
+        pool_names = getattr(self._model_resolver, "pool_names", None)
+        return list(pool_names()) if callable(pool_names) else None
+
     # ------------------------------------------------------------------
     # Worker execution (override point for tests)
     # ------------------------------------------------------------------
