@@ -633,7 +633,7 @@ class DeepAgentSpec(BaseModel):
 
         sys_operation = self.sys_operation.resolve() if self.sys_operation else None
 
-        parts = resolve_deep_agent_parts(
+        return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
             system_prompt=self.system_prompt,
@@ -667,9 +667,6 @@ class DeepAgentSpec(BaseModel):
             kv_cache_affinity_config=self.kv_cache_affinity_config,
             **self._progressive_tool_kwargs(),
         )
-        # Providers capture this per-agent context and read its operation at invocation.
-        build_ctx.extras["sys_operation"] = parts.config.sys_operation
-        return parts
 
     def build(self, context: "BuildContext | None" = None) -> "DeepAgent":
         """Materialize a live DeepAgent from this spec.

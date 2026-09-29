@@ -1,4 +1,3 @@
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
@@ -24,7 +23,7 @@ def test_deep_agent_spec_forwards_kv_cache_affinity_config() -> None:
 
     with patch(
         "openjiuwen.harness.factory.resolve_deep_agent_parts",
-        return_value=SimpleNamespace(config=SimpleNamespace(sys_operation=None)),
+        return_value=object(),
     ) as resolve_parts:
         spec.resolve_parts()
 
