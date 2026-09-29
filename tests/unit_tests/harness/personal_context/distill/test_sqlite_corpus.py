@@ -228,4 +228,4 @@ async def test_run_distill_job_consumes_sqlite_im_corpus(tmp_path: Path):
     root = Path(result.distilled_dir)
     assert (root / "persona.md").is_file()
     assert (root / "work.md").is_file()
-    assert get_cursor_ms(home_str) == WINDOW_END_MS
+    assert get_cursor_ms(home_str) == BASE_MS + 3_000 + 1

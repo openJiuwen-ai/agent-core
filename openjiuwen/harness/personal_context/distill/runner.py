@@ -42,8 +42,12 @@ async def run_distill_job(
     Run one distill cycle under PersonalContext ``home``.
 
     On non-empty success: writes ``im/profiles/versions/<job_id>/``,
-    atomically switches ``current.json``, then advances Distill cursor.
-    Empty window advances cursor without writing profiles.
+    atomically switches ``current.json``, then advances Distill cursor to
+    ``max(sent_at_ms) + 1`` of messages actually processed (not wall clock).
+    When the window was downsampled (``sampled=True``), the cursor is left
+    unchanged so uncovered messages are not marked done.
+    Empty window succeeds without advancing the cursor, so late-ingested
+    messages in the same time range remain eligible for a later tick.
     """
     cursor_ms = 0 if force_full_window else get_cursor_ms(home)
     floor_ms = 0 if learning_since_ms is None else int(learning_since_ms)
@@ -78,7 +82,7 @@ async def run_distill_job(
                 status="success",
                 message_count=0,
                 sampled=False,
-                covered_through_ms=window_end_ms,
+                covered_through_ms=None,
             )
             return DistillRunResult(
                 job_id=job_id,
@@ -109,13 +113,17 @@ async def run_distill_job(
             merge_with_existing=True,
         )
         activate_profile_version(home, job_id, source="distill")
+        max_sent = max(message.sent_at_ms for message in messages)
+        covered_through_ms = (
+            None if sampled else max(window_start_ms, max_sent + 1)
+        )
         finish_job(
             home,
             job_id,
             status="success",
             message_count=len(messages),
             sampled=sampled,
-            covered_through_ms=window_end_ms,
+            covered_through_ms=covered_through_ms,
         )
         return DistillRunResult(
             job_id=job_id,
