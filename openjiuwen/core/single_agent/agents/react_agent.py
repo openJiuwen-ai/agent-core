@@ -71,7 +71,7 @@ from openjiuwen.core.session.agent import Session, create_agent_session
 from openjiuwen.core.session.stream import OutputSchema
 from openjiuwen.core.session.stream.base import StreamMode
 from openjiuwen.core.single_agent.base import BaseAgent
-from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext
+from openjiuwen.core.single_agent.interrupt.handler import ToolInterruptHandler, ResumeContext, HitlBuildArgs
 from openjiuwen.core.single_agent.interrupt.state import (
     BaseInterruptionState,
     RESUME_START_ITERATION_KEY,
@@ -2501,13 +2501,10 @@ class ReActAgent(BaseAgent):
             results: list,
             tool_calls: list,
             ai_message: AssistantMessage,
-            iteration: int,
-            original_query: str = "",
-            request_id: str = "",
+            hitl_args: "HitlBuildArgs",
     ) -> tuple[Optional['ToolInterruptionState'], list]:
         return self._hitl_handler.build_interrupt_state(
-            results, tool_calls, ai_message, iteration,
-            original_query=original_query, request_id=request_id,
+            results, tool_calls, ai_message, hitl_args,
         )
 
     def _save_interruption_state(self, state: InterruptionState, session) -> None:
@@ -2539,7 +2536,6 @@ class ReActAgent(BaseAgent):
             session: Optional[Session],
             invoke_inputs: InvokeInputs,
             sub_agent_outputs: list = None,
-            request_id: str = "",
     ) -> Dict[str, Any]:
         """Persist interruption state and return the interrupt result dict.
 
@@ -2547,8 +2543,7 @@ class ReActAgent(BaseAgent):
         """
         if isinstance(interrupt, ToolInterruptionState):
             return await self._hitl_handler.commit_interrupt(
-                interrupt, context, session, invoke_inputs,
-                sub_agent_outputs, request_id=request_id,
+                interrupt, context, session, invoke_inputs, sub_agent_outputs,
             )
 
         pending_entry = interrupt.interrupted_workflows[interrupt.pending_workflow_id]
@@ -2617,7 +2612,6 @@ class ReActAgent(BaseAgent):
                     interruption_state.pending_component_id = next_comp_id
                     return await self._commit_interrupt(
                         interruption_state, context, session, invoke_inputs,
-                        request_id=invoke_inputs.invocation_id,
                     )
 
         # Step 3: all feedbacks collected — write ai_message and concurrently resume all workflows
@@ -2638,7 +2632,6 @@ class ReActAgent(BaseAgent):
         if workflow_interrupt:
             return await self._commit_interrupt(
                 workflow_interrupt, context, session, invoke_inputs,
-                request_id=invoke_inputs.invocation_id,
             )
 
         # All workflows completed — continue ReAct loop from next iteration
@@ -3082,14 +3075,17 @@ class ReActAgent(BaseAgent):
                             break
 
                         hitl_interrupt, sub_agent_outputs = self._after_execute_tool_call_for_hitl(
-                            results, ai_message.tool_calls, ai_message, iteration,
-                            original_query=ctx.extra.get("_original_query", ""),
-                            request_id=invoke_inputs.invocation_id,
+                            results, ai_message.tool_calls, ai_message,
+                            HitlBuildArgs(
+                                iteration=iteration,
+                                original_query=ctx.extra.get("_original_query", ""),
+                                request_id=invoke_inputs.invocation_id,
+                            ),
                         )
                         if hitl_interrupt:
-                            await self._commit_interrupt(hitl_interrupt, context, session, invoke_inputs,
-                                                         sub_agent_outputs,
-                                                         request_id=invoke_inputs.invocation_id)
+                            await self._commit_interrupt(
+                                hitl_interrupt, context, session, invoke_inputs, sub_agent_outputs,
+                            )
                             break
 
                         workflow_interrupt = self._after_execute_tool_call(
@@ -3099,7 +3095,6 @@ class ReActAgent(BaseAgent):
                         if workflow_interrupt:
                             await self._commit_interrupt(
                                 workflow_interrupt, context, session, invoke_inputs,
-                                request_id=invoke_inputs.invocation_id,
                             )
                             break
 
