@@ -253,8 +253,19 @@ async def test_no_llm_and_model_failure_never_preserve_legacy_positive_edge() ->
         '{"status":"success","status":"failure","reason":"valid"}',
         {"status": "success", "reason": "valid", "extra": True},
         {"status": "maybe", "reason": "valid"},
+        {"status": "success", "reason": ""},
+        {"status": "success", "reason": " leading whitespace"},
+        {"status": "success", "reason": 7},
     ],
-    ids=["invalid_json", "duplicate_key", "extra_field", "invalid_status"],
+    ids=[
+        "invalid_json",
+        "duplicate_key",
+        "extra_field",
+        "invalid_status",
+        "empty_reason",
+        "reason_whitespace",
+        "reason_type",
+    ],
 )
 async def test_invalid_model_response_fails_closed(response: object) -> None:
     candidate = _candidate(1)
@@ -379,6 +390,7 @@ async def test_requests_are_bounded_data_without_execution_control_fields() -> N
     system_prompt = call["messages"][0]["content"].casefold()
     assert "names" in system_prompt and "order" in system_prompt and "planned" in system_prompt
     assert "do not infer" in system_prompt
+    assert "512 utf-8 bytes" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -716,3 +728,37 @@ async def test_model_reason_rejects_format_control_characters(reason: str) -> No
     )
 
     assert result[0].status == "insufficient_evidence"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["a" * 512, "判" * 170 + "ab"])
+async def test_model_reason_at_byte_limit_is_preserved(reason: str) -> None:
+    candidate = _candidate(1)
+    result = await evaluate_symphony_edge_candidates(
+        llm=_RecordingLLM([{"status": "success", "reason": reason}]),
+        query="query",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries=_summaries(candidate),
+    )
+
+    assert result[0].status == "success"
+    assert result[0].reason == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reason", ["a" * 514, "判" * 171 + "a"])
+async def test_oversized_valid_model_reason_is_utf8_safely_truncated(reason: str) -> None:
+    candidate = _candidate(1)
+    result = await evaluate_symphony_edge_candidates(
+        llm=_RecordingLLM([{"status": "success", "reason": reason}]),
+        query="query",
+        candidates=(candidate,),
+        decisions=(_decision(candidate),),
+        summaries=_summaries(candidate),
+    )
+
+    assert result[0].status == "success"
+    assert result[0].reason.endswith("...")
+    assert len(result[0].reason.encode("utf-8")) <= 512
+    assert reason.startswith(result[0].reason[:-3])

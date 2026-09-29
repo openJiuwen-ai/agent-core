@@ -1,3 +1,5 @@
+# coding: utf-8
+# Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 """Tool execution tracking rail.
 
 Emits ``tool_call`` and ``tool_result`` chunks into the session
@@ -11,7 +13,8 @@ import json
 from typing import Any
 
 from openjiuwen.core.session.stream.base import OutputSchema
-from openjiuwen.core.single_agent.rail.base import AgentRail
+from openjiuwen.core.single_agent.ability_manager import resolve_tool_result_text
+from openjiuwen.core.single_agent.rail.base import AgentRail, ToolCallInputs
 
 
 class ToolTrackingRail(AgentRail):
@@ -29,7 +32,15 @@ class ToolTrackingRail(AgentRail):
         tool_name: str,
         tool_result: Any,
     ) -> dict[str, Any]:
-        """Build the UI payload for a completed tool call."""
+        """Build the UI payload for a completed tool call.
+
+        ``tool_result`` is a compatibility field: ``str()`` of the structured
+        result, which existing consumers still parse. Displays read
+        ``rendered_result`` (see ``after_tool_call``) instead. A structured
+        ``structured_result`` field is intentionally not emitted yet; once UI
+        consumers migrate to structured data, this string field and the
+        parsing built on it are removed end to end.
+        """
         payload: dict[str, Any] = {
             "tool_result": str(tool_result)
             if tool_result is not None
@@ -89,7 +100,12 @@ class ToolTrackingRail(AgentRail):
         )
 
     async def after_tool_call(self, ctx: Any) -> None:
-        """Write a ``tool_result`` chunk when a tool finishes."""
+        """Write a ``tool_result`` chunk when a tool finishes.
+
+        Besides the compatibility fields, the chunk carries ``rendered_result``:
+        the exact text the model reads for this call. The rail's priority (5)
+        is below every rail that rewrites the tool message, so the text is final.
+        """
         session = ctx.session
         if session is None:
             return
@@ -106,16 +122,22 @@ class ToolTrackingRail(AgentRail):
             except (json.JSONDecodeError, TypeError):
                 pass
 
+        payload: dict[str, Any] = {
+            "tool_name": tool_name,
+            "tool_args": tool_args,
+            **self._build_tool_result_payload(
+                tool_name, tool_result
+            ),
+        }
+        if isinstance(inputs, ToolCallInputs):
+            rendered_result = resolve_tool_result_text(inputs, ctx.exception)
+            if rendered_result is not None:
+                payload["rendered_result"] = rendered_result
+
         await session.write_stream(
             OutputSchema(
                 type="tool_result",
                 index=0,
-                payload={
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                    **self._build_tool_result_payload(
-                        tool_name, tool_result
-                    ),
-                },
+                payload=payload,
             )
         )

@@ -196,9 +196,9 @@ skill 后最直觉的下一步，所以 "## Nested skills" 那段文案**点名�
 skill 的真实名字拼出可用的那条调用。
 
 这段文案要能被读到，`skill_tool` 就必须**无条件**设 `data["content"]`：
-`AbilityManager._build_tool_message_content` 只在有 `content` 时按原文渲染，否则回落
-`str(result)`——把 skill 正文连同这段附录一起埋进整个 `ToolOutput` 的 pydantic repr。
-`data` 的其余键（`skill_directory` / `discovered_skill_names` …）仍留给程序消费者。
+`SkillTool` 不覆写 `render_for_llm`，默认渲染只在有 `content` 时按原文输出，否则回落为整个
+载荷的 JSON——把 skill 正文连同这段附录一起埋进元数据键里。`data` 的其余键
+（`skill_directory` / `discovered_skill_names` …）仍留给程序消费者。
 
 发现侧跳过隐藏目录与 `_SKILL_SCAN_SKIP_DIRS`；后者与 `skill_tool._TREE_SKIP_DIR_NAMES` 取值
 恰好相同但**是两个独立常量**，回答的是不同问题（"别进去找" vs "别在目录树里展示"）。

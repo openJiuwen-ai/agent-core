@@ -89,3 +89,23 @@ def test_reasoning_is_split_per_phase_across_a_tool_call() -> None:
     # The post-tool reasoning is a new phase and must not repeat the first one.
     assert final_message.reasoning_content == "the file says X"
     assert final_message.phase_id == 2
+
+
+def test_tool_result_content_prefers_rendered_result_over_compat_result() -> None:
+    message = _projector().project(
+        {
+            "type": "tool_result",
+            "payload": {
+                "tool_result": {
+                    "tool_name": "glob",
+                    "tool_call_id": "call-1",
+                    "result": "success=True data={'matching_files': ['/a.py']} error=None",
+                    "rendered_result": "/a.py",
+                }
+            },
+        },
+        task_id="task-1",
+    )
+
+    assert message is not None
+    assert message.content == "/a.py"

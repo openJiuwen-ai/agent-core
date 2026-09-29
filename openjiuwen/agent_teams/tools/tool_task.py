@@ -325,7 +325,7 @@ class TaskCreateTool(TeamTool):
         if started:
             team_logger.info(f"Auto-started members: {started}")
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Operation failed"
         d = output.data
@@ -457,7 +457,7 @@ class ScheduledTaskCreateTool(TeamTool):
             line += f" {_owner_phrase(task)}"
         return line
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Operation failed"
         d = output.data
@@ -526,7 +526,7 @@ class ViewTaskToolV2(TeamTool):
 
         return ToolOutput(success=True, data=result.model_dump())
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         """Map view_task result — tiered output by action.
 
         Both tiers render the task's last-transition time as ``<absolute
@@ -895,7 +895,7 @@ class UpdateTaskTool(TeamTool):
             },
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Operation failed"
         d = output.data
@@ -945,7 +945,7 @@ class SubmitPlanTool(TeamTool):
             error=None if result.get("success") else result.get("message", "Failed to submit member plan"),
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to submit member plan"
         d = output.data
@@ -1033,7 +1033,7 @@ class ClaimTaskTool(TeamTool):
             },
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         """Map claim_task result with behavior guidance on completion."""
         if not output.success:
             return output.error or "Task not found"
@@ -1133,7 +1133,7 @@ class MemberCompleteTaskTool(TeamTool):
             },
         )
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to complete task"
         d = output.data
@@ -1198,7 +1198,7 @@ class VerifyTaskTool(TeamTool):
             data["tally"] = result.data
         return ToolOutput(success=True, data=data)
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to verify task"
         d = output.data

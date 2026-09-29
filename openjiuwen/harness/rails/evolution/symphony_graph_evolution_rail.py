@@ -31,9 +31,13 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     read_tool_call,
     span_attributes,
     span_identity,
-    trim_trajectory,
 )
 from openjiuwen.agent_evolving.trajectory.team import span_category
+from openjiuwen.agent_evolving.trajectory.windows import (
+    is_trajectory_event_span,
+    rebase_window_chain,
+    trim_trajectory_window,
+)
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.session import InteractiveInput
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, InvokeInputs, ToolCallInputs
@@ -58,6 +62,7 @@ from openjiuwen.harness.rails.evolution.symphony_edge_evidence import (
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_fragments import (
     SymphonyExecutionFragment,
+    _match_observability_truncated_suffix,
     project_symphony_execution_fragments,
 )
 from openjiuwen.harness.rails.evolution.symphony_execution_graph import (
@@ -80,7 +85,6 @@ _SUMMARY_VALUE_MAX_BYTES = 512
 _SUMMARY_MAX_KEYS = 12
 _SUMMARY_MAX_BRANCHES = 6
 _SUMMARY_MAX_BRANCH_VALUES = 2
-_OBSERVABILITY_TRUNCATED_SUFFIX = re.compile(r"\.\.\.<truncated [1-9]\d* chars>$")
 _SUMMARY_REDACTED_KEY_TOKENS = (
     "accesskey",
     "apikey",
@@ -323,7 +327,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
     # Capture must therefore run afterwards for after hooks (and, symmetrically,
     # subscribe after the invoke root has opened in before hooks).
     priority = 5
-    _SUBSCRIPTION_CATEGORIES = ("llm", "tool", "agent", "task", "message")
+    _SUBSCRIPTION_CATEGORIES = ("llm", "tool", "event", "agent", "task", "message")
 
     def __init__(
         self,
@@ -643,19 +647,10 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         if trajectory is None:
             return ()
         issues: list[Mapping[str, object]] = []
-        indexed_pattern = re.compile(r"^(gen_ai\.(?:prompt|completion))\.(\d+)\.")
         for span in iter_spans(trajectory):
-            attrs = span_attributes(span)
-            indexes: dict[str, set[int]] = {}
-            for key in attrs:
-                match = indexed_pattern.match(str(key))
-                if match:
-                    indexes.setdefault(match.group(1), set()).add(int(match.group(2)))
-            for base, values in indexes.items():
-                if values and values != set(range(max(values) + 1)):
-                    issues.append(MappingProxyType({"code": "indexed_attribute_gap", "attribute": base}))
             if span_category(span) != "tool":
                 continue
+            attrs = span_attributes(span)
             for key in (
                 observability_semconv.GEN_AI_TOOL_CALL_ARGUMENTS,
                 observability_semconv.GEN_AI_TOOL_CALL_RESULT,
@@ -664,7 +659,7 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
                 if not isinstance(value, str) or not value.strip() or value.strip()[0] not in "[{":
                     continue
                 stripped = value.strip()
-                if stripped.startswith("[ERROR]:") or _OBSERVABILITY_TRUNCATED_SUFFIX.search(stripped):
+                if stripped.startswith("[ERROR]:") or _match_observability_truncated_suffix(stripped):
                     continue
                 if not _is_structured_tool_payload(value):
                     issues.append(MappingProxyType({"code": "tool_payload_json_error", "attribute": key}))
@@ -807,7 +802,9 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         if state is None:
             return projected
         detached = Trajectory.from_otlp(increment.to_otlp())
-        detached_span_count = sum(1 for _ in iter_spans(detached))
+        # Events ride along with the work they describe and do not spend the
+        # span budget, the same as in the shared clean window.
+        detached_span_count = sum(1 for span in iter_spans(detached) if not is_trajectory_event_span(span))
         with state.lock:
             if state.continuity_break_pending:
                 if state.increments:
@@ -830,14 +827,21 @@ class SymphonyGraphEvolutionRail(EvolutionRail):
         while overflow and state.increments:
             oldest_count = state.increment_span_counts[0]
             if oldest_count <= overflow:
-                state.increments.pop(0)
+                dropped = state.increments.pop(0)
                 state.increment_continuities.pop(0)
                 state.increment_span_counts.pop(0)
                 state.span_count -= oldest_count
                 overflow -= oldest_count
+                if state.increments:
+                    # The new head may apply its window deltas onto a window
+                    # the dropped increment built; restate that base.
+                    state.increments[0] = rebase_window_chain(
+                        merge_trajectories(dropped, state.increments[0]),
+                        state.increments[0],
+                    )
                 continue
             retained_count = oldest_count - overflow
-            state.increments[0] = trim_trajectory(state.increments[0], retained_count)
+            state.increments[0] = trim_trajectory_window(state.increments[0], retained_count)
             state.increment_span_counts[0] = retained_count
             state.span_count -= overflow
             overflow = 0
@@ -1664,7 +1668,7 @@ def _is_possible_partial_json_scalar(value: str) -> bool:
 
 
 def _structured_truncated_summary(value: str) -> Mapping[str, Any] | None:
-    match = _OBSERVABILITY_TRUNCATED_SUFFIX.search(value)
+    match = _match_observability_truncated_suffix(value)
     if match is None:
         return None
     prefix = value[: match.start()].rstrip()

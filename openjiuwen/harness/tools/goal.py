@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 from openjiuwen.core.foundation.tool import Input, Output, Tool
 from openjiuwen.harness.goal.schema import GoalAssessment, GoalAssessmentStatus
 from openjiuwen.harness.prompts.tools import build_tool_card
+from openjiuwen.harness.tools.base_tool import render_fields
 
 if TYPE_CHECKING:
     from openjiuwen.harness.goal.manager import GoalManager
@@ -130,6 +131,10 @@ class SubmitGoalReportTool(Tool):
             "status": status.value,
         }
 
+    def render_for_llm(self, output: dict[str, Any]) -> str:
+        """Acknowledge the report with the normalized assessment status."""
+        return f"Goal report accepted (status: {output['status']})."
+
     async def stream(self, inputs: Input, **kwargs: Any) -> AsyncIterator[Output]:
         result = await self.invoke(inputs, **kwargs)
         yield result
@@ -188,6 +193,12 @@ class GetCurrentGoalTool(Tool):
             "attempt_count": record.attempt_count,
             "last_assessment": assessment.to_dict() if assessment else None,
         }
+
+    def render_for_llm(self, output: dict[str, Any]) -> str:
+        """Render the goal summary as ``key: value`` lines, or the no-goal message."""
+        if not output["has_goal"]:
+            return output["message"]
+        return render_fields({key: value for key, value in output.items() if key != "has_goal"})
 
     async def stream(self, inputs: Input, **kwargs: Any) -> AsyncIterator[Output]:
         result = await self.invoke(inputs, **kwargs)

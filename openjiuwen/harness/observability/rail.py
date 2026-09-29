@@ -88,7 +88,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TOOL_PROTOCOL,
     OJ_TOOL_RESOURCE_ID,
     OJ_TRACE_ROOT,
-    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
@@ -531,6 +532,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent_name=agent_name,
                 decoration=decoration,
                 root_span=root_span,
+                scope_parent=iteration_parent,
             )
             span.set_attribute(DA_TASK_ITERATION, iteration)
             span.set_attribute(DA_TASK_IS_FOLLOW_UP, is_follow_up)
@@ -708,6 +710,7 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent_name=agent_name,
                 decoration=decoration,
                 root_span=root_span,
+                scope_parent=parent_span,
             )
 
             query = getattr(inputs, "query", "") or ""
@@ -829,8 +832,10 @@ class AgentObservabilityRail(DeepAgentRail):
                 agent_name=agent_name,
                 decoration=AgentSpanDecoration.collect(ctx),
                 root_span=root_span,
+                scope_parent=scope_parent,
             )
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "step")
+            span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
             step_id = f"{span.context.span_id:016x}"
             span.set_attribute(OJ_STEP_ID, step_id)
             # The ReAct counter is the step number. ``deepagent.task.iteration``
@@ -884,20 +889,19 @@ class AgentObservabilityRail(DeepAgentRail):
     # ------------------------------------------------------------------
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
-        """Open the authoritative span around one AbilityManager execution."""
+        """Open the authoritative span around one AbilityManager execution.
+
+        Every agent this rail is mounted on gets it, a Team member included.
+        Only this hook sees the model's tool call, so only this span can state
+        the call id; the global tool callback span a Team member used to get
+        stated none, and nothing could join the call to the tool message the
+        model read for it.
+        """
         try:
             inputs = getattr(ctx, "inputs", None)
             tool_name = str(getattr(inputs, "tool_name", "") or "unknown")
             current_agent = get_current_agent_span()
             root_span = self._root_span_for(ctx)
-            if (
-                root_span is None
-                or not root_span.attributes.get(OJ_TRACE_ROOT)
-            ):
-                # This authoritative Ability scope is the single-Agent
-                # integration. Team roots keep their existing global Tool
-                # callback behavior until the later Team trajectory phase.
-                return
             parent = (
                 current_agent
                 if current_agent is not None and current_agent.is_recording()
@@ -914,7 +918,7 @@ class AgentObservabilityRail(DeepAgentRail):
             )
             span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
             span.set_attribute(GEN_AI_TOOL_NAME, tool_name)
-            span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
+            span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
             span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "tool")
             span.set_attribute(OJ_TOOL_AUTHORITATIVE, True)
 
@@ -1143,10 +1147,29 @@ class AgentObservabilityRail(DeepAgentRail):
         agent_name: str,
         decoration: AgentSpanDecoration,
         root_span: Span | None,
+        scope_parent: Span | None,
     ) -> None:
-        """Apply the attributes shared by iteration and invoke spans."""
+        """Apply the attributes shared by iteration, invoke and Step spans.
+
+        Correlation comes from the run root, except the turn identity, which
+        the scope parent overrides when it states one. A single agent's root
+        states the turn and every agent span copies it, so the parent's value
+        is the root's and nothing changes there. A Team root states no turn —
+        one trace holds many member turns — so the member span states it and
+        its Step and nested sub-agent spans inherit it from there. A
+        decoration still has the last word.
+
+        Args:
+            span: The agent-tier span being opened.
+            agent: The agent the span belongs to.
+            agent_name: Resolved agent name for the span.
+            decoration: Attributes another rail contributed to this span.
+            root_span: The run root this span belongs to, if any.
+            scope_parent: The span this one opens inside (run root, invoke,
+                iteration or agent span), if any.
+        """
         span.set_attribute(GEN_AI_OPERATION_NAME, "invoke_agent")
-        span.set_attribute(OJ_TRACE_SCHEMA_VERSION, "1")
+        span.set_attribute(OJ_TRAJECTORY_SCHEMA_VERSION, TRAJECTORY_SPAN_SCHEMA_VERSION)
         span.set_attribute(OJ_TRAJECTORY_RECORD_KIND, "agent")
         if agent_name:
             span.set_attribute(GEN_AI_AGENT_NAME, agent_name)
@@ -1177,6 +1200,11 @@ class AgentObservabilityRail(DeepAgentRail):
                 OJ_EXECUTION_SUBJECT_SESSION_ID,
             ):
                 value = root_span.attributes.get(key)
+                if value is not None:
+                    span.set_attribute(key, value)
+        if scope_parent is not None and scope_parent.attributes.get(OJ_TURN_ID) is not None:
+            for key in (OJ_TURN_ID, OJ_TURN_NUMBER):
+                value = scope_parent.attributes.get(key)
                 if value is not None:
                     span.set_attribute(key, value)
         subject = current_execution_subject()

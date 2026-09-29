@@ -82,7 +82,7 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRACE_COMPLETE,
     OJ_TRACE_FORCED_CLOSE,
     OJ_TRACE_ROOT,
-    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
     OJ_TRAJECTORY_RECORD_KIND,
 )
 from openjiuwen.extensions.observability.span_context import (
@@ -631,7 +631,6 @@ async def test_structured_input_and_output_share_redaction_decisions() -> None:
             enabled=True,
             service_name="redaction-contract-test",
             sample_rate=1.0,
-            backend="otlp",
             redact_prompts=True,
             redact_completions=True,
         ),
@@ -676,7 +675,6 @@ async def test_prompt_attachment_provenance_is_additive_and_positioned() -> None
             enabled=True,
             service_name="input-provenance-contract-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -787,7 +785,6 @@ async def test_prompt_attachment_provenance_survives_attribute_pressure_and_reda
             enabled=True,
             service_name="input-provenance-pressure-test",
             sample_rate=1.0,
-            backend="otlp",
             redact_prompts=True,
             max_attributes=35,
         ),
@@ -929,7 +926,7 @@ async def test_llm_semantic_identity_survives_prompt_attribute_pressure() -> Non
     assert span.attributes[OJ_REQUEST_ID] == "semantic-pressure-call"
     assert span.attributes[OJ_INFERENCE_ID] == f"{span.context.span_id:016x}"
     assert span.attributes[GEN_AI_OPERATION_NAME] == "chat"
-    assert span.attributes[OJ_TRACE_SCHEMA_VERSION] == "1"
+    assert span.attributes[OJ_TRAJECTORY_SCHEMA_VERSION] == "2"
     assert span.attributes[OJ_TRAJECTORY_RECORD_KIND] == "inference"
     assert span.attributes[GEN_AI_REQUEST_STREAM] is False
     assert GEN_AI_OUTPUT_MESSAGES in span.attributes
@@ -944,7 +941,6 @@ async def test_structured_messages_preserve_ordered_multimodal_parts_and_name() 
             enabled=True,
             service_name="multimodal-contract-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1049,7 +1045,6 @@ async def test_unified_and_legacy_llm_terminals_each_end_exactly_once() -> None:
             enabled=True,
             service_name="llm-terminal-contract-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1122,7 +1117,6 @@ async def test_internal_probe_callback_flow_does_not_create_trajectory_span() ->
             enabled=True,
             service_name="internal-probe-suppression-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1169,7 +1163,6 @@ async def test_tool_definitions_model_dump_before_string_fallback() -> None:
             enabled=True,
             service_name="tool-definition-contract-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1252,7 +1245,6 @@ async def test_tool_definitions_failures_fallback_per_item_without_orphaning_spa
             enabled=True,
             service_name="tool-definition-fallback-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1317,7 +1309,6 @@ async def test_real_model_stream_early_close_is_forced_unset_before_root(
             enabled=True,
             service_name="early-close-contract-test",
             sample_rate=1.0,
-            backend="otlp",
         ),
         span_exporter_override=exporter,
     )
@@ -1862,3 +1853,30 @@ async def test_tool_reported_failure_masks_reason_in_status() -> None:
     assert span.attributes[ERROR_TYPE] == "ToolReportedFailure"
     assert span.status.description == "auth failed: access_token=***"
     assert "eyAbCdEf123" not in span.status.description
+
+
+def test_tool_inputs_record_arguments_not_the_invocation_signature() -> None:
+    """``gen_ai.tool.call.arguments`` carries the model's arguments alone.
+
+    The runner invokes tools as ``invoke(arguments, session=session)``; the
+    keyword arguments are injected call context, not model output, so the
+    recorded arguments keep the arguments' own shape instead of burying them
+    in an ``(args, kwargs)`` tuple.
+    """
+    serialize = OtelCallbackHandler._serialize_tool_inputs
+    session = SimpleNamespace(get_session_id=lambda: "session-1")
+
+    assert serialize((({"command": "pwd"},), {"session": session})) == '{"command": "pwd"}'
+    assert serialize((({"command": "ls"},), {"session": session, "_tool_callback_context": "c"})) == (
+        '{"command": "ls"}'
+    )
+    # A tool invoked without arguments records an empty argument object.
+    assert serialize(((), {"session": session})) == "{}"
+    assert serialize(((), {})) == "{}"
+    # A nested Session inside the arguments still renders readable.
+    assert serialize((({"session": session},), {})) == '{"session": "session:session-1"}'
+    # Shapes the unwrap cannot vouch for keep the whole invocation recorded.
+    assert serialize((({"a": 1}, {"b": 2}), {})) == '[[{"a": 1}, {"b": 2}], {}]'
+    assert serialize(((), {"q": "hello"})) == '[[], {"q": "hello"}]'
+    assert serialize({"command": "pwd"}) == '{"command": "pwd"}'
+    assert serialize(None) == ""

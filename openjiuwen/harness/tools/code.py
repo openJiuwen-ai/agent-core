@@ -54,5 +54,17 @@ class CodeTool(Tool):
             error=res.data.stderr if res.data and res.data.exit_code != 0 else None
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render stdout, stderr and a non-zero exit code as terminal-like text."""
+        data = output.data
+        if data is None:
+            return super().render_for_llm(output)
+        parts = [data["stdout"]] if data["stdout"] else []
+        if data["stderr"]:
+            parts.append(f"Stderr:\n{data['stderr']}")
+        if data["exit_code"] != 0:
+            parts.append(f"Exit code: {data['exit_code']}")
+        return "\n".join(parts) or "Code executed successfully with no output."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass

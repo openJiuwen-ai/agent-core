@@ -184,7 +184,7 @@ def test_swarmflow_tool_launches_and_returns_immediately():
     assert out.data["run_id"].startswith("wf_")
     assert len(harness.launched) == 1
     assert harness.launched[0][1] == "swarmflow"
-    mapped = tool.map_result(out)
+    mapped = tool.render_for_llm(out)
     assert out.data["run_id"] in mapped
     assert out.data["task_id"] in mapped
 
@@ -378,7 +378,7 @@ def test_swarmflow_tool_launches_inline_script(tmp_path):
         assert os.path.isfile(script_path)
         assert len(harness.launched) == 1
         assert harness.launched[0][2] == f"swarmflow: {script_path}"
-        assert script_path in tool.map_result(out)
+        assert script_path in tool.render_for_llm(out)
     finally:
         paths.reset_openjiuwen_home()
 

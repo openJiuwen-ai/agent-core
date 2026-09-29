@@ -2738,7 +2738,7 @@ class ReActAgent(BaseAgent):
 
                 if invoke_inputs.result is None:
                     for iteration in range(start_iteration, self._config.max_iterations):
-                        logger.info(f"ReAct iteration {iteration + 1}/{self._config.max_iterations}")
+                        logger.info(f"ReAct iteration {iteration + 1}")
                         ctx.extra["_react_iteration"] = iteration + 1
 
                         # Honor force_finish requests set at iteration boundary

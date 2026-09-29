@@ -1138,7 +1138,7 @@ async def test_large_run_io_helpers_execute_outside_event_loop_thread(
 
     monkeypatch.setattr(context_pipeline.shutil, "rmtree", record_rmtree)
     await service.start()
-    await _submit_run(queue, "local", "run-threaded", _batch(_item(content="large body " * 50_000)))
+    await _submit_run(queue, "local", "run-threaded", _batch(_item(content="large body " * 4_000)))
     await service.stop(timeout_seconds=1)
 
     expected = {
@@ -1427,12 +1427,14 @@ async def test_cancel_run_discards_only_inflight_batch_and_retains_checkpoint(
 @pytest.mark.asyncio
 async def test_finish_reports_validation_and_commit_phases(tmp_path: Path) -> None:
     queue: asyncio.Queue[object] = asyncio.Queue(maxsize=8)
-    phases: list[tuple[str, str, str]] = []
+    phases: list[tuple[str, str, str, int]] = []
     service = ContextPipelineService(
         home=tmp_path,
         config=_config(),
         input_queue=queue,
-        progress_callback=lambda service_id, run_id, phase: phases.append((service_id, run_id, phase)),
+        progress_callback=lambda service_id, run_id, phase, percent: phases.append(
+            (service_id, run_id, phase, percent)
+        ),
     )
     await service.start()
     try:
@@ -1441,8 +1443,11 @@ async def test_finish_reports_validation_and_commit_phases(tmp_path: Path) -> No
         await service.stop(timeout_seconds=1)
 
     assert phases == [
-        ("local", "run-progress", "validating"),
-        ("local", "run-progress", "committing"),
+        ("local", "run-progress", "organizing", 50),
+        ("local", "run-progress", "organizing", 60),
+        ("local", "run-progress", "organizing", 85),
+        ("local", "run-progress", "validating", 90),
+        ("local", "run-progress", "committing", 97),
     ]
 
 

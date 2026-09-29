@@ -158,6 +158,8 @@ class LLMCallEvents(EventBase):
         LLM_STREAM_OUTPUT: Fired for each item yielded by BaseModelClient.stream
         LLM_STREAM_COMPLETED: Fired once after Model.stream naturally exhausts,
             carrying the fully accumulated AssistantMessage
+        LLM_ROUTE: Fired when a model-group router selects a final route or
+            exhausts all routes. Carries frontend-safe route metadata.
         LLM_INPUT: Fired before LLM request with messages/tools input data
         LLM_OUTPUT: Fired after LLM response with response/usage output data
     """
@@ -169,6 +171,7 @@ class LLMCallEvents(EventBase):
     LLM_STREAM_INPUT = EventBase.get_event("llm_stream_input")
     LLM_STREAM_OUTPUT = EventBase.get_event("llm_stream_output")
     LLM_STREAM_COMPLETED = EventBase.get_event("llm_stream_completed")
+    LLM_ROUTE = EventBase.get_event("llm_route")
     LLM_INPUT = EventBase.get_event("llm_input")
     LLM_OUTPUT = EventBase.get_event("llm_output")
 

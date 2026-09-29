@@ -27,6 +27,7 @@ from openjiuwen.core.single_agent.rail.base import (
 from openjiuwen.harness.prompts.builder import PromptSection, SystemPromptBuilder
 from openjiuwen.harness.rails.progressive_tool_rail import ProgressiveToolRail
 from openjiuwen.harness.schema.config import DeepAgentConfig
+from openjiuwen.harness.tools.base_tool import ToolOutput
 from openjiuwen.harness.tools.tool_discovery.tool_call import ToolCallTool
 from openjiuwen.harness.tools.tool_discovery.tool_search import ToolSearchTool
 
@@ -106,6 +107,17 @@ class _InterruptingAbilityManager(_CapturingAbilityManager):
     async def execute(self, ctx, tool_call, session, parallel_tool_calls=False):
         self.executed.append(tool_call)
         return [(self.interrupt, None)]
+
+
+class _FailingTargetAbilityManager(_CapturingAbilityManager):
+    async def execute(self, ctx, tool_call, session, parallel_tool_calls=False):
+        self.executed.append(tool_call)
+        return [
+            (
+                ToolOutput(success=False, data={"stdout": "a.py:1:x"}, error="raw error"),
+                ToolMessage(content="rendered error\na.py:1:x", tool_call_id=tool_call.id),
+            )
+        ]
 
 
 class _TestableProgressiveToolRail(ProgressiveToolRail):
@@ -327,6 +339,10 @@ async def test_search_result_requires_tool_call_wrapper_and_unknown_name_is_reje
         "name": "cron_create_job",
         "result": {"jobs": []},
     }
+    # The model reads the target's rendered message; the structured result
+    # streamed to upper layers carries no rendered text.
+    assert call_tool.render_for_llm(wrapper_output) == '{"jobs": []}'
+    assert "content" not in wrapper_output.model_dump()["data"]
     assert manager.executed[-1].name == "cron_create_job"
     assert manager.executed[-1].arguments == '{"when": "tomorrow", "text": "call mom"}'
 
@@ -484,3 +500,43 @@ async def test_tool_call_requires_new_search_after_tool_schema_changes():
     assert "has changed" in (output.error or "")
     assert manager.executed == []
     assert rail._get_discovered_tools(session) == []
+
+
+@pytest.mark.asyncio
+async def test_tool_call_relays_target_rendering_without_touching_structured_result():
+    """A failed target shows the model its rendered message; the raw error stays structured."""
+
+    rail, agent, manager = _rail_and_agent(_FailingTargetAbilityManager())
+    rail.seed_cached_tools(
+        all_tool_infos=[
+            ToolInfo(
+                name="cron_create_job",
+                description="Create a calendar reminder",
+                parameters=FULL_SCHEMA,
+            )
+        ]
+    )
+    session = _FakeSession()
+    await manager.registered["tool_search"][1].invoke({"query": "calendar", "limit": 1}, session=session)
+
+    call_tool = manager.registered["tool_call"][1]
+    wrapper_ctx = AgentCallbackContext(
+        agent=agent,
+        inputs=ToolCallInputs(
+            tool_call=SimpleNamespace(id="wrapper-call"),
+            tool_name="tool_call",
+            tool_args={"name": "cron_create_job", "args": {}},
+        ),
+        session=session,
+    )
+    output = await call_tool.invoke(
+        wrapper_ctx.inputs.tool_args,
+        session=session,
+        _tool_callback_context=wrapper_ctx,
+    )
+
+    assert output.success is False
+    assert output.error == "raw error"
+    assert call_tool.render_for_llm(output) == "rendered error\na.py:1:x"
+    assert "rendered error" not in str(output)
+    assert "rendered error" not in str(output.model_dump())

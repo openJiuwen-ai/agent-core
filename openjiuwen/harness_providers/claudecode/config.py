@@ -22,20 +22,29 @@ _PERMISSION_MODES = ("default", "acceptEdits", "plan", "bypassPermissions", "don
 DEFAULT_CLAUDE_MAX_BUFFER_SIZE = 32 * 1024 * 1024
 
 
+def _is_number(value: object) -> bool:
+    """Return whether ``value`` is an int or float; ``bool`` does not count."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 @dataclass(frozen=True, slots=True)
 class ClaudeModelConfig:
     """Model endpoint used by the Claude CLI.
 
     ``api_base`` / ``api_key`` are injected through the CLI ``--settings``
-    flag-settings layer so they win over the user's ``settings.json``.
+    flag-settings layer so they win over the user's ``settings.json``. Without
+    them the CLI runs on its own login (for example a subscription), where
+    ``model`` may be a built-in alias such as ``"sonnet"`` or ``"haiku"``.
+    ``effort`` is the CLI ``--effort`` level (``low`` ... ``max``).
     """
 
     model: str | None = None
     api_base: str | None = None
     api_key: str | None = field(default=None, repr=False)
+    effort: str | None = None
 
     def __post_init__(self) -> None:
-        for name in ("model", "api_base", "api_key"):
+        for name in ("model", "api_base", "api_key", "effort"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, str) or not value):
                 raise ValueError(f"Claude model {name} must be a non-empty string when provided")
@@ -81,6 +90,12 @@ class ClaudeCodeHarnessConfig:
     settings: str | None = None
     settings_env: Mapping[str, str] = field(default_factory=dict, repr=False)
     event_buffer_capacity: int = 1024
+    # How long a reply waits for the CLI's request logs before its model
+    # request is reported from the SDK message alone.
+    request_observation_wait_s: float = 5.0
+    # How long a turn waits, after a result, for a delivery receipt on a
+    # message the CLI has not acknowledged at all.
+    lifecycle_ack_timeout_s: float = 10.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "skills", normalize_skills(self.skills, self.skill_conflict))
@@ -116,6 +131,14 @@ class ClaudeCodeHarnessConfig:
             raise TypeError("Claude event_buffer_capacity must be an integer")
         if self.event_buffer_capacity <= 0:
             raise ValueError("Claude event_buffer_capacity must be positive")
+        if not _is_number(self.request_observation_wait_s):
+            raise TypeError("Claude request_observation_wait_s must be a number")
+        if self.request_observation_wait_s < 0:
+            raise ValueError("Claude request_observation_wait_s must not be negative")
+        if not _is_number(self.lifecycle_ack_timeout_s):
+            raise TypeError("Claude lifecycle_ack_timeout_s must be a number")
+        if self.lifecycle_ack_timeout_s <= 0:
+            raise ValueError("Claude lifecycle_ack_timeout_s must be positive")
         if self.model is not None and not isinstance(self.model, ClaudeModelConfig):
             raise TypeError("Claude model must be a ClaudeModelConfig")
         if self.fallback_model is not None and not isinstance(self.fallback_model, ClaudeModelConfig):

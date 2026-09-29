@@ -21,6 +21,7 @@ from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_SOURCE
 from openjiuwen.agent_evolving.trajectory.spans import (
     decode_json_attribute,
     iter_spans,
+    is_compaction_span,
     read_llm_exchange,
     read_tool_call,
     read_usage,
@@ -105,6 +106,8 @@ class SFTRawTrajectoryConverter:
         for step_index, span in enumerate(iter_spans(trajectory)):
             attrs = span_attributes(span)
             category = span_category(span)
+            if category == "llm" and is_compaction_span(span):
+                continue
             if category == "llm":
                 prompt_messages, completion_messages = read_llm_exchange(span)
                 response = normalize_assistant_message(completion_messages[-1] if completion_messages else {})
@@ -173,9 +176,6 @@ class SFTRawTrajectoryConverter:
     @staticmethod
     def _span_meta(span: dict[str, Any], attrs: dict[str, Any]) -> dict[str, Any]:
         meta = {str(key): json_safe(value) for key, value in attrs.items()}
-        legacy_meta = decode_json_attribute(meta.get("openjiuwen.legacy.step.meta"))
-        if isinstance(legacy_meta, dict):
-            meta.update(json_safe(legacy_meta))
         for output_key, span_key in (
             ("span_name", "name"),
             ("span_id", "spanId"),

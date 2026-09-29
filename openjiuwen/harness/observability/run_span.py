@@ -107,7 +107,8 @@ def open_agent_run_span(
             OJ_REQUEST_ID,
             OJ_RUN_ID,
             OJ_TRACE_ROOT,
-            OJ_TRACE_SCHEMA_VERSION,
+            OJ_TRAJECTORY_SCHEMA_VERSION,
+            TRAJECTORY_SPAN_SCHEMA_VERSION,
             OJ_TRAJECTORY_RECORD_KIND,
             OJ_TURN_ID,
             OJ_TURN_NUMBER,
@@ -130,7 +131,7 @@ def open_agent_run_span(
         base_attributes: dict[str, Any] = {
             OJ_AGENT_MODE: mode or "",
             OJ_TRACE_ROOT: True,
-            OJ_TRACE_SCHEMA_VERSION: "1",
+            OJ_TRAJECTORY_SCHEMA_VERSION: TRAJECTORY_SPAN_SCHEMA_VERSION,
             GEN_AI_OPERATION_NAME: "invoke_agent",
             OJ_TRAJECTORY_RECORD_KIND: "turn",
             OJ_EXECUTION_SUBJECT_ID: subject.subject_id if subject is not None else "main",

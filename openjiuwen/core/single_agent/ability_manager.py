@@ -76,6 +76,56 @@ class AbilityExecutionError(AgentError):
         self.tool_message = tool_message
 
 
+def resolve_tool_message(
+        inputs: ToolCallInputs,
+        exception: BaseException | None,
+) -> ToolMessage | None:
+    """Return the tool-result message the model receives for one tool call.
+
+    AFTER_TOOL_CALL rails run before ``AbilityManager.execute`` assembles its
+    results, so this is the single rule they share with it: a finished or
+    skipped call carries the message on ``inputs.tool_msg`` (including any
+    rewrite by earlier rails); a call that raised carries it on the
+    ``AbilityExecutionError``. ``None`` means no message exists at this point.
+
+    Args:
+        inputs: The tool call's callback inputs.
+        exception: The exception the tool call raised, if any.
+
+    Returns:
+        The model-facing tool message, or ``None``.
+    """
+    if inputs.tool_msg is not None:
+        return inputs.tool_msg
+    if isinstance(exception, AbilityExecutionError):
+        return exception.tool_message
+    return None
+
+
+def resolve_tool_result_text(
+        inputs: ToolCallInputs,
+        exception: BaseException | None,
+) -> str | None:
+    """Return the text the model reads for one tool call.
+
+    Stream producers publish it as ``rendered_result`` next to the structured
+    tool result, so displays and restored histories show what the model saw
+    instead of re-deriving it from the structured value.
+
+    Args:
+        inputs: The tool call's callback inputs.
+        exception: The exception the tool call raised, if any.
+
+    Returns:
+        The model-facing text, or ``None`` when no message exists yet.
+    """
+    message = resolve_tool_message(inputs, exception)
+    if message is None:
+        return None
+    content = message.content
+    return content if isinstance(content, str) else json.dumps(content, ensure_ascii=False, default=str)
+
+
 # 单次 tool.invoke 的默认调用级超时上限(秒)。作为"工具自身无超时"时的
 # 兜底,防止卡死的 tool.invoke 永久阻塞整轮 task_loop。工具可在
 # ``ToolCard.properties["resilience"]["timeout_s"]`` 声明覆盖;声明 ``None``
@@ -213,29 +263,21 @@ class AbilityManager:
         self._mcp_tool_allowlists[server_id] = normalized_names
 
     @staticmethod
-    def _build_tool_message_content(result: Any) -> str:
-        data = getattr(result, "data", None)
-        error = getattr(result, "error", None)
-        success = getattr(result, "success", None)
+    def _render_tool_result(tool: Tool, tool_call: ToolCall, result: Any) -> str:
+        """Render a tool result through the tool's own ``render_for_llm``.
 
-        if success is False and error:
-            return str(error)
-
-        # Recall envelopes carry paging and lookup status even when content is empty.
-        if isinstance(data, dict) and {"handle", "found", "content"}.issubset(data):
-            return str(result)
-
-        if isinstance(data, dict) and "content" in data:
-            content = str(data.get("content") or "")
-            if content:
-                return content
-            if success is True:
-                path = data.get("path")
-                suffix = f" path={path}" if path else ""
-                return f"Tool succeeded but returned empty content.{suffix}"
-            return ""
-
-        return str(result)
+        The tool has already run, possibly with side effects, so a failing
+        custom renderer must not turn a finished call into an execution error
+        (and a retry). It is logged and the base rendering is used instead.
+        """
+        try:
+            return tool.render_for_llm(result)
+        except Exception:
+            logger.exception(
+                "Tool '%s' failed to render its result, falling back to the default rendering",
+                tool_call.name,
+            )
+            return Tool.render_for_llm(tool, result)
 
     def set_context_engine(self, context_engine) -> None:
         self._context_engine = context_engine
@@ -1185,13 +1227,7 @@ class AbilityManager:
                 tool_message = None
                 if isinstance(tool_ctx.inputs, ToolCallInputs):
                     tool_result = tool_ctx.inputs.tool_result
-                    tool_message = tool_ctx.inputs.tool_msg
-
-                if (
-                        tool_message is None
-                        and isinstance(result, AbilityExecutionError)
-                ):
-                    tool_message = result.tool_message
+                    tool_message = resolve_tool_message(tool_ctx.inputs, result)
 
                 if tool_message is None:
                     tool_message = ToolMessage(
@@ -1527,6 +1563,7 @@ class AbilityManager:
                 ) from e
             finally:
                 reset_usage_delegation(delegation_token)
+            return result, ToolMessage(content=str(result), tool_call_id=tool_call.id)
         elif tool_name in self._mcp_servers:
             # Execute MCP tool
             raise self._build_execution_error(
@@ -1572,10 +1609,9 @@ class AbilityManager:
                 ) from e
 
         # Build ToolMessage for successful execution.
-        content = self._build_tool_message_content(result)
         tool_message = ToolMessage(
-            content=content,
-            tool_call_id=tool_call.id
+            content=self._render_tool_result(tool, tool_call, result),
+            tool_call_id=tool_call.id,
         )
 
         return result, tool_message

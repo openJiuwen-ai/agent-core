@@ -29,7 +29,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_TRAJECTORY_SEQUENCE_EPOCH,
     OJ_TRAJECTORY_SUBJECT_ID,
     OJ_TRAJECTORY_SUBJECT_SEQUENCE,
-    OJ_TRACE_SCHEMA_VERSION,
+    TRAJECTORY_EVENT_KINDS,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
     OJ_TURN_ID,
     OJ_TURN_NUMBER,
     OJ_EXECUTION_SUBJECT_ID,
@@ -40,9 +41,22 @@ from openjiuwen.extensions.observability.semconv import (
 )
 from openjiuwen.extensions.observability.span_context import (
     advance_context_window,
-    consume_context_window_compaction,
+    current_context_window_messages,
     next_trajectory_subject_position,
 )
+
+# Occurrence ids of the per-request system slot a window carries at its head.
+# The slot is request material, not conversation: a compaction rewrites the
+# conversation and leaves the slot as it was, so the window it states keeps
+# the slot from the window before it.
+REQUEST_SYSTEM_SLOT_PREFIX = "openjiuwen:request-system-slot:"
+
+
+def _require_known_event_kind(event_kind: str) -> None:
+    # Readers treat the event-kind set as closed; an unknown kind would be
+    # dropped by every one of them, so refuse it where it is written.
+    if event_kind not in TRAJECTORY_EVENT_KINDS:
+        raise ValueError(f"unknown trajectory event kind: {event_kind!r}")
 
 
 def emit_native_trajectory_event(
@@ -55,6 +69,7 @@ def emit_native_trajectory_event(
     sequence_epoch: str | None = None,
 ) -> Span | None:
     """Emit one immutable v2 event using the parent's concrete owner."""
+    _require_known_event_kind(event_kind)
     if not parent_span.is_recording():
         return None
     session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
@@ -74,7 +89,7 @@ def emit_native_trajectory_event(
     span = tracer.start_span(name=event_kind, context=parent_context, kind=SpanKind.INTERNAL)
     recorded_at = time.time_ns()
     attributes: dict[str, Any] = {
-        OJ_TRAJECTORY_SCHEMA_VERSION: "2",
+        OJ_TRAJECTORY_SCHEMA_VERSION: TRAJECTORY_SPAN_SCHEMA_VERSION,
         OJ_TRAJECTORY_EVENT_ID: event_id,
         OJ_TRAJECTORY_EVENT_KIND: event_kind,
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
@@ -84,7 +99,6 @@ def emit_native_trajectory_event(
         OJ_TRAJECTORY_RECORDED_AT_UNIX_NANO: recorded_at,
         OJ_TRAJECTORY_PAYLOAD: json.dumps(payload, ensure_ascii=False, default=str),
         OJ_TRAJECTORY_RECORD_KIND: "event",
-        OJ_TRACE_SCHEMA_VERSION: "2",
     }
     for routing_key in (
         OJ_TURN_ID,
@@ -117,6 +131,7 @@ def record_native_trajectory_log_event(
     payload: dict[str, Any],
 ) -> bool:
     """Record one immutable trajectory event on the current short-lived Span."""
+    _require_known_event_kind(event_kind)
     if not parent_span.is_recording():
         return False
     session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
@@ -127,7 +142,7 @@ def record_native_trajectory_log_event(
     )
     recorded_at = time.time_ns()
     attributes: dict[str, Any] = {
-        OJ_TRAJECTORY_SCHEMA_VERSION: "2",
+        OJ_TRAJECTORY_SCHEMA_VERSION: TRAJECTORY_SPAN_SCHEMA_VERSION,
         OJ_TRAJECTORY_EVENT_ID: uuid.uuid4().hex,
         OJ_TRAJECTORY_EVENT_KIND: event_kind,
         OJ_TRAJECTORY_SUBJECT_ID: subject_id,
@@ -157,7 +172,8 @@ def emit_context_window_commit(
     Only a request that carries the conversation forward advances the chain.
     A compaction asks the model to summarize the conversation, so its prompt
     is *about* the context rather than part of it; committing it would splice
-    a foreign window into the chain a reader replays.
+    a foreign window into the chain a reader replays. The window a compaction
+    produces is committed by :func:`emit_compaction_window_commit` instead.
 
     Returns:
         The emitted span, or None when this request does not advance the
@@ -172,6 +188,140 @@ def emit_context_window_commit(
         return None
     session_id = str(llm_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
     subject_id = str(llm_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
+    sequence_epoch, sequence, payload = _context_window_commit_payload(
+        session_id=session_id,
+        subject_id=subject_id,
+        messages=messages,
+        request_purpose=request_purpose,
+    )
+    return emit_native_trajectory_event(
+        tracer=tracer,
+        parent_span=llm_span,
+        event_kind="context.window.commit",
+        payload=payload,
+        subject_sequence=sequence,
+        sequence_epoch=sequence_epoch,
+    )
+
+
+def emit_compaction_window_commit(
+    *,
+    tracer: Tracer,
+    parent_span: Span,
+    messages: list[dict[str, Any]],
+    operation_id: str,
+    model_requests: list[dict[str, str]],
+) -> Span | None:
+    """Commit the context window a completed compaction produced.
+
+    A compaction is a turn of its own: its instruction is the input, the
+    summary request is its model call, and the rewritten conversation is the
+    context every later turn starts from. The window therefore changes when
+    the compaction completes, and the compaction states that change itself
+    rather than leaving the next model call to guess which compaction it
+    follows. Every later commit is a plain delta on top of this window.
+
+    The compaction's own model call has ended by the time its result is
+    known, so the commit hangs off the live agent or run span and names its
+    physical request through ``model_requests`` instead, the way the
+    compaction.completed event does. An empty list is a model-free
+    compaction.
+
+    Args:
+        tracer: Tracer that emits the commit span.
+        parent_span: Live span the commit is parented to; it names the
+            session and execution subject whose window changed.
+        messages: The conversation after compaction, in canonical trajectory
+            form. The per-request system slot of the previous window is kept
+            at its head, because a compaction rewrites the conversation and
+            not the request material around it.
+        operation_id: The compaction operation that caused this window.
+        model_requests: ``{"request_id", "inference_id"}`` of each model call
+            the compaction made.
+
+    Returns:
+        The emitted span, or None when the parent is no longer recording.
+    """
+    session_id = str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or "")
+    subject_id = str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main")
+    previous = current_context_window_messages(session_id=session_id, subject_id=subject_id)
+    sequence_epoch, sequence, payload = _context_window_commit_payload(
+        session_id=session_id,
+        subject_id=subject_id,
+        messages=_compacted_window(previous or [], messages),
+        request_purpose="compaction",
+    )
+    payload.update({
+        "caused_by_operation_id": str(operation_id).strip(),
+        "input_window_id": payload["base_window_id"],
+        "output_window_id": payload["window_id"],
+        "model_requests": list(model_requests),
+    })
+    if payload.get("transition_kind") == "epoch_baseline":
+        payload["correlation_kind"] = "compaction"
+    else:
+        payload["transition_kind"] = "compaction"
+    return emit_native_trajectory_event(
+        tracer=tracer,
+        parent_span=parent_span,
+        event_kind="context.window.commit",
+        payload=payload,
+        subject_sequence=sequence,
+        sequence_epoch=sequence_epoch,
+    )
+
+
+def _compacted_window(
+    previous: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build the window a compaction leaves behind.
+
+    The previous window was stated from a model request's view of the
+    messages; *messages* is the context engine's view of what survived. The
+    two spell one message differently in places that are not content (the
+    shape of tool calls, provider-normalized parts), and such a difference
+    must not read as the compaction having rewritten a message it kept. A
+    survivor whose role and content are unchanged is therefore restated
+    exactly as the previous window had it; one whose content did change (a
+    model-free processor trimming a tool result, say) is stated anew and
+    reads as the replacement it is.
+
+    The per-request system slot at the head of the previous window is kept:
+    a compaction rewrites the conversation, not the request material.
+    """
+    previous_by_id = {
+        str(message.get("message_id", "")): message
+        for message in previous
+    }
+    window = [
+        message
+        for message in previous
+        if str(message.get("message_id", "")).startswith(REQUEST_SYSTEM_SLOT_PREFIX)
+    ]
+    for message in messages:
+        prior = previous_by_id.get(str(message.get("message_id", "")))
+        unchanged = (
+            prior is not None
+            and prior.get("role") == message.get("role")
+            and prior.get("content") == message.get("content")
+        )
+        window.append(prior if unchanged else message)
+    return window
+
+
+def _context_window_commit_payload(
+    *,
+    session_id: str,
+    subject_id: str,
+    messages: list[dict[str, Any]],
+    request_purpose: str,
+) -> tuple[str, int, dict[str, Any]]:
+    """Advance one subject's window and build the commit that states it.
+
+    Returns:
+        The sequence epoch, the subject sequence, and the commit payload.
+    """
     window_id = uuid.uuid4().hex
     sequence_epoch, sequence, base_window_id, delta, is_epoch_baseline = advance_context_window(
         session_id=session_id,
@@ -198,32 +348,12 @@ def emit_context_window_commit(
             "transition_kind": "epoch_baseline",
             "baseline_reason": "runtime_epoch_start",
         })
-    caused_by_operation_id = consume_context_window_compaction(
-        session_id=session_id,
-        subject_id=subject_id,
-        step_id=str(llm_span.attributes.get(OJ_STEP_ID) or ""),
-    )
-    if caused_by_operation_id is not None:
-        payload.update({
-            "caused_by_operation_id": caused_by_operation_id,
-            "input_window_id": base_window_id,
-            "output_window_id": window_id,
-        })
-        if is_epoch_baseline:
-            payload["correlation_kind"] = "compaction"
-        else:
-            payload["transition_kind"] = "compaction"
-    return emit_native_trajectory_event(
-        tracer=tracer,
-        parent_span=llm_span,
-        event_kind="context.window.commit",
-        payload=payload,
-        subject_sequence=sequence,
-        sequence_epoch=sequence_epoch,
-    )
+    return sequence_epoch, sequence, payload
 
 
 __all__ = [
+    "REQUEST_SYSTEM_SLOT_PREFIX",
+    "emit_compaction_window_commit",
     "emit_context_window_commit",
     "emit_native_trajectory_event",
     "record_native_trajectory_log_event",

@@ -24,8 +24,8 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     SESSION_ID,
     TRAJECTORY_ID,
-    TRAJECTORY_SCHEMA_VERSION,
-    TRAJECTORY_SCHEMA_VERSION_ATTR,
+    TRAJECTORY_PROJECTION_VERSION,
+    TRAJECTORY_PROJECTION_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
@@ -564,7 +564,7 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
     ) -> Trajectory:
         resource_attrs = {
             TRAJECTORY_ID: str(uuid.uuid4()),
-            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+            TRAJECTORY_PROJECTION_VERSION_ATTR: TRAJECTORY_PROJECTION_VERSION,
             TRAJECTORY_SOURCE: "sft_online",
             SESSION_ID: session_id or str(uuid.uuid4()),
             **metadata,
@@ -589,7 +589,6 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
         attrs: dict[str, Any] = {
             semconv.GEN_AI_OPERATION_NAME: "chat",
             semconv.GEN_AI_REQUEST_MODEL: str(turn.get("model_id") or "unknown"),
-            "openjiuwen.legacy.step.meta": turn.get("meta") or {},
         }
         tools = normalize_tool_definitions(turn.get("tools"))
         if tools:
@@ -610,6 +609,13 @@ class SFTOnlineRail(BaseOnlineTrainingRail):
             attrs["prompt_ids"] = turn.get("prompt_ids")
         if turn.get("completion_token_ids") is not None:
             attrs["completion_token_ids"] = turn.get("completion_token_ids")
+        # The turn's own meta rides as plain span attributes, which the raw
+        # converter already reports as step meta; it never overrides a
+        # semantic attribute of the span.
+        turn_meta = turn.get("meta")
+        if isinstance(turn_meta, dict):
+            for key, value in turn_meta.items():
+                attrs.setdefault(str(key), value)
         return {
             "traceId": f"{uuid.uuid4().int & ((1 << 128) - 1):032x}",
             "spanId": f"{index + 1:016x}",

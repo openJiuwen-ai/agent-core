@@ -278,6 +278,33 @@ def team_session_dir(team_name: str, session_id: str) -> Path:
     return team_sessions_dir(team_name) / _safe_segment(session_id)
 
 
+def group_conversation_registry_dir(team_name: str) -> Path:
+    """Return the default-home registry locating custom conversation workspaces."""
+    if not team_name or team_name in (".", ".."):
+        raise ValueError("Conversation team_name must be a single path component of at most 255 UTF-8 bytes")
+    if "/" in team_name or "\\" in team_name or len(team_name.encode("utf-8")) > 255:
+        raise ValueError("Conversation team_name must be a single path component of at most 255 UTF-8 bytes")
+    root = get_agent_teams_home().resolve() / team_name / "conversation-workspaces"
+    if root.resolve() != root:
+        raise ValueError("Conversation registry must not follow directory symlinks")
+    return root
+
+
+def group_conversation_dir(
+    team_name: str, session_id: str, *, workspace_path: str | Path | None = None,
+) -> Path:
+    """Return a team/session-isolated public archive inside the shared workspace."""
+    group_conversation_registry_dir(team_name)
+    root = Path(workspace_path).expanduser() if workspace_path is not None else team_workspace_dir(team_name)
+    root = root.resolve()
+    team_scope = _safe_segment(team_name) + "-" + hashlib.sha256(team_name.encode("utf-8")).hexdigest()
+    session_scope = _safe_segment(session_id) + "-" + hashlib.sha256(session_id.encode("utf-8")).hexdigest()
+    path = root / "conversations" / team_scope / session_scope
+    if path.resolve() != path:
+        raise ValueError("Conversation history must remain inside its own workspace directory without symlinks")
+    return path
+
+
 def project_worktree_hash(project_dir: str) -> str:
     """Return the stable project hash segment for session-scoped worktrees.
 
@@ -328,6 +355,55 @@ def workflow_journal_path(team_name: str, session_id: str, workflow_name: str) -
         workflow_name: Workflow name from the script ``META``.
     """
     return workflow_run_dir(team_name, session_id, workflow_name) / "journal.jsonl"
+
+
+def workflow_run_journal_path(
+    team_name: str, session_id: str, workflow_name: str, run_id: str | None
+) -> Path:
+    """Return the per-run journal snapshot path for a swarmflow run.
+
+    Layout:
+        ``{team_home}/sessions/{session_id}/workflows/{workflow_name}/journal-{run_id}.jsonl``
+
+    Each run owns its own journal file, so two concurrent runs of the same
+    workflow never overwrite each other's snapshot (per-run_id isolation).
+    ``run_id`` is sanitized like every other path segment; ``None`` falls back
+    to the legacy shared ``journal.jsonl`` (offline / no-run callers).
+
+    Args:
+        team_name: Team identifier.
+        session_id: Session identifier.
+        workflow_name: Workflow name from the script ``META``.
+        run_id: The workflow run id (``wf_{12hex}``), or ``None`` for the
+            shared fallback.
+    """
+    if not run_id:
+        return workflow_journal_path(team_name, session_id, workflow_name)
+    return workflow_run_dir(team_name, session_id, workflow_name) / f"journal-{_safe_segment(run_id)}.jsonl"
+
+
+def workflow_run_wal_path(
+    team_name: str, session_id: str, workflow_name: str, run_id: str | None
+) -> Path:
+    """Return the per-run WAL path for a swarmflow run.
+
+    Layout:
+        ``{team_home}/sessions/{session_id}/workflows/{workflow_name}/wal/{run_id}.wal``
+
+    The WAL is append-only and never actively deleted; splitting it by run_id
+    means two concurrent runs never append to / truncate each other's log
+    (the concurrency races on a shared WAL file). ``run_id=None`` falls back
+    to the legacy sidecar ``journal.jsonl.wal``.
+
+    Args:
+        team_name: Team identifier.
+        session_id: Session identifier.
+        workflow_name: Workflow name from the script ``META``.
+        run_id: The workflow run id, or ``None`` for the legacy sidecar path.
+    """
+    if not run_id:
+        return workflow_journal_path(team_name, session_id, workflow_name).with_suffix(".jsonl.wal")
+    return workflow_run_dir(team_name, session_id, workflow_name) / "wal" / f"{_safe_segment(run_id)}.wal"
 
 
 def async_tool_output_dir(team_name: str, session_id: str) -> Path:

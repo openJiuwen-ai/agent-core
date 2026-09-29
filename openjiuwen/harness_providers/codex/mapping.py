@@ -164,6 +164,7 @@ class CodexTurnAccumulator:
                 data["error"] = to_json_safe(error)
             elif status in {"failed", "declined"}:
                 data["error"] = {"status": status}
+            data["is_error"] = "error" in data
             self.messages.append(
                 TurnMessage(
                     message_id=f"codex-tool:{item_id}",

@@ -173,3 +173,22 @@ def test_phase_ids_stay_unique_across_turns() -> None:
     second_turn = projector.project(_thinking("turn two"), task_id="task-2")
     assert first_turn[0].phase_id == 1
     assert second_turn[0].phase_id == 2
+
+
+def test_tool_result_summary_prefers_rendered_result_over_compat_result() -> None:
+    activities = _projector().project(
+        {
+            "type": "tool_result",
+            "payload": {
+                "tool_result": {
+                    "tool_name": "glob",
+                    "tool_call_id": "call-1",
+                    "result": "success=True data={'matching_files': ['/a.py']} error=None",
+                    "rendered_result": "/a.py",
+                }
+            },
+        },
+        task_id="task-1",
+    )
+
+    assert activities[0].summary == "/a.py"

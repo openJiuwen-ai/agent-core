@@ -61,6 +61,24 @@ async def test_recalls_bounded_chunk_from_current_session(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rendered_recall_keeps_paging_metadata_next_to_content(tmp_path):
+    content = "0123456789" * 30
+    _write_offload(tmp_path, "browser-session", content)
+    tool = BrowserOffloadRecallTool(str(tmp_path), language="en")
+
+    result = await tool.invoke(
+        {"handle": _HANDLE, "offset": 20, "limit": 40},
+        session=_session("browser-session"),
+    )
+    text = tool.render_for_llm(result)
+
+    assert f"handle: {_HANDLE}" in text
+    assert "offset: 20" in text
+    assert "next_offset: 60" in text
+    assert text.endswith(content[20:60])
+
+
+@pytest.mark.asyncio
 async def test_query_returns_context_around_first_match(tmp_path):
     content = ("before-" * 100) + "UNIQUE TARGET" + ("-after" * 100)
     _write_offload(tmp_path, "browser-session", content)

@@ -430,11 +430,11 @@ class SkillTool(Tool):
             )
             data.update(layout)
 
-            # ``content`` is set unconditionally: AbilityManager renders it verbatim
-            # when present and otherwise falls back to ``str(result)``, which buries
-            # the skill body — and this appendix with it — inside a pydantic repr of
-            # the whole ToolOutput. The other keys stay in ``data`` for programmatic
-            # consumers; the model reads this.
+            # ``content`` is set unconditionally: the default ``Tool.render_for_llm``
+            # renders it verbatim and otherwise falls back to a JSON dump of the
+            # whole payload, which buries the skill body — and this appendix with
+            # it — among the metadata keys. The other keys stay in ``data`` for
+            # programmatic consumers; the model reads this.
             appendix = _format_layout_appendix_for_model(layout, skill_name=skill.name)
             data["content"] = f"{body.rstrip()}\n\n{appendix}" if appendix else body
 

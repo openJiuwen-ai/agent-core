@@ -209,6 +209,47 @@ class TestTaskCompletionWithDependencyResolution:
 
     @pytest.mark.asyncio
     @pytest.mark.level0
+    async def test_complete_task_is_idempotent(self, task_manager):
+        """Completing the same task twice should succeed and not raise."""
+        task = await task_manager.add(title="Idempotent Task", content="Content")
+        assert await task_manager.claim(task.task_id)
+
+        first = await task_manager.complete(task.task_id)
+        assert first.ok
+
+        second = await task_manager.complete(task.task_id)
+        assert second.ok
+
+        task_state = await task_manager.get(task.task_id)
+        assert task_state.status == TaskStatus.COMPLETED.value
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_complete_task_after_reset_is_noop_race(self, task_manager):
+        """A stale completion call after the task was reset must not error."""
+        task = await task_manager.add(title="Racy Task", content="Content")
+        assert await task_manager.claim(task.task_id)
+
+        # Simulate recovery/pause: task is reset to pending while an old
+        # completion coroutine is still in flight.
+        reset = await task_manager.reset(task.task_id)
+        assert reset.ok
+
+        reset_state = await task_manager.get(task.task_id)
+        assert reset_state.status == TaskStatus.PENDING.value
+        assert reset_state.assignee is None
+
+        # The old completion call should now be a safe no-op, not raise or log ERROR.
+        result = await task_manager.complete(task.task_id)
+        assert not result.ok
+
+        # Task must stay pending and unassigned.
+        final_state = await task_manager.get(task.task_id)
+        assert final_state.status == TaskStatus.PENDING.value
+        assert final_state.assignee is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
     async def test_complete_task_sets_updated_at(self, task_manager):
         """Completing a task bumps updated_at so it reflects completion time."""
         task = await task_manager.add(title="Test Task", content="Content")

@@ -188,6 +188,30 @@ async def test_outputs_and_tool_items_project_to_deepagent_chunks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_completed_tool_item_keeps_rendered_result_as_a_separate_field() -> None:
+    harness = _FakeHarness()
+    adapter = HarnessIOAdapter(harness)
+    await adapter.start(_context())
+    await harness.emit(
+        ItemLifecycleEvent(
+            kind=ItemEventKind.COMPLETED,
+            item_type="tool",
+            data={"tool_name": "glob", "result": {"success": True, "data": {"n": 1}}, "rendered_result": "/a.py"},
+        ),
+        item_id="call-1",
+    )
+    await adapter.stop()
+    chunks = await _drain(adapter)
+
+    assert chunks[-1].payload == {
+        "tool_name": "glob",
+        "result": {"success": True, "data": {"n": 1}},
+        "tool_call_id": "call-1",
+        "rendered_result": "/a.py",
+    }
+
+
+@pytest.mark.asyncio
 async def test_user_input_request_round_trips_through_interactive_input() -> None:
     harness = _FakeHarness()
     adapter = HarnessIOAdapter(harness)

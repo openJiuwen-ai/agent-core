@@ -265,6 +265,28 @@ STRINGS: dict[str, str] = {
         "authentication failures explicitly reported by the runtime. Use null only when the team model pool has "
         "no compatible model; the agent can then use its own default model without automatic fallback"
     ),
+    "spawn_external_cli.builtin_model": (
+        "Optional. A built-in model from this cli_agent's entry in the catalog below, running on the CLI's "
+        "own login (e.g. a subscription); pick it to fit the member's workload. Mutually exclusive with "
+        "model_name. Omit to let the CLI use its own default model"
+    ),
+    "spawn_external_cli.effort": (
+        "Optional. Reasoning effort, one of the chosen builtin_model's efforts; requires builtin_model. "
+        "Omit to take the model's default_effort"
+    ),
+    # ===== set_member_model ====================================================
+    # set_member_model._desc lives in descs/en/member/set_member_model.md
+    "set_member_model.member_name": (
+        "member_name of the external CLI member to switch (semantic slug, not display label)"
+    ),
+    "set_member_model.model": (
+        "Optional. The new built-in model, from the member's cli_agent entry in the catalog below; omit to "
+        "keep the current model and change only effort"
+    ),
+    "set_member_model.effort": (
+        "Optional. The new reasoning effort, one of the chosen model's efforts; omitted with model set it "
+        "takes the model's default_effort, omitted without model it stays unchanged"
+    ),
     # ===== shutdown_member =====================================================
     # shutdown_member._desc lives in descs/en/member/shutdown_member.md
     "shutdown_member.member_name": (

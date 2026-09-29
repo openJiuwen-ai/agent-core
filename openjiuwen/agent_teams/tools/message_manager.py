@@ -42,7 +42,7 @@ class TeamMessageManager:
         team_name: str,
         member_name: str,
         db: TeamDatabase,
-        messager: Messager,
+        messager: Messager | None,
     ):
         """Initialize team messaging manager
 
@@ -50,7 +50,7 @@ class TeamMessageManager:
             team_name: Team identifier
             member_name: Current member identifier
             db: Team database instance
-            messager: Messager instance for event publishing
+            messager: Transport for event publishing; None permits offline direct messages
         """
         self.team_name = team_name
         self.member_name = member_name
@@ -96,6 +96,9 @@ class TeamMessageManager:
         if not success:
             team_logger.error(f"Failed to create message {message_id}")
             return None
+
+        if self.messager is None:
+            return message_id
 
         try:
             await self.messager.publish(

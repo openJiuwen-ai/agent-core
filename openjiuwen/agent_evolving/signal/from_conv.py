@@ -103,8 +103,26 @@ _USER_FEEDBACK_PROMPT_EN = (
     "Recent user messages: {user_messages}\n\n"
     'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
 )
+_USER_FEEDBACK_SKILLESS_PROMPT_CN = (
+    "判断以下用户消息是否包含对 agent 行为的被动纠正或可沉淀的改进反馈。\n"
+    "只有当用户消息明确指出 agent 的理解、步骤、顺序或工具使用需要调整时，"
+    "才认为值得转成演进信号。\n\n"
+    "最近用户消息：{user_messages}\n\n"
+    '输出 JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
+_USER_FEEDBACK_SKILLESS_PROMPT_EN = (
+    "Determine whether the following user messages contain passive corrective feedback "
+    "or reusable improvement guidance about the agent's behavior.\n"
+    "Only treat the messages as an evolution signal when the user is clearly correcting "
+    "the agent's understanding, ordering, steps, or tool usage.\n\n"
+    "Recent user messages: {user_messages}\n\n"
+    'Output JSON: {{"is_feedback": true/false, "excerpt": "str"}}\n'
+)
 
 # Tools whose output is fetched content (web pages, files, search results).
+# ``ttse_consult`` returns FACT/TIP text that often mentions 失败/错误 as
+# historical heuristics; keyword-scanning it as a live tool crash is a
+# false positive for both skill evolution and TTSE detect.
 _DATA_FETCH_TOOLS = frozenset(
     {
         "mcp_fetch_webpage",
@@ -122,6 +140,7 @@ _DATA_FETCH_TOOLS = frozenset(
         "get_url",
         "curl",
         "wget",
+        "ttse_consult",
     }
 )
 
@@ -150,6 +169,67 @@ _EXEC_CONTENT_KEYS = (
     "cmd",
     "shell_command",
 )
+
+
+def is_tool_execution_failure(content: str, tool_name: str = "") -> Optional[str]:
+    """Return an excerpt if tool output matches execution-failure rules, else None.
+
+    Shared by ConversationSignalDetector and TTSE success detection so the
+    keyword / data-fetch / schema-dump rules stay single-sourced.
+    """
+    name = (tool_name or "").lower()
+    if name in _DATA_FETCH_TOOLS:
+        return None
+    text = content or ""
+    match = _FAILURE_KEYWORDS.search(text)
+    if not match:
+        return None
+    if _TOOL_SCHEMA_PATTERN.search(text):
+        return None
+    return _extract_around_match(text, match)
+
+
+def detect_tool_error_signals(messages: List[dict]) -> List[EvolutionSignal]:
+    """Scan messages for tool ``execution_failure`` signals.
+
+    Deterministic regex scan over ``role in ("tool", "function")`` messages.
+    Resolves tool names from assistant ``tool_calls`` when the tool message
+    only carries ``tool_call_id``. Does not attribute skills.
+    """
+    signals: List[EvolutionSignal] = []
+    tool_call_id_to_name: Dict[str, str] = {}
+    for msg in messages or []:
+        role = str(_get_field(msg, "role") or "")
+        tool_calls = _get_field(msg, "tool_calls", []) or []
+        if role == "assistant" and tool_calls:
+            for tool_call in tool_calls:
+                tc_id = str(get_tool_call_id(tool_call) or "")
+                tc_name = str(tool_call_name(tool_call) or "")
+                if tc_id and tc_name:
+                    tool_call_id_to_name[tc_id] = tc_name
+            continue
+        if role not in ("tool", "function"):
+            continue
+        tool_name = str(_get_field(msg, "name") or _get_field(msg, "tool_name") or "")
+        tool_call_id = str(_get_field(msg, "tool_call_id", "") or "")
+        if not tool_name and tool_call_id:
+            tool_name = tool_call_id_to_name.get(tool_call_id, "")
+        content = str(_get_field(msg, "content") or "")
+        excerpt = is_tool_execution_failure(content, tool_name)
+        if not excerpt:
+            continue
+        signals.append(
+            make_evolution_signal(
+                signal_type="execution_failure",
+                section="Troubleshooting",
+                excerpt=excerpt,
+                tool_name=tool_name or None,
+                skill_name=None,
+                source="passive_conversation",
+            )
+        )
+    return signals
+
 
 DetectionInput = Union[Trajectory, List[dict]]
 
@@ -247,8 +327,15 @@ class ConversationSignalDetector:
     async def detect_user_intent(
         self,
         messages: List[dict],
+        *,
+        allow_skillless: bool = False,
     ) -> List[EvolutionSignal]:
-        """Use LLM judgment to turn passive user messages into standard signals."""
+        """Use LLM judgment to turn passive user messages into standard signals.
+
+        Default (``allow_skillless=False``) matches skill-evolution: no inferred
+        skill means no signal. TTSE success detection opts into the
+        skill-agnostic path with ``allow_skillless=True``.
+        """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
             raise TypeError(
                 "detect_user_intent() expects normalized messages; call trajectory_to_messages() first."
@@ -263,7 +350,9 @@ class ConversationSignalDetector:
 
         skill_name = self._infer_skill_from_messages(messages)
         if not skill_name:
-            return []
+            if not allow_skillless:
+                return []
+            return await self._detect_skillless_user_feedback(user_messages)
 
         if self._llm is None or not self._model:
             return self._fallback_user_feedback_signals(user_messages, skill_name)
@@ -297,6 +386,57 @@ class ConversationSignalDetector:
 
         excerpt = str(parsed.get("excerpt") or user_messages[-1]).strip()
         return [self._make_user_feedback_signal(excerpt, skill_name)]
+
+    async def _detect_skillless_user_feedback(
+        self,
+        user_messages: List[str],
+    ) -> List[EvolutionSignal]:
+        """Detect corrective feedback without skill attribution (TTSE / skill-agnostic)."""
+        text = str(user_messages[-1] if user_messages else "").strip()
+        if not text:
+            return []
+        if self._llm is None or not self._model:
+            return self._skillless_pattern_fallback(text)
+
+        prompt_template = (
+            _USER_FEEDBACK_SKILLESS_PROMPT_CN if self._language == "cn" else _USER_FEEDBACK_SKILLESS_PROMPT_EN
+        )
+        prompt = prompt_template.format(user_messages="\n".join(user_messages)[:2000])
+        try:
+            response = await self._llm.invoke(
+                model=self._model,
+                messages=[{"role": "user", "content": prompt}],
+                timeout=30,
+            )
+            raw = _response_to_text(response)
+        except Exception as exc:
+            logger.warning(
+                "[ConversationSignalDetector] skillless user feedback detection failed: %s",
+                exc,
+            )
+            return self._skillless_pattern_fallback(text)
+
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return self._skillless_pattern_fallback(text)
+        if not isinstance(parsed, dict):
+            return self._skillless_pattern_fallback(text)
+        if not parsed.get("is_feedback"):
+            return []
+        excerpt = str(parsed.get("excerpt") or text).strip() or text
+        return [self._make_user_feedback_signal(excerpt, None)]
+
+    def _skillless_pattern_fallback(self, text: str) -> List[EvolutionSignal]:
+        """Emit unattributed feedback only when correction cues match."""
+        if not text or not _CORRECTION_PATTERN.search(text):
+            return []
+        return [self._make_user_feedback_signal(text, None)]
+
+    @staticmethod
+    def convert_trajectory_to_messages(trajectory: Trajectory) -> List[dict]:
+        """Convert trajectory to message list (compat wrapper for TTSE / callers)."""
+        return trajectory_to_messages(trajectory)
 
     def _detect_from_messages(self, messages: List[dict]) -> List[EvolutionSignal]:
         """Scan messages and return deduplicated signals.
@@ -351,14 +491,8 @@ class ConversationSignalDetector:
                         )
                     del pending_scripts[tool_call_id]
 
-                if tool_name.lower() in _DATA_FETCH_TOOLS:
-                    continue
-
-                match = _FAILURE_KEYWORDS.search(content)
-                if match:
-                    if _TOOL_SCHEMA_PATTERN.search(content):
-                        continue
-                    excerpt = _extract_around_match(content, match)
+                excerpt = is_tool_execution_failure(content, str(tool_name or ""))
+                if excerpt:
                     signals.append(
                         make_evolution_signal(
                             signal_type="execution_failure",
@@ -433,7 +567,7 @@ class ConversationSignalDetector:
         return []
 
     @staticmethod
-    def _make_user_feedback_signal(excerpt: str, skill_name: str) -> EvolutionSignal:
+    def _make_user_feedback_signal(excerpt: str, skill_name: Optional[str]) -> EvolutionSignal:
         return make_evolution_signal(
             signal_type=USER_INTENT_SIGNAL,
             section="Instructions",
@@ -480,5 +614,7 @@ SignalDetector = ConversationSignalDetector
 __all__ = [
     "ConversationSignalDetector",
     "SignalDetector",  # backward compatibility alias
+    "detect_tool_error_signals",
+    "is_tool_execution_failure",
     "make_signal_fingerprint",
 ]

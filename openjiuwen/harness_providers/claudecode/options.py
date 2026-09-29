@@ -9,10 +9,19 @@ import json
 import os
 import uuid
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
-from openjiuwen.harness_protocol import HarnessError, McpServerConfig, McpTransport, UnsupportedHarnessCapabilityError
+from openjiuwen.harness_protocol import (
+    HarnessError,
+    McpServerConfig,
+    McpTransport,
+    ModelOption,
+    UnsupportedHarnessCapabilityError,
+)
 from openjiuwen.harness_providers.claudecode.config import ClaudeCodeHarnessConfig, ClaudeModelConfig
+from openjiuwen.harness_providers.jsonsafe import to_json_safe
+from openjiuwen.harness_providers.mcp_naming import TOOL_PLACEHOLDER, mcp_tool_naming_preamble
+from openjiuwen.harness_providers.telemetry.otlp_receiver import OTEL_RESOURCE_SOURCE_ID
 
 if TYPE_CHECKING:
     from claude_agent_sdk import ClaudeAgentOptions
@@ -21,6 +30,13 @@ _CLAUDE_ENV_STRIP_PREFIXES = ("CLAUDECODE", "CLAUDE_CODE_")
 _ANTHROPIC_AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 _ANTHROPIC_BASE_URL_ENV = "ANTHROPIC_BASE_URL"
 _CLAUDE_OTEL_EXPORT_INTERVAL_MS = "1000"
+_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
+# Catalog value of the model the CLI picks when none is configured.
+_CLAUDE_DEFAULT_MODEL_VALUE = "default"
+# Vendor catalog fields kept on ``ModelOption.extensions``.
+_CLAUDE_MODEL_EXTENSION_KEYS = frozenset(
+    {"resolvedModel", "supportsEffort", "supportsAdaptiveThinking", "supportsFastMode", "supportsAutoMode"}
+)
 
 
 def load_claude_sdk() -> Any:
@@ -32,6 +48,23 @@ def load_claude_sdk() -> Any:
             "claude-agent-sdk is required for the Claude Code harness; install the optional SDK"
         ) from exc
     return claude_agent_sdk
+
+
+def build_claude_subprocess_transport(options: Any, prompt: Any) -> Any:
+    """Build the SDK's own subprocess transport for ``options``.
+
+    The SDK builds this transport itself unless one is supplied; the provider
+    builds it here so it can be wrapped before the SDK ever sees it.
+
+    Args:
+        options: The SDK options the transport turns into a CLI command.
+        prompt: The streaming prompt the transport writes on connect; an empty
+            stream leaves the session open for ``query()`` to write into.
+    """
+    load_claude_sdk()
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    return SubprocessCLITransport(prompt=prompt, options=options)
 
 
 def build_claude_session_id(*, host_session_id: str | None, agent_name: str) -> str | None:
@@ -99,35 +132,57 @@ def model_settings(
     return json.dumps({"env": flag_env})
 
 
-def claude_otel_env(endpoint: str) -> dict[str, str]:
-    """Build the env pointing Claude Code's own OTel export at ``endpoint``.
+def claude_request_log_env(
+    *,
+    endpoint: str,
+    body_dir: str,
+    source_id: str,
+    resource_attributes: str = "",
+) -> dict[str, str]:
+    """Build the env making Claude Code log each model request to a receiver.
 
-    Claude Code's OTLP exporter only speaks gRPC — with ``http/protobuf`` it
-    silently connects and never sends data (verified against CLI 2.1.206 and
-    2.1.259) — so the protocol is pinned to grpc and ``endpoint`` must be the
-    receiver's gRPC listener. Raw API body log events
-    (``OTEL_LOG_RAW_API_BODIES=1``) carry the full Messages API
-    request/response JSON to that receiver, so the consumer is responsible for
-    redacting content before it lands in a span.
+    Claude Code's raw API body events (``OTEL_LOG_RAW_API_BODIES``) carry the
+    full Messages API request and the assembled response of every model call.
+    ``file:<dir>`` mode writes the bodies untruncated to ``body_dir`` and puts
+    a ``body_ref`` pointer on the event; inline mode truncates at 60 KB, which
+    cuts every long conversation. Claude Code's OTLP exporter only speaks gRPC
+    — with ``http/protobuf`` it silently connects and never sends data — so the
+    protocol is pinned to grpc and ``endpoint`` must be the receiver's gRPC
+    listener.
 
     Args:
-        endpoint: gRPC OTLP endpoint of the receiver collecting the spans.
+        endpoint: gRPC OTLP endpoint of the receiver collecting the events.
+        body_dir: Directory the CLI writes request and response bodies into.
+        source_id: Identity stamped on the resource so a receiver shared by
+            several processes can tell this one apart.
+        resource_attributes: ``OTEL_RESOURCE_ATTRIBUTES`` the process already
+            carries; kept, with any stale source identity replaced.
 
     Returns:
         The env vars enabling the export.
     """
+    kept = [
+        item
+        for item in resource_attributes.split(",")
+        if item and not item.startswith(f"{OTEL_RESOURCE_SOURCE_ID}=")
+    ]
+    kept.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
+        # The enhanced beta adds the per-request ``claude_code.llm_request``
+        # span, the only place the CLI states time-to-first-token, attempts
+        # and the request id that joins a response body to its request.
         "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
         "OTEL_TRACES_EXPORTER": "otlp",
+        "OTEL_TRACES_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
         "OTEL_LOGS_EXPORTER": "otlp",
         "OTEL_EXPORTER_OTLP_PROTOCOL": "grpc",
         "OTEL_EXPORTER_OTLP_ENDPOINT": endpoint,
         # The CLI fails silently on exporter errors, so a short export interval
-        # keeps spans flowing before the turn ends.
-        "OTEL_TRACES_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
+        # keeps events flowing while the turn still runs.
         "OTEL_LOGS_EXPORT_INTERVAL": _CLAUDE_OTEL_EXPORT_INTERVAL_MS,
-        "OTEL_LOG_RAW_API_BODIES": "1",
+        "OTEL_LOG_RAW_API_BODIES": f"file:{body_dir}",
+        _OTEL_RESOURCE_ATTRIBUTES_ENV: ",".join(kept),
         # The gRPC client honors http_proxy/https_proxy and would route the
         # loopback export through the user's proxy, which may not forward
         # 127.0.0.1 traffic. Exempt loopback instead of clearing the proxy
@@ -135,6 +190,78 @@ def claude_otel_env(endpoint: str) -> dict[str, str]:
         "no_proxy": "127.0.0.1,localhost",
         "NO_PROXY": "127.0.0.1,localhost",
     }
+
+
+def claude_request_log_settings_env(env: Mapping[str, str]) -> dict[str, str]:
+    """Return the part of the request-log env that must also win over user settings.
+
+    The CLI applies user settings after the process env, so the resource
+    identity a receiver filters on is injected through ``--settings`` as well.
+    """
+    value = env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV)
+    return {_OTEL_RESOURCE_ATTRIBUTES_ENV: value} if value else {}
+
+
+def claude_model_options(server_info: Mapping[str, Any] | None) -> tuple[ModelOption, ...]:
+    """Map the CLI ``initialize`` model catalog to protocol model options.
+
+    The CLI lists its login's models on the ``initialize`` response (entries
+    like ``{"value": "sonnet", "supportedEffortLevels": [...]}``); the entry
+    whose ``value`` is ``"default"`` is the model the CLI uses when none is set.
+
+    Args:
+        server_info: ``ClaudeSDKClient.get_server_info()`` of a connected client.
+
+    Returns:
+        One option per catalog entry, in CLI order.
+    """
+    raw = server_info.get("models") if server_info else None
+    if not isinstance(raw, list):
+        return ()
+    result: list[ModelOption] = []
+    for entry in raw:
+        if not isinstance(entry, Mapping):
+            continue
+        value = entry.get("value")
+        if not isinstance(value, str) or not value:
+            continue
+        efforts = entry.get("supportedEffortLevels")
+        extensions = {key: to_json_safe(item) for key, item in entry.items() if key in _CLAUDE_MODEL_EXTENSION_KEYS}
+        result.append(
+            ModelOption(
+                model_id=value,
+                display_name=str(entry.get("displayName") or ""),
+                description=str(entry.get("description") or ""),
+                efforts=tuple(str(item) for item in efforts if item) if isinstance(efforts, list) else (),
+                is_default=value == _CLAUDE_DEFAULT_MODEL_VALUE,
+                extensions=extensions,
+            )
+        )
+    return tuple(result)
+
+
+async def apply_claude_flag_settings(client: Any, settings: Mapping[str, Any]) -> bool:
+    """Push flag settings into a live CLI session through ``apply_flag_settings``.
+
+    The SDK wraps ``set_model`` but not effort; the CLI control protocol's
+    ``apply_flag_settings`` request hot-applies ``effortLevel`` without a
+    restart. The SDK exposes no public method for it, so the private query
+    seam stays isolated here.
+
+    Args:
+        client: A connected ``ClaudeSDKClient``.
+        settings: Flag settings to apply, e.g. ``{"effortLevel": "low"}``.
+
+    Returns:
+        False when this SDK build does not expose the control channel; the
+        caller then falls back to reconnecting with the new options.
+    """
+    query = getattr(client, "_query", None)
+    send = getattr(query, "_send_control_request", None)
+    if not callable(send):
+        return False
+    await send({"subtype": "apply_flag_settings", "settings": dict(settings)})
+    return True
 
 
 def mcp_servers_to_sdk(servers: tuple[McpServerConfig, ...]) -> dict[str, Any]:
@@ -159,6 +286,15 @@ def mcp_servers_to_sdk(servers: tuple[McpServerConfig, ...]) -> dict[str, Any]:
     return result
 
 
+def claude_mcp_tool_naming(server_names: Iterable[str]) -> str:
+    """State how the CLI names the tools of the given MCP servers.
+
+    Claude Code offers an MCP tool as ``mcp__<server>__<tool>``, with the
+    server name spelled exactly as it was registered.
+    """
+    return mcp_tool_naming_preamble({name: f"mcp__{name}__{TOOL_PLACEHOLDER}" for name in server_names})
+
+
 def build_claude_options(
     *,
     sdk: Any,
@@ -172,14 +308,26 @@ def build_claude_options(
     mcp_servers: dict[str, Any],
     can_use_tool: Callable[..., Any] | None,
     stderr: Callable[[str], None] | None,
+    settings_env: Mapping[str, str] = MappingProxyType({}),
 ) -> "ClaudeAgentOptions":
-    """Build ``ClaudeAgentOptions`` for one harness session."""
-    if config.system_prompt_mode == "replace" and system_prompt:
-        prompt_option: Any = system_prompt
+    """Build ``ClaudeAgentOptions`` for one harness session.
+
+    ``settings_env`` is merged over ``config.settings_env`` into the
+    ``--settings`` env, for env the harness itself must pin above user settings.
+
+    The prompt is led by the naming declaration for the session's MCP servers,
+    so the tools the host names by their bare names resolve to the servers it
+    registered rather than to a built-in tool of the CLI.
+    """
+    prompt_text = "\n\n".join(
+        part for part in (claude_mcp_tool_naming(mcp_servers), system_prompt) if part
+    )
+    if config.system_prompt_mode == "replace" and prompt_text:
+        prompt_option: Any = prompt_text
     else:
-        prompt_option = {"type": "preset", "append": system_prompt or ""}
+        prompt_option = {"type": "preset", "append": prompt_text}
     settings = config.settings
-    endpoint_settings = model_settings(model, config.settings_env)
+    endpoint_settings = model_settings(model, {**config.settings_env, **settings_env})
     if endpoint_settings is not None:
         settings = endpoint_settings
     return sdk.ClaudeAgentOptions(
@@ -191,6 +339,7 @@ def build_claude_options(
         env=dict(env),
         mcp_servers=mcp_servers,
         model=model.model if model is not None else None,
+        effort=model.effort if model is not None else None,
         permission_mode=config.permission_mode,
         resume=resume,
         session_id=session_id,
@@ -205,7 +354,11 @@ def build_claude_options(
 
 
 __all__ = [
-    "claude_otel_env",
+    "apply_claude_flag_settings",
+    "claude_mcp_tool_naming",
+    "claude_model_options",
+    "claude_request_log_env",
+    "claude_request_log_settings_env",
     "build_claude_options",
     "build_claude_session_id",
     "build_process_env",

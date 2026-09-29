@@ -470,18 +470,28 @@ class SwarmflowTool(AsyncTool):
     async def _seal_guard(self, script_path: str, resume_id: str) -> str:
         """Blank out a resume_id that points at a TERMINAL (sealed) run.
 
-        Relaunching under it would wrongly replay the sealed cache. Best-effort:
-        failures only debug-log, never block the launch.
+        Relaunching under it would wrongly replay the sealed cache. Reads the
+        run's own journal snapshot + WAL (per-run_id paths): the seal record of
+        ``resume_id`` lives in exactly those files, so the guard stays O(1)
+        with no cross-run scanning. Best-effort: failures only debug-log,
+        never block the launch.
         """
         if not (resume_id and script_path):
             return resume_id
         try:
             from openjiuwen.agent_teams.context import get_session_id
             from openjiuwen.agent_teams.workflow.engine.journal import Journal
-            from openjiuwen.agent_teams.workflow.runner import _resolve_journal_path
+            from openjiuwen.agent_teams.workflow.runner import (
+                _resolve_journal_path,
+                _resolve_legacy_resume,
+                _resolve_wal_path,
+            )
 
-            journal_path = _resolve_journal_path(script_path, self._team_name, get_session_id())
-            journal = await Journal.load(journal_path, wal_path=f"{journal_path}.wal")
+            session_id = get_session_id()
+            journal_path = _resolve_journal_path(script_path, self._team_name, session_id, resume_id)
+            wal_path = _resolve_wal_path(script_path, self._team_name, session_id, resume_id)
+            legacy_path = _resolve_legacy_resume(script_path, self._team_name, session_id, resume_id)
+            journal = await Journal.load(journal_path, wal_path=wal_path, legacy_path=legacy_path)
             if journal.find_run_record(resume_id, "seal") is not None:
                 team_logger.warning(
                     "[swarmflow] resume_id %s is terminal (sealed); forcing a fresh run_id", resume_id
@@ -514,7 +524,7 @@ class SwarmflowTool(AsyncTool):
         enriched[_COMPLETION_CTX_KEY] = {}
         return enriched
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         if not output.success:
             return output.error or "Failed to launch async tool"
         data = output.data or {}

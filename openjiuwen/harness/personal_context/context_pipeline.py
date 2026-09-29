@@ -23,7 +23,7 @@ import threading
 import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
+from typing import Any, Awaitable, Callable, Iterable, Mapping, NoReturn, Sequence, TypeVar, cast
 from urllib.parse import unquote, urlsplit, urlunsplit
 
 from openjiuwen.core.common.exception.errors import BaseError
@@ -33,6 +33,7 @@ from openjiuwen.core.foundation.store.base_embedding import EmbeddingConfig
 from openjiuwen.core.retrieval.embedding.api_embedding import APIEmbedding
 from openjiuwen.harness.personal_context.agent_support import run_personal_context_agent
 from openjiuwen.harness.personal_context.config import PersonalContextConfig
+from openjiuwen.harness.personal_context.file_tools import _ReclusterApply, _ReclusterPlan
 from openjiuwen.harness.personal_context.models import FetchBatch, RawChangeItem
 from openjiuwen.harness.personal_context.path_safety import (
     PORTABLE_FORBIDDEN as _PORTABLE_CONTEXT_FORBIDDEN,
@@ -75,6 +76,7 @@ _MARKDOWN_LINK_TOKEN = re.compile(rf"\[[^\]\r\n]*\]\({_MARKDOWN_DESTINATION_TOKE
 _MARKDOWN_INLINE_LINK = re.compile(rf"!?\[([^\]\r\n]+)\]\({_MARKDOWN_DESTINATION_TOKEN}\)")
 _MARKDOWN_HEADING = re.compile(r"^ {0,3}(#{1,6})[ \t]+(.+?)\s*#*\s*$")
 _SHORT_REFERENCE = re.compile(r"\[\[ref:(0|[1-9][0-9]*)\]\]")
+_INERT_REFERENCE_TOKEN = re.compile(r"(?<!\[)\[ref:(0|[1-9][0-9]*)\](?!\])(?!\()")
 _SOURCE_METADATA_ID = re.compile(r"src_[0-9a-f]{32}")
 _URI_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*:")
 _PERSONAL_CONTEXT_MANAGED_MARKER = re.compile(r"<!--\s*personal-context(?::[a-z0-9-]+|-[a-z0-9-]+):(?:start|end)\s*-->")
@@ -95,7 +97,10 @@ _MANAGED_SOURCE_MARKER_LIKE = re.compile(r"(?i)<!--\s*personal-context-managed-s
 _RELATED_START = "<!-- personal-context-related:start -->"
 _RELATED_END = "<!-- personal-context-related:end -->"
 _RELATED_LIMIT = 3
-_RELATED_ACCEPT_SCORE = 0.50
+# Related-page links share the measured sparse-cosine scale (F_05): tree-wide,
+# same-topic page pairs reach p95 ~ 0.039 while cross-topic pairs stay <= ~0.012
+# at p95, so 0.04 keeps only genuinely tight pairs.
+_RELATED_ACCEPT_SCORE = 0.04
 _MAX_BLOCK_CHARS = 4_000
 _MAX_AGENT_CONTEXT_FILES = 10_000
 _MAX_AGENT_CONTEXT_FILE_BYTES = 2 * 1024 * 1024
@@ -136,9 +141,17 @@ _CONVENTIONAL_COMMIT = re.compile(
 )
 _BM25_K1 = 1.2
 _BM25_B = 0.75
-_DIRECTORY_ACCEPT_SCORE = 0.42
+# Absolute "meaningfully related" floor for semantic cosine scores, measured on
+# a real Context tree (codex_workspace/20260917_semantic_threshold_calibration,
+# see F_05): a page vs its own directory scores >= ~0.11, vs any other directory
+# <= ~0.045, so 0.06 sits inside that gap.  Structural decisions (routing,
+# rehome, coherence) use this absolute value; clustering derives an adaptive cut
+# from the population's pairwise scores but never accepts a cut below this floor.
+_SEMANTIC_ACCEPT_FLOOR = 0.06
+# An adaptive cut above this ceiling means the population is one coherent mass
+# (near-duplicate records); the cut is rejected and the floor rules instead.
+_CLUSTER_SCORE_CEILING = 0.35
 _DIRECTORY_MARGIN = 0.10
-_CLUSTER_TITLE_ANCHOR_WEIGHT = 2.0
 _SPARSE_SHORTLIST_LIMIT = 8
 _INITIAL_PROMPT_DOCUMENT_LIMIT = 12
 _SMALL_PROMPT_SUMMARY_CHARS = 1_200
@@ -197,7 +210,10 @@ _PROVIDER_DISPLAY_NAMES = {
 }
 _FILESYSTEM_WIKI_INSTRUCTIONS = (
     "Source references: copy only [[ref:N]] tokens already present in the supplied Processing Markdown; never "
-    "invent a number or write a permanent source ID, source URL, or source metadata path. Place each copied token "
+    "invent a number or write a permanent source ID, source URL, or source metadata path. The already-published "
+    "Context only shows converted reference forms (single-bracket [ref:N] in description.md files, [来源N](...) "
+    "links in ordinary pages); never imitate those converted forms — always cite with the exact double-bracket "
+    "[[ref:N]] token. Place each copied token "
     "where the referenced object is actually discussed. A reference may identify an origin or evidence, or merely "
     "a mention or association; it does not by itself mean support, proof, agreement, or endorsement. One page may "
     "reference multiple sources and one source may appear on multiple pages, but never add an unrelated reference "
@@ -326,84 +342,10 @@ def _bm25_sparse_vectors(
     return result
 
 
-def _semantic_title_anchor(title: str) -> str | None:
-    """Return one conservative, provider-neutral topic anchor for clustering."""
-
-    normalized = " ".join(unicodedata.normalize("NFKC", title).strip().split())
-    conventional = _CONVENTIONAL_COMMIT.fullmatch(normalized)
-    if conventional is not None:
-        normalized = conventional.group(2).strip()
-    normalized = re.sub(
-        r"^(?:(?:如何(?:使用|配置|实现|选择)?|怎么(?:使用|配置|实现)?|怎样(?:使用|配置|实现)?|"
-        r"为什么|为何|关于|介绍|详解|教程|指南)\s*|"
-        r"(?:使用|基于|实现|支持|新增|修复)(?=\s|[A-Za-z0-9]))+",
-        "",
-        normalized,
-    ).lstrip(" -:：")
-    normalized = re.sub(r"^[^\w\u3400-\u9fff]+", "", normalized)
-    if not normalized:
-        return None
-    folded = normalized.casefold()
-    agent_semantics = re.sub(
-        r"(?<![a-z0-9])(?:user[- ]agent|travel agents?|cleaning agents?|chemical agents?)(?![a-z0-9])",
-        " ",
-        folded,
-    )
-    agent_pattern_matches = []
-    for matched_pattern in (
-        "(?<![a-z0-9])agentic(?![a-z0-9])",
-        "(?<![a-z0-9])(?:ai|artificial[ -]+intelligence|autonomous)[ -]+agents?(?![a-z0-9])",
-        "(?<![a-z0-9])multi[ -]+agents?(?![a-z0-9])",
-    ):
-        agent_pattern_matches.append(re.search(matched_pattern, agent_semantics) is not None)
-    explicit_agent_context = any(agent_pattern_matches)
-    explicit_agent_context = (
-        explicit_agent_context
-        or re.search(
-            r"(?<![a-z0-9])agents?(?![a-z0-9])\s+"
-            r"(?:memory|tools?|system|workflow|记忆|工具|系统|工作流)(?![a-z0-9])",
-            agent_semantics,
-        )
-        is not None
-    )
-    if "智能体" in normalized or explicit_agent_context:
-        return "topic:智能体"
-    chinese = re.match(r"[\u3400-\u9fff]+", normalized)
-    if chinese is not None and len(chinese.group(0)) >= 2:
-        return f"zh:{chinese.group(0)[:4]}"
-    words = re.findall(r"[a-z][a-z0-9_.+#-]*", folded)
-    while words and words[0] in {
-        "a",
-        "about",
-        "ai",
-        "an",
-        "for",
-        "from",
-        "getting",
-        "guide",
-        "guides",
-        "how",
-        "introduction",
-        "introducing",
-        "new",
-        "on",
-        "started",
-        "the",
-        "to",
-        "use",
-        "using",
-        "what",
-        "why",
-        "with",
-    }:
-        words.pop(0)
-    return f"latin:{words[0]}" if words else None
-
-
 def _clustering_sparse_vectors(
     records_by_id: Mapping[str, tuple[str, Sequence[str], str]],
 ) -> dict[str, dict[str, float]]:
-    """Build BM25 vectors with a separately weighted high-confidence title anchor."""
+    """Build deterministic L2-normalized BM25 vectors from semantic records."""
 
     base = _bm25_sparse_vectors(
         {
@@ -414,12 +356,73 @@ def _clustering_sparse_vectors(
     result: dict[str, dict[str, float]] = {}
     for identifier in sorted(records_by_id, key=lambda value: (value.casefold(), value)):
         vector = {f"bm25:{term}": value for term, value in base[identifier].items()}
-        anchor = _semantic_title_anchor(records_by_id[identifier][0])
-        if anchor is not None:
-            vector[f"title-anchor:{anchor}"] = _CLUSTER_TITLE_ANCHOR_WEIGHT
         norm = math.sqrt(sum(value * value for value in vector.values()))
         result[identifier] = {term: value / norm for term, value in vector.items()} if norm > 0.0 else {}
     return result
+
+
+def _adaptive_accept_cut(scores: Sequence[float]) -> float:
+    """Derive the clustering edge cut from a population's pairwise scores.
+
+    The scores are 1-D, so the optimal binary split (maximum between-class
+    variance, equivalent to exact two-means) is found by one sorted sweep —
+    fully deterministic, no initialization.  The cut is accepted only inside
+    [_SEMANTIC_ACCEPT_FLOOR, _CLUSTER_SCORE_CEILING]: below the floor the
+    population has no separable structure (weak or noisy similarity), above
+    the ceiling it is one coherent mass; both cases fall back to the floor.
+
+    A single global split can slice through the weakest of several same-topic
+    families whose scores sit at different scales (noise ~0, family A ~0.1,
+    family B ~0.2 → the cut lands between A and B and kills every A edge).
+    Cross-topic pairs are ~0 in BM25 space, so lowering the cut never invents
+    false merges; it only preserves weaker families.  The accepted cut's low
+    side is therefore re-split recursively, walking the cut down toward the
+    noise boundary — but never below the floor, which stays the absolute
+    guard.  See F_05 for the measurement basis.
+    """
+
+    counts: dict[float, int] = {}
+    for score in scores:
+        key = round(float(score), 12)
+        counts[key] = counts.get(key, 0) + 1
+    values = sorted(counts)
+    if len(values) < 2:
+        return _SEMANTIC_ACCEPT_FLOOR
+
+    def best_split(split_values: list[float]) -> tuple[float, list[float]]:
+        """Return the max-between-class cut and the distinct values below it."""
+
+        total_n = sum(counts[value] for value in split_values)
+        total_sum = sum(value * counts[value] for value in split_values)
+        best_cut, best_between = split_values[0], -1.0
+        low_values: list[float] = []
+        left_n = left_sum = 0
+        left_values: list[float] = []
+        for value in split_values[:-1]:
+            left_n += counts[value]
+            left_sum += value * counts[value]
+            left_values.append(value)
+            right_n = total_n - left_n
+            right_sum = total_sum - left_sum
+            between = left_n * right_n * ((left_sum / left_n - right_sum / right_n) ** 2)
+            if between > best_between:
+                best_between = between
+                best_cut = (left_sum / left_n + right_sum / right_n) / 2.0
+                low_values = list(left_values)
+        return best_cut, low_values
+
+    cut, low_values = best_split(values)
+    if not _SEMANTIC_ACCEPT_FLOOR <= cut <= _CLUSTER_SCORE_CEILING:
+        return _SEMANTIC_ACCEPT_FLOOR
+    while len(low_values) >= 2:
+        sub_cut, sub_low = best_split(low_values)
+        if sub_cut < _SEMANTIC_ACCEPT_FLOOR:
+            return _SEMANTIC_ACCEPT_FLOOR
+        if sub_cut > _CLUSTER_SCORE_CEILING:
+            return cut
+        cut = sub_cut
+        low_values = sub_low
+    return cut
 
 
 def _sparse_vector_cosine(left: Mapping[str, float], right: Mapping[str, float]) -> float:
@@ -502,6 +505,8 @@ def _capacity_constrained_clusters(
     target_members: int,
     dense_vectors_by_id: Mapping[str, Sequence[float]] | None = None,
     source_distributions_by_id: Mapping[str, _SourceDistribution] | None = None,
+    accept_score: float | None = None,
+    affinity_groups: Sequence[Sequence[str]] | None = None,
 ) -> list[tuple[str, ...]]:
     """Cluster semantic vectors deterministically while respecting a hard member cap."""
 
@@ -513,6 +518,15 @@ def _capacity_constrained_clusters(
     sparse = {identifier: dict(vectors_by_id[identifier]) for identifier in identifiers}
     dense = _normalized_dense_vectors(dense_vectors_by_id, identifiers)
     sources = source_distributions_by_id or {}
+
+    bundles: dict[str, tuple[Mapping[str, float], Sequence[float] | None, _SourceDistribution]] = {
+        identifier: (
+            sparse[identifier],
+            dense[identifier] if dense is not None else None,
+            sources.get(identifier, {}),
+        )
+        for identifier in identifiers
+    }
 
     def similarity_vectors(
         left: tuple[Mapping[str, float], Sequence[float] | None, _SourceDistribution],
@@ -527,9 +541,40 @@ def _capacity_constrained_clusters(
             _fused_semantic_score(_sparse_vector_cosine(left_sparse, right_sparse), cosine), left_source, right_source
         )
 
+    # Pairwise scores are computed once up front: when no absolute accept_score
+    # is forced, the edge cut is derived adaptively from their distribution
+    # (F_05), then the matrix is reused for component discovery below.
+    pair_scores: dict[str, dict[str, float]] = {identifier: {} for identifier in identifiers}
+    for position, left_id in enumerate(identifiers):
+        for right_id in identifiers[position + 1:]:
+            score = similarity_vectors(bundles[left_id], bundles[right_id])
+            pair_scores[left_id][right_id] = score
+            pair_scores[right_id][left_id] = score
+    if accept_score is None:
+        threshold = _adaptive_accept_cut([score for left_id in identifiers for score in pair_scores[left_id].values()])
+    else:
+        threshold = accept_score
+
     # Preserve disconnected semantic islands instead of filling a capacity
     # slot with an unrelated page merely because the global cluster count is
     # small.  Each connected component is clustered independently below.
+    affinity_adjacency: dict[str, set[str]] = {identifier: set() for identifier in identifiers}
+    filtered_affinity_groups: list[tuple[str, ...]] = []
+    if affinity_groups is not None:
+        known = set(identifiers)
+        for group in affinity_groups:
+            members = tuple(sorted((member for member in group if member in known), key=lambda v: (v.casefold(), v)))
+            if len(members) < 2:
+                continue
+            filtered_affinity_groups.append(members)
+            for left_id in members:
+                affinity_adjacency[left_id].update(member for member in members if member != left_id)
+
+    def connected(component_current: str, candidate: str) -> bool:
+        return (
+            candidate in affinity_adjacency[component_current] or pair_scores[component_current][candidate] >= threshold
+        )
+
     unseen = set(identifiers)
     components: list[tuple[str, ...]] = []
     while unseen:
@@ -541,25 +586,11 @@ def _capacity_constrained_clusters(
             component_current = frontier.pop()
             connected_candidates = []
             for matched_identifier in sorted(unseen, key=lambda value: (value.casefold(), value)):
-                if not (
-                    similarity_vectors(
-                        (
-                            sparse[component_current],
-                            dense[component_current] if dense is not None else None,
-                            sources.get(component_current, {}),
-                        ),
-                        (
-                            sparse[matched_identifier],
-                            dense[matched_identifier] if dense is not None else None,
-                            sources.get(matched_identifier, {}),
-                        ),
-                    )
-                    >= _DIRECTORY_ACCEPT_SCORE
-                ):
+                if not connected(component_current, matched_identifier):
                     continue
                 connected_candidates.append(matched_identifier)
-            connected = connected_candidates
-            for identifier in connected:
+            connected_ids = connected_candidates
+            for identifier in connected_ids:
                 unseen.remove(identifier)
                 component_members.append(identifier)
                 frontier.append(identifier)
@@ -569,6 +600,7 @@ def _capacity_constrained_clusters(
         for component_ids in components:
             sub_vectors = {identifier: sparse[identifier] for identifier in component_ids}
             sub_dense = {identifier: dense[identifier] for identifier in component_ids} if dense is not None else None
+            component_id_set = set(component_ids)
             clustered.extend(
                 _capacity_constrained_clusters(
                     sub_vectors,
@@ -576,6 +608,12 @@ def _capacity_constrained_clusters(
                     target_members=target_members,
                     dense_vectors_by_id=sub_dense,
                     source_distributions_by_id=sources,
+                    accept_score=threshold,
+                    affinity_groups=[
+                        tuple(member for member in group if member in component_id_set)
+                        for group in filtered_affinity_groups
+                    ]
+                    or None,
                 )
             )
         return sorted(clustered, key=lambda cluster: (cluster[0].casefold(), cluster[0]))
@@ -735,7 +773,7 @@ def _capacity_constrained_clusters(
                         _mean_source_distribution([sources.get(member, {}) for member in right]),
                     ),
                 )
-                if score >= _DIRECTORY_ACCEPT_SCORE:
+                if score >= _SEMANTIC_ACCEPT_FLOOR:
                     candidates.append(
                         (
                             -score,
@@ -921,7 +959,7 @@ async def _rank_hybrid_semantic_candidates(
 
 
 def _accepted_directory_rank(ranked: Sequence[tuple[int, float]]) -> int | None:
-    if not ranked or ranked[0][1] < _DIRECTORY_ACCEPT_SCORE:
+    if not ranked or ranked[0][1] < _SEMANTIC_ACCEPT_FLOOR:
         return None
     if len(ranked) > 1 and ranked[0][1] - ranked[1][1] < _DIRECTORY_MARGIN:
         return None
@@ -1198,27 +1236,45 @@ def _remove_tree_entry(path: Path) -> None:
         _remove_tree(path)
 
 
+def _retry_readonly_removal(
+    function: Any,
+    path: str,
+    exc_info: tuple[type[BaseException], BaseException, Any],
+) -> None:
+    error = exc_info[1]
+    if not isinstance(error, PermissionError):
+        raise error
+    try:
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            raise error
+        os.chmod(path, stat.S_IWRITE)
+        function(path)
+    except OSError:
+        raise error from None
+
+
 def _remove_tree(path: Path) -> None:
     try:
-        shutil.rmtree(path)
+        shutil.rmtree(path, onerror=_retry_readonly_removal)
     except OSError as exc:
-        if not isinstance(exc, FileNotFoundError) and getattr(exc, "winerror", None) != 145:
+        if (
+            not isinstance(exc, FileNotFoundError)
+            and getattr(exc, "winerror", None) not in (3, 145, 206)
+        ):
             raise
         if not _path_exists(path) and not _path_is_link_or_reparse(path):
             return
-        shutil.rmtree(_extended_path(path))
+        shutil.rmtree(_extended_path(path), onerror=_retry_readonly_removal)
 
 
 def _make_tree_writable(path: Path) -> None:
     """Make a temporary candidate removable after read-only source copies."""
 
-    target = _extended_path(path)
-    if target.is_symlink() or not target.exists():
+    if not _path_exists(path) or _path_is_link_or_reparse(path):
         return
-    if target.is_dir():
-        for child in target.iterdir():
-            _make_tree_writable(child)
-    target.chmod(target.stat().st_mode | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
+    for entry in [path, *_walk_tree_paths(path)]:
+        extended = _extended_path(entry)
+        extended.chmod(extended.stat().st_mode | stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH)
 
 
 def _remove_empty_directories(root: Path) -> None:
@@ -4332,9 +4388,11 @@ def _cluster_is_semantically_coherent(
     *,
     dense_vectors_by_id: Mapping[str, Sequence[float]] | None = None,
     source_distributions_by_id: Mapping[str, _SourceDistribution] | None = None,
+    accept_score: float | None = None,
 ) -> bool:
     if len(members) < 2:
         return True
+    threshold = _SEMANTIC_ACCEPT_FLOOR if accept_score is None else accept_score
     center = _sparse_centroid([vectors_by_id[member] for member in members])
     dense = _normalized_dense_vectors(dense_vectors_by_id, members)
     dense_center = None
@@ -4356,7 +4414,7 @@ def _cluster_is_semantically_coherent(
             sources.get(member, {}),
             center_source,
         )
-        >= _DIRECTORY_ACCEPT_SCORE
+        >= threshold
         for member in members
     )
 
@@ -4600,6 +4658,8 @@ def _build_hierarchical_cluster_tree(
     max_root_nodes: int | None = None,
     dense_vectors_by_id: Mapping[str, Sequence[float]] | None = None,
     source_distributions_by_id: Mapping[str, _SourceDistribution] | None = None,
+    accept_score: float | None = None,
+    affinity_groups: Sequence[Sequence[str]] | None = None,
 ) -> Mapping[str, object]:
     target_members = min(max_pages_per_directory, max(1, round(max_pages_per_directory * 0.6)))
     clusters = _capacity_constrained_clusters(
@@ -4608,6 +4668,8 @@ def _build_hierarchical_cluster_tree(
         target_members=target_members,
         dense_vectors_by_id=dense_vectors_by_id,
         source_distributions_by_id=source_distributions_by_id,
+        accept_score=accept_score,
+        affinity_groups=affinity_groups,
     )
     coherent_clusters: list[tuple[str, ...]] = []
     for cluster in clusters:
@@ -4616,6 +4678,7 @@ def _build_hierarchical_cluster_tree(
             vectors_by_id,
             dense_vectors_by_id=dense_vectors_by_id,
             source_distributions_by_id=source_distributions_by_id,
+            accept_score=accept_score,
         ):
             coherent_clusters.append(cluster)
         else:
@@ -4640,7 +4703,8 @@ def _build_hierarchical_cluster_tree(
     return {"clusters": tuple(clusters), "roots": tuple(level)}
 
 
-def _hierarchy_node_is_coherent(node: Mapping[str, object]) -> bool:
+def _hierarchy_node_is_coherent(node: Mapping[str, object], *, accept_score: float | None = None) -> bool:
+    threshold = _SEMANTIC_ACCEPT_FLOOR if accept_score is None else accept_score
     children = cast(tuple[Mapping[str, object], ...], node["children"])
     if len(children) < 2:
         return True
@@ -4656,7 +4720,7 @@ def _hierarchy_node_is_coherent(node: Mapping[str, object]) -> bool:
         for left_index, left in enumerate(children)
         for right in children[slice(left_index + 1, None)]
     ]
-    return bool(scores) and sum(scores) / len(scores) >= _DIRECTORY_ACCEPT_SCORE
+    return bool(scores) and sum(scores) / len(scores) >= threshold
 
 
 def _semantic_cluster_name(
@@ -4687,6 +4751,35 @@ def _old_directory_label(directory: Path) -> str:
         heading = _markdown_heading(markdown, fallback=directory.name)
         return _safe_semantic_name(heading)
     return _safe_semantic_name(directory.name)
+
+
+def _unique_recluster_directory_name(base: str, members: Sequence[str], used_names: set[str]) -> str:
+    name = base
+    if name.casefold() == "description.md" or name.casefold() in _RESERVED_CONTEXT_SEGMENTS:
+        name = _safe_semantic_name(f"{base}主题")
+    suffix_length = 6
+    while name.casefold() in used_names:
+        name = _truncate_semantic_context_segment(
+            base,
+            suffix=_digest("|".join(members))[:suffix_length],
+        )
+        suffix_length += 2
+    used_names.add(name.casefold())
+    return name
+
+
+def _recluster_navigation_name(labels: Sequence[str], *, suffix: str = "导航") -> str:
+    representatives: list[str] = []
+    for label in labels:
+        cleaned = re.sub(r"(?:等主题|导航)$", "", label).strip(" ·")
+        if cleaned and cleaned.casefold() not in {item.casefold() for item in representatives}:
+            representatives.append(cleaned)
+        if len(representatives) == 2:
+            break
+    body_limit = _MAX_SEMANTIC_NAME_CHARS - len(suffix)
+    body = _semantic_prefix("·".join(representatives) or "内容", body_limit)
+    candidate = f"{body}{suffix}"
+    return candidate if _semantic_context_segment_is_safe(candidate, markdown_file=False) else f"内容{suffix}"
 
 
 def _plan_context_reclustering(
@@ -4768,33 +4861,6 @@ def _plan_context_reclustering(
     occupied_targets: set[str] = set()
     directory_roles: dict[str, str] = {}
     fallback_reasons: dict[str, str] = {}
-
-    def unique_directory_name(base: str, members: Sequence[str], used_names: set[str]) -> str:
-        name = base
-        if name.casefold() == "description.md" or name.casefold() in _RESERVED_CONTEXT_SEGMENTS:
-            name = _safe_semantic_name(f"{base}主题")
-        suffix_length = 6
-        while name.casefold() in used_names:
-            name = _truncate_semantic_context_segment(
-                base,
-                suffix=_digest("|".join(members))[:suffix_length],
-            )
-            suffix_length += 2
-        used_names.add(name.casefold())
-        return name
-
-    def navigation_name(labels: Sequence[str], *, suffix: str = "导航") -> str:
-        representatives: list[str] = []
-        for label in labels:
-            cleaned = re.sub(r"(?:等主题|导航)$", "", label).strip(" ·")
-            if cleaned and cleaned.casefold() not in {item.casefold() for item in representatives}:
-                representatives.append(cleaned)
-            if len(representatives) == 2:
-                break
-        body_limit = _MAX_SEMANTIC_NAME_CHARS - len(suffix)
-        body = _semantic_prefix("·".join(representatives) or "内容", body_limit)
-        candidate = f"{body}{suffix}"
-        return candidate if _semantic_context_segment_is_safe(candidate, markdown_file=False) else f"内容{suffix}"
 
     def assign_page_targets(
         members: Sequence[str],
@@ -4886,26 +4952,6 @@ def _plan_context_reclustering(
         )
         if dense_by_identity is not None and len(dense_by_identity) != len(normal_ids):
             dense_by_identity = None
-        tree_roots: tuple[dict[str, object], ...] = ()
-        if normal_ids:
-            root_reserves_fallback = rebuild_root == context_root and bool(fallback_ids)
-            tree = _build_hierarchical_cluster_tree(
-                vectors,
-                max_pages_per_directory=max_pages_per_directory,
-                max_subdirectories_per_directory=max_subdirectories_per_directory,
-                max_root_nodes=max_subdirectories_per_directory - int(root_reserves_fallback),
-                dense_vectors_by_id=dense_by_identity,
-                source_distributions_by_id={
-                    identity: _page_source_distribution(
-                        context_root / subtree_relative_by_identity[identity],
-                        context_root=context_root,
-                        source_root=source_root,
-                        alias_targets=alias_targets,
-                    )
-                    for identity in normal_ids
-                },
-            )
-            tree_roots = cast(tuple[dict[str, object], ...], tree["roots"])
 
         old_members_by_directory: dict[str, set[str]] = {}
         for identity in normal_ids:
@@ -4926,11 +4972,57 @@ def _plan_context_reclustering(
             {
                 **normal_records,
                 **{
-                    old_label_id_by_directory[old_relative]: (label, (), label)
-                    for old_relative, label in old_labels_by_directory.items()
+                    # Old-directory labels reuse the full directory record
+                    # (name + description + member-page signals, F_05) so the
+                    # page↔directory channel — the strongest measured signal —
+                    # decides label reuse instead of the bare name string.
+                    old_label_id_by_directory[old_relative]: _directory_semantic_parts(
+                        rebuild_root / Path(*PurePosixPath(old_relative).parts)
+                    )
+                    for old_relative in old_labels_by_directory
                 },
             }
         )
+        # Preserve-affinity (F_05): members still matching their old
+        # directory's full record are kept in one cluster, so a healthy
+        # directory survives the rebuild even when page↔page scores are
+        # idf-deflated below the floor.  Members below the floor are
+        # unconstrained and may be rerouted.
+        affinity_groups: list[tuple[str, ...]] = []
+        for old_relative, old_members in sorted(old_members_by_directory.items()):
+            if len(old_members) < 2:
+                continue
+            label_vector = reuse_vectors[old_label_id_by_directory[old_relative]]
+            passing = tuple(
+                member
+                for member in sorted(old_members, key=lambda value: (value.casefold(), value))
+                if _sparse_vector_cosine(reuse_vectors[member], label_vector) >= _SEMANTIC_ACCEPT_FLOOR
+            )
+            if len(passing) >= 2:
+                affinity_groups.append(passing)
+
+        tree_roots: tuple[dict[str, object], ...] = ()
+        if normal_ids:
+            root_reserves_fallback = rebuild_root == context_root and bool(fallback_ids)
+            tree = _build_hierarchical_cluster_tree(
+                vectors,
+                max_pages_per_directory=max_pages_per_directory,
+                max_subdirectories_per_directory=max_subdirectories_per_directory,
+                max_root_nodes=max_subdirectories_per_directory - int(root_reserves_fallback),
+                dense_vectors_by_id=dense_by_identity,
+                source_distributions_by_id={
+                    identity: _page_source_distribution(
+                        context_root / subtree_relative_by_identity[identity],
+                        context_root=context_root,
+                        source_root=source_root,
+                        alias_targets=alias_targets,
+                    )
+                    for identity in normal_ids
+                },
+                affinity_groups=affinity_groups or None,
+            )
+            tree_roots = cast(tuple[dict[str, object], ...], tree["roots"])
+
         reused_old_directories: set[str] = set()
 
         def semantic_node_name(members: Sequence[str]) -> str:
@@ -4958,7 +5050,7 @@ def _plan_context_reclustering(
                     node["name"] = _safe_semantic_name(f"{base}等主题")
                     node["role"] = "semantic"
                 else:
-                    node["name"] = navigation_name(
+                    node["name"] = _recluster_navigation_name(
                         [cast(str, child["name"]) for child in children],
                     )
                     node["role"] = "navigation"
@@ -4986,7 +5078,7 @@ def _plan_context_reclustering(
                 normalized_label = _normalized_balanced_topic_title(label)
                 normalized_proposed = _normalized_balanced_topic_title(proposed)
                 if (
-                    score < _DIRECTORY_ACCEPT_SCORE
+                    score < _SEMANTIC_ACCEPT_FLOOR
                     and normalized_label not in normalized_proposed
                     and normalized_proposed not in normalized_label
                 ):
@@ -5015,7 +5107,7 @@ def _plan_context_reclustering(
             used_names: set[str] = set()
             for node in sorted(nodes, key=_hierarchy_node_key):
                 members = cast(tuple[str, ...], node["members"])
-                name = unique_directory_name(cast(str, node["name"]), members, used_names)
+                name = _unique_recluster_directory_name(cast(str, node["name"]), members, used_names)
                 current = parent / name
                 directory_roles[current.as_posix()] = cast(str, node["role"])
                 children = cast(tuple[dict[str, object], ...], node["children"])
@@ -5065,7 +5157,7 @@ def _plan_context_reclustering(
                         )
                         grouped.append(
                             fallback_node(
-                                navigation_name(
+                                _recluster_navigation_name(
                                     [cast(str, child["name"]) for child in children],
                                     suffix="来源导航",
                                 ),
@@ -5142,7 +5234,7 @@ def _plan_context_reclustering(
                 if children:
                     used_names: set[str] = set()
                     for child in children:
-                        child["name"] = unique_directory_name(
+                        child["name"] = _unique_recluster_directory_name(
                             cast(str, child["name"]),
                             cast(tuple[str, ...], child["members"]),
                             used_names,
@@ -5342,10 +5434,16 @@ def _apply_context_reclustering(
         # old description is no longer a description of any remaining content
         # (and may still contain provider-specific navigation), so remove that
         # stale leaf before rendering fresh descriptions for the new tree.
-        emptied_directories = {
-            (context_root / _validated_relative_path(old_relative, name="recluster source path")).parent
-            for old_relative in old_paths
-        }
+        # Whole-directory moves can also hollow out intermediate ancestors
+        # that never held a page directly; walk up from every emptied leaf so
+        # those description-only shells are removed as well.  Directories
+        # that still hold anything besides their description.md are skipped.
+        emptied_directories: set[Path] = set()
+        for old_relative in old_paths:
+            directory = (context_root / _validated_relative_path(old_relative, name="recluster source path")).parent
+            while directory != context_root and directory not in emptied_directories:
+                emptied_directories.add(directory)
+                directory = directory.parent
         for directory in sorted(
             emptied_directories,
             key=lambda path: (-len(path.relative_to(context_root).parts), path.as_posix()),
@@ -5500,6 +5598,629 @@ async def _recluster_context_candidate(
     )
 
 
+def _agent_recluster_scope_roots(context_root: Path, scope_paths: Sequence[str]) -> list[Path]:
+    roots: list[Path] = []
+    for value in scope_paths:
+        raw = str(value).replace("\\", "/").strip()
+        root = (
+            context_root
+            if raw in {"", "."}
+            else context_root / _validated_relative_path(raw, name="Context recluster scope")
+        )
+        try:
+            root.relative_to(context_root)
+        except ValueError as exc:
+            raise _pipeline_error("Context recluster scope escaped Context") from exc
+        if not _path_is_dir(root) or _path_is_link_or_reparse(root):
+            raise _pipeline_error("Context recluster scope is not a directory")
+        # Every scope the agent names must hold at least one entry (F_05): an
+        # empty directory contributes nothing and usually means a wrong path.
+        try:
+            has_entries = next(iter(_extended_path(root).iterdir()), None) is not None
+        except OSError as exc:
+            raise _pipeline_error("Context recluster scope could not be inspected") from exc
+        if not has_entries:
+            raise _pipeline_error(f"Context recluster scope is an empty directory: {raw or '.'}")
+        if root not in roots:
+            roots.append(root)
+    # A scope nested inside another selected scope is already covered by it;
+    # drop the nested one so no item can be claimed by two roots at once.
+    return [root for root in roots if not any(root != parent and root.is_relative_to(parent) for parent in roots)]
+
+
+def _agent_recluster_items(
+    context_root: Path,
+    scope_roots: Sequence[Path],
+) -> dict[Path, tuple[list[Path], list[Path], set[str]]]:
+    """Collect the clusterable items sitting directly under each scope root.
+
+    Items are the root's immediate subdirectories that hold at least one
+    ordinary page, plus the ordinary pages placed directly in the root.  The
+    third element case-folds the names of child directories that stay put
+    (reserved, page-less, or reparse points) and keep occupying a slot.
+    """
+
+    items: dict[Path, tuple[list[Path], list[Path], set[str]]] = {}
+    for root in scope_roots:
+        directories: list[Path] = []
+        pages: list[Path] = []
+        staying: set[str] = set()
+        try:
+            entries = sorted(entry.name for entry in _extended_path(root).iterdir())
+        except OSError as exc:
+            raise _pipeline_error("Context recluster scope could not be inspected") from exc
+        for name in entries:
+            entry = root / name
+            if _path_is_link_or_reparse(entry):
+                continue
+            if _path_is_dir(entry):
+                if name in _RESERVED_CONTEXT_SEGMENTS or not any(
+                    matched.suffix.casefold() == ".md"
+                    and matched.name.casefold() != "description.md"
+                    and _path_is_file(matched)
+                    and not _path_is_link_or_reparse(matched)
+                    for matched in _walk_tree_paths(entry)
+                ):
+                    staying.add(name.casefold())
+                    continue
+                directories.append(entry)
+                continue
+            if entry.suffix.casefold() == ".md" and name.casefold() != "description.md" and _path_is_file(entry):
+                pages.append(entry)
+        items[root] = (directories, pages, staying)
+    return items
+
+
+def _agent_recluster_directory_record(
+    context_root: Path,
+    directory: Path,
+) -> tuple[str, tuple[str, list[str], str]]:
+    """Cluster one directory by the same name + description + member-page signals rules uses."""
+
+    return directory.relative_to(context_root).as_posix(), _directory_semantic_parts(directory)
+
+
+def _assign_recluster_tree_targets(
+    tree_roots: Sequence[dict[str, object]],
+    *,
+    anchor: PurePosixPath,
+    records: Mapping[str, tuple[str, list[str], str]],
+    vectors: Mapping[str, Mapping[str, float]],
+    staying: set[str],
+    kind_by_id: Mapping[str, str],
+    relative_by_id: Mapping[str, str],
+    mapping: dict[str, str],
+) -> None:
+    """Name one scope root's cluster tree and write its moves into ``mapping``."""
+
+    def semantic_node_name(members: Sequence[str]) -> str:
+        proposed = _semantic_cluster_name(members, records_by_id=records, vectors_by_id=vectors)
+        if proposed == "主题" or proposed.casefold() in _RESERVED_CONTEXT_SEGMENTS:
+            proposed = "内容主题"
+        return proposed
+
+    def prepare_names(node: dict[str, object]) -> None:
+        children = cast(tuple[dict[str, object], ...], node["children"])
+        members = cast(tuple[str, ...], node["members"])
+        if children:
+            for child in children:
+                prepare_names(child)
+            if _hierarchy_node_is_coherent(node):
+                node["name"] = _safe_semantic_name(f"{semantic_node_name(members)}等主题")
+            else:
+                node["name"] = _recluster_navigation_name(
+                    [cast(str, child["name"]) for child in children],
+                )
+            return
+        node["name"] = semantic_node_name(members)
+
+    def page_target_stem(item_id: str, used_names: set[str]) -> str:
+        title = records[item_id][0]
+        stem = PurePosixPath(relative_by_id[item_id]).stem
+        if not _semantic_context_segment_is_safe(f"{stem}.md", markdown_file=True):
+            stem = _semantic_page_stem(title)
+        if stem.casefold() in used_names:
+            stem = _semantic_page_stem(title)
+        suffix_length = 6
+        while stem.casefold() in used_names:
+            stem = _semantic_page_stem(title, suffix=_digest(item_id)[:suffix_length])
+            suffix_length += 2
+        used_names.add(stem.casefold())
+        return stem
+
+    def assign_leaf_targets(members: Sequence[str], current: PurePosixPath) -> None:
+        used_page_names: set[str] = set()
+        for item_id in members:
+            relative = relative_by_id[item_id]
+            if kind_by_id[item_id] == "directory":
+                target = (current / PurePosixPath(relative).name).as_posix()
+            else:
+                target = (current / f"{page_target_stem(item_id, used_page_names)}.md").as_posix()
+            if target != relative:
+                mapping[relative] = target
+
+    def assign_nodes(nodes: Sequence[dict[str, object]], parent: PurePosixPath, *, top_level: bool) -> None:
+        used_names: set[str] = set(staying) if top_level else set()
+        if top_level:
+            # Lone root items stay untouched; reserve their directory
+            # names before any new group can claim them.
+            for node in nodes:
+                members = cast(tuple[str, ...], node["members"])
+                if (
+                    not cast(tuple[dict[str, object], ...], node["children"])
+                    and len(members) == 1
+                    and kind_by_id[members[0]] == "directory"
+                ):
+                    used_names.add(PurePosixPath(relative_by_id[members[0]]).name.casefold())
+        for node in sorted(nodes, key=_hierarchy_node_key):
+            members = cast(tuple[str, ...], node["members"])
+            children = cast(tuple[dict[str, object], ...], node["children"])
+            if top_level and not children and len(members) == 1:
+                continue
+            # A group named after one of its own directory members would
+            # nest that directory into itself (B -> B/B); reserve member
+            # directory names so the group earns a digest suffix instead.
+            for member in members:
+                if kind_by_id[member] == "directory":
+                    used_names.add(PurePosixPath(relative_by_id[member]).name.casefold())
+            name = _unique_recluster_directory_name(cast(str, node["name"]), members, used_names)
+            current = parent / name
+            if children:
+                assign_nodes(children, current, top_level=False)
+            else:
+                assign_leaf_targets(members, current)
+
+    for node in tree_roots:
+        prepare_names(node)
+    assign_nodes(tree_roots, anchor, top_level=True)
+
+
+def _plan_agent_recluster_mapping(
+    context_root: Path,
+    *,
+    scope_roots: Sequence[Path],
+    items_by_root: Mapping[Path, tuple[list[Path], list[Path], set[str]]],
+    records_by_id: Mapping[str, tuple[str, list[str], str]],
+    kind_by_id: Mapping[str, str],
+    relative_by_id: Mapping[str, str],
+    dense_vectors_by_id: Mapping[str, Sequence[float]] | None,
+    max_pages_per_directory: int,
+    max_subdirectories_per_directory: int,
+) -> dict[str, str]:
+    """Group each scope root's directory and page items into named clusters.
+
+    The proposal mixes directory entries (``主题A -> 分组/主题A`` moves the
+    whole directory, description included) with page entries.  Items sharing
+    no cluster stay put, so a healthy root is never churned.
+    """
+
+    mapping: dict[str, str] = {}
+    member_capacity = max(1, min(max_pages_per_directory, max_subdirectories_per_directory))
+
+    for root in scope_roots:
+        directories, pages, staying = items_by_root[root]
+        root_ids = [f"dir:{directory.relative_to(context_root).as_posix()}" for directory in directories]
+        root_ids += [f"page:{page.relative_to(context_root).as_posix()}" for page in pages]
+        if len(root_ids) < 2:
+            continue
+        records = {item_id: records_by_id[item_id] for item_id in root_ids}
+        # Mixed directory/page items share one plain BM25 vector space (F_05:
+        # no title anchor anywhere); the edge cut is derived adaptively from
+        # each population's pairwise scores, floored at _SEMANTIC_ACCEPT_FLOOR.
+        vectors = _clustering_sparse_vectors(records)
+        dense = (
+            {item_id: dense_vectors_by_id[item_id] for item_id in root_ids if item_id in dense_vectors_by_id}
+            if dense_vectors_by_id is not None
+            else None
+        )
+        if dense is not None and len(dense) != len(root_ids):
+            dense = None
+        tree = _build_hierarchical_cluster_tree(
+            vectors,
+            max_pages_per_directory=member_capacity,
+            max_subdirectories_per_directory=max_subdirectories_per_directory,
+            max_root_nodes=max(1, max_subdirectories_per_directory - len(staying)),
+            dense_vectors_by_id=dense,
+        )
+        tree_roots = cast(tuple[dict[str, object], ...], tree["roots"])
+        anchor = PurePosixPath(*root.relative_to(context_root).parts)
+        _assign_recluster_tree_targets(
+            tree_roots,
+            anchor=anchor,
+            records=records,
+            vectors=vectors,
+            staying=staying,
+            kind_by_id=kind_by_id,
+            relative_by_id=relative_by_id,
+            mapping=mapping,
+        )
+    return mapping
+
+
+def _assign_agent_recluster_groups(
+    context_root: Path,
+    *,
+    scope_roots: Sequence[Path],
+    items_by_root: Mapping[Path, tuple[list[Path], list[Path], set[str]]],
+    records_by_id: Mapping[str, tuple[str, list[str], str]],
+    group_names: Sequence[str],
+    max_pages_per_directory: int,
+    max_subdirectories_per_directory: int,
+) -> tuple[dict[str, str], list[str], list[str]]:
+    """File each scope item into one agent-named group directory (F_05).
+
+    A group name matching an in-scope directory item (its name or its
+    context-relative path, casefolded) pins that directory as the group
+    target: the directory itself stays put and assigned peers move into it.
+    Any other name creates one new group directory per scope root.  An item
+    joins the group with the best BM25 score at or above
+    _SEMANTIC_ACCEPT_FLOOR (ties resolve to the earliest sorted group name);
+    below the floor it stays put and is reported in ``unassigned``.  Groups
+    whose projected direct page or subdirectory count exceeds capacity are
+    reported in ``over_capacity`` so the agent can split or rename them
+    before applying.
+    """
+
+    mapping: dict[str, str] = {}
+    unassigned: list[str] = []
+    over_capacity: list[str] = []
+    names: list[str] = []
+    seen_names: set[str] = set()
+    for value in group_names:
+        name = " ".join(str(value).split()).strip()
+        if name and name.casefold() not in seen_names:
+            seen_names.add(name.casefold())
+            names.append(name)
+    if not names:
+        return mapping, unassigned, over_capacity
+
+    for root in scope_roots:
+        directories, pages, staying = items_by_root[root]
+        item_ids = [f"dir:{directory.relative_to(context_root).as_posix()}" for directory in directories]
+        item_ids += [f"page:{page.relative_to(context_root).as_posix()}" for page in pages]
+        if not item_ids:
+            continue
+        anchor = PurePosixPath(*root.relative_to(context_root).parts)
+
+        used_names: set[str] = set(staying)
+        for directory in directories:
+            used_names.add(directory.name.casefold())
+        groups: list[dict[str, object]] = []
+        pinned_ids: set[str] = set()
+        for name in sorted(names, key=lambda value: (value.casefold(), value)):
+            pinned_id: str | None = None
+            for directory in directories:
+                relative = directory.relative_to(context_root).as_posix()
+                candidate_id = f"dir:{relative}"
+                if candidate_id in pinned_ids:
+                    continue
+                if name.casefold() in {directory.name.casefold(), relative.casefold()}:
+                    pinned_id = candidate_id
+                    break
+            if pinned_id is not None:
+                pinned_ids.add(pinned_id)
+                groups.append(
+                    {
+                        "pinned_id": pinned_id,
+                        "prefix": pinned_id.removeprefix("dir:"),
+                        "record": records_by_id[pinned_id],
+                    }
+                )
+                continue
+            unique = _unique_recluster_directory_name(_safe_semantic_name(name), [name], used_names)
+            groups.append(
+                {
+                    "pinned_id": None,
+                    "prefix": (anchor / unique).as_posix(),
+                    "record": (unique, [], unique),
+                }
+            )
+
+        # Items and group targets share one BM25 corpus so their scores are
+        # comparable; dense embeddings stay exclusive to the automatic
+        # planner (F_05).
+        corpus = {item_id: records_by_id[item_id] for item_id in item_ids}
+        for index, group in enumerate(groups):
+            corpus[f"group:{index}"] = cast(tuple[str, list[str], str], group["record"])
+        vectors = _clustering_sparse_vectors(corpus)
+
+        assignments: dict[str, int] = {}
+        for item_id in sorted(item_ids):
+            if item_id in pinned_ids:
+                continue
+            best_index = -1
+            best_score = _SEMANTIC_ACCEPT_FLOOR
+            for index in range(len(groups)):
+                score = _sparse_vector_cosine(vectors[item_id], vectors[f"group:{index}"])
+                if score >= _SEMANTIC_ACCEPT_FLOOR and (best_index < 0 or score > best_score):
+                    best_index = index
+                    best_score = score
+            if best_index < 0:
+                unassigned.append(item_id.split(":", 1)[1])
+                continue
+            assignments[item_id] = best_index
+
+        movable = {item_id.split(":", 1)[1] for item_id in assignments}
+        projected_pages = [0] * len(groups)
+        projected_subdirectories = [0] * len(groups)
+        for index, group in enumerate(groups):
+            pinned_id = cast(str | None, group["pinned_id"])
+            if pinned_id is None:
+                continue
+            pinned_path = context_root.joinpath(*PurePosixPath(cast(str, group["prefix"])).parts)
+            projected_pages[index] = _directory_ordinary_markdown_count(pinned_path)
+            projected_subdirectories[index] = _directory_direct_subdirectory_count(pinned_path)
+
+        page_stems_by_prefix: dict[str, set[str]] = {}
+        for item_id in sorted(assignments):
+            index = assignments[item_id]
+            prefix = PurePosixPath(cast(str, groups[index]["prefix"]))
+            relative = item_id.split(":", 1)[1]
+            if item_id.startswith("dir:"):
+                name = PurePosixPath(relative).name
+                target = (prefix / name).as_posix()
+                suffix_length = 6
+                while (
+                    target != relative
+                    and _path_exists(context_root.joinpath(*PurePosixPath(target).parts))
+                    and target not in movable
+                ):
+                    name = _truncate_semantic_context_segment(
+                        PurePosixPath(relative).name,
+                        suffix=_digest(item_id)[:suffix_length],
+                    )
+                    suffix_length += 2
+                    target = (prefix / name).as_posix()
+                projected_subdirectories[index] += 1
+            else:
+                used_stems = page_stems_by_prefix.setdefault(prefix.as_posix(), set())
+                title = records_by_id[item_id][0]
+                stem = PurePosixPath(relative).stem
+                if not _semantic_context_segment_is_safe(f"{stem}.md", markdown_file=True):
+                    stem = _semantic_page_stem(title)
+                if stem.casefold() in used_stems:
+                    stem = _semantic_page_stem(title)
+                suffix_length = 6
+                while True:
+                    target = f"{prefix.as_posix()}/{stem}.md"
+                    occupied = (
+                        target != relative
+                        and _path_is_file(context_root.joinpath(*PurePosixPath(target).parts))
+                        and target not in movable
+                    )
+                    if stem.casefold() not in used_stems and not occupied:
+                        break
+                    stem = _semantic_page_stem(title, suffix=_digest(item_id)[:suffix_length])
+                    suffix_length += 2
+                used_stems.add(stem.casefold())
+                projected_pages[index] += 1
+            if target != relative:
+                mapping[relative] = target
+
+        for index, group in enumerate(groups):
+            problems: list[str] = []
+            if projected_pages[index] > max_pages_per_directory:
+                problems.append(f"{projected_pages[index]} ordinary pages")
+            if projected_subdirectories[index] > max_subdirectories_per_directory:
+                problems.append(f"{projected_subdirectories[index]} subdirectories")
+            if problems:
+                over_capacity.append(
+                    f"{cast(str, group['prefix'])} projects {' and '.join(problems)} "
+                    f"(limit {max_pages_per_directory} pages / {max_subdirectories_per_directory} subdirectories)"
+                )
+    return mapping, unassigned, over_capacity
+
+
+def _preflight_agent_recluster_mapping(
+    context_root: Path,
+    mapping: Mapping[str, str],
+    scope_roots: Sequence[Path],
+) -> None:
+    """Reject an agent-edited recluster mapping that breaks the page contract."""
+
+    if not mapping:
+        raise _pipeline_error("Context recluster mapping is empty")
+    directory_entries: list[tuple[PurePosixPath, PurePosixPath]] = []
+    page_entries: list[tuple[PurePosixPath, PurePosixPath]] = []
+    for old_relative, new_relative in mapping.items():
+        old_pure = PurePosixPath(_validated_relative_path(old_relative, name="recluster source path").as_posix())
+        new_pure = PurePosixPath(_validated_relative_path(new_relative, name="recluster target path").as_posix())
+        if old_pure.name.casefold() == "description.md" or new_pure.name.casefold() == "description.md":
+            raise _pipeline_error("Context reclustering cannot move description.md")
+        old_is_page = old_pure.suffix.casefold() == ".md"
+        new_is_page = new_pure.suffix.casefold() == ".md"
+        if old_is_page != new_is_page:
+            raise _pipeline_error("Context reclustering paths must keep the .md extension")
+        old_path = context_root.joinpath(*old_pure.parts)
+        if not any(root in old_path.parents for root in scope_roots):
+            kind = "page" if old_is_page else "directory"
+            raise _pipeline_error(f"Context reclustering source {kind} is outside the selected scope")
+        if old_is_page:
+            if len(new_pure.parts) < 2:
+                raise _pipeline_error("ordinary Markdown pages cannot be placed directly under context/")
+            page_entries.append((old_pure, new_pure))
+            continue
+        if len(new_pure.parts) < 2:
+            raise _pipeline_error("Context directories cannot be placed directly under context/")
+        if old_pure == new_pure or old_pure in new_pure.parents:
+            raise _pipeline_error("Context reclustering cannot move a directory into itself")
+        if old_pure.name in _RESERVED_CONTEXT_SEGMENTS:
+            raise _pipeline_error("Context reclustering cannot move a reserved directory")
+        if any(part in _RESERVED_CONTEXT_SEGMENTS for part in new_pure.parts):
+            raise _pipeline_error("Context reclustering cannot move a directory into a reserved directory")
+        if not _path_is_dir(old_path) or _path_is_link_or_reparse(old_path):
+            raise _pipeline_error("Context reclustering source directory is invalid")
+        has_ordinary_page = False
+        for matched in _walk_tree_paths(old_path):
+            if not _path_is_file(matched) or _path_is_link_or_reparse(matched):
+                continue
+            if matched.suffix.casefold() != ".md":
+                raise _pipeline_error("Context reclustering directories may only contain Markdown files")
+            if matched.name.casefold() != "description.md":
+                has_ordinary_page = True
+        if not has_ordinary_page:
+            raise _pipeline_error("Context reclustering source directory has no pages to move")
+        directory_entries.append((old_pure, new_pure))
+    for index, (old_first, new_first) in enumerate(directory_entries):
+        for old_second, new_second in directory_entries[index + 1:]:
+            if old_first in old_second.parents or old_second in old_first.parents:
+                raise _pipeline_error("Context reclustering directory entries cannot be nested")
+            if new_first == new_second:
+                raise _pipeline_error("Context reclustering directory targets are duplicated")
+            if new_first in new_second.parents or new_second in new_first.parents:
+                raise _pipeline_error("Context reclustering directory targets cannot be nested")
+            moves_into_moved = (
+                new_first == old_second
+                or new_second == old_first
+                or old_second in new_first.parents
+                or old_first in new_second.parents
+            )
+            if moves_into_moved:
+                raise _pipeline_error("Context reclustering cannot move a directory into a directory being moved")
+    for old_first, _new_first in directory_entries:
+        if any(old_first in old_page.parents for old_page, _new_page in page_entries):
+            raise _pipeline_error("Context reclustering page entries cannot be inside a moved directory")
+        if any(old_first in new_page.parents for _old_page, new_page in page_entries):
+            raise _pipeline_error("Context reclustering page targets cannot be inside a moved directory")
+
+
+def _expand_agent_recluster_mapping(context_root: Path, mapping: Mapping[str, str]) -> dict[str, str]:
+    """Expand directory entries into per-page moves; descriptions follow on their own."""
+
+    expanded: dict[str, str] = {}
+    for old_relative, new_relative in mapping.items():
+        old_pure = PurePosixPath(old_relative)
+        new_pure = PurePosixPath(new_relative)
+        if old_pure.suffix.casefold() == ".md":
+            expanded[old_pure.as_posix()] = new_pure.as_posix()
+            continue
+        old_path = context_root.joinpath(*old_pure.parts)
+        for page in _walk_tree_paths(old_path):
+            is_ordinary_page = (
+                page.suffix.casefold() == ".md"
+                and page.name.casefold() != "description.md"
+                and _path_is_file(page)
+                and not _path_is_link_or_reparse(page)
+            )
+            if not is_ordinary_page:
+                continue
+            suffix_path = page.relative_to(old_path)
+            expanded[(old_pure / suffix_path).as_posix()] = (new_pure / suffix_path).as_posix()
+    return expanded
+
+
+async def _agent_recluster_plan(
+    context_root: Path,
+    scope_paths: Sequence[str],
+    *,
+    embed_texts: _SemanticEmbedder | None,
+    max_pages_per_directory: int,
+    max_subdirectories_per_directory: int,
+    group_names: Sequence[str] | None = None,
+) -> Mapping[str, object]:
+    """Compute one reclustering proposal for agent scopes.
+
+    Returns a dict with ``mapping`` plus the ``unassigned`` and
+    ``over_capacity`` advisories.  With ``group_names`` the agent dictates
+    the target groups and items are filed by BM25 affinity (F_05); without
+    them the automatic semantic clustering planner proposes the groups
+    itself and the advisories stay empty.
+    """
+
+    scope_roots = await _cancel_safe_to_thread(_agent_recluster_scope_roots, context_root, scope_paths)
+    items_by_root = await _cancel_safe_to_thread(_agent_recluster_items, context_root, scope_roots)
+    item_count = sum(len(directories) + len(pages) for directories, pages, _staying in items_by_root.values())
+    if item_count == 0 or (group_names is None and item_count < 2):
+        return {"mapping": {}, "unassigned": [], "over_capacity": []}
+
+    def collect_records() -> tuple[
+        dict[str, tuple[str, list[str], str]],
+        dict[str, str],
+        dict[str, str],
+    ]:
+        records_by_id: dict[str, tuple[str, list[str], str]] = {}
+        kind_by_id: dict[str, str] = {}
+        relative_by_id: dict[str, str] = {}
+        for root in scope_roots:
+            directories, pages, _staying = items_by_root[root]
+            for directory in directories:
+                relative, record = _agent_recluster_directory_record(context_root, directory)
+                item_id = f"dir:{relative}"
+                records_by_id[item_id] = record
+                kind_by_id[item_id] = "directory"
+                relative_by_id[item_id] = relative
+            for page in pages:
+                relative, record = _context_page_semantic_record(context_root, page)
+                item_id = f"page:{relative}"
+                records_by_id[item_id] = record
+                kind_by_id[item_id] = "page"
+                relative_by_id[item_id] = relative
+        return records_by_id, kind_by_id, relative_by_id
+
+    records_by_id, kind_by_id, relative_by_id = await _cancel_safe_to_thread(collect_records)
+    if group_names is not None:
+        mapping, unassigned, over_capacity = await _cancel_safe_to_thread(
+            _assign_agent_recluster_groups,
+            context_root,
+            scope_roots=scope_roots,
+            items_by_root=items_by_root,
+            records_by_id=records_by_id,
+            group_names=group_names,
+            max_pages_per_directory=max_pages_per_directory,
+            max_subdirectories_per_directory=max_subdirectories_per_directory,
+        )
+        return {"mapping": mapping, "unassigned": unassigned, "over_capacity": over_capacity}
+    dense_vectors: Mapping[str, Sequence[float]] | None = None
+    # Same embedder contract as the pipeline remap: without a usable dense
+    # vector the planner deterministically falls back to sparse signals.
+    if embed_texts is not None:
+        ordered_ids = sorted(records_by_id)
+        texts = [_semantic_embedding_text(*records_by_id[item_id]) for item_id in ordered_ids]
+        try:
+            raw = await embed_texts(texts)
+            vectors = _validated_embedding_vectors(raw, expected_count=len(ordered_ids))
+            if vectors is not None:
+                dense_vectors = dict(zip(ordered_ids, vectors, strict=True))
+        except Exception:
+            dense_vectors = None
+    mapping = await _cancel_safe_to_thread(
+        _plan_agent_recluster_mapping,
+        context_root,
+        scope_roots=scope_roots,
+        items_by_root=items_by_root,
+        records_by_id=records_by_id,
+        kind_by_id=kind_by_id,
+        relative_by_id=relative_by_id,
+        dense_vectors_by_id=dense_vectors,
+        max_pages_per_directory=max_pages_per_directory,
+        max_subdirectories_per_directory=max_subdirectories_per_directory,
+    )
+    return {"mapping": mapping, "unassigned": [], "over_capacity": []}
+
+
+async def _agent_recluster_apply(
+    context_root: Path,
+    mapping: Mapping[str, str],
+    scope_paths: Sequence[str],
+    *,
+    source_root: Path,
+) -> set[str]:
+    """Preflight and atomically apply one agent-edited reclustering mapping."""
+
+    scope_roots = await _cancel_safe_to_thread(_agent_recluster_scope_roots, context_root, scope_paths)
+    await _cancel_safe_to_thread(_preflight_agent_recluster_mapping, context_root, mapping, scope_roots)
+    expanded = await _cancel_safe_to_thread(_expand_agent_recluster_mapping, context_root, mapping)
+    if not expanded:
+        return set()
+    return await _cancel_safe_to_thread(
+        _apply_context_reclustering,
+        context_root,
+        source_root=source_root,
+        mapping=expanded,
+        rebuild_roots=scope_roots,
+    )
+
+
 def _rules_source_page(
     document: Mapping[str, object],
     *,
@@ -5568,7 +6289,7 @@ async def _rules_update_target_directory(
         key=lambda item: (-item[1], item[0]),
     )
     best = _accepted_directory_rank(candidates)
-    if best is None or old_score >= _DIRECTORY_ACCEPT_SCORE or scores[best] - old_score < _DIRECTORY_MARGIN:
+    if best is None or old_score >= _SEMANTIC_ACCEPT_FLOOR or scores[best] - old_score < _DIRECTORY_MARGIN:
         return None
     return directories[best]
 
@@ -6588,11 +7309,13 @@ def _validate_reference_graph(
 
     context_edges: dict[str, set[str]] = {relative: set() for relative in pages}
     source_edges: dict[str, set[str]] = {relative: set() for relative in pages}
+    page_texts: dict[str, str] = {}
     for relative, page in pages.items():
         try:
             text = _extended_path(page).read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise error("candidate Markdown reference graph could not be read") from exc
+        page_texts[relative] = text
         if "[[ref:" in _SHORT_REFERENCE.sub("", text):
             raise error("candidate contains a malformed or unresolved short source reference")
         reference_text = _markdown_reference_text(text)
@@ -6666,7 +7389,17 @@ def _validate_reference_graph(
             break
         source_reachable = expanded
     if source_reachable != set(pages):
-        raise error("candidate Context contains a reference chain without an atomic source")
+        stranded = sorted(set(pages) - source_reachable)
+        details: list[str] = []
+        for relative in stranded[:5]:
+            if _INERT_REFERENCE_TOKEN.search(page_texts.get(relative, "")):
+                details.append(f"{relative} (contains inert [ref:N] text; use [[ref:N]] instead)")
+            else:
+                details.append(relative)
+        remainder = f" (+{len(stranded) - 5} more)" if len(stranded) > 5 else ""
+        raise error(
+            "candidate Context contains a reference chain without an atomic source: " + "; ".join(details) + remainder
+        )
 
 
 def _source_ids_reachable_from_page(
@@ -6830,7 +7563,8 @@ class ContextPipelineService:
         config: PersonalContextConfig,
         input_queue: asyncio.Queue[object],
         embedding_config: EmbeddingConfig | None = None,
-        progress_callback: Callable[[str, str, str], None] | None = None,
+        progress_callback: Callable[[str, str, str, int], None] | None = None,
+        profile_callback: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._home = home.expanduser().resolve()
         self._config = config
@@ -6848,6 +7582,7 @@ class ContextPipelineService:
         self._invalidated_run_keys: set[tuple[str, str]] = set()
         self._publish_lock = asyncio.Lock()
         self._progress_callback = progress_callback
+        self._profile_callback = profile_callback
         self._embedding: APIEmbedding | None = None
         self._embedding_cache: dict[str, tuple[float, ...]] = {}
         self._embedding_dimension: int | None = None
@@ -7302,6 +8037,7 @@ class ContextPipelineService:
                 alias_targets=alias_targets,
                 deleted_source_ids=deleted_source_ids,
                 service_id=service_id,
+                run_id=run_id,
                 provider=provider,
                 source_ids_by_logical_id=logical_sources,
                 run_time=run_time,
@@ -7309,7 +8045,7 @@ class ContextPipelineService:
             )
             self._raise_if_publication_fenced(key)
             if self._progress_callback is not None:
-                self._progress_callback(service_id, run_id, "validating")
+                self._progress_callback(service_id, run_id, "validating", 90)
             if retaining:
                 processed["_retaining"] = True
             actual_profile = filesystem_profile
@@ -7808,6 +8544,11 @@ class ContextPipelineService:
                 _make_tree_writable(target)
                 _remove_tree(target)
             except OSError as exc:
+                logger.warning(
+                    "PersonalContext run sandbox removal failed: %s (winerror=%s)",
+                    exc,
+                    getattr(exc, "winerror", None),
+                )
                 raise _publish_error("run sandbox could not be removed") from exc
         service_root = target.parent
         with contextlib.suppress(OSError):
@@ -7901,6 +8642,38 @@ class ContextPipelineService:
             "source_link_book": collect_source_link_book(documents),
         }
 
+    def _agent_recluster_hooks(self, sandbox: Path) -> tuple[_ReclusterPlan, _ReclusterApply]:
+        """Bind the recluster_context tool to this run's sandbox and embedder."""
+
+        context_root = sandbox / "context"
+        source_root = self._source_meta_root
+        embed_texts = self._embed_semantic_texts if self._embedding is not None else None
+        max_pages = self._config.max_pages_per_directory
+        max_subdirectories = self._config.max_subdirectories_per_directory
+
+        async def plan(
+            scope_paths: Sequence[str],
+            group_names: Sequence[str] | None = None,
+        ) -> Mapping[str, object]:
+            return await _agent_recluster_plan(
+                context_root,
+                scope_paths,
+                embed_texts=embed_texts,
+                max_pages_per_directory=max_pages,
+                max_subdirectories_per_directory=max_subdirectories,
+                group_names=group_names,
+            )
+
+        async def apply(mapping: Mapping[str, str], scope_paths: Sequence[str]) -> set[str]:
+            return await _agent_recluster_apply(
+                context_root,
+                mapping,
+                scope_paths,
+                source_root=source_root,
+            )
+
+        return plan, apply
+
     async def _filesystem_with_fallback(
         self,
         *,
@@ -7910,6 +8683,7 @@ class ContextPipelineService:
         alias_targets: Mapping[str, str] | None = None,
         deleted_source_ids: set[str] | None = None,
         service_id: str | None = None,
+        run_id: str,
         provider: str | None = None,
         source_ids_by_logical_id: Mapping[str, str] | None = None,
         run_time: datetime | None = None,
@@ -7927,6 +8701,11 @@ class ContextPipelineService:
             source_ids_by_logical_id=source_ids_by_logical_id,
             alias_targets=alias_targets,
         )
+
+        def report_progress(percent: int) -> None:
+            if self._progress_callback is not None and service_id is not None:
+                self._progress_callback(service_id, run_id, "organizing", percent)
+        report_progress(50)
 
         def log_agent_fallback(profile: str) -> None:
             if requested == "agent":
@@ -8007,7 +8786,9 @@ class ContextPipelineService:
             await prepare_rules_candidate(
                 preserve_existing_paths=retaining or requested == "agent",
             )
+            report_progress(60)
             log_agent_fallback("rules")
+            report_progress(85)
             return "rules"
         profiles = [
             candidate
@@ -8029,7 +8810,9 @@ class ContextPipelineService:
         for candidate in profiles:
             if candidate == "rules":
                 await prepare_rules_candidate(preserve_existing_paths=requested == "agent")
+                report_progress(60)
                 log_agent_fallback("rules")
+                report_progress(85)
                 return "rules"
             try:
                 preserve_existing_paths = requested == "agent" and candidate in {"balanced", "rules"}
@@ -8059,6 +8842,7 @@ class ContextPipelineService:
                 }
                 preexisting_managed_source_ids = frozenset(preexisting_managed_pages_by_source)
                 balanced_baseline_managed_pages_by_source = preexisting_managed_pages_by_source or None
+                report_progress(60)
                 if candidate == "agent":
                     await _cancel_safe_to_thread(
                         _remove_rules_pages_for_deleted_source_ids,
@@ -8249,6 +9033,7 @@ class ContextPipelineService:
                             "only.\n" + json.dumps(payload, ensure_ascii=False, sort_keys=True)
                         )
                     )
+                    recluster_plan, recluster_apply = self._agent_recluster_hooks(sandbox)
                     output = await run_personal_context_agent(
                         model_client=self._config.model_client,
                         model_request=self._config.model_request,
@@ -8274,6 +9059,8 @@ class ContextPipelineService:
                         ),
                         max_pages_per_directory=self._config.max_pages_per_directory,
                         max_subdirectories_per_directory=self._config.max_subdirectories_per_directory,
+                        recluster_plan=recluster_plan,
+                        recluster_apply=recluster_apply,
                     )
                     del output
                     changed_paths = _changed_context_paths(sandbox / "context", context_baseline)
@@ -8306,6 +9093,7 @@ class ContextPipelineService:
                         }
                         balanced_baseline_managed_pages_by_source.update(preexisting_managed_pages_by_source)
 
+                report_progress(70)
                 _validate_agent_candidate(
                     sandbox / "context",
                     baseline=context_baseline,
@@ -8364,13 +9152,21 @@ class ContextPipelineService:
                 processed["_filesystem_candidate_profile"] = final_candidate
                 if preserve_existing_paths:
                     log_agent_fallback(final_candidate)
+                report_progress(85)
                 return final_candidate
             except (OSError, UnicodeError) as error:
                 raise _publish_error("filesystem candidate could not be prepared") from error
             except Exception as error:
                 if not _profile_fallback_allowed(error):
                     raise
+                logger.warning(
+                    "PersonalContext filesystem profile candidate=%s failed; falling back (%s: %.400s)",
+                    candidate,
+                    type(error).__name__,
+                    str(error),
+                )
                 continue
+        report_progress(85)
         return "rules"
 
     async def _filesystem_balanced_model_attempt(
@@ -8778,7 +9574,10 @@ class ContextPipelineService:
                 )
             self._raise_if_publication_fenced((service_id, run_id))
             if self._progress_callback is not None:
-                self._progress_callback(service_id, run_id, "committing")
+                self._progress_callback(service_id, run_id, "committing", 97)
+            actual_profile = processed.get("actual_profile")
+            if self._profile_callback is not None and isinstance(actual_profile, str):
+                self._profile_callback(service_id, run_id, actual_profile)
             await _cancel_safe_to_thread(_commit_context_tree, candidate_context, self._context_root)
 
     def _fail_active(self, error: BaseError) -> None:
@@ -8934,9 +9733,10 @@ def _make_tree_read_only(root: Path) -> None:
 
     if not root.exists() or root.is_symlink():
         return
-    for path in [*root.rglob("*"), root]:
-        mode = path.stat().st_mode
-        path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+    for path in [*list(_walk_tree_paths(root)), root]:
+        extended = _extended_path(path)
+        mode = extended.stat().st_mode
+        extended.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
 
 
 def _prepare_agent_inputs(
@@ -9597,9 +10397,10 @@ def _materialize_candidate_source(
         _assert_no_symlinks(source)
         target = sandbox / "materialized-source"
         _copy_tree(source, target)
-        for path in [target, *target.rglob("*")]:
-            mode = path.stat().st_mode
-            path.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
+        for path in [target, *list(_walk_tree_paths(target))]:
+            extended = _extended_path(path)
+            mode = extended.stat().st_mode
+            extended.chmod(mode & ~(stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
         return "materialized-source"
     except (OSError, ValueError) as exc:
         raise _publish_error("materialized source could not be safely copied") from exc

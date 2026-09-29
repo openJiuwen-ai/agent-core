@@ -390,10 +390,7 @@ class TeamPolicyRail(DeepAgentRail):
         else:
             sections = build_team_static_sections(
                 role=role,
-                member_prompt=member_prompt,
                 member_name=member_name,
-                display_name=display_name,
-                member_workspace_path=member_workspace_path,
                 lifecycle=lifecycle,
                 teammate_mode=teammate_mode,
                 team_mode=team_mode,

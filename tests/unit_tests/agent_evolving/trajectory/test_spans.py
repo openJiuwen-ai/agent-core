@@ -388,8 +388,34 @@ def test_an_llm_exchange_round_trips_through_the_standard_attributes() -> None:
         },
         {"role": "tool", "tool_call_id": "call-1", "content": "found"},
     ]
-    completions = [{"role": "assistant", "content": "done"}]
+    completions = [{"role": "assistant", "content": "done", "reasoning_content": "they asked twice"}]
 
     span = _span("llm", attrs=write_llm_exchange(prompts, completions))
 
     assert read_llm_exchange(span) == (prompts, completions)
+
+
+def test_reasoning_parts_are_read_apart_from_content() -> None:
+    span = _span(
+        "llm",
+        attrs={
+            semconv.GEN_AI_OUTPUT_MESSAGES: json.dumps(
+                [
+                    {
+                        "role": "assistant",
+                        "parts": [
+                            {"type": "reasoning", "content": "step one"},
+                            {"type": "reasoning", "content": "step two"},
+                            {"type": "text", "content": "the answer"},
+                        ],
+                    }
+                ]
+            )
+        },
+    )
+
+    _, completions = read_llm_exchange(span)
+
+    assert completions == [
+        {"role": "assistant", "content": "the answer", "reasoning_content": "step one\nstep two"}
+    ]

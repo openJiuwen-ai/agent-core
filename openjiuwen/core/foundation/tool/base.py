@@ -1,7 +1,8 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 
 import inspect
+import json
 from abc import ABCMeta, abstractmethod
 from functools import wraps
 from typing import Any, AsyncIterator, Dict, Type
@@ -13,10 +14,65 @@ from openjiuwen.core.common import BaseCard
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool.exposure import ToolExposure
-from openjiuwen.core.foundation.tool.schema import ToolInfo
+from openjiuwen.core.foundation.tool.schema import ToolInfo, ToolOutput
 
 Input = TypeVar('Input', contravariant=True)
 Output = TypeVar('Output', contravariant=True)
+
+EMPTY_SUCCESS_TEXT = "Tool succeeded with empty output."
+EMPTY_FAILURE_TEXT = "Tool failed without an error message."
+
+
+def _json_default(value: Any) -> Any:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return str(value)
+
+
+def render_payload_text(data: Any) -> str:
+    """Render a ``ToolOutput.data`` payload as model-facing text.
+
+    A string payload is used as-is. A dict carrying a ``content`` key renders
+    only that value, so sibling keys stay program-only (e.g. ``multimodal``
+    image items delivered by a separate message). Any other payload, or a
+    non-string ``content``, is serialized as JSON: a readable last resort for
+    tools that have not declared their own rendering.
+
+    Args:
+        data: The ``ToolOutput.data`` value.
+
+    Returns:
+        The rendered text; empty when there is nothing to show.
+    """
+    if data is None:
+        return ""
+    if isinstance(data, dict) and "content" in data:
+        data = data["content"]
+        if data is None:
+            return ""
+    if isinstance(data, str):
+        return data
+    return json.dumps(data, ensure_ascii=False, default=_json_default)
+
+
+def render_tool_output(output: ToolOutput) -> str:
+    """Render a ``ToolOutput`` with the default model-facing rules.
+
+    Success renders ``data["content"]``; failure renders ``error``, falling
+    back to the payload when the error is empty. An empty rendering becomes a
+    short placeholder so the model never receives a blank tool result. Tools
+    that customize ``Tool.render_for_llm`` delegate here for the cases they
+    do not special-case; function-backed tools without a subclass reuse it.
+
+    Args:
+        output: The structured tool result.
+
+    Returns:
+        The model-facing text, never empty.
+    """
+    if output.success:
+        return render_payload_text(output.data) or EMPTY_SUCCESS_TEXT
+    return output.error or render_payload_text(output.data) or EMPTY_FAILURE_TEXT
 
 
 class ToolCard(BaseCard):
@@ -183,6 +239,31 @@ class Tool(metaclass=_ToolMeta):
     def is_parallel_safe(self) -> bool:
         """Return whether this tool may run concurrently with sibling tool calls."""
         return bool(getattr(self.card, "parallel_safe", True))
+
+    # An override hook: subclasses render from their own state, and callers
+    # dispatch it on the instance.
+    # pylint: disable-next=add-staticmethod-or-classmethod-decorator
+    def render_for_llm(self, output: Any) -> str:
+        """Render an ``invoke`` result into the plain text the model reads.
+
+        The ability layer calls this once per tool call when it builds the
+        tool-result message; the structured result itself is kept intact for
+        rails, events and logs. Override it to control the model-facing text.
+
+        The default renders a ``ToolOutput`` through ``render_tool_output``:
+        ``data["content"]`` on success and ``error`` on failure. Results that
+        are not a ``ToolOutput`` (plain functions, REST APIs) render as
+        ``str(output)``.
+
+        Args:
+            output: The value returned by ``invoke``.
+
+        Returns:
+            The model-facing text of the tool result.
+        """
+        if not isinstance(output, ToolOutput):
+            return str(output)
+        return render_tool_output(output)
 
     @abstractmethod
     async def invoke(self, inputs: Input, **kwargs) -> Output:

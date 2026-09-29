@@ -4,6 +4,7 @@
 """Unit tests for TeamMessageManager module"""
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -767,3 +768,69 @@ async def test_has_unread_messages_broadcast_partial_read(db, team_messaging):
 
     await team_messaging.mark_message_read(message_id, "member3")
     assert await team_messaging.has_unread_messages() is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
+async def test_offline_direct_messages_start_only_waiting_recipients(db, team_messaging, monkeypatch):
+    """Offline host/@ input rides the existing mailbox, startup, and read flags."""
+    from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
+    from openjiuwen.agent_teams.schema.events import EventMessage, MessageEvent
+    from openjiuwen.agent_teams.schema.team import TeamRole
+
+    team_name = team_messaging.team_name
+    states = {
+        "offline": MemberStatus.UNSTARTED,
+        "failed": MemberStatus.ERROR,
+        "ready": MemberStatus.READY,
+        "gone": MemberStatus.SHUTDOWN,
+        "leaving": MemberStatus.SHUTDOWN_REQUESTED,
+        "read": MemberStatus.UNSTARTED,
+        "broadcast_only": MemberStatus.UNSTARTED,
+    }
+    offline = TeamMessageManager(team_name, "user", db, None)
+    for name, status in states.items():
+        await db.member.create_member(name, team_name, name, "{}", status.value)
+        if name != "broadcast_only":
+            message_id = await offline.send_message(f"Input for {name}", name)
+            assert message_id
+            if name == "read":
+                await db.message.mark_message_read(message_id, name)
+    await offline.send_message("Another input", "offline")
+    await offline.send_message("No agent process", "user")
+    await team_messaging.broadcast_message("Public broadcast")
+    assert len(await db.message.get_messages(team_name, "offline", unread_only=True)) == 2
+
+    # Finding startup targets must not read or hydrate any message bodies.
+    def no_hydration(_rows):
+        raise AssertionError("Startup query read mailbox bodies")
+
+    monkeypatch.setattr(db.message, "_hydrate_rows", no_hydration)
+    targets = await db.message.get_unread_startable_members(team_name)
+    assert set(targets) == {"offline", "failed"}
+    assert len(targets) == 2
+    handler = object.__new__(MessageHandler)
+    handler._blueprint = SimpleNamespace(role=TeamRole.LEADER, member_name="leader")
+    handler._infra = SimpleNamespace(
+        team_backend=SimpleNamespace(db=db, team_name=team_name), message_manager=offline,
+    )
+    handler._lifecycle = SimpleNamespace(auto_start_member=AsyncMock())
+    handler._poll = SimpleNamespace(resume_polls=AsyncMock())
+    handler._process_unread_messages = AsyncMock()
+    handler._ack_user_bound_message = AsyncMock()
+    handler._notify_human_agent_inbound = AsyncMock()
+    await handler.on_poll_mailbox(None)
+    assert {call.args[0] for call in handler._lifecycle.auto_start_member.await_args_list} == {"offline", "failed"}
+    handler._process_unread_messages.assert_awaited_once_with("leader")
+
+    handler._lifecycle.auto_start_member.reset_mock()
+    event = EventMessage.from_event(MessageEvent(
+        team_name=team_name, message_id=message_id, from_member_name="user", to_member_name="offline",
+    ))
+    await handler.on_message_or_broadcast(event)
+    assert {call.args[0] for call in handler._lifecycle.auto_start_member.await_args_list} == {"offline", "failed"}
+
+    handler._lifecycle.auto_start_member.reset_mock()
+    handler._blueprint.role = TeamRole.TEAMMATE
+    await handler.on_poll_mailbox(None)
+    handler._lifecycle.auto_start_member.assert_not_awaited()

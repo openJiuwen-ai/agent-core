@@ -57,7 +57,7 @@ class AgentCallbackManager:
             self for chaining
         """
         for event, callback in rail.get_callbacks().items():
-            await self.register_callback(event, callback, rail.priority)
+            await self.register_callback(event, callback, rail.callback_priority(event))
 
         return self
 

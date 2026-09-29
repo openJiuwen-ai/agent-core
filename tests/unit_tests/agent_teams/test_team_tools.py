@@ -38,7 +38,6 @@ from openjiuwen.agent_teams.tools.team_tools import (
     ClaimTaskTool,
     CleanTeamTool,
     ListMembersTool,
-    MappedToolOutput,
     SendMessageTool,
     ShutdownMemberTool,
     SpawnExternalCliTool,
@@ -221,7 +220,7 @@ class TestBuildTeamTool:
             "leader_desc": "PM",
         }
         create_tool = BuildTeamTool(agent_team_without_team, t)
-        created = create_tool.map_result(await create_tool.invoke(args))
+        created = create_tool.render_for_llm(await create_tool.invoke(args))
 
         reattached = TeamBackend(
             team_name="test_team",
@@ -231,7 +230,7 @@ class TestBuildTeamTool:
             messager=message_bus,
         )
         take_over_tool = BuildTeamTool(reattached, t)
-        taken_over = take_over_tool.map_result(await take_over_tool.invoke(args))
+        taken_over = take_over_tool.render_for_llm(await take_over_tool.invoke(args))
 
         assert "# 团队角色" in taken_over
         # Same policy body; only the outcome lines differ.
@@ -1237,7 +1236,7 @@ class TestListCheckpointsTool:
         assert by_name["refactor-done"]["message_count"] == 12
 
     @pytest.mark.level1
-    def test_map_result_renders_rows(self, agent_team, t):
+    def test_render_for_llm_renders_rows(self, agent_team, t):
         tool = ListCheckpointsTool(agent_team, t)
         out = ToolOutput(
             success=True,
@@ -1249,14 +1248,14 @@ class TestListCheckpointsTool:
                 "count": 2,
             },
         )
-        text = tool.map_result(out)
+        text = tool.render_for_llm(out)
         assert "code-ready" in text and "message_count=5" in text and "base done" in text
         assert "refactor-done" in text and "message_count=12" in text
 
     @pytest.mark.level1
-    def test_map_result_empty(self, agent_team, t):
+    def test_render_for_llm_empty(self, agent_team, t):
         tool = ListCheckpointsTool(agent_team, t)
-        text = tool.map_result(ToolOutput(success=True, data={"checkpoints": [], "count": 0}))
+        text = tool.render_for_llm(ToolOutput(success=True, data={"checkpoints": [], "count": 0}))
         assert text == "No checkpoints"
 
 
@@ -1819,24 +1818,12 @@ class TestClaimTaskTool:
 # ========== Result Mapping ==========
 
 
-class TestMappedToolOutput:
-    """Test MappedToolOutput and map_result integration"""
+class TestRenderForLlm:
+    """Test the model-facing text team tools render from their results"""
 
     @pytest.mark.level1
-    def test_str_returns_mapped_content(self):
-        """MappedToolOutput.__str__ returns mapped content, not Pydantic repr"""
-        output = MappedToolOutput.from_output(
-            ToolOutput(success=True, data={"key": "value"}),
-            mapped_content="Custom text for LLM",
-        )
-        assert str(output) == "Custom text for LLM"
-        # underlying data still accessible
-        assert output.success is True
-        assert output.data == {"key": "value"}
-
-    @pytest.mark.level1
-    def test_claim_task_map_result_completed_guidance(self, agent_team, t):
-        """ClaimTaskTool.map_result injects behavior guidance on completion"""
+    def test_claim_task_render_for_llm_completed_guidance(self, agent_team, t):
+        """ClaimTaskTool.render_for_llm injects behavior guidance on completion"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
         output = ToolOutput(
             success=True,
@@ -1846,13 +1833,13 @@ class TestMappedToolOutput:
                 "status_change": {"from": "claimed", "to": "completed"},
             },
         )
-        result = tool.map_result(output)
+        result = tool.render_for_llm(output)
         assert "Task #t1 claimed → completed" in result
         assert "view_task" in result
 
     @pytest.mark.level1
-    def test_claim_task_map_result_claimed_no_guidance(self, agent_team, t):
-        """ClaimTaskTool.map_result does NOT inject guidance on claim"""
+    def test_claim_task_render_for_llm_claimed_no_guidance(self, agent_team, t):
+        """ClaimTaskTool.render_for_llm does NOT inject guidance on claim"""
         tool = ClaimTaskTool(agent_team.task_manager, t)
         output = ToolOutput(
             success=True,
@@ -1862,13 +1849,13 @@ class TestMappedToolOutput:
                 "status_change": {"from": "pending", "to": "claimed"},
             },
         )
-        result = tool.map_result(output)
+        result = tool.render_for_llm(output)
         assert "Task #t1 pending → claimed" in result
         assert "view_task" not in result
 
     @pytest.mark.level1
-    def test_view_task_map_result_list(self, agent_team, t):
-        """ViewTaskToolV2.map_result formats list view as compact lines"""
+    def test_view_task_render_for_llm_list(self, agent_team, t):
+        """ViewTaskToolV2.render_for_llm formats list view as compact lines"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         output = ToolOutput(
             success=True,
@@ -1887,7 +1874,7 @@ class TestMappedToolOutput:
                 "count": 2,
             },
         )
-        result = tool.map_result(output)
+        result = tool.render_for_llm(output)
         assert "#t1 [pending] Fix bug" in result
         assert "(dev-1)" in result
         assert "[blocked by #t1]" in result
@@ -1896,8 +1883,8 @@ class TestMappedToolOutput:
         assert "2023-11-" in result
 
     @pytest.mark.level1
-    def test_view_task_map_result_get(self, agent_team, t):
-        """ViewTaskToolV2.map_result formats detail view with dependencies"""
+    def test_view_task_render_for_llm_get(self, agent_team, t):
+        """ViewTaskToolV2.render_for_llm formats detail view with dependencies"""
         tool = ViewTaskToolV2(agent_team.task_manager, t)
         output = ToolOutput(
             success=True,
@@ -1912,42 +1899,41 @@ class TestMappedToolOutput:
                 "updated_at": 1_700_000_000_000,
             },
         )
-        result = tool.map_result(output)
+        result = tool.render_for_llm(output)
         assert "Task #t1: Fix bug" in result
         assert "Content: Fix the login bug" in result
         assert "Blocks: #t2, #t3" in result
         assert "Updated:" in result
 
     @pytest.mark.level1
-    def test_send_message_map_result(self, agent_team, t):
-        """SendMessageTool.map_result formats routing summary"""
+    def test_send_message_render_for_llm(self, agent_team, t):
+        """SendMessageTool.render_for_llm formats routing summary"""
         tool = SendMessageTool(agent_team.message_manager, t)
         output = ToolOutput(
             success=True,
             data={"type": "message", "from": "leader", "to": "dev-1", "summary": None},
         )
-        assert tool.map_result(output) == "Message Already sent from leader to dev-1 Success"
+        assert tool.render_for_llm(output) == "Message Already sent from leader to dev-1 Success"
 
     @pytest.mark.level1
-    def test_send_message_map_result_broadcast(self, agent_team, t):
-        """SendMessageTool.map_result formats broadcast summary"""
+    def test_send_message_render_for_llm_broadcast(self, agent_team, t):
+        """SendMessageTool.render_for_llm formats broadcast summary"""
         tool = SendMessageTool(agent_team.message_manager, t)
         output = ToolOutput(
             success=True,
             data={"type": "broadcast", "from": "leader", "summary": None},
         )
-        assert tool.map_result(output) == "Broadcast Already sent from leader Success"
+        assert tool.render_for_llm(output) == "Broadcast Already sent from leader Success"
 
     @pytest.mark.level1
-    def test_default_map_result_json(self, agent_team, t):
-        """TeamTool default map_result returns JSON for data"""
+    def test_list_members_render_for_llm(self, agent_team, t):
+        """ListMembersTool.render_for_llm renders one row per member"""
         tool = ListMembersTool(agent_team, t)
         output = ToolOutput(
             success=True,
             data={"members": [{"member_name": "m1", "display_name": "Dev", "status": "ready"}], "count": 1},
         )
-        # ListMembersTool overrides map_result, so test directly
-        result = tool.map_result(output)
+        result = tool.render_for_llm(output)
         assert "member_name=m1 display_name=Dev status=ready" in result
 
 
@@ -2294,8 +2280,8 @@ class TestSendMessageTool:
         assert result.data["to"] == "m1"
 
     @pytest.mark.level1
-    def test_send_message_map_result_multicast_success(self, agent_team, t):
-        """map_result renders multicast success with sender, delivered list and count"""
+    def test_send_message_render_for_llm_multicast_success(self, agent_team, t):
+        """render_for_llm renders multicast success with sender, delivered list and count"""
         tool = SendMessageTool(agent_team.message_manager, t)
         output = ToolOutput(
             success=True,
@@ -2307,14 +2293,14 @@ class TestSendMessageTool:
                 "summary": None,
             },
         )
-        text = tool.map_result(output)
+        text = tool.render_for_llm(output)
         assert "Multicast sent from leader" in text
         assert "m1, m2" in text
         assert "(2 delivered)" in text
 
     @pytest.mark.level1
-    def test_send_message_map_result_multicast_partial(self, agent_team, t):
-        """map_result on failure carries delivered + failed details"""
+    def test_send_message_render_for_llm_multicast_partial(self, agent_team, t):
+        """render_for_llm on failure carries delivered + failed details"""
         tool = SendMessageTool(agent_team.message_manager, t)
         output = ToolOutput(
             success=False,
@@ -2327,7 +2313,7 @@ class TestSendMessageTool:
                 "summary": None,
             },
         )
-        text = tool.map_result(output)
+        text = tool.render_for_llm(output)
         assert "partially failed" in text
         assert "delivered: m1" in text
         assert "m2 — Member 'm2' not found" in text

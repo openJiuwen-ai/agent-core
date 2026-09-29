@@ -165,7 +165,7 @@ def test_sparse_semantics_match_cross_provider_chinese_topic() -> None:
 
     scores = context_pipeline._sparse_semantic_scores(query, [matching, unrelated])
 
-    assert scores[0] >= context_pipeline._DIRECTORY_ACCEPT_SCORE
+    assert scores[0] >= context_pipeline._SEMANTIC_ACCEPT_FLOOR
     assert scores[0] - scores[1] >= context_pipeline._DIRECTORY_MARGIN
 
 
@@ -224,35 +224,72 @@ def test_bm25_sparse_vectors_are_l2_normalized_and_provider_neutral() -> None:
     )
 
 
-def test_clustering_title_anchor_skips_generic_how_to_prefixes() -> None:
-    assert context_pipeline._semantic_title_anchor("How to use Docker networking") == "latin:docker"
-    assert context_pipeline._semantic_title_anchor("How to use Photoshop layers") == "latin:photoshop"
-    assert context_pipeline._semantic_title_anchor("如何使用 Docker 网络") == "latin:docker"
-    assert context_pipeline._semantic_title_anchor("如何使用 Photoshop 图层") == "latin:photoshop"
+def test_adaptive_accept_cut_splits_bimodal_population_inside_the_band() -> None:
+    scores = [0.4, 0.38, 0.41, 0.037]
+
+    cut = context_pipeline._adaptive_accept_cut(scores)
+
+    assert 0.037 < cut < 0.38
+    assert context_pipeline._SEMANTIC_ACCEPT_FLOOR <= cut <= context_pipeline._CLUSTER_SCORE_CEILING
 
 
-def test_user_agent_and_human_or_chemical_agents_do_not_get_ai_title_anchor() -> None:
-    for title in (
-        "User-Agent request header",
-        "User-Agent system header",
-        "Travel agent itinerary",
-        "Travel agent workflow",
-        "Cleaning agent safety",
-        "Cleaning agent tools",
-        "Chemical agent system",
-    ):
-        assert context_pipeline._semantic_title_anchor(title) != "topic:智能体"
+def test_adaptive_accept_cut_walks_down_through_multi_scale_families() -> None:
+    # Noise at 0, one family near 0.1, another near 0.3: the global split
+    # lands between the families, but the recursive low-side re-split finds
+    # the noise boundary below the floor and clamps to it, keeping both
+    # families connected.
+    scores = [0.3, 0.28, 0.31, 0.1, 0.09, 0.0, 0.0, 0.0]
 
-    assert context_pipeline._semantic_title_anchor("AI agent architecture") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Agentic workflow patterns") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Autonomous agent tools") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Multi-agent memory") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Agent memory") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Agent tool") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Agent system") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Agent workflow") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Guide to Agent memory") == "topic:智能体"
-    assert context_pipeline._semantic_title_anchor("Notes on agent tool workflows") == "topic:智能体"
+    assert context_pipeline._adaptive_accept_cut(scores) == context_pipeline._SEMANTIC_ACCEPT_FLOOR
+
+
+@pytest.mark.parametrize(
+    "scores",
+    [
+        [0.9, 0.85, 0.95],  # one coherent mass: the cut lands above the ceiling
+        [0.001, 0.002, 0.003],  # weak noise: the cut lands below the floor
+        [0.01, 0.012, 0.05, 0.055],  # separable but still below the floor
+        [0.2],  # a single distinct score carries no split signal
+        [],
+    ],
+)
+def test_adaptive_accept_cut_falls_back_to_the_floor(scores: list[float]) -> None:
+    assert context_pipeline._adaptive_accept_cut(scores) == context_pipeline._SEMANTIC_ACCEPT_FLOOR
+
+
+def test_capacity_constrained_clusters_derive_adaptive_cut_for_coherent_and_weak_populations() -> None:
+    coherent = {
+        "alpha": {"x": 1.0},
+        "beta": {"x": 0.9, "y": 0.4359},
+        "gamma": {"x": 0.9, "z": 0.4359},
+    }
+
+    assert context_pipeline._capacity_constrained_clusters(coherent, max_members=10, target_members=10) == [
+        ("alpha", "beta", "gamma")
+    ]
+
+    weak = {"alpha": {"x": 1.0}, "beta": {"y": 1.0}, "gamma": {"z": 1.0}}
+
+    assert context_pipeline._capacity_constrained_clusters(weak, max_members=10, target_members=10) == [
+        ("alpha",),
+        ("beta",),
+        ("gamma",),
+    ]
+
+
+def test_capacity_constrained_clusters_respect_forced_absolute_accept_score() -> None:
+    vectors = {
+        "alpha": {"x": 1.0},
+        "beta": {"x": 0.9, "y": 0.4359},
+        "gamma": {"x": 0.9, "z": 0.4359},
+    }
+
+    assert context_pipeline._capacity_constrained_clusters(
+        vectors,
+        max_members=10,
+        target_members=10,
+        accept_score=0.95,
+    ) == [("alpha",), ("beta",), ("gamma",)]
 
 
 def test_dense_subset_projects_from_superset_and_missing_requested_id_is_sparse_only() -> None:
@@ -493,48 +530,77 @@ def test_capacity_constrained_clusters_are_stable_and_bounded() -> None:
     assert all(len({member.split("-", 1)[0] for member in cluster}) == 1 for cluster in results[0])
 
 
+def _repeated_title_topic_families() -> tuple[
+    dict[str, tuple[tuple[str, ...], str | None]],
+    list[str],
+]:
+    families: dict[str, tuple[tuple[str, ...], str | None]] = {
+        "agent": (
+            (
+                "Agent 记忆系统",
+                "Agent 工具管理",
+                "Agent 工作流框架",
+                "Agent 系统协议",
+                "AI Agents 技术栈",
+                "Agentic AI 架构",
+            ),
+            "agent memory tools workflow protocol architecture 智能体 记忆 工具 工作流 协议 架构",
+        ),
+        "claude": (
+            (
+                "Claude Code 配置",
+                "Claude Code 上下文",
+                "Claude Code CLI",
+                "Claude Code 模型",
+                "Claude Code Git 审查",
+                "Claude Code 快捷键",
+            ),
+            "claude code cli 配置 上下文 模型 快捷键 审查 终端 插件",
+        ),
+        "embodied": (
+            ("具身智能数据采集", "具身智能产品设计"),
+            "具身智能 机器人 数据 采集 产品 设计 传感 控制",
+        ),
+        "isolated": (
+            (
+                "跑步训练计划",
+                "烘焙温度控制",
+                "古典音乐欣赏",
+                "家庭园艺灌溉",
+                "财务报表阅读",
+                "旅行路线规划",
+                "摄影构图基础",
+            ),
+            None,
+        ),
+    }
+    isolated_bodies = [
+        "跑步 配速 心率 马拉松 训练",
+        "烘焙 温度 面团 发酵 烤箱",
+        "古典 音乐 交响乐 作曲家 乐章",
+        "园艺 灌溉 浇水 植物 土壤",
+        "财务 报表 资产 负债 利润",
+        "旅行 路线 行程 机票 酒店",
+        "摄影 构图 光圈 快门 取景",
+    ]
+    return families, isolated_bodies
+
+
 def test_reclustering_merges_realistic_repeated_title_topics_without_encoder(tmp_path: Path) -> None:
     context_root = tmp_path / "context"
     source_root = tmp_path / "source-meta"
     context_root.mkdir()
     source_root.mkdir()
     (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
-    families = {
-        "agent": (
-            "Agent 记忆系统",
-            "Agent 工具管理",
-            "Agent 工作流框架",
-            "Agent 系统协议",
-            "AI Agents 技术栈",
-            "Agentic AI 架构",
-        ),
-        "claude": (
-            "Claude Code 配置",
-            "Claude Code 上下文",
-            "Claude Code CLI",
-            "Claude Code 模型",
-            "Claude Code Git 审查",
-            "Claude Code 快捷键",
-        ),
-        "embodied": ("具身智能数据采集", "具身智能产品设计"),
-        "isolated": (
-            "跑步训练计划",
-            "烘焙温度控制",
-            "古典音乐欣赏",
-            "家庭园艺灌溉",
-            "财务报表阅读",
-            "旅行路线规划",
-            "摄影构图基础",
-        ),
-    }
+    families, isolated_bodies = _repeated_title_topic_families()
     paths_by_family: dict[str, list[str]] = {}
     index = 0
-    for family, titles in families.items():
+    for family, (titles, body) in families.items():
         paths_by_family[family] = []
-        for title in titles:
+        for offset, title in enumerate(titles):
             relative = f"旧目录{index:02d}/页面{index:02d}.md"
-            unique_preview = " ".join(f"detail{index:02d}_{token:02d}" for token in range(60))
-            _write_cluster_page(context_root, relative, title=title, body=unique_preview)
+            actual_body = body if body is not None else isolated_bodies[offset]
+            _write_cluster_page(context_root, relative, title=title, body=actual_body)
             paths_by_family[family].append(relative)
             index += 1
 
@@ -555,6 +621,50 @@ def test_reclustering_merges_realistic_repeated_title_topics_without_encoder(tmp
     assert len({final_parent_by_path[path] for path in paths_by_family["embodied"]}) == 1
     assert len(set(final_parent_by_path.values())) <= 10
     assert all("github" not in parent.casefold() for parent in final_parent_by_path.values())
+
+
+def test_reclustering_keeps_noise_drowned_topics_fragmented_without_encoder(tmp_path: Path) -> None:
+    # 弱信号不硬聚 (F_05): pages that share a title token but drown it in
+    # unique noise bodies score below the floor in pure BM25 space, so the
+    # planner must refuse to invent a grouping and leave the layout alone.
+    context_root = tmp_path / "context"
+    source_root = tmp_path / "source-meta"
+    context_root.mkdir()
+    source_root.mkdir()
+    (context_root / "description.md").write_text("# Context\n", encoding="utf-8")
+    families, _isolated_bodies = _repeated_title_topic_families()
+    paths_by_family: dict[str, list[str]] = {}
+    index = 0
+    for family, (titles, _body) in families.items():
+        paths_by_family[family] = []
+        for title in titles:
+            relative = f"旧目录{index:02d}/页面{index:02d}.md"
+            unique_preview = " ".join(f"detail{index:02d}_{token:02d}" for token in range(60))
+            _write_cluster_page(context_root, relative, title=title, body=unique_preview)
+            paths_by_family[family].append(relative)
+            index += 1
+
+    mapping = _plan_context_reclustering(
+        context_root,
+        changed_paths=set(),
+        max_pages_per_directory=20,
+        max_subdirectories_per_directory=20,
+    )
+
+    final_parent_by_path = {
+        relative: PurePosixPath(mapping.get(relative, relative)).parent.as_posix()
+        for relatives in paths_by_family.values()
+        for relative in relatives
+    }
+    # Single shared title tokens drowned in noise score below the floor:
+    # these families must stay exactly where they are, no fabricated groups.
+    for family in ("agent", "claude", "isolated"):
+        parents = {final_parent_by_path[path] for path in paths_by_family[family]}
+        expected = {PurePosixPath(path).parent.as_posix() for path in paths_by_family[family]}
+        assert parents == expected
+    # A long shared CJK prefix survives the noise as a legitimately strong
+    # n-gram signal: the embodied-intelligence pair still clusters.
+    assert len({final_parent_by_path[path] for path in paths_by_family["embodied"]}) == 1
 
 
 def test_readable_topic_names_never_expose_arbitrary_ngram() -> None:
@@ -1296,6 +1406,7 @@ async def test_direct_profiles_promote_readable_page_out_of_pending(
     monkeypatch.setattr(context_pipeline, "Model", _KeepRulesBalancedModel)
 
     actual_profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=batch,
@@ -1375,6 +1486,7 @@ async def test_forty_two_readable_pages_have_zero_fallback_through_direct_profil
     monkeypatch.setattr(context_pipeline, "Model", _KeepRulesBalancedModel)
 
     actual_profile = await service._filesystem_with_fallback(
+        run_id="run-progress",
         processed={"documents": [document], "blocks": [], "deleted_ids": []},
         sandbox=sandbox,
         batch=batch,
@@ -2125,13 +2237,13 @@ async def test_rules_transient_capacity_ranks_full_best_before_available_distrac
 
 
 @pytest.mark.asyncio
-async def test_semantic_collision_is_stable_across_batch_trigger_provider_and_time(tmp_path: Path) -> None:
+async def test_semantic_layout_is_stable_across_batch_trigger_provider_and_time(tmp_path: Path) -> None:
     items = (
         RawChangeItem(
             logical_id="notes/personal-context-cooking",
             revision_id="rev-1",
             operation="upsert",
-            title="PersonalContext cooking recipes",
+            title="Cooking recipes",
             content="Tomato omelette, kitchen ingredients, and cooking steps.",
             original_ref="file:///notes/cooking.md",
             metadata={"kind": "document"},
@@ -2140,7 +2252,7 @@ async def test_semantic_collision_is_stable_across_batch_trigger_provider_and_ti
             logical_id="notes/personal-context-travel",
             revision_id="rev-1",
             operation="upsert",
-            title="PersonalContext travel itinerary",
+            title="Travel itinerary",
             content="Flights, hotels, passports, and destination planning.",
             original_ref="file:///notes/travel.md",
             metadata={"kind": "document"},
@@ -2189,7 +2301,6 @@ async def test_semantic_collision_is_stable_across_batch_trigger_provider_and_ti
     assert first == second
     assert len(set(first.values())) == 2
     assert all("待整理" not in name for name in first.values())
-    assert any(re.search(r"-[0-9a-f]{8}$", name) for name in first.values())
 
 
 def test_layout_normalization_avoids_mechanical_group_for_readable_root_page(
@@ -4152,6 +4263,7 @@ async def test_embedding_failure_keeps_balanced_profile_and_one_model_attempt(
 
     with caplog.at_level(logging.WARNING):
         result = await service._filesystem_with_fallback(
+            run_id="run-progress",
             processed=processed,
             sandbox=sandbox,
             batch=FetchBatch(batch_id="batch-1", items=[]),
@@ -4169,3 +4281,108 @@ async def test_embedding_failure_keeps_balanced_profile_and_one_model_attempt(
     assert "embedding.invalid" not in rendered_log
     assert "主动上下文目录治理" not in rendered_log
     assert "[1,2]" not in rendered_log
+
+
+def _stranded_reference_graph_fixture(
+    tmp_path: Path, page_body: str, page_name: str = "惰性引用页.md"
+) -> tuple[Path, Path]:
+    workspace = tmp_path / "workspace"
+    context_root = workspace / "context"
+    source_root = workspace / "source-meta"
+    topic = context_root / "主题A"
+    topic.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    source_id = _register_migration_source(source_root, provider="local", suffix="anchor", title="锚点来源")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [主题A](主题A/description.md)\n",
+        encoding="utf-8",
+    )
+    (topic / "description.md").write_text(
+        f"# 主题A\n\n- [锚点页](锚点页.md)\n- [{page_name[:-3]}]({page_name})\n",
+        encoding="utf-8",
+    )
+    (topic / "锚点页.md").write_text(
+        f"# 锚点页\n\n正文。[来源1](../../source-meta/{source_id}.md)\n",
+        encoding="utf-8",
+    )
+    (topic / page_name).write_text(page_body, encoding="utf-8")
+    return context_root, source_root
+
+
+def test_reference_graph_error_lists_stranded_page_with_inert_reference_hint(tmp_path: Path) -> None:
+    context_root, source_root = _stranded_reference_graph_fixture(
+        tmp_path,
+        "# 惰性引用页\n\n这个页面把引用写成了 [ref:0] 单方括号惰性文本。\n",
+    )
+
+    with pytest.raises(BaseError) as excinfo:
+        context_pipeline._validate_reference_graph(
+            context_root,
+            final_context_root=context_root,
+            source_root=source_root,
+            repairable=True,
+        )
+
+    message = str(excinfo.value)
+    assert "reference chain without an atomic source" in message
+    assert "主题A/惰性引用页.md" in message
+    assert "contains inert [ref:N] text; use [[ref:N]] instead" in message
+
+
+def test_reference_graph_error_lists_stranded_page_without_inert_hint(tmp_path: Path) -> None:
+    context_root, source_root = _stranded_reference_graph_fixture(
+        tmp_path,
+        "# 孤立页\n\n这个页面没有任何引用。\n",
+        page_name="孤立页.md",
+    )
+
+    with pytest.raises(BaseError) as excinfo:
+        context_pipeline._validate_reference_graph(
+            context_root,
+            final_context_root=context_root,
+            source_root=source_root,
+            repairable=True,
+        )
+
+    message = str(excinfo.value)
+    assert "主题A/孤立页.md" in message
+    assert "inert" not in message
+    assert "锚点页" not in message
+
+
+def test_reference_graph_error_truncates_long_stranded_page_list(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    context_root = workspace / "context"
+    source_root = workspace / "source-meta"
+    topic = context_root / "主题A"
+    topic.mkdir(parents=True)
+    source_root.mkdir(parents=True)
+    source_id = _register_migration_source(source_root, provider="local", suffix="anchor", title="锚点来源")
+    (context_root / "description.md").write_text(
+        "# Context\n\n- [主题A](主题A/description.md)\n",
+        encoding="utf-8",
+    )
+    links = ["- [锚点页](锚点页.md)"] + [f"- [页{index:02d}](页{index:02d}.md)" for index in range(7)]
+    (topic / "description.md").write_text(
+        "# 主题A\n\n" + "\n".join(links) + "\n",
+        encoding="utf-8",
+    )
+    (topic / "锚点页.md").write_text(
+        f"# 锚点页\n\n正文。[来源1](../../source-meta/{source_id}.md)\n",
+        encoding="utf-8",
+    )
+    for index in range(7):
+        (topic / f"页{index:02d}.md").write_text(f"# 页{index:02d}\n", encoding="utf-8")
+
+    with pytest.raises(BaseError) as excinfo:
+        context_pipeline._validate_reference_graph(
+            context_root,
+            final_context_root=context_root,
+            source_root=source_root,
+            repairable=True,
+        )
+
+    message = str(excinfo.value)
+    assert "主题A/页00.md" in message
+    assert "(+2 more)" in message
+    assert "页05.md" not in message

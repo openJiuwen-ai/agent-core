@@ -16,18 +16,23 @@ from openjiuwen.harness_protocol import (
     CheckpointReason,
     CheckpointSaveReceipt,
     DeliveryMode,
+    DiagnosticEvent,
+    DiagnosticLevel,
     HarnessCapability,
     HarnessCard,
     HarnessCheckpoint,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
+    HarnessModelControl,
     HarnessProtocol,
     HarnessState,
     HarnessStateError,
     HostCapability,
     InteractionCancelReason,
     InteractionResponseStatus,
+    ModelOption,
+    ModelSelection,
     OutputEvent,
     OutputKind,
     OutputOperation,
@@ -40,7 +45,12 @@ from openjiuwen.harness_protocol import (
     UserInputRequest,
     UserInputResponse,
 )
-from openjiuwen.harness_providers.base import PendingTurn, SerializedTurnHarness, TurnTiming
+from openjiuwen.harness_providers.base import (
+    PendingTurn,
+    SerializedTurnHarness,
+    TurnTiming,
+    merge_model_selection,
+)
 from tests.test_logger import logger
 
 
@@ -60,6 +70,7 @@ class _ScriptedHarness(SerializedTurnHarness):
         self.opened = 0
         self.closed = 0
         self.steered: list[str] = []
+        self.steered_message_ids: list[str] = []
         self.interrupted: list[AbortMode] = []
         self.release = asyncio.Event()
         self.release.set()
@@ -105,8 +116,9 @@ class _ScriptedHarness(SerializedTurnHarness):
             duration_ms=timing.duration_ms(),
         )
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
         self.steered.append(str(content.content))
+        self.steered_message_ids.append(message_id)
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         self.interrupted.append(mode)
@@ -221,6 +233,9 @@ async def test_steer_targets_the_active_turn_and_fails_when_idle() -> None:
     assert steer.turn_id == receipt.turn_id
     assert steer.accepted_mode is DeliveryMode.STEER
     assert harness.steered == ["also"]
+    # The hook sees the very id the receipt reports, so a provider can label
+    # its outbound message with it.
+    assert harness.steered_message_ids == [steer.message_id]
     harness.release.set()
     events = await _collect_turn(harness, receipt.turn_id)
     assert _terminal(events).kind is TurnEventKind.FINISHED
@@ -306,4 +321,127 @@ async def test_single_consumer_lease_is_enforced() -> None:
         harness.events()
     await cursor.aclose()
     harness.events()
+    await harness.stop()
+
+
+class _SelectableHarness(_ScriptedHarness):
+    """Scripted provider that also declares model discovery and selection."""
+
+    card = HarnessCard(
+        name="selectable",
+        implementation_version="1.0",
+        protocol_version=PROTOCOL_VERSION,
+        capabilities=frozenset(
+            {HarnessCapability.STEER, HarnessCapability.MODEL_SELECTION, HarnessCapability.MODEL_DISCOVERY}
+        ),
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.applied: list[ModelSelection] = []
+        self.applied_before_turn: list[int] = []
+        self.fail_selection = False
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        return (ModelOption(model_id="small", efforts=("low", "high"), default_effort="low"),)
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        if self.fail_selection:
+            raise RuntimeError("switch refused")
+        self.applied.append(selection)
+
+    async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
+        self.applied_before_turn.append(len(self.applied))
+        return await super()._execute_turn(turn)
+
+
+def test_merge_model_selection_keeps_fields_the_update_leaves_unset() -> None:
+    merged = merge_model_selection(ModelSelection(model="a", effort="low"), ModelSelection(effort="high"))
+    assert merged == ModelSelection(model="a", effort="high")
+    assert merge_model_selection(None, ModelSelection(model="b")) == ModelSelection(model="b")
+
+
+@pytest.mark.asyncio
+async def test_model_control_requires_declared_capabilities() -> None:
+    harness = _ScriptedHarness()
+    await harness.start(_context())
+    with pytest.raises(UnsupportedHarnessCapabilityError):
+        await harness.list_models()
+    with pytest.raises(UnsupportedHarnessCapabilityError):
+        await harness.set_model(ModelSelection(model="x"))
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_selection_applies_immediately_and_stopped_harness_rejects_it() -> None:
+    harness = _SelectableHarness()
+    assert isinstance(harness, HarnessModelControl)
+    with pytest.raises(HarnessStateError):
+        await harness.set_model(ModelSelection(model="small"))
+    assert [option.model_id for option in await harness.list_models()] == ["small"]
+
+    await harness.start(_context())
+    await harness.set_model(ModelSelection(model="small", effort="low"))
+    assert harness.applied == [ModelSelection(model="small", effort="low")]
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_selection_during_a_turn_is_merged_and_applied_before_the_next_turn() -> None:
+    harness = _SelectableHarness()
+    await harness.start(_context())
+    harness.release.clear()
+    first = await harness.send(HarnessInput(content="one"))
+    await asyncio.sleep(0)
+    await harness.set_model(ModelSelection(model="small"))
+    await harness.set_model(ModelSelection(effort="high"))
+    assert harness.applied == [], "a running turn keeps its model"
+    second = await harness.send(HarnessInput(content="two"))
+    harness.release.set()
+
+    await _collect_turn(harness, first.turn_id)
+    await _collect_turn(harness, second.turn_id)
+    assert harness.applied == [ModelSelection(model="small", effort="high")]
+    assert harness.applied_before_turn == [0, 1]
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_idle_selection_supersedes_one_left_pending_by_a_finished_turn() -> None:
+    harness = _SelectableHarness()
+    await harness.start(_context())
+    harness.release.clear()
+    first = await harness.send(HarnessInput(content="one"))
+    await asyncio.sleep(0)
+    await harness.set_model(ModelSelection(model="small", effort="low"))
+    harness.release.set()
+    await _collect_turn(harness, first.turn_id)
+
+    await harness.set_model(ModelSelection(effort="high"))
+    assert harness.applied == [ModelSelection(model="small", effort="high")]
+    second = await harness.send(HarnessInput(content="two"))
+    await _collect_turn(harness, second.turn_id)
+    assert harness.applied == [ModelSelection(model="small", effort="high")], "no stale re-apply"
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_failed_deferred_selection_warns_and_keeps_the_turn_running() -> None:
+    harness = _SelectableHarness()
+    await harness.start(_context())
+    harness.release.clear()
+    first = await harness.send(HarnessInput(content="one"))
+    await asyncio.sleep(0)
+    harness.fail_selection = True
+    await harness.set_model(ModelSelection(model="small"))
+    second = await harness.send(HarnessInput(content="two"))
+    harness.release.set()
+
+    await _collect_turn(harness, first.turn_id)
+    events = await _collect_turn(harness, second.turn_id)
+    warnings = [event.event for event in events if isinstance(event.event, DiagnosticEvent)]
+    assert len(warnings) == 1 and warnings[0].level is DiagnosticLevel.WARNING
+    assert warnings[0].data["model"] == "small"
+    assert _terminal(events).kind is TurnEventKind.FINISHED
+    logger.info("deferred selection warning: %s", warnings[0].message)
     await harness.stop()

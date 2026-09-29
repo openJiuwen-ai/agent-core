@@ -15,12 +15,14 @@ from typing import (
 )
 
 from openjiuwen.agent_teams.context import get_session_id
-from openjiuwen.agent_teams.schema.status import MemberStatus
+from openjiuwen.agent_teams.schema.status import ExecutionStatus, MemberStatus
 from openjiuwen.agent_teams.schema.team import (
+    ExternalCliModelConfig,
     TeamRole,
     TeamRuntimeContext,
 )
 from openjiuwen.agent_teams.tools.member_options import (
+    get_member_builtin_model,
     get_member_fallback_model_ref,
     get_member_model_ref,
 )
@@ -271,6 +273,20 @@ class SpawnManager:
     async def restart_teammate(self, member_name: str, max_retries: int = 3) -> bool:
         await self.cleanup_teammate(member_name)
 
+        # After cleanup, the previous execution context is gone. Reset
+        # execution_status back to IDLE so the new lifecycle starts from a
+        # known state and we avoid illegal transitions such as
+        # RUNNING -> STARTING on the next spawn (issue #4318).
+        team_backend = self._configurator.team_backend
+        team_name = self._configurator.team_name
+        db = getattr(team_backend, "db", None) if team_backend is not None else None
+        if db is not None and team_name is not None:
+            await db.member.reset_member_execution_status(
+                member_name,
+                team_name,
+                ExecutionStatus.IDLE.value,
+            )
+
         ctx = await self.build_context_from_db(member_name)
         if ctx is None:
             team_logger.error("Cannot recover spawn config for {}", member_name)
@@ -319,6 +335,7 @@ class SpawnManager:
         team_name = self._configurator.team_name
         if team_backend and team_name:
             member = await team_backend.db.member.get_member(member_name, team_name)
+            status = MemberStatus.ERROR
             if member is not None:
                 try:
                     status = MemberStatus(member.status)
@@ -331,6 +348,18 @@ class SpawnManager:
                         status.value,
                     )
                     return
+            # READY/BUSY/UNSTARTED 等 active 状态不能直接迁移到 RESTARTING，需先经
+            # ERROR 归一化（与 recovery_manager 的 session-switch 路径一致），否则
+            # 会报 "Invalid state transition: ready -> restarting"（issue #4318）。
+            if status not in {
+                MemberStatus.PAUSED,
+                MemberStatus.STOPPED,
+                MemberStatus.ERROR,
+                MemberStatus.SHUTDOWN,
+            }:
+                await team_backend.db.member.update_member_status(
+                    member_name, team_name, MemberStatus.ERROR.value,
+                )
             await team_backend.db.member.update_member_status(
                 member_name,
                 team_name,
@@ -392,6 +421,10 @@ class SpawnManager:
         cli_agent = team_backend.get_external_cli_agent(teammate.member_name)
 
         permissions_override = get_member_permissions_override(teammate)
+        builtin = get_member_builtin_model(teammate)
+        builtin_model = (
+            ExternalCliModelConfig(model=builtin.model, effort=builtin.effort) if builtin is not None else None
+        )
 
         # Team-level B-class values come from ``team_info``: they are
         # written to the DB when ``build_team`` succeeds and are carried
@@ -415,6 +448,7 @@ class SpawnManager:
             db_config=ctx.db_config if ctx else None,
             member_model=member_model,
             fallback_member_model=fallback_member_model,
+            builtin_model=builtin_model,
             worktree_path=worktree_path,
             cli_agent=cli_agent,
             permissions_override=permissions_override,

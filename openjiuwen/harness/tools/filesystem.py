@@ -25,7 +25,7 @@ import pdfplumber
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.session import get_current_session
 from openjiuwen.core.common.logging import logger
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool.base import Tool, render_tool_output
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_agent_history_root, get_cwd
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
@@ -1409,6 +1409,14 @@ class WriteFileTool(Tool):
             }
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Confirm the write without echoing the previous file content."""
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        action = "Created" if data["created"] else "Updated"
+        return f"{action} {data['file_path']} ({data['bytes_written']} bytes written)."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass
 
@@ -1859,6 +1867,15 @@ class EditFileTool(Tool):
             data={"file_path": file_path, "replacements": replaced},
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Confirm the edit; creating a file via an empty old_string reads as a creation."""
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        if data.get("created"):
+            return f"Created {data['file_path']}."
+        return f"Edited {data['file_path']} ({data['replacements']} replacement(s))."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         if False:
             yield None
@@ -1960,6 +1977,18 @@ class GlobTool(Tool):
             }
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """List matching files one per line, noting when the list was cut."""
+        if not output.success:
+            return super().render_for_llm(output)
+        files = output.data["matching_files"]
+        if not files:
+            return "No files found."
+        text = "\n".join(files)
+        if output.data["truncated"]:
+            text += f"\n(Results truncated to the first {len(files)} files; use a more specific path or pattern.)"
+        return text
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass
 
@@ -2008,8 +2037,40 @@ class ListDirTool(Tool):
             }
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """List directories (with a trailing slash) before files, one per line."""
+        if not output.success:
+            return super().render_for_llm(output)
+        entries = [f"{name}/" for name in output.data["dirs"]] + output.data["files"]
+        return "\n".join(entries) or "No entries found."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass
+
+
+def render_grep_output(output: ToolOutput) -> str:
+    """Render a grep result as its matched lines in every output mode.
+
+    Shared by every tool that returns the grep result shape. A failed rg run
+    (exit code 2, e.g. an unreadable file) may still carry matches, so they
+    follow the error instead of being dropped.
+
+    Args:
+        output: A grep tool result.
+
+    Returns:
+        The model-facing text.
+    """
+    data = output.data
+    if data is None:
+        return render_tool_output(output)
+    matches = data["stdout"]
+    if data["appliedLimit"] is not None:
+        matches += f"\n(Results truncated to {data['appliedLimit']} entries; pass offset to see more.)"
+    if output.success:
+        return matches or "No matches found."
+    error = output.error or f"Search failed with exit code {data['exit_code']}."
+    return f"{error}\n{matches}" if matches else error
 
 
 class GrepTool(Tool):
@@ -2566,6 +2627,10 @@ class GrepTool(Tool):
             ),
             error=stderr if not success else None
         )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render through the shared grep result formatter."""
+        return render_grep_output(output)
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         pass

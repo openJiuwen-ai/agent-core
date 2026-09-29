@@ -9,7 +9,6 @@ from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
-from openjiuwen.agent_evolving.trajectory.legacy import is_legacy_record, upgrade_legacy_record
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.serialization import to_json_compatible
 from openjiuwen.agent_evolving.trajectory.schema import (
@@ -94,12 +93,6 @@ def _canonical_input(trajectory: Any) -> Trajectory:
     raise TypeError("store accepts only canonical Trajectory")
 
 
-def _canonical_record(data: Mapping[str, Any]) -> Trajectory:
-    if is_legacy_record(data):
-        return upgrade_legacy_record(data)
-    return Trajectory.from_otlp(data)
-
-
 class InMemoryTrajectoryStore:
     """Process-local canonical trajectory archive."""
 
@@ -140,7 +133,7 @@ class InMemoryTrajectoryStore:
 
 
 class FileTrajectoryStore:
-    """Append-only JSONL archive with read-only historical conversion."""
+    """Append-only JSONL archive of canonical trajectories."""
 
     def __init__(self, base_dir: Path) -> None:
         self._base_dir = Path(base_dir)
@@ -177,7 +170,7 @@ class FileTrajectoryStore:
     @staticmethod
     def _decode(record: Mapping[str, Any]) -> Trajectory | None:
         try:
-            return _canonical_record(record)
+            return Trajectory.from_otlp(record)
         except (TypeError, ValueError, KeyError):
             return None
 

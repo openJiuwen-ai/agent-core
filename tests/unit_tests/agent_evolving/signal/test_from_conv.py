@@ -10,8 +10,7 @@ import pytest
 from openjiuwen.agent_evolving.signal.base import make_signal_fingerprint
 from openjiuwen.agent_evolving.signal.from_conv import ConversationSignalDetector
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
+from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, write_llm_exchange
 from openjiuwen.extensions.observability import semconv
 from openjiuwen.core.foundation.llm import ToolMessage
 
@@ -24,15 +23,22 @@ def _build_trajectory_from_messages(messages: List[dict]) -> Trajectory:
 
     def add_llm(prompt: list[dict], completion: dict | None) -> None:
         nonlocal span_index
-        values: dict[str, object] = {}
-        for index, message in enumerate(prompt):
-            values[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.{index}.role"] = message.get("role", "")
-            values[f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.{index}.content"] = message.get("content", "")
+        completions = []
         if completion is not None:
-            values[f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.role"] = completion.get("role", "assistant")
-            values[f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.content"] = completion.get("content", "")
-            if completion.get("tool_calls"):
-                values[legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS] = completion["tool_calls"]
+            completions.append(
+                {
+                    "role": completion.get("role", "assistant"),
+                    "content": completion.get("content", ""),
+                    **({"tool_calls": completion["tool_calls"]} if completion.get("tool_calls") else {}),
+                }
+            )
+        values: dict[str, object] = {
+            **write_llm_exchange(
+                [{"role": m.get("role", ""), "content": m.get("content", "")} for m in prompt],
+                completions,
+            ),
+            semconv.GEN_AI_OPERATION_NAME: "chat",
+        }
         values[semconv.GEN_AI_REQUEST_MODEL] = "test-model"
         spans.append(
             {
@@ -168,10 +174,10 @@ class TestConversationSignalDetector:
                                         "spanId": "llm-1",
                                         "name": "llm.call",
                                         "attributes": attributes_from_map(
-                                            {
-                                                f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.role": "system",
-                                                f"{legacy_semconv.LEGACY_GEN_AI_PROMPT}.0.content": "system prompt",
-                                            }
+                                            write_llm_exchange(
+                                                [{"role": "system", "content": "system prompt"}],
+                                                [],
+                                            )
                                         ),
                                     }
                                 ]
@@ -585,3 +591,126 @@ class TestConversationSignalDetectorCollaborationBoundary:
 
         assert [signal.signal_type for signal in signals] == ["execution_failure"]
         assert signals[0].context.get("tool_name") == "send_message"
+
+
+class TestTtseFromConvHelpers:
+    """TTSE-facing helpers ported onto develop's ConversationSignalDetector."""
+
+    def test_is_tool_execution_failure_skips_ttse_consult(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import is_tool_execution_failure
+
+        bash_hit = is_tool_execution_failure("Error: command failed", "bash")
+        assert bash_hit is not None
+        assert "failed" in bash_hit.lower()
+        assert is_tool_execution_failure("FACT: 上次失败要改用 cl /utf-8", "ttse_consult") is None
+        assert is_tool_execution_failure("file content", "read_file") is None
+
+    def test_detect_tool_error_signals_resolves_tool_name_from_call_id(self) -> None:
+        from openjiuwen.agent_evolving.signal.from_conv import detect_tool_error_signals
+
+        signals = detect_tool_error_signals(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc_1", "name": "bash", "arguments": "{}"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "content": "Error: command failed",
+                },
+            ]
+        )
+        assert [s.signal_type for s in signals] == ["execution_failure"]
+        assert signals[0].context.get("tool_name") == "bash"
+        assert signals[0].skill_name is None
+
+    def test_detect_skips_ttse_consult_failure_keywords(self) -> None:
+        detector = ConversationSignalDetector()
+        signals = detector.detect(
+            [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc_1", "name": "ttse_consult", "arguments": "{}"}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc_1",
+                    "name": "ttse_consult",
+                    "content": "[FACT] 上次编译失败要改用 cl /utf-8",
+                },
+            ]
+        )
+        assert signals == []
+
+    def test_convert_trajectory_to_messages_wraps_canonical_converter(self) -> None:
+        messages = [
+            {"role": "user", "content": "Run the code"},
+            {
+                "role": "assistant",
+                "content": "I'll run it",
+                "tool_calls": [{"id": "tc_1", "name": "bash", "type": "function", "arguments": "{}"}],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "name": "bash",
+                "content": "Error: command failed",
+            },
+        ]
+        trajectory = _build_trajectory_from_messages(messages)
+        converted = ConversationSignalDetector.convert_trajectory_to_messages(trajectory)
+        assert isinstance(converted, list)
+        assert converted
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_rule_fallback() -> None:
+        messages = [
+            {"role": "user", "content": "build the project"},
+            {"role": "assistant", "content": "running compile"},
+            {"role": "user", "content": "不对，你应该先检查文件是否存在"},
+        ]
+        detector = ConversationSignalDetector()
+        assert await detector.detect_user_intent(messages) == []
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
+        assert len(signals) == 1
+        assert signals[0].signal_type == "user_intent"
+        assert not signals[0].skill_name
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_true() -> None:
+        messages = [
+            {"role": "user", "content": "build the project"},
+            {"role": "assistant", "content": "done"},
+            {"role": "user", "content": "the output encoding is wrong, use utf-8"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(
+            return_value={"content": '{"is_feedback": true, "excerpt": "use utf-8"}'}
+        )
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+        assert await detector.detect_user_intent(messages) == []
+        llm.invoke.assert_not_awaited()
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
+        assert len(signals) == 1
+        assert signals[0].excerpt == "use utf-8"
+        llm.invoke.assert_awaited()
+
+    @staticmethod
+    @pytest.mark.asyncio
+    async def test_detect_user_intent_skillless_llm_false() -> None:
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+            {"role": "user", "content": "thanks"},
+        ]
+        llm = MagicMock()
+        llm.invoke = AsyncMock(return_value={"content": '{"is_feedback": false}'})
+        detector = ConversationSignalDetector().bind_llm(llm=llm, model="test-model")
+        signals = await detector.detect_user_intent(messages, allow_skillless=True)
+        assert signals == []
+

@@ -225,7 +225,9 @@ def test_source_prior_cannot_connect_disjoint_semantic_islands():
 
 def test_source_prior_connects_semantically_close_members():
     source = pipeline._source_distribution([{"provider": "github", "source_type": "issue", "service": "same"}])
-    vectors = {"a": {"shared": 0.6, "a": 0.8}, "b": {"shared": 0.6, "b": 0.8}}
+    # Sparse cosine 0.04 sits below the semantic floor; the shared source
+    # prior lifts the pair above it and the members connect.
+    vectors = {"a": {"shared": 0.2, "a": 0.98}, "b": {"shared": 0.2, "b": 0.98}}
     assert pipeline._capacity_constrained_clusters(vectors, max_members=20, target_members=12) == [("a",), ("b",)]
     assert pipeline._capacity_constrained_clusters(
         vectors, max_members=20, target_members=12, source_distributions_by_id={"a": source, "b": source}

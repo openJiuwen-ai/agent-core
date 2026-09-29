@@ -41,6 +41,7 @@ from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.schema.team import (
     BridgeMemberSpec,
     ExternalCliAgentSpec,
+    ExternalCliMemberSpec,
     MemberSpecBase,
     TeamLifecycle,
     TeamMemberSpec,
@@ -145,7 +146,7 @@ class StorageSpec(BaseModel):
 # does the dispatch when both arms declare the discriminator as ``Literal``
 # (already wired in ``schema/team.py``).
 PredefinedMemberSpec = Annotated[
-    Union[BridgeMemberSpec, TeamMemberSpec],
+    Union[BridgeMemberSpec, ExternalCliMemberSpec, TeamMemberSpec],
     Field(discriminator="role_type"),
 ]
 
@@ -205,6 +206,8 @@ class TeamAgentSpec(BaseModel):
 
     agents: dict[str, DeepAgentSpec]
     team_name: str = "agent_team"
+    enable_group_chat: bool = False
+    group_context_tail: int = Field(default=5, ge=1, le=20)
     lifecycle: str = TeamLifecycle.TEMPORARY
     evolution_enabled: bool = True
     """Team switch for self-evolution coverage.
@@ -1004,6 +1007,7 @@ class TeamAgentSpec(BaseModel):
 __all__ = [
     "DeepAgentSpec",
     "ExternalCliAgentSpec",
+    "ExternalCliMemberSpec",
     "LeaderSpec",
     "PredefinedMemberSpec",
     "StorageSpec",

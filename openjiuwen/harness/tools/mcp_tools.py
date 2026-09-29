@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """LLM-callable tools for MCP resource listing and reading."""
 from __future__ import annotations
 
@@ -37,6 +37,17 @@ class ListMcpResourcesTool(Tool):
         except Exception as e:
             return ToolOutput(success=False, error=str(e))
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """List resources one per line as ``uri (name, mimeType): description``."""
+        if not output.success:
+            return super().render_for_llm(output)
+        lines = []
+        for resource in output.data:
+            meta = ", ".join(str(value) for value in (resource["name"], resource["mimeType"]) if value)
+            line = f"{resource['uri']} ({meta})" if meta else str(resource["uri"])
+            lines.append(f"{line}: {resource['description']}" if resource["description"] else line)
+        return "\n".join(lines) or "No resources found."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         raise NotImplementedError
 
@@ -67,6 +78,16 @@ class ReadMcpResourceTool(Tool):
             return ToolOutput(success=True, data=data)
         except Exception as e:
             return ToolOutput(success=False, error=str(e))
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Join text contents; a binary content is named by its uri and mime type."""
+        if not output.success:
+            return super().render_for_llm(output)
+        parts = [
+            item["text"] if item["text"] is not None else f"[binary content: {item['uri']} ({item['mimeType']})]"
+            for item in output.data
+        ]
+        return "\n\n".join(parts) or "Resource has no content."
 
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> AsyncIterator[Any]:
         raise NotImplementedError

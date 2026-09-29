@@ -18,8 +18,8 @@ from openjiuwen.agent_evolving.trajectory.schema import (
     RL_PROMPT_TOKEN_IDS,
     SESSION_ID,
     TRAJECTORY_ID,
-    TRAJECTORY_SCHEMA_VERSION,
-    TRAJECTORY_SCHEMA_VERSION_ATTR,
+    TRAJECTORY_PROJECTION_VERSION,
+    TRAJECTORY_PROJECTION_VERSION_ATTR,
     TRAJECTORY_SOURCE,
 )
 from openjiuwen.agent_evolving.trajectory.spans import (
@@ -185,7 +185,7 @@ class RLOnlineRail(BaseOnlineTrainingRail):
 
         resource_attrs = {
             TRAJECTORY_ID: uuid.uuid4().hex,
-            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+            TRAJECTORY_PROJECTION_VERSION_ATTR: TRAJECTORY_PROJECTION_VERSION,
             TRAJECTORY_SOURCE: "rl_online",
             SESSION_ID: session_id,
             "tenant_id": self._tenant_id,

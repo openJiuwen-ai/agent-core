@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness_providers/`（`base.py` / `stream.py` / `io_adapter.py` / `factory.py` / `inputs.py` / `jsonsafe.py` / `native/` / `claudecode/` / `codex/` / `dsh/`） |
-| 最近一次修订日期 | 2026-09-09 |
-| 关联 feature | F_03_harness-providers-and-manifest-factory.md |
+| 最近一次修订日期 | 2026-09-18 |
+| 关联 feature | F_03_harness-providers-and-manifest-factory.md、agent_teams F_113_external-harness-builtin-model-selection.md |
 
 ## 范围 / 边界
 
@@ -20,15 +20,19 @@
 1. **骨架唯一**：provider 继承 `SerializedTurnHarness`，只实现 `_open_session` / `_close_session` /
    `_execute_turn`（+ `_steer` / `_interrupt_turn`）。每个已接受输入恰好一个 STARTED 与一个 terminal
    `TurnLifecycleEvent`；stop 时排队中的 Turn 以 `HARNESS_STOP` ABORTED 收口；terminal 后队列为空才
-   进入 IDLE。
+   进入 IDLE。`_steer` 收到回执将要上报的 `message_id`，便于 provider 给出站消息打上同一个标识。
+   **一个 Turn 覆盖它投递的每一条消息**：steer 被厂商折叠进当前周期、或另起一个周期作答，都算同一个
+   Turn，不能在 SDK 给出的第一个 terminal 处收口——否则第二个周期的产出会漏进下一个 Turn。Claude Code
+   据 CLI 的 `command_lifecycle` 投递回执判定（`claudecode/lifecycle.py`），细节见
+   `harness_providers/AGENTS.md` 不变量 11。
 2. **能力声明真实**：
 
    | provider | card | capabilities | optional host capabilities |
    |---|---|---|---|
    | `native` | `deepagent` | STEER, FORCE_ABORT | USER_INPUT |
    | `native_v2` | `native_v2` | STEER, GRACEFUL_ABORT, FORCE_ABORT, PAUSE_RESUME, CHECKPOINT, PERSISTENT_SESSION | USER_INPUT, CHECKPOINT_SINK |
-   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
-   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION |
+   | `claudecode` | `claude-code` | STEER, GRACEFUL_ABORT, PERSISTENT_SESSION, CHECKPOINT, MCP_TOOLS | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
+   | `codex` | `codex` | 同 claudecode | TOOL_APPROVAL, USER_INPUT, CHECKPOINT_SINK, MCP_SERVERS, PROVIDER_INTERACTION, MODEL_REQUEST_OBSERVATION |
    | `dsh` | `deepseek-harness` | MCP_TOOLS | MCP_SERVERS |
 
    未声明的命令抛 `UnsupportedHarnessCapabilityError`；`_validate_context` 在 `start` 里 fail-fast。
@@ -37,9 +41,10 @@
 4. **失败词汇统一**：`TurnError.category ∈ {auth_required, quota_exceeded, rate_limited,
    server_unavailable, network_timeout, process_start_failed, sdk_error, unknown}`；
    `provider_data` 可带 `sdk_error_type` / `http_status`；`retryable` 由类别推导。
-5. **JSON 边界**：进入事件的 vendor 对象一律先 `to_json_safe`；原始 SDK 对象只经
-   provider-private 构造参数（`CodexHarness(notification_observer)`、
-   `ClaudeCodeHarness(transport_factory)`）流向宿主。
+5. **JSON 边界**：进入事件的 vendor 对象一律先 `to_json_safe`；原始 SDK 对象不流向宿主，唯一的
+   provider-private 构造参数是 `ClaudeCodeHarness(transport_factory)`（宿主提供 SDK transport）。
+   模型请求观测由 provider 内部完成（Claude 请求日志 / Codex rollout trace），以
+   `ModelRequestEvent` 交付，见 [[F_112_harness-protocol-trajectory-observation]]。
 6. **用户输入是 interaction**：Claude `AskUserQuestion`、Codex `request_user_input`
    （App Server 请求 `item/tool/requestUserInput`）与 DeepAgent `ask_user` 中断映射为
    `UserInputRequest`，Turn 在应答前保持 RUNNING；宿主未提供 handler 时 Claude 拒绝该工具、Codex 回
@@ -53,6 +58,9 @@
    随后创建的 supervisor / scheduler task 才能继承。
 7. **IO adapter 是唯一 DeepAgent 投影**：`HarnessIOAdapter` 输出 `llm_output` / `llm_reasoning` /
    `tool_call` / `tool_result` / `__interaction__`（`InteractionOutput(id=request_id, value=...)`）；
+   `tool_result` 的 `result` 是结构化值，provider 提供模型可见文本时另带独立字段 `rendered_result`
+   （DeepAgent：`_ObservationRail` 写入流式块，`_consume_chunk` 放进 `ItemLifecycleEvent.data` 与
+   `ContentBlock.data`，见 `S_05` 不变量 11）；
    DELTA 直出，FINAL/SNAPSHOT 只补前缀增量；`send(InteractiveInput)` 先应答 pending interaction，
    未匹配时以 `metadata.kind="interactive_input"` 转发；`delivery_mode(immediate)` 按状态与 STEER
    能力选 AUTO / STEER / FOLLOW_UP。
@@ -68,6 +76,17 @@
    配置（显式 `config` 优先），manifest 的 `tools` / `rails` / `subagents` 非空时
    `ValueError`。`build_harness_context` 对三方 provider 渲染 prompt sections 与 MCP，对 `native`
    只放 `extra_system_prompt`。
+10. **模型控制由骨架承担**（F_113）：`SerializedTurnHarness` 实现 `HarnessModelControl`——`list_models`
+    / `set_model` 先按 card 门控；`set_model` 在 `_command_lock` 内判空闲则立即经
+    `_apply_model_selection` 应用，否则按字段合并进暂存选择，由 supervisor 在 STARTED 之后、
+    `_execute_turn` 之前应用，失败发 WARNING `DiagnosticEvent` 且 Turn 照常执行。Claude Code / Codex
+    声明 `MODEL_SELECTION` / `MODEL_DISCOVERY`，把选择并入 `_active_model` 与 `_primary_model`（认证
+    fallback 被拒后回退的原生端点），所以重连不丢选择；Claude 用 `set_model()` +
+    `apply_flag_settings {"effortLevel"}`（SDK 缺该通道则断开、下个 Turn 以新 `--effort` resume），Codex
+    只在下一次 `thread.turn(model=, effort=)` 携带覆盖（App Server 粘性）。探测：Claude 读 `initialize`
+    的 `models`，Codex 调 `model/list`（过滤 hidden），未启动时用临时 client，只握手不请求模型。
+    Codex 仅 `CodexModelConfig.is_external`（有 `provider` 或 `api_base`）时强制
+    `deny_all + full_access`；官方内置模型保留 auto-review reviewer。
 
 ## 接口契约
 
@@ -101,6 +120,9 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 `turn_idle_retries` / `max_will_retry_count` / `mcp_*` / `client_*` / `experimental_raw_events` /
 `event_buffer_capacity`）、`DshHarnessConfig`（镜像 `DeepSeekHarnessConfig` + `launch_args_override` /
 `system_prompt_env_var` / `event_buffer_capacity`）。`from_mapping` 拒绝未知字段。
+模型配置：`ClaudeModelConfig`（`model` / `api_base` / `api_key` / `effort`）、`CodexModelConfig`（`model` /
+`provider` / `api_base` / `api_key` / `effort`，`is_external` = 有 `provider` 或 `api_base`）；不带端点的
+`model` 即 CLI 自身登录（订阅）上的内置模型。
 
 ## 数据结构
 
@@ -124,7 +146,7 @@ provider 配置模型：`ClaudeCodeHarnessConfig`（`cwd` / `add_dirs` / `env` /
 
 ## 系统提示词模式
 
-Codex 和 DSH provider config 新增 `system_prompt_mode: append | replace`，默认 replace 保持兼容。
+Codex 和 DSH provider config 提供 `system_prompt_mode: append | replace`。**Codex 默认 append**（与 Claude 一致：宿主提示词加在 CLI 既有配置之上，而不是顶掉它），DSH 默认 replace。
 Codex append 读取 app-server config/read 的生效 developer_instructions，并优先采用显式
 thread_config.developer_instructions，再追加宿主提示词；每次连接重新从原始配置构造，避免 resume
 或 fallback 重复追加。读取失败则启动失败，不静默降级为替换。replace 直接设置字段；均不修改
@@ -138,13 +160,14 @@ assembly hook 仅替换 prefix 文本，保留其它 sections（新 prefix 仍�
 
 三方 provider 接受 manifest.skills；每个 SkillSpec.dir 可指向单个含 SKILL.md 的 bundle 或包含多个
 bundle 的 library。包路径按现有 manifest loader 解析为绝对路径，内存配置也建议传绝对源路径。
-同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（默认）或 replace。
+同名的 config.skills 显式覆盖 manifest 声明；skill_conflict 为 skip（Provider 默认）、replace 或 append。
 
 start 在 SDK 启动前复制完整目录到 cwd/.claude/skills（claudecode）、cwd/.agents/skills（codex）、
 cwd/.dsh/skills（dsh）。cwd 优先取 HarnessContext，再取 provider config，再取当前进程目录。
 名称取 SKILL.md front matter.name，缺省取目录名；同名按不区分大小写比较，同时识别已有目录里的
 声明名。enabled_skills 非空时筛选声明名；mode 仍被解析校验，但原生 CLI 决定加载/调用方式，
 不仿造 DeepAgent 的 auto_list 工具。skip 保留已有目录全部内容，replace 完整替换（清除旧文件），
+append 新增带序号的独立目录和技能名；专家团 manifest 装配的外部成员默认使用 append。
 多源重名按声明顺序处理。临时完整副本切换失败会恢复原目录。复制结果跨 stop 保留。
 
 复制保留普通文件、子目录、隐藏资源和可执行位；内部链接物化成文件，越界/循环链接拒绝。

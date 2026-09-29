@@ -17,6 +17,7 @@ from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructure
 from openjiuwen.rsi.harness_rsi.evaluator.judger import ScriptBasedJudger
 from openjiuwen.rsi.harness_rsi.schema import DatasetArtifact
 from openjiuwen.rsi.harness_rsi.single_harness import IterativeSingleHarnessRequest
+from openjiuwen.rsi.harness_rsi.single_harness import iterative as iterative_module
 from openjiuwen.rsi.harness_rsi.single_harness.iterative import SingleHarnessIterativeOptimizationOrchestrator
 from openjiuwen.rsi.harness_rsi.single_harness.source_evidence import _harness_identity, matching_cases, read_mapping
 from openjiuwen.rsi.usage import record_model_usage
@@ -113,7 +114,7 @@ def test_judge_policy_change_invalidates_epoch_source_signature(setup, monkeypat
     assert old["cases"] == new["cases"]
 
 
-def test_epochs_reuse_h0_then_latest_checkpoint_without_fake_usage(setup, tmp_path):
+def test_epochs_reuse_h0_without_fake_full_evaluation_or_usage(setup, tmp_path):
     controller, refs, _cases, file = setup
     events = []
 
@@ -127,23 +128,16 @@ def test_epochs_reuse_h0_then_latest_checkpoint_without_fake_usage(setup, tmp_pa
         auto_full_baseline=True,
     )
     result = asyncio.run(controller.run(request, on_event=sink))
-    assert [Path(call["output_dir"]).name for call in controller.evaluator.calls] == [
-        "frozen_baseline",
-        "full",
-        "full",
-        "full",
-    ]
+    assert [Path(call["output_dir"]).name for call in controller.evaluator.calls] == ["frozen_baseline"]
     assert len(controller.analyzer.inputs) == 6
-    for index, invocation in enumerate(controller.analyzer.inputs):
+    for invocation in controller.analyzer.inputs:
         payload = read_mapping(invocation.eval_ref_path)
-        assert [case["score"] for case in payload["cases"]] == [index // 2 / 10]
-        assert read_mapping(payload["summary_path"])["average_score"] == index // 2 / 10
+        assert [case["score"] for case in payload["cases"]] == [0.0]
+        assert read_mapping(payload["summary_path"])["average_score"] == 0.0
         assert len(payload["source_evidence"]["reused_case_ids"]) == 1
         assert not payload["source_evidence"]["evaluated_case_ids"]
         origin = Path(payload["source_evidence"]["evaluations"][0]["eval_ref_path"])
-        assert origin.parent.name == ("frozen_baseline" if index < 2 else "full")
-        if index >= 2:
-            assert origin.parent.parent.name == f"e{index // 2:03d}"
+        assert origin.parent.name == "frozen_baseline"
     reuses = [event for event in events if isinstance(event, NodeStageEvent) and event.stage["id"] == "source.reuse"]
     assert len(reuses) == 6
     assert all(event.stage["reused_case_count"] == 1 for event in reuses)
@@ -153,10 +147,10 @@ def test_epochs_reuse_h0_then_latest_checkpoint_without_fake_usage(setup, tmp_pa
         "epoch-002",
         "epoch-003",
     }
-    assert len([event for event in events if isinstance(event, EventUsage)]) == 4
+    assert len([event for event in events if isinstance(event, EventUsage)]) == 1
     state = read_mapping(result.state_path)
-    assert state["usage"]["call_count"] == 4
-    assert state["usage"]["tokens"]["input"] == 40
+    assert state["usage"]["call_count"] == 1
+    assert state["usage"]["tokens"]["input"] == 10
     assert [event.iteration for event in events if isinstance(event, EventProgress)][-1] == 3
     final = [event.node for event in events if isinstance(event, EventNode)][-1]
     assert len(final.extra["source_evidence"]) == 2
@@ -192,7 +186,7 @@ def test_new_harness_from_previous_batch_requires_new_source_and_candidate_retes
 
 
 @pytest.mark.parametrize("resume", [False, True])
-def test_replay_regression_reenters_analysis_without_changing_promotion(setup, tmp_path, resume):
+def test_no_provisional_epochs_skip_replay_without_changing_promotion(setup, tmp_path, resume):
     controller, refs, cases, file = setup
     cases.append({"case_id": "c", "input": "keep c correct"})
     file.write_text(json.dumps({"cases": cases}))
@@ -238,25 +232,26 @@ def test_replay_regression_reenters_analysis_without_changing_promotion(setup, t
     state = read_mapping(result.state_path)
     batches = state["completed_batches"]
     assert batches["epoch_001:batch_002"]["candidate_gate_reason"] == "no_active_cases"
-    regression = batches["epoch_002:batch_002"]
+    regression = batches["epoch_002:batch_001"]
     assert regression["analysis_ref_path"]
-    assert regression["source_evidence"]["reused_case_ids"] == ["b"]
+    assert regression["source_evidence"]["reused_case_ids"] == ["a"]
     assert regression["source_evidence"]["evaluated_case_ids"] == []
-    assert Path(regression["source_evidence"]["evaluations"][0]["eval_ref_path"]).parent.parent.name == "e001"
+    assert Path(regression["source_evidence"]["evaluations"][0]["eval_ref_path"]).parent.name == "frozen_baseline"
     assert batches["epoch_003:batch_002"]["candidate_gate_reason"] == "no_active_cases"
     assert all(batches[f"epoch_{epoch:03d}:batch_003"]["candidate_gate_reason"] == "no_active_cases"
                for epoch in range(1, 4))
-    assert [Path(call["output_dir"]).name for call in controller.evaluator.calls] == [
-        "frozen_baseline", "full", "full", "full",
-    ]
+    assert [Path(call["output_dir"]).name for call in controller.evaluator.calls] == ["frozen_baseline"]
     assert state["baseline_score"] == state["best_score"] == 2 / 3
     assert state["current_harness_refs_path"] == str(refs)
     assert state["retained_case_ids"] == ["b", "c"]
     assert not state["candidate_gates"]
     assert all(not item["promotion_applied"] for item in state["epoch_checkpoints"])
+    assert all(
+        item["full_evaluation_skipped_reason"] == "no_retained_harness_change" for item in state["epoch_checkpoints"]
+    )
     reused = [event for event in events if isinstance(event, NodeStageEvent)
               and event.node_ref == "epoch-002" and event.stage["id"] == "source.reuse"]
-    assert len(reused) == 2
+    assert len(reused) == 1
 
 
 @pytest.mark.parametrize("change", ["harness", "judge", "infra"])
@@ -283,6 +278,45 @@ def test_historical_pass_cannot_skip_case_without_current_valid_evidence(setup, 
         assert not controller._source_passing_case_ids(cases, str(refs), [baseline, latest])
         return
     assert not controller._source_passing_case_ids(cases, str(refs), [baseline])
+
+
+def test_skipped_checkpoint_keeps_active_cases_from_latest_matching_harness_evidence(setup, tmp_path):
+    controller, h0_refs, _setup_cases, file = setup
+    cases = [{"case_id": f"#{index}", "input": f"case {index}"} for index in range(1, 6)]
+    file.write_text(json.dumps({"cases": cases}), encoding="utf-8")
+
+    _, baseline = asyncio.run(_baseline(controller, h0_refs, cases, file, tmp_path / "h0_evaluation"))
+    baseline_payload = read_mapping(baseline)
+    for case in baseline_payload["cases"]:
+        passed = case["case_id"] in {"#3", "#4", "#5"}
+        case.update(status="passed" if passed else "failed", score=1.0 if passed else 0.0)
+    _write_yaml(Path(baseline), baseline_payload)
+
+    h1 = tmp_path / "h1"
+    h1.mkdir()
+    (h1 / "harness.yaml").write_text("name: h1\n", encoding="utf-8")
+    h1_refs = tmp_path / "h1_refs.yaml"
+    _write_yaml(h1_refs, {"harness_refs": {"solver": str(h1)}})
+    _, node1 = asyncio.run(_baseline(controller, h1_refs, cases, file, tmp_path / "h1_full"))
+    node1_payload = read_mapping(node1)
+    for case in node1_payload["cases"]:
+        passed = case["case_id"] in {"#1", "#4"}
+        case.update(status="passed" if passed else "failed", score=1.0 if passed else 0.0)
+    _write_yaml(Path(node1), node1_payload)
+
+    state = {
+        "baseline_eval_ref_path": baseline,
+        "epoch_checkpoints": [
+            {"epoch": 1, "eval_ref_path": node1},
+            {"epoch": 2, "eval_ref_path": ""},
+        ],
+    }
+    prior_refs = iterative_module._prior_eval_refs_from_state(state)
+
+    assert prior_refs == [baseline, node1]
+    passing = controller._source_passing_case_ids(cases, str(h1_refs), prior_refs)
+    assert passing == {"#1", "#4"}
+    assert {case["case_id"] for case in cases} - passing == {"#2", "#3", "#5"}
 
 
 async def _baseline(controller, refs, cases, file, directory):

@@ -18,7 +18,6 @@ from openjiuwen.symphony.flow.distill import (
     normalize_execution_graph,
     qualified_edges,
     recipe_provenance,
-    topological_order,
 )
 from openjiuwen.symphony.flow.models import (
     OUTCOME_SUCCESS,
@@ -35,7 +34,7 @@ from openjiuwen.symphony.flow.models import (
 from openjiuwen.symphony.flow.narrative import distill_texts
 from openjiuwen.symphony.flow.packager import CapabilityPackager
 from openjiuwen.symphony.flow.privacy import sanitize_distilled_text
-from openjiuwen.symphony.flow.render import render_package
+from openjiuwen.symphony.flow.render import SkillArtifactAdapter, render_package
 from openjiuwen.symphony.flow.review import PackageReviewGate
 from openjiuwen.symphony.flow.store import FlowStore
 from openjiuwen.symphony.orchestration.config import SymphonyFlowConfig
@@ -64,7 +63,7 @@ class SymphonyFlowEngine:
         store: FlowStore | None = None,
         packager: CapabilityPackager | None = None,
         gate: PackageReviewGate | None = None,
-        skill_adapter: Any | None = None,
+        skill_adapter: SkillArtifactAdapter | None = None,
     ) -> None:
         self.config = config or SymphonyFlowConfig()
         self.llm_client = llm_client
@@ -268,6 +267,11 @@ class SymphonyFlowEngine:
             skill_pack=result.skill_pack,
             max_examples=max_examples,
             llm_client=self.llm_client,
+            capability_infos={
+                str(node_id): (node.get("metadata") or {})
+                for node_id, node in (result.skill_pack.get("nodes") or {}).items()
+                if isinstance(node, dict)
+            },
         )
         existing = self.store.read_recipe(result.recipe_id)
         version = (existing.version + 1) if existing else 1
@@ -277,6 +281,7 @@ class SymphonyFlowEngine:
         ]
         return ExperienceRecipe(
             recipe_id=result.recipe_id,
+            name=texts["name"],
             version=version,
             status=result.status,
             grade=result.grade,
@@ -469,7 +474,7 @@ class SymphonyFlowEngine:
         return tuple(candidates)
 
     def acknowledge_candidate(self, recipe_id: str, version: int) -> bool:
-        """Acknowledge successful Host Event delivery for one candidate version."""
+        """Acknowledge successful completion for one candidate version."""
 
         current = self.get_recipe(recipe_id)
         if current is None:
@@ -477,6 +482,16 @@ class SymphonyFlowEngine:
         if current.version != version or current.status != "active" or current.grade != "verified":
             return False
         return self.store.acknowledge_candidate(recipe_id, version)
+
+    def release_candidate(self, recipe_id: str, version: int) -> bool:
+        """Release a deferred candidate version so it can be offered again."""
+
+        current = self.get_recipe(recipe_id)
+        if current is None:
+            return False
+        if current.version != version or current.status != "active" or current.grade != "verified":
+            return False
+        return self.store.release_candidate(recipe_id, version)
 
     def review_history(self, package_id: str) -> list[ReviewResult]:
         """评审结果按包存储；v1 返回最近一次（幂等输入 → 幂等评审）。"""
@@ -517,11 +532,10 @@ def _candidate_from_recipe(recipe: ExperienceRecipe) -> CombinationCandidate:
         for edge in edges
         if isinstance(edge, dict)
     )
-    capability_ids = topological_order(recipe.combination_structure)
     return CombinationCandidate(
         recipe_id=recipe.recipe_id,
         version=recipe.version,
-        name=" → ".join(capability_ids) or recipe.recipe_id,
+        name=recipe.name,
         applicability=summary,
         structure=structure,
         execution_count=int(recipe.quality.get("execution_count") or 0),

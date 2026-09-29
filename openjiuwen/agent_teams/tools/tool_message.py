@@ -287,7 +287,7 @@ class _SendMessageBase(TeamTool, ABC):
             if restarted:
                 team_logger.info("Recovered failed message recipient: {}", member_name)
 
-    def map_result(self, output: ToolOutput) -> str:
+    def render_for_llm(self, output: ToolOutput) -> str:
         d = output.data
         if not output.success:
             base = output.error or "Failed to send message"

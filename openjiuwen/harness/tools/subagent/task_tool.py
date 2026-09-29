@@ -19,6 +19,7 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
+from openjiuwen.core.foundation.tool.base import render_payload_text
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail.base import (
     bind_usage_delegation,
@@ -1000,6 +1001,22 @@ class TaskTool(Tool):
             browser_query=browser_query,
             affinity_enabled=affinity_enabled,
         )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the subagent's answer; browser tasks keep their orchestration fields.
+
+        The tool description tells the model to act on ``resume_task_id``,
+        ``retryable`` and ``browser_result``, so a browser task appends those
+        fields after the answer. A refused browser query (it carries ``code``)
+        already uses that payload as its answer.
+        """
+        data = output.data
+        answer = render_payload_text(data["output"])
+        orchestration = {key: value for key, value in data.items() if key not in ("output", "agent_id")}
+        if not orchestration or "code" in orchestration:
+            return answer or "Subagent finished without output."
+        block = json.dumps({"browser_orchestration": orchestration}, ensure_ascii=False)
+        return f"{answer}\n\n{block}" if answer else block
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

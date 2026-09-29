@@ -228,7 +228,12 @@ class ActivityProjector:
             ok = not bool(info.get("is_error"))
         if ok is None and info.get("status") is not None:
             ok = str(info.get("status")).lower() not in {"error", "failed", "failure"}
-        summary = _pick_str(info, "summary") or _pick_str(info, "result") or tool_name
+        summary = (
+            _pick_str(info, "summary")
+            or _pick_str(info, "rendered_result")
+            or _pick_str(info, "result")
+            or tool_name
+        )
         return self._make(
             kind="tool_result",
             task_id=task_id,

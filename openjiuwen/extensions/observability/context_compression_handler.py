@@ -1,11 +1,19 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
-"""Bridge real context-compression completion facts into trajectory v2."""
+"""Bridge real context-compression completion facts into trajectory v2.
+
+A compaction is a turn of its own: an instruction goes in, the model is
+asked once for a summary, and the rewritten conversation comes out as the
+context every later turn starts from. The bridge records both halves of that
+turn when it completes -- the compaction.completed event for what happened,
+and the context.window.commit for the window it left behind.
+"""
 
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from typing import Any
 
 from opentelemetry import trace
@@ -21,23 +29,39 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_REQUEST_ID,
     OJ_REQUEST_PURPOSE,
     GEN_AI_CONVERSATION_ID,
-    OJ_STEP_ID,
 )
 from openjiuwen.extensions.observability.span_context import (
     context_compaction_number,
     get_current_agent_span,
     get_current_llm_span,
     get_root_span,
-    queue_context_window_compaction,
 )
-from openjiuwen.extensions.observability.trajectory_events import emit_native_trajectory_event
+from openjiuwen.extensions.observability.trajectory_events import (
+    emit_compaction_window_commit,
+    emit_native_trajectory_event,
+)
 
 
 class ContextCompressionObservabilityBridge:
-    """Emit one immutable event for each completed compression lifecycle."""
+    """Emit the event and the window commit of each completed compression."""
 
-    def __init__(self, *, tracer: Tracer) -> None:
+    def __init__(
+        self,
+        *,
+        tracer: Tracer,
+        window_messages: Callable[[Any], list[dict[str, Any]]],
+    ) -> None:
+        """Create the bridge.
+
+        Args:
+            tracer: Tracer that emits the trajectory spans.
+            window_messages: Converts context-engine messages into the
+                canonical trajectory form a window commit states; the same
+                converter the model-request commits use, so both kinds of
+                commit share one message identity.
+        """
         self._tracer = tracer
+        self._window_messages = window_messages
         self._model_requests_by_operation: dict[str, list[dict[str, str]]] = {}
         self._model_requests_lock = threading.Lock()
 
@@ -98,22 +122,26 @@ class ContextCompressionObservabilityBridge:
                 event_kind="compaction.completed",
                 payload=payload,
             )
-            if event is not None:
-                queued = queue_context_window_compaction(
-                    session_id=str(parent_span.attributes.get(GEN_AI_CONVERSATION_ID) or ""),
-                    subject_id=str(parent_span.attributes.get(OJ_EXECUTION_SUBJECT_ID) or "main"),
-                    step_id=str(parent_span.attributes.get(OJ_STEP_ID) or ""),
-                    operation_id=state.operation_id,
+            if event is None:
+                return
+            context = kwargs.get("context")
+            if context is None:
+                # Silence here is what hid an earlier defect: a compaction
+                # that leaves no window commit makes the viewer render the
+                # next turn's removals as fresh rows, and nothing said why.
+                logger.warning(
+                    "otel: context compaction {} states no output window; "
+                    "the completion callback carried no context",
+                    state.operation_id,
                 )
-                if not queued:
-                    # Silence here is what hid the previous defect: every
-                    # compaction failed to queue and nothing said so, leaving
-                    # the viewer to report each one as missing its output.
-                    logger.debug(
-                        "otel: context compaction {} not queued for correlation; "
-                        "its parent span states no step id",
-                        state.operation_id,
-                    )
+                return
+            emit_compaction_window_commit(
+                tracer=self._tracer,
+                parent_span=parent_span,
+                messages=self._window_messages(context.get_messages()),
+                operation_id=state.operation_id,
+                model_requests=model_requests,
+            )
         except Exception as exc:
             logger.warning("otel: context compression completion bridge failed - {}", exc)
 

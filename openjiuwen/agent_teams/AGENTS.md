@@ -53,7 +53,7 @@ agent_teams/
 ├── context.py           # session_id 跨成员/跨模式共享 contextvars
 ├── i18n.py              # 运行时中/英文字符串（仅装运行时 hard-coded 串）+ `reply_hint_for(sender)`：按发件人选 reply-hint 文案（user 走无条件强制版，其余走通用条件版）——文案归它管，选哪条文案也归它管，两个消费点（coordination `MessageHandler` / external `format`）不各写一遍
 ├── timefmt.py           # 毫秒 epoch → "绝对本地时间 + 相对差" 渲染（喂 LLM/观测，文案走 i18n）
-├── inbound_render.py    # 入站消息/框架事件/团队状态 → <team-inbound>/<team-event>/<team-note>/<team-context> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取；`<team-note>` 嵌在它所修饰的 inbound / event 块内部，不平级）+ `render_controller_input`：HITT 控制者指令渲染成 `<team-inbound from="controller">`，让 avatar 分得清控制者与团队侧的 `user`（见 interaction/AGENTS.md 运行约束 6）+ `SNAPSHOT_EVENT_KINDS`/`snapshot_kind_of`/`drop_superseded_snapshots`：判定哪些 event 是全量幂等快照、并从一批排队输入里整条剔除被覆盖的那几条（当前只有 task-board）。见 F_46 / F_70 / F_71 / F_72
+├── inbound_render.py    # 入站消息/框架事件/团队状态 → <team-inbound>/<team-event>/<team-note>/<team-context> XML 渲染（纯函数，喂 LLM；文案由 handler 从 i18n 取；`<team-note>` 嵌在它所修饰的 inbound / event 块内部，不平级）+ `render_team_policy`：外部 CLI 成员的系统提示词包成 `<team-policy tools="<mcp server>">`，首个子元素是 `<team-note kind="tool-namespace">`，一次声明裸工具名归属哪个 MCP server（正文是团队自己的 markdown，不做转义）+ `render_controller_input`：HITT 控制者指令渲染成 `<team-inbound from="controller">`，让 avatar 分得清控制者与团队侧的 `user`（见 interaction/AGENTS.md 运行约束 6）+ `SNAPSHOT_EVENT_KINDS`/`snapshot_kind_of`/`drop_superseded_snapshots`：判定哪些 event 是全量幂等快照、并从一批排队输入里整条剔除被覆盖的那几条（当前只有 task-board）。见 F_46 / F_70 / F_71 / F_72
 ├── team_context.py      # TeamContextTracker：判定该告诉这个成员哪些团队状态（自身身份 / 团队元数据 / 成员名册），并把投递进度基线持久化到成员自己的 child AgentSession。两个调用方：TeamPolicyRail（进程内）与 CliRuntimeBase（外部 CLI）。见 F_70
 ├── message_template.py  # 框架模板消息的两阶段渲染：发送存意图（消息行 content 空 + meta={template,refs,params}），投递时按收件人语言加载 prompts/<lang>/<key>.md、用 {{task.*}}/{{member.*}}/{{param.*}} 填当前行（单遍替换不二次扫描、字段白名单、失败降级为 meta 合成的 fallback 行）。见 F_63
 ├── tiny_agent.py        # Tiny Agent：随时唤起的极简 NativeHarness（system_prompt + model + 仅结构化输出工具）；run 单轮 / chat 多轮；ephemeral（含 title/summary 预定义）+ team-scoped（TeamAgentSpec.tiny_agents 多实例，TeamInfra 持有）。见 F_45
@@ -70,7 +70,7 @@ agent_teams/
 ├── messager/            # 消息传输层（inprocess / pyzmq）
 ├── spawn/               # 成员启动（process / inprocess）
 ├── monitor/             # 团队运行态监控（TeamMonitor 只读视图 + TeamStreamLogger 流式诊断日志）
-├── observability/       # 团队 OpenTelemetry 观测；Codex 专用桥接 / OTLP 接收 / rollout trace 集中在 codex/ 子包。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider）
+├── observability/       # 团队 OpenTelemetry 观测。三方 harness 成员不在这里：其模型请求由 provider 以 ModelRequestEvent 交付，`harness_providers/trajectory.py` 记录（F_112）。agent 层 span 不在这里——`TeamObservabilityRail` 只贡献 `agentteam.*` 增量，span 本身由 `harness/observability/` 的 `AgentObservabilityRail` 开关（成对挂载，不继承）；两边共用 `extensions/observability/`（含 demand.py 的 provider 需求协调，进程内只允许一个 TracerProvider） **team 根 span（`team.{name}`）按 session 注册**（`get_or_create_team_span(session_id=)` → `set_root_span(session_id=)`，session 由 runner 传入而非只靠 ContextVar）：进程内 teammate 在自己的 task 里跑，只按 session id 查根，注册不上就整轮不落记录。**interact 路径（用户 `@` 直呼成员）也要开根**——它不属于任何 streaming run，上一条 trace finalize 后就没有根可挂了。
 ├── reliability/         # 主动可靠性框架（健康信号采集 rail + 检测器 + 分级处置；opt-in）
 ├── team_workspace/      # 团队共享工作空间（跨成员的文件/锁/版本）
 ├── cli/                 # 交互式 TUI / 斜杠命令子模块（prompt_toolkit + rich）
@@ -98,6 +98,14 @@ agent_teams/
 | `cn/` · `en/` | 角色 / 工作流 / 生命周期模板 |
 
 **唯一装配路径是 `sections.build_team_*_section`**（由 `TeamPolicyRail` / `build_team_member_system_prompt` 消费，各 builder 直接 `load_template` 读对应 `.md`）。改正文即时生效。详见 `prompts/AGENTS.md`。
+
+模板里的工具一律写**裸名**（`send_message` / `view_task` / ...）。进程内成员本来就这么调；外部 CLI
+成员的工具走 MCP、带命名空间，且 CLI 自带工具可能重名（Claude Code 的 `SendMessage`、Codex 的
+`collaboration.send_message`），所以 `build_team_member_system_prompt(mcp_server_name=...)` 把提示词包进
+`<team-policy tools="...">`，用 `tool_namespace.md` 声明一次：本区域与所有 `team-*` 消息块里的裸名都归这个
+MCP server。**不要**逐条把模板里的工具名改成全限定名——两家 CLI 的全限定形式不同，声明作用域是一处改动，
+改名是全量改动，而且会把厂商细节焊进模板。裸名到真实调用名的翻译由 provider 声明（见
+`harness_providers/AGENTS.md` 不变式 12）。
 
 ### rails/ — 团队 Rail 注入 + manifest 声明
 
@@ -256,7 +264,8 @@ provider session/Turn 协议合并。
   行为：成员 child AgentSession（provider checkpoint sink + `TeamContextTracker` 投递基线）、
   `harness.state` / `harness.round`（legacy 兼容名）回调、外部 runtime 可靠性上下文
   （`bind_reliability_context`：FAILED terminal / 启动失败 → leader 邮箱失败消息，retrying 诊断 →
-  进度事件）、观测桥接（`bind_span_bridge`）、认证 fallback 持久化（`bind_fallback_promotion`：以
+  进度事件）、轨迹记录（`bind_trajectory_recorder`：协议事件 → `HarnessTrajectoryRecorder`，STARTED
+  前注入持久化成员 turn 身份，见 [[F_112_harness-protocol-trajectory-observation]]）、认证 fallback 持久化（`bind_fallback_promotion`：以
   `auth_fallback` provider interaction 先持久化再放行，持久化失败 provider 回退原生端点）与
   MCP server 挂载（`bind_mcp_servers`）。`resume_external_backend=True` 时要求 checkpoint 存在并以
   `REQUIRE_RESUME` 启动。Claude Code / Codex 成员都走这一条路径（`build_cli_runtime`），不再有
@@ -264,8 +273,8 @@ provider session/Turn 协议合并。
 - `external/cli_agent/claude/`：只剩团队侧接线——`sdk_mcp.py`（进程内 SDK MCP 团队工具集，作为
   `McpServerConfig(IN_PROCESS)` 挂到 runtime）、`ssh_transport.py`（Claude SDK ssh transport，经
   `ClaudeCodeHarness(transport_factory=...)` 注入）、`options.py`（team 命名的 session id 助手）。
-  `external/cli_agent/codex/`：`observer.py`（把原始 SDK notification 喂给 `CodexSpanBridge` 的
-  provider-private observer）+ `options.py`（team MCP overrides 助手）。DSH 的 Turn 边界与限制见
+  `external/cli_agent/codex/`：只有 `options.py`（team MCP overrides 助手）；Codex 观测在
+  `harness_providers/codex/observation.py`。DSH 的 Turn 边界与限制见
   [[F_95_dsh-external-harness-adapter]]。
 
 - `external/descriptor.py`：`TeamJoinDescriptor`（session/team/member + role + language +
@@ -275,7 +284,7 @@ provider session/Turn 协议合并。
 
 - **member**（cli-agent 三方团队成员）：`ExternalTeamClient.connect` 建最小 `TeamBackend` +
   `create_team_tools(role="teammate")`，对外暴露**真实** teammate `TeamTool`
-  （`view_task` / `claim_task[claimed|completed]` / `send_message`，结果即 `map_result()`
+  （`view_task` / `claim_task[claimed|completed]` / `send_message`，结果即 `render_for_llm()`
   文本，与进程内成员逐字一致）。入站消息与原生成员同路——父进程 coordination push 进 CLI，
   **不暴露** pull 工具（operator 专有的 `read_inbox` 对 member 不可见）。`complete_task`
   折进 `claim_task(status=completed)`、list/get/claimable 折进 `view_task`。MCP instructions
@@ -309,7 +318,10 @@ provider session/Turn 协议合并。
 `TeamAgentSpec.external_cli_agents`（`ExternalCliAgentSpec` 列表：`cli_agent` 种类标识 +
 `command`/`cwd`/`inject_mcp`/`mcp_server_command`/`env`/`ssh_transport`），非空集即外部 CLI 成员的能力上限。
 leader 用 `spawn_external_cli(cli_agent=<name>)` 按名引用，不在 spawn
-调用里传启动细节。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
+调用里传启动细节。claude / codex 条目可声明 `builtin_models`（订阅等 CLI 自身登录提供的模型与
+effort 目录）：声明后 leader 可在 spawn 时挑内置模型，并用 `set_member_model` 在运行中切换模型 /
+effort（落库到 `options.builtin_model`，经 `HarnessModelControl.set_model` 下一 turn 生效）；
+未声明则行为不变。见 [[F_113_external-harness-builtin-model-selection]]。当前内置 backend：claude / codex（`harness_providers` 协议 provider +
 `ExternalHarnessMemberRuntime`）与 adapter 型 gemini / openclaw / hermes / generic
 （`CliRuntimeBase` 子进程 runtime）。spawn 路径（`external_cli_spawn` → `build_cli_runtime`）按 backend
 注入团队 MCP server——claude 走 SDK 进程内 MCP（`_bind_protocol_member_team_tools` 在 `configure`

@@ -40,8 +40,14 @@ def _execution_graph(*, outcome: str = "success", include_snapshot: bool = True)
             "type": "execution_graph",
             "directed": True,
             "nodes": {
-                "skill:a": {"label": "skill"},
-                "skill:b": {"label": "skill"},
+                "skill:a": {
+                    "label": "skill",
+                    "metadata": {"capability_type": "skill", "version": "1.0.0"},
+                },
+                "skill:b": {
+                    "label": "skill",
+                    "metadata": {"capability_type": "skill", "version": "1.0.0"},
+                },
             },
             "edges": [
                 {
@@ -59,6 +65,40 @@ def _execution_graph(*, outcome: str = "success", include_snapshot: bool = True)
             "observation_revision": "observation-start",
             "merged_revision": "merged-start",
         }
+    return value
+
+
+def _execution_graph_with_capability_metadata() -> dict:
+    value = _execution_graph()
+    value["graph"]["nodes"] = {
+        "skill:a": {
+            "label": "skill",
+            "metadata": {
+                "capability_type": "skill",
+                "version": "1.0.0",
+                "description": "Fetch a weather forecast.",
+                "inputs": [
+                    {
+                        "name": "location",
+                        "type": "string",
+                        "required": True,
+                        "description": "Destination name.",
+                    }
+                ],
+                "outputs": [{"name": "forecast", "type": "object"}],
+            },
+        },
+        "skill:b": {
+            "label": "skill",
+            "metadata": {
+                "capability_type": "skill",
+                "version": "1.0.0",
+                "description": "Create a travel guide.",
+                "inputs": [{"name": "forecast", "type": "object", "required": True}],
+                "outputs": [{"name": "guide", "type": "markdown"}],
+            },
+        },
+    }
     return value
 
 
@@ -135,6 +175,44 @@ async def test_runtime_builds_canonical_graph_observation() -> None:
     assert value.task.task_cluster_id is None
     assert value.graph_snapshot.static_revision == "static-1"
     assert set(value.execution_graph.nodes) == {"skill:a", "skill:b"}
+
+
+@pytest.mark.asyncio
+async def test_runtime_accepts_capability_metadata_and_submits_to_flow() -> None:
+    receipt = ObservationReceipt(
+        evidence_id="execution-1",
+        graph_scope_id="workspace:test",
+        sequence=1,
+        status="accepted",
+    )
+    graph_engine = SimpleNamespace(submit_observation=Mock(return_value=receipt))
+    flow_engine = SimpleNamespace(submit=AsyncMock(return_value=()))
+    runtime = _runtime(graph_engine, flow_engine)
+
+    result = await runtime.submit_evolution(
+        _planned_graph(),
+        _execution_graph_with_capability_metadata(),
+        session_id="session-1",
+        capture_mode="agent",
+    )
+
+    assert result.graph_receipt is receipt
+    submitted_observation = graph_engine.submit_observation.call_args.args[0]
+    assert submitted_observation.execution_graph.nodes["skill:a"].metadata == {
+        "capability_type": "skill",
+        "version": "1.0.0",
+        "description": "Fetch a weather forecast.",
+        "inputs": [
+            {
+                "name": "location",
+                "type": "string",
+                "required": True,
+                "description": "Destination name.",
+            }
+        ],
+        "outputs": [{"name": "forecast", "type": "object"}],
+    }
+    flow_engine.submit.assert_awaited_once()
 
 
 @pytest.mark.asyncio

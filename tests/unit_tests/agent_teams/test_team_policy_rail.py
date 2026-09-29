@@ -10,7 +10,6 @@ from openjiuwen.agent_teams.prompts import (
     TeamSectionName,
     build_leader_policy_disclosure,
     build_team_extra_section,
-    build_team_identity_section,
     build_team_lifecycle_section,
     build_team_member_system_prompt,
     build_team_role_section,
@@ -166,22 +165,6 @@ class TestTeamRoleSection:
         section = build_team_role_section(role=TeamRole.TEAMMATE, language="cn")
         content = section.render("cn")
         assert "你的 member_name" not in content
-
-
-class TestTeamIdentitySection:
-    @pytest.mark.level0
-    def test_identity_section(self):
-        section = build_team_identity_section(member_name="dev1", language="cn")
-        assert section is not None
-        assert section.name == TeamSectionName.IDENTITY
-        assert section.priority == 10
-        content = section.render("cn")
-        assert "# 成员身份" in content
-        assert "你的 member_name: dev1" in content
-
-    @pytest.mark.level0
-    def test_identity_section_without_any_member_content(self):
-        assert build_team_identity_section(member_name=None, language="cn") is None
 
 
 class TestTeamWorkflowSection:
@@ -351,41 +334,6 @@ class TestTeamTaskStateSection:
             )
             is None
         )
-
-
-class TestTeamPrivatePromptInIdentity:
-    """The private working agreement is a subsection of the identity content.
-
-    It shares a lifecycle with ``member_name`` (fixed at spawn, constant after,
-    different between members) and the same delivery lane, so it is one piece
-    of content rather than two.
-    """
-
-    @pytest.mark.level0
-    def test_private_prompt_nested_under_identity(self):
-        section = build_team_identity_section(
-            member_name="dev1",
-            member_prompt="always write tests",
-            language="cn",
-        )
-        assert section is not None
-        content = section.render("cn")
-        assert "# 成员身份" in content
-        assert "你的 member_name: dev1" in content
-        assert "## 私有工作约定" in content
-        assert "always write tests" in content
-
-    @pytest.mark.level0
-    def test_empty_private_prompt_drops_only_that_subsection(self):
-        section = build_team_identity_section(
-            member_name="dev1",
-            member_prompt="   ",
-            language="cn",
-        )
-        assert section is not None
-        content = section.render("cn")
-        assert "你的 member_name: dev1" in content
-        assert "## 私有工作约定" not in content
 
 
 class TestTeamExtraSection:
@@ -616,8 +564,6 @@ class TestTeamPolicyRailStaticSections:
             TeamSectionName.LIFECYCLE,
             TeamSectionName.DISPATCH,
             TeamSectionName.INBOUND_TAGS,
-            # The per-member content never enters the builder.
-            TeamSectionName.IDENTITY,
         ):
             assert name not in sections
 
@@ -659,7 +605,6 @@ class TestTeamPolicyRailStaticSections:
         assert TeamSectionName.LIFECYCLE not in sections
         assert TeamSectionName.EXTRA not in sections
         assert TeamSectionName.ROLE in sections
-        assert TeamSectionName.IDENTITY not in sections
 
 
 class TestTeamPolicyRailTeamContext:
@@ -1354,49 +1299,37 @@ class TestTagNoticeInclusion:
         assert "team-inbound" in build_leader_policy_disclosure(language="cn")
 
 
-class TestMemberSpecificInclusion:
-    """The per-member section is inlined only for external CLI members.
+class TestMemberStateStaysOutOfTheSystemPrompt:
+    """Who a member is never reaches any system prompt.
 
-    ``team_identity`` (member_name + private working agreement) differs between
-    members, so in-process members receive it as a conversation message and the
-    whole team shares one cacheable system-prompt prefix. An external CLI prompt
-    is a standalone per-member snapshot with no conversation at launch, so it
-    inlines it.
+    The member's name and its private working agreement differ between members
+    and can be evolved mid-session, so every member -- in-process or external
+    CLI -- is told through ``<team-context>`` in its conversation. That keeps
+    one cacheable prefix per role and one channel that can correct itself.
     """
 
     @pytest.mark.level1
-    def test_static_sections_omit_member_specific_by_default(self):
+    def test_static_sections_omit_member_state(self):
         secs = build_team_static_sections(
             role=TeamRole.TEAMMATE,
             member_name="dev1",
-            member_prompt="ship small PRs",
             language="cn",
         )
-        names = {s.name for s in secs}
-        assert TeamSectionName.IDENTITY not in names
+        rendered = "\n".join(str(s.content) for s in secs)
+        assert "你的 member_name" not in rendered
 
     @pytest.mark.level1
-    def test_static_sections_include_member_specific_when_flagged(self):
-        secs = build_team_static_sections(
-            role=TeamRole.TEAMMATE,
-            member_name="dev1",
-            member_prompt="ship small PRs",
-            language="cn",
-            include_member_specific=True,
-        )
-        names = {s.name for s in secs}
-        assert TeamSectionName.IDENTITY in names
-
-    @pytest.mark.level1
-    def test_external_cli_prompt_inlines_member_specific(self):
+    def test_external_cli_prompt_omits_member_state(self):
         prompt = build_team_member_system_prompt(
             role=TeamRole.TEAMMATE,
             member_name="dev1",
-            member_prompt="ship small PRs",
             language="cn",
+            workspace_prompt_variant="external",
         )
-        assert "你的 member_name: dev1" in prompt
-        assert "ship small PRs" in prompt
+        # The standing policy is there; who the member is is not.
+        assert "团队角色" in prompt
+        assert "你的 member_name" not in prompt
+        assert "ship small PRs" not in prompt
 
 
 class TestTeamPolicyRailSnapshotCollapse:

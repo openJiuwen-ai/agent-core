@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import base64
 import threading
-import warnings
 from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
@@ -176,6 +175,7 @@ class ObservabilityRuntime:
                 )
                 context_compression_handler = ContextCompressionObservabilityBridge(
                     tracer=provider.get_tracer("openjiuwen.extensions.observability.context"),
+                    window_messages=callback_handler.context_window_messages,
                 )
                 self._callback_handler = callback_handler
                 self._context_compression_handler = context_compression_handler
@@ -396,7 +396,7 @@ class ObservabilityRuntime:
 
 def build_span_exporter(config: ObservabilityConfig) -> SpanExporter:
     """Construct the exporter selected by the configuration."""
-    resolved = resolve_exporter_selection(config)
+    resolved = config.exporter
     if resolved == "console":
         return ConsoleSpanExporter()
     if resolved == "file":
@@ -443,24 +443,6 @@ def wrap_langfuse_projection(
     )
 
 
-def resolve_exporter_selection(config: ObservabilityConfig) -> str:
-    """Resolve the effective exporter, translating the deprecated ``backend``.
-
-    ``backend`` is translated to ``exporter`` exactly once, here in the
-    initialization stage, and emits a deprecation warning. The translated
-    value is never handed to the collection layer (callback/bridge/rail)
-    and never influences telemetry shape.
-    """
-    if config.backend == "langfuse":
-        warnings.warn(
-            "ObservabilityConfig.backend is deprecated; use exporter='langfuse' instead",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return "langfuse"
-    return config.exporter
-
-
 def build_auth_headers(config: ObservabilityConfig) -> dict[str, str]:
     """Build Basic authentication headers for a configured OTLP backend."""
     if not config.langfuse_public_key or not config.langfuse_secret_key:
@@ -474,5 +456,4 @@ __all__ = [
     "SafeSpanProcessor",
     "build_auth_headers",
     "build_span_exporter",
-    "resolve_exporter_selection",
 ]

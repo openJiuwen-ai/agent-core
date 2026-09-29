@@ -15,6 +15,7 @@ from openjiuwen.agent_evolving.trajectory.spans import (
     write_llm_exchange,
 )
 from openjiuwen.agent_evolving.trajectory.store import InMemoryTrajectoryStore
+from openjiuwen.core.foundation.llm.call_scope import is_llm_observation_suppressed
 from openjiuwen.harness.rails.evolution.evolution_rail import EvolutionRail, PreparedEvolutionInput
 from openjiuwen.harness.rails.evolution.trajectory_rail import TrajectoryRail
 from openjiuwen.extensions.observability import semconv
@@ -76,6 +77,21 @@ class _TimeoutRail(EvolutionRail):
         await asyncio.sleep(1)
 
 
+class _ObservationRail(EvolutionRail):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.seen: list[bool] = []
+
+    async def run_evolution(self, prepared: PreparedEvolutionInput) -> None:
+        del prepared
+        self.seen.append(is_llm_observation_suppressed())
+        nested = asyncio.create_task(self._nested_check())
+        await nested
+
+    async def _nested_check(self) -> None:
+        self.seen.append(is_llm_observation_suppressed())
+
+
 @pytest.mark.asyncio
 async def test_safe_run_evolution_isolates_failure_and_emits_host_event() -> None:
     rail = _FailingRail(trajectory_span_processor=TrajectorySpanProcessor())
@@ -86,6 +102,17 @@ async def test_safe_run_evolution_isolates_failure_and_emits_host_event() -> Non
     assert len(events) == 1
     assert events[0].payload["evolution_meta"]["status"] == "failed"
     assert "evolution failed" in events[0].payload["content"]
+
+
+@pytest.mark.asyncio
+async def test_safe_run_evolution_suppresses_llm_observation() -> None:
+    rail = _ObservationRail(trajectory_span_processor=TrajectorySpanProcessor())
+
+    assert not is_llm_observation_suppressed()
+    await rail._safe_run_evolution(_prepared())
+
+    assert rail.seen == [True, True]
+    assert not is_llm_observation_suppressed()
 
 
 @pytest.mark.asyncio

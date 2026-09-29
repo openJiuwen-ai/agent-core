@@ -55,7 +55,7 @@
 13. **`TeamStreamLogger` 是一次性的、与单次 run 绑定**。每次 `run_agent_team_streaming` 调用配一个新实例：`__init__` 用调用方给的 `file_path` 以 append 模式打开文件，`flush()` 在 stream 结束时把所有 source 的尾段写完并 close 文件。`_llm_output_seen` 等去重门控、`_runs` 累积缓冲贯穿整个 run。runner 不构造、不复用——构造责任在调用方（CLI / SDK），runner 只 `feed` / `flush`，类型在 `TYPE_CHECKING` 下引用。
 14. **聚合按 source 独立维护**。`_runs: dict[(member, role), _Run]`——每个 source 有自己的待定累积段；同一 source 切换 category 或遇到该 source 的离散 chunk 时 flush **该 source 的段**，**不同 source 的 chunk 交错不互相打断**。leader 与 teammate 在 inprocess fan-out 下 chunk 必然交错，单一游标模型会把每个 token 切成独立记录、彻底破坏聚合，故须按 source 分桶。
 15. **`hide_dm` 是 monitor 实例级别的对称过滤**。`TeamMonitor(hide_dm=True)` 同时作用于 pull 与 push 两条路径：`get_messages` 把非广播消息（`MessageInfo.broadcast=False`）从结果中剔除——单收件人 DM 视图（带 `to_member_name`）直接返 `[]`，全 team 视图走 `get_team_messages(broadcast=True)` 下推到 DAO；`_on_event` 丢弃 `MonitorEventType.MESSAGE` 事件，`BROADCAST` 不动。两路必须一致：单边过滤会让"流里看不到 DM 但 query 仍能查到"或反之，破坏调用方对"hide_dm = DM 不可见"的语义预期。`hide_dm` 只屏蔽消息维度，team / member / task 事件不受影响。
-16. **GenAI 标准键只有一套写入真相**。所有模型、工具、Codex/Claude bridge、trajectory、RL 与前端投影都使用 OpenTelemetry GenAI semantic conventions 的当前名称；后端类型不得改变字段形状。OpenJiuwen 关联信息只能写入 `openjiuwen.*`。旧 `gen_ai.prompt.*`、`gen_ai.completion.*`、`gen_ai.tool.input/output/id` 等只允许在 `trajectory/legacy_semconv.py` 的历史读取边界出现。
+16. **GenAI 标准键只有一套写入真相**。所有模型、工具、Codex/Claude bridge、trajectory、RL 与前端投影都使用 OpenTelemetry GenAI semantic conventions 的当前名称；后端类型不得改变字段形状。OpenJiuwen 关联信息只能写入 `openjiuwen.*`。旧 `gen_ai.prompt.*`、`gen_ai.completion.*`、`gen_ai.tool.input/output/id` 等不再有任何读取边界：历史轨迹不被读取，也不得重新引入回退。
 
 ## 接口契约
 

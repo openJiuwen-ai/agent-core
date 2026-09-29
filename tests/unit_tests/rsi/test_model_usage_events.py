@@ -137,7 +137,9 @@ async def test_failed_attempt_and_retry_both_count_without_guessing_failed_token
             )
         await model.invoke("retry")
     assert state["usage"]["call_count"] == 2
-    assert state["usage"]["tokens"] == {"input": None, "output": None, "cache_hit": None}
+    # The failed attempt contributes nothing, but it must not erase the counters
+    # reported by the successful retry.
+    assert state["usage"]["tokens"] == {"input": 100, "output": 30, "cache_hit": 20}
     lines = [json.loads(line) for line in (tmp_path / "model_calls.jsonl").read_text().splitlines()]
     assert [line["model_call"]["status"] for line in lines] == ["failed", "succeeded"]
     assert lines[1]["model_call"]["tokens"]["input"] == 100

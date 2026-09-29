@@ -33,7 +33,8 @@ from openjiuwen.extensions.observability.semconv import (
     OJ_EXECUTION_SUBJECT_SESSION_ID,
     OJ_REQUEST_ID,
     OJ_RUN_ID,
-    OJ_TRACE_SCHEMA_VERSION,
+    OJ_TRAJECTORY_SCHEMA_VERSION,
+    TRAJECTORY_SPAN_SCHEMA_VERSION,
 )
 
 
@@ -114,7 +115,7 @@ class OtlpSpanRecord:
     request_id: str | None
     run_id: str | None
     agent_mode: str | None
-    schema_version: str = "1"
+    schema_version: str = TRAJECTORY_SPAN_SCHEMA_VERSION
     record_revision: int = 1
     observed_time_unix_nano: int = 0
     lifecycle: str = "final"
@@ -158,7 +159,7 @@ class OtlpSpanSnapshotRecord:
     request_id: str | None
     run_id: str | None
     agent_mode: str | None
-    schema_version: str = "1"
+    schema_version: str = TRAJECTORY_SPAN_SCHEMA_VERSION
     lifecycle: str = "running"
     execution_subject_id: str | None = None
     execution_subject_display_name: str | None = None
@@ -674,7 +675,7 @@ class SpanRecordProcessor(SpanProcessor):
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),
-            schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            schema_version=_attribute_text(attributes, OJ_TRAJECTORY_SCHEMA_VERSION) or TRAJECTORY_SPAN_SCHEMA_VERSION,
             record_revision=record_revision,
             observed_time_unix_nano=time.time_ns(),
             execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
@@ -723,7 +724,7 @@ class SpanRecordProcessor(SpanProcessor):
             request_id=_attribute_text(attributes, OJ_REQUEST_ID),
             run_id=_attribute_text(attributes, OJ_RUN_ID),
             agent_mode=_agent_mode(attributes),
-            schema_version=_attribute_text(attributes, OJ_TRACE_SCHEMA_VERSION) or "1",
+            schema_version=_attribute_text(attributes, OJ_TRAJECTORY_SCHEMA_VERSION) or TRAJECTORY_SPAN_SCHEMA_VERSION,
             execution_subject_id=_attribute_text(attributes, OJ_EXECUTION_SUBJECT_ID),
             execution_subject_display_name=_attribute_text(
                 attributes,

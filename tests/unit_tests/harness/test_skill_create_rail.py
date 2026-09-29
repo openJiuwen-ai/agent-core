@@ -22,9 +22,13 @@ from openjiuwen.agent_evolving.signal.skill_creation import (
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
 from openjiuwen.agent_evolving.trajectory.schema import SESSION_ID, TRAJECTORY_ID
-from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map, iter_spans, merge_trajectories
+from openjiuwen.agent_evolving.trajectory.spans import (
+    attributes_from_map,
+    iter_spans,
+    merge_trajectories,
+    write_llm_exchange,
+)
 from openjiuwen.extensions.observability import semconv
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
 from openjiuwen.core.single_agent.skills.skill_manager import Skill
 from openjiuwen.harness.prompts.builder import SystemPromptBuilder
 from openjiuwen.harness.prompts.sections import SectionName
@@ -68,10 +72,9 @@ def _llm_span(span_index: int, tool_calls: list[dict]) -> dict:
         "name": "llm.call",
         "attributes": attributes_from_map(
             {
-                f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.role": "assistant",
-                f"{legacy_semconv.LEGACY_GEN_AI_COMPLETION}.0.content": "",
+                **write_llm_exchange([], [{"role": "assistant", "content": "", "tool_calls": tool_calls}]),
+                semconv.GEN_AI_OPERATION_NAME: "chat",
                 semconv.GEN_AI_REQUEST_MODEL: "mock",
-                legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS: tool_calls,
             }
         ),
     }

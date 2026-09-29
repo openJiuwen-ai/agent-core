@@ -29,6 +29,8 @@ from openjiuwen.harness_protocol import (
     CheckpointConflictError,
     CheckpointReason,
     DeliveryMode,
+    DiagnosticEvent,
+    DiagnosticLevel,
     EventBufferConfig,
     EventOverflowPolicy,
     HarnessCapability,
@@ -48,6 +50,8 @@ from openjiuwen.harness_protocol import (
     InteractionCancelReason,
     InteractionResponseStatus,
     JsonObject,
+    ModelOption,
+    ModelSelection,
     ProviderInteractionRequest,
     SendReceipt,
     StateChangedEvent,
@@ -140,6 +144,8 @@ class SerializedTurnHarness(ABC):
         self._latest_checkpoint: HarnessCheckpoint | None = None
         self._checkpoint_sequence = 0
         self._checkpoint_storage_revision: str | None = None
+        # A model switch accepted while a turn runs; applied before the next turn.
+        self._pending_model_selection: ModelSelection | None = None
 
     # ------------------------------------------------------------------
     # Read-only surface
@@ -190,15 +196,33 @@ class SerializedTurnHarness(ABC):
     async def _execute_turn(self, turn: PendingTurn) -> tuple[TurnEventKind, TurnResult]:
         """Run one accepted input to its terminal result, emitting observations."""
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        """Inject ``content`` into the active turn when STEER is declared."""
-        _ = turn, content
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        """Inject ``content`` into the active turn when STEER is declared.
+
+        ``message_id`` is the id the receipt reports back to the host, so a
+        provider that can label its outbound message keeps one identity from
+        the receipt through to its own transport.
+        """
+        _ = turn, content, message_id
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support steering")
 
     async def _interrupt_turn(self, turn: PendingTurn, mode: AbortMode) -> None:
         """Ask the provider to stop the active turn when abort is declared."""
         _ = turn, mode
         raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support turn abort")
+
+    async def _list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the provider catalog when MODEL_DISCOVERY is declared."""
+        raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model discovery")
+
+    async def _apply_model_selection(self, selection: ModelSelection) -> None:
+        """Switch the live session to ``selection`` when MODEL_SELECTION is declared.
+
+        Called between turns only; the base class serializes it with turn
+        execution. Implementations must keep the selection across reconnects.
+        """
+        _ = selection
+        raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model selection")
 
     # ------------------------------------------------------------------
     # HarnessProtocol: lifecycle
@@ -223,6 +247,7 @@ class SerializedTurnHarness(ABC):
             self._latest_checkpoint = None
             self._checkpoint_sequence = 0
             self._checkpoint_storage_revision = None
+            self._pending_model_selection = None
             try:
                 self._session_id = await self._open_session(context)
             except BaseException:
@@ -322,9 +347,12 @@ class SerializedTurnHarness(ABC):
                 active = self._active_turn
                 if active is None or self._state is not HarnessState.RUNNING:
                     raise HarnessStateError("there is no active turn to steer")
-            await self._steer(active, content)
+            # The id is minted before the hook runs: a provider that labels its
+            # outbound message needs the very id the receipt will report.
+            message_id = f"message-{uuid.uuid4().hex}"
+            await self._steer(active, content, message_id=message_id)
             return SendReceipt(
-                message_id=f"message-{uuid.uuid4().hex}",
+                message_id=message_id,
                 turn_id=active.turn_id,
                 accepted_mode=DeliveryMode.STEER,
             )
@@ -383,6 +411,35 @@ class SerializedTurnHarness(ABC):
         return self._latest_checkpoint
 
     # ------------------------------------------------------------------
+    # HarnessModelControl
+    # ------------------------------------------------------------------
+
+    async def list_models(self) -> tuple[ModelOption, ...]:
+        """Probe the models the provider offers; works started or not."""
+
+        if not self.card.supports(HarnessCapability.MODEL_DISCOVERY):
+            raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model discovery")
+        return await self._list_models()
+
+    async def set_model(self, selection: ModelSelection) -> None:
+        """Switch model / effort now when idle, otherwise before the next turn."""
+
+        if not self.card.supports(HarnessCapability.MODEL_SELECTION):
+            raise UnsupportedHarnessCapabilityError(f"{self.card.name} does not support model selection")
+        async with self._command_lock:
+            self._require_accepting()
+            merged = merge_model_selection(self._pending_model_selection, selection)
+            if self._active_turn is not None or self._pending:
+                self._pending_model_selection = merged
+                return
+            # A switch left pending by a turn that had no successor folds in
+            # here; otherwise the next turn would re-apply it over this one.
+            self._pending_model_selection = None
+            # Holding the lock keeps the supervisor from starting a turn
+            # halfway through the switch.
+            await self._apply_model_selection(merged)
+
+    # ------------------------------------------------------------------
     # Supervisor
     # ------------------------------------------------------------------
 
@@ -399,6 +456,8 @@ class SerializedTurnHarness(ABC):
                     active = self._pending.popleft()
                     queued = ()
                     self._active_turn = active
+                selection = self._pending_model_selection
+                self._pending_model_selection = None
 
             if active is None:
                 await self._abort_queued_turns(queued)
@@ -406,6 +465,8 @@ class SerializedTurnHarness(ABC):
 
             await self._transition(HarnessState.RUNNING)
             await self._emit(TurnLifecycleEvent(kind=TurnEventKind.STARTED), turn=active)
+            if selection is not None:
+                await self._apply_deferred_model_selection(selection, active)
             try:
                 terminal_kind, result = await self._execute_turn(active)
             except Exception as exc:
@@ -429,6 +490,26 @@ class SerializedTurnHarness(ABC):
                 return
             if self._stopping:
                 return
+
+    async def _apply_deferred_model_selection(self, selection: ModelSelection, turn: PendingTurn) -> None:
+        """Apply a switch accepted mid-turn; a failure is reported, not fatal.
+
+        The caller's ``set_model`` already returned, so a failure cannot be
+        raised to it. The turn still runs on the previous model and the host
+        sees a WARNING diagnostic instead of a silent no-op.
+        """
+        try:
+            await self._apply_model_selection(selection)
+        except Exception as exc:
+            logger.warning("[%s] deferred model selection failed: %s", self.card.name, exc)
+            await self._emit(
+                DiagnosticEvent(
+                    level=DiagnosticLevel.WARNING,
+                    message=f"{self.card.name} could not switch model: {type(exc).__name__}",
+                    data={"model": selection.model, "effort": selection.effort},
+                ),
+                turn=turn,
+            )
 
     def _crash_result(self, turn: PendingTurn, exc: BaseException) -> tuple[TurnEventKind, TurnResult]:
         if turn.abort_requested:
@@ -476,16 +557,33 @@ class SerializedTurnHarness(ABC):
         turn: PendingTurn | None = None,
         item_id: str | None = None,
         provider_session_id: str | None = None,
+        causation_ids: tuple[str, ...] = (),
+        timestamp: float | None = None,
     ) -> None:
+        """Put one event on the observation stream.
+
+        Args:
+            payload: The protocol event payload.
+            turn: The turn the event belongs to, when any.
+            item_id: Provider item the event is about, when any.
+            provider_session_id: Override for the envelope provider session.
+            causation_ids: Extra causes beyond the turn's input message, such
+                as the model request that produced a tool item.
+            timestamp: When the event was observed, for an event the provider
+                held back to keep causal order; defaults to now.
+        """
         context = self._context
         buffer = self._event_buffer
         if context is None or buffer is None:
             raise HarnessProtocolError(f"cannot emit a {self.card.name} event outside an active cycle")
         self._sequence += 1
+        causes = ((turn.message_id,) if turn else ()) + tuple(
+            cause for cause in causation_ids if not turn or cause != turn.message_id
+        )
         await buffer.put(
             HarnessEvent(
                 sequence=self._sequence,
-                timestamp=time.time(),
+                timestamp=time.time() if timestamp is None else timestamp,
                 event=payload,
                 host_session_id=context.host_session_id,
                 agent_id=context.agent_id,
@@ -493,7 +591,7 @@ class SerializedTurnHarness(ABC):
                 turn_id=turn.turn_id if turn else None,
                 item_id=item_id,
                 correlation_id=turn.message_id if turn else None,
-                causation_ids=(turn.message_id,) if turn else (),
+                causation_ids=causes,
             )
         )
 
@@ -663,6 +761,16 @@ def interrupted_result(
     )
 
 
+def merge_model_selection(current: ModelSelection | None, update: ModelSelection) -> ModelSelection:
+    """Overlay ``update`` on ``current``; fields ``update`` leaves unset are kept."""
+    if current is None:
+        return update
+    return ModelSelection(
+        model=update.model if update.model is not None else current.model,
+        effort=update.effort if update.effort is not None else current.effort,
+    )
+
+
 __all__ = [
     "PendingTurn",
     "ProviderStartupError",
@@ -670,4 +778,5 @@ __all__ = [
     "TurnTiming",
     "build_queued_stop_result",
     "interrupted_result",
+    "merge_model_selection",
 ]

@@ -2,15 +2,20 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Literal
+from unicodedata import category as unicode_category
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from openjiuwen.symphony.models._base import NonEmptyString, SymphonyModel
 
 GRAPH_EVOLUTION_INPUT_SCHEMA = "symphony.graph_evolution_input.v2"
+
+_EXECUTION_NODE_METADATA_FIELDS = frozenset({"capability_type", "version", "description", "inputs", "outputs"})
+_CAPABILITY_PORT_FIELDS = frozenset({"name", "type", "required", "description"})
 
 
 class EvidenceStrength(str, Enum):
@@ -155,8 +160,8 @@ class GraphEvolutionInput(SymphonyModel):
             raise ValueError("execution_graph.type must be execution_graph")
         if any(node.label != "skill" for node in self.execution_graph.nodes.values()):
             raise ValueError("execution_graph nodes must be skills")
-        if any(node.metadata for node in self.execution_graph.nodes.values()):
-            raise ValueError("execution_graph nodes must not contain metadata")
+        for node in self.execution_graph.nodes.values():
+            _validate_execution_node_metadata(node.metadata, label=node.label)
         capability_ids = set(self.execution_graph.nodes)
         referenced_ids = {
             endpoint for edge in self.execution_graph.edges for endpoint in (edge.source_id, edge.target_id)
@@ -165,6 +170,50 @@ class GraphEvolutionInput(SymphonyModel):
         if missing_ids:
             raise ValueError(f"execution_graph references missing nodes: {missing_ids}")
         return self
+
+
+def _validate_execution_node_metadata(value: object, *, label: str) -> None:
+    """Validate the allow-listed capability snapshot attached by the Rail."""
+
+    if not isinstance(value, Mapping):
+        raise ValueError("execution_graph node metadata must be an object")
+    if not set(value).issubset(_EXECUTION_NODE_METADATA_FIELDS):
+        raise ValueError("execution_graph node metadata contains unsupported fields")
+    if value.get("capability_type") != label or not _valid_contract_text(value.get("version")):
+        raise ValueError("execution_graph node identity metadata is invalid")
+    description = value.get("description", "")
+    if description != "" and not _valid_contract_text(description):
+        raise ValueError("execution_graph node description is invalid")
+    for field_name in ("inputs", "outputs"):
+        ports = value.get(field_name, [])
+        if not isinstance(ports, list):
+            raise ValueError("execution_graph node ports must be arrays")
+        for port in ports:
+            _validate_capability_port(port)
+
+
+def _validate_capability_port(value: object) -> None:
+    if not isinstance(value, Mapping) or not set(value).issubset(_CAPABILITY_PORT_FIELDS):
+        raise ValueError("execution_graph node port is invalid")
+    if not _valid_contract_text(value.get("name")) or not _valid_contract_text(value.get("type")):
+        raise ValueError("execution_graph node port identity is invalid")
+    if "required" in value and not isinstance(value.get("required"), bool):
+        raise ValueError("execution_graph node port required must be boolean")
+    description = value.get("description", "")
+    if description != "" and not _valid_contract_text(description):
+        raise ValueError("execution_graph node port description is invalid")
+
+
+def _valid_contract_text(value: object) -> bool:
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    if any(unicode_category(character) in {"Cc", "Cf"} for character in value):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeError:
+        return False
+    return True
 
 
 class ObservationReceipt(SymphonyModel):

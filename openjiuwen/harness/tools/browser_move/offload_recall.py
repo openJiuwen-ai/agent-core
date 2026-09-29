@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Optional
 
 from openjiuwen.core.foundation.tool import Tool, ToolCard
-from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 
 if TYPE_CHECKING:
     from openjiuwen.harness.workspace.workspace import Workspace
@@ -242,6 +242,33 @@ class BrowserOffloadRecallTool(Tool):
             "stale_interaction_refs": True,
             "content": fragment,
         }
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the recalled fragment behind a one-line paging header.
+
+        ``next_offset`` is how the model reads the following chunk, so it must
+        stay visible next to the fragment.
+        """
+        if not output.success:
+            return super().render_for_llm(output)
+        data = output.data
+        if not data["found"]:
+            return (
+                f'No match for "{data["query"]}" in offloaded result {data["handle"]} '
+                f"({data['original_size']} chars)."
+            )
+        header = render_fields(
+            {
+                "handle": data["handle"],
+                "tool": data["tool_name"],
+                "offset": data["offset"],
+                "returned_chars": data["returned_chars"],
+                "original_size": data["original_size"],
+                "next_offset": data["next_offset"],
+            },
+            separator=" | ",
+        )
+        return f"[{header}]\n{data['content']}"
 
     async def stream(self, inputs: Dict[str, Any], **kwargs: Any) -> AsyncIterator[Any]:
         del inputs, kwargs

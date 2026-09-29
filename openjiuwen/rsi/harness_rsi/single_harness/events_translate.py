@@ -209,16 +209,38 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
     adopted = bool(checkpoint.get("promotion_applied"))
     running = checkpoint.get("status") == "running"
     rejected = checkpoint.get("status") == "rejected"
+    full_evaluation_skipped_reason = str(checkpoint.get("full_evaluation_skipped_reason") or "")
     changes = []
     if adopted:
         for candidate in _mapping_items(state.get("candidate_gates")):
             if int(candidate.get("epoch", 0)) == epoch and candidate.get("status") == "accepted":
                 changes.extend(_changes(candidate.get("capabilities")))
     # A filtered or rolled-back Harness was not the one in the full replay.
-    score = _number(checkpoint.get("score")) if selected and selected == evaluated else None
+    score = None
+    if not full_evaluation_skipped_reason and selected and selected == evaluated:
+        score = _number(checkpoint.get("score"))
     reason = None
     if not running and not adopted:
-        reason = str(checkpoint.get("promotion_reason") or "") or "No Harness change passed the acceptance checks"
+        reason = (
+            full_evaluation_skipped_reason
+            or str(checkpoint.get("promotion_reason") or "")
+            or "No Harness change passed the acceptance checks"
+        )
+    extra = {
+        "artifact_path": selected,
+        "iteration_unit": "epoch",
+        "source_evidence": [
+            {
+                "batch_index": batch["batch_index"],
+                "eval_ref_path": batch["source_eval_ref_path"],
+                **batch["source_evidence"],
+            }
+            for batch in (state.get("completed_batches") or {}).values()
+            if int(batch.get("epoch", 0)) == epoch and batch.get("source_evidence")
+        ],
+    }
+    if full_evaluation_skipped_reason:
+        extra["full_evaluation_skipped_reason"] = full_evaluation_skipped_reason
     return EventNode(
         node=RsiTreeNode(
             node_id=f"epoch-{epoch:03d}",
@@ -232,19 +254,7 @@ def epoch_node_event(state: Mapping[str, Any], checkpoint: Mapping[str, Any]) ->
             reason=reason,
             failure_class=None,
             changes=changes,
-            extra={
-                "artifact_path": selected,
-                "iteration_unit": "epoch",
-                "source_evidence": [
-                    {
-                        "batch_index": batch["batch_index"],
-                        "eval_ref_path": batch["source_eval_ref_path"],
-                        **batch["source_evidence"],
-                    }
-                    for batch in (state.get("completed_batches") or {}).values()
-                    if int(batch.get("epoch", 0)) == epoch and batch.get("source_evidence")
-                ],
-            },
+            extra=extra,
         ),
         artifacts=harness_artifacts(selected) if not running else [],
     )

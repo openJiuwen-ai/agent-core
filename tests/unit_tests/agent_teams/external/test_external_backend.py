@@ -3,18 +3,26 @@
 
 """Tests for TeamBackend.spawn_external_cli_agent registration."""
 
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
 
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.external.cli_agent import backends
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import ExternalCliAgentSpec
 from openjiuwen.agent_teams.tools.database import DatabaseConfig, DatabaseType, TeamDatabase
 from openjiuwen.agent_teams.tools.team import TeamBackend
 
 _TEAM = "ext_cli_team"
+
+
+@pytest.fixture
+def sdk_installed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat every backend SDK as importable regardless of the test env."""
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
 
 
 @pytest_asyncio.fixture
@@ -48,7 +56,7 @@ async def make_backend():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
-async def test_spawn_external_cli_agent_registers_member(make_backend):
+async def test_spawn_external_cli_agent_registers_member(make_backend, sdk_installed):
     backend = make_backend(["claude", "codex"])
     result = await backend.spawn_external_cli_agent(
         member_name="cli-1",
@@ -110,6 +118,38 @@ async def test_spawn_external_cli_agent_requires_prompt(make_backend):
     )
     assert not result.ok
     assert not await backend.is_external_cli_agent("cli-3")
+
+
+@pytest.mark.asyncio
+@pytest.mark.level1
+async def test_spawn_external_cli_agent_missing_sdk_fails(make_backend, monkeypatch: pytest.MonkeyPatch):
+    # Point the claude backend at a module that cannot exist so the real
+    # find_spec probe reports it missing, independent of the installed SDK.
+    claude = backends.backend_for("claude")
+    assert claude is not None
+    unavailable = replace(
+        claude,
+        sdk_requirement=backends.SdkRequirement(
+            module="openjiuwen_absent_claude_sdk_probe",
+            distribution="claude-agent-sdk",
+            extra="claude",
+        ),
+    )
+    monkeypatch.setitem(backends._SDK_BACKENDS, "claude", unavailable)
+    backend = make_backend(["claude"])
+
+    result = await backend.spawn_external_cli_agent(
+        member_name="cli-4",
+        display_name="CLI Four",
+        cli_agent="claude",
+        prompt="senior reviewer",
+    )
+
+    assert not result.ok
+    assert "claude-agent-sdk" in (result.reason or "")
+    assert "openjiuwen[claude]" in (result.reason or "")
+    assert not await backend.is_external_cli_agent("cli-4")
+    assert await backend.get_member("cli-4") is None
 
 
 @pytest.mark.asyncio

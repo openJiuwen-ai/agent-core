@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from openjiuwen.symphony.flow.codegen import normalize_meta_name
 from openjiuwen.symphony.flow.distill import topological_order
 from openjiuwen.symphony.flow.models import RecipeEvidence
 from openjiuwen.symphony.flow.privacy import model_response_text, sanitize_distilled_text
@@ -16,11 +17,12 @@ _MEMBER_DEFAULT_DESCRIPTION = "协作成员能力"
 
 _SYSTEM_PROMPT = (
     "你是编排经验蒸馏助手。根据历史任务请求和已验证的能力组合结构，"
-    "归纳任务类型描述、适用触发条件、示例请求与执行过程说明。要求："
+    "归纳简短功能名、任务类型描述、适用触发条件、示例请求与执行过程说明。"
+    "name 必须是说明整体功能的英文 kebab-case 名称，不得使用 Skill ID 列表、执行箭头或步骤列表。要求："
     "只依据给定材料，不得虚构未出现的能力、步骤或结论；"
     "不得把相关性表述为因果关系；示例请求必须是对历史请求的改写归纳，"
     "不得原样复制。只输出 JSON 对象，字段为 "
-    '{"task_description": str, "trigger_conditions": str, '
+    '{"name": str, "task_description": str, "trigger_conditions": str, '
     '"example_requests": [str], "execution_narrative": str}。'
 )
 
@@ -122,12 +124,17 @@ async def _distill_with_llm(
     )
     if not task_description or not narrative:
         raise ValueError("narrative distillation produced empty text")
+    name = _skill_pack_name(
+        sanitize_distilled_text(payload.get("name"), source_queries=source_queries),
+        order=order,
+    )
     example_requests = []
     for item in payload.get("example_requests") or []:
         sanitized = sanitize_distilled_text(item, source_queries=source_queries)
         if sanitized:
             example_requests.append(sanitized)
     return {
+        "name": name,
         "applicability": {
             "task_description": task_description,
             "trigger_conditions": sanitize_distilled_text(
@@ -154,6 +161,7 @@ def _template_texts(
     narrative_steps = "；".join(f"由能力 {member['id']}（{member['description']}）接力执行" for member in members)
     execution_narrative = f"执行过程：{narrative_steps}。"
     return {
+        "name": _skill_pack_name("", order=order),
         "applicability": {
             "task_description": task_description,
             "trigger_conditions": trigger_conditions,
@@ -162,3 +170,13 @@ def _template_texts(
         "execution_narrative": execution_narrative,
         "narrative_source": NARRATIVE_SOURCE_TEMPLATE,
     }
+
+
+def _skill_pack_name(value: object, *, order: list[str]) -> str:
+    """Return one stable, installable functional name for every surface."""
+
+    raw = " ".join(str(value or "").split())
+    fallback = normalize_meta_name(order[-1] if order else "skill-pack", fallback="skill-pack")
+    if not raw or "→" in raw or "->" in raw:
+        return fallback
+    return normalize_meta_name(raw, fallback=fallback)

@@ -56,7 +56,15 @@ class MappedClaudeEvent:
 class ClaudeTurnAccumulator:
     """State needed to normalize the messages of one Claude turn."""
 
-    def __init__(self, *, turn_id: str, sdk: Any) -> None:
+    def __init__(self, *, turn_id: str, sdk: Any, cost_baseline_usd: float = 0.0) -> None:
+        """Collect one turn's messages, usage and cost.
+
+        Args:
+            turn_id: The protocol turn being accumulated.
+            sdk: The loaded Claude Agent SDK module.
+            cost_baseline_usd: The session cost already reported by earlier
+                turns; the CLI reports cost per session, not per turn.
+        """
         self.turn_id = turn_id
         self._sdk = sdk
         self.messages: list[TurnMessage] = []
@@ -66,6 +74,15 @@ class ClaudeTurnAccumulator:
         self._stream_message_open = False
         self._tool_names: dict[str, str] = {}
         self._tool_parents: dict[str, str | None] = {}
+        # A turn spans every cycle the CLI runs for it: one when a steered
+        # message folds into the running cycle, more when it answers one in a
+        # cycle of its own. Usage is reported per cycle and has to be summed;
+        # cost is reported per session and has to be differenced.
+        self._cost_baseline_usd = max(0.0, cost_baseline_usd)
+        self.session_cost_usd = self._cost_baseline_usd
+        self._raw_usage: dict[str, Any] = {}
+        self._num_turns = 0
+        self._last_result: Any = None
 
     # ------------------------------------------------------------------
     # Message mapping
@@ -82,7 +99,7 @@ class ClaudeTurnAccumulator:
         if isinstance(message, sdk.UserMessage):
             return self._map_user(message)
         if isinstance(message, sdk.ResultMessage):
-            return self._map_result_observations(message)
+            return self._observe_result(message)
         if isinstance(message, sdk.SystemMessage):
             subtype = str(getattr(message, "subtype", "") or "system")
             return [self._provider_event(f"system/{subtype}", to_json_object(getattr(message, "data", {})))]
@@ -279,12 +296,38 @@ class ClaudeTurnAccumulator:
             item_id=call_id,
         )
 
-    @staticmethod
-    def _map_result_observations(message: Any) -> list[MappedClaudeEvent]:
-        usage = _turn_usage(getattr(message, "usage", None))
+    def _observe_result(self, message: Any) -> list[MappedClaudeEvent]:
+        """Fold one cycle's result into the turn's running totals."""
+        self._last_result = message
+        _add_raw_usage(self._raw_usage, getattr(message, "usage", None))
+        num_turns = getattr(message, "num_turns", None)
+        if isinstance(num_turns, int) and not isinstance(num_turns, bool):
+            self._num_turns += num_turns
+        cost = getattr(message, "total_cost_usd", None)
+        if not isinstance(cost, bool) and isinstance(cost, (int, float)):
+            self.session_cost_usd = float(cost)
+        usage = self.turn_usage
         if usage is None:
             return []
         return [MappedClaudeEvent(UsageUpdatedEvent(usage=usage, mode=UsageUpdateMode.CUMULATIVE))]
+
+    @property
+    def has_result(self) -> bool:
+        """Return whether the CLI has reported a result for this turn."""
+        return self._last_result is not None
+
+    @property
+    def turn_usage(self) -> TurnUsage | None:
+        """Return the usage summed over every cycle the turn ran."""
+        return claude_turn_usage(self._raw_usage)
+
+    @property
+    def turn_cost(self) -> MonetaryAmount | None:
+        """Return what this turn added to the session cost."""
+        spent = self.session_cost_usd - self._cost_baseline_usd
+        # A reconnected CLI counts from zero again, which reads as a drop;
+        # the reported total is then this session's whole cost so far.
+        return _monetary(spent if spent >= 0 else self.session_cost_usd)
 
     # ------------------------------------------------------------------
     # Terminal result
@@ -292,14 +335,20 @@ class ClaudeTurnAccumulator:
 
     def build_terminal_result(
         self,
-        result_message: Any,
         *,
         turn: PendingTurn,
         timing: TurnTiming,
     ) -> tuple[TurnEventKind, TurnResult]:
-        """Build the external terminal result from a Claude ``ResultMessage``."""
+        """Build the external terminal result from the cycles the turn ran.
 
-        usage = _turn_usage(getattr(result_message, "usage", None))
+        The last result states how the turn ended; the counters come from
+        every cycle it spanned.
+        """
+
+        result_message = self._last_result
+        if result_message is None:
+            raise ValueError("the turn reported no Claude result")
+        usage = self.turn_usage
         final_output = getattr(result_message, "result", None)
         if not isinstance(final_output, str) or not final_output:
             final_output = self.last_text_output
@@ -312,11 +361,12 @@ class ClaudeTurnAccumulator:
                 final_output=final_output,
                 usage=usage,
             )
-        cost = _monetary(getattr(result_message, "total_cost_usd", None))
+        cost = self.turn_cost
         provider_data: dict[str, Any] = {
             "subtype": getattr(result_message, "subtype", None),
-            "num_turns": getattr(result_message, "num_turns", None),
+            "num_turns": self._num_turns or getattr(result_message, "num_turns", None),
             "duration_api_ms": getattr(result_message, "duration_api_ms", None),
+            "session_cost_usd": self.session_cost_usd,
         }
         stop_reason = getattr(result_message, "stop_reason", None)
         common: dict[str, Any] = {
@@ -412,26 +462,72 @@ def _non_negative(value: Any) -> int | None:
     return value
 
 
-def _turn_usage(usage: Any) -> TurnUsage | None:
+def claude_turn_usage(usage: Any) -> TurnUsage | None:
+    """Normalize a Claude ``usage`` mapping; ``None`` when it states no counters.
+
+    Anthropic reports ``input_tokens`` as the part of the prompt it had to
+    read, with cache hits and cache writes counted beside it. The GenAI
+    conventions state the whole prompt in ``input_tokens`` and treat cached
+    input as a breakdown inside it, so the cache counters are folded in;
+    a reader that wants the uncached part subtracts them.
+    """
     if not isinstance(usage, Mapping):
         return None
-    input_tokens = _non_negative(usage.get("input_tokens"))
+    uncached_tokens = _non_negative(usage.get("input_tokens"))
     output_tokens = _non_negative(usage.get("output_tokens"))
     cache_read = _non_negative(usage.get("cache_read_input_tokens"))
     cache_write = _non_negative(usage.get("cache_creation_input_tokens"))
-    if input_tokens is None and output_tokens is None and cache_read is None:
+    reasoning_tokens = _thinking_tokens(usage)
+    if uncached_tokens is None and output_tokens is None and cache_read is None:
         return None
-    total = sum(value or 0 for value in (input_tokens, output_tokens, cache_read, cache_write))
+    input_tokens = None
+    if uncached_tokens is not None or cache_read is not None or cache_write is not None:
+        input_tokens = (uncached_tokens or 0) + (cache_read or 0) + (cache_write or 0)
+    total = (input_tokens or 0) + (output_tokens or 0)
     provider_data: dict[str, JsonValue] = {}
     if cache_write is not None:
         provider_data["cache_creation_input_tokens"] = cache_write
+    if uncached_tokens is not None:
+        provider_data["uncached_input_tokens"] = uncached_tokens
     return TurnUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cached_input_tokens=cache_read,
+        reasoning_output_tokens=reasoning_tokens,
         total_tokens=total,
         provider_data=provider_data,
     )
+
+
+def _thinking_tokens(usage: Mapping[str, Any]) -> int | None:
+    """Return the thinking tokens of one Claude usage report.
+
+    Claude Code asks the API to omit the thinking text, so a reply states
+    that it thought and how much but never what it thought. The count is the
+    only thing a reader can be shown.
+    """
+    details = usage.get("output_tokens_details")
+    if not isinstance(details, Mapping):
+        return None
+    return _non_negative(details.get("thinking_tokens"))
+
+
+def _add_raw_usage(total: dict[str, Any], usage: Any) -> None:
+    """Add one cycle's raw Claude counters into ``total``.
+
+    Summing the raw counters, rather than the normalized usage, keeps one
+    place where Anthropic's cache accounting is folded into the conventions.
+    """
+    if not isinstance(usage, Mapping):
+        return
+    for key in ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"):
+        counted = _non_negative(usage.get(key))
+        if counted is not None:
+            total[key] = total.get(key, 0) + counted
+    thinking = _thinking_tokens(usage)
+    if thinking is not None:
+        details = total.setdefault("output_tokens_details", {})
+        details["thinking_tokens"] = details.get("thinking_tokens", 0) + thinking
 
 
 def _monetary(total_cost_usd: Any) -> MonetaryAmount | None:
@@ -443,4 +539,4 @@ def _monetary(total_cost_usd: Any) -> MonetaryAmount | None:
     return MonetaryAmount(micros=micros, currency="USD")
 
 
-__all__ = ["ClaudeTurnAccumulator", "MappedClaudeEvent", "PROVIDER_NAME"]
+__all__ = ["ClaudeTurnAccumulator", "MappedClaudeEvent", "PROVIDER_NAME", "claude_turn_usage"]

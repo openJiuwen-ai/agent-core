@@ -11,12 +11,35 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
-from openjiuwen.harness.tools.base_tool import ToolOutput
+from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
 from openjiuwen.harness.subagent_runtime.status_events import map_status_to_view
 
 if TYPE_CHECKING:
     from openjiuwen.harness.deep_agent import DeepAgent
+
+
+_SUBAGENT_ROW_KEYS = (
+    "subagent_id",
+    "display_name",
+    "subagent_type",
+    "role",
+    "status",
+    "turn_outcome",
+    "closed_reason",
+    "error",
+    "task_description",
+)
+
+
+def _render_subagent_rows(title: str, rows: list[dict[str, Any]]) -> str:
+    if not rows:
+        return f"{title}: none"
+    lines = [
+        "- " + render_fields({key: row.get(key) for key in _SUBAGENT_ROW_KEYS}, separator=" | ")
+        for row in rows
+    ]
+    return f"{title}:\n" + "\n".join(lines)
 
 
 def _attach_call_timeout(card: ToolCard, timeout_s: float) -> ToolCard:
@@ -155,6 +178,10 @@ class SubagentSpawnTool(Tool):
             },
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the spawned subagent's identifiers and initial status."""
+        return render_fields(output.data)
+
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)
 
@@ -206,6 +233,18 @@ class SubagentWaitTool(Tool):
             },
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render each waited subagent's final status and result as its own section."""
+        data = output.data
+        sections = [
+            render_fields({"subagent_id": sid, "status": status, "output_file": data["output_files"].get(sid)})
+            + f"\nresult:\n{data['results'].get(sid) or '(no result)'}"
+            for sid, status in data["statuses"].items()
+        ]
+        if data["timed_out"]:
+            sections.append("Timed out before every subagent reached a final status.")
+        return "\n\n".join(sections)
+
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)
 
@@ -229,6 +268,18 @@ class SubagentListTool(Tool):
         return ToolOutput(
             success=True,
             data=control.describe_list(),
+        )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render capacity plus one line per live and closed subagent."""
+        data = output.data
+        capacity = data["capacity"]
+        return "\n\n".join(
+            [
+                f"Capacity: {capacity['used']}/{capacity['max']} subagents in use.",
+                _render_subagent_rows("Live subagents", data["live_subagents"]),
+                _render_subagent_rows("Closed subagents (resumable)", data["closed_subagents"]),
+            ]
         )
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
@@ -289,6 +340,10 @@ class SubagentSendInputTool(Tool):
             },
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the target subagent, its new task and status."""
+        return render_fields(output.data)
+
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)
 
@@ -327,6 +382,10 @@ class SubagentCloseTool(Tool):
                 "previous_status": previous.kind.value,
             },
         )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the closed subagent and the status it had."""
+        return render_fields(output.data)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)
@@ -369,6 +428,10 @@ class SubagentResumeTool(Tool):
         if result.message:
             data["message"] = result.message
         return ToolOutput(success=True, data=data)
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the resumed subagent's status and restore outcome."""
+        return render_fields(output.data)
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         yield await self.invoke(inputs, **kwargs)

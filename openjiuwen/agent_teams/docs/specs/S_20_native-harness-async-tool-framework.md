@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `harness/async_tools.py`、`harness/native_harness.py`、`id_generator.py`、`tools/tool_async.py`、`tools/tool_factory.py`、`tools/tool_permissions.py`、`paths.py`、`rails/team_tool_rail.py`、`workflow/tool_swarmflow.py`、`workflow/observer.py` |
-| 最近一次修订日期 | 2026-07-01 |
+| 最近一次修订日期 | 2026-09-16 |
 | 关联 feature | `F_35_native-harness-async-tool-framework.md`、`F_41_async-tool-control-and-spill.md`、`F_47_swarmflow-concurrency-governor.md`、`F_48_swarmflow-inline-script-execution.md` |
 
 ## 范围 / 边界
@@ -51,7 +51,7 @@ openjiuwen 工具循环与 Anthropic API 一样**强配对**：每个 `tool_call
 - 子类实现 `async def run_background(self, task_id, inputs) -> Any`（返回**完整**结果）；
   可选覆写 `launched_description(inputs)`。
 - `invoke`：生成 `task_id`（`generate_id(self.card.name)`，swarmflow→`w` 前缀，其它工具名未
-  注册→`t`）→ `parent_agent.launch_async_tool(...)` → 立即返回 launched。`map_result` 统一返回
+  注册→`t`）→ `parent_agent.launch_async_tool(...)` → 立即返回 launched。`render_for_llm` 统一返回
   `async_tool.launched` 文案（含 task_id）。
 
 ## `AsyncToolRecord`

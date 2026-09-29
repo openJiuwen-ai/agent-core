@@ -126,15 +126,14 @@ config = ObservabilityConfig(
 
 ```python
 config = ObservabilityConfig(
-    exporter="otlp_http",
+    exporter="langfuse",
     endpoint="https://your-langfuse.example.com/api/public/otel/v1/traces",
-    backend="langfuse",
     langfuse_public_key="pk-lf-...",
     langfuse_secret_key="sk-lf-...",
 )
 ```
 
-`backend="langfuse"` 会避免同时写入语义相同的标准 `gen_ai.*` 和 `langfuse.*` 内容属性。导出到通用 OTLP 后端时可设置 `backend="otlp"`。
+采集到的 Span 形态与导出器无关。`exporter="langfuse"`（以及作为其离线 WAL 的 `exporter="file"`）在导出时把标准 `gen_ai.*` 属性投影为 Langfuse 兼容字段；`otlp_grpc` / `otlp_http` 原样发送标准属性。
 
 不要把密钥提交到配置文件；生产环境应从环境变量或密钥管理服务读取。
 
@@ -144,14 +143,13 @@ config = ObservabilityConfig(
 |--------|--------|------|
 | `enabled` | `True` | 总开关；为 `False` 时初始化为空操作 |
 | `service_name` | `openjiuwen-agent-teams` | OTel Resource 的 `service.name` |
-| `exporter` | `otlp_grpc` | `otlp_grpc`、`otlp_http`、`console` 或 `file` |
+| `exporter` | `otlp_grpc` | `otlp_grpc`、`otlp_http`、`langfuse`、`console` 或 `file` |
 | `endpoint` | `http://localhost:4317` | OTLP 地址；文件 exporter 忽略该项 |
 | `sample_rate` | `1.0` | 父级继承的比例采样率，范围 `0.0` 到 `1.0` |
 | `redact_prompts` | `False` | 对 prompt 内容做哈希/截断处理 |
 | `redact_completions` | `False` | 对 completion 内容做哈希/截断处理 |
 | `attribute_value_max_length` | `40960` | 单个字符串属性的最大长度 |
 | `max_attributes` | `200` | 每个 Span 的最大属性数 |
-| `backend` | `langfuse` | 属性兼容模式：`langfuse` 或 `otlp` |
 | `export_timeout_ms` | `5000` | exporter 关闭和刷新超时 |
 | `traces_dir` | `./traces` | 文件 exporter 输出目录 |
 | `file_retention_days` | `7` | 文件 exporter 的保留天数 |
@@ -203,6 +201,6 @@ Prompt、Completion、工具参数和工具结果可能包含用户数据或密�
 | OTLP 导出失败 | exporter 类型、端口和协议是否匹配；gRPC 通常为 4317，HTTP 通常为 4318 |
 | 进程结束后缺少尾部 Span | `Runner.stop()` 后是否调用了 `shutdown_observability()` |
 | 属性被截断或缺失 | 检查 `attribute_value_max_length`、`max_attributes` 和脱敏设置 |
-| Langfuse 内容属性重复 | 使用 `backend="langfuse"` |
+| Langfuse 只显示原始 `gen_ai.*` 属性、没有 input/output | 使用 `exporter="langfuse"`，导出时才会做 Langfuse 投影 |
 
 可运行的完整示例位于 `tests/system_tests/agent_swarm/agent_team_observability_e2e.py`。

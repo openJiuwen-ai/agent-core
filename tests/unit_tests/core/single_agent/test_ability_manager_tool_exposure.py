@@ -6,21 +6,6 @@ from __future__ import annotations
 
 from openjiuwen.core.foundation.tool import ToolCard, ToolExposure
 from openjiuwen.core.single_agent.ability_manager import AbilityManager
-from openjiuwen.harness.tools.base_tool import ToolOutput
-
-
-def test_content_envelope_does_not_drop_scoped_recall_metadata():
-    result = ToolOutput(success=True, data={
-        "content": "weather text", "found": True, "handle": "abc", "offset": 200, "next_offset": 212,
-    })
-    content = AbilityManager._build_tool_message_content(result)  # pylint: disable=protected-access
-    assert content == str(result)
-    assert "next_offset" in content and "weather text" in content
-
-
-def test_plain_file_content_keeps_existing_rendering():
-    result = ToolOutput(success=True, data={"content": "file text", "file_path": "/file.txt", "line_count": 1})
-    assert AbilityManager._build_tool_message_content(result) == "file text"  # pylint: disable=protected-access
 
 
 def test_ability_manager_registration_preserves_card_exposure():

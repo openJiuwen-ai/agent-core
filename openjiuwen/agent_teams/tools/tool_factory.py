@@ -7,7 +7,6 @@ from functools import wraps
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from openjiuwen.agent_teams.tools.team import TeamBackend
-from openjiuwen.agent_teams.tools.tool_base import MappedToolOutput, TeamTool
 from openjiuwen.agent_teams.tools.tool_async import (
     AsyncTaskCancelTool,
     AsyncTaskOutputTool,
@@ -18,6 +17,7 @@ from openjiuwen.agent_teams.tools.tool_member import (
     ApproveToolCallTool,
     CheckpointTool,
     ListCheckpointsTool,
+    SetMemberModelTool,
     ShutdownMemberTool,
     SpawnBridgeAgentTool,
     SpawnExternalCliTool,
@@ -221,6 +221,7 @@ def create_team_tools(
             model_config_allocator=model_config_allocator,
         ),
         "shutdown_member": ShutdownMemberTool(agent_team, t),
+        "set_member_model": SetMemberModelTool(agent_team, t),
         "approve_plan": ApprovePlanTool(agent_team, t),
         "approve_tool": ApproveToolCallTool(agent_team, t),
         # Task management
@@ -288,6 +289,9 @@ def create_team_tools(
         allowed = allowed - {"spawn_bridge_agent"}
     if not agent_team.external_cli_kinds():
         allowed = allowed - {"spawn_external_cli"}
+    # Switching a member's built-in model needs a declared catalog to pick from.
+    if not agent_team.builtin_models_enabled():
+        allowed = allowed - {"set_member_model"}
     # Context inheritance (F_75). One flag gates the whole capability:
     # ``checkpoint`` / ``list_checkpoints`` disappear here, and
     # ``SpawnTeammateTool`` reads the same ``fork_enabled()`` above to drop
@@ -301,6 +305,12 @@ def create_team_tools(
     # spawn tools.
     if swarmflow_model_resolver is None:
         allowed = allowed - {"swarmflow"}
+    if getattr(getattr(agent_team, "group_chat_spec", None), "enable_group_chat", False) is True:
+        from openjiuwen.agent_teams.tools.tool_group_chat import create_group_chat_tools
+
+        extra = create_group_chat_tools(agent_team, t)
+        all_tools.update({tool.card.name: tool for tool in extra})
+        allowed = allowed | {tool.card.name for tool in extra}
     if exclude_tools:
         allowed = allowed - exclude_tools
     tools = [tool for name, tool in all_tools.items() if name in allowed]
@@ -312,25 +322,21 @@ def create_team_tools(
 
 
 def _wrap_invoke_with_logging(tool: Tool) -> None:
-    """Wrap a tool's invoke method with debug logging and result mapping.
+    """Wrap a tool's invoke method with debug logging.
 
-    For TeamTool instances, the wrapper also calls map_result() to produce
-    a MappedToolOutput whose __str__ returns model-optimized text.
+    The structured result passes through unchanged; the model-facing text is
+    produced later by the tool's own ``render_for_llm``.
     """
     from openjiuwen.core.common.logging import team_logger
 
     original_invoke = tool.invoke
     tool_name = tool.card.name
-    is_team_tool = isinstance(tool, TeamTool)
 
     @wraps(original_invoke)
     async def logged_invoke(inputs: dict[str, Any], **kwargs: Any) -> ToolOutput:
         team_logger.debug(f"[{tool_name}] invoke start, inputs={inputs}")
         result = await original_invoke(inputs, **kwargs)
         team_logger.debug(f"[{tool_name}] invoke end, output={result}")
-        if is_team_tool:
-            mapped = tool.map_result(result)  # type: ignore[union-attr]
-            return MappedToolOutput.from_output(result, mapped)
         return result
 
     tool.invoke = logged_invoke

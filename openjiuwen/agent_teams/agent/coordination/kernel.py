@@ -579,7 +579,7 @@ class CoordinationKernel:
         if not messager or not self._event_bus:
             return
         from openjiuwen.agent_teams.context import get_session_id
-        from openjiuwen.agent_teams.schema.events import EventMessage, TeamTopic
+        from openjiuwen.agent_teams.schema.events import EventMessage, TeamEvent, TeamTopic
 
         local_member_name = host.member_name or ""
 
@@ -589,7 +589,10 @@ class CoordinationKernel:
                     await listener(event)
                 except Exception as e:
                     team_logger.error("Event listener error: {}", e)
-            if local_member_name and event.sender_id == local_member_name:
+            mailbox_wakeup = event.event_type == TeamEvent.MESSAGE and (
+                host.role == TeamRole.LEADER or event.get_payload().to_member_name == local_member_name
+            )
+            if local_member_name and event.sender_id == local_member_name and not mailbox_wakeup:
                 team_logger.debug("ignoring self-published event: {}", event.event_type)
                 # F_62: the scheduler must observe board changes the leader
                 # process performed itself (create_task, settle). Coordination
@@ -703,7 +706,11 @@ class CoordinationKernel:
         - **cold**: the harness was stopped and rebuilt, its context restored from
           the session checkpoint. The marker ``pause`` persisted names the round's
           originating query, making ``pause -> stop -> start`` behave exactly like
-          ``pause -> resume``.
+          ``pause -> resume``. Leader-only: the marker lives in the team-scoped
+          session bucket that every member of the team shares, and only the
+          leader writes it (``_persist_pending_resume``). A teammate reading it
+          would replay the leader's round on its own harness — and an external
+          CLI harness without pause/resume support crashes on it.
 
         Without this the member would idle until a new message arrived, silently
         dropping the work it was suspended mid-way through.
@@ -721,6 +728,8 @@ class CoordinationKernel:
             self._clear_pending_resume()
             return
 
+        if self._host.role != TeamRole.LEADER:
+            return
         pending = self._read_pending_resume()
         if pending is None:
             return

@@ -160,6 +160,10 @@ class TeamMember:
                 f"Member {self.member_name} not registered yet; skipping execution status update to {new_status.value}"
             )
             return False
+        # 幂等：重复设置相同执行状态直接返回成功，避免恢复路径重复事件报
+        # "Invalid state transition"（issue #4318 在 restart 路径已修复）。
+        if old_status == new_status:
+            return True
         success = await self.db.member.update_member_execution_status(
             self.member_name,
             self.team_name,

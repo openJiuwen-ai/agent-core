@@ -36,7 +36,6 @@ from openjiuwen.extensions.observability.gen_ai_semconv import *  # noqa: F403
 # ---------------------------------------------------------------------------
 
 OJ_TRACE_ROOT = "openjiuwen.trace.root"
-OJ_TRACE_SCHEMA_VERSION = "openjiuwen.trace.schema_version"
 OJ_TRACE_COMPLETE = "openjiuwen.trace.complete"
 OJ_TRACE_FORCED_CLOSE = "openjiuwen.trace.forced_close"
 OJ_SPAN_FORCED_CLOSE = "openjiuwen.span.forced_close"
@@ -63,7 +62,10 @@ OJ_CONTEXT_OPERATION_ID = "openjiuwen.context.operation.id"
 # context, not what the provider made of it.
 OJ_COMPACTION_NUMBER = "openjiuwen.compaction.number"
 OJ_TRAJECTORY_RECORD_KIND = "openjiuwen.trajectory.record.kind"
+# The one span-level contract version. Every canonical span states it; v2
+# events are identified by OJ_TRAJECTORY_EVENT_KIND, not by this value.
 OJ_TRAJECTORY_SCHEMA_VERSION = "openjiuwen.trajectory.schema_version"
+TRAJECTORY_SPAN_SCHEMA_VERSION = "2"
 OJ_TRAJECTORY_EVENT_ID = "openjiuwen.trajectory.event_id"
 OJ_TRAJECTORY_EVENT_KIND = "openjiuwen.trajectory.event_kind"
 OJ_TRAJECTORY_SUBJECT_ID = "openjiuwen.trajectory.subject_id"
@@ -185,6 +187,19 @@ DA_TASK_LOOP_EVENT = "deepagent.task.loop_event"
 # ---------------------------------------------------------------------------
 # Attribute values — everything above this line is an attribute key
 # ---------------------------------------------------------------------------
+
+# Closed set of ``OJ_TRAJECTORY_RECORD_KIND`` values. Readers generated from this
+# module (the web trajectory viewer) reject anything outside it, so a new record
+# kind is added here first.
+TRAJECTORY_RECORD_KINDS = ("turn", "step", "inference", "reasoning", "tool", "agent", "event")
+
+# Closed set of ``OJ_TRAJECTORY_EVENT_KIND`` values a v2 event may state.
+TRAJECTORY_EVENT_KINDS = (
+    "context.window.commit",
+    "compaction.completed",
+    "ask_user.requested",
+    "ask_user.resolved",
+)
 
 # Recorded as the value of ``OJ_GEN_AI_REASONING_TIMING`` when no reasoning
 # duration could be measured. A zero would itself be a measurement, so the

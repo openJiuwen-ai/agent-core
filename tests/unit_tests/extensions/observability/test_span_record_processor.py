@@ -55,7 +55,7 @@ def _finished_child_span() -> ReadableSpan:
     child.set_attribute("openjiuwen.request.id", "request")
     child.set_attribute("openjiuwen.run.id", "run")
     child.set_attribute("openjiuwen.agent.mode", "agent.plan")
-    child.set_attribute("openjiuwen.trace.schema_version", "1")
+    child.set_attribute("openjiuwen.trajectory.schema_version", "2")
     child.set_attribute("openjiuwen.execution.subject.id", "subagent:one")
     child.set_attribute("openjiuwen.execution.subject.display_name", "Explore Agent")
     child.set_attribute("openjiuwen.execution.subject.kind", "subagent")
@@ -83,7 +83,7 @@ def test_processor_delivers_exact_file_exporter_bytes_and_hints() -> None:
     assert record.request_id == "request"
     assert record.run_id == "run"
     assert record.agent_mode == "agent.plan"
-    assert record.schema_version == "1"
+    assert record.schema_version == "2"
     assert record.execution_subject_id == "subagent:one"
     assert record.execution_subject_display_name == "Explore Agent"
     assert record.execution_subject_kind == "subagent"

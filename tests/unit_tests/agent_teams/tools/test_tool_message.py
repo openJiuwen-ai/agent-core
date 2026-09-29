@@ -121,8 +121,8 @@ async def test_rejection_tells_the_caller_how_to_fix_it(db):
     assert "产物目录" in result.error
     assert str(MAX_CONTENT_CHARS) in result.error
     assert str(len(OVERSIZE)) in result.error
-    # map_result is what actually reaches the model.
-    assert "write_file" in send.map_result(result)
+    # render_for_llm is what actually reaches the model.
+    assert "write_file" in send.render_for_llm(result)
 
 
 @pytest.mark.asyncio

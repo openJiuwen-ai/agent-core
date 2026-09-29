@@ -1,5 +1,5 @@
 # coding: utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) Huawei Technologies Co., Ltd. 2025-2026. All rights reserved.
 """Agent mode tools for switching runtime mode and managing plan files.
 
 These tools are registered by AgentModeRail and cover mode switching plus the
@@ -254,6 +254,12 @@ class SwitchModeTool(Tool):
                 "message": _SWITCH_MODE_TO_NORMAL_MSG[lang],
             },
         )
+
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the localized mode-switch message."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["message"]
 
     async def stream(self, inputs: Input, **kwargs) -> AsyncIterator[Output]:
         pass

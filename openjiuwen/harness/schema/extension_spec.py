@@ -81,6 +81,20 @@ class SkillSpec(_ExtensionSpecModel):
     enabled_skills: list[str] | None = None
 
 
+class AgentRuntimeSpec(_ExtensionSpecModel):
+    """External Harness runtime declared by an AgentTemplate package."""
+
+    provider_name: str = Field(min_length=1)
+    provider_version: str = Field(min_length=1)
+    sdk_paths: list[str] = Field(default_factory=list)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("config")
+    @classmethod
+    def _config_is_plain_data(cls, value: dict[str, Any]) -> dict[str, Any]:
+        return _validate_plain_mapping(value)
+
+
 class PromptSectionSpec(_ExtensionSpecModel):
     """Inline prompt section declaration."""
 
@@ -115,6 +129,9 @@ class AgentTemplateSpec(_ExtensionSpecModel):
 
     # Optional model definitions loaded from model.json
     model: ModelSpec | None = None
+
+    # Optional external Harness runtime. ``None`` keeps the native DeepAgent.
+    runtime: AgentRuntimeSpec | None = None
 
     # Persona prompt sections (identity, sops, output_contract, safety, ...)
     prompt_sections: list[PromptSectionSpec] = Field(default_factory=list)
@@ -200,11 +217,16 @@ def validate_plugin_paths(spec: PluginSpec | AgentTemplateSpec) -> None:
             _require_absolute_path(mcp.cwd, field_name="mcps.cwd")
     for skill in spec.skills:
         _require_absolute_path(skill.dir, field_name="skills.dir")
+    runtime = getattr(spec, "runtime", None)
+    if runtime is not None:
+        for sdk_path in runtime.sdk_paths:
+            _require_absolute_path(sdk_path, field_name="runtime.sdk_paths")
     for subagent in getattr(spec, "subagents", []):
         validate_plugin_paths(subagent)
 
 
 __all__ = [
+    "AgentRuntimeSpec",
     "AgentTemplateSpec",
     "McpDirSpec",
     "McpServerSpec",

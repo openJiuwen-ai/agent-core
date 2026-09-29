@@ -312,7 +312,11 @@ def test_auto_full_baseline_is_frozen_inside_single_run(tmp_path: Path) -> None:
 
 def test_no_candidate_cannot_turn_stochastic_replay_into_best_score(tmp_path: Path) -> None:
     class StochasticReplayEvaluator:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
         async def evaluate_batch(self, **kwargs: Any) -> str:
+            self.calls.append(kwargs)
             output_dir = Path(kwargs["output_dir"])
             output_dir.mkdir(parents=True, exist_ok=True)
             score = 1.0 if output_dir.name == "full" else 0.0
@@ -380,11 +384,157 @@ def test_no_candidate_cannot_turn_stochastic_replay_into_best_score(tmp_path: Pa
     state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
     checkpoint = state["epoch_checkpoints"][0]
 
-    assert checkpoint["score"] == 1.0
+    assert not [call for call in orchestrator.evaluator.calls if Path(call["output_dir"]).name == "full"]
+    assert checkpoint["score"] is None
+    assert checkpoint["eval_ref_path"] == ""
+    assert checkpoint["full_evaluation_skipped_reason"] == "no_retained_harness_change"
+    assert checkpoint["promotion_reason"] == "no_provisional_harness_change"
     assert checkpoint["promotion_applied"] is False
     assert checkpoint["noop_initial_score_seed"] is False
     assert state["baseline_score"] == 0.0
     assert state["best_score"] == 0.0
+    assert state["best_eval_ref_path"] == state["baseline_eval_ref_path"]
+    assert state["best_harness_refs_path"] == str(harness_refs.resolve())
+    assert state["current_harness_refs_path"] == str(harness_refs.resolve())
+    assert state["retained_case_ids"] == []
+    assert state["publication_status"] == "not_published_no_improvement"
+    assert not (tmp_path / "run" / "evaluations" / "e001" / "full" / "eval_ref.yaml").exists()
+
+    calls_before_resume = len(orchestrator.evaluator.calls)
+    asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+                resume=True,
+            )
+        )
+    )
+    assert len(orchestrator.evaluator.calls) == calls_before_resume
+
+
+def test_uninitialized_best_still_runs_epoch_full_to_seed_baseline(tmp_path: Path) -> None:
+    class NoIssueAnalyzer:
+        async def analyze(self, invocation: Any) -> str:
+            output_dir = Path(invocation.output_dir)
+            await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
+            analysis_ref = output_dir / "analysis_ref.yaml"
+            _write_yaml(analysis_ref, {"issues": []})
+            return str(analysis_ref)
+
+    class MustNotRunOptimizer:
+        async def optimize(self, **kwargs: Any) -> str:
+            del kwargs
+            raise AssertionError("root baseline must not generate a candidate")
+
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    evaluator = _Evaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+        ),
+        evaluator=evaluator,
+        analyzer=NoIssueAnalyzer(),
+        member_optimizer=MustNotRunOptimizer(),
+    )
+
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+            )
+        )
+    )
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    checkpoint = state["epoch_checkpoints"][0]
+    full_calls = [call for call in evaluator.calls if Path(call["output_dir"]).name == "full"]
+    assert len(full_calls) == 1
+    assert Path(full_calls[0]["output_dir"]).parent.name == "e001"
+    assert checkpoint["score"] == 0.0
+    assert checkpoint["noop_initial_score_seed"] is True
+    assert checkpoint["promotion_applied"] is False
+    assert "full_evaluation_skipped_reason" not in checkpoint
+    assert state["best_score"] == 0.0
+    assert state["best_eval_ref_path"] == checkpoint["eval_ref_path"]
+
+
+def test_generated_candidate_rejected_by_member_gate_skips_parent_full_eval(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_path = tmp_path / "dataset" / "cases.json"
+    dataset_path.parent.mkdir()
+    dataset_path.write_text(json.dumps({"cases": [{"case_id": "case_001", "input": "fix"}]}), encoding="utf-8")
+    harness_refs = tmp_path / "harness_refs.yaml"
+    _write_yaml(harness_refs, {"harness_refs": {"solver": "baseline"}})
+    evaluator = _Evaluator()
+    orchestrator = SingleHarnessIterativeOptimizationOrchestrator(
+        AutoCoordinatingHarnessConfig(
+            max_epochs=1,
+            evaluator=EvaluatorConfig(backend="single_harness"),
+            data_loader=DataLoaderConfig(batch_size=1),
+            member_optimizer=MemberOptimizerConfig(max_repair_rounds_per_batch=1),
+        ),
+        evaluator=evaluator,
+        analyzer=_Analyzer(),
+        member_optimizer=_MemberOptimizer(),
+    )
+
+    async def reject_activation_window(**kwargs: Any) -> dict[str, Any]:
+        candidate_refs = str(kwargs["candidate_harness_refs_path"])
+        assert await asyncio.to_thread(Path(candidate_refs).is_file)
+        return {
+            "accepted": False,
+            "status": "rejected",
+            "reason": "expected_skill_invoked_outside_activation_window",
+            "failure_class": "natural_skill_activation_failure",
+            "candidate_harness_refs_path": candidate_refs,
+            "target_case_ids": ["case_001"],
+            "source_score": 0.0,
+            "candidate_score": 1.0,
+            "score_delta": 1.0,
+            "capabilities": [{"action_group": "skill", "runtime_name": "post_edit_validation"}],
+        }
+
+    monkeypatch.setattr(orchestrator, "_candidate_gate", reject_activation_window)
+    result = asyncio.run(
+        orchestrator.run(
+            IterativeSingleHarnessRequest(
+                dataset_files=[str(dataset_path)],
+                harness_refs_path=str(harness_refs),
+                output_dir=str(tmp_path / "run"),
+                auto_full_baseline=True,
+            )
+        )
+    )
+
+    state = yaml.safe_load(Path(result.state_path).read_text(encoding="utf-8"))
+    checkpoint = state["epoch_checkpoints"][0]
+    gate = state["candidate_gates"][0]
+    assert gate["status"] == "rejected"
+    assert gate["reason"] == "expected_skill_invoked_outside_activation_window"
+    assert Path(gate["candidate_harness_refs_path"]).is_file()
+    assert not [call for call in evaluator.calls if Path(call["output_dir"]).name == "full"]
+    assert not (tmp_path / "run" / "evaluations" / "e001" / "full" / "eval_ref.yaml").exists()
+    assert checkpoint["promotion_applied"] is False
+    assert checkpoint["retained_candidate_action_ids"] == []
+    assert checkpoint["removed_candidate_action_ids"] == []
+    assert checkpoint["full_evaluation_skipped_reason"] == "no_retained_harness_change"
+    assert state["best_score"] == state["baseline_score"] == 0.0
+    assert state["best_eval_ref_path"] == state["baseline_eval_ref_path"]
+    assert state["best_harness_refs_path"] == str(harness_refs.resolve())
+    assert state["publication_status"] == "not_published_no_improvement"
 
 
 class _Evaluator:

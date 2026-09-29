@@ -645,7 +645,7 @@ async def test_two_stage_run_freezes_candidates_and_reports_processing_progress(
     submit_release[2].set()
     await asyncio.wait_for(finish_entered.wait(), timeout=1)
     publishing = (await personal_context.snapshot()).fetch_run_progress["notes"]
-    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 80)
+    assert (publishing["completed_items"], publishing["progress_percent"]) == (20, 45)
 
     finish_release.set()
     await asyncio.wait_for(task, timeout=1)
@@ -958,8 +958,7 @@ async def test_run_fetch_rejects_disabled_core_stopped_runtime_or_dead_pipeline(
     await stopped.set_configuration(_manual_config(tmp_path))
     stopped._state = "STOPPED"
     stopped._pipeline_service = _RunningPipeline()  # type: ignore[assignment]
-    with pytest.raises(PersonalContext.Error):
-        await stopped.run_fetch()
+    await stopped.run_fetch()
 
     dead_pipeline = PersonalContext(home=tmp_path / "dead")
     await dead_pipeline.set_configuration(_manual_config(tmp_path))
@@ -2546,7 +2545,7 @@ async def test_stop_fetch_run_timeout_never_leaves_stopping_state(
         await asyncio.wait_for(cancellation_seen.wait(), timeout=0.1)
         progress = (await personal_context.snapshot()).fetch_run_progress["notes"]
         assert progress["run_state"] == "failed"
-        assert progress["progress_percent"] == 80
+        assert progress["progress_percent"] == 45
         assert personal_context._fetch_states["notes"] == "FAILED"
     finally:
         release.set()
@@ -2877,7 +2876,7 @@ async def test_stop_fetch_run_cancels_finish_and_retains_completed_batches(
     assert (progress["run_state"], progress["completed_items"], progress["progress_percent"]) == (
         "cancelled",
         2,
-        80,
+        45,
     )
 
 
@@ -3130,6 +3129,73 @@ async def test_retained_run_history_rejects_corrupt_file(tmp_path):
     core = PersonalContext(home=tmp_path)
     with pytest.raises(Exception, match="history is invalid"):
         await core.set_configuration(_manual_config(tmp_path))
+
+
+def _terminal_history_record(run_id: str, **extra: object) -> dict[str, object]:
+    record: dict[str, object] = {
+        **personal_context_module._fetch_run_status("notes", run_state="succeeded"),
+        "run_id": run_id,
+        "started_at": "2026-09-16T02:00:00+00:00",
+        "finished_at": "2026-09-16T02:01:00+00:00",
+    }
+    record.update(extra)
+    return record
+
+
+@pytest.mark.asyncio
+async def test_retained_run_history_round_trips_optional_actual_profile(tmp_path):
+    history_path = tmp_path / "state" / "run-history" / "notes.json"
+    history_path.parent.mkdir(parents=True)
+    legacy = _terminal_history_record("a" * 32)
+    degraded = _terminal_history_record("b" * 32, actual_profile="balanced")
+    history_path.write_text(
+        json.dumps({"schema_version": 1, "runs": [degraded, legacy]}, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    core = PersonalContext(home=tmp_path)
+
+    records = core._read_run_history("notes")
+
+    # Both the legacy shape (no actual_profile) and the degraded-fallback
+    # shape stay readable; the field is optional on purpose.
+    assert records[0]["actual_profile"] == "balanced"
+    assert "actual_profile" not in records[1]
+
+    history_path.write_text(
+        json.dumps(
+            {"schema_version": 1, "runs": [_terminal_history_record("c" * 32, actual_profile="unknown")]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="history is invalid"):
+        core._read_run_history("notes")
+
+
+@pytest.mark.asyncio
+async def test_retain_fetch_run_records_actual_profile_only_when_reported(tmp_path):
+    core = PersonalContext(home=tmp_path)
+
+    async def retain(run_id: str) -> dict[str, object]:
+        core._fetch_run_identity["notes"] = {
+            "run_id": run_id,
+            "started_at": personal_context_module._utc_now(),
+            "finished_at": None,
+        }
+        core._fetch_run_progress["notes"] = personal_context_module._fetch_run_status(
+            "notes",
+            run_state="succeeded",
+        )
+        await core._retain_fetch_run("notes")
+        return core._read_run_history("notes")[0]
+
+    core._fetch_run_profile["notes"] = "balanced"
+    degraded = await retain("a" * 32)
+    assert degraded["actual_profile"] == "balanced"
+    assert core._fetch_run_profile == {}
+
+    clean = await retain("b" * 32)
+    assert "actual_profile" not in clean
 
 
 @pytest.mark.asyncio

@@ -40,7 +40,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from openjiuwen.core.common.logging import team_logger
-from openjiuwen.core.foundation.tool.base import Tool
+from openjiuwen.core.foundation.tool.base import Tool, render_tool_output
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 if TYPE_CHECKING:
@@ -109,23 +109,23 @@ class PassiveToolExecutor:
     def map_output(self, tool_name: str, output: ToolOutput) -> str:
         """Render one tool's ``ToolOutput`` to model-facing text.
 
-        Uses the tool's own ``map_result`` where available so the text an
-        external protocol sees matches what an LLM caller would have seen.
+        Uses the tool's own ``render_for_llm`` so the text an external protocol
+        sees matches what an LLM caller would have seen.
         """
         tools = next(iter(self._tool_cache.values()), {})
         tool = tools.get(tool_name)
-        if tool is not None and hasattr(tool, "map_result"):
+        if tool is not None:
             try:
-                return tool.map_result(output)
+                return tool.render_for_llm(output)
             except Exception as exc:
-                # A tool's own rendering is best-effort: fall back to the plain
-                # text rather than failing the passthrough, but say why.
+                # A tool's own rendering is best-effort: fall back to the default
+                # rendering rather than failing the passthrough, but say why.
                 team_logger.warning(
                     "[passive-human] tool {} failed to render its result: {}",
                     tool_name,
                     exc,
                 )
-        return str(output)
+        return render_tool_output(output)
 
     async def _tools_for(self, sender: str) -> dict[str, Tool]:
         """Resolve (and cache) the sender-bound tool surface."""

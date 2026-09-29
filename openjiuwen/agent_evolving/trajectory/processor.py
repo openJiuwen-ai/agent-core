@@ -34,7 +34,7 @@ __all__ = ["TrajectorySpanProcessor"]
 
 _LOGGER = logging.getLogger(__name__)
 
-_CATEGORIES = frozenset({"llm", "tool", "agent", "task", "message", "member", "team"})
+_CATEGORIES = frozenset({"llm", "tool", "event", "agent", "task", "message", "member", "team"})
 
 # LLM and tool spans are named after the GenAI operation they carry ("chat
 # gpt-4o", "execute_tool search"), so their names embed a model or tool name and
@@ -490,6 +490,14 @@ class TrajectorySpanProcessor(SpanProcessor):
             The trajectory category, or ``None`` when the span is not captured.
         """
         attributes = getattr(span, "attributes", None) or {}
+        # The record kind is decided before the operation: a reasoning child
+        # span also states ``chat``, yet it restates part of its parent's
+        # output and would only spend the window's span budget.
+        record_kind = str(attributes.get(semconv.OJ_TRAJECTORY_RECORD_KIND) or "")
+        if record_kind == "event":
+            return "event"
+        if record_kind == "reasoning":
+            return None
         operation = attributes.get(semconv.GEN_AI_OPERATION_NAME)
         if operation is not None:
             category = _CATEGORY_BY_OPERATION.get(str(operation))

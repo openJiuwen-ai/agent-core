@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/subagent_runtime/`（18 文件） |
-| 最近一次修订日期 | 2026-08-23 |
+| 最近一次修订日期 | 2026-09-17 |
 | 关联 feature | N/A |
 
 ## 范围 / 边界
@@ -65,7 +65,8 @@ persistence。`subagent_runtime/` 18 文件承载 `enable_subagent_runtime=True`
    （`S_02` 不变量 11）。`cancel_all(reason="parent_ended")` 是父会话结束时的批量清理。
 9. **输出投影两路**：`ActivityProjector`（活动事件：reasoning / boundary / tool）与
    `TranscriptEmitter` / `TranscriptProjector`（turn 转录）；`resolve_presentation` 把它们
-   折成宿主可渲染形态。`SUBAGENT_*_EVENT_TYPE` 常量是事件类型契约。
+   折成宿主可渲染形态。`SUBAGENT_*_EVENT_TYPE` 常量是事件类型契约。工具结果的展示文本按
+   `summary` → `rendered_result`（模型可见文本，`S_05` 不变量 11）→ 兼容字段 `result` 取值。
 
 ## 接口契约
 

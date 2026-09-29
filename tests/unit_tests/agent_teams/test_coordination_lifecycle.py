@@ -269,6 +269,30 @@ async def test_resume_paused_round_cold_path_consumes_the_marker():
 
 @pytest.mark.asyncio
 @pytest.mark.level0
+@pytest.mark.parametrize("role", [TeamRole.TEAMMATE, TeamRole.EXTERNAL_CLI])
+async def test_resume_paused_round_cold_path_is_leader_only(role: TeamRole):
+    """A non-leader must not replay the leader's marker from the shared team bucket.
+
+    Every member of a team reads the same session bucket; an external CLI
+    harness without pause/resume support crashed on the leader's marker.
+    """
+    session = _StubSession()
+    host = _make_kernel_host()
+    host.role = role
+    host.session_manager.team_session = session
+    host.resources.harness.state = HarnessState.IDLE
+    merge_pending_resume(session, "test-team", {"query": "the leader's task"})
+    kernel = CoordinationKernel(host)
+
+    await kernel.resume_paused_round()
+
+    host.stream_controller.resume_agent.assert_not_awaited()
+    # Left intact for the leader, which is the only consumer.
+    assert read_pending_resume(session, "test-team") == {"query": "the leader's task"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.level0
 async def test_resume_paused_round_warm_path_ignores_the_marker():
     """A still-PAUSED harness resumes from memory, then drops the marker."""
     session = _StubSession()

@@ -11,14 +11,6 @@ alongside the harness sections (safety, tools, memory, ...).
 
 Section layout (aligned with ``prompt_design.md``):
 
-  P:10  team_identity    — everything specific to this one member: its
-                          member_name and its private working agreement.
-                          The only per-member content, delivered as a
-                          prompt attachment for in-process members (keeping
-                          it out of the system prompt lets every member of
-                          a team share one cached prefix); inlined into the
-                          static prompt only for external CLI members,
-                          whose prompt is a standalone snapshot.
   P:11  team_role        — role policy + execution mode (always)
   P:12  team_hitt        — HITT collaboration rules. LEADER + HUMAN_AGENT
                           always get the full roster section (when human
@@ -40,17 +32,21 @@ Section layout (aligned with ``prompt_design.md``):
                           parameter nor the runtime to drive one.
   P:17  team_extra       — user-supplied base prompt (when set)
 
-Team *state* (team metadata, peer roster) is not a section at all: it is
-delivered into the member's conversation history as it appears, rendered by
-``prompts/messages.py`` and driven by ``agent_teams/team_context.py``.
+Team *state* is not a section at all: the member's own identity (its name,
+its workspace and its private working agreement), the team metadata and the
+peer roster are all delivered into the member's conversation history as they
+appear, rendered by ``prompts/messages.py`` and driven by
+``agent_teams/team_context.py``. Every member of a role therefore reads the
+same prefix, and the state that can change mid-session has exactly one
+channel that can correct it.
 """
 
 from __future__ import annotations
 
 from typing import Literal, Optional
 
+from openjiuwen.agent_teams.inbound_render import render_team_policy
 from openjiuwen.agent_teams.prompts.loader import TemplateLoader, load_template
-from openjiuwen.agent_teams.prompts.messages import build_identity_text
 from openjiuwen.agent_teams.schema.team import TeamRole
 from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPromptBuilder
 
@@ -62,7 +58,6 @@ from openjiuwen.core.single_agent.prompts.builder import PromptSection, SystemPr
 class TeamSectionName:
     """Centralized section names owned by ``TeamPolicyRail``."""
 
-    IDENTITY = "team_identity"
     BOOTSTRAP = "team_bootstrap"
     ROLE = "team_role"
     HITT = "team_hitt"
@@ -80,7 +75,6 @@ class TeamSectionName:
 # ordering constant only — the workspace assembler no longer stamps it into
 # A-class md frontmatter, so there is no on-disk copy to drift from.
 SECTION_PRIORITY: dict[str, int] = {
-    TeamSectionName.IDENTITY: 10,
     TeamSectionName.ROLE: 11,
     TeamSectionName.HITT: 12,
     TeamSectionName.BRIDGE: 12,
@@ -152,57 +146,6 @@ def _labels_for(language: str) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Section builders
 # ---------------------------------------------------------------------------
-
-
-def build_team_identity_section(
-    *,
-    member_name: str | None,
-    display_name: str | None = None,
-    member_workspace_path: str | None = None,
-    member_prompt: str | None = None,
-    language: str = "cn",
-) -> Optional[PromptSection]:
-    """Build the member's own-identity section (external CLI members only).
-
-    Carries everything specific to this one member: its ``member_name`` and its
-    private working agreement (the member-private counterpart to the public
-    ``desc``, never shared into any peer's roster or ``list_members`` output).
-    Both are fixed at spawn time, but they are the only content that differs
-    *between* members of a team, so they must stay out of the shared system
-    prompt for in-process members — those receive the same body as a history
-    message (see ``prompts/messages.build_identity_text``).
-
-    External CLI members are the exception this section exists for: their prompt
-    is a standalone per-member snapshot rather than a prefix shared with sibling
-    members, and at launch they have no conversation to write into. They inline
-    it via ``build_team_static_sections(include_member_specific=True)``.
-
-    Args:
-        member_name: Semantic member identifier.
-        display_name: Human-readable member label.
-        member_workspace_path: The member's own artifact directory.
-        member_prompt: The member's private working agreement; blank (a member
-            spawned without one) drops that subsection.
-        language: Prompt language ('cn' or 'en').
-
-    Returns:
-        PromptSection carrying the member's names and, when set, the private
-        working agreement; ``None`` when none of them is set.
-    """
-    body = build_identity_text(
-        member_name=member_name,
-        display_name=display_name,
-        member_workspace_path=member_workspace_path,
-        member_prompt=member_prompt,
-        language=language,
-    )
-    if body is None:
-        return None
-    return PromptSection(
-        name=TeamSectionName.IDENTITY,
-        content={language: body},
-        priority=SECTION_PRIORITY[TeamSectionName.IDENTITY],
-    )
 
 
 def build_leader_bootstrap_section(
@@ -664,9 +607,6 @@ def build_team_static_sections(
     *,
     role: TeamRole,
     member_name: str | None,
-    display_name: str = "",
-    member_workspace_path: str | None = None,
-    member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
@@ -675,7 +615,6 @@ def build_team_static_sections(
     language: str = "cn",
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
-    include_member_specific: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
     loader: TemplateLoader = load_template,
 ) -> list[PromptSection]:
@@ -685,23 +624,16 @@ def build_team_static_sections(
     members call this through :class:`TeamPolicyRail`; external CLI members call
     it directly to build a standalone prompt snapshot. Every section here is
     static — HITT is gated on ``hitt_enabled``, bridge on ``role ==
-    BRIDGE_AGENT``. Team state (metadata, peer roster) is NOT built here: it is
-    delivered into the member's conversation as it appears (see
-    ``agent_teams/team_context.py``). The one per-member section
-    (``team_identity``: member_name + private working agreement) is delivered
-    the same way for in-process members, and only inlined here when
-    ``include_member_specific`` is set.
+    BRIDGE_AGENT``. Team state is NOT built here: the member's own identity,
+    the team metadata and the peer roster are all delivered into the member's
+    conversation as they appear (see ``agent_teams/team_context.py``), which
+    keeps this prefix identical for every member of a role and leaves one
+    correctable channel for the state that can change mid-session.
 
     Args:
         role: LEADER or TEAMMATE (other roles get the role-appropriate slices).
-        member_name: Semantic member identifier. Feeds the HITT / bridge
-            self-contracts, and the identity section when
-            ``include_member_specific`` is set.
-        member_prompt: The member's private working agreement (DB ``prompt``),
-            delivered only to this member as part of the identity section;
-            rendered here only when ``include_member_specific`` is set. The
-            public ``desc`` is intentionally NOT rendered here — it belongs
-            only in peers' roster.
+        member_name: Semantic member identifier, which feeds the HITT / bridge
+            self-contracts.
         lifecycle: Team lifecycle ("temporary" / "persistent").
         teammate_mode: Teammate execution mode ("build_mode" / "plan_mode").
         team_mode: Team mode ("default" / "predefined" / "hybrid").
@@ -712,27 +644,13 @@ def build_team_static_sections(
             HITT collaboration contract.
         expose_human_agents_to_teammates: Whether teammates get the roster-aware
             HITT variant (and, via the caller, the ``[human]`` roster tag).
-        include_member_specific: When True, inline the per-member section
-            (``team_identity``) as a static section. Only external CLI members
-            set this; in-process members receive it as a history message so the
-            system-prompt prefix stays identical across the team.
         workspace_prompt_variant: Workspace wording variant forwarded to the
             teammate role policy section.
 
     Returns:
         The non-None sections, unsorted (the caller orders by priority).
     """
-    identity_section = None
-    if include_member_specific:
-        identity_section = build_team_identity_section(
-            member_name=member_name,
-            display_name=display_name,
-            member_workspace_path=member_workspace_path,
-            member_prompt=member_prompt,
-            language=language,
-        )
     builders = [
-        identity_section,
         build_team_role_section(
             role=role,
             teammate_mode=teammate_mode,
@@ -844,7 +762,6 @@ def build_leader_policy_disclosure(
         base_prompt=None,
         language=language,
         hitt_enabled=hitt_enabled,
-        include_member_specific=False,
         loader=loader,
     )
     builder = SystemPromptBuilder(language=language)
@@ -857,9 +774,6 @@ def build_team_member_system_prompt(
     *,
     role: TeamRole,
     member_name: str | None,
-    display_name: str = "",
-    member_workspace_path: str | None = None,
-    member_prompt: str = "",
     lifecycle: str = "temporary",
     teammate_mode: str = "build_mode",
     team_mode: str = "default",
@@ -869,6 +783,7 @@ def build_team_member_system_prompt(
     hitt_enabled: bool = False,
     expose_human_agents_to_teammates: bool = False,
     workspace_prompt_variant: Literal["native", "external"] = "native",
+    mcp_server_name: str | None = None,
     loader: TemplateLoader = load_template,
 ) -> str:
     """Render a member's team sections into a single standalone system prompt.
@@ -879,12 +794,29 @@ def build_team_member_system_prompt(
     sections — the harness / other DeepAgent rails do not apply to an external
     CLI, so their prompt contributions are intentionally excluded.
 
-    The per-member section IS inlined here (``include_member_specific``):
-    an external CLI prompt is a standalone per-member snapshot, not a prefix
-    shared with sibling members, so there is no cache to protect — and at launch
-    there is no conversation yet to deliver it into.
+    What the prompt carries is the team's standing policy: the role and the
+    collaboration contracts every member of that role shares. Who this member
+    is -- its name, its workspace and its private working agreement -- is team
+    state, so it reaches the member the same way the team metadata and the peer
+    roster do: as a ``<team-context>`` message in its conversation (see
+    ``agent_teams/team_context.py``). Stating it in both places said the same
+    thing twice, and the identity restated in a system prompt could never be
+    corrected when the member's private agreement was evolved mid-session.
 
-    Args mirror :func:`build_team_static_sections`.
+    A member whose tools arrive through MCP does not see them under the bare
+    names this policy uses: its CLI puts every MCP tool in a namespace of its
+    own, and a CLI that ships tools of its own may well have one whose name
+    resembles a team tool's. Passing ``mcp_server_name`` wraps the prompt in
+    ``<team-policy>`` and declares, once, that the bare names belong to that
+    server. Only the server name is stated -- how the CLI spells out one of its
+    tools is the harness provider's to declare, next to the tools it registered.
+
+    Args:
+        mcp_server_name: The MCP server providing the team's tools, when the
+            member reaches them through MCP. ``None`` (an in-process member,
+            which calls its tools by the bare name) renders the policy alone.
+
+    Other args mirror :func:`build_team_static_sections`.
 
     Returns:
         The rendered system prompt, or ``""`` when no section produced content.
@@ -892,9 +824,6 @@ def build_team_member_system_prompt(
     sections = build_team_static_sections(
         role=role,
         member_name=member_name,
-        display_name=display_name,
-        member_workspace_path=member_workspace_path,
-        member_prompt=member_prompt,
         lifecycle=lifecycle,
         teammate_mode=teammate_mode,
         team_mode=team_mode,
@@ -903,14 +832,17 @@ def build_team_member_system_prompt(
         language=language,
         hitt_enabled=hitt_enabled,
         expose_human_agents_to_teammates=expose_human_agents_to_teammates,
-        include_member_specific=True,
         workspace_prompt_variant=workspace_prompt_variant,
         loader=loader,
     )
     builder = SystemPromptBuilder(language=language)
     for section in sections:
         builder.add_section(section)
-    return builder.build()
+    prompt = builder.build()
+    if not prompt or not mcp_server_name:
+        return prompt
+    note = loader("tool_namespace", language).format({"server": mcp_server_name}).content.strip()
+    return render_team_policy(body=prompt, tools=mcp_server_name, note=note)
 
 
 __all__ = [
@@ -921,7 +853,6 @@ __all__ = [
     "build_team_dispatch_section",
     "build_team_extra_section",
     "build_team_hitt_section",
-    "build_team_identity_section",
     "build_team_inbound_tags_section",
     "build_team_lifecycle_section",
     "build_team_member_system_prompt",

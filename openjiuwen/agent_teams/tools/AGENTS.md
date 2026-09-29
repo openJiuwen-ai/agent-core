@@ -6,10 +6,10 @@
 
 | 文件 | 负责 |
 |---|---|
-| `tool_base.py` | `TeamTool` ABC、`MappedToolOutput` |
+| `tool_base.py` | `TeamTool` ABC |
 | `tool_permissions.py` | 权限集合（`LEADER_*`、`MEMBER_*`、`MEMBER_TOOLS_BY_DISPATCH`、`SHARED_TOOLS`、`HUMAN_AGENT_TOOLS`）、`_MEMBER_NAME_PATTERN` |
 | `tool_team.py` | `BuildTeamTool`、`CleanTeamTool` |
-| `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
+| `tool_member.py` | `_SpawnToolBase`（含 `omit_slots` 传递 capability 槽）、`SpawnTeammateTool`、`CheckpointTool`、`SpawnHumanAgentTool`、`SpawnBridgeAgentTool`、`SpawnExternalCliTool`、`ShutdownMemberTool`、`SetMemberModelTool`、`ApprovePlanTool`、`ApproveToolCallTool`、`ListMembersTool` |
 | `tool_task.py` | `TaskCreateTool` / `ScheduledTaskCreateTool`（各自独立，共享模块级纯函数 `_task_node_schema` / `_validate_task_batch`）、`ViewTaskToolV2`、`UpdateTaskTool`、`SubmitPlanTool`、`ClaimTaskTool`、`MemberCompleteTaskTool` |
 | `tool_message.py` | `_SendMessageBase` → `SendMessageTool`（点对点、多播、广播）/ `ReportToLeaderTool`（scheduled 成员：仅 leader + user） |
 | `tool_factory.py` | `create_team_tools` 工厂、`_wrap_invoke_with_logging` |
@@ -24,7 +24,7 @@
 | `message_manager.py` | `TeamMessageManager` —— 点对点 + 广播发送、已读状态查询 |
 | `database/` | `TeamDatabase` + 建立在共享 `DbSessions` 上的按表 DAO（读写 session 分离 —— 见下文 *数据库并发*）。静态表 + 按 session 的动态表的 SQL 层。测试跑在 sqlite `:memory:` 的 `connection_string` 上（快、无文件） |
 | `models.py` | `Team`、`TeamMember` 静态表 + 按 session 动态生成的 `TeamTask*` / `TeamMessage*` 工厂 |
-| `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列 |
+| `member_options.py` | `TeamMemberOptions` / `MemberModelRef` / `MemberBuiltinModel` / `MemberWorktreeOptions` 结构化 options 辅助（load/dump/build/merge/get_member_model_ref/get_member_builtin_model/set_member_builtin_model/get_member_permissions_override）。用统一的 `options` JSON 取代旧的 `model_ref_json` 列。`builtin_model` 是外部 CLI 成员在自身登录上跑的内置模型与 effort，`promote_member_fallback_model` 提升 fallback 时一并清除（F_113） |
 | `structured_output_tool.py` | `StructuredOutputTool`（`input_params=schema_json`，捕获 `captured`）+ `StructuredOutputFinishRail`（一旦捕获就强制结束本轮）。给任何无原生 `response_format` 的 agent 用的通用结构化输出工具；被 swarmflow worker/session 与 tiny agent（`tiny_agent.py`）复用 |
 | `locales/` | i18n 字符串（`cn.py`、`en.py`）与 Markdown 描述文件（`descs/<lang>/<domain>/<tool>.md`，领域目录见下文「Markdown 描述文件」） |
 
@@ -104,13 +104,14 @@ PostgreSQL / MySQL 后端（`engine.py`），不要用 SQLite。
 
 | 工具 | Leader | Teammate | 说明 |
 |---|---|---|---|
-| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。**对已存在的团队幂等（F_76）**：命中团队行则走 `TeamBackend._reattach_team` 接管而非报错——写零行、注册零人，生效的 verification flag 从行里读回（团队既有配置优先于本次参数），`on_team_built` 照常触发但不发 `TeamCreated`；返回值首行区分 `Team created:` / `Existing team taken over:`。因为它是协同准则的唯一交付点，"团队已经在了"不能是失败——**要救的是 `NEW_TEAM_IN_SESSION`**（新 session 接手已有团队：child session 共享 team session id，换 session 即换掉整段历史，准则随之丢失）。**`COLD_RECOVER` 则是明令禁止**：同 session、历史恢复、准则还在其中，且那条 tool result 由 `team_policy` 重注入保证不会被压缩掉，所以 `invoke` 在 `backend.rejects_rebuild()`（`_history_restored` **且** 团队行仍在）为真时直接返回失败——两个条件缺一不可，因为被 `clean_team` 解散过的恢复 leader 确实需要重新建队。dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info`。F_62 的 `enable_task_verification`（提示词驱动的"验证预期"开关，可在 spec 天花板内覆盖）**是 dispatch 门控的属性（F_76）**：`dispatch_mode == "scheduled"` 才挂它、才填描述里的 `{{build_team_verify_gate}}` 槽，autonomous 下属性与那节散文一起消失、`invoke` 把偷传的值报错拒掉——它唯一能开关的就是 verify 闸，而闸的三个消费点（scheduled `create_task` 剥 reviewer / `update_task` 剥 reviewer / `TeamScheduler._reconcile_reviews` 短路）在 autonomous 下一个都不可达。scheduled 下返回结果**回带实际生效值**（`data["enable_task_verification"]` + `map_result` 的 `task_verification=`）：spec 天花板对这个开关是**静默收窄**（不像 `enable_hitt` / `enable_bridge` 撞顶就 `raise_error`），回带生效值是 leader 唯一能发现自己没拿到验证闸的通道。**F_76：`map_result` 在建队结果之后附上 leader 的完整协同准则**（`prompts.build_leader_policy_disclosure` 按本次调用选定的 `dispatch_mode` / `team_mode` / `lifecycle` / `teammate_mode` 与**实际生效的** `enable_hitt` 裁剪）——leader 的系统提示词里只留一段 bootstrap，其余全部经这条返回值渐进式披露。因此工厂要给它传那几个装配参数（`create_team_tools` 的 `team_mode` 参数就是为它加的） |
+| `build_team` | ✓ | | 入口工具 —— 描述里承载完整工作流。**对已存在的团队幂等（F_76）**：命中团队行则走 `TeamBackend._reattach_team` 接管而非报错——写零行、注册零人，生效的 verification flag 从行里读回（团队既有配置优先于本次参数），`on_team_built` 照常触发但不发 `TeamCreated`；返回值首行区分 `Team created:` / `Existing team taken over:`。因为它是协同准则的唯一交付点，"团队已经在了"不能是失败——**要救的是 `NEW_TEAM_IN_SESSION`**（新 session 接手已有团队：child session 共享 team session id，换 session 即换掉整段历史，准则随之丢失）。**`COLD_RECOVER` 则是明令禁止**：同 session、历史恢复、准则还在其中，且那条 tool result 由 `team_policy` 重注入保证不会被压缩掉，所以 `invoke` 在 `backend.rejects_rebuild()`（`_history_restored` **且** 团队行仍在）为真时直接返回失败——两个条件缺一不可，因为被 `clean_team` 解散过的恢复 leader 确实需要重新建队。dispatch_mode 是静态 spec 配置，**不在此选择**，spec 值随行记录进 `team_info`。F_62 的 `enable_task_verification`（提示词驱动的"验证预期"开关，可在 spec 天花板内覆盖）**是 dispatch 门控的属性（F_76）**：`dispatch_mode == "scheduled"` 才挂它、才填描述里的 `{{build_team_verify_gate}}` 槽，autonomous 下属性与那节散文一起消失、`invoke` 把偷传的值报错拒掉——它唯一能开关的就是 verify 闸，而闸的三个消费点（scheduled `create_task` 剥 reviewer / `update_task` 剥 reviewer / `TeamScheduler._reconcile_reviews` 短路）在 autonomous 下一个都不可达。scheduled 下返回结果**回带实际生效值**（`data["enable_task_verification"]` + `render_for_llm` 的 `task_verification=`）：spec 天花板对这个开关是**静默收窄**（不像 `enable_hitt` / `enable_bridge` 撞顶就 `raise_error`），回带生效值是 leader 唯一能发现自己没拿到验证闸的通道。**F_76：`render_for_llm` 在建队结果之后附上 leader 的完整协同准则**（`prompts.build_leader_policy_disclosure` 按本次调用选定的 `dispatch_mode` / `team_mode` / `lifecycle` / `teammate_mode` 与**实际生效的** `enable_hitt` 裁剪）——leader 的系统提示词里只留一段 bootstrap，其余全部经这条返回值渐进式披露。因此工厂要给它传那几个装配参数（`create_team_tools` 的 `team_mode` 参数就是为它加的） |
 | `clean_team` | ✓（仅 temporary） | | 要求先关停每个 teammate；`lifecycle="persistent"` 时不接线（那类团队由 operator 经 SDK facade 拆除） |
 | `spawn_teammate` | ✓ | | 拉起一个普通 LLM teammate；可选 `model_config_allocator` 回调；扁平 schema `member_name`/`display_name`/`desc`/`prompt?`/`model_name?`/`isolation?`/`permissions?`。始终接线，但**上下文继承是属性级门控**：`fork_enabled()` 为真才加 `fork`/`fork_source`/`fork_mode` 三个属性，并同时填上描述里的 `{{fork_usage}}` 槽；关时三个属性与那一整节散文一起消失，`invoke` 把偷传进来的 fork 参数在建成员行之前拒掉（MCP 客户端不过 schema）。`fork_mode` 取 `full`/`before`/`after`/`keep_before_compact_after`/`keep_after_compact_before`。见 F_75 |
 | `checkpoint` | ✓ | ✓ | 为本成员当前上下文存一个命名快照，供 `spawn_teammate(fork="<name>")` 继承；仅 `fork_enabled()`（`TeamAgentSpec.enable_fork`）时接线，`invoke` 内保留同源兜底。外部成员（`external/client.py` / `sdk_mcp.py`）另行 `exclude_tools` 排除——它们没有 `DeepAgent`，快照无从取起 |
 | `spawn_human_agent` | ✓ | | 拉起一个 HITT 人类成员；schema 仅 `member_name`/`display_name`/`desc`（无 `model_name`/`prompt`）；仅 `hitt_enabled()` 时接线 |
 | `spawn_bridge_agent` | ✓ | | 拉起一个到远程 agent 的桥接；`desc` 兼作 connect briefing；可选 `mailbox_inject_mode`/`protocol`/`adapter_config`/`model_name`；仅 `bridge_enabled()` 时接线 |
-| `spawn_external_cli` | ✓ | | 拉起一个第三方 CLI teammate；需要 `cli_agent`（在 `TeamAgentSpec.external_cli_agents` 声明的一个 kind）+ `desc`；仅 `external_cli_kinds()` 非空时接线 |
+| `spawn_external_cli` | ✓ | | 拉起一个第三方 CLI teammate；需要 `cli_agent`（在 `TeamAgentSpec.external_cli_agents` 声明的一个 kind）+ `desc`；仅 `external_cli_kinds()` 非空时接线。`builtin_model` / `effort` 是**属性级门控**（gate `builtin_models_enabled()`，同时填 `{{builtin_model_param_rows}}` / `{{builtin_model_usage}}` 两个槽）：从 kind 声明的 `builtin_models` 目录里挑订阅内置模型与推理强度，与 `model_name` 互斥，持久化进 `options.builtin_model`。见 F_113 |
+| `set_member_model` | ✓ | | 运行中切换外部 CLI 成员的内置模型 / effort（`member_name` + `model?` + `effort?`）；仅 `builtin_models_enabled()` 时接线。经 `TeamBackend.set_member_model` 先落库、再由 `set_member_model_fn`（`TeamAgent._apply_member_model`）推给活成员，下一 turn 生效；成员不在跑则下次启动生效（结果带 `applied_live`）。`model_ref` 非空的成员（pool 端点 / 已提升的认证 fallback）拒绝。见 F_113 |
 | `shutdown_member` | ✓ | | `force=True` 跳过正常关停序列 |
 | `approve_plan` | ✓（仅 plan_mode） | | 仅 `teammate_mode == "plan_mode"` 时接线 |
 | `approve_tool` | ✓（仅 plan_mode） | | 与 `approve_plan` 相同的门控 |
@@ -197,7 +198,7 @@ _VERIFY_TASK_DESC_KEY = {"autonomous": "verify_task", "scheduled": "verify_task_
 **共享用最轻的手段，够用就好**——两个形态怎么共享代码，取决于共享的是数据还是行为：
 - `create_task` 的两个形态（`TaskCreateTool` / `ScheduledTaskCreateTool`）**各自独立**，
   只共享模块级纯函数（基础 schema 字段、形态 schema 拼装、assignee / 批次校验）。
-  `invoke` / `map_result` 各写一遍——它们是短小的线性流程，读一个类就看到全貌，好过为省几行
+  `invoke` / `render_for_llm` 各写一遍——它们是短小的线性流程，读一个类就看到全貌，好过为省几行
   去造一层带钩子方法的基类。
 - `send_message` 的两个形态共享 `_SendMessageBase`，因为它们共享的是**真实行为**
   （`_send` / `_multicast` / `_broadcast` / `_auto_start_members` 是实打实的投递逻辑，不是钩子），
@@ -337,45 +338,42 @@ LLM 有可预测的失败模式。工具描述应主动应对它们：
 异常，返回 `ToolOutput(success=False, error=...)`。永远不要让未处理的异常上抛 —— 工具调用
 必须总是返回一个 `ToolOutput`。
 
-## 结果映射：`TeamTool.map_result` + `_wrap_invoke_with_logging`
+## 结果渲染：`render_for_llm`
 
 `TeamTool` 子类从 `invoke()` 返回一个原始 `ToolOutput`。工厂把每个工具都跑过
-`_wrap_invoke_with_logging`（见 `team_tools.py:1037`），它会：
+`_wrap_invoke_with_logging`（见 `tool_factory.py`），它只在 debug 级记录 inputs/outputs，
+原样返回结果。
 
-1. 在 debug 级记录 inputs/outputs。
-2. 调用 `tool.map_result(output)` 生成面向模型的文本。
-3. 把结果包进 `MappedToolOutput`，其 `__str__` 返回映射后的文本。
-
-ability 层用 `str(result)` 渲染工具结果 —— `MappedToolOutput.__str__` 才是真正变成
-LLM 可见的 `ToolMessage.content` 的东西。`ToolOutput.data` 仍然存在，供程序化消费者
-（事件、日志）使用。
+面向模型的文本来自各工具覆写的 core `Tool.render_for_llm(output)`：ability 层构造
+`ToolMessage.content` 时直接调用它（harness `S_05` 不变量 11）。`ToolOutput.data` 仍然存在，
+供程序化消费者（事件、日志）使用。`TeamTool` 不提供自己的默认渲染，未覆写时走 core 默认实现。
 
 > **外部成员复用这套完全相同的工具（F_26）。** `mcp/` server 和 `skill/` CLI 在其
 > `member` scope 下暴露真实的 `create_team_tools(role="teammate")` 实例
-> （`view_task` / `claim_task` / `send_message`）并返回 `str(await tool.invoke(...))`
-> —— 因此 `map_result()` 是进程内成员与外部 CLI 成员之间面向 LLM 文本的唯一来源。让工具
-> 描述 / `map_result` 保持足够角色中立，对第三方 CLI 成员也读得通顺，而不只是进程内的
+> （`view_task` / `claim_task` / `send_message`）并返回 `tool.render_for_llm(await tool.invoke(...))`
+> —— 因此 `render_for_llm()` 是进程内成员与外部 CLI 成员之间面向 LLM 文本的唯一来源。让工具
+> 描述 / `render_for_llm` 保持足够角色中立，对第三方 CLI 成员也读得通顺，而不只是进程内的
 > DeepAgent。
 
-本模块的 `map_result` 策略：
+本模块的 `render_for_llm` 策略：
 
 | 模式 | 工具 | 策略 |
 |---|---|---|
 | **纯文本** | `build_team`、`clean_team`、四个 `spawn_*` 工具、`shutdown_member`、`approve_*` | 一句确认 —— token 最少 |
 | **结构化文本行** | `list_members`、`view_task`（list）、`create_task`（批量） | 一实体一行，密集格式 |
 | **详情文本** | `view_task`（get） | 带标签行的完整字段 |
-| **时间上下文** | `view_task`（list + get） | 两档都经 `timefmt.format_time_context` 把 `updated_at` 渲染成 `<绝对本地时间> (<相对差>)`。`map_result` 不能接参数，故内部调 `get_current_time()` 并在 `updated_at is not None` 上做保护 |
+| **时间上下文** | `view_task`（list + get） | 两档都经 `timefmt.format_time_context` 把 `updated_at` 渲染成 `<绝对本地时间> (<相对差>)`。`render_for_llm` 不能接参数，故内部调 `get_current_time()` 并在 `updated_at is not None` 上做保护 |
 | **文本 + 行为引导** | `claim_task`（completed） | 任务完成后追加 `Call view_task now…` 以维持自主任务循环 |
-| **默认 JSON** | `TeamTool` 基类 | 对任何忘了 override 的兜底 `json.dumps(output.data)` |
+| **默认渲染** | core `Tool` | 对任何忘了 override 的兜底：有 `data["content"]` 取它，否则 JSON |
 
 ### Async 工具的两段式文本（`AsyncTool` 子类，如 `SwarmflowTool`）
 
-对同步 `TeamTool`，`map_result` 是 LLM 可见工具文本的**唯一**来源。async 工具在**后续
+对同步 `TeamTool`，`render_for_llm` 是 LLM 可见工具文本的**唯一**来源。async 工具在**后续
 一轮里**加了**第二个出口**：
 
 | 阶段 | 出口 | 时机 | 文案 |
 |---|---|---|---|
-| **Launch** | `map_result` | `invoke` 后同步，经 `_wrap_invoke_with_logging` | 已启动回执（swarmflow → `swarmflow.launched`，含 `run_id` + `task_id`） |
+| **Launch** | `render_for_llm` | `invoke` 后同步，ability 层构造工具结果消息时 | 已启动回执（swarmflow → `swarmflow.launched`，含 `run_id` + `task_id`） |
 | **Terminal** | `format_completed_injection` / `format_failed_injection` | 后台运行结束；`AsyncToolRuntime._run` 调 `AsyncToolRecord.format_*` | `swarmflow.completed` / `swarmflow.failed`（含 `run_id`） |
 
 终态回调在 invoke 时经 `launch_async_tool(..., format_completed=, format_failed=)` 注册
@@ -387,7 +385,7 @@ LLM 可见的 `ToolMessage.content` 的东西。`ToolOutput.data` 仍然存在�
 
 设计原则：
 - **Token 效率**：只发模型下一步决策所需的东西。
-- **行为引导注入**：把这些 nudge 留在 `map_result`，而非 descriptor —— 它们只在到达终态时触发。
+- **行为引导注入**：把这些 nudge 留在 `render_for_llm`，而非 descriptor —— 它们只在到达终态时触发。
 - **错误语义**：错误结果返回纯错误文本，绝不用可能级联取消兄弟工具的 `is_error` 式标志。
 
 ## i18n
@@ -426,7 +424,8 @@ descs/<lang>/
 ├── fragments/    共享片段（不按领域分——跨领域复用，且 slot 名是独立命名空间，建索引时跳过）
 ├── team/         build_team · clean_team
 ├── member/       spawn_teammate · spawn_human_agent · spawn_bridge_agent · spawn_external_cli
-│                 · shutdown_member · list_members · checkpoint · approve_plan · approve_tool
+│                 · set_member_model · shutdown_member · list_members · checkpoint · approve_plan
+│                 · approve_tool
 ├── task/         create_task · create_task_scheduled · view_task · update_task · claim_task
 │                 · member_complete_task · member_complete_task_scheduled
 │                 · verify_task · verify_task_scheduled
@@ -442,6 +441,8 @@ descs/<lang>/
 `test_tool_message.py` 断言，改常量必须同步改片段）、
 `create_task_edge_semantics`、`create_task_granularity`（两个 `create_task` 形态共用）、
 `fork_usage`（**capability 槽**，`spawn_teammate` 专用，gate `fork_enabled()`）、
+`builtin_model_param_rows` / `builtin_model_usage`（**capability 槽**，`spawn_external_cli` 专用，
+gate `builtin_models_enabled()`，F_113）、
 `update_task_verify_gate`（**capability 槽**，`update_task` 专用，gate `dispatch_mode == "scheduled"`，F_76）、
 `build_team_verify_gate`（**capability 槽**，`build_team` 专用，gate 同上，F_76；首个位于正文中间的
 `##` 节级 capability 槽——间距归一化就是为它加的）。
@@ -456,7 +457,7 @@ descs/<lang>/
 规则：**不要跨层重复内容**。如果工作流住在工具描述里，系统提示词就不应重复它。
 
 **分层不等于投递时刻（F_76）**：leader 侧 `prompts/` 那一层的内容**不再进系统提示词**，而是经
-`BuildTeamTool.map_result` 附在 `build_team` 的返回值里下发。这不改变分层归属——角色身份 /
+`BuildTeamTool.render_for_llm` 附在 `build_team` 的返回值里下发。这不改变分层归属——角色身份 /
 决策原则 / 状态流转仍然由 `prompts/leader_policy.md` 拥有，工具描述仍然只讲怎么调这个工具；
 变的只是"它什么时候到达 leader"。所以往 `build_team.md` 里塞角色策略、或往 `leader_policy.md`
 里塞调用顺序，依然是越层，不会因为两者现在同处一条 ToolResult 而变得可接受。

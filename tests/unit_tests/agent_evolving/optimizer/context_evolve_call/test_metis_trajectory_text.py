@@ -7,7 +7,6 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import TRAJECTORY_ID
 from openjiuwen.agent_evolving.trajectory.spans import attributes_from_map
 from openjiuwen.extensions.observability import semconv
-from openjiuwen.agent_evolving.trajectory import legacy_semconv
 
 
 def _trajectory() -> Trajectory:
@@ -33,12 +32,15 @@ def _trajectory() -> Trajectory:
                                                 {
                                                     "role": "assistant",
                                                     "parts": [
-                                                        {"type": "text", "content": "Use the lookup tool."}
+                                                        {"type": "text", "content": "Use the lookup tool."},
+                                                        {
+                                                            "type": "tool_call",
+                                                            "id": "call-1",
+                                                            "name": "lookup",
+                                                            "arguments": {"q": "x"},
+                                                        },
                                                     ],
                                                 }
-                                            ],
-                                            legacy_semconv.LEGACY_GEN_AI_TOOL_CALLS: [
-                                                {"id": "call-1", "name": "lookup", "arguments": {"q": "x"}}
                                             ],
                                         }
                                     ),

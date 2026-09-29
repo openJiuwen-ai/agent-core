@@ -90,7 +90,7 @@ class ExternalTeamClient:
         self._session_token: Token[str] | None = None
         # Member-scope real team tools, keyed by card.name. Built at connect()
         # for the ``member`` scope so an external CLI member calls the exact
-        # same TeamTool instances (same schema + map_result text) as a native
+        # same TeamTool instances (same schema + render_for_llm text) as a native
         # in-process teammate. Empty for the ``operator`` scope.
         self._tools: dict[str, "Tool"] = {}
         self._connected = False

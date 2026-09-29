@@ -21,8 +21,8 @@ from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.schema import (
     CASE_ID,
     TRAJECTORY_ID,
-    TRAJECTORY_SCHEMA_VERSION,
-    TRAJECTORY_SCHEMA_VERSION_ATTR,
+    TRAJECTORY_PROJECTION_VERSION,
+    TRAJECTORY_PROJECTION_VERSION_ATTR,
     TRAJECTORY_SCOPE_NAME,
     TRAJECTORY_SOURCE,
 )
@@ -121,7 +121,7 @@ class TrajectoryBuilder:
     def _resource_attributes(self) -> dict[str, Any]:
         attrs: dict[str, Any] = {
             TRAJECTORY_ID: self.trajectory_id,
-            TRAJECTORY_SCHEMA_VERSION_ATTR: TRAJECTORY_SCHEMA_VERSION,
+            TRAJECTORY_PROJECTION_VERSION_ATTR: TRAJECTORY_PROJECTION_VERSION,
             TRAJECTORY_SOURCE: self.source,
             semconv.GEN_AI_CONVERSATION_ID: self.session_id,
         }
@@ -151,7 +151,7 @@ class TrajectoryBuilder:
                         {
                             "scope": {
                                 "name": TRAJECTORY_SCOPE_NAME,
-                                "version": TRAJECTORY_SCHEMA_VERSION,
+                                "version": TRAJECTORY_PROJECTION_VERSION,
                             },
                             "spans": deepcopy(self._spans),
                         }

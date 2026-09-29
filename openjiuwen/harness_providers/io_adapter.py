@@ -460,14 +460,20 @@ class HarnessIOAdapter:
                 },
             )
         if item.kind is ItemEventKind.COMPLETED:
+            payload = {
+                "tool_name": data.get("tool_name") or data.get("name") or "unknown",
+                "result": data.get("result"),
+                "tool_call_id": item_id or "",
+            }
+            # Independent model-facing text next to the structured ``result``;
+            # providers that do not render tool results simply omit it.
+            rendered_result = data.get("rendered_result")
+            if isinstance(rendered_result, str):
+                payload["rendered_result"] = rendered_result
             return OutputSchema(
                 type="tool_result",
                 index=self._next_output_index(),
-                payload={
-                    "tool_name": data.get("tool_name") or data.get("name") or "unknown",
-                    "result": data.get("result"),
-                    "tool_call_id": item_id or "",
-                },
+                payload=payload,
             )
         return None
 

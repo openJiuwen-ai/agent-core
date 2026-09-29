@@ -6,7 +6,7 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/agent_teams/interaction/`、`openjiuwen/agent_teams/constants.py`、`openjiuwen/agent_teams/runtime/manager.py`（`_dispatch_payload`）、`openjiuwen/agent_teams/agent/coordination/handlers/message.py`（HITT inbound 钩子）|
-| 最近一次修订日期 | 2026-07-14 |
+| 最近一次修订日期 | 2026-09-16 |
 | 关联 feature | F_13_human-agent-send-message.md |
 
 ## 范围 / 边界
@@ -95,7 +95,7 @@ class DeliverResult:
     ok: bool
     message_id: Optional[str] = None
     reason: Optional[str] = None
-    output: Optional[str] = None       # F_111: 透传工具执行的 map_result 文本
+    output: Optional[str] = None       # F_111: 透传工具执行的 render_for_llm 文本
     data: Optional[dict] = None        # F_111: 透传工具执行的 ToolOutput.data
 
     @classmethod

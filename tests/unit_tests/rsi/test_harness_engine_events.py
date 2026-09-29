@@ -112,6 +112,28 @@ def test_epoch_node_does_not_reuse_score_for_a_different_harness() -> None:
     assert event.node.extra["artifact_path"] == "filtered.yaml"
 
 
+def test_skipped_epoch_node_has_no_fresh_score_and_exposes_skip_reason() -> None:
+    event = epoch_node_event(
+        {"source_harness_refs_path": "h0.yaml", "epoch_checkpoints": []},
+        {
+            "epoch": 1,
+            "status": "unchanged",
+            "promotion_applied": False,
+            "promotion_reason": "no_provisional_harness_change",
+            "full_evaluation_skipped_reason": "no_retained_harness_change",
+            "before_harness_refs_path": "h0.yaml",
+            "selected_harness_refs_path": "h0.yaml",
+            "harness_refs_path": "h0.yaml",
+            "score": 0.8,
+        },
+    )
+
+    assert event.node.adopted is False
+    assert event.node.score is None
+    assert event.node.reason == "no_retained_harness_change"
+    assert event.node.extra["full_evaluation_skipped_reason"] == "no_retained_harness_change"
+
+
 def test_rejected_and_unchanged_epochs_do_not_become_h0_parents() -> None:
     state = {"source_harness_refs_path": "h0.yaml", "baseline_score": 0.6, "epoch_checkpoints": []}
     for epoch, status in enumerate(("rejected", "verified", "rejected"), 1):

@@ -155,8 +155,14 @@ def test_cache_hit_is_not_reappended_to_wal(tmp_path):
     assert len(wal.read_text(encoding="utf-8").splitlines()) == 1
 
 
-def test_finalize_deletes_wal_once_durable(tmp_path):
-    """Terminal finalize() writes the journal then drops the WAL (work is durable)."""
+def test_finalize_keeps_wal_forever(tmp_path):
+    """Terminal finalize() writes the journal and NEVER deletes the WAL.
+
+    The WAL is an append-only log: like any log it ages out (whole-tree
+    delete_team sweep / future rolling policy), never a per-run unlink. A
+    finalize deleting it would also clobber a concurrent sibling run's
+    records sharing the legacy sidecar file.
+    """
     journal = tmp_path / "journal.jsonl"
     wal = tmp_path / "journal.jsonl.wal"
 
@@ -169,11 +175,12 @@ def test_finalize_deletes_wal_once_durable(tmp_path):
     asyncio.run(_run())
     assert journal.exists()
     assert len(_keys_in_file(journal)) == 2
-    assert not wal.exists()  # deleted after verifying used ⊆ saved journal
+    assert wal.exists()  # WAL survives finalize — it is a log, not a temp file
+    assert len(wal.read_text(encoding="utf-8").splitlines()) == 2
 
 
 def test_save_keeps_wal_for_checkpoint(tmp_path):
-    """save() is a pure write: it never deletes the WAL (only finalize() does)."""
+    """save() is a pure write: it never deletes the WAL (nothing does)."""
     journal = tmp_path / "journal.jsonl"
     wal = tmp_path / "journal.jsonl.wal"
 
@@ -212,26 +219,41 @@ def test_load_tolerates_torn_wal_line(tmp_path):
 
     j = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
     assert set(j.prior.keys()) == {key_str([["call", 0]])}  # good line kept, torn line skipped
+    # The WAL is left byte-identical: load never rewrites the log (no compaction).
+    assert wal.read_text(encoding="utf-8") == good + "\n" + '{"key": "[[\\"call\\", 1]]", "sig": "s", "resu'
 
 
-def test_finalize_keeps_wal_if_saved_journal_missing_a_used_record(tmp_path):
-    """If the saved journal does not reflect a used record, the WAL is kept as a net."""
+def test_load_leaves_wal_untouched_with_sealed_runs(tmp_path):
+    """Sealed-run call records in the WAL are kept — the WAL is never compacted.
+
+    Compaction (dropping sealed runs' call records on load) was removed: a
+    shared-file rewrite races a concurrent sibling run's appends, and the
+    per-run_id WAL split makes cross-run dead records impossible anyway — each
+    run's WAL only ever holds its own records.
+    """
     journal = tmp_path / "journal.jsonl"
     wal = tmp_path / "journal.jsonl.wal"
 
-    async def _run():
+    async def _build():
         j = await Journal.load(str(journal), wal_path=str(wal))
-        r = _rec([["call", 0]])
-        await j.use(r["key"], r)  # appends to the WAL
-        assert wal.exists()
-        # Simulate a corrupt / partial journal write: file exists but is missing
-        # the used record. The WAL must be kept as the safety net.
-        partial = tmp_path / "partial.jsonl"
-        partial.write_text("", encoding="utf-8")
-        await j._discard_wal_if_durable(str(partial))
+        await _use_all(j, [[["call", 0]]], run_id="run-A")  # run-A computes one call
+        await j.write_run_record("run-A", "seal", {"terminal_status": "completed"})
+        # run-B paused mid-run: its records must survive too
+        await _use_all(j, [[["call", 1]]], run_id="run-B")
+        await j.write_run_record("run-B", "pause", {"pause_reason": "paused"})
+        # No save/finalize — everything lives in the WAL only.
 
-    asyncio.run(_run())
-    assert wal.exists()
+    asyncio.run(_build())
+    before = wal.read_text(encoding="utf-8")
+
+    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
+    assert wal.read_text(encoding="utf-8") == before  # byte-identical: no rewrite
+    assert loaded.find_run_record("run-A", "seal") is not None
+    assert loaded.find_run_record("run-B", "pause") is not None
+    # Sealed records stay unusable as cross-run hits (run_id isolation), and
+    # unsealed ones still recover for their own run's resume.
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-new") is None
+    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-B") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -372,71 +394,163 @@ def test_seal_record_written_on_terminal():
     assert rec["final_spent"] == 2000
 
 
-def test_load_compacts_sealed_run_records_from_wal(tmp_path):
-    """Load drops WAL call records of sealed runs; unsealed ones survive."""
-    journal = tmp_path / "journal.jsonl"
-    wal = tmp_path / "journal.jsonl.wal"
+# ---------------------------------------------------------------------------
+# per-run journal + WAL isolation (concurrent runs never share files)
+# ---------------------------------------------------------------------------
 
-    async def _build():
-        j = await Journal.load(str(journal), wal_path=str(wal))
-        await _use_all(j, [[["call", 0]]], run_id="run-A")  # run-A computes one call
-        await j.write_run_record("run-A", "seal", {"terminal_status": "completed"})
-        # run-B paused mid-run: its records must survive compaction
-        await _use_all(j, [[["call", 1]]], run_id="run-B")
-        await j.write_run_record("run-B", "pause", {"pause_reason": "paused"})
-        # No save/finalize — everything lives in the WAL only.
+def test_two_journals_on_separate_wal_files_never_interfere(tmp_path):
+    """Two runs with per-run WAL paths append/finalize without clobbering each other.
 
-    asyncio.run(_build())
-    lines_before = len(wal.read_text(encoding="utf-8").splitlines())
+    This is the concurrency-race fix at the unit level: run B's finalize (and
+    any append) touches only ``wal/{run-B}.wal``; run A's WAL file stays whole,
+    so a crash of A after B completed still recovers A's records.
+    """
+    ja = tmp_path / "journal-run-A.jsonl"
+    jb = tmp_path / "journal-run-B.jsonl"
+    wa = tmp_path / "wal" / "run-A.wal"
+    wb = tmp_path / "wal" / "run-B.wal"
+    wa.parent.mkdir(parents=True, exist_ok=True)
+    wb.parent.mkdir(parents=True, exist_ok=True)
 
-    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
-    lines_after = len(wal.read_text(encoding="utf-8").splitlines())
-    # run-A's call record dropped; everything else (seal, pause, run-B call) kept.
-    assert lines_after == lines_before - 1
-    assert loaded.find_run_record("run-A", "seal") is not None
-    assert loaded.find_run_record("run-B", "pause") is not None
-    # Sealed call records are already unusable as hits (run_id mismatch), so
-    # dropping them from prior changes nothing observable for a fresh run.
-    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-new") is None
-    # Unsealed call record still recovers for run-B's cold resume.
-    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-B") is not None
-
-
-def test_load_compaction_keeps_wal_without_seals(tmp_path):
-    """No seal records in prior → WAL is left byte-identical (no rewrite)."""
-    journal = tmp_path / "journal.jsonl"
-    wal = tmp_path / "journal.jsonl.wal"
-
-    async def _build():
-        j = await Journal.load(str(journal), wal_path=str(wal))
-        await _use_all(j, [[["call", 0]]])
-        await j.write_run_record("run-A", "pause", {"pause_reason": "paused"})
-
-    asyncio.run(_build())
-    before = wal.read_text(encoding="utf-8")
-    asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
-    assert wal.read_text(encoding="utf-8") == before
-
-
-def test_load_compaction_tolerates_torn_line_and_empty_result(tmp_path):
-    """A torn line survives compaction; dropping every call record empties the WAL cleanly."""
-    journal = tmp_path / "journal.jsonl"
-    wal = tmp_path / "journal.jsonl.wal"
-
-    async def _build():
-        j = await Journal.load(str(journal), wal_path=str(wal))
+    async def _run_a():
+        j = await Journal.load(str(ja), wal_path=str(wa))
         await _use_all(j, [[["call", 0]]], run_id="run-A")
-        await j.write_run_record("run-A", "seal", {"terminal_status": "stopped"})
 
-    asyncio.run(_build())
-    with open(wal, "a", encoding="utf-8") as f:
-        f.write('{"key": "torn')  # simulate crash mid-append
-    before_lines = [l for l in wal.read_text(encoding="utf-8").splitlines() if l]
+    async def _run_b():
+        j = await Journal.load(str(jb), wal_path=str(wb))
+        await _use_all(j, [[["call", 0]], [["call", 1]]], run_id="run-B")
+        # Run B completes and finalizes while run A is still in flight.
+        await j.finalize(str(jb))
 
-    loaded = asyncio.run(Journal.load(str(journal), wal_path=str(wal)))
-    text = wal.read_text(encoding="utf-8")
-    # The call record is dropped; the seal record and the torn line remain.
-    assert [l for l in text.splitlines() if l] == [before_lines[1], before_lines[-1]]
-    # Seal record still findable after the rewrite.
+    asyncio.run(_run_b())
+    asyncio.run(_run_a())
+
+    # Run A's WAL survived run B's finalize — the crash-durability guarantee
+    # holds under concurrency.
+    assert wa.exists()
+    assert len(wa.read_text(encoding="utf-8").splitlines()) == 1
+    # Run B's journal snapshot exists; its WAL also survives (never deleted).
+    assert jb.exists()
+    assert len(_keys_in_file(jb)) == 2
+    assert wb.exists()
+    # Run A's records recover from its own WAL alone.
+    rec_a = asyncio.run(Journal.load(str(ja), wal_path=str(wa)))
+    assert rec_a.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    assert rec_a.get_cached(key_str([["call", 1]]), "s", "run-A") is None
+
+
+
+# ---------------------------------------------------------------------------
+# legacy shared-journal read-side back-compat (pre-per-run sessions)
+# ---------------------------------------------------------------------------
+
+def test_load_seeds_prior_from_legacy_shared_files(tmp_path):
+    """A per-run resume still replays records from the pre-split shared journal.
+
+    Sessions created before the per-run split kept everything in one shared
+    ``journal.jsonl`` (+ ``.wal`` sidecar). The upgraded run reads those as a
+    seed under the per-run sources: same-key conflicts resolve per-run-first,
+    and records of a *different* run_id load into prior but naturally miss
+    get_cached's triple check.
+    """
+    legacy_journal = tmp_path / "journal.jsonl"
+    legacy_wal = tmp_path / "journal.jsonl.wal"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed():
+        # Legacy shared files: run-A records + a foreign run-B record + a seal
+        # for run-A (old layout also kept seal records in the shared WAL).
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]], [["call", 1]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        lw = Journal(wal_path=str(legacy_wal))
+        await _use_all(lw, [[["call", 2]]], run_id="run-B")
+        await lw.write_run_record("run-A", "seal", {"terminal_status": "completed"})
+
+    asyncio.run(_seed())
+    assert not run_journal.exists() and not run_wal.exists()
+
+    loaded = asyncio.run(
+        Journal.load(
+            str(run_journal),
+            wal_path=str(run_wal),
+            legacy_path=str(legacy_journal),
+        )
+    )
+    # run-A call records from the legacy shared journal are replayable.
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    assert loaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None
+    # The legacy WAL sidecar seeds too — the foreign run-B record is visible
+    # to its own run_id but never serves a run-A query (triple check).
+    assert loaded.get_cached(key_str([["call", 2]]), "s", "run-B") is not None
+    assert loaded.get_cached(key_str([["call", 2]]), "s", "run-A") is None
+    # The seal of run-A is found through the legacy path (seal-guard back-compat).
     assert loaded.find_run_record("run-A", "seal") is not None
 
+
+def test_load_per_run_sources_win_over_legacy_on_key_conflict(tmp_path):
+    """Per-run journal/WAL records overlay the legacy seed on key conflicts."""
+    legacy_journal = tmp_path / "journal.jsonl"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed():
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        # The per-run snapshot exists with a NEWER sig for the same key.
+        rj = Journal(wal_path=None)
+        await _use_all(rj, [[["call", 0]]], run_id="run-A")
+        await rj.save(str(run_journal))
+
+    asyncio.run(_seed())
+
+    loaded = asyncio.run(
+        Journal.load(
+            str(run_journal),
+            wal_path=str(run_wal),
+            legacy_path=str(legacy_journal),
+        )
+    )
+    assert loaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    # legacy-only file is never written by the per-run journal (frozen read-only).
+    assert legacy_journal.read_text(encoding="utf-8").count('"key"') == 1
+
+
+def test_new_records_go_to_per_run_wal_not_legacy(tmp_path):
+    """After a legacy-seeded load, fresh records append to the per-run WAL only."""
+    legacy_journal = tmp_path / "journal.jsonl"
+    legacy_wal = tmp_path / "journal.jsonl.wal"
+    run_journal = tmp_path / "journal-run-A.jsonl"
+    run_wal = tmp_path / "wal" / "run-A.wal"
+    run_wal.parent.mkdir(parents=True)
+
+    async def _seed_and_extend():
+        jl = Journal(wal_path=None)
+        await _use_all(jl, [[["call", 0]]], run_id="run-A")
+        await jl.save(str(legacy_journal))
+        j = await Journal.load(
+            str(run_journal), wal_path=str(run_wal), legacy_path=str(legacy_journal)
+        )
+        assert j.get_cached(key_str([["call", 0]]), "s", "run-A") is not None  # HIT
+        await _use_all(j, [[["call", 1]]], run_id="run-A")  # fresh record
+        await j.save(str(run_journal))
+
+    asyncio.run(_seed_and_extend())
+
+    # New record went to the per-run WAL; the legacy files are byte-frozen.
+    assert not legacy_wal.exists()
+    assert _keys_in_file(run_wal) == [key_str([["call", 1]])]
+    # The per-run snapshot carries the fresh call (hit records enter it only
+    # via journal.use, which is agent()'s job — this test drives the journal
+    # layer directly, so only the explicitly used record is snapshotted).
+    assert _keys_in_file(run_journal) == [key_str([["call", 1]])]
+    # And the next load (with legacy seed) still resolves both.
+    reloaded = asyncio.run(
+        Journal.load(str(run_journal), wal_path=str(run_wal), legacy_path=str(legacy_journal))
+    )
+    assert reloaded.get_cached(key_str([["call", 0]]), "s", "run-A") is not None
+    assert reloaded.get_cached(key_str([["call", 1]]), "s", "run-A") is not None

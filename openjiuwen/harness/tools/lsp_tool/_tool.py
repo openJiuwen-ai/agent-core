@@ -71,6 +71,12 @@ class LspTool(Tool):
             },
         )
 
+    def render_for_llm(self, output: ToolOutput) -> str:
+        """Render the formatted LSP result text."""
+        if not output.success:
+            return super().render_for_llm(output)
+        return output.data["result"] or "No results found."
+
     async def stream(self, inputs: Dict[str, Any], **kwargs) -> None:
         """Streaming not supported for LSP operations."""
         return  # pylint: disable=return-in-async-function

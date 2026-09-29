@@ -6,7 +6,7 @@
 ``server.py`` builds a low-level ``mcp.server.lowlevel.Server`` whose tool set
 is chosen from the join descriptor's ``scope``: a ``member`` exposes the real
 teammate ``TeamTool`` instances (view_task / claim_task / send_message — same
-schema + ``map_result()`` text as a native teammate) with empty instructions
+schema + ``render_for_llm()`` text as a native teammate) with empty instructions
 (inbound messages are pushed by the parent process's coordination layer, so
 no pull tool); an ``operator`` exposes the broad team-control set (including
 the operator-only ``read_inbox``) + workflow instructions. An MCP-capable

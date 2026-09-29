@@ -2357,3 +2357,11 @@ async def test_run_agent_team_base_true_resolves_team_id_via_resource_mgr(isolat
         assert result["resolved"] is True
     finally:
         await Runner.resource_mgr.remove_agent_team(team_id=team.card.id)
+
+
+@pytest.fixture(autouse=True)
+def mock_group_history_cleanup(monkeypatch):
+    # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+    )

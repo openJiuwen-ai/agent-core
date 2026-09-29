@@ -852,6 +852,22 @@ class AgentRail(ABC):
 
     priority: int = 50
 
+    def callback_priority(self, event: AgentCallbackEvent) -> int:
+        """Return where this rail's callback for ``event`` runs in its chain.
+
+        ``priority`` for every hook unless a rail needs one hook elsewhere --
+        a reader of what the other callbacks of that hook produced runs after
+        them without also initialising after them.
+
+        Args:
+            event: The event whose callback is being registered.
+
+        Returns:
+            The callback priority; higher runs first.
+        """
+        del event
+        return self.priority
+
     def init(self, agent):
         pass
 

@@ -345,7 +345,7 @@ async def test_scheduled_create_task_lands_assignee_atomically(db):
     assert t2.status == TaskStatus.BLOCKED.value
     assert t2.assignee == DEV_2
 
-    text = create_task.map_result(result)
+    text = create_task.render_for_llm(result)
     assert DEV_1 in text and DEV_2 in text
     assert "blocked" in text
 
@@ -456,7 +456,7 @@ async def test_autonomous_create_task_can_preassign_existing_non_leader(db):
     task = await backend.task_manager.get("a2")
     assert task.status == TaskStatus.PENDING.value
     assert task.assignee == DEV_1
-    assert create_task.map_result(result).endswith(f"-> {DEV_1}")
+    assert create_task.render_for_llm(result).endswith(f"-> {DEV_1}")
 
 
 @pytest.mark.asyncio
@@ -1035,7 +1035,7 @@ async def test_build_team_reports_the_effective_verification_flag(db):
     assert result.success is True
     assert result.data["enable_task_verification"] is False
     assert backend.task_verification_enabled() is False
-    assert "task_verification=False" in build.map_result(result)
+    assert "task_verification=False" in build.render_for_llm(result)
 
 
 @pytest.mark.asyncio
@@ -1056,7 +1056,7 @@ async def test_build_team_reports_the_ceiling_narrowing_the_leader_choice(db):
 
     assert result.success is True
     assert result.data["enable_task_verification"] is False
-    assert "task_verification=False" in build.map_result(result)
+    assert "task_verification=False" in build.render_for_llm(result)
 
 
 @pytest.mark.asyncio

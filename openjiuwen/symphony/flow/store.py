@@ -22,7 +22,7 @@ RECIPES_DIRNAME = "recipes"
 PACKAGES_DIRNAME = "packages"
 CURRENT_FILENAME = "current.json"
 CURRENT_STATE_FILENAME = "current_state.json"
-ACKNOWLEDGEMENTS_FILENAME = "candidate_acknowledgements.json"
+ACKNOWLEDGEMENTS_FILENAME = "candidate_completion_acknowledgements.json"
 DISTILLATION_STATE_FILENAME = "distillation_state.json"
 REVIEWS_DIRNAME = "reviews"
 
@@ -264,7 +264,7 @@ class FlowStore:
         return self.root / ACKNOWLEDGEMENTS_FILENAME
 
     def acknowledge_candidate(self, recipe_id: str, version: int) -> bool:
-        """Persist a recipe_id+version delivery acknowledgement."""
+        """Persist a recipe_id+version completion acknowledgement."""
 
         try:
             _validate_identifier(recipe_id, _RECIPE_ID_PATTERN, "recipe_id")
@@ -283,6 +283,29 @@ class FlowStore:
             if key in keys:
                 return False
             keys.add(key)
+            _atomic_write_json(path, sorted(keys))
+            return True
+
+    def release_candidate(self, recipe_id: str, version: int) -> bool:
+        """Remove a persisted acknowledgement so the candidate can be offered again."""
+
+        try:
+            _validate_identifier(recipe_id, _RECIPE_ID_PATTERN, "recipe_id")
+        except ValueError:
+            return False
+        if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+            return False
+        key = f"{recipe_id}:v{version}"
+        with self._lock:
+            path = self.candidate_acknowledgements_path()
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return False
+            keys = {str(item) for item in value} if isinstance(value, list) else set()
+            if key not in keys:
+                return False
+            keys.remove(key)
             _atomic_write_json(path, sorted(keys))
             return True
 

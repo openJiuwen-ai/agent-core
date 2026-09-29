@@ -68,7 +68,7 @@ def test_context_matches_plugin_manifest_prompt_and_resource_declarations(tmp_pa
         "package_type": "plugin",
         "id": "evaluated",
         "prompt_sections": [{"file": "prompt_sections/check.md"}],
-        "skills": [{"dir": "skills"}],
+        "skills": [{"dir": "skills/trace_owner"}],
         "tools": [{"file": "tools/check.py", "class": "CheckTool"}],
         "rails": [{"file": "rails/check.py", "class": "CheckRail"}],
     }

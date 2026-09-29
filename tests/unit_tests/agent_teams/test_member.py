@@ -425,6 +425,27 @@ class TestStatusTransitionsComplex:
 
         assert await team_member.execution_status() == ExecutionStatus.IDLE
 
+    @pytest.mark.asyncio
+    @pytest.mark.level1
+    async def test_restart_resets_execution_status_to_idle(self, team_member):
+        """Restarting a member forces execution_status back to IDLE so the new lifecycle can start cleanly (issue #4318)."""
+        # Simulate a previously aborted execution
+        assert await team_member.update_execution_status(ExecutionStatus.STARTING)
+        assert await team_member.update_execution_status(ExecutionStatus.RUNNING)
+
+        # Recovery/restart resets execution status to IDLE
+        assert await team_member.db.member.reset_member_execution_status(
+            team_member.member_name,
+            team_member.team_name,
+            ExecutionStatus.IDLE.value,
+        )
+        assert await team_member.execution_status() == ExecutionStatus.IDLE
+
+        # A fresh spawn can now proceed IDLE -> STARTING -> RUNNING without
+        # ever seeing the illegal RUNNING -> STARTING transition.
+        assert await team_member.update_execution_status(ExecutionStatus.STARTING)
+        assert await team_member.update_execution_status(ExecutionStatus.RUNNING)
+
 
 @pytest.mark.asyncio
 @pytest.mark.level1

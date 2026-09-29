@@ -357,3 +357,11 @@ class TestDeleteTeamFilesystemCleanup:
             assert not apaths.team_home("teamA").is_dir(), "team home must be removed"
         finally:
             apaths.reset_openjiuwen_home()
+
+
+@pytest.fixture(autouse=True)
+def mock_group_history_cleanup(monkeypatch):
+    # Archive cleanup has its own scope tests; lifecycle tests use fake storage.
+    monkeypatch.setattr(
+        "openjiuwen.agent_teams.tools.group_conversation.GroupConversationLog.delete_registered", lambda *a: None,
+    )

@@ -169,12 +169,18 @@ async def test_cmd_error_action_silently_continue(sys_op, tmp_path):
     assert cmd.startswith("$ErrorActionPreference='SilentlyContinue'")
 
 
-# ── routing / error tests (mock shutil.which → no rg on NT) ─────────────────
+# ── routing / error tests (mock rg lookup → no rg on NT) ────────────────────
+# Patch the resolver GrepTool calls rather than ``shutil.which``: the PATH lookup
+# is lru-cached, so on a host with rg installed an earlier test may have cached
+# the real binary and the ``nt`` branch would never be reached.
+
+_NO_RG = "openjiuwen.harness.tools.filesystem.resolve_rg_binary"
+
 
 @pytest.mark.asyncio
 async def test_type_filter_returns_error_without_rg(sys_op, tmp_path):
     tool = GrepTool(sys_op)
-    with mock.patch("shutil.which", return_value=None), \
+    with mock.patch(_NO_RG, return_value=None), \
          mock.patch.object(os, "name", "nt"):
         result = await tool.invoke({"pattern": "x", "path": str(tmp_path), "type": "py"})
     assert result.success is False
@@ -184,7 +190,7 @@ async def test_type_filter_returns_error_without_rg(sys_op, tmp_path):
 @pytest.mark.asyncio
 async def test_multiline_returns_error_without_rg(sys_op, tmp_path):
     tool = GrepTool(sys_op)
-    with mock.patch("shutil.which", return_value=None), \
+    with mock.patch(_NO_RG, return_value=None), \
          mock.patch.object(os, "name", "nt"):
         result = await tool.invoke({"pattern": "x", "path": str(tmp_path), "multiline": True})
     assert result.success is False

@@ -30,6 +30,7 @@ import pytest_asyncio
 
 from openjiuwen.agent_teams.agent.coordination.handlers.message import MessageHandler
 from openjiuwen.agent_teams.context import reset_session_id, set_session_id
+from openjiuwen.agent_teams.external.cli_agent import backends
 from openjiuwen.agent_teams.messager import Messager
 from openjiuwen.agent_teams.schema.team import (
     BridgeMailboxInjectMode,
@@ -48,7 +49,10 @@ _TEAM = "ext_cli_probe_team"
 
 
 @pytest_asyncio.fixture
-async def backend():
+async def backend(monkeypatch: pytest.MonkeyPatch):
+    # Registration probes the optional Claude SDK; these tests only cover the
+    # DB role lookup, so they must not depend on the SDK being installed.
+    monkeypatch.setattr(backends, "missing_sdk_requirement", lambda name: None)
     token = set_session_id("ext_cli_probe_session")
     db = TeamDatabase(
         DatabaseConfig(db_type=DatabaseType.SQLITE, connection_string=":memory:")

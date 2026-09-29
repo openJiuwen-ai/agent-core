@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from openjiuwen.core.common.constants.constant import INTERACTION
 from openjiuwen.core.session.interaction.interactive_input import InteractiveInput
 from openjiuwen.core.session.stream.base import OutputSchema
+from openjiuwen.core.single_agent.ability_manager import resolve_tool_result_text
 from openjiuwen.core.single_agent.prompts.builder import PromptSection
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext, AgentRail, ToolCallInputs
 from openjiuwen.harness.deep_agent import DeepAgent
@@ -102,15 +103,21 @@ class _ObservationRail(AgentRail):
         inputs = ctx.inputs
         if session is None or not isinstance(inputs, ToolCallInputs):
             return
+        payload: dict[str, Any] = {
+            "tool_call_id": _tool_call_id(inputs),
+            "tool_name": inputs.tool_name,
+            "tool_result": to_json_safe(inputs.tool_result),
+        }
+        # ``tool_result`` keeps the structured value; ``rendered_result`` is the
+        # separate model-facing text, so structure parsers stay unaffected.
+        rendered_result = resolve_tool_result_text(inputs, ctx.exception)
+        if rendered_result is not None:
+            payload["rendered_result"] = rendered_result
         await session.write_stream(
             OutputSchema(
                 type=_TOOL_RESULT_CHUNK,
                 index=0,
-                payload={
-                    "tool_call_id": _tool_call_id(inputs),
-                    "tool_name": inputs.tool_name,
-                    "tool_result": to_json_safe(inputs.tool_result),
-                },
+                payload=payload,
             )
         )
 
@@ -359,6 +366,12 @@ class DeepAgentHarness(SerializedTurnHarness):
             call_id = str(payload.get("tool_call_id") or uuid.uuid4().hex)
             name = str(payload.get("tool_name") or "unknown")
             result = to_json_safe(payload.get("tool_result"))
+            rendered_result = payload.get("rendered_result")
+            block_data: dict[str, Any] = {"call_id": call_id}
+            item_data: dict[str, Any] = {"tool_name": name, "result": result}
+            if isinstance(rendered_result, str):
+                block_data["rendered_result"] = rendered_result
+                item_data["rendered_result"] = rendered_result
             state.tool_messages.append(
                 TurnMessage(
                     message_id=f"{turn.turn_id}:tool-result:{call_id}",
@@ -368,7 +381,7 @@ class DeepAgentHarness(SerializedTurnHarness):
                             block_id=f"{turn.turn_id}:tool-result:{call_id}",
                             kind="tool_result",
                             content=freeze_json_value(result),
-                            data={"call_id": call_id},
+                            data=block_data,
                         ),
                     ),
                 )
@@ -377,7 +390,7 @@ class DeepAgentHarness(SerializedTurnHarness):
                 ItemLifecycleEvent(
                     kind=ItemEventKind.COMPLETED,
                     item_type="tool",
-                    data=freeze_json_object({"tool_name": name, "result": result}),
+                    data=freeze_json_object(item_data),
                 ),
                 turn=turn,
                 item_id=call_id,
@@ -467,8 +480,8 @@ class DeepAgentHarness(SerializedTurnHarness):
             **common,
         )
 
-    async def _steer(self, turn: PendingTurn, content: HarnessInput) -> None:
-        _ = turn
+    async def _steer(self, turn: PendingTurn, content: HarnessInput, *, message_id: str) -> None:
+        _ = turn, message_id
         agent = self._agent
         if agent is None:
             raise HarnessProtocolError("DeepAgent disappeared during an active cycle")

@@ -16,6 +16,7 @@ import pytest
 from openjiuwen.harness_protocol import (
     DeliveryMode,
     DiagnosticEvent,
+    HarnessCapability,
     HarnessContext,
     HarnessEvent,
     HarnessInput,
@@ -27,6 +28,7 @@ from openjiuwen.harness_protocol import (
     ItemLifecycleEvent,
     McpServerConfig,
     McpTransport,
+    ModelSelection,
     OutputEvent,
     OutputOperation,
     ProviderEvent,
@@ -50,7 +52,9 @@ from openjiuwen.harness_providers.codex.failure_classifier import (
 from openjiuwen.harness_providers.codex.harness import USER_INPUT_METHOD, _answers_from_response
 from openjiuwen.harness_providers.codex.options import (
     USER_INPUT_FEATURE_OVERRIDE,
+    build_thread_options,
     codex_mcp_config_overrides,
+    codex_mcp_tool_naming,
     codex_model_config_overrides,
 )
 from tests.test_logger import logger
@@ -74,6 +78,11 @@ class _FakeSdkState:
         # SDK handle exists (the STARTED-to-turn/start window).
         self.turn_gate = asyncio.Event()
         self.turn_gate.set()
+        self.turn_overrides: list[dict[str, str | None]] = []
+        self.model_list: Any = SimpleNamespace(data=[])
+        # What ``config/read`` reports as the CLI's own developer instructions,
+        # which the host prompt is appended to.
+        self.developer_instructions: str | None = None
 
 
 class _FakeHandle:
@@ -121,7 +130,8 @@ class _FakeThread:
         self.model = model
         self.handles: list[_FakeHandle] = []
 
-    async def turn(self, prompt: str) -> _FakeHandle:
+    async def turn(self, prompt: str, *, model: str | None = None, effort: str | None = None) -> _FakeHandle:
+        self.state.turn_overrides.append({"model": model, "effort": effort})
         await self.state.turn_gate.wait()
         handle = _FakeHandle(self.state, self.id, prompt)
         self.handles.append(handle)
@@ -134,8 +144,20 @@ class _FakeCodex:
         self.state = state
         self.config = config
         self.closed = False
-        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None))
+        self.requests: list[tuple[str, Any]] = []
+        self._client = SimpleNamespace(_sync=SimpleNamespace(_approval_handler=None), request=self._request)
         state.clients.append(self)
+
+    async def _ensure_initialized(self) -> None:
+        return None
+
+    async def _request(self, method: str, params: Any, **_kwargs: Any) -> Any:
+        """Answer the App Server calls the harness makes outside a turn."""
+        self.requests.append((method, params))
+        if method == "config/read":
+            instructions = self.state.developer_instructions
+            return SimpleNamespace(config=SimpleNamespace(developer_instructions=instructions))
+        raise AssertionError(f"unexpected app-server request {method!r}")
 
     async def thread_start(self, **options: Any) -> _FakeThread:
         self.state.thread_calls.append(("start", options))
@@ -145,6 +167,10 @@ class _FakeCodex:
         self.state.thread_calls.append(("resume", options))
         return _FakeThread(self.state, thread_id, model=_thread_model(options))
         return _FakeThread(self.state, thread_id)
+
+    async def models(self, *, include_hidden: bool = False) -> Any:
+        _ = include_hidden
+        return self.state.model_list
 
     async def close(self) -> None:
         self.closed = True
@@ -163,6 +189,7 @@ def _install_fake_sdk(monkeypatch: pytest.MonkeyPatch) -> tuple[ModuleType, _Fak
         def __init__(self, config: Any = None) -> None:
             super().__init__(state, config)
 
+    sdk.generated = SimpleNamespace(v2_all=SimpleNamespace(ConfigReadResponse=object))
     sdk.CodexConfig = CodexConfig
     sdk.AsyncCodex = AsyncCodex
     sdk.ApprovalMode = SimpleNamespace(deny_all="deny_all", auto_review="auto_review")
@@ -288,7 +315,11 @@ async def test_full_turn_maps_notifications_to_protocol_events(monkeypatch: pyte
     assert harness.provider_session_id == "thread-1"
     kind, options = state.thread_calls[0]
     assert kind == "start"
-    assert options["developer_instructions"] == "You are a coder."
+    # The host prompt names the team's tools by their bare names, so the
+    # namespace the CLI puts them in is stated ahead of it.
+    assert options["developer_instructions"].startswith('<mcp-tools>\n<server name="team"')
+    assert 'tool-name="mcp__team.{tool}"' in options["developer_instructions"]
+    assert options["developer_instructions"].endswith("You are a coder.")
     assert options["approval_mode"] == "deny_all"
     codex_config = state.configs[0].kwargs
     assert codex_config["env"]["OPENJIUWEN_CODEX_API_KEY"] == "k"
@@ -713,6 +744,20 @@ async def test_append_developer_instructions_reads_effective_config():
 
 
 @pytest.mark.asyncio
+async def test_the_host_prompt_is_appended_to_the_cli_instructions_by_default(monkeypatch):
+    # Appending is the default: a member adds to what the CLI was configured
+    # with instead of dropping it, the way Claude Code's preset append does.
+    sdk, state = _install_fake_sdk(monkeypatch)
+    state.developer_instructions = "CLI rules"
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context(system_prompt="Team rules"))
+    _kind, options = state.thread_calls[0]
+    assert options["developer_instructions"] == "CLI rules\n\nTeam rules"
+    assert ("config/read", {"cwd": None, "includeLayers": False}) in state.clients[0].requests
+    await harness.stop()
+
+
+@pytest.mark.asyncio
 async def test_append_read_failure_closes_codex_client(monkeypatch):
     from unittest.mock import AsyncMock
     sdk, state = _install_fake_sdk(monkeypatch)
@@ -911,3 +956,133 @@ async def test_generic_final_error_does_not_replace_retrying_auth_failure(
     assert harness.fallback_activated
     assert [call[0] for call in state.thread_calls] == ["start", "resume"]
     await harness.stop()
+
+
+class _Effort(Enum):
+    low = "low"
+    medium = "medium"
+    high = "high"
+
+
+def _codex_catalog() -> Any:
+    def effort(value: _Effort) -> Any:
+        return SimpleNamespace(reasoning_effort=value, description=value.value)
+
+    return SimpleNamespace(
+        data=[
+            SimpleNamespace(
+                id="gpt-5.6-sol", display_name="Sol", description="default", hidden=False, is_default=True,
+                default_reasoning_effort=_Effort.low,
+                supported_reasoning_efforts=[effort(_Effort.low), effort(_Effort.high)],
+            ),
+            SimpleNamespace(
+                id="gpt-5.5", display_name="5.5", description="", hidden=False, is_default=False,
+                default_reasoning_effort=_Effort.medium, supported_reasoning_efforts=[effort(_Effort.medium)],
+            ),
+            SimpleNamespace(
+                id="internal", display_name="", description="", hidden=True, is_default=False,
+                default_reasoning_effort=_Effort.low, supported_reasoning_efforts=[],
+            ),
+        ]
+    )
+
+
+async def _next_model_changed(cursor: Any, model: str) -> ProviderEvent:
+    """Skip earlier announcements (session activation) up to the one naming ``model``."""
+    while True:
+        envelope = await asyncio.wait_for(anext(cursor), timeout=2)
+        payload = envelope.event
+        if not isinstance(payload, ProviderEvent) or payload.event_type != "session/model_changed":
+            continue
+        if payload.payload.get("model") == model:
+            return payload
+
+
+def test_builtin_model_keeps_the_reviewer_and_effort_reaches_thread_config() -> None:
+    sdk = SimpleNamespace(
+        ApprovalMode=SimpleNamespace(deny_all="deny_all"),
+        Sandbox=SimpleNamespace(full_access="full_access"),
+    )
+    config = CodexHarnessConfig()
+    builtin = build_thread_options(
+        sdk=sdk, config=config, model=CodexModelConfig(model="gpt-5.5", effort="high"), cwd=None, system_prompt=""
+    )
+    assert builtin["model"] == "gpt-5.5"
+    assert builtin["config"]["model_reasoning_effort"] == "high"
+    assert "approval_mode" not in builtin, "a built-in model stays on the official endpoint"
+    assert codex_model_config_overrides(CodexModelConfig(model="gpt-5.5")) == ()
+
+    external = build_thread_options(
+        sdk=sdk, config=config, model=CodexModelConfig(model="m", provider="jiuwen"), cwd=None, system_prompt=""
+    )
+    assert external["approval_mode"] == "deny_all"
+    assert "model_reasoning_effort" not in external["config"]
+    card = CodexHarnessProvider().card
+    assert card.supports(HarnessCapability.MODEL_SELECTION)
+    assert card.supports(HarnessCapability.MODEL_DISCOVERY)
+
+
+@pytest.mark.asyncio
+async def test_list_models_maps_the_catalog_live_or_probed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    state.model_list = _codex_catalog()
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+
+    probed = await harness.list_models()
+    assert [option.model_id for option in probed] == ["gpt-5.6-sol", "gpt-5.5"], "hidden models are excluded"
+    assert probed[0].is_default and probed[0].efforts == ("low", "high") and probed[0].default_effort == "low"
+    assert probed[1].efforts == ("medium",) and probed[1].default_effort == "medium"
+    assert state.clients[0].closed and state.thread_calls == [], "the probe starts no thread"
+
+    await harness.start(_context())
+    assert await harness.list_models() == probed
+    assert len(state.clients) == 2
+    await harness.stop()
+
+
+@pytest.mark.asyncio
+async def test_set_model_rides_the_next_turn_and_survives_reconnects(monkeypatch: pytest.MonkeyPatch) -> None:
+    _, state = _install_fake_sdk(monkeypatch)
+    for turn_id in ("turn-one", "turn-two", "turn-three"):
+        state.scripts.append([_turn_completed(turn_id, _Status.completed)])
+    harness = CodexHarness(CodexHarnessConfig(inherit_process_env=False))
+    await harness.start(_context())
+    cursor = harness.events()
+
+    await harness.set_model(ModelSelection(model="gpt-5.5", effort="high"))
+    event = await _next_model_changed(cursor, "gpt-5.5")
+    assert dict(event.payload) == {"model": "gpt-5.5", "effort": "high"}
+    await cursor.aclose()
+
+    first = await harness.send(HarnessInput(content="one"))
+    await _turn(harness, first.turn_id)
+    second = await harness.send(HarnessInput(content="two"))
+    await _turn(harness, second.turn_id)
+    # The App Server keeps a turn override for the following turns, so it
+    # rides only the first turn after the switch.
+    assert state.turn_overrides[:2] == [{"model": "gpt-5.5", "effort": "high"}, {"model": None, "effort": None}]
+
+    await harness._disconnect_client()
+    third = await harness.send(HarnessInput(content="three"))
+    await _turn(harness, third.turn_id)
+    kind, options = state.thread_calls[-1]
+    assert kind == "resume"
+    assert options["model"] == "gpt-5.5"
+    assert options["config"]["model_reasoning_effort"] == "high"
+    await harness.stop()
+
+
+def test_the_tool_name_declared_is_the_one_a_call_states() -> None:
+    # The declaration tells the model what to call a team tool; the observer
+    # reads back what it did call. Both come from the same rule, so a change
+    # to one cannot leave the other behind — and the form is the one a real
+    # rollout records: namespace "mcp__openjiuwen_team", name "send_message".
+    from openjiuwen.harness_providers.codex.observation import _called_tool_name
+
+    server = McpServerConfig(name="openjiuwen-team", transport=McpTransport.STDIO, command=("mcp",))
+    declared = codex_mcp_tool_naming((server,))
+    assert 'tool-name="mcp__openjiuwen_team.{tool}"' in declared
+
+    called = _called_tool_name({"type": "function_call", "name": "send_message", "namespace": "mcp__openjiuwen_team"})
+    assert called == "mcp__openjiuwen_team.send_message"
+    assert called in declared.replace("{tool}", "send_message")

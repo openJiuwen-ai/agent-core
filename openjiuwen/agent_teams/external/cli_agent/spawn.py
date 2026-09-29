@@ -15,12 +15,12 @@ either the configured team messenger or a Gateway WebSocket relay.
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import uuid
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.agent_teams.external.cli_agent import TEAM_MCP_SERVER_NAME
 from openjiuwen.agent_teams.external.cli_agent.adapters import CliAgentAdapter, build_adapter
 from openjiuwen.agent_teams.external.cli_agent.injector import StdinPipeInjector
 from openjiuwen.agent_teams.external.cli_agent.transport.base import StreamReaderLike
@@ -195,7 +195,7 @@ async def build_cli_runtime(
     cli_path: str | None = None,
     codex_bin: str | None = None,
     inject_mcp: bool = True,
-    mcp_server_name: str = "openjiuwen-team",
+    mcp_server_name: str = TEAM_MCP_SERVER_NAME,
     mcp_server_command: tuple[str, ...] = ("openjiuwen-team-mcp",),
     mcp_default_tools_approval_mode: str | None = None,
     codex_bypass_approvals_and_sandbox: bool = True,
@@ -513,10 +513,25 @@ def _member_context(
     )
 
 
+def _is_native_endpoint(config: ExternalCliModelConfig | None) -> bool:
+    """Return whether the member runs on the CLI's own login.
+
+    Only such a member takes the auth fallback: one already on an endpoint
+    (pool allocation or static endpoint config) has nothing to fall back from.
+    A built-in model choice carries neither ``api_base`` nor ``provider``.
+    """
+    return config is None or (config.api_base is None and config.provider is None)
+
+
 def _claude_model(config: ExternalCliModelConfig | None) -> ClaudeModelConfig | None:
     if config is None:
         return None
-    return ClaudeModelConfig(model=config.model, api_base=config.api_base, api_key=config.api_key)
+    return ClaudeModelConfig(
+        model=config.model,
+        api_base=config.api_base,
+        api_key=config.api_key,
+        effort=config.effort,
+    )
 
 
 def _codex_model(config: ExternalCliModelConfig | None) -> CodexModelConfig | None:
@@ -527,6 +542,7 @@ def _codex_model(config: ExternalCliModelConfig | None) -> CodexModelConfig | No
         provider=config.provider,
         api_base=config.api_base,
         api_key=config.api_key,
+        effort=config.effort,
     )
 
 
@@ -574,21 +590,8 @@ async def _build_claude_member_runtime(
         "OPENJIUWEN_TEAM_JOIN" in env,
         ssh_transport is not None,
     )
-    span_bridge = _build_claude_span_bridge(
-        member_name=ctx.member_name or "",
-        member_agent_id=member_agent_id,
-        team_name=descriptor.team_name,
-        session_id=descriptor.session_id,
-        role=ctx.role.value,
-    )
-    settings_env = await _attach_claude_native_otel(
-        span_bridge,
-        env,
-        member_name=ctx.member_name or "",
-        ssh_transport=ssh_transport,
-    )
     fallback_model = None
-    if external_model_config is None and fallback_external_model_config is not None:
+    if _is_native_endpoint(external_model_config) and fallback_external_model_config is not None:
         fallback_model = _claude_model(fallback_external_model_config)
     config = ClaudeCodeHarnessConfig(
         skills=skills,
@@ -597,7 +600,6 @@ async def _build_claude_member_runtime(
         cwd=cwd,
         add_dirs=add_dirs,
         env=env,
-        settings_env=settings_env,
         inherit_process_env=False,
         cli_path=cli_path,
         model=_claude_model(external_model_config),
@@ -624,7 +626,6 @@ async def _build_claude_member_runtime(
         inject_mcp=inject_mcp,
         mcp_server_name=mcp_server_name,
     )
-    runtime.bind_span_bridge(span_bridge)
     runtime.bind_fallback_promotion(promote_fallback_model)
     return runtime
 
@@ -633,110 +634,6 @@ async def _empty_prompt() -> AsyncIterator[dict[str, Any]]:
     """Provide an empty streaming prompt for SDK transport construction."""
     return
     yield {}  # type: ignore[unreachable]
-
-
-_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
-
-
-async def _attach_claude_native_otel(
-    span_bridge: Any,
-    env: dict[str, str],
-    *,
-    member_name: str,
-    ssh_transport: SshTransportConfig | None,
-) -> dict[str, str]:
-    """Point Claude Code's own OTel export at the bridge's loopback receiver.
-
-    Native spans (``claude_code.llm_request`` and the raw API body log events)
-    are what the bridge turns into ``llm.call`` spans. The augmentation is
-    best-effort: a failure to attach only disables it.
-
-    Args:
-        span_bridge: The Claude span bridge, or ``None`` when observability is
-            not initialized.
-        env: Process env for the CLI subprocess, updated in place.
-        member_name: Member the runtime belongs to, for diagnostics.
-        ssh_transport: Set when the CLI runs on a remote host, where a
-            loopback receiver is unreachable.
-
-    Returns:
-        Env that must also win over the CLI's user settings, empty when the
-        native export is not enabled.
-    """
-    if span_bridge is None:
-        return {}
-    if ssh_transport is not None:
-        team_logger.info(
-            "[external-cli] claude native otel disabled for ssh member {}; loopback receiver is local-only",
-            member_name,
-        )
-        return {}
-    try:
-        endpoint = await span_bridge.attach_native_trace()
-    except Exception as exc:  # noqa: BLE001 - observability is optional
-        team_logger.warning("[external-cli] claude native otel disabled for member {}: {}", member_name, exc)
-        return {}
-    if not endpoint:
-        return {}
-    from openjiuwen.agent_teams.observability.shared_otlp import OTEL_RESOURCE_SOURCE_ID
-    from openjiuwen.harness_providers.claudecode.options import claude_otel_env
-
-    team_logger.info(
-        "[external-cli] claude native otel enabled for member {} endpoint={}",
-        member_name,
-        endpoint,
-    )
-    env.update(claude_otel_env(endpoint))
-    # Pin the trace parent explicitly. The SDK injects the ambient OTel context
-    # at connect() time, but member turns run in bare background tasks with no
-    # active span — the CLI would then start its own root trace and the
-    # bridge's trace-id filter would drop every native span.
-    traceparent = span_bridge.native_traceparent()
-    if traceparent:
-        env.setdefault("TRACEPARENT", traceparent)
-    source_id = span_bridge.native_source_id()
-    if not source_id:
-        return {}
-    existing = [
-        item
-        for item in str(env.get(_OTEL_RESOURCE_ATTRIBUTES_ENV) or "").split(",")
-        if item and not item.startswith(f"{OTEL_RESOURCE_SOURCE_ID}=")
-    ]
-    existing.append(f"{OTEL_RESOURCE_SOURCE_ID}={source_id}")
-    resource_attributes = ",".join(existing)
-    env[_OTEL_RESOURCE_ATTRIBUTES_ENV] = resource_attributes
-    # The CLI applies user settings after the process env, so the identity the
-    # receiver filters on has to be injected through --settings as well.
-    return {_OTEL_RESOURCE_ATTRIBUTES_ENV: resource_attributes}
-
-
-def _build_claude_span_bridge(
-    *,
-    member_name: str,
-    member_agent_id: str | None,
-    team_name: str | None,
-    session_id: str | None,
-    role: str | None,
-) -> Any:
-    """Build the optional Claude OTel bridge without a hard OTel dependency."""
-    try:
-        from openjiuwen.agent_teams.observability.setup import is_initialized
-    except ImportError:
-        return None
-    if not is_initialized():
-        return None
-    try:
-        from openjiuwen.agent_teams.observability.claude import ClaudeSpanBridge
-    except ImportError as exc:
-        team_logger.warning("[{}] Claude observability bridge unavailable: {}", member_name, exc)
-        return None
-    return ClaudeSpanBridge.build(
-        member_name=member_name,
-        member_agent_id=member_agent_id,
-        team_name=team_name,
-        session_id=session_id,
-        role=role,
-    )
 
 
 async def _build_codex_member_runtime(
@@ -783,21 +680,8 @@ async def _build_codex_member_runtime(
             StatusCode.AGENT_TEAM_CONFIG_INVALID,
             reason="Codex SDK MCP injection requires a non-empty mcp_server_command",
         )
-    observability = await _start_codex_observability(
-        member_name=member_name,
-        member_agent_id=member_agent_id,
-        team_name=descriptor.team_name,
-        session_id=descriptor.session_id,
-        role=ctx.role.value,
-    )
-    traceparent = observability.traceparent
-    if traceparent:
-        # Codex reads TRACEPARENT when its App Server subprocess starts.
-        env.setdefault("TRACEPARENT", traceparent)
-    for key, value in observability.env.items():
-        env.setdefault(key, value)
     fallback_model = None
-    if external_model_config is None and fallback_external_model_config is not None:
+    if _is_native_endpoint(external_model_config) and fallback_external_model_config is not None:
         fallback_model = _codex_model(fallback_external_model_config)
     config_kwargs: dict[str, Any] = {
         "skills": skills,
@@ -809,7 +693,6 @@ async def _build_codex_member_runtime(
         "codex_bin": codex_bin,
         "model": _codex_model(external_model_config),
         "fallback_model": fallback_model,
-        "config_overrides": observability.config_overrides,
         "bypass_approvals_and_sandbox": bypass_approvals_and_sandbox,
         "mcp_env_passthrough": tuple(MCP_SERVER_ENV_VARS),
         "mcp_default_tools_approval_mode": mcp_default_tools_approval_mode,
@@ -820,12 +703,8 @@ async def _build_codex_member_runtime(
         config_kwargs["turn_idle_timeout_s"] = turn_idle_timeout_s
     if turn_idle_retries is not None:
         config_kwargs["turn_idle_retries"] = turn_idle_retries
-    try:
-        config = CodexHarnessConfig(**config_kwargs)
-    except BaseException:
-        await observability.aclose()
-        raise
-    harness = CodexHarness(config, notification_observer=observability.observer)
+    config = CodexHarnessConfig(**config_kwargs)
+    harness = CodexHarness(config)
     runtime = ExternalHarnessMemberRuntime(
         harness=harness,
         context=_member_context(ctx, descriptor, member_agent_id=member_agent_id, system_prompt=system_prompt, cwd=cwd),
@@ -840,115 +719,8 @@ async def _build_codex_member_runtime(
         runtime.bind_mcp_servers(
             [McpServerConfig(name=mcp_server_name, transport=McpTransport.STDIO, command=mcp_server_command)]
         )
-    runtime.bind_span_bridge(observability.span_bridge)
     runtime.bind_fallback_promotion(promote_fallback_model)
-    runtime.add_teardown_hook(observability.aclose)
     return runtime
-
-
-class _CodexObservability:
-    """Optional OTel augmentation attached to one Codex member."""
-
-    def __init__(self, span_bridge: Any) -> None:
-        self.span_bridge = span_bridge
-        self.observer: Callable[[Any], None] | None = None
-        self.config_overrides: tuple[str, ...] = ()
-        self.env: dict[str, str] = {}
-        self.traceparent: str | None = None
-        self.receiver: Any = None
-        self.rollout_reader: Any = None
-
-    async def aclose(self) -> None:
-        receiver, self.receiver = self.receiver, None
-        reader, self.rollout_reader = self.rollout_reader, None
-        for closer in (receiver, reader):
-            if closer is None:
-                continue
-            try:
-                await closer.aclose()
-            except Exception:
-                team_logger.debug("[external-cli] codex observability teardown failed", exc_info=True)
-
-
-async def _start_codex_observability(
-    *,
-    member_name: str,
-    member_agent_id: str,
-    team_name: str,
-    session_id: str,
-    role: str | None,
-) -> _CodexObservability:
-    """Start the Codex OTel bridge, receiver and rollout reader when enabled.
-
-    Observability augmentation is best-effort: a failure only logs a warning
-    and disables that augmentation; it never blocks member construction.
-    """
-    try:
-        from openjiuwen.agent_teams.observability.setup import is_initialized
-    except ImportError:
-        return _CodexObservability(None)
-    if not is_initialized():
-        return _CodexObservability(None)
-    try:
-        from openjiuwen.agent_teams.observability.codex import (
-            CodexOtelTraceReceiver,
-            CodexRolloutTraceReader,
-            CodexSpanBridge,
-        )
-    except ImportError as exc:
-        team_logger.warning("[{}] Codex observability bridge unavailable: {}", member_name, exc)
-        return _CodexObservability(None)
-    from openjiuwen.agent_teams.external.cli_agent.codex.observer import build_codex_notification_observer
-
-    span_bridge = CodexSpanBridge(
-        member_name=member_name,
-        member_agent_id=member_agent_id,
-        team_name=team_name,
-        session_id=session_id,
-        role=role,
-    )
-    result = _CodexObservability(span_bridge)
-    result.observer = build_codex_notification_observer(span_bridge)
-    result.traceparent = span_bridge.native_traceparent()
-    overrides: list[str] = []
-    try:
-        team_logger.info("[external-cli] starting codex rollout trace reader for member {}", member_name)
-        result.rollout_reader = await CodexRolloutTraceReader.start(span_bridge.record_rollout_event)
-        span_bridge.enable_rollout_trace()
-        team_logger.info("[external-cli] starting codex native otel receiver for member {}", member_name)
-        result.receiver = await CodexOtelTraceReceiver.start(span_bridge.record_native_model_span)
-        if result.receiver is not None:
-            span_bridge.enable_native_model_spans()
-    except Exception as exc:  # noqa: BLE001 - observability is optional
-        team_logger.warning(
-            "[external-cli] codex observability augmentation disabled for member {}: {}",
-            member_name,
-            exc,
-        )
-        await result.aclose()
-        return result
-    if result.rollout_reader is not None:
-        result.env["CODEX_ROLLOUT_TRACE_ROOT"] = str(result.rollout_reader.root)
-    if result.receiver is not None:
-        # Codex uses an OTel batch span processor. Keep its delivery interval
-        # below the turn-finalization grace period so the native sampling
-        # span arrives before the member turn is finalized.
-        result.env["OTEL_BSP_SCHEDULE_DELAY"] = "100"
-        overrides.extend(
-            (
-                'otel.environment="openjiuwen"',
-                "otel.exporter=none",
-                (
-                    "otel.trace_exporter={ otlp-http = { "
-                    f"endpoint = {json.dumps(result.receiver.endpoint)}, "
-                    'protocol = "binary" } }'
-                ),
-                "otel.metrics_exporter=none",
-                "otel.log_user_prompt=false",
-            )
-        )
-    result.config_overrides = tuple(overrides)
-    return result
 
 
 __all__ = ["MemberRuntimeLike", "build_cli_runtime", "descriptor_from_context"]

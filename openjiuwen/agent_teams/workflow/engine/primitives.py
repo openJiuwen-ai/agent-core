@@ -597,11 +597,20 @@ async def agent(
 
     async with gate.acquire():
         rt.spawn_count += 1
-        # ``ks`` (the journal key) rides into backend.run so backend-side per-call
-        # identity (worker member names) is deterministic across replays.
-        call_result = await _attempt_calls(
-            rt, opts, json_schema, model_cls,
-            lambda: rt.backend.run(prompt, opts, json_schema, call_key=ks),
+        # ``ks`` (the journal key) rides into the spec twice: as ``agent_id`` so
+        # the backend can tag live activity events, and as ``call_key`` so
+        # backend-side per-call identity (worker member names) is deterministic
+        # across replays.
+        call_result = await _call_backend(
+            rt,
+            _BackendCallSpec(
+                prompt=prompt,
+                opts=opts,
+                json_schema=json_schema,
+                model=model_cls,
+                agent_id=ks,
+                call_key=ks,
+            ),
         )
 
     if not call_result.succeeded:
@@ -640,6 +649,44 @@ async def agent(
         tokens=call_result.tokens, budget_snapshot=_budget_snapshot(rt.budget),
     )
     return call_result.result
+
+
+@dataclass
+class _BackendCallSpec:
+    """Everything ``_call_backend`` needs to run one single-shot ``agent()`` call.
+
+    Bundles the correlated per-call arguments (prompt / opts / json_schema /
+    model / agent_id / call_key) into one named value instead of a long
+    positional list, mirroring ``_BackendCallResult`` / ``_JournalRecordInput``.
+    """
+
+    prompt: str
+    opts: dict
+    json_schema: dict | None
+    model: Any
+    agent_id: str | None = None
+    # The engine's structural call-path key, forwarded to ``backend.run`` as the
+    # ``call_key`` kwarg so backends derive per-call identity deterministically.
+    call_key: str | None = None
+
+
+async def _call_backend(rt, spec: _BackendCallSpec) -> _BackendCallResult:
+    """Run the single-shot ``agent()`` call (``backend.run``) with retries.
+
+    ``spec.agent_id`` is the deterministic call-path key computed in ``agent()``
+    and used for the started/completed events. It is injected into a *copy* of
+    ``spec.opts`` (never the journaled original) so the backend can tag live
+    activity events with the same id its worker node was created under.
+    ``spec.call_key`` is forwarded verbatim to ``backend.run`` for per-call
+    identity (e.g. worker member names), independent of the opts bag.
+    """
+    opts = spec.opts
+    if spec.agent_id:
+        opts = {**opts, "agent_id": spec.agent_id}
+    return await _attempt_calls(
+        rt, opts, spec.json_schema, spec.model,
+        lambda: rt.backend.run(spec.prompt, opts, spec.json_schema, call_key=spec.call_key),
+    )
 
 
 async def _attempt_calls(rt, opts, json_schema, model, make_call) -> _BackendCallResult:
