@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.permission_engine.models import PermissionLevel
+from openjiuwen.harness.security.permission_engine.toolguard.builtin_rules import shell_builtin_rules_enabled
 from openjiuwen.harness.security.permission_engine.toolguard.command_canonicalize import (
     canonicalize_shell_command_for_permission,
 )
@@ -619,6 +620,8 @@ def evaluate_tiered_policy(
         rules = []
     dict_rules = [r for r in rules if isinstance(r, dict)]
     builtin_rules = [r for r in dict_rules if r.get("layer") == "builtin"]
+    if not shell_builtin_rules_enabled(permission_config):
+        builtin_rules = []
     user_rules = [r for r in dict_rules if r.get("layer") != "builtin"]
     approval_overrides = permission_config.get("approval_overrides") or []
     if not isinstance(approval_overrides, list):
@@ -662,6 +665,22 @@ def evaluate_tiered_policy(
             approval_overrides, tool_name, canon_args, permission_config,
         )
     if override_hits:
+        # Remembered approval may bypass ASK, never a command blacklist.
+        candidates = [tool_args, canon_args]
+        if shell_parse is not None and shell_parse.kind == "simple":
+            candidates.extend(
+                _with_shell_command(tool_args, sub.text)
+                for sub in shell_parse.subcommands if sub.text
+            )
+        for candidate in candidates:
+            denied = _evaluate_param_rules_only(tool_name, candidate, invocation_ctx)
+            if denied is not None and denied[0] == PermissionLevel.DENY:
+                return denied
+        # An opaque shell structure cannot be checked against every blacklist.
+        # Remembered approval must not suppress a fresh confirmation here.
+        override_floor, override_floor_rule = _shell_ast_floor(shell_parse, unknown_structure=True)
+        if override_floor is not None:
+            return override_floor, override_floor_rule or f"{_MR}:shell_ast:unverified"
         contributing = sorted(set(override_hits))
         return PermissionLevel.ALLOW, _APPROVAL_OVERRIDES_PREFIX + ":" + "+".join(contributing)
 

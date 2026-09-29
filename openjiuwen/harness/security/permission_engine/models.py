@@ -133,8 +133,9 @@ class NetGuardSection(TypedDict, total=False):
 
 
 class ShellGuardSection(TypedDict, total=False):
-    """复合命令额外检查。值为布尔：开则抬 ASK。"""
+    """Direct shell command guard; package command rules default to enabled."""
 
+    builtin_rules_enabled: bool
     unknown_structure: bool
     interpreter_sink: bool
 

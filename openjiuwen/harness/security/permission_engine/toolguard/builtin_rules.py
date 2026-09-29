@@ -13,6 +13,7 @@ YAML (command rules, sensitive_paths, net_urls). Missing values default True.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,12 @@ def _package_rules_yaml_path() -> Path:
         if parent.name == "harness":
             return parent / "resources" / "builtin_rules.yaml"
     return here.parent.parent / "resources" / "builtin_rules.yaml"
+
+
+def shell_builtin_rules_enabled(permissions: Mapping[str, Any]) -> bool:
+    """Command-only switch; never changes file or network package policies."""
+    guard = permissions.get("shell_guard")
+    return not isinstance(guard, dict) or guard.get("builtin_rules_enabled") is not False
 
 
 def get_package_builtin_rules_path() -> Path:
@@ -122,14 +129,15 @@ def inline_package_command_rules(
 ) -> dict[str, Any]:
     """Copy package command rules into effective ``rules`` using YAML ``action``."""
     cfg = deepcopy(permissions) if isinstance(permissions, dict) else {}
-    if not package_builtin_rules_enabled(cfg):
-        return cfg
     existing = cfg.get("rules") if isinstance(cfg.get("rules"), list) else []
     user_rules = [
         dict(r)
         for r in existing
         if isinstance(r, dict) and r.get("layer") != "builtin"
     ]
+    if not package_builtin_rules_enabled(cfg) or not shell_builtin_rules_enabled(cfg):
+        cfg["rules"] = user_rules
+        return cfg
     package_rules: list[dict[str, Any]] = []
     for raw in load_package_command_rules():
         action = _yaml_action(raw)
