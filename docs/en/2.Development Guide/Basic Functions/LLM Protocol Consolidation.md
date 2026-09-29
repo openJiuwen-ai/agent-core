@@ -40,3 +40,11 @@ These classes and modules are gone. Use `Model` plus a string `client_provider` 
 - `AscendAffinityModelClient`
 
 Image / speech / video generation is served by `OpenAIModelClient` when `client_provider="DashScope"` (or `endpoint_profile="dashscope"`).
+
+## `api_base` semantics (migration note)
+
+The OpenAI-compatible implementation passes `api_base` to the OpenAI SDK **verbatim** (the SDK appends `/chat/completions` itself); `/v1` is never appended. Gateway-specific paths (e.g. `https://gw.example.com/llm`) and URLs with a query string work as configured.
+
+Only the raw HTTP gateway path (the KV-affinity streaming flow of the `ascend_affinity` / `inference_affinity` endpoint profiles) keeps the legacy AscendAffinity/InferenceAffinity normalization: it appends `/v1` and tolerates an `/v1/chat/completions` suffix.
+
+**Migrating from older versions**: if you relied on "any host works, the framework appends `/v1`", spell out the full `api_base` (e.g. `https://host/v1`) — otherwise requests will hit the wrong path.

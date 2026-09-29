@@ -40,3 +40,11 @@ model = Model(
 - `AscendAffinityModelClient`
 
 生图 / 语音 / 视频：`client_provider="DashScope"`（或 `endpoint_profile="dashscope"`）时，由 `OpenAIModelClient` 提供 `generate_image` / `generate_speech` / `generate_video`。
+
+## `api_base` 语义（迁移注意）
+
+OpenAI 兼容实现把 `api_base` **原样**交给 OpenAI SDK（SDK 自行在末尾拼接 `/chat/completions`），不会追加 `/v1`。网关自定义路径（如 `https://gw.example.com/llm`）或带 query 的地址都能按原样生效。
+
+只有走原始 HTTP 网关路径的场景（`endpoint_profile` 为 `ascend_affinity` / `inference_affinity` 的 KV affinity 流）才沿用旧 AscendAffinity/InferenceAffinity 客户端的归一化规则：自动补 `/v1`，并容忍 `/v1/chat/completions` 结尾的写法。
+
+**从旧版本迁移**：如果原来依赖"随便填个 host、框架自动补 `/v1`"的行为，请把 `api_base` 写全（例如 `https://host/v1`），否则请求会打到错误路径。
