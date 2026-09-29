@@ -111,7 +111,8 @@ class RolloutEncoder:
         
         # Fallback to tokenizer-based encoding
         input_prompt = rollout.input_prompt or {}
-        input_messages = input_prompt["message"]
+        input_prompt = rollout.input_prompt or {}
+        input_messages = input_prompt.get("message", [])
         output_messages = [rollout.output_response]
         full_messages = input_messages + output_messages
         tools_info = input_prompt.get("tools", [])
