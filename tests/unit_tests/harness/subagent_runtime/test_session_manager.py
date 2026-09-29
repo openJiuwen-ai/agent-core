@@ -380,3 +380,54 @@ async def test_kv_cache_lifecycle_called_when_affinity_enabled() -> None:
     finish_mock.assert_awaited_once()
     assert finish_mock.await_args.kwargs["succeeded"] is True
     assert instance._include_parent_session_id is True
+
+
+@pytest.mark.asyncio
+async def test_chunk_handler_receives_raw_child_chunks_in_order() -> None:
+    seen: list[tuple[str, str]] = []
+
+    async def handler(subagent_id: str, chunk: object) -> None:
+        seen.append((subagent_id, chunk["type"]))
+
+    manager = SubagentSessionManager(
+        MockParentAgent(),
+        SubagentRuntimeConfig(),
+        asyncio.Semaphore(5),
+        chunk_handler=handler,
+    )
+
+    with _patch_create_session():
+        instance = await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_explore",
+            parent_session_id="parent",
+            display_name="Explorer",
+            role="researcher",
+        )
+        instance._agent = MockAgent()
+        await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
+        await asyncio.sleep(0.05)
+
+    assert seen == [
+        ("parent_sub_explore", "llm_output"),
+        ("parent_sub_explore", "answer"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_no_chunk_handler_keeps_turn_behaviour() -> None:
+    manager = _manager()
+
+    with _patch_create_session():
+        instance = await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_explore",
+            parent_session_id="parent",
+            display_name="Explorer",
+            role="researcher",
+        )
+        instance._agent = MockAgent(output="result")
+        await instance.enqueue(UserInputOp(query="hello", task_id="t1"))
+        await asyncio.sleep(0.05)
+
+    assert instance.agent_status().kind is SubagentStatusKind.COMPLETED
