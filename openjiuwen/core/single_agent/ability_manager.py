@@ -23,6 +23,10 @@ from openjiuwen.core.foundation.tool import ToolInfo
 from openjiuwen.core.foundation.tool import Tool
 from openjiuwen.core.foundation.tool import ToolCard
 from openjiuwen.core.foundation.tool import McpServerConfig
+from openjiuwen.core.foundation.tool.name_sanitize import (
+    is_llm_safe_tool_name,
+    sanitize_llm_tool_name,
+)
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.rail import AgentCallbackContext
 from openjiuwen.core.single_agent.rail.base import (
@@ -135,6 +139,13 @@ class AbilityManager:
         self._mcp_servers: Dict[str, McpServerConfig] = {}
         self._mcp_tool_allowlists: Dict[str, frozenset[str]] = {}
         self._context_engine = None
+        # LLM-visible name -> registered raw key. Populated by list_tool_info
+        # when a registered name is not LLM-safe (e.g. MCP connector tools with
+        # dots, which OpenAI-compatible providers reject with a 400). Model
+        # tool_calls are resolved back through it before execution; alias keys
+        # never collide with raw keys because every raw key is pre-taken during
+        # sanitization.
+        self._llm_tool_aliases: Dict[str, str] = {}
         # Owner agent id used to qualify stateful tool ids on registration so
         # each agent owns an exclusive resource-manager entry.
         self._owner_id: Optional[str] = owner_id
@@ -810,6 +821,23 @@ class AbilityManager:
             self.remove(name)
             Runner.resource_mgr.remove_tool(card.id)
 
+    def _live_raw_keys(self) -> set:
+        """Live raw ability keys across tools / workflows / agents."""
+        return (
+            set(self._tools.keys())
+            | set(self._workflows.keys())
+            | set(self._agents.keys())
+        )
+
+    def _gc_llm_tool_aliases(self) -> None:
+        """Drop aliases whose raw key is gone or collides with a live raw key."""
+        if self._llm_tool_aliases:
+            raw_keys = self._live_raw_keys()
+            self._llm_tool_aliases = {
+                llm: raw for llm, raw in self._llm_tool_aliases.items()
+                if raw in raw_keys and llm not in raw_keys
+            }
+
     def remove(self, name: Union[str, List[str]]) -> Union[None, Ability, List[Ability]]:
         """Remove an ability by name
 
@@ -841,6 +869,7 @@ class AbilityManager:
                         self._tools.pop(tool_name, None)
                     self._mcp_tool_allowlists.pop(server_id, None)
                 removed = mcp_server
+            self._gc_llm_tool_aliases()
             return removed
         elif isinstance(name, list):
             result = []
@@ -867,6 +896,7 @@ class AbilityManager:
                         self._mcp_tool_allowlists.pop(server_id, None)
                     removed = mcp_server
                 result.append(removed)
+            self._gc_llm_tool_aliases()
             return result
         else:
             return None
@@ -890,7 +920,8 @@ class AbilityManager:
         """Get an ability Card by name
 
         Args:
-            name: Ability name
+            name: Ability name (raw key, or an LLM-sanitized alias produced by
+                ``list_tool_info``)
 
         Returns:
             Ability Card, or None if not found
@@ -903,6 +934,17 @@ class AbilityManager:
             return self._agents[name]
         if name in self._mcp_servers:
             return self._mcp_servers[name]
+        # Alias fallback: a sanitized model name resolves back to the raw key
+        # of a tool, workflow or agent. Raw keys win over aliases (see
+        # _resolve_model_tool_call_names for the matching execute() rule).
+        resolved = self._llm_tool_aliases.get(name)
+        if resolved is not None:
+            if resolved in self._tools:
+                return self._tools[resolved]
+            if resolved in self._workflows:
+                return self._workflows[resolved]
+            if resolved in self._agents:
+                return self._agents[resolved]
         return None
 
     def list(self) -> List[Ability]:
@@ -956,13 +998,47 @@ class AbilityManager:
         """
         tool_infos: List[ToolInfo] = []
 
+        # LLM-safe exposure: model-facing names must match ^[a-zA-Z0-9_-]{1,64}$
+        # (OpenAI function calling); MCP connector tools may legally carry dots
+        # etc. Every raw key is pre-taken so a sanitized name can never shadow
+        # or collide with any registered key or another sanitized name.
+        if self._llm_tool_aliases:
+            # Drop aliases whose raw key is gone, and aliases that now collide
+            # with a live raw key: the raw registration wins (get()/execute()
+            # precedence) and the aliased ability re-derives a fresh
+            # digest-disambiguated name in the loops below.
+            self._gc_llm_tool_aliases()
+        # Seed taken names with every registered key EXCEPT MCP-server-owned
+        # cards: the MCP branch below re-derives its exposed names on every
+        # call and overwrites them in self._tools under the same key. A
+        # previous round's own output must not look like a collision, or
+        # sanitize would take the digest branch and drift the model-visible
+        # name every ReAct round while leaking one dead key per round.
+        # Intra-round collisions are still prevented by taken_names.add()
+        # inside the loops below.
+        taken_names: set = {
+            name for name, tool_card in self._tools.items()
+            if not self._is_tool_in_mcp_server(str(tool_card.id or ""))
+        }
+        taken_names.update(self._workflows.keys())
+        taken_names.update(self._agents.keys())
+
         # Convert ToolCards to ToolInfo
         for name, tool_card in self._prioritize_paid_search(list(self._tools.items())):
             if names is None or name in names:
                 id_in_tool_card = tool_card.id
                 if not self._is_tool_in_mcp_server(id_in_tool_card):
+                    llm_name = name
+                    if not is_llm_safe_tool_name(llm_name):
+                        llm_name = sanitize_llm_tool_name(llm_name, taken=taken_names)
+                        self._llm_tool_aliases[llm_name] = name
+                        taken_names.add(llm_name)
+                        logger.warning(
+                            "Sanitized non-LLM-safe tool name for model exposure: "
+                            "raw=%r llm=%r tool_id=%r", name, llm_name, tool_card.id,
+                        )
                     tool_info = ToolInfo(
-                        name=tool_card.name,
+                        name=llm_name,
                         description=tool_card.description or "",
                         parameters=tool_card.input_params or {}
                     )
@@ -971,8 +1047,17 @@ class AbilityManager:
         # Convert WorkflowCards to ToolInfo
         for name, workflow_card in self._workflows.items():
             if names is None or name in names:
+                llm_name = name
+                if not is_llm_safe_tool_name(llm_name):
+                    llm_name = sanitize_llm_tool_name(llm_name, taken=taken_names)
+                    self._llm_tool_aliases[llm_name] = name
+                    taken_names.add(llm_name)
+                    logger.warning(
+                        "Sanitized non-LLM-safe workflow name for model exposure: "
+                        "raw=%r llm=%r", name, llm_name,
+                    )
                 tool_info = ToolInfo(
-                    name=workflow_card.name,
+                    name=llm_name,
                     description=workflow_card.description or "",
                     parameters=workflow_card.input_params or {}
                 )
@@ -995,8 +1080,17 @@ class AbilityManager:
                     # Fallback to default JSON Schema for unknown types
                     params = {"type": "object", "properties": {}, "required": []}
 
+                llm_name = name
+                if not is_llm_safe_tool_name(llm_name):
+                    llm_name = sanitize_llm_tool_name(llm_name, taken=taken_names)
+                    self._llm_tool_aliases[llm_name] = name
+                    taken_names.add(llm_name)
+                    logger.warning(
+                        "Sanitized non-LLM-safe agent name for model exposure: "
+                        "raw=%r llm=%r", name, llm_name,
+                    )
                 tool_info = ToolInfo(
-                    name=agent_card.name,
+                    name=llm_name,
                     description=agent_card.description or "",
                     parameters=params
                 )
@@ -1013,15 +1107,73 @@ class AbilityManager:
                     underlying_tool_name = mcp_tool.name
                     if allowed_tool_names is not None and underlying_tool_name not in allowed_tool_names:
                         continue
-                    mcp_tool_name = f"mcp_{mcp_server_name}_{underlying_tool_name}"
                     mcp_tool_id = f'{mcp_server_id}.{mcp_server_name}.{underlying_tool_name}'
-                    mcp_tool.name = mcp_tool_name
+                    # The id keeps the raw server/tool names for MCP invocation;
+                    # only the model-facing name is sanitized. Prefixed names are
+                    # usually already safe, but a server/tool name may itself
+                    # carry dots or other illegal characters.
+                    raw_model_name = f"mcp_{mcp_server_name}_{underlying_tool_name}"
+                    mcp_tool_name = sanitize_llm_tool_name(raw_model_name, taken=taken_names)
+                    if mcp_tool_name != raw_model_name:
+                        logger.warning(
+                            "Sanitized MCP tool name for model exposure: server=%r "
+                            "tool=%r llm=%r tool_id=%r", mcp_server_name,
+                            underlying_tool_name, mcp_tool_name, mcp_tool_id,
+                        )
+                    taken_names.add(mcp_tool_name)
+                    # Copy instead of mutating in place: resource_mgr-owned
+                    # ToolInfo objects must never be modified here (a cached
+                    # or shared instance would compound the prefix per call).
+                    exposed = mcp_tool.model_copy(update={"name": mcp_tool_name})
                     self._tools[mcp_tool_name] = ToolCard(id=mcp_tool_id, name=mcp_tool_name,
-                                                          description=mcp_tool.description,
-                                                          input_params=mcp_tool.parameters or {})
-                    tool_infos.append(mcp_tool)
+                                                          description=exposed.description,
+                                                          input_params=exposed.parameters or {})
+                    tool_infos.append(exposed)
 
-        return tool_infos
+        # Last line of defense: never hand a non-LLM-safe name to a provider —
+        # strict APIs (OpenAI official, DeepSeek, ...) reject the whole request
+        # with a 400 invalid 'tools[N].function.name'. Drop and report instead.
+        safe_tool_infos: List[ToolInfo] = []
+        for tool_info in tool_infos:
+            if is_llm_safe_tool_name(tool_info.name):
+                safe_tool_infos.append(tool_info)
+            else:
+                logger.error(
+                    "Dropping tool with non-LLM-safe name (it would fail the whole "
+                    "model request): name=%r", tool_info.name,
+                )
+        return safe_tool_infos
+
+    def _is_registered_ability_key(self, name: str) -> bool:
+        """True when ``name`` is a live raw key in any ability registry."""
+        return (
+            name in self._tools
+            or name in self._workflows
+            or name in self._agents
+            or name in self._mcp_servers
+        )
+
+    def _resolve_model_tool_call_names(self, tool_calls: List[ToolCall]) -> List[ToolCall]:
+        """Resolve model-facing sanitized names back to raw registered keys.
+
+        Rewritten calls are returned as copies: the caller's ToolCall objects
+        are shared with the assistant message stored in session history, and
+        history must keep the sanitized names so later turns replay
+        provider-legal names to the model. Raw registered keys always win
+        over aliases (mirrors get() precedence): a tool registered later
+        under a name equal to an existing alias must not be hijacked.
+        """
+        if not self._llm_tool_aliases:
+            return tool_calls
+        resolved: List[ToolCall] = []
+        for single_tool_call in tool_calls:
+            name = str(single_tool_call.name or "")
+            raw_name = self._llm_tool_aliases.get(name)
+            if raw_name is None or self._is_registered_ability_key(name):
+                resolved.append(single_tool_call)
+                continue
+            resolved.append(single_tool_call.model_copy(update={"name": raw_name}))
+        return resolved
 
     async def execute(
             self,
@@ -1046,6 +1198,12 @@ class AbilityManager:
         tool_calls = self._normalize_tool_calls(tool_call)
         if not tool_calls:
             return []
+
+        # Model-visible names may be LLM-sanitized forms of the registered raw
+        # keys (see list_tool_info); resolve them back first so rails, MCP
+        # allowlists and resource routing keep seeing raw names throughout.
+        # The resolution copies (never mutates) the caller's ToolCall objects.
+        tool_calls = self._resolve_model_tool_call_names(tool_calls)
 
         # Each tool call gets an isolated callback context to avoid races
         # between concurrent BEFORE/AFTER_TOOL_CALL hooks.
