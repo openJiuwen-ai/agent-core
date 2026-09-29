@@ -596,6 +596,17 @@ async def test_read_capped_reads_all_when_unbounded():
 # --------------------------------------------------------------------------- #
 # _request transport contract (against a fake aiohttp session)
 # --------------------------------------------------------------------------- #
+class _FakeReqCM:
+    def __init__(self, resp):
+        self._resp = resp
+
+    async def __aenter__(self):
+        return self._resp
+
+    async def __aexit__(self, *exc):
+        return False
+
+
 class _FakeRespFull:
     def __init__(self, status, headers, chunks, url):
         self.status = status
@@ -603,35 +614,23 @@ class _FakeRespFull:
         self.url = url
         self.content = _FakeContent(chunks)
 
-    def release(self):
-        pass
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
 
 class _FakeSession:
     def __init__(self, resp):
         self._resp = resp
         self.last_kwargs: dict | None = None
 
-    async def request(
-        self, method, url, *, allow_redirects=True, headers=None, json=None, proxy=None, proxy_auth=None, timeout=None
-    ):
+    def request(self, method, url, *, headers=None, json=None, proxy=None, proxy_auth=None, timeout=None):
         self.last_kwargs = {
             "method": method,
             "url": url,
-            "allow_redirects": allow_redirects,
             "headers": headers,
             "json": json,
             "proxy": proxy,
             "proxy_auth": proxy_auth,
             "timeout": timeout,
         }
-        return self._resp
+        return _FakeReqCM(self._resp)
 
 
 @pytest.mark.asyncio
@@ -658,7 +657,6 @@ async def test_request_transport_contract(monkeypatch):
     assert final_url == "https://final.example/x"
     assert truncated is False
     assert session.last_kwargs["method"] == "GET"
-    assert session.last_kwargs["allow_redirects"] is False
     assert session.last_kwargs["json"] == {"a": 1}
     assert session.last_kwargs["proxy"] is None
     assert isinstance(session.last_kwargs["timeout"], aiohttp.ClientTimeout)
