@@ -109,6 +109,14 @@ from openjiuwen.harness.prompts.tools.session_tools import (
 from openjiuwen.harness.prompts.tools.skill_tool import (
     SkillToolMetadataProvider,
 )
+from openjiuwen.harness.prompts.tools.subagent_tools import (
+    SubagentCloseMetadataProvider,
+    SubagentListMetadataProvider,
+    SubagentResumeMetadataProvider,
+    SubagentSendInputMetadataProvider,
+    SubagentSpawnMetadataProvider,
+    SubagentWaitMetadataProvider,
+)
 from openjiuwen.harness.prompts.tools.task_tool import (
     TaskMetadataProvider,
 )
@@ -163,6 +171,12 @@ _PROVIDERS: List[ToolMetadataProvider] = [
     SessionsSpawnMetadataProvider(),
     SessionsCancelMetadataProvider(),
     SkillToolMetadataProvider(),
+    SubagentSpawnMetadataProvider(),
+    SubagentWaitMetadataProvider(),
+    SubagentListMetadataProvider(),
+    SubagentSendInputMetadataProvider(),
+    SubagentCloseMetadataProvider(),
+    SubagentResumeMetadataProvider(),
     TodoCreateMetadataProvider(),
     TodoListMetadataProvider(),
     TodoModifyMetadataProvider(),
