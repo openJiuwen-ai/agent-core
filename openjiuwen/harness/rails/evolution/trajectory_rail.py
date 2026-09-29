@@ -9,7 +9,7 @@ from typing import Any
 
 from openjiuwen.agent_evolving.trajectory.model import Trajectory
 from openjiuwen.agent_evolving.trajectory.processor import TrajectorySpanProcessor
-from openjiuwen.agent_evolving.trajectory.spans import merge_trajectories, span_identity
+from openjiuwen.agent_evolving.trajectory.spans import normalize_otlp, span_identity
 from openjiuwen.agent_evolving.trajectory.store import TrajectoryStore
 from openjiuwen.core.common.logging import logger
 from openjiuwen.core.single_agent.rail.base import AgentCallbackContext
@@ -17,6 +17,9 @@ from openjiuwen.harness.rails.evolution.evolution_rail import (
     EvolutionRail,
     EvolutionTriggerPoint,
     _InvokeCapture,
+    _append_increment,
+    _payload_of,
+    _project_buffer,
 )
 
 
@@ -46,7 +49,7 @@ class TrajectoryRail(EvolutionRail):
         if trajectory_store is None:
             raise TypeError("trajectory_store is required")
         self._trajectory_store = trajectory_store
-        self._execution_accumulators: dict[object, Trajectory] = {}
+        self._execution_accumulators: dict[object, dict[str, Any]] = {}
         self._execution_seen_spans: set[tuple[str, str]] = set()
         self._execution_lock = threading.RLock()
 
@@ -72,10 +75,16 @@ class TrajectoryRail(EvolutionRail):
             increment = self._select_new_execution_spans(increment)
             if increment is None:
                 return
+            # The archive grows unbounded, so a full re-merge per increment is
+            # quadratic.  Keep it as a mutable payload and append only the new
+            # spans; ``_select_new_execution_spans`` already filtered identities,
+            # so the O(window) identity scan is skipped (pure append).
+            increment_payload = normalize_otlp(_payload_of(increment))
             previous = self._execution_accumulators.get(capture.subscription)
-            self._execution_accumulators[capture.subscription] = (
-                merge_trajectories(previous, increment) if previous is not None else increment
-            )
+            if previous is None:
+                self._execution_accumulators[capture.subscription] = increment_payload
+            else:
+                _append_increment(previous, increment_payload, dedup_buffer=False)
 
     def _select_new_execution_spans(self, increment: Trajectory) -> Trajectory | None:
         """Remove identities already archived by this recorder stream.
@@ -100,12 +109,12 @@ class TrajectoryRail(EvolutionRail):
                     selected = True
         return Trajectory.from_otlp(payload) if selected else None
 
-    def _save_execution_archive(self, archive: Trajectory, capture: _InvokeCapture) -> None:
+    def _save_execution_archive(self, archive: dict[str, Any], capture: _InvokeCapture) -> None:
         """Apply canonical metadata and synchronously save one archive."""
 
-        archive = self._with_scope_metadata(archive, self._scope_metadata(capture))
+        trajectory = _project_buffer(archive, self._scope_metadata(capture))
         try:
-            self._trajectory_store.save(archive)
+            self._trajectory_store.save(trajectory)
         except Exception as exc:  # pragma: no cover - backend-specific errors
             logger.warning("[%s] failed to save execution trajectory: %s", type(self).__name__, exc)
 

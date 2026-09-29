@@ -20,11 +20,18 @@ through this module, so the two paths cannot drift apart.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # ``error.type`` for a call that returned a failing result instead of raising.
 # Exceptions keep reporting their own class name.
 TOOL_REPORTED_FAILURE = "ToolReportedFailure"
+
+# 工具以裸字符串/字典返回失败时统一使用的错误前缀标记。多工具约定（见 web_search /
+# image_tools / command_tools / audio_tools / video_tools / bash_tool_safety /
+# acp_chat 等），runtime 未抛异常、也未显式 success=False 时，靠此前缀识别失败，
+# 否则 web_search 之类"吞掉异常后返回 [ERROR]: ... 字符串"的调用会让 trace 对失败视而不见。
+_ERROR_PREFIX_RE = re.compile(r"^\[ERROR\]\s*:?\s*(.*)$", re.IGNORECASE | re.DOTALL)
 
 _DEFAULT_FAILURE_REASON = "tool reported failure"
 _EXCEPTION_RESULT_PREFIX = "Ability execution error: "
@@ -33,9 +40,11 @@ _EXCEPTION_RESULT_PREFIX = "Ability execution error: "
 def tool_failure_reason(output: Any) -> str | None:
     """Return the failure a tool reported in its own result.
 
-    Only an explicit ``success is False`` counts. A result that carries no
-    ``success`` field at all (workflow outputs, raw MCP payloads, plain
-    strings) is left alone rather than guessed at.
+    An explicit ``success is False`` always wins (the common shape for built-in
+    tools like bash that return ``ToolOutput(success=False, error=...)``). As a
+    backstop, a result whose text is prefixed with the shared ``[ERROR]`` marker
+    — returned as a plain string, or inside an ``error`` field, without raising —
+    is also treated as a failure, so the span gets marked ERROR instead of OK.
 
     Args:
         output: Whatever the ability returned — a ``ToolOutput``, a mapping, or
@@ -54,9 +63,36 @@ def tool_failure_reason(output: Any) -> str | None:
         error = getattr(output, "error", None)
 
     if success is not False:
-        return None
+        # 兜底：工具吞掉异常后返回 "[ERROR]: ..." 这类约定错误串时，仍判为失败。
+        return _error_string_reason(output)
     reason = str(error or "").strip()
     return reason or _DEFAULT_FAILURE_REASON
+
+
+def _error_string_reason(output: Any) -> str | None:
+    """Backstop: detect the shared ``[ERROR]`` failure marker in a result's text.
+
+    Covers the shape where a tool returns ``"[ERROR]: <reason>"`` (or ``"[ERROR]
+    <reason>"``) as a plain string, or carries it inside an ``error`` field,
+    without raising and without an explicit ``success=False``.
+    """
+    text: str | None = None
+    if isinstance(output, str):
+        text = output
+    elif isinstance(output, dict):
+        err = output.get("error")
+        if isinstance(err, str):
+            text = err
+    else:
+        err = getattr(output, "error", None)
+        if isinstance(err, str):
+            text = err
+    if not text:
+        return None
+    match = _ERROR_PREFIX_RE.match(text.strip())
+    if match:
+        return match.group(1).strip() or _DEFAULT_FAILURE_REASON
+    return None
 
 
 def tool_result_for_exception(exception: BaseException) -> str:

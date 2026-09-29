@@ -232,6 +232,17 @@ class ContextFilter(logging.Filter):
         from openjiuwen.core.common.logging.utils import get_member_id
         record.member_id = get_member_id()
 
+        # request_id for precise log↔span join (diagnosis evidence). Falls back
+        # to empty when outside a run span — keeps the format string valid.
+        try:
+            from openjiuwen.extensions.observability.span_context import (
+                get_current_request_id,
+            )
+
+            record.request_id = get_current_request_id()
+        except Exception:
+            record.request_id = ""
+
         # Set log type, special handling for performance type
         record.log_type = resolve_log_type_label(self.log_type)
 
@@ -399,7 +410,8 @@ class DefaultLogger(DefaultStructuredLoggerMixin, LoggerProtocol):
         """
         log_format = (
                 self.config.get("format")
-                or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(levelname)s | %(message)s"
+                or "%(asctime)s.%(msecs)03d | %(log_type)s | %(trace_id)s | %(request_id)s | %(levelname)s "
+                   "| %(filename)s:%(lineno)d | %(message)s"
         )
         return logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S")
 

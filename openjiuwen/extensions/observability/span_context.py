@@ -477,6 +477,7 @@ class LlmSpanState:
 _root_span_ctx: ContextVar[Span | None] = ContextVar("observability_root_span", default=None)
 _root_session_ctx: ContextVar[str] = ContextVar("observability_root_session", default="")
 _current_session_ctx: ContextVar[str] = ContextVar("observability_session_id", default="")
+_current_request_ctx: ContextVar[str] = ContextVar("observability_request_id", default="")
 
 _root_registry: dict[str, Span] = {}
 _root_registry_lock = threading.RLock()
@@ -512,6 +513,24 @@ def get_current_session_id() -> str:
 
 def clear_current_session_id() -> None:
     _current_session_ctx.set("")
+
+
+def set_current_request_id(request_id: str | None = None) -> None:
+    """Bind the current request id so log filters can emit it per line.
+
+    Paired with ``set_current_session_id`` in ``open_agent_run_span``: the run
+    span already stamps ``OJ_REQUEST_ID`` on the span attribute; this exposes
+    it to the logging layer for precise log↔span join (diagnosis evidence).
+    """
+    _current_request_ctx.set(str(request_id or ""))
+
+
+def get_current_request_id() -> str:
+    return _current_request_ctx.get()
+
+
+def clear_current_request_id() -> None:
+    _current_request_ctx.set("")
 
 
 def next_execution_subject_request_number(
@@ -992,6 +1011,7 @@ def reset_state() -> None:
     _current_agent_span.set(None)
     _tool_span_map.set({})
     clear_current_session_id()
+    clear_current_request_id()
     clear_ambient_root_span()
     with _root_registry_lock:
         _root_registry.clear()

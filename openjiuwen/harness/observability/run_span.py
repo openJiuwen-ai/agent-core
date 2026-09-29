@@ -117,6 +117,7 @@ def open_agent_run_span(
         )
         from openjiuwen.extensions.observability.setup import get_tracer, is_initialized
         from openjiuwen.extensions.observability.span_context import (
+            set_current_request_id,
             set_current_session_id,
             set_root_span,
         )
@@ -171,6 +172,7 @@ def open_agent_run_span(
         sid = session_id or ""
         set_root_span(span, session_id=sid)
         set_current_session_id(sid)
+        set_current_request_id(request_id or "")
         register_run_root_span(span, session_id=sid)
         logger.info("[AgentObservability] root span opened: name=%s", name)
         return span
