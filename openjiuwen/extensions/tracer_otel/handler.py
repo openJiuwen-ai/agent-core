@@ -39,14 +39,18 @@ from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.redaction import redact
 from openjiuwen.extensions.tracer_otel.semconv import (
     ERROR_TYPE,
+    GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_K,
     GEN_AI_REQUEST_TOP_P,
@@ -71,9 +75,11 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_METADATA,
     OJ_GEN_AI_USAGE_INPUT_COST,
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
+    OJ_GEN_AI_USER_ID,
     OJ_INNER_ERROR,
     OJ_INTERACTIVE_INPUTS,
     OJ_INVOKE_ID,
@@ -128,6 +134,11 @@ _LLM_SUBSTRINGS: tuple[str, ...] = ("LLM", "IntentDetection", "Questioner")
 # gen_ai.operation.name="execute_tool" per OTel GenAI semantic conventions.
 # Substring match on "Tool" covers ToolExecutable and any future Tool-named variants.
 _TOOL_SUBSTRINGS: tuple[str, ...] = ("Tool",)
+
+# gen_ai.operation.name values (OTel GenAI semantic conventions) — constants so
+# no call site re-types the literal.
+_OPERATION_NAME_CHAT = "chat"
+_OPERATION_NAME_EXECUTE_TOOL = "execute_tool"
 
 
 def _serialize(value: Any) -> str:
@@ -233,6 +244,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
         self._config = config
         self._trace_id = trace_id or ""
         self._span_manager = OtelAgentSpanManager()
+        # Bound later by the tracer registry via set_session_id(); declared
+        # here so _start_and_push never depends on the base-class attribute.
+        self._session_id: str | None = None
 
     # --- helper: resolve parent context via parent_invoke_id ---
 
@@ -257,7 +271,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
         # Span base fields — use span value if present, otherwise set ourselves
         otel_span.set_attribute(OJ_TRACE_ID, agent_span.trace_id)
         # Absent for tracers not bound to a Session, so old consumers see no new key.
-        session_id = agent_span.session_id or self._session_id
+        session_id = getattr(agent_span, "session_id", None) or self._session_id
         if session_id:
             otel_span.set_attribute(OJ_SESSION_ID, session_id)
         otel_span.set_attribute(OJ_INVOKE_ID, agent_span.invoke_id or "")
@@ -268,6 +282,9 @@ class OtelAgentHandler(TraceExtAgentHandler):
         state = OtelSpanState(
             span=otel_span, context_token=context_token, invoke_id=agent_span.invoke_id, start_time=start_time
         )
+        # Always populate attributes on this path: set_attribute is a no-op on
+        # a non-recording span, and span wrappers may misreport is_recording().
+        state.recorded = True
         self._span_manager.push(agent_span.invoke_id, state)
         return state
 
@@ -326,6 +343,29 @@ class OtelAgentHandler(TraceExtAgentHandler):
         otel_span.end()
         otel_context.detach(state.context_token)
 
+    # --- helper: set GenAI agent identity attributes on any span ---
+
+    def _set_agent_identity_attrs(self, otel_span: trace.Span, instance_info: dict | None) -> None:
+        """Set agent identity / conversation attributes from OtelRail common info.
+
+        ``instance_info`` keys come from ``OtelRail._build_common_info``:
+        ``agent_id`` / ``agent_description`` / ``conversation_id`` /
+        ``user_id`` / ``metadata``. Events raised without them (other rails,
+        direct handler callers) simply skip the attributes.
+        """
+        info = instance_info or {}
+        agent_id = info.get("agent_id")
+        if agent_id:
+            otel_span.set_attribute(GEN_AI_AGENT_ID, str(agent_id))
+        if info.get("agent_description"):
+            otel_span.set_attribute(GEN_AI_AGENT_DESCRIPTION, str(info["agent_description"]))
+        if info.get("conversation_id"):
+            otel_span.set_attribute(GEN_AI_CONVERSATION_ID, str(info["conversation_id"]))
+        if info.get("user_id"):
+            otel_span.set_attribute(OJ_GEN_AI_USER_ID, str(info["user_id"]))
+        if info.get("metadata"):
+            otel_span.set_attribute(OJ_GEN_AI_METADATA, _serialize(info["metadata"]))
+
     # --- helper: set common agent attributes (non-LLM) ---
 
     def _set_non_llm_attrs(
@@ -339,10 +379,8 @@ class OtelAgentHandler(TraceExtAgentHandler):
         name_val = agent_span.name or (instance_info.get("class_name", "") if instance_info else "")
         otel_span.set_attribute(OJ_AGENT_INVOKE_TYPE, invoke_type_val)
         otel_span.set_attribute(OJ_AGENT_NAME, name_val)
-        # Agent identity on the root span, forwarded by OtelRail.before_invoke
-        agent_id = (instance_info or {}).get("agent_id")
-        if agent_id:
-            otel_span.set_attribute(GEN_AI_AGENT_ID, str(agent_id))
+        # Agent identity + conversation facts, forwarded by OtelRail
+        self._set_agent_identity_attrs(otel_span, instance_info)
 
     # ================================================================
     # LLM events — SpanKind.CLIENT, gen_ai.* attributes
@@ -361,13 +399,17 @@ class OtelAgentHandler(TraceExtAgentHandler):
                 return
             # LLM-specific OTel attributes
             state.span.set_attribute(GEN_AI_REQUEST_MODEL, instance_info.get("class_name", ""))
-            state.span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
+            state.span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
+            # Agent identity + conversation facts, forwarded by OtelRail
+            self._set_agent_identity_attrs(state.span, instance_info)
             # GenAI request parameters, forwarded by OtelRail.before_model_call
             for param, key in (
                 ("temperature", GEN_AI_REQUEST_TEMPERATURE),
                 ("top_p", GEN_AI_REQUEST_TOP_P),
                 ("top_k", GEN_AI_REQUEST_TOP_K),
                 ("max_tokens", GEN_AI_REQUEST_MAX_TOKENS),
+                ("stop_sequences", GEN_AI_REQUEST_STOP_SEQUENCES),
+                ("reasoning_level", GEN_AI_REQUEST_REASONING_LEVEL),
             ):
                 value = (instance_info.get("request_params") or {}).get(param)
                 if value is not None:
@@ -476,7 +518,7 @@ class OtelAgentHandler(TraceExtAgentHandler):
     async def on_plugin_start(self, span: TraceAgentSpan, inputs: Any, instance_info: dict, **kwargs):
         try:
             extra_attrs: dict[str, Any] = {
-                GEN_AI_OPERATION_NAME: "execute_tool",
+                GEN_AI_OPERATION_NAME: _OPERATION_NAME_EXECUTE_TOOL,
                 GEN_AI_TOOL_NAME: instance_info.get("class_name", ""),
             }
             tool_type = instance_info.get("tool_type")
@@ -486,7 +528,8 @@ class OtelAgentHandler(TraceExtAgentHandler):
             # tool name for direct on_plugin_start callers.
             agent_name = instance_info.get("agent_name") or instance_info.get("class_name", "")
             extra_attrs[GEN_AI_AGENT_NAME] = str(agent_name)
-            tool_call_id = self._extract_tool_call_id(inputs) or kwargs.get("id") or kwargs.get("tool_call_id")
+            # Tool-call id rides instance_info (forwarded by OtelRail.before_tool_call).
+            tool_call_id = instance_info.get("tool_call_id", "")
             if tool_call_id:
                 extra_attrs[GEN_AI_TOOL_CALL_ID] = str(tool_call_id)
             self._start_non_llm_span(
@@ -495,21 +538,6 @@ class OtelAgentHandler(TraceExtAgentHandler):
             )
         except Exception as exc:
             session_logger.warning("otel agent handler: on_plugin_start failed: %s", exc)
-
-    @staticmethod
-    def _extract_tool_call_id(inputs: Any) -> str:
-        """Read the tool-call id from the plugin inputs payload."""
-        if isinstance(inputs, dict):
-            for key in ("id", "tool_call_id", "call_id"):
-                value = inputs.get(key)
-                if value:
-                    return str(value)
-            tool_call = inputs.get("tool_call")
-            if tool_call is not None:
-                return str(getattr(tool_call, "id", "") or "")
-        else:
-            return str(getattr(inputs, "id", "") or "")
-        return ""
 
     async def on_plugin_end(self, span: TraceAgentSpan, outputs, **kwargs):
         try:
@@ -666,6 +694,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
         self._config = config
         self._trace_id = trace_id or ""
         self._span_manager = OtelWorkflowSpanManager()
+        # Session binding arrives per-event or via set_session_id(); declared
+        # here so on_call_start never depends on the base-class attribute.
+        self._session_id: str | None = None
         # Mapping 2: parent_node_id → root OtelSpanState for the layer
         self._layer_root_spans: dict[str, OtelSpanState] = {}
         # Mapping 3: node_id → host-component OtelSpanState
@@ -933,9 +964,9 @@ class OtelWorkflowHandler(TraceExtWorkflowHandler):
                 otel_span.set_attribute(OJ_SOURCE_IDS, _serialize(source_ids))
             # LLM component: gen_ai attributes
             if is_llm_component:
-                otel_span.set_attribute(GEN_AI_OPERATION_NAME, "chat")
+                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_CHAT)
             elif any(s in component_type for s in _TOOL_SUBSTRINGS):
-                otel_span.set_attribute(GEN_AI_OPERATION_NAME, "execute_tool")
+                otel_span.set_attribute(GEN_AI_OPERATION_NAME, _OPERATION_NAME_EXECUTE_TOOL)
 
             self._set_workflow_attrs(otel_span, metadata, invoke_id)
 

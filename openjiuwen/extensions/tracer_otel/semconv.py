@@ -33,6 +33,8 @@ GEN_AI_REQUEST_TEMPERATURE = "gen_ai.request.temperature"
 GEN_AI_REQUEST_TOP_P = "gen_ai.request.top_p"
 GEN_AI_REQUEST_TOP_K = "gen_ai.request.top_k"
 GEN_AI_REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+GEN_AI_REQUEST_STOP_SEQUENCES = "gen_ai.request.stop_sequences"
+GEN_AI_REQUEST_REASONING_LEVEL = "gen_ai.request.reasoning.level"
 GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
 
@@ -47,6 +49,8 @@ GEN_AI_TOOL_CALL_ID = "gen_ai.tool.call.id"
 
 GEN_AI_AGENT_NAME = "gen_ai.agent.name"
 GEN_AI_AGENT_ID = "gen_ai.agent.id"
+GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
+GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
 
 GEN_AI_RETRIEVAL_TOP_K = "gen_ai.retrieval.top_k"
 
@@ -59,6 +63,10 @@ OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
+# Conversation facts carried by the Session: source-metadata user id and the
+# raw source metadata dict.
+OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
+OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
 
 
 # ---------------------------------------------------------------------------

@@ -46,6 +46,32 @@ class OtelRail(AgentRail):
         self._tool_spans: list = []
 
     # ------------------------------------------------------------------
+    # Common info shared by root / LLM / tool spans
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_common_info(ctx: AgentCallbackContext) -> dict[str, Any]:
+        """Identity + conversation fields forwarded on every tracer event.
+
+        Source of truth for the GenAI identity attributes
+        (``gen_ai.agent.id`` / ``gen_ai.agent.description`` /
+        ``gen_ai.conversation.id``) and the session-carried project
+        extensions (``openjiuwen.gen_ai.user.id`` /
+        ``openjiuwen.gen_ai.metadata``). Shared by the root, LLM, and tool
+        span builders so the three stay in sync.
+        """
+        source_metadata = getattr(ctx.session, "_source_metadata", None) or {}
+        card = getattr(ctx.agent, "card", None)
+        return {
+            "agent_id": getattr(card, "id", None),
+            "user_id": source_metadata.get("user_id", ""),
+            "metadata": source_metadata,
+            # Conversation id and agent description follow metadata.
+            "conversation_id": ctx.session.get_session_id() if ctx.session is not None else "",
+            "agent_description": str(getattr(card, "description", "") or ""),
+        }
+
+    # ------------------------------------------------------------------
     # Root span (BEFORE_INVOKE / AFTER_INVOKE)
     # ------------------------------------------------------------------
 
@@ -57,9 +83,9 @@ class OtelRail(AgentRail):
         tracer = session.tracer()
         root_span = tracer.tracer_agent_span_manager.create_agent_span()
         instance_info = {
+            **self._build_common_info(ctx),
             "class_name": ctx.agent.card.name,
             "type": "agent",
-            "agent_id": getattr(ctx.agent.card, "id", None),
         }
 
         inputs_dict = {"query": ctx.inputs.query} if isinstance(ctx.inputs, InvokeInputs) else {}
@@ -114,18 +140,16 @@ class OtelRail(AgentRail):
         llm_span = tracer.tracer_agent_span_manager.create_agent_span(parent_span)
         self._llm_spans.append(llm_span)
 
-        # Build instance_info — prefer model name from agent config
-        model_name = "LLM"
-        agent_config = ctx.agent.config
-        if agent_config is not None:
-            config_model_name = ""
-            if hasattr(agent_config, "model_config_obj"):
-                config_model_name = getattr(agent_config.model_config_obj, "model_name", "")
-            if not config_model_name:
-                config_model_name = getattr(agent_config, "model_name", "")
-            model_name = config_model_name or model_name
-        instance_info = {"class_name": model_name, "type": InvokeType.LLM.value}
-        request_params = self._extract_request_params(agent_config)
+        # Build instance_info — model name comes from the request config the
+        # call will actually use (see _resolve_model_config).
+        model_config = self._resolve_model_config(ctx.agent)
+        model_name = str(getattr(model_config, "model_name", "") or "") or "LLM"
+        instance_info = {
+            **self._build_common_info(ctx),
+            "class_name": model_name,
+            "type": InvokeType.LLM.value,
+        }
+        request_params = self._extract_request_params(model_config)
         if request_params:
             instance_info["request_params"] = request_params
 
@@ -193,22 +217,46 @@ class OtelRail(AgentRail):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _extract_request_params(agent_config: Any) -> dict[str, Any]:
-        """Extract GenAI request parameters from the agent's model request config.
+    def _resolve_model_config(agent: Any) -> Any:
+        """Return the ``ModelRequestConfig`` the next model call will use.
 
-        ``top_k`` is not a declared ``ModelRequestConfig`` field — it rides in as
-        an extra field (``extra="allow"``), so ``getattr`` covers both cases.
+        The agent's live LLM object is authoritative — it covers agents wired
+        via ``set_llm`` whose config carries no ``model_config_obj``, and any
+        params the ``Model`` was built with. Fall back to the config object
+        while the LLM has not been constructed yet (lazy agents). ``getattr``
+        keeps this defensive: the rail must never break the model call.
+        """
+        model_config = getattr(getattr(agent, "_llm", None), "model_config", None)
+        if model_config is None:
+            model_config = getattr(getattr(agent, "config", None), "model_config_obj", None)
+        return model_config
+
+    @staticmethod
+    def _extract_request_params(model_config: Any) -> dict[str, Any]:
+        """Normalize a ``ModelRequestConfig`` into GenAI request parameters.
+
+        ``top_k`` is not a declared field — it rides in as an extra field
+        (``extra="allow"``), so ``getattr`` covers both cases. ``stop`` is a
+        single string in the config but the semconv attribute is a sequence;
+        ``reasoning.effort`` maps to the reasoning level.
         """
         params: dict[str, Any] = {}
-        if agent_config is None:
-            return params
-        model_config_obj = getattr(agent_config, "model_config_obj", None)
-        if model_config_obj is None:
+        if model_config is None:
             return params
         for key in ("temperature", "top_p", "top_k", "max_tokens"):
-            value = getattr(model_config_obj, key, None)
+            value = getattr(model_config, key, None)
             if value is not None:
                 params[key] = value
+        stop = getattr(model_config, "stop", None)
+        if stop:
+            stops = stop if isinstance(stop, (list, tuple)) else [stop]
+            params["stop_sequences"] = [str(s) for s in stops]
+        reasoning = getattr(model_config, "reasoning", None)
+        effort = getattr(reasoning, "effort", None)
+        if not effort and isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+        if effort:
+            params["reasoning_level"] = str(effort)
         return params
 
     async def before_tool_call(self, ctx: AgentCallbackContext) -> None:
@@ -223,10 +271,13 @@ class OtelRail(AgentRail):
         tool_call = getattr(ctx.inputs, "tool_call", None)
         tool_name = getattr(ctx.inputs, "tool_name", "") or (getattr(tool_call, "name", "") if tool_call else "")
         instance_info = {
+            **self._build_common_info(ctx),
             "class_name": tool_name,
             "type": InvokeType.PLUGIN.value,
             "tool_type": str(getattr(tool_call, "type", "") or "function") if tool_call else "function",
             "agent_name": getattr(ctx.agent.card, "name", ""),
+            # Handler reads the tool-call id from here (OtelRail is its source).
+            "tool_call_id": str(getattr(tool_call, "id", "") or ""),
         }
 
         inputs_dict: dict = {}
