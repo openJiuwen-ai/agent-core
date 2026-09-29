@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from openjiuwen.core.foundation.llm import AssistantMessage, ToolCall
 from openjiuwen.rsi.harness_rsi.evaluator.judger import judge_evidence
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_evidence import prepare_judge_workspace
 from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeBudgetRail
@@ -77,6 +78,22 @@ def test_nonstandard_response_object_is_not_dropped(tmp_path):
     request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
     combined = "".join((workspace / p["path"]).read_text(encoding="utf-8") for p in request["response"]["pages"])
     assert json.loads(combined) == response
+
+
+def test_assistant_message_response_is_preserved_as_json_evidence(tmp_path):
+    response = AssistantMessage(
+        content="I need to inspect the workspace first.",
+        tool_calls=[ToolCall(id="call-1", type="function", name="list_files", arguments="{}")],
+    )
+    workspace = tmp_path / "judge"
+    prepare_judge_workspace(
+        case={"input": "Question"}, response=response, case_dir=tmp_path,
+        workspace=workspace, behaviors=[], forbidden=[],
+    )
+    request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
+    assert request["response"]["role"] == "assistant"
+    assert request["response"]["content"] == "I need to inspect the workspace first."
+    assert request["response"]["tool_calls"][0]["function"]["name"] == "list_files"
 
 
 def test_judge_policy_change_invalidates_case_cache_but_not_non_llm_evals(monkeypatch):

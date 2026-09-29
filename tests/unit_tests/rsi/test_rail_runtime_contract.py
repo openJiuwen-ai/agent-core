@@ -118,3 +118,27 @@ class FinishRail(AgentRail):
         assert not ctx.has_force_finish_request
 
     asyncio.run(simulate())
+
+
+@pytest.mark.parametrize("body, expected", [
+    (
+        "ctx.request_force_finish(ctx.inputs.response)",
+        "cannot return the raw model response",
+    ),
+    (
+        'ctx.request_force_finish({"output": ctx.inputs.response.content, "result_type": "answer"})',
+        "before checking response.tool_calls",
+    ),
+])
+def test_after_model_force_finish_rejects_unsafe_response_handling(tmp_path, body, expected):
+    path = tmp_path / "unsafe_finish.py"
+    path.write_text(
+        "from openjiuwen.core.single_agent.rail.base import AgentRail\n"
+        "class UnsafeFinishRail(AgentRail):\n"
+        "    async def after_model_call(self, ctx):\n"
+        f"        {body}\n",
+        encoding="utf-8",
+    )
+    check = _check_rail_runtime_contract("solver", tmp_path, path.name)
+    assert check.status == "failed"
+    assert expected in check.error

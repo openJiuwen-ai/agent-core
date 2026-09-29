@@ -200,6 +200,36 @@ def _check_rail_runtime_contract(role: str, root: Path, target: str) -> Verifica
             )
         if "_next_model_tool_choice" in reads | writes:
             errors.append("Host does not consume _next_model_tool_choice; use supported callback control APIs")
+        for hook in (
+            node for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "after_model_call"
+        ):
+            finish_calls = [
+                node for node in ast.walk(hook)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "request_force_finish"
+            ]
+            if not finish_calls:
+                continue
+            if not any(isinstance(node, ast.Attribute) and node.attr == "tool_calls" for node in ast.walk(hook)):
+                errors.append(
+                    "after_model_call must not force-finish before checking response.tool_calls"
+                )
+            for call in finish_calls:
+                if not call.args:
+                    continue
+                argument = call.args[0]
+                if (
+                    isinstance(argument, ast.Attribute)
+                    and argument.attr == "response"
+                    and isinstance(argument.value, ast.Attribute)
+                    and argument.value.attr == "inputs"
+                ):
+                    errors.append(
+                        "request_force_finish cannot return the raw model response; "
+                        "return a serializable result containing response.content"
+                    )
     except (OSError, ValueError, SyntaxError) as exc:
         errors.append(str(exc))
     return VerificationCheck(
