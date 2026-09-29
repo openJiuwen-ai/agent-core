@@ -3,17 +3,19 @@
 """YuanRong sandbox providers (shell / code / fs).
 
 Communication uses the ``yr`` actor SDK. Both executors create a
-``yr.sandbox.Sandbox`` wrapper with ``idle_timeout=-1`` (never idle-evict):
+``yr.sandbox.Sandbox`` wrapper. ``idle_timeout`` defaults to ``-1``
+(never idle-evict) and can be overridden via launcher ``extra_params``:
 
-- ``executor=default`` → ``yr.sandbox.Sandbox(idle_timeout=-1)``
-- ``executor=docker`` → ``yr.sandbox.Sandbox(sandbox_type="docker", idle_timeout=-1, ...)``
+- ``executor=default`` → ``yr.sandbox.Sandbox(idle_timeout=...)``
+- ``executor=docker`` → ``yr.sandbox.Sandbox(sandbox_type="docker", idle_timeout=..., ...)``
 
 FS APIs map to ``Sandbox.read_file`` / ``write_file`` / ``list_files`` /
 ``search_files`` (native Python I/O inside the sandbox).
 
 ``PreDeployLauncherConfig.base_url`` is required by the launcher type but unused
 by the SDK path; cluster address comes from YuanRong env (e.g. ``YR_SERVER_ADDRESS``).
-``idle_ttl_seconds`` is unused; idle timeout is hardcoded to ``-1``.
+``idle_ttl_seconds`` is unused; idle timeout comes from
+``extra_params["idle_timeout"]`` or defaults to ``-1``.
 """
 from __future__ import annotations
 
@@ -379,8 +381,12 @@ class _YuanrongProviderMixin:
         )
 
     def _sandbox_create_kwargs(self) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"idle_timeout": YUANRONG_IDLE_TIMEOUT}
         extra = self._launcher_extra_params()
+        raw_idle_timeout = extra.get("idle_timeout")
+        idle_timeout = (
+            int(raw_idle_timeout) if raw_idle_timeout is not None else YUANRONG_IDLE_TIMEOUT
+        )
+        kwargs: dict[str, Any] = {"idle_timeout": idle_timeout}
         user = extra.get("user")
         if isinstance(user, str) and user.strip():
             kwargs["user"] = user.strip()
