@@ -34,6 +34,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
     GEN_AI_CONVERSATION_ID,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_REASONING_LEVEL,
     GEN_AI_REQUEST_STOP_SEQUENCES,
@@ -41,12 +42,16 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
+    GEN_AI_SYSTEM,
+    GEN_AI_SYSTEM_VALUE,
     GEN_AI_TOOL_CALL_ID,
     GEN_AI_TOOL_NAME,
     GEN_AI_TOOL_TYPE,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
     OJ_GEN_AI_METADATA,
+    OJ_GEN_AI_TRACE_NAME,
     OJ_GEN_AI_USAGE_TOTAL_COST,
     OJ_GEN_AI_USER_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
@@ -150,7 +155,9 @@ class TestOtelRailAgentCallbacks:
         _, _, kwargs = tracer.calls[0]
         info = kwargs["instance_info"]
         assert info["agent_description"] == "Does things"
+        assert info["agent_name"] == "MyAgent"
         assert info["conversation_id"] == "sess-9"
+        assert info["session_id"] == "sess-9"
         assert info["user_id"] == "u-1"
         assert info["metadata"] == {"user_id": "u-1", "channel": "web"}
 
@@ -375,6 +382,7 @@ class TestOtelRailEndToEnd:
                     model_name="test-model",
                     input_tokens=10,
                     output_tokens=20,
+                    first_token_time="0.42",
                     input_cost=0.1,
                     output_cost=0.2,
                     total_cost=0.3,
@@ -409,6 +417,11 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
             assert llm_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 20
             assert llm_span.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.3)
+            assert llm_span.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.42)
+            # Hotfix keeps the frozen gen_ai.system alongside the standard key.
+            assert llm_span.attributes[GEN_AI_PROVIDER_NAME] == GEN_AI_SYSTEM_VALUE
+            assert llm_span.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
+            assert llm_span.attributes[OJ_GEN_AI_TRACE_NAME] == "E2EAgent"
             # Identity / conversation attributes from _build_common_info
             assert llm_span.attributes[GEN_AI_AGENT_DESCRIPTION] == "E2E test agent"
             assert llm_span.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
@@ -422,6 +435,7 @@ class TestOtelRailEndToEnd:
             assert tool_span.attributes[GEN_AI_AGENT_NAME] == "E2EAgent"
             assert tool_span.attributes[GEN_AI_AGENT_DESCRIPTION] == "E2E test agent"
             assert tool_span.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
+            assert tool_span.attributes[OJ_GEN_AI_TRACE_NAME] == "E2EAgent"
 
             # LLM and tool spans share the agent root span's trace
             agent_span_names = [s.name for s in spans if s.name not in ("llm.test-model", "tool.echo")]

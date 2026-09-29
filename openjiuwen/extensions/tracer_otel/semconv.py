@@ -37,6 +37,7 @@ GEN_AI_REQUEST_STOP_SEQUENCES = "gen_ai.request.stop_sequences"
 GEN_AI_REQUEST_REASONING_LEVEL = "gen_ai.request.reasoning.level"
 GEN_AI_RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
 GEN_AI_RESPONSE_MODEL = "gen_ai.response.model"
+GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK = "gen_ai.response.time_to_first_chunk"
 
 GEN_AI_USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
 GEN_AI_USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
@@ -53,6 +54,9 @@ GEN_AI_AGENT_DESCRIPTION = "gen_ai.agent.description"
 GEN_AI_CONVERSATION_ID = "gen_ai.conversation.id"
 
 GEN_AI_RETRIEVAL_TOP_K = "gen_ai.retrieval.top_k"
+GEN_AI_DATA_SOURCE_ID = "gen_ai.data_source.id"
+GEN_AI_EMBEDDINGS_DIMENSION_COUNT = "gen_ai.embeddings.dimension.count"
+GEN_AI_MEMORY_RECORD_COUNT = "gen_ai.memory.record.count"
 
 ERROR_TYPE = "error.type"
 
@@ -67,6 +71,12 @@ OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 # raw source metadata dict.
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
 OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
+# Latency facts the GenAI standard does not model: trace display name,
+# inter-token latency, and reasoning duration (毫秒). first-token latency IS
+# standard-modeled (gen_ai.response.time_to_first_chunk, above).
+OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
+OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS = "openjiuwen.gen_ai.response.inter_token_latency_ms"
+OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 
 # ---------------------------------------------------------------------------
