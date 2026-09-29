@@ -140,6 +140,23 @@ def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
     )
 
 
+def _dashscope_disabled_thinking_error() -> _OpenAIStyleError:
+    message = (
+        "litellm.BadRequestError:DashscopeException-该模型始终思考，不支持关闭思考;"
+        "请使用low、high或max。.ReceivedModel Group=GLM-5.3-Flash\n"
+        "Available ModelGroup Fallbacks=None"
+    )
+    body = {
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+            "param": None,
+            "code": 400,
+        }
+    }
+    return _OpenAIStyleError(f"Error code: 400 - {body!r}", status_code=400, body=body)
+
+
 @pytest.mark.asyncio
 async def test_stream_parser_preserves_response_facts_through_usage_terminal() -> None:
     client = _make_client()
@@ -526,6 +543,49 @@ class TestDisabledThinkingIntent:
         assert sent_calls[4]["model"] == "MiniMax-M3"
         assert sent_calls[4]["extra_body"]["thinking"] == {"type": "disabled"}
         assert sent_calls[4]["reasoning_effort"] == "off"
+
+    @pytest.mark.asyncio
+    async def test_symphony_retries_dashscope_disabled_thinking_bad_request(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _dashscope_disabled_thinking_error(),
+            _response("retried"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with disabled_thinking_fallback_scope():
+                result = await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert result.content == "retried"
+        assert sdk_client.chat.completions.create.call_count == 2
+        first_call, retry_call = [
+            call.kwargs for call in sdk_client.chat.completions.create.call_args_list
+        ]
+        assert first_call["extra_body"]["thinking"] == {"type": "disabled"}
+        assert retry_call["extra_body"] == {
+            "routing": "blue",
+            "chat_template_kwargs": {"template": "keep"},
+        }
+        assert retry_call["reasoning"] == {"budget": 32}
+        assert "reasoning_effort" not in retry_call
+
+    @pytest.mark.asyncio
+    async def test_symphony_does_not_retry_unrelated_bad_request(self):
+        client = _make_client()
+        sdk_client = _mock_sdk_client(
+            _OpenAIStyleError(
+                "Error code: 400 - {'error': {'message': 'invalid parameter'}}",
+                status_code=400,
+                body={"error": {"message": "invalid parameter", "code": 400}},
+            )
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with disabled_thinking_fallback_scope():
+                with pytest.raises(BaseError):
+                    await client.invoke("hello", **self._disabled_request_kwargs())
+
+        assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("status_code", [401, 403, 408, 429, 500, 503])
