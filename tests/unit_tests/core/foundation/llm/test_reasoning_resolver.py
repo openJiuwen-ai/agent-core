@@ -1,6 +1,8 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
 
+import pytest
+
 from openjiuwen.core.foundation.llm import (
     ModelClientConfig,
     ModelRequestConfig,
@@ -123,6 +125,46 @@ def test_openai_chat_disabled_uses_current_none_effort_value() -> None:
     )
 
     assert params["reasoning_effort"] == "none"
+
+
+@pytest.mark.parametrize(
+    ("model", "expected_controls"),
+    [
+        (
+            "GLM-5.3",
+            {"extra_body": {"thinking": {"type": "disabled"}}},
+        ),
+        ("glm-5.3-flash", {}),
+    ],
+)
+def test_glm53_and_flash_use_distinct_evidence_backed_capabilities(
+    model: str,
+    expected_controls: dict,
+) -> None:
+    for endpoint_profile in ("zhipu", "openai"):
+        client = OpenAIModelClient(
+            ModelRequestConfig(
+                model=model,
+                reasoning=ReasoningConfig(mode="disabled"),
+            ),
+            _openai_config(
+                endpoint_profile=endpoint_profile,
+                api_base="https://custom-gateway.invalid/v1",
+            ),
+        )
+
+        params = client._build_request_params(
+            messages="hello",
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=None,
+            stream=False,
+        )
+
+        assert reasoning_request_controls(params) == expected_controls
 
 
 def test_dashscope_qwen_reasoning_uses_extra_body_not_sdk_kwargs() -> None:

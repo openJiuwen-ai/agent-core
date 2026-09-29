@@ -348,6 +348,8 @@ async def test_beam_final_rerank_selects_second_plan(tmp_path):
         "error": "",
     }
     rerank_payload = json.loads(llm.rerank_calls[0]["user_content"])
+    assert llm.rerank_calls[0]["reasoning"] == {"mode": "disabled"}
+    assert "extra_body" not in llm.rerank_calls[0]
     assert set(rerank_payload) == {
         "query",
         "required_output_types",

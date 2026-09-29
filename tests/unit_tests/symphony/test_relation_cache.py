@@ -296,6 +296,8 @@ async def test_internal_matcher_limits_concurrent_llm_requests() -> None:
 
     assert llm.max_active == 2
     assert [item.candidate_id for item in matches] == [item.key for item in candidates]
+    assert all(call["kwargs"]["reasoning"] == {"mode": "disabled"} for call in llm.calls)
+    assert all("extra_body" not in call["kwargs"] for call in llm.calls)
 
 
 @pytest.mark.asyncio

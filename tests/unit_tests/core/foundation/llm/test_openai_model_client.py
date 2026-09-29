@@ -11,15 +11,17 @@ from openjiuwen.core.foundation.llm import (
     AssistantMessageChunk,
     ModelClientConfig,
     ModelRequestConfig,
+    ReasoningConfig,
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm.schema.config import LLMAuthMode, LLMApiMode
-from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
 )
+from openjiuwen.core.foundation.llm.reasoning import ReasoningPlan
+from openjiuwen.core.foundation.llm.schema.config import LLMApiMode, LLMAuthMode
+from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 
 
 def _make_client() -> OpenAIModelClient:
@@ -32,6 +34,20 @@ def _make_client() -> OpenAIModelClient:
     )
     request_config = ModelRequestConfig(model="MiniMax-M3")
     return OpenAIModelClient(request_config, client_config)
+
+
+def _make_zhipu_client(model: str = "GLM-5.3") -> OpenAIModelClient:
+    return OpenAIModelClient(
+        ModelRequestConfig(model=model),
+        ModelClientConfig(
+            client_provider="OpenAI",
+            endpoint_profile="zhipu",
+            api_key="sk-test-key",
+            api_base="https://custom-gateway.invalid/v1",
+            timeout=60.0,
+            verify_ssl=False,
+        ),
+    )
 
 
 class _UpperParser:
@@ -134,6 +150,18 @@ def _unsupported_disabled_thinking_error() -> _OpenAIStyleError:
             "error": {
                 "code": "1210",
                 "message": "该模型始终思考，不支持关闭思考；请使用 low、high 或 max。",
+            }
+        },
+    )
+
+
+def _unsupported_disabled_reasoning_error_en() -> _OpenAIStyleError:
+    return _OpenAIStyleError(
+        "Bad request: this reasoning model does not support thinking.type=disabled",
+        status_code=422,
+        body={
+            "error": {
+                "message": "This reasoning model does not support thinking.type=disabled.",
             }
         },
     )
@@ -431,6 +459,51 @@ class TestDisabledThinkingIntent:
             "reasoning_effort": "off",
         }
 
+    def test_regular_request_does_not_snapshot_payload_for_fallback(self):
+        client = _make_client()
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.deepcopy",
+            side_effect=AssertionError("ordinary requests must not be deep-copied"),
+        ):
+            params, fallback = client._build_request_params_with_reasoning_fallback(
+                messages="hello",
+                tools=None,
+                temperature=None,
+                top_p=None,
+                model=None,
+                stop=None,
+                max_tokens=None,
+                stream=False,
+            )
+
+        assert params["messages"] == [{"role": "user", "content": "hello"}]
+        assert fallback is None
+
+    def test_fallback_shares_large_payload_and_only_restores_reasoning_fields(self):
+        client = _make_zhipu_client("GLM-5.3")
+        tools = [{"type": "function", "function": {"name": "lookup", "parameters": {}}}]
+
+        params, fallback = client._build_request_params_with_reasoning_fallback(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=tools,
+            temperature=None,
+            top_p=None,
+            model=None,
+            stop=None,
+            max_tokens=None,
+            stream=False,
+            reasoning={"mode": "disabled"},
+            extra_body={"routing": {"pool": "blue"}},
+        )
+
+        assert fallback is not None
+        assert fallback["messages"] is params["messages"]
+        assert fallback["tools"] is params["tools"]
+        assert fallback["extra_body"] is not params["extra_body"]
+        assert fallback["extra_body"] == {"routing": {"pool": "blue"}}
+        assert params["extra_body"]["thinking"] == {"type": "disabled"}
+
     @pytest.mark.asyncio
     async def test_supported_disabled_thinking_request_is_sent_once_unchanged(self):
         client = _make_client()
@@ -455,6 +528,115 @@ class TestDisabledThinkingIntent:
         assert "chat_template_kwargs" not in sent_call
         assert sent_call["reasoning"]["enabled"] is False
         assert sent_call["reasoning_effort"] == "off"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model", "error"),
+        [
+            ("GLM-5.3", _unsupported_disabled_thinking_error()),
+            ("GLM-5.3-Proxied", _unsupported_disabled_reasoning_error_en()),
+        ],
+    )
+    async def test_neutral_disabled_reasoning_retries_once_without_resolved_controls(self, model, error):
+        client = _make_zhipu_client(model)
+        sdk_client = _mock_sdk_client(error, _response("fallback"))
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            result = await client.invoke(
+                "hello",
+                reasoning={"mode": "disabled"},
+                extra_body={"routing": "blue"},
+            )
+
+        assert result.content == "fallback"
+        assert sdk_client.chat.completions.create.call_count == 2
+        first_call = sdk_client.chat.completions.create.call_args_list[0].kwargs
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert first_call["extra_body"] == {
+            "routing": "blue",
+            "thinking": {"type": "disabled"},
+        }
+        assert retry_call["extra_body"] == {"routing": "blue"}
+
+    @pytest.mark.asyncio
+    async def test_stream_neutral_disabled_reasoning_retries_once(self):
+        client = _make_zhipu_client("GLM-5.3")
+        sdk_client = _mock_sdk_client(
+            _unsupported_disabled_thinking_error(),
+            _stream_response("a", "b"),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            chunks = [
+                chunk.content
+                async for chunk in client.stream("hello", reasoning={"mode": "disabled"})
+            ]
+
+        assert chunks == ["a", "b"]
+        assert sdk_client.chat.completions.create.call_count == 2
+        retry_call = sdk_client.chat.completions.create.call_args_list[1].kwargs
+        assert "extra_body" not in retry_call
+        assert retry_call["stream_options"] == {"include_usage": True}
+
+    @pytest.mark.asyncio
+    async def test_neutral_disabled_reasoning_second_failure_is_propagated_without_third_attempt(self):
+        client = _make_zhipu_client()
+        sdk_client = _mock_sdk_client(
+            _unsupported_disabled_thinking_error(),
+            _OpenAIStyleError("fallback failed", status_code=400),
+        )
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError, match="fallback failed"):
+                await client.invoke("hello", reasoning={"mode": "disabled"})
+
+        assert sdk_client.chat.completions.create.call_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        [
+            _OpenAIStyleError(
+                "Unauthorized: thinking disabled is unsupported",
+                status_code=401,
+            ),
+            _OpenAIStyleError(
+                "Forbidden: thinking disabled is unsupported",
+                status_code=403,
+            ),
+            _OpenAIStyleError(
+                "Request timeout: thinking disabled is unsupported",
+                status_code=408,
+            ),
+            _OpenAIStyleError(
+                "Rate limited: thinking disabled is unsupported",
+                status_code=429,
+            ),
+            _OpenAIStyleError(
+                "Server error: thinking disabled is unsupported",
+                status_code=500,
+            ),
+            _OpenAIStyleError(
+                "Conflict: thinking disabled is unsupported",
+                status_code=409,
+            ),
+            _OpenAIStyleError("Bad request: invalid temperature", status_code=400),
+            _OpenAIStyleError(
+                "Bad request: thinking parameter is unsupported",
+                status_code=400,
+            ),
+            TimeoutError("timed out"),
+        ],
+    )
+    async def test_neutral_disabled_reasoning_does_not_retry_unrelated_errors(self, error):
+        client = _make_zhipu_client()
+        sdk_client = _mock_sdk_client(error)
+
+        with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
+            with pytest.raises(BaseError):
+                await client.invoke("hello", reasoning={"mode": "disabled"})
+
+        assert sdk_client.chat.completions.create.call_count == 1
 
     @pytest.mark.asyncio
     async def test_rejected_disable_is_not_silently_retried_with_model_defaults(self):
@@ -803,7 +985,9 @@ class TestOpenAIResponsesApiKeyMode:
     """OpenAIModelClient with api_mode=responses talks to /responses."""
 
     @staticmethod
-    def _make_responses_client() -> OpenAIModelClient:
+    def _make_responses_client(
+        reasoning: ReasoningConfig | dict | None = None,
+    ) -> OpenAIModelClient:
         client_config = ModelClientConfig(
             client_provider="OpenAI",
             api_key="sk-test-key",
@@ -812,7 +996,12 @@ class TestOpenAIResponsesApiKeyMode:
             timeout=60.0,
             verify_ssl=False,
         )
-        request_config = ModelRequestConfig(model="gpt-5.4-mini", temperature=0.2, top_p=0.1)
+        request_config = ModelRequestConfig(
+            model="gpt-5.4-mini",
+            temperature=0.2,
+            top_p=0.1,
+            reasoning=reasoning,
+        )
         return OpenAIModelClient(request_config, client_config)
 
     @staticmethod
@@ -829,6 +1018,146 @@ class TestOpenAIResponsesApiKeyMode:
     def test_uses_responses_api_detects_api_mode(self):
         assert self._make_responses_client()._uses_responses_api() is True
         assert _make_client()._uses_responses_api() is False
+
+    def test_regular_responses_request_does_not_snapshot_payload_for_fallback(self):
+        client = self._make_responses_client()
+
+        with patch(
+            "openjiuwen.core.foundation.llm.model_clients.openai_model_client.deepcopy",
+            side_effect=AssertionError("ordinary Responses payloads must not be deep-copied"),
+        ):
+            body, fallback = client._build_responses_request_body_with_reasoning_fallback(
+                messages="hello",
+                tools=None,
+                temperature=None,
+                top_p=None,
+                model=None,
+                max_tokens=None,
+                stop=None,
+            )
+
+        assert body["input"][0]["content"][0]["text"] == "hello"
+        assert fallback is None
+
+    @pytest.mark.asyncio
+    async def test_invoke_consumes_neutral_disabled_reasoning_without_leaking_dsl(self):
+        import httpx
+
+        seen_bodies = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_bodies.append(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client(ReasoningConfig(mode="disabled"))
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            response = await client.invoke("hello")
+
+        assert response.content == "ok"
+        assert len(seen_bodies) == 1
+        assert "reasoning" not in seen_bodies[0]
+        assert '"mode"' not in json.dumps(seen_bodies[0])
+
+    @pytest.mark.asyncio
+    async def test_stream_consumes_neutral_disabled_reasoning_without_leaking_dsl(self):
+        import httpx
+
+        seen_bodies = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_bodies.append(json.loads(request.content.decode()))
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client(ReasoningConfig(mode="disabled"))
+        with patch.object(
+            client,
+            "_make_responses_transport",
+            return_value=OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler)),
+        ):
+            chunks = [chunk async for chunk in client.stream("hello")]
+
+        assert "".join(chunk.content for chunk in chunks) == "ok"
+        assert len(seen_bodies) == 1
+        assert "reasoning" not in seen_bodies[0]
+        assert '"mode"' not in json.dumps(seen_bodies[0])
+
+    def test_responses_preserves_caller_raw_reasoning_payload(self):
+        client = self._make_responses_client({"enabled": False, "budget": 32})
+
+        body = client._build_responses_request_body(
+            messages="hello",
+            tools=None,
+            temperature=None,
+            top_p=None,
+            model=None,
+            max_tokens=None,
+            stop=None,
+        )
+
+        assert body["reasoning"] == {"enabled": False, "budget": 32}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_responses_retries_once_when_resolved_disable_wire_is_explicitly_rejected(
+        self,
+        stream,
+    ):
+        import httpx
+
+        seen_bodies = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            seen_bodies.append(json.loads(request.content.decode()))
+            if len(seen_bodies) == 1:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": {
+                            "message": (
+                                "This reasoning model does not support reasoning effort off."
+                            ),
+                        }
+                    },
+                )
+            return httpx.Response(
+                200,
+                content=self._responses_stream_body(),
+                headers={"content-type": "text/event-stream"},
+            )
+
+        client = self._make_responses_client(ReasoningConfig(mode="disabled"))
+        transport = OpenAIAccountResponsesTransport(transport=httpx.MockTransport(handler))
+        with (
+            patch.object(client, "_make_responses_transport", return_value=transport),
+            patch(
+                "openjiuwen.core.foundation.llm.model_clients.openai_model_client.resolve_reasoning_plan",
+                return_value=ReasoningPlan(
+                    sdk_params={"reasoning": {"effort": "none"}},
+                ),
+            ),
+        ):
+            if stream:
+                result = [chunk async for chunk in client.stream("hello")]
+                assert "".join(chunk.content for chunk in result) == "ok"
+            else:
+                result = await client.invoke("hello")
+                assert result.content == "ok"
+
+        assert len(seen_bodies) == 2
+        assert seen_bodies[0]["reasoning"] == {"effort": "none"}
+        assert "reasoning" not in seen_bodies[1]
 
     @pytest.mark.asyncio
     async def test_invoke_routes_to_responses_endpoint_with_api_key(self):

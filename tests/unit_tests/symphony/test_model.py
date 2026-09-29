@@ -9,7 +9,12 @@ import pytest
 import openjiuwen.symphony as symphony
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import BaseError, build_error
-from openjiuwen.symphony.orchestration.model import invoke_json, model_identity, model_usage_context
+from openjiuwen.symphony.orchestration.model import (
+    invoke_json,
+    model_identity,
+    model_usage_context,
+    thinking_disabled_request_overrides,
+)
 from openjiuwen.symphony.shared.identity import endpoint_sha256, sanitize_metadata
 
 
@@ -183,6 +188,10 @@ def test_removed_llm_adapter_contracts_are_not_exported() -> None:
     assert not hasattr(symphony, "LLMClient")
     assert not hasattr(symphony, "LLMResponseObserver")
     assert not hasattr(symphony, "OpenJiuwenLLMClient")
+
+
+def test_thinking_disabled_request_overrides_use_provider_neutral_reasoning() -> None:
+    assert thinking_disabled_request_overrides() == {"reasoning": {"mode": "disabled"}}
 
 
 @pytest.mark.asyncio

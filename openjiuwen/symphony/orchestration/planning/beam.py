@@ -19,7 +19,12 @@ from openjiuwen.symphony.orchestration.language import (
     default_beam_plan_title,
     planner_language_instruction,
 )
-from openjiuwen.symphony.orchestration.model import ModelResponseObserver, invoke_json, model_usage_context
+from openjiuwen.symphony.orchestration.model import (
+    ModelResponseObserver,
+    invoke_json,
+    model_usage_context,
+    thinking_disabled_request_overrides,
+)
 from openjiuwen.symphony.orchestration.planning.models import (
     OrchestrationPlan,
     SearchState,
@@ -560,7 +565,7 @@ class BidirectionalBeamPlanner:
                     system_prompt=(f"{BEAM_FINAL_RERANK_SYSTEM_PROMPT}\n{planner_language_instruction(self.language)}"),
                     user_content=json.dumps(payload, ensure_ascii=False),
                     error_context="Symphony beam final rerank",
-                    request_overrides={"extra_body": {"thinking": {"type": "disabled"}}},
+                    request_overrides=thinking_disabled_request_overrides(),
                     response_observer=self.model_response_observer,
                 )
             selection = json.loads(raw)
