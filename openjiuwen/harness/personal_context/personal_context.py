@@ -1594,12 +1594,13 @@ class PersonalContext:
         stop_error: BaseError | None = None
         if cancel_fetch_runs:
             async with self._fetch_lock:
-                active_runs = [
-                    (service_id, cast(str, identity["run_id"]))
-                    for service_id, task in self._active_fetch_run_tasks.items()
-                    if not task.done()
-                    and (identity := self._fetch_run_identity.get(service_id)) is not None
-                ]
+                active_runs: list[tuple[str, str]] = []
+                for service_id, task in self._active_fetch_run_tasks.items():
+                    if task.done():
+                        continue
+                    identity = self._fetch_run_identity.get(service_id)
+                    if identity is not None:
+                        active_runs.append((service_id, cast(str, identity["run_id"])))
                 for event in self._fetch_stop_events.values():
                     event.set()
                 tasks = set(self._fetch_tasks.values()) | set(self._manual_fetch_tasks.values())
