@@ -492,3 +492,82 @@ class TestExtractReasoningContent:
     def test_reasoning_details_text_empty_falls_back(self):
         delta = _Delta(reasoning_details=[{"text": ""}], reasoning_content="fallback")
         assert OpenAIModelClient._extract_reasoning_content(delta) == "fallback"
+
+
+class TestApiBaseForms:
+    """Regression guards for api_base semantics (MR review: Must Fix).
+
+    The OpenAI SDK path must receive the configured api_base verbatim;
+    only the raw affinity-gateway path (_chat_completions_url) appends
+    /v1, replicating the legacy AscendAffinity/InferenceAffinity clients.
+    """
+
+    def test_connection_key_uses_raw_api_base(self):
+        client = _make_client()
+        key = OpenAIModelClient.connection_key(client.model_client_config)
+        assert key[1] == "https://api.openai.com/v1"
+
+    def test_connection_key_preserves_custom_path_and_query(self):
+        client_config = ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test-key",
+            api_base="https://gw.example.com/llm",
+            verify_ssl=False,
+        )
+        key = OpenAIModelClient.connection_key(client_config)
+        assert key[1] == "https://gw.example.com/llm"
+
+    def test_sdk_client_receives_raw_api_base(self, monkeypatch):
+        captured = {}
+
+        class _FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        # _build_async_openai_client imports AsyncOpenAI from the openai
+        # package at call time, so patch it there.
+        import openai
+        monkeypatch.setattr(openai, "AsyncOpenAI", _FakeAsyncOpenAI)
+        client = _make_client()
+        client._build_async_openai_client()
+        assert captured["base_url"] == "https://api.openai.com/v1"
+
+    def test_sdk_client_preserves_custom_path_api_base(self, monkeypatch):
+        captured = {}
+
+        class _FakeAsyncOpenAI:
+            def __init__(self, **kwargs):
+                captured.update(kwargs)
+
+        import openai
+        monkeypatch.setattr(openai, "AsyncOpenAI", _FakeAsyncOpenAI)
+        client_config = ModelClientConfig(
+            client_provider="OpenAI",
+            api_key="sk-test-key",
+            api_base="https://gw.example.com/llm",
+            verify_ssl=False,
+        )
+        client = OpenAIModelClient(ModelRequestConfig(model="gpt-x"), client_config)
+        client._build_async_openai_client()
+        assert captured["base_url"] == "https://gw.example.com/llm"
+
+    def test_affinity_gateway_url_appends_v1_for_plain_host(self):
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            _chat_completions_url,
+        )
+        assert _chat_completions_url("https://gw.example.com/llm") == \
+            "https://gw.example.com/llm/v1/chat/completions"
+
+    def test_affinity_gateway_url_keeps_existing_v1(self):
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            _chat_completions_url,
+        )
+        assert _chat_completions_url("https://gw.example.com/v1") == \
+            "https://gw.example.com/v1/chat/completions"
+
+    def test_affinity_gateway_url_strips_trailing_chat_completions(self):
+        from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
+            _chat_completions_url,
+        )
+        assert _chat_completions_url("https://gw.example.com/v1/chat/completions") == \
+            "https://gw.example.com/v1/chat/completions"
