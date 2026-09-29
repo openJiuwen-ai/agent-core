@@ -5,13 +5,15 @@
 | 项 | 值 |
 | --- | --- |
 | 类型 | spec |
-| 状态 | 拟议契约；尚未实现 |
-| 关联模块 | `openjiuwen/harness/persistent_agent/{context/,schema/context.py}`（拟议路径） |
-| 最近一次修订日期 | 2026-09-25 |
-| 关联 feature | N/A；开发计划 PA-05、PA-09～PA-12 |
+| 状态 | PA-01 的窗口 / 版本资料类型和端口协议已定义；ContextAssembler、存储后端与换窗执行尚未实现 |
+| 关联模块 | `openjiuwen/harness/persistent_agent/persistent_agent/{ports.py,schema/context.py}` |
+| 最近一次修订日期 | 2026-09-29 |
+| 关联 feature | [F_02 执行协议](../features/F_02_execution-protocol.md)；开发计划 PA-05、PA-09～PA-12 |
 | 设计依据 | [详细架构设计](../designs/persistent-agent-architecture.md) §9～11 |
 
-当前没有本模块的 ContextAssembler、ContextStore 或换窗实现；本规约描述拟议目标。
+当前已有 `ContextStore`、`HistoryPort`、`KnowledgePort`、`GroupMaterialPort` Protocol，以及窗口记录、条件操作结果、版本化资料快照 DTO；这些只定义数据与调用契约，不提供存储、检索、授权判定或运行行为。本模块仍没有 ContextAssembler、ContextStore 后端或换窗实现；本规约其余部分描述目标行为。
+
+PA-01 已定义的最小接口包括：`ContextStore.read_head/read_window/save_window/advance_head/create_and_activate_window/query_operation`，以及历史、知识、群资料的 search / resolve / read。读取结果将 `unknown`、`unavailable`、`forbidden`、`partial` 与具备完整查询水位的 `empty / not_found` 区分；`MaterialSnapshot` 固定来源、范围、版本、授权修订、内容引用和摘要。真正保存消息窗口、跨群原文检索、检查撤权和按阶段装配由后续 PA-05、PA-09～PA-12 实现。
 
 ## 范围 / 边界
 

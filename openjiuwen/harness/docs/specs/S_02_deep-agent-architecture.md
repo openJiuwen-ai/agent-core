@@ -6,8 +6,8 @@
 |---|---|
 | 类型 | spec |
 | 关联模块 | `openjiuwen/harness/deep_agent.py`、`openjiuwen/harness/schema/interaction.py`、`openjiuwen/harness/schema/state.py`、`openjiuwen/harness/schema/agent_mode.py` |
-| 最近一次修订日期 | 2026-09-15 |
-| 关联 feature | `F_04_authoritative-terminal-stream.md` |
+| 最近一次修订日期 | 2026-09-28 |
+| 关联 feature | `F_04_authoritative-terminal-stream.md`、`F_06_opt-in-stream-task-lifecycle.md` |
 
 ## 范围 / 边界
 
@@ -82,6 +82,7 @@
 15. 最终 payload 与 `invoke` 的返回契约一致，允许 rail 替换整个 result 对象。结构化 Browser
     partial/blocked 不是传输异常，TaskTool 保留其 evidence、retryable 和恢复字段；没有结构化
     结果的执行错误仍走框架异常路径。
+16. `DeepAgentConfig.stream_task_lifecycle` 是可选运行时句柄，默认 None，默认构造不启用新分支。Persistent 构造在配置应用前注入独立管理器；单轮 stream 将 scope 传给 ReAct，取消 / 提前关闭必须等待登记的后台生产者及其 Session 收尾退出，abort 也只收敛此管理器的任务。仅启用的流在回调 / Session 包装器内显式传递 aclose，普通流保留旧路径。此接缝不替代外部工具进程收敛或宿主业务取消确认。
 
 ## 接口契约
 

@@ -598,6 +598,7 @@ class DeepAgentSpec(BaseModel):
         return resolve_deep_agent_parts(
             llm_model,
             card=self.card,
+            tool_owner_id=build_ctx.tool_owner_id,
             system_prompt=self.system_prompt,
             tools=self._resolve_tools(language, self.card.id if self.card else None, context=build_ctx),
             mcps=self.mcps,

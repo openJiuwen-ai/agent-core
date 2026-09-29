@@ -257,6 +257,9 @@ class DeepAgentConfig:
     context_engine_config: Optional[Any] = None
     kv_cache_affinity_config: Optional[KVCacheAffinityConfig] = None
     enable_task_loop: bool = False
+    # Optional runtime lifecycle seam. None preserves the native/personal
+    # streaming path; Persistent construction supplies a per-binding owner.
+    stream_task_lifecycle: Any = None
     enable_async_subagent: bool = False
     enable_subagent_runtime: bool = False
     add_general_purpose_agent: bool = False

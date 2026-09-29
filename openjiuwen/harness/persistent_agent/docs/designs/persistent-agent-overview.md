@@ -5,7 +5,7 @@
 | 项 | 说明 |
 | --- | --- |
 | 类型 | 目标设计草案；不代表已实现 API 或已生效规约 |
-| 最近一次修订日期 | 2026-09-24 |
+| 最近一次修订日期 | 2026-09-29 |
 | 责任人 | henry hu |
 | 关联模块 | `openjiuwen.harness.persistent_agent` |
 | 详细设计 | [Persistent Agent 详细架构设计](persistent-agent-architecture.md) |
@@ -28,7 +28,7 @@ Persistent Agent 使同一业务 Agent 身份能在多个独立 Session 中持�
 
 本模块负责**宿主指定 Session 内的执行**：参与判断、Agent Loop 接入、上下文装配、窗口与历史、资产访问、恢复状态重建，以及 Agent 级主动学习的目标与反馈。JiuwenMate/AgentServer 负责渠道接入、Session 定位和排队、配置发布、执行权、业务事实提交、控制调度、发送检查与投递。PersonalContext 负责知识来源采集、处理和发布；本模块只消费获授权的版本，并通过独立学习作业与之协作。Team Leader、跨 Agent 私有状态共享及模型参数训练不在基础范围内。
 
-当前 `persistent_agent/` 只有设计文档，拟议的 `SessionExecutor` 和 `execute` 尚未实现。现有 [DeepAgent](../../../deep_agent.py)、[构造工厂](../../../factory.py)、[PersonalContext](../../../personal_context/personal_context.py)、Rails、工具权限与 Workspace 是可复用基础，不等于已具备本文的可靠执行闭环。
+当前已落地 PA-01～03 的接口契约、原生 DeepAgent 构造及实例内 Session 隔离；拟议的 `SessionExecutor` 和 `execute_persistent_request` 仍未实现。现有 [DeepAgent](../../../deep_agent.py)、[构造工厂](../../../factory.py)、[PersonalContext](../../../personal_context/personal_context.py)、Rails、工具权限与 Workspace 是可复用基础，不等于已具备本文的可靠执行闭环。
 
 设计不要求一 Agent 常驻一个进程，也不要求每个逻辑模块独立部署。它依赖宿主提供可靠接收、执行权与提交确认；若宿主暂不具备某项保证，对应能力应保持关闭，而不是由模型或内存状态假装可靠。
 

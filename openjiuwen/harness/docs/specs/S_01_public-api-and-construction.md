@@ -33,6 +33,10 @@
 
 ## 不变量
 
+### Spec 调用级工具 owner 接缝（2026-09-28）
+
+`schema.BuildContext` 提供可选 `tool_owner_id`，默认 None。DeepAgentSpec.resolve_parts 在工具注册前将其传入 resolve_deep_agent_parts / DeepAgentConfig；未设置时继续由 DeepAgent 使用 Card.id。资格化发生在 AbilityManager.add_ability，不依赖 provider 的 tool_id 保留参数；stateless 工具保持共享 ID。此字段是运行构造句柄，不加入可序列化 DeepAgentSpec，也不改变 Card 身份。Persistent 的专用工厂通过同一 parts / Config 路径构造原生 DeepAgent；其独立包导出不增加 harness 顶层的 8 个符号。变更背景见 [Persistent F_01](../../persistent_agent/docs/features/F_01_spec-and-deep-agent-construction.md)。
+
 公开表面：
 
 1. `openjiuwen/harness/__init__.py` 的 `__all__` 是公开 API 的**完整集合**（8 个符号）：

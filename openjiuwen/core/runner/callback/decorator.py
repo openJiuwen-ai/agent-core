@@ -36,6 +36,7 @@ from typing import (
     Set,
 )
 
+from openjiuwen.core.common.stream_lifecycle import owns_stream_lifecycle
 from openjiuwen.core.runner.callback.filters import EventFilter
 
 # Sentinel value returned by trigger_transform when no transform callbacks are registered.
@@ -265,9 +266,20 @@ def create_emit_before_decorator(
                 await _do_trigger(framework, event, args, kwargs, pass_args=pass_args,
                                   extra_kwargs=extra_kwargs)
                 _remove_session_if_not_needed(func, kwargs)
+<<<<<<< HEAD
                 async with aclosing(func(*args, **kwargs)) as source:
                     async for item in source:
                         yield item
+=======
+                close_source = owns_stream_lifecycle(func, args, kwargs)
+                source = func(*args, **kwargs)
+                try:
+                    async for item in source:
+                        yield item
+                finally:
+                    if close_source:
+                        await source.aclose()
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
 
             return async_gen_wrapper
 
@@ -345,10 +357,22 @@ def create_emit_after_decorator(
                 async def async_gen_once_wrapper(*args: Any, **kwargs: Any) -> Any:
                     collected: list[Any] = []
                     _remove_session_if_not_needed(func, kwargs)
+<<<<<<< HEAD
                     async with aclosing(func(*args, **kwargs)) as source:
                         async for item in source:
                             collected.append(item)
                             yield item
+=======
+                    close_source = owns_stream_lifecycle(func, args, kwargs)
+                    source = func(*args, **kwargs)
+                    try:
+                        async for item in source:
+                            collected.append(item)
+                            yield item
+                    finally:
+                        if close_source:
+                            await source.aclose()
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
                     await _do_trigger(
                         framework, event, args, kwargs,
                         pass_args=pass_args,
@@ -361,7 +385,13 @@ def create_emit_after_decorator(
             @wraps(func)
             async def async_gen_per_item_wrapper(*args: Any, **kwargs: Any) -> Any:
                 _remove_session_if_not_needed(func, kwargs)
+<<<<<<< HEAD
                 async with aclosing(func(*args, **kwargs)) as source:
+=======
+                close_source = owns_stream_lifecycle(func, args, kwargs)
+                source = func(*args, **kwargs)
+                try:
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
                     async for item in source:
                         await _do_trigger(
                             framework, event, args, kwargs,
@@ -370,6 +400,12 @@ def create_emit_after_decorator(
                             extra_kwargs=extra_kwargs,
                         )
                         yield item
+<<<<<<< HEAD
+=======
+                finally:
+                    if close_source:
+                        await source.aclose()
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
 
             return async_gen_per_item_wrapper
 
@@ -630,13 +666,23 @@ def _make_transform_io_decorator(
             )
             _remove_session_if_not_needed(func, call_kwargs)
             source = func(*call_args, **call_kwargs)
-            if output_source_fn is None:
-                async for item in source:
-                    yield item
-            else:
-                iterable = await output_source_fn(source)
-                async for item in iterable:
-                    yield item
+            close_source = owns_stream_lifecycle(func, call_args, call_kwargs)
+            iterable = source
+            try:
+                if output_source_fn is None:
+                    async for item in source:
+                        yield item
+                else:
+                    iterable = await output_source_fn(source)
+                    async for item in iterable:
+                        yield item
+            finally:
+                if close_source:
+                    try:
+                        if iterable is not source and hasattr(iterable, "aclose"):
+                            await iterable.aclose()
+                    finally:
+                        await source.aclose()
 
         return async_gen_wrapper_gen_mode  # type: ignore[return-value]
 
@@ -656,9 +702,19 @@ def _make_transform_io_decorator(
                     "expected async generator function, "
                     f"got {type(async_gen)}"
                 )
+<<<<<<< HEAD
             async with aclosing(async_gen) as source:
                 async for item in source:
                     yield await output_fn(item)
+=======
+            close_source = owns_stream_lifecycle(func, call_args, call_kwargs)
+            try:
+                async for item in async_gen:
+                    yield await output_fn(item)
+            finally:
+                if close_source:
+                    await async_gen.aclose()
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
 
         return async_gen_wrapper  # type: ignore[return-value]
 
