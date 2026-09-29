@@ -12,11 +12,10 @@ bug that previously required a process-global monkey-patch to work around.
 
 import base64
 import json
-import os
 import random
-import subprocess
-import sys
-from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
 
 from openjiuwen.core.context_engine.token.tiktoken_counter import (
     DEFAULT_IMAGE_PLACEHOLDER_TOKENS,
@@ -37,29 +36,21 @@ def _counter() -> TiktokenCounter:
     return TiktokenCounter()
 
 
-def test_cl100k_base_is_available_without_network() -> None:
-    """Unit tests must not depend on downloading tiktoken's BPE file."""
-    cache_dir = Path(os.environ["TIKTOKEN_CACHE_DIR"])
-    resource_dir = Path(__file__).resolve().parents[3] / "resources" / "tiktoken_cache"
-    assert cache_dir != resource_dir
-    assert (resource_dir / "9b5ad71b2ce5302211f9c61530b329a4922fc6a4").is_file()
-    assert (cache_dir / "9b5ad71b2ce5302211f9c61530b329a4922fc6a4").is_file()
+@pytest.mark.parametrize("model", ["gpt-4", "gpt-4o"])
+def test_counter_is_available_without_vocab_or_network(monkeypatch, tmp_path, model) -> None:
+    """Count messages without a cached vocab or a vocab download."""
+    import tiktoken.load
+    import tiktoken.registry
 
-    offline_check = """
-from unittest.mock import patch
-import tiktoken
+    monkeypatch.setenv("TIKTOKEN_CACHE_DIR", str(tmp_path / "empty-cache"))
+    monkeypatch.setattr(tiktoken.registry, "ENCODINGS", {})
+    read_file = Mock(side_effect=AssertionError("vocab access"))
+    monkeypatch.setattr(tiktoken.load, "read_file", read_file)
 
-with patch("tiktoken.load.read_file", side_effect=AssertionError("network access")):
-    assert tiktoken.get_encoding("cl100k_base").encode("hello")
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", offline_check],
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=10,
-    )
-    assert result.returncode == 0, result.stderr
+    counter = TiktokenCounter(model=model)
+    assert counter.measurement_source == "tiktoken"
+    assert counter.count("hello") > 0
+    read_file.assert_not_called()
 
 
 def _png_data_url(width: int, height: int) -> str:
