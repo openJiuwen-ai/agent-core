@@ -160,12 +160,27 @@ def _copy_preserved_blocks_to_converted_messages(
             converted[_ANTHROPIC_INTERNAL_CONTENT_BLOCKS_KEY] = copy.deepcopy(raw_blocks)
 
 
-def _stream_blocks_metadata(block_acc: Mapping[int, dict]) -> dict[str, Any]:
-    blocks = []
-    for _, block in sorted(block_acc.items()):
-        sanitized = _sanitize_replay_block(block)
-        if sanitized is not None:
-            blocks.append(sanitized)
+def _refresh_sanitized_block(
+        tool_use_acc: Mapping[int, dict],
+        sanitized_blocks: dict[int, dict],
+        idx: int,
+) -> None:
+    """Re-sanitize a single content block after its accumulator changed."""
+    sanitized = _sanitize_replay_block(tool_use_acc[idx])
+    if sanitized is None:
+        sanitized_blocks.pop(idx, None)
+    else:
+        sanitized_blocks[idx] = sanitized
+
+
+def _stream_blocks_metadata(sanitized_blocks: Mapping[int, dict]) -> dict[str, Any]:
+    """Build a chunk metadata snapshot from incrementally sanitized blocks.
+
+    ``sanitized_blocks`` is maintained by ``_event_to_chunk`` (one entry per
+    content-block index, refreshed only when that block changes). Shallow
+    copies keep chunks independent without re-sanitizing accumulated text.
+    """
+    blocks = [dict(sanitized_blocks[idx]) for idx in sorted(sanitized_blocks)]
     if not blocks:
         return {}
     return {_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY: blocks}
@@ -920,12 +935,16 @@ class AnthropicModelClient(BaseModelClient):
             # retains thinking signatures so the next agent iteration can replay
             # the assistant turn exactly as Anthropic returned it.
             tool_use_acc: dict[int, dict] = {}
+            # Per-index sanitized replay blocks, refreshed only for the block
+            # touched by the current event so per-delta cost stays O(block
+            # count) instead of re-sanitizing every accumulated block.
+            sanitized_blocks: dict[int, dict] = {}
             last_usage: Optional[UsageMetadata] = None
             final_stop_reason: Optional[str] = None
 
             async with async_client.messages.stream(**params) as response_stream:
                 async for event in response_stream:
-                    chunk = self._event_to_chunk(event, tool_use_acc)
+                    chunk = self._event_to_chunk(event, tool_use_acc, sanitized_blocks)
                     if chunk is None:
                         continue
                     if chunk.usage_metadata is not None:
@@ -1126,6 +1145,7 @@ class AnthropicModelClient(BaseModelClient):
             self,
             event: Any,
             tool_use_acc: dict[int, dict],
+            sanitized_blocks: dict[int, dict],
     ) -> Optional[AssistantMessageChunk]:
         """Map an Anthropic SSE event to ``AssistantMessageChunk``.
 
@@ -1175,9 +1195,10 @@ class AnthropicModelClient(BaseModelClient):
                     "type": "redacted_thinking",
                     "data": getattr(block, "data", "") or "",
                 }
+                _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
                 return AssistantMessageChunk(
                     content="",
-                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    metadata=_stream_blocks_metadata(sanitized_blocks),
                     finish_reason="null",
                 )
             elif block_type == "text":
@@ -1185,6 +1206,9 @@ class AnthropicModelClient(BaseModelClient):
                     "type": "text",
                     "text": getattr(block, "text", "") or "",
                 }
+            else:
+                return None
+            _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
             return None
 
         if etype == "content_block_delta":
@@ -1200,10 +1224,11 @@ class AnthropicModelClient(BaseModelClient):
                 if idx is not None:
                     state = tool_use_acc.setdefault(idx, {"type": "text", "text": ""})
                     state["text"] = (state.get("text") or "") + text
+                    _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
                 return AssistantMessageChunk(
                     content=text,
                     reasoning_content=None,
-                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    metadata=_stream_blocks_metadata(sanitized_blocks),
                     tool_calls=None,
                     usage_metadata=None,
                     finish_reason="null",
@@ -1217,10 +1242,11 @@ class AnthropicModelClient(BaseModelClient):
                         idx, {"type": "thinking", "thinking": "", "signature": ""}
                     )
                     state["thinking"] = (state.get("thinking") or "") + thinking
+                    _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
                 return AssistantMessageChunk(
                     content="",
                     reasoning_content=thinking,
-                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    metadata=_stream_blocks_metadata(sanitized_blocks),
                     tool_calls=None,
                     usage_metadata=None,
                     finish_reason="null",
@@ -1233,13 +1259,15 @@ class AnthropicModelClient(BaseModelClient):
                     idx, {"type": "thinking", "thinking": "", "signature": ""}
                 )
                 state["signature"] = (state.get("signature") or "") + signature
+                _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
                 return AssistantMessageChunk(
                     content="",
-                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    metadata=_stream_blocks_metadata(sanitized_blocks),
                     finish_reason="null",
                 )
             if self._is_tool_input_json_delta(dtype, idx, tool_use_acc):
                 tool_use_acc[idx]["args_str"] += getattr(delta, "partial_json", "") or ""
+                _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
                 return None
             return None
 
@@ -1251,7 +1279,7 @@ class AnthropicModelClient(BaseModelClient):
             if block.get("type") != "tool_use":
                 return AssistantMessageChunk(
                     content="",
-                    metadata=_stream_blocks_metadata(tool_use_acc),
+                    metadata=_stream_blocks_metadata(sanitized_blocks),
                     finish_reason="null",
                 )
             args_str = block.get("args_str") or "{}"
@@ -1259,6 +1287,7 @@ class AnthropicModelClient(BaseModelClient):
                 block["input"] = json.loads(args_str)
             except (TypeError, ValueError):
                 block["input"] = {"_raw_arguments": args_str}
+            _refresh_sanitized_block(tool_use_acc, sanitized_blocks, idx)
             return AssistantMessageChunk(
                 content="",
                 reasoning_content=None,
@@ -1269,7 +1298,7 @@ class AnthropicModelClient(BaseModelClient):
                     arguments=args_str,
                     index=idx,
                 )],
-                metadata=_stream_blocks_metadata(tool_use_acc),
+                metadata=_stream_blocks_metadata(sanitized_blocks),
                 usage_metadata=None,
                 finish_reason="null",
             )
@@ -1290,7 +1319,7 @@ class AnthropicModelClient(BaseModelClient):
                 content="",
                 reasoning_content=None,
                 tool_calls=None,
-                metadata=_stream_blocks_metadata(tool_use_acc),
+                metadata=_stream_blocks_metadata(sanitized_blocks),
                 usage_metadata=usage_metadata,
                 finish_reason=finish_reason,
                 provider_metadata=(

@@ -639,19 +639,20 @@ class TestResponseReasoning:
     def test_stream_thinking_and_signature_are_preserved(self):
         client = _make_client()
         state = {}
+        sanitized_blocks = {}
 
         start = MagicMock(type="content_block_start", index=0)
         start.content_block = MagicMock(type="thinking", thinking="", signature="")
-        assert client._event_to_chunk(start, state) is None
+        assert client._event_to_chunk(start, state, sanitized_blocks) is None
 
         thinking_event = MagicMock(type="content_block_delta", index=0)
         thinking_event.delta = MagicMock(type="thinking_delta", thinking="plan")
-        thinking_chunk = client._event_to_chunk(thinking_event, state)
+        thinking_chunk = client._event_to_chunk(thinking_event, state, sanitized_blocks)
         assert thinking_chunk.reasoning_content == "plan"
 
         signature_event = MagicMock(type="content_block_delta", index=0)
         signature_event.delta = MagicMock(type="signature_delta", signature="sig")
-        signature_chunk = client._event_to_chunk(signature_event, state)
+        signature_chunk = client._event_to_chunk(signature_event, state, sanitized_blocks)
         assert signature_chunk.metadata[_ANTHROPIC_CONTENT_BLOCKS_METADATA_KEY] == [{
             "type": "thinking",
             "thinking": "plan",
