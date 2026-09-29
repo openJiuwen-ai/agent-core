@@ -2,7 +2,7 @@
 """Judge iteration recovery always starts from the complete frozen snapshot."""
 
 import json
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -142,7 +142,6 @@ async def test_closeout_has_no_consumed_state(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     model = AsyncMock()
-    model.context_budget = Mock(return_value=262144)
     model.invoke.return_value = AssistantMessage(content=_verdict())
     monkeypatch.setattr(judge_runtime, "_judge_model", lambda _config: model)
     assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == _verdict()

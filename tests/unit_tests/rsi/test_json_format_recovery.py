@@ -24,7 +24,6 @@ async def test_repair_uses_existing_strict_scoring(tmp_path, monkeypatch, score)
         {"id": "criterion", "score": score, "reason": "checked", "evidence": "answer.txt"}
     ], "forbidden_hits": []}
     monkeypatch.setattr(judge, "run_judge_agent", AsyncMock(return_value=malformed))
-    monkeypatch.setattr(judge.JudgeBudgetRail, "closeout", AsyncMock(return_value=malformed))
     repair = AsyncMock(return_value=json.dumps(verdict))
     monkeypatch.setattr(judge, "repair_judge_json", repair)
     runner = judge.LlmAsJudgeJudger(EvaluatorConfig(judge_model_config_ref="unused", judge_max_retries=0))

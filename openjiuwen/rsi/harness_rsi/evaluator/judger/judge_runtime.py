@@ -25,6 +25,10 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     JudgeEvidenceTool,
     bound_tool_content,
 )
+from openjiuwen.rsi.harness_rsi.evaluator.judger.scoring import (
+    MissingJudgeVerdictError,
+    parse_judge_output,
+)
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
 
 
@@ -65,10 +69,12 @@ class JudgeBudgetRail(AgentRail):
     def __init__(self, iterations: int, log_path: Path) -> None:
         self.iterations = iterations
         self.log_path = log_path
+        self.turns = 0
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         turn = int(ctx.extra.get("judge_turn", 0)) + 1
         ctx.extra["judge_turn"] = turn
+        self.turns = turn
         if turn >= self.iterations:
             await ctx.context.add_messages(
                 UserMessage(
@@ -172,7 +178,8 @@ async def run_judge_agent(
     payload = await asyncio.to_thread(inline_evidence, workspace, include_images=True)
     if payload is not None:
         return await _invoke_complete_evidence(_judge_model(config), payload)
-    agent = build_judge_agent(config, workspace, log_path)
+    budget = JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
+    agent = build_judge_agent(config, workspace, log_path, budget=budget)
     try:
         result = await Runner.run_agent(agent=agent, inputs={"query": prompt}, session=f"judge_{agent.card.id}")
         if isinstance(result, dict):
@@ -181,7 +188,13 @@ async def run_judge_agent(
                     raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
-        return json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+        raw = json.dumps(result, ensure_ascii=False) if isinstance(result, dict) else str(result)
+        try:
+            parse_judge_output(raw)
+        except MissingJudgeVerdictError as exc:
+            if budget.turns >= budget.iterations:
+                raise JudgeIterationLimitError("Judge reading iteration limit reached without a verdict") from exc
+        return raw
     finally:
         for rail in agent.configured_rails():
             if isinstance(rail, JudgeReadOnlyRail):
@@ -196,7 +209,7 @@ async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
     payload = await asyncio.to_thread(
         inline_evidence,
         workspace,
-        max_bytes=model.context_budget(),
+        max_bytes=None,
         required=True,
         include_images=True,
     )

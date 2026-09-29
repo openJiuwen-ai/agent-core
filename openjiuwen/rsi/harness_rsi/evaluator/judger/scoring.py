@@ -13,6 +13,10 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.base import _reference_answer
 from openjiuwen.rsi.harness_rsi.evaluator.requirement_results import requirement_results_contract
 
 
+class MissingJudgeVerdictError(ValueError):
+    """The model returned no structured verdict to validate or repair."""
+
+
 def finite_number(value: Any, *, minimum: float, maximum: float, name: str) -> float:
     """Reject booleans, coercible strings and non-finite model scores."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -156,7 +160,7 @@ def parse_judge_output(raw: str) -> dict[str, Any]:
             if _contains_judge_payload(text[match.start():end]):
                 candidates.append(value)
         if not candidates:
-            raise ValueError("judge output contains no JSON verdict")
+            raise MissingJudgeVerdictError("judge output contains no JSON verdict")
         if len(candidates) != 1:
             raise ValueError("ambiguous judge output: more than one structured payload")
         parsed = candidates[0]

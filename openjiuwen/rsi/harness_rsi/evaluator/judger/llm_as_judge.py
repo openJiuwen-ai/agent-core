@@ -33,6 +33,20 @@ if TYPE_CHECKING:
     from openjiuwen.rsi.harness_rsi.evaluator.case_backend import CaseExecutionResult
 
 
+async def _parse_with_format_repair(
+    config: EvaluatorConfig,
+    judge_dir: Path,
+    output: str,
+) -> dict[str, Any]:
+    try:
+        return parse_judge_output(output)
+    except ValueError as parse_error:
+        async with asyncio.timeout(config.judge_timeout_sec):
+            repaired = await repair_judge_json(config, output, str(parse_error))
+        write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
+        return parse_judge_output(repaired)
+
+
 class LlmAsJudgeJudger(EvaluationJudger):
     """Explicit opt-in model grading; official and exact-match judgers stay unchanged."""
 
@@ -129,6 +143,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
             '{"status":"unavailable","reason":"specific limitation"}. '
             "Missing work is not evaluator unavailability. "
         )
+
         async def invoke_agent() -> str:
             try:
                 async with asyncio.timeout(self._config.judge_timeout_sec):
@@ -143,6 +158,15 @@ class LlmAsJudgeJudger(EvaluationJudger):
                     f"Judge attempt timed out after {self._config.judge_timeout_sec}s"
                 ) from exc
 
+        async def invoke_closeout() -> str:
+            try:
+                async with asyncio.timeout(self._config.judge_timeout_sec):
+                    return await run_judge_closeout(self._config, workspace)
+            except TimeoutError as exc:
+                raise TimeoutError(
+                    f"Judge closeout timed out after {self._config.judge_timeout_sec}s"
+                ) from exc
+
         recovery = "none"
         try:
             raw = await run_model_call_with_retries(
@@ -152,16 +176,6 @@ class LlmAsJudgeJudger(EvaluationJudger):
             )
         except JudgeIterationLimitError:
             recovery = "complete_frozen_evidence"
-
-            async def invoke_closeout() -> str:
-                try:
-                    async with asyncio.timeout(self._config.judge_timeout_sec):
-                        return await run_judge_closeout(self._config, workspace)
-                except TimeoutError as exc:
-                    raise TimeoutError(
-                        f"Judge closeout timed out after {self._config.judge_timeout_sec}s"
-                    ) from exc
-
             raw = await run_model_call_with_retries(
                 invoke_closeout,
                 operation_name="llm evaluator closeout",
@@ -171,11 +185,8 @@ class LlmAsJudgeJudger(EvaluationJudger):
         try:
             try:
                 parsed = parse_judge_output(raw)
-            except (json.JSONDecodeError, ValueError) as parse_error:
-                async with asyncio.timeout(self._config.judge_timeout_sec):
-                    repaired = await repair_judge_json(self._config, raw, str(parse_error))
-                write_judge_json(judge_dir / "format_repair.json", {"raw_output": repaired})
-                parsed = parse_judge_output(repaired)
+            except ValueError:
+                parsed = await _parse_with_format_repair(self._config, judge_dir, raw)
             if parsed.get("status") == "unavailable":
                 raise EvaluationInfrastructureError(f"LLM evaluation unavailable: {parsed.get('reason', '')}")
             if parsed.get("status", "completed") != "completed":
@@ -186,7 +197,7 @@ class LlmAsJudgeJudger(EvaluationJudger):
                 forbidden,
                 penalty_mode=penalty_mode,
             )
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+        except (ValueError, TypeError) as exc:
             write_judge_json(
                 judge_dir / "validation_error_1.json",
                 {"error_type": type(exc).__name__, "message": str(exc)},
