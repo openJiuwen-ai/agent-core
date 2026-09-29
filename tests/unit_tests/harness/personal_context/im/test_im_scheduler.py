@@ -17,6 +17,7 @@ from openjiuwen.harness.personal_context.im.scheduler import (
     ImLearningScheduler,
     open_im_context_db,
 )
+from openjiuwen.harness.personal_context.im.schema import init_im_schema
 from openjiuwen.harness.personal_context.im.stage_runs import (
     begin_stage_run,
     source_key_for,
@@ -142,6 +143,60 @@ class TestImLearningScheduler:
             assert count == 2
         finally:
             conn.close()
+
+    @pytest.mark.asyncio
+    async def test_fetch_lease_renewed_during_slow_fetch(self, tmp_path, monkeypatch) -> None:
+        from openjiuwen.harness.personal_context.im import scheduler as scheduler_module
+
+        class SlowSource:
+            """One page that takes longer than a heartbeat interval."""
+
+            async def fetch_messages(self, target, cursor=None):
+                await asyncio.sleep(1.5)
+                return ImMessageBatch(messages=(), next_cursor=None)
+
+        # 3s TTL -> 1s heartbeat interval; the 1.5s fetch spans at least one tick.
+        monkeypatch.setattr(scheduler_module, "LEASE_TTL_MS", 3_000)
+        renew_calls: list[str] = []
+        original_renew = scheduler_module.renew_lease
+
+        def _spy(conn, *, run_id, **kwargs):
+            renew_calls.append(run_id)
+            return original_renew(conn, run_id=run_id, **kwargs)
+
+        monkeypatch.setattr(scheduler_module, "renew_lease", _spy)
+
+        scheduler = ImLearningScheduler(
+            source=SlowSource(),
+            home=tmp_path,
+            targets=(_target(),),
+            since_ms=0,
+            fetch_interval_seconds=3600,
+            index_fallback_seconds=3600,
+        )
+        await scheduler.start()
+        try:
+            await asyncio.sleep(3.0)
+        finally:
+            await scheduler.stop()
+        assert renew_calls  # heartbeat kept the lease alive during the fetch
+
+
+class TestOpenImContextDb:
+    def test_create_false_opens_existing_db_read_only(self, tmp_path) -> None:
+        writer = open_im_context_db(tmp_path)
+        try:
+            init_im_schema(writer)
+        finally:
+            writer.close()
+        reader = open_im_context_db(tmp_path, create=False)
+        try:
+            assert int(reader.execute("PRAGMA query_only").fetchone()[0]) == 1
+            assert reader.execute("SELECT COUNT(*) FROM im_stage_runs").fetchone()[0] == 0
+            with pytest.raises(sqlite3.OperationalError):
+                reader.execute("CREATE TABLE probe_write(x)")
+        finally:
+            reader.close()
 
 
 class TestPersonalContextIntegration:

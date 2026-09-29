@@ -6,7 +6,7 @@ One row per (stage, source_key) run.  Stages: ``fetch`` / ``index`` /
 Guarantees:
 
 - single active run per (stage, source_key): a partial unique index rejects
-  a second ``running`` row;
+  a second ``pending``/``running`` row;
 - lease takeover: an expired lease may be claimed by a new run; duplicate
   execution is de-duplicated downstream by the message unique key
   (channel_id, msg_id);
@@ -69,28 +69,6 @@ _SELECT_COLUMNS = (
     "id, stage, source_key, status, attempt, lease_owner, lease_expires_at_ms, "
     "started_at_ms, finished_at_ms, last_error"
 )
-
-
-def _active_run(conn: sqlite3.Connection, *, stage: str, source_key: str, now_ms: int) -> Optional[StageRunSnapshot]:
-    row = conn.execute(
-        f"""
-        SELECT {_SELECT_COLUMNS} FROM im_stage_runs
-        WHERE stage = ? AND source_key = ? AND status IN ('pending', 'running')
-        ORDER BY created_at_ms DESC LIMIT 1
-        """,
-        (stage, source_key),
-    ).fetchone()
-    if row is None:
-        return None
-    snapshot = _row_to_snapshot(row)
-    # Lease takeover: a running run whose lease expired may be claimed later
-    # by a fresh begin_stage_run (single active constraint enforced below).
-    if snapshot.status == "running" and snapshot.lease_expires_at_ms is not None:
-        if int(snapshot.lease_expires_at_ms) < now_ms:
-            return None
-    if snapshot.status == "pending":
-        return None
-    return snapshot
 
 
 def begin_stage_run(

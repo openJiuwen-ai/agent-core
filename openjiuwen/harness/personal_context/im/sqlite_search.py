@@ -37,6 +37,44 @@ def _escape_like(text: str) -> str:
     return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _find_conversation_exact(
+    conn: sqlite3.Connection,
+    channel_id: Optional[str],
+    external_id: str,
+) -> list[str]:
+    """Exact ``external_id`` matches.
+
+    Without a ``channel_id`` the same external_id may exist on several
+    channels; all of them are returned (same semantics as a title match).
+    """
+    if channel_id:
+        rows = conn.execute(
+            "SELECT id FROM im_conversations WHERE channel_id = ? AND external_id = ?",
+            (channel_id, external_id),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id FROM im_conversations WHERE external_id = ?",
+            (external_id,),
+        ).fetchall()
+    return [str(row[0]) for row in rows]
+
+
+def _find_conversations_by_title(
+    conn: sqlite3.Connection,
+    channel_id: Optional[str],
+    ref: str,
+) -> list[str]:
+    pattern = f"%{_escape_like(ref)}%"
+    sql = "SELECT id FROM im_conversations WHERE title LIKE ? ESCAPE '\\'"
+    params: list[Any] = [pattern]
+    if channel_id:
+        sql += " AND channel_id = ?"
+        params.append(channel_id)
+    rows = conn.execute(sql, params).fetchall()
+    return [str(row[0]) for row in rows]
+
+
 class SqliteImSearchStore:
     """``ImSearchPort`` over ``<home>/im/im_context.db`` (read-only)."""
 
@@ -58,9 +96,8 @@ class SqliteImSearchStore:
         if not db_path.is_file():
             # Read path never creates the database: missing store = empty corpus.
             return [], 0, False
-        conn = open_im_context_db(self._home)
+        conn = open_im_context_db(self._home, create=False)
         try:
-            conn.execute("PRAGMA query_only=ON")
             return self._search_on_conn(conn, query, keyword)
         except sqlite3.DatabaseError as exc:
             im_logger.exception("im.search.failed db=%s", db_path)
@@ -104,8 +141,8 @@ class SqliteImSearchStore:
         truncated = (offset + len(hits)) < total
         return hits, total, truncated
 
+    @staticmethod
     def _resolve_conversation_ids(
-        self,
         conn: sqlite3.Connection,
         query: ImSearchQuery,
     ) -> Optional[list[str]]:
@@ -120,45 +157,12 @@ class SqliteImSearchStore:
             return None
         resolved: list[str] = []
         for ref in refs:
-            row = self._find_conversation_exact(conn, query.channel_id, ref)
-            if row is not None:
-                resolved.append(row)
+            exact = _find_conversation_exact(conn, query.channel_id, ref)
+            if exact:
+                resolved.extend(exact)
                 continue
-            resolved.extend(self._find_conversations_by_title(conn, query.channel_id, ref))
+            resolved.extend(_find_conversations_by_title(conn, query.channel_id, ref))
         return list(dict.fromkeys(resolved))
-
-    @staticmethod
-    def _find_conversation_exact(
-        conn: sqlite3.Connection,
-        channel_id: Optional[str],
-        external_id: str,
-    ) -> Optional[str]:
-        if channel_id:
-            row = conn.execute(
-                "SELECT id FROM im_conversations WHERE channel_id = ? AND external_id = ?",
-                (channel_id, external_id),
-            ).fetchone()
-        else:
-            row = conn.execute(
-                "SELECT id FROM im_conversations WHERE external_id = ?",
-                (external_id,),
-            ).fetchone()
-        return str(row[0]) if row is not None else None
-
-    @staticmethod
-    def _find_conversations_by_title(
-        conn: sqlite3.Connection,
-        channel_id: Optional[str],
-        ref: str,
-    ) -> list[str]:
-        pattern = f"%{_escape_like(ref)}%"
-        sql = "SELECT id FROM im_conversations WHERE title LIKE ? ESCAPE '\\'"
-        params: list[Any] = [pattern]
-        if channel_id:
-            sql += " AND channel_id = ?"
-            params.append(channel_id)
-        rows = conn.execute(sql, params).fetchall()
-        return [str(row[0]) for row in rows]
 
     def _run_match(
         self,
@@ -210,6 +214,8 @@ class SqliteImSearchStore:
             clauses.append(f"m.conversation_id IN ({placeholders})")
             params.extend(conversation_ids)
         if query.sender:
+            # SQLite's LOWER folds ASCII only; CJK display names are unaffected
+            # and non-ASCII case folding is accepted as out of scope here.
             sender = query.sender.strip()
             clauses.append("(m.sender_account = ? OR LOWER(m.sender_name) LIKE ? ESCAPE '\\')")
             params.append(sender)

@@ -43,6 +43,7 @@ from openjiuwen.harness.personal_context.im.stage_runs import (
     finish_stage_run,
     latest_stage_run,
     list_active_runs,
+    renew_lease,
     source_key_for,
 )
 
@@ -59,17 +60,28 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-def open_im_context_db(home: str | Path) -> sqlite3.Connection:
-    """Open (and create) the dedicated ``<home>/im/im_context.db`` connection."""
+def open_im_context_db(home: str | Path, *, create: bool = True) -> sqlite3.Connection:
+    """Open the dedicated ``<home>/im/im_context.db`` connection.
+
+    ``create=False`` opens an existing database strictly read-only: no
+    directory or file is created and no WAL / foreign_keys pragma is set
+    (a read-only path must not mutate the database); the connection is
+    guarded by ``query_only``.  Callers pre-check ``is_file`` because a
+    plain ``sqlite3.connect`` on a missing path would create an empty file.
+    """
     db_path = Path(home).expanduser() / "im" / "im_context.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    if create:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(db_path), isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA foreign_keys=ON")
-    except sqlite3.DatabaseError:
-        im_logger.exception("im.scheduler.pragma_failed path=%s", db_path)
+    if create:
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA foreign_keys=ON")
+        except sqlite3.DatabaseError:
+            im_logger.exception("im.scheduler.pragma_failed path=%s", db_path)
+    else:
+        conn.execute("PRAGMA query_only=ON")
     return conn
 
 
@@ -197,9 +209,7 @@ class ImLearningScheduler:
         stop_event = self._stop_event
         wake_event = self._wake_event
         if stop_event is None or wake_event is None:
-            raise RuntimeError(
-                "ImLearningScheduler._run called before start(): stop_event/wake_event not initialized"
-            )
+            raise RuntimeError("ImLearningScheduler._run called before start(): stop_event/wake_event not initialized")
         next_fetch_at = 0.0
         next_index_at = 0.0
         loop = asyncio.get_running_loop()
@@ -236,10 +246,12 @@ class ImLearningScheduler:
                     return
         except asyncio.CancelledError:
             im_logger.info("im.scheduler.loop_cancelled")
+            self._status.running = False
             raise
         except Exception as exc:  # noqa: BLE001
             im_logger.exception("im.scheduler.loop_failed")
             self._status.last_error = str(exc)
+            self._status.running = False
             raise
 
     async def _run_cycle(self) -> None:
@@ -274,7 +286,7 @@ class ImLearningScheduler:
                 # cycle): skip this target, next cycle retries.
                 continue
             try:
-                outcome = await self._provider.fetch_target(target, now_ms=now_ms)
+                outcome = await self._fetch_target_with_heartbeat(target, run_id=run_id, now_ms=now_ms)
             except Exception as exc:  # noqa: BLE001
                 im_logger.exception(
                     "im.scheduler.fetch_failed channel=%s kind=%s external_id=%s",
@@ -303,6 +315,62 @@ class ImLearningScheduler:
             )
             outcomes.append(outcome)
         return tuple(outcomes)
+
+    async def _fetch_target_with_heartbeat(
+        self,
+        target: ImLearningTarget,
+        *,
+        run_id: str,
+        now_ms: int,
+    ) -> TargetFetchOutcome:
+        """Fetch one target while a heartbeat task keeps the run's lease alive.
+
+        A slow fetch (many pages, slow source) can outlive the lease TTL;
+        without renewal another process could take the lease over mid-run.
+        Each renewal runs on its own short-lived connection so it never
+        interleaves with the fetch's transaction on the shared writer
+        connection.  No heartbeat when the host injected the connection:
+        ``self._home`` may not even point at that connection's database.
+        """
+        if not self._owns_conn:
+            return await self._provider.fetch_target(target, now_ms=now_ms)
+        interval = max(1.0, LEASE_TTL_MS / 1000.0 / 3.0)
+        stop = asyncio.Event()
+        heartbeat_task = asyncio.create_task(self._heartbeat_loop(run_id=run_id, stop=stop, interval=interval))
+        try:
+            return await self._provider.fetch_target(target, now_ms=now_ms)
+        finally:
+            stop.set()
+            heartbeat_task.cancel()
+            await asyncio.gather(heartbeat_task, return_exceptions=True)
+
+    async def _heartbeat_loop(self, *, run_id: str, stop: asyncio.Event, interval: float) -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=interval)
+            except asyncio.TimeoutError:
+                pass
+            if stop.is_set():
+                return
+            try:
+                renewed = await asyncio.to_thread(self._renew_lease_once, run_id=run_id)
+            except Exception:  # noqa: BLE001
+                im_logger.exception("im.scheduler.lease_renewal_failed run_id=%s", run_id)
+                continue
+            if not renewed:
+                # The run is no longer 'running' (finished or taken over):
+                # further heartbeats cannot help.
+                return
+
+    def _renew_lease_once(self, *, run_id: str) -> bool:
+        conn = open_im_context_db(self._home)
+        try:
+            return renew_lease(conn, run_id=run_id, lease_ttl_ms=LEASE_TTL_MS)
+        finally:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                im_logger.exception("im.scheduler.renewal_conn_close_failed")
 
     async def _run_index_stage(self, *, now_ms: int) -> int:
         run_id = await asyncio.to_thread(
@@ -380,7 +448,11 @@ class ImLearningScheduler:
             active = list_active_runs(conn)
             return backfill, active
         # Stopped and we own (and closed) the connection: reopen read-only.
-        reopened = open_im_context_db(self._home)
+        # A missing database means nothing was ever collected: report an
+        # empty surface instead of creating files on the read path.
+        if not self.db_path().is_file():
+            return {}, []
+        reopened = open_im_context_db(self._home, create=False)
         try:
             backfill = assess_backfill(reopened, targets=self._targets)
             active = list_active_runs(reopened)
@@ -394,7 +466,13 @@ class ImLearningScheduler:
     async def latest_fetch_run(self, target: ImLearningTarget) -> Optional[Any]:
         """Newest stage run snapshot for one target (status surface helper)."""
         source_key = source_key_for(target.channel_id, target.kind, target.external_id)
-        conn = self._conn if (not self._owns_conn or self.is_running()) else open_im_context_db(self._home)
+        conn = self._conn if (not self._owns_conn or self.is_running()) else None
+        if conn is None:
+            # Stopped and we own (and closed) the connection: reopen
+            # read-only; a missing database means no runs were ever recorded.
+            if not self.db_path().is_file():
+                return None
+            conn = open_im_context_db(self._home, create=False)
         try:
             return await asyncio.to_thread(
                 latest_stage_run,

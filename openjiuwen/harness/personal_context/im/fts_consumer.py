@@ -68,6 +68,10 @@ class FtsConsumer:
                         now_ms=now_ms,
                     )
                 elif entry.op == "delete" and entry.entity_type == "message":
+                    # No producer writes op="delete" today: the pull-based
+                    # learning pipeline only upserts. The branch is kept for
+                    # compliance-driven physical deletion if that requirement
+                    # lands later; deletions never flow from normal learning.
                     self._fts.remove(message_id=entry.entity_id)
                 processed += 1
                 last_seq = max(last_seq, entry.seq)

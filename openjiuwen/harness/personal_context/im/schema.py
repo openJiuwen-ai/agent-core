@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS im_learning_backfill (
     oldest_sent_at_ms INTEGER,
     -- 断点续传游标：上次拉到的最老消息的 msgId，回填期从此处继续向前翻。
     oldest_msg_id TEXT,
-    -- 常态增量水位（D3）：上次已见的最新消息，常态翻页以此为终止边界。
+    -- 常态增量水位：上次已见的最新消息，常态翻页以此为终止边界。
     newest_seen_msg_id TEXT,
     newest_seen_sent_at INTEGER,
     query_count INTEGER,
@@ -148,6 +148,12 @@ CREATE TABLE IF NOT EXISTS im_stage_runs (
 
 CREATE INDEX IF NOT EXISTS idx_im_stage_runs_stage_source
 ON im_stage_runs(stage, source_key, status);
+
+-- Single-active guarantee at the storage level: a second pending/running row
+-- for the same (stage, source_key) is rejected even when a caller bypasses
+-- begin_stage_run's transactional check.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_im_stage_runs_active
+ON im_stage_runs(stage, source_key) WHERE status IN ('pending', 'running');
 """
 
 # FTS5 virtual table. We use a non-contentless FTS5 table because the

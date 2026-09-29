@@ -7,10 +7,15 @@ never stored.
 
 Idempotency:
 - im_conversations: upsert on (channel_id, external_id) -> update last_message_at_ms
-- im_messages: ON CONFLICT(channel_id, external_id) DO UPDATE SET (refresh content)
-- im_changelog: appended unconditionally (consumers ack by seq, so dupes
-  are harmless from a correctness standpoint; the digest check at FTS
-  upsert skips no-op FTS writes)
+- im_messages: ON CONFLICT(channel_id, external_id) DO UPDATE SET, guarded by
+  a WHERE clause so an unchanged row is not rewritten at all
+- im_changelog: appended only for messages actually inserted/updated — a
+  steady-state cycle that re-sees already-stored messages appends nothing
+  (consumers ack by seq; the digest check at FTS upsert additionally skips
+  no-op FTS writes)
+- learning_eligible is tri-state: 1=distillable, 0=out of learning scope,
+  NULL=undecided (excluded from distill and search). A NULL never overwrites
+  an existing verdict; 0 is sticky ("only downgrade").
 """
 
 from __future__ import annotations
@@ -31,9 +36,16 @@ class PersistResult:
     """Summary of one persist_batch call."""
 
     conversations_upserted: int = 0
-    messages_upserted: int = 0
+    messages_inserted: int = 0
+    messages_updated: int = 0
+    messages_unchanged: int = 0
     changelog_entries_appended: int = 0
     changelog_head: int = 0
+
+    @property
+    def messages_written(self) -> int:
+        """Messages actually inserted or updated (unchanged rows excluded)."""
+        return self.messages_inserted + self.messages_updated
 
 
 def _gen_id() -> str:
@@ -98,9 +110,11 @@ def persist_batch(
             conv_id = conversation_id_by_external.get(msg.conversation_external_id)
             if conv_id is None:
                 # Implicit conversation: derive from (channel, external).
-                # NOTE: real callers should always pass conversations first.
+                # NOTE: real callers should always pass conversations first;
+                # target_kind cannot be derived here, so a fresh row defaults
+                # to 'group' while an existing row keeps its stored kind.
                 conv_id = _gen_id()
-                conn.execute(
+                conv_row = conn.execute(
                     """
                     INSERT INTO im_conversations (
                         id, channel_id, external_id, target_kind, title,
@@ -114,17 +128,13 @@ def persist_batch(
                     RETURNING id
                     """,
                     (conv_id, msg.channel_id, msg.conversation_external_id, "group", ts, ts),
-                )
-                conv_id_res = conn.execute(
-                    "SELECT id FROM im_conversations WHERE channel_id=? AND external_id=?",
-                    (msg.channel_id, msg.conversation_external_id),
                 ).fetchone()
-                conv_id = str(conv_id_res[0]) if conv_id_res is not None else conv_id
+                conv_id = str(conv_row[0]) if conv_row is not None else conv_id
                 conversation_id_by_external[msg.conversation_external_id] = conv_id
             msg_row_id = _gen_id()
-            eligible = 1 if msg.learning_eligible is None else int(msg.learning_eligible)
+            eligible = None if msg.learning_eligible is None else int(msg.learning_eligible)
             if eligible not in (0, 1):
-                eligible = 1
+                eligible = None
             cur = conn.execute(
                 """
                 INSERT INTO im_messages (
@@ -149,10 +159,35 @@ def persist_batch(
                     direction = excluded.direction,
                     is_self = COALESCE(excluded.is_self, im_messages.is_self),
                     learning_eligible = CASE
+                        WHEN excluded.learning_eligible IS NULL THEN im_messages.learning_eligible
                         WHEN im_messages.learning_eligible = 0 THEN 0
                         ELSE excluded.learning_eligible
                     END,
                     created_at = im_messages.created_at
+                WHERE
+                    im_messages.conversation_id IS NOT excluded.conversation_id
+                    OR im_messages.sender_account IS NOT COALESCE(
+                        excluded.sender_account, im_messages.sender_account
+                    )
+                    OR im_messages.sender_name IS NOT COALESCE(
+                        excluded.sender_name, im_messages.sender_name
+                    )
+                    OR im_messages.content_text IS NOT COALESCE(
+                        NULLIF(excluded.content_text, ''), im_messages.content_text
+                    )
+                    OR im_messages.content_type IS NOT COALESCE(
+                        excluded.content_type, im_messages.content_type
+                    )
+                    OR excluded.sent_at > im_messages.sent_at
+                    OR im_messages.direction IS NOT excluded.direction
+                    OR im_messages.is_self IS NOT COALESCE(
+                        excluded.is_self, im_messages.is_self
+                    )
+                    OR im_messages.learning_eligible IS NOT CASE
+                        WHEN excluded.learning_eligible IS NULL THEN im_messages.learning_eligible
+                        WHEN im_messages.learning_eligible = 0 THEN 0
+                        ELSE excluded.learning_eligible
+                    END
                 RETURNING id
                 """,
                 (
@@ -172,7 +207,12 @@ def persist_batch(
                 ),
             )
             row = cur.fetchone()
-            real_msg_id = str(row[0]) if row is not None else msg_row_id
+            if row is None:
+                # Conflict on an unchanged row: the DO UPDATE ... WHERE clause
+                # skipped the rewrite, so there is nothing to publish.
+                result.messages_unchanged += 1
+                continue
+            real_msg_id = str(row[0])
             changelog_repo.append(
                 op="upsert",
                 entity_type="message",
@@ -184,7 +224,10 @@ def persist_batch(
                 digest=content_digest(msg.content_text),
                 emitted_at=ts,
             )
-            result.messages_upserted += 1
+            if row[0] == msg_row_id:
+                result.messages_inserted += 1
+            else:
+                result.messages_updated += 1
             result.changelog_entries_appended += 1
             conv_last_sent[conv_id] = max(conv_last_sent.get(conv_id, 0), msg.sent_at)
         for conv_id, last_ms in conv_last_sent.items():

@@ -30,6 +30,7 @@ from openjiuwen.harness.personal_context.im.backfill import (
     record_backfill_result,
 )
 from openjiuwen.harness.personal_context.im.fetch_depth import (
+    MAX_PAGES,
     FetchPageRangeResult,
     backfill_stop_predicate,
     fetch_page_range,
@@ -47,8 +48,6 @@ from openjiuwen.harness.personal_context.im.persist import persist_batch
 from openjiuwen.harness.personal_context.im.schema import init_im_schema
 
 im_logger = LogManager.get_logger("im_learning")
-
-MAX_PAGES = 10
 
 
 def _now_ms() -> int:
@@ -88,7 +87,7 @@ class ImCorpusSink:
             learning_eligible_map=eligible_map,
         )
         result = persist_batch(self.conn, batch)  # type: ignore[arg-type]
-        return result.messages_upserted
+        return result.messages_written
 
 
 class ImLearningFetchProvider:

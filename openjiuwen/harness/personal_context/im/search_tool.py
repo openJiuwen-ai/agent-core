@@ -82,6 +82,8 @@ class ImSearchTool(Tool):
         until_ms, error = self._parse_bound(inputs.get("until"), "until")
         if error is not None:
             return ToolOutput(success=False, error=error)
+        if since_ms is not None and until_ms is not None and since_ms > until_ms:
+            return ToolOutput(success=False, error="since must not be later than until")
 
         conversation = inputs.get("conversation")
         refs = (conversation.strip(),) if isinstance(conversation, str) and conversation.strip() else ()
@@ -116,12 +118,12 @@ class ImSearchTool(Tool):
         pass
 
     @staticmethod
-    def _parse_bound(raw: Any, field: str) -> tuple[Optional[int], Optional[str]]:
+    def _parse_bound(raw: Any, field: str, *, now_ms: Optional[int] = None) -> tuple[Optional[int], Optional[str]]:
         if raw is None:
             return None, None
         if not isinstance(raw, str) or not raw.strip():
             return None, f"invalid {field}: expected {_TIME_FORMAT_HINT}"
-        parsed = _parse_time_to_ms(raw)
+        parsed = _parse_time_to_ms(raw, now_ms=now_ms)
         if parsed is None:
             return None, f"invalid {field}: {raw!r}, expected {_TIME_FORMAT_HINT}"
         return parsed, None

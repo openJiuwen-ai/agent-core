@@ -93,6 +93,57 @@ def _classes(path: Path) -> set[str]:
     return result
 
 
+def _method_shape(method) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Structural signature summary: (positional-or-keyword, keyword-only) names, ``self`` stripped.
+
+    Insensitive to annotation and default-value churn that does not change
+    how hosts call the surface, unlike a full ``str(signature)`` comparison.
+    """
+    params = list(inspect.signature(method).parameters.values())
+    positional = tuple(
+        p.name
+        for p in params[1:]
+        if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+    )
+    keyword_only = tuple(p.name for p in params[1:] if p.kind is inspect.Parameter.KEYWORD_ONLY)
+    return positional, keyword_only
+
+
+# (positional-or-keyword, keyword-only) parameter names per public method.
+EXPECTED_METHOD_SHAPES = {
+    "activate_runtime": ((), ()),
+    "authorize_provider": (("provider",), ("reauthorize",)),
+    "deactivate_runtime": ((), ("timeout_seconds",)),
+    "get_authorization_status": (("provider",), ()),
+    "get_fetch_run_status": (("service_id",), ("run_id",)),
+    "get_graph": ((), ("root_id", "depth")),
+    "get_graph_page": (("node_id",), ()),
+    "get_im_learning_status": ((), ()),
+    "get_source": (("source_id",), ()),
+    "get_tree": ((), ("root_id", "depth")),
+    "remove_fetch_cursor": (("service_id",), ()),
+    "remove_fetch_run_history": (("service_id",), ()),
+    "restore_fetch_cursor": (("service_id", "payload"), ()),
+    "restore_fetch_run_history": (("service_id", "records"), ()),
+    "run_fetch": ((), ("service_id",)),
+    "run_im_learning_now": ((), ()),
+    "search_graph": (("query",), ()),
+    "set_configuration": (("config",), ()),
+    "set_distill_corpus": (("corpus",), ()),
+    "set_distill_runner": (("runner",), ()),
+    "set_fetch_service_enabled": (("service_id", "enabled"), ()),
+    "shutdown": ((), ()),
+    "snapshot": ((), ()),
+    "start_agent_use": ((), ()),
+    "start_collection": ((), ()),
+    "start_fetch_service": (("service_id",), ()),
+    "stop_agent_use": ((), ()),
+    "stop_collection": ((), ("timeout_seconds",)),
+    "stop_fetch_run": (("service_id",), ()),
+    "stop_fetch_service": (("service_id",), ("timeout_seconds",)),
+}
+
+
 def test_embedded_core_declares_only_the_core_closed_class_inventory() -> None:
     assert _classes(PERSONAL_CONTEXT) == EXPECTED_CLASSES - {"PersonalContextRail"}
     assert _classes(RAIL) == {"PersonalContextRail"}
@@ -129,40 +180,7 @@ def test_embedded_core_public_surface_and_personal_context_signatures_match_cont
         inspect.iscoroutinefunction(method) == (name not in synchronous_host_methods)
         for name, method in public_methods.items()
     )
-    assert {name: str(inspect.signature(method)) for name, method in public_methods.items()} == {
-        "activate_runtime": "(self) -> 'None'",
-        "authorize_provider": "(self, provider: 'str', *, reauthorize: 'bool' = False) -> 'dict[str, object]'",
-        "deactivate_runtime": "(self, *, timeout_seconds: 'float' = 30.0) -> 'None'",
-        "get_authorization_status": "(self, provider: 'str') -> 'dict[str, object]'",
-        "get_graph": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",
-        "get_graph_page": "(self, node_id: 'str') -> 'dict[str, object]'",
-        "get_fetch_run_status": (
-            "(self, service_id: 'str | None' = None, *, run_id: 'str | None' = None) -> 'dict[str, object]'"
-        ),
-        "get_im_learning_status": "(self) -> 'dict[str, object]'",
-        "remove_fetch_run_history": "(self, service_id: 'str') -> 'list[dict[str, object]]'",
-        "shutdown": "(self) -> 'None'",
-        "restore_fetch_run_history": "(self, service_id: 'str', records: 'list[dict[str, object]]') -> 'None'",
-        "get_source": "(self, source_id: 'str') -> 'dict[str, object]'",
-        "get_tree": "(self, *, root_id: 'str | None' = None, depth: 'int' = 3) -> 'dict[str, object]'",
-        "remove_fetch_cursor": "(self, service_id: 'str') -> 'bytes | None'",
-        "restore_fetch_cursor": "(self, service_id: 'str', payload: 'bytes | None') -> 'None'",
-        "run_fetch": "(self, *, service_id: 'str | None' = None) -> 'dict[str, object]'",
-        "run_im_learning_now": "(self) -> 'bool'",
-        "search_graph": "(self, query: 'str') -> 'dict[str, object]'",
-        "set_configuration": "(self, config: 'PersonalContextConfig') -> 'None'",
-        "set_distill_corpus": "(self, corpus: 'CorpusPort | None') -> 'None'",
-        "set_distill_runner": "(self, runner: 'DistillRunnerPort | None') -> 'None'",
-        "set_fetch_service_enabled": "(self, service_id: 'str', enabled: 'bool') -> 'None'",
-        "snapshot": "(self) -> 'PersonalContextStatus'",
-        "start_agent_use": "(self) -> 'None'",
-        "start_collection": "(self) -> 'None'",
-        "start_fetch_service": "(self, service_id: 'str') -> 'None'",
-        "stop_agent_use": "(self) -> 'None'",
-        "stop_collection": "(self, *, timeout_seconds: 'float' = 30.0) -> 'None'",
-        "stop_fetch_run": "(self, service_id: 'str') -> 'None'",
-        "stop_fetch_service": "(self, service_id: 'str', *, timeout_seconds: 'float' = 30.0) -> 'None'",
-    }
+    assert {name: _method_shape(method) for name, method in public_methods.items()} == EXPECTED_METHOD_SHAPES
 
 
 def test_legacy_proactive_harness_package_is_removed() -> None:

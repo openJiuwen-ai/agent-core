@@ -23,7 +23,6 @@ from openjiuwen.harness.personal_context.im.backfill import (
 from openjiuwen.harness.personal_context.im.fetch_depth import fetch_page_range
 from openjiuwen.harness.personal_context.im.fetch_provider import ImLearningFetchProvider
 from openjiuwen.harness.personal_context.im.fts_consumer import FtsConsumer
-from openjiuwen.harness.personal_context.im.fts_index import FtsIndexRepository
 from openjiuwen.harness.personal_context.im.learning_scope import (
     build_target_keys,
     compute_eligible_map,
@@ -40,7 +39,10 @@ from openjiuwen.harness.personal_context.im.normalize import (
     normalize_batch,
 )
 from openjiuwen.harness.personal_context.im.persist import persist_batch
+from openjiuwen.harness.personal_context.im.scheduler import open_im_context_db
 from openjiuwen.harness.personal_context.im.schema import init_im_schema
+from openjiuwen.harness.personal_context.im.search import ImSearchQuery
+from openjiuwen.harness.personal_context.im.sqlite_search import SqliteImSearchStore
 from openjiuwen.harness.personal_context.im.stage_runs import (
     begin_stage_run,
     finish_stage_run,
@@ -192,15 +194,73 @@ class TestPersist:
             learning_eligible_map={"m1": 1, "m2": 1},
         )
         result = persist_batch(db_conn, batch, ensure_schema=False)
-        assert result.messages_upserted == 2
+        assert result.messages_inserted == 2
+        assert result.messages_written == 2
         assert result.changelog_entries_appended == 2
         rows = db_conn.execute("SELECT id, direction FROM im_messages ORDER BY sent_at").fetchall()
         assert len(rows) == 2
-        # upsert idempotent: re-persist same batch appends changelog but no dupes
+        # upsert idempotent: re-persisting an unchanged batch writes nothing
+        # and appends no changelog rows
         result2 = persist_batch(db_conn, batch, ensure_schema=False)
-        assert result2.messages_upserted == 2
+        assert result2.messages_unchanged == 2
+        assert result2.messages_written == 0
+        assert result2.changelog_entries_appended == 0
+        assert result2.changelog_head == result.changelog_head
         count = db_conn.execute("SELECT COUNT(*) FROM im_messages").fetchone()[0]
         assert count == 2
+
+    def test_changed_repersist_appends_changelog(self, db_conn) -> None:
+        target = make_target()
+        first = normalize_batch(
+            target=target,
+            messages=[make_message("m1", sent_at=BASE_MS, text="旧内容")],
+            fetched_at_ms=BASE_MS,
+            learning_eligible_map={"m1": 1},
+        )
+        persist_batch(db_conn, first, ensure_schema=False)
+        second = normalize_batch(
+            target=target,
+            messages=[make_message("m1", sent_at=BASE_MS, text="新内容")],
+            fetched_at_ms=BASE_MS + 5,
+            learning_eligible_map={"m1": 1},
+        )
+        result = persist_batch(db_conn, second, ensure_schema=False)
+        assert result.messages_updated == 1
+        assert result.messages_unchanged == 0
+        assert result.changelog_entries_appended == 1
+        text = db_conn.execute("SELECT content_text FROM im_messages WHERE external_id='m1'").fetchone()[0]
+        assert text == "新内容"
+
+    def test_learning_eligible_none_lands_null(self, db_conn) -> None:
+        # An undecided verdict must not default to "distillable" (fail-closed).
+        target = make_target()
+        batch = normalize_batch(
+            target=target,
+            messages=[make_message("m1", sent_at=BASE_MS, text="a")],
+            fetched_at_ms=BASE_MS,
+        )  # no learning_eligible_map -> None
+        persist_batch(db_conn, batch, ensure_schema=False)
+        row = db_conn.execute("SELECT learning_eligible FROM im_messages WHERE external_id='m1'").fetchone()
+        assert row[0] is None
+
+    def test_learning_eligible_none_keeps_existing_verdict(self, db_conn) -> None:
+        target = make_target()
+        first = normalize_batch(
+            target=target,
+            messages=[make_message("m1", sent_at=BASE_MS, text="a")],
+            fetched_at_ms=BASE_MS,
+            learning_eligible_map={"m1": 1},
+        )
+        persist_batch(db_conn, first, ensure_schema=False)
+        second = normalize_batch(
+            target=target,
+            messages=[make_message("m1", sent_at=BASE_MS, text="a")],
+            fetched_at_ms=BASE_MS + 5,
+        )  # no map -> None must not overwrite the stored 1
+        result = persist_batch(db_conn, second, ensure_schema=False)
+        assert result.messages_unchanged == 1
+        row = db_conn.execute("SELECT learning_eligible FROM im_messages WHERE external_id='m1'").fetchone()
+        assert row[0] == 1
 
     def test_learning_eligible_only_decreases(self, db_conn) -> None:
         target = make_target()
@@ -350,6 +410,21 @@ class TestStageRuns:
         assert renew_lease(db_conn, run_id=run, lease_ttl_ms=10_000, now_ms=1500) is True
         assert begin_stage_run(db_conn, stage="index", source_key="-", now_ms=8000) is None
 
+    def test_unique_index_rejects_second_active_row(self, db_conn) -> None:
+        # The partial unique index enforces the single-active constraint even
+        # when a caller bypasses begin_stage_run and INSERTs directly.
+        key = source_key_for("welink", "group", "g1")
+        assert begin_stage_run(db_conn, stage="fetch", source_key=key, now_ms=1000) is not None
+        with pytest.raises(sqlite3.IntegrityError):
+            db_conn.execute(
+                "INSERT INTO im_stage_runs (id, stage, source_key, status, run_token, "
+                "attempt, created_at_ms, updated_at_ms) "
+                "VALUES ('x2', 'fetch', ?, 'running', 't', 1, 1000, 1000)",
+                (key,),
+            )
+        # A different (stage, source_key) stays unaffected.
+        assert begin_stage_run(db_conn, stage="index", source_key="-", now_ms=1000) is not None
+
     def test_list_active_runs(self, db_conn) -> None:
         key = source_key_for("welink", "group", "g1")
         begin_stage_run(db_conn, stage="fetch", source_key=key, now_ms=1000)
@@ -408,29 +483,37 @@ class TestBackfill:
 
 
 class TestFtsPipeline:
-    def test_drain_once_indexes_and_searches(self, db_conn) -> None:
-        target = make_target()
-        batch = normalize_batch(
-            target=target,
-            messages=[
-                make_message("m1", sent_at=BASE_MS, text="项目排期延期了"),
-                make_message("m2", sent_at=BASE_MS + 1, text="收到，明天同步"),
-            ],
-            fetched_at_ms=BASE_MS + 10,
-            learning_eligible_map={"m1": 1, "m2": 1},
-        )
-        persist_batch(db_conn, batch, ensure_schema=False)
-        consumer = FtsConsumer(db_conn)
-        processed = consumer.drain_once(now_ms=BASE_MS + 20)
-        assert processed == 2
-        fts = FtsIndexRepository(db_conn)
-        hits = fts.search("排期")
-        assert len(hits) >= 1
-        # query-time eligible filtering
-        db_conn.execute("UPDATE im_messages SET learning_eligible = 0 WHERE external_id = 'm2'")
-        db_conn.commit()
-        eligible_hits = fts.search("收到", learning_eligible_only=True)
-        assert len(eligible_hits) == 0
+    def test_drain_once_indexes_and_searches(self, tmp_path) -> None:
+        # File-backed db: the search assertions go through the production
+        # read path (SqliteImSearchStore over a separate read-only conn).
+        conn = open_im_context_db(tmp_path)
+        try:
+            init_im_schema(conn)
+            target = make_target()
+            batch = normalize_batch(
+                target=target,
+                messages=[
+                    make_message("m1", sent_at=BASE_MS, text="项目排期延期了"),
+                    make_message("m2", sent_at=BASE_MS + 1, text="收到，明天同步"),
+                ],
+                fetched_at_ms=BASE_MS + 10,
+                learning_eligible_map={"m1": 1, "m2": 1},
+            )
+            persist_batch(conn, batch, ensure_schema=False)
+            consumer = FtsConsumer(conn)
+            processed = consumer.drain_once(now_ms=BASE_MS + 20)
+            assert processed == 2
+            # query-time eligible filtering
+            conn.execute("UPDATE im_messages SET learning_eligible = 0 WHERE external_id = 'm2'")
+        finally:
+            conn.close()
+        store = SqliteImSearchStore(tmp_path)
+        hits, total, _ = store.search(ImSearchQuery(keyword="排期"))
+        assert total == 1
+        assert len(hits) == 1
+        hits, total, _ = store.search(ImSearchQuery(keyword="收到"))
+        assert total == 0
+        assert hits == []
 
     def test_drain_failure_does_not_advance_cursor(self, db_conn) -> None:
         target = make_target()
@@ -537,13 +620,18 @@ class TestProviderEndToEnd:
         assert outcomes[0].messages_persisted == 1
 
     @pytest.mark.asyncio
-    async def test_fts_search_after_provider_cycle(self, db_conn) -> None:
-        target = make_target()
-        source = PageTokenSource([[make_message("m1", sent_at=1, text="预算超支需要评审")]])
-        provider = ImLearningFetchProvider(source=source, conn=db_conn, targets=(target,), since_ms=0)
-        await provider.run_once(now_ms=1000)
-        consumer = FtsConsumer(db_conn)
-        consumer.drain_once(now_ms=1100)
-        fts = FtsIndexRepository(db_conn)
-        hits = fts.search("预算")
+    async def test_fts_search_after_provider_cycle(self, tmp_path) -> None:
+        conn = open_im_context_db(tmp_path)
+        try:
+            init_im_schema(conn)
+            target = make_target()
+            source = PageTokenSource([[make_message("m1", sent_at=1, text="预算超支需要评审")]])
+            provider = ImLearningFetchProvider(source=source, conn=conn, targets=(target,), since_ms=0)
+            await provider.run_once(now_ms=1000)
+            consumer = FtsConsumer(conn)
+            consumer.drain_once(now_ms=1100)
+        finally:
+            conn.close()
+        hits, total, _ = SqliteImSearchStore(tmp_path).search(ImSearchQuery(keyword="预算"))
+        assert total == 1
         assert len(hits) == 1

@@ -22,7 +22,6 @@ from openjiuwen.harness.personal_context.im.models import (
     ImLearningCursor,
     ImLearningMessage,
     ImLearningTarget,
-    ImMessageBatch,
 )
 
 
@@ -143,11 +142,6 @@ def oldest_message(messages: list[ImLearningMessage] | tuple[ImLearningMessage, 
     return min(messages, key=lambda m: (int(m.sent_at or 0), m.msg_id))
 
 
-def batch_messages(batch: ImMessageBatch) -> tuple[ImLearningMessage, ...]:
-    """Flatten a fetch page into its message tuple."""
-    return batch.messages
-
-
 def cursor_count(cursor: ImLearningCursor | None, *, default: int = 50) -> int:
     """Page size carried by the cursor, or the default when absent."""
     if cursor is None:
@@ -163,7 +157,6 @@ __all__ = [
     "NormalizedBatch",
     "NormalizedConversation",
     "NormalizedMessage",
-    "batch_messages",
     "content_digest",
     "cursor_count",
     "derive_direction",

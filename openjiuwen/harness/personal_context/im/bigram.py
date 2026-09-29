@@ -17,9 +17,6 @@ CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿가-힯]")
 # ASCII word chars: keep words like "k8s-prod" intact (hyphen preserved)
 ASCII_WORD_CHAR_RE = re.compile(r"[A-Za-z0-9_+#.-]")
 
-# FTS5 special chars that must be escaped inside token literals
-FTS5_SPECIAL_CHARS = re.compile(r'["\'\-*:+()]')
-
 
 def _is_cjk(char: str) -> bool:
     return bool(CJK_RE.match(char))
@@ -71,11 +68,6 @@ def to_index_segment(text: str) -> str:
     return " ".join(dict.fromkeys(tokenize(text)))
 
 
-def to_query_tokens(query: str) -> list[str]:
-    """Query side: user input -> deduped token list."""
-    return list(dict.fromkeys(tokenize(query)))
-
-
 def to_query_token_tiers(query: str) -> list[list[str]]:
     """Query side: returns 1 or 2 tiers, strict -> relaxed.
 
@@ -94,7 +86,11 @@ def to_query_token_tiers(query: str) -> list[list[str]]:
 
 
 def escape_fts_token(token: str) -> str:
-    """Escape a single token as a quoted FTS5 phrase (handles special chars)."""
+    """Quote a single token as an FTS5 phrase literal.
+
+    Inside a quoted phrase only the double quote needs escaping (doubled);
+    every other FTS5 special character is a literal within quotes.
+    """
     escaped = token.replace('"', '""')
     return f'"{escaped}"'
 
@@ -109,7 +105,6 @@ def build_match_expr(tiers: list[list[str]]) -> str:
 __all__ = [
     "tokenize",
     "to_index_segment",
-    "to_query_tokens",
     "to_query_token_tiers",
     "escape_fts_token",
     "build_match_expr",

@@ -14,13 +14,15 @@ IM_SEARCH_DESCRIPTION: Dict[str, str] = {
     "cn": (
         "按关键词检索学习范围内的 IM 原始消息，支持按会话、人员、时间过滤，返回原文与出处（只读）。"
         "当用户询问与某人聊过什么、聊天记录、历史消息等个人 IM 内容时，应主动调用本工具检索，无需用户明确要求。"
+        "同一关键词与过滤条件在本轮对话已有结果时，不要重复调用。"
     ),
     "en": (
         "Search original IM messages within the learning scope by keyword, "
         "filterable by conversation, sender, and time; read-only. "
         "When the user asks about personal IM content such as past chats with "
         "someone, chat history, or messages, call this tool proactively "
-        "without waiting for an explicit request."
+        "without waiting for an explicit request. Do not call again with the "
+        "same keyword and filters when a result already exists this turn."
     ),
 }
 
@@ -33,12 +35,16 @@ IM_SEARCH_PARAMS: Dict[str, Dict[str, str]] = {
     },
     "sender": {"cn": "人员过滤：账号或昵称（可选）", "en": "Sender filter: account or display name (optional)"},
     "since": {
-        "cn": "起始时间：ISO 8601 或相对表述如 7d/24h/30m（可选）",
-        "en": "Start time: ISO 8601 or relative like 7d/24h/30m (optional)",
+        "cn": "起始时间（下界）：ISO 8601，或相对表述如 7d/24h/30m，表示当前时间往前推该时长的时间点（可选）",
+        "en": (
+            "Start time (lower bound): ISO 8601, or relative like 7d/24h/30m meaning now minus that duration (optional)"
+        ),
     },
     "until": {
-        "cn": "结束时间：ISO 8601 或相对表述如 7d/24h/30m（可选）",
-        "en": "End time: ISO 8601 or relative like 7d/24h/30m (optional)",
+        "cn": "结束时间（上界）：ISO 8601，或相对表述如 7d/24h/30m，表示当前时间往前推该时长的时间点（可选）",
+        "en": (
+            "End time (upper bound): ISO 8601, or relative like 7d/24h/30m meaning now minus that duration (optional)"
+        ),
     },
     "limit": {"cn": "单页条数，默认 20、最大 50（可选）", "en": "Page size, default 20, max 50 (optional)"},
     "offset": {"cn": "翻页偏移（可选）", "en": "Paging offset (optional)"},

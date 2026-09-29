@@ -24,6 +24,7 @@ import pytest
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.harness.personal_context.im import search as search_contract_module
 from openjiuwen.harness.personal_context.im.fts_consumer import FtsConsumer
+from openjiuwen.harness.personal_context.im.learning_scope import build_target_keys, compute_eligible_map
 from openjiuwen.harness.personal_context.im.models import (
     ImLearningMessage,
     ImLearningTarget,
@@ -126,15 +127,26 @@ SEED: list[tuple[ImLearningTarget, list[ImLearningMessage], dict[str, int]]] = [
 @pytest.fixture()
 def corpus(tmp_path: Path):
     """Seeded im_context.db; returns (home, external_id -> internal message_id)."""
+    # Mirror the production path: the fetch provider persists with a complete
+    # eligible map from compute_eligible_map (every message decided 1/0);
+    # a partial map would leave undecided messages unsearchable.
+    whitelist = build_target_keys([target for target, _, _ in SEED])
     conn = open_im_context_db(tmp_path)
     try:
         init_im_schema(conn)
         for target, messages, eligible_map in SEED:
+            full_map = compute_eligible_map(
+                target=target,
+                messages=messages,
+                whitelist_keys=whitelist,
+                since_ms=None,
+            )
+            full_map.update(eligible_map or {})
             batch = normalize_batch(
                 target=target,
                 messages=messages,
                 fetched_at_ms=BASE_MS,
-                learning_eligible_map=eligible_map or None,
+                learning_eligible_map=full_map,
             )
             persist_batch(conn, batch, now_ms=BASE_MS)
         FtsConsumer(conn).drain_once(now_ms=BASE_MS)
@@ -276,6 +288,38 @@ class TestSqliteFilters:
         assert total == 1
         assert hits[0].message_id == ext_to_id["m3"]
 
+    def test_exact_ref_without_channel_matches_all_channels(self, tmp_path: Path) -> None:
+        # The same external_id may exist on several channels; without a
+        # channel filter an exact ref resolves to every channel's conversation.
+        conn = open_im_context_db(tmp_path)
+        try:
+            init_im_schema(conn)
+            for channel in ("welink", "dingtalk"):
+                target = ImLearningTarget(channel_id=channel, kind="group", external_id="g1", title=f"项目群-{channel}")
+                msg = ImLearningMessage(
+                    channel_id=channel,
+                    msg_id="m1",
+                    conversation_external_id="g1",
+                    content_text="排期同步",
+                    sent_at=BASE_MS,
+                    sender_account="alice",
+                    sender_name="Alice",
+                )
+                batch = normalize_batch(
+                    target=target, messages=[msg], fetched_at_ms=BASE_MS, learning_eligible_map={"m1": 1}
+                )
+                persist_batch(conn, batch, now_ms=BASE_MS)
+            FtsConsumer(conn).drain_once(now_ms=BASE_MS)
+        finally:
+            conn.close()
+        store = SqliteImSearchStore(tmp_path)
+        hits, total, _ = store.search(ImSearchQuery(keyword="排期", conversation_refs=("g1",)))
+        assert total == 2
+        assert {h.channel_id for h in hits} == {"welink", "dingtalk"}
+        hits, total, _ = store.search(ImSearchQuery(keyword="排期", conversation_refs=("g1",), channel_id="welink"))
+        assert total == 1
+        assert hits[0].channel_id == "welink"
+
 
 # ---------------------------------------------------------------------------
 # SQLite implementation: semantics (learning-scope filter / paging / read-only / truncation)
@@ -416,6 +460,13 @@ class TestImSearchTool:
         assert "until" in (result.error or "")
 
     @pytest.mark.asyncio
+    async def test_since_after_until_rejected(self) -> None:
+        tool = ImSearchTool(FakeSearchPort())
+        result = await tool.invoke({"keyword": "排期", "since": "2026-09-10", "until": "2026-09-01"})
+        assert result.success is False
+        assert "since must not be later than until" in (result.error or "")
+
+    @pytest.mark.asyncio
     async def test_invalid_limit_rejected(self) -> None:
         tool = ImSearchTool(FakeSearchPort())
         result = await tool.invoke({"keyword": "排期", "limit": "abc"})
@@ -494,6 +545,14 @@ class TestTimeParsing:
         assert _parse_time_to_ms("not-a-date") is None
         assert _parse_time_to_ms("") is None
 
+    def test_parse_bound_relative_uses_injected_now(self) -> None:
+        now = 1_000_000
+        parsed, error = ImSearchTool._parse_bound("7d", "since", now_ms=now)
+        assert (parsed, error) == (now - 7 * 86_400_000, None)
+        parsed, error = ImSearchTool._parse_bound("not-a-date", "until", now_ms=now)
+        assert parsed is None
+        assert "until" in (error or "")
+
 
 # ---------------------------------------------------------------------------
 # Prompts metadata
@@ -519,6 +578,17 @@ class TestImSearchMetadata:
             "offset",
         }
         assert params["properties"]["keyword"]["type"] == "string"
+
+    def test_description_carries_dedup_hint(self) -> None:
+        assert "不要重复调用" in IM_SEARCH_DESCRIPTION["cn"]
+        assert "Do not call again" in IM_SEARCH_DESCRIPTION["en"]
+
+    def test_time_params_state_bound_semantics(self) -> None:
+        params = get_tool_input_params("im_search")
+        assert "下界" in params["properties"]["since"]["description"]
+        assert "7d/24h/30m" in params["properties"]["since"]["description"]
+        assert "上界" in params["properties"]["until"]["description"]
+        assert "7d/24h/30m" in params["properties"]["until"]["description"]
 
     def test_provider_validate(self) -> None:
         ImSearchMetadataProvider().validate()
