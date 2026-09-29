@@ -57,17 +57,23 @@ class OtelRail(AgentRail):
         (``gen_ai.agent.id`` / ``gen_ai.agent.description`` /
         ``gen_ai.conversation.id``) and the session-carried project
         extensions (``openjiuwen.gen_ai.user.id`` /
-        ``openjiuwen.gen_ai.metadata``). Shared by the root, LLM, and tool
-        span builders so the three stay in sync.
+        ``openjiuwen.gen_ai.metadata``). ``agent_name`` feeds the trace
+        display name (``openjiuwen.trace.name``) and tool-span
+        ``gen_ai.agent.name``; ``session_id`` mirrors the conversation id.
+        Shared by the root, LLM, and tool span builders so the three stay
+        in sync.
         """
         source_metadata = getattr(ctx.session, "_source_metadata", None) or {}
         card = getattr(ctx.agent, "card", None)
+        session_id = ctx.session.get_session_id() if ctx.session is not None else ""
         return {
             "agent_id": getattr(card, "id", None),
+            "agent_name": str(getattr(card, "name", "") or ""),
             "user_id": source_metadata.get("user_id", ""),
             "metadata": source_metadata,
             # Conversation id and agent description follow metadata.
-            "conversation_id": ctx.session.get_session_id() if ctx.session is not None else "",
+            "conversation_id": session_id,
+            "session_id": session_id,
             "agent_description": str(getattr(card, "description", "") or ""),
         }
 

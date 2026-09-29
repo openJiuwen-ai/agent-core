@@ -33,9 +33,13 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
     GEN_AI_CONVERSATION_ID,
+    GEN_AI_DATA_SOURCE_ID,
+    GEN_AI_EMBEDDINGS_DIMENSION_COUNT,
     GEN_AI_INPUT_MESSAGES,
+    GEN_AI_MEMORY_RECORD_COUNT,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_REASONING_LEVEL,
@@ -45,6 +49,7 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -62,6 +67,9 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_END_TIME,
     OJ_ERROR,
     OJ_GEN_AI_METADATA,
+    OJ_GEN_AI_REASONING_DURATION_MS,
+    OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS,
+    OJ_GEN_AI_TRACE_NAME,
     OJ_GEN_AI_USAGE_INPUT_COST,
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
@@ -1449,7 +1457,8 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_error(span=agent_span, error=RuntimeError("boom"))
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert s.attributes[ERROR_TYPE] == OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
+        # error.type carries the exception class name (OTel standard string form)
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
         # BaseError carries its own classification code
         _EXPORTER.clear()
@@ -1461,7 +1470,7 @@ class TestGenAiSemconvAttrs:
         await handler.on_llm_error(span=agent_span2, error=base_error)
 
         s2 = _EXPORTER.get_finished_spans()[0]
-        assert s2.attributes[ERROR_TYPE] == OJStatusCode.TOOL_EXECUTION_ERROR.code
+        assert s2.attributes[ERROR_TYPE] == type(base_error).__name__
 
     async def test_chain_start_sets_agent_identity_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1518,13 +1527,161 @@ class TestGenAiSemconvAttrs:
 
         await handler.on_retriever_start(
             span=retriever_span,
-            inputs={"query": "hello", "top_k": 5},
+            inputs={"query": "hello", "top_k": 5, "data_source_id": "kb-7"},
             instance_info={"class_name": "kb"},
         )
         await handler.on_retriever_end(span=retriever_span, outputs=None)
 
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_RETRIEVAL_TOP_K] == 5
+        assert s.attributes[GEN_AI_DATA_SOURCE_ID] == "kb-7"
+
+    async def test_provider_name_and_trace_name_on_llm_span(self):
+        """gen_ai.provider.name rides every span; trace name prefers the
+        rail-forwarded agent_name, falling back to the model name."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "TestModel", "agent_name": "MyAgent"},
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyAgent"
+
+    async def test_trace_name_falls_back_to_entity_name(self):
+        """Without an agent_name (direct callers) the span entity name wins."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_chain_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={"class_name": "MyChain", "type": "agent"},
+        )
+        await handler.on_chain_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+        assert s.attributes[OJ_GEN_AI_TRACE_NAME] == "MyChain"
+
+    async def test_llm_end_sets_zero_usage_values(self):
+        """Present-but-zero usage facts are recorded, not skipped."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(content="x", usage_metadata=UsageMetadata())
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 0
+        assert s.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 0
+        assert s.attributes[GEN_AI_RESPONSE_MODEL] == ""
+        assert s.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == 0.0
+        assert s.attributes[OJ_GEN_AI_USAGE_INPUT_COST] == 0.0
+        assert s.attributes[OJ_GEN_AI_USAGE_OUTPUT_COST] == 0.0
+
+    async def test_llm_end_sets_streaming_and_reasoning_latency(self):
+        """first_token_time parses to time_to_first_chunk; the *_ms latency
+        keys flow through raw-dict usage payloads schema-transparently."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        message = AssistantMessage(
+            content="x",
+            usage_metadata=UsageMetadata(first_token_time="0.35"),
+        )
+        await handler.on_llm_end(span=agent_span, outputs=message)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK] == pytest.approx(0.35)
+        # Declared schema has no producer for these yet — absent, not zero.
+        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
+
+        # Raw-dict callers (and future UsageMetadata fields) flow through.
+        _EXPORTER.clear()
+        agent_span2 = span_manager.create_agent_span()
+        await handler.on_llm_start(
+            span=agent_span2, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw = {
+            "outputs": {
+                "usage_metadata": {
+                    "inter_token_latency_ms": 12.5,
+                    "reasoning_duration_ms": 300.0,
+                }
+            }
+        }
+        await handler.on_llm_end(span=agent_span2, outputs=raw)
+
+        s2 = _EXPORTER.get_finished_spans()[0]
+        assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
+        assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
+
+    async def test_embedding_start_sets_dimension_count(self):
+        """EMBEDDING span entry point: embeddings operation + dimension count.
+        No core emitter yet — invoked directly here until the framework grows
+        on_embedding_* events."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        embedding_span = span_manager.create_agent_span()
+
+        await handler.on_embedding_start(
+            span=embedding_span,
+            inputs={"input": "text", "dimension": 768},
+            instance_info={"class_name": "text-embedding"},
+        )
+        await handler.on_embedding_end(span=embedding_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "embedding.text-embedding"
+        assert s.attributes[GEN_AI_OPERATION_NAME] == "embeddings"
+        assert s.attributes[GEN_AI_EMBEDDINGS_DIMENSION_COUNT] == 768
+        assert s.attributes[GEN_AI_PROVIDER_NAME] == "openjiuwen"
+
+    async def test_memory_start_sets_record_count(self):
+        """MEMORY span entry point: record count from inputs."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        memory_span = span_manager.create_agent_span()
+
+        await handler.on_memory_start(
+            span=memory_span,
+            inputs={"query": "q", "record_count": 12},
+            instance_info={"class_name": "session-memory"},
+        )
+        await handler.on_memory_end(span=memory_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.name == "memory.session-memory"
+        assert s.attributes[GEN_AI_MEMORY_RECORD_COUNT] == 12
 
     async def test_workflow_invoke_error_sets_error_type(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1538,6 +1695,6 @@ class TestGenAiSemconvAttrs:
         await handler.on_invoke(invoke_id="wf_root", exception=RuntimeError("wf failed"))
 
         s = _EXPORTER.get_finished_spans()[0]
-        assert s.attributes[ERROR_TYPE] == OJStatusCode.WORKFLOW_EXECUTION_ERROR.code
+        assert s.attributes[ERROR_TYPE] == "RuntimeError"
 
 

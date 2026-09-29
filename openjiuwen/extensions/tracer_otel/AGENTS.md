@@ -33,8 +33,12 @@ facts with different wire formats, and that is intentional:
   way; facts the registry does not model are defined here as this package's own
   `openjiuwen.*` extensions (`openjiuwen.gen_ai.usage.*_cost`,
   `openjiuwen.llm.prev_message_count`, `openjiuwen.gen_ai.user.id`,
-  `openjiuwen.gen_ai.metadata`) — project extensions never ride the
-  `gen_ai.*` prefix. Do not grow the re-export list casually.
+  `openjiuwen.gen_ai.metadata`, `openjiuwen.trace.name`,
+  `openjiuwen.gen_ai.response.inter_token_latency_ms`,
+  `openjiuwen.gen_ai.reasoning.duration_ms`) — project extensions never ride
+  the `gen_ai.*` prefix. Do not grow the re-export list casually.
+  `gen_ai.provider.name` (`"openjiuwen"`) is set on every span; the
+  non-standard `gen_ai.system` key is deliberately absent on this stack.
 - Project keys (`openjiuwen.workflow.*`, `openjiuwen.agent.*`,
   `openjiuwen.invoke_id`, `openjiuwen.session_id` — note the underscore — and
   the base-span block `OJ_INVOKE_ID` … `OJ_META_DATA`) are this package's own

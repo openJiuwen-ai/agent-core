@@ -24,9 +24,13 @@ from openjiuwen.extensions.observability.semconv import (  # noqa: F401
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
     GEN_AI_CONVERSATION_ID,
+    GEN_AI_DATA_SOURCE_ID,
+    GEN_AI_EMBEDDINGS_DIMENSION_COUNT,
     GEN_AI_INPUT_MESSAGES,
+    GEN_AI_MEMORY_RECORD_COUNT,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
+    GEN_AI_PROVIDER_NAME,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
     GEN_AI_REQUEST_REASONING_LEVEL,
@@ -36,6 +40,7 @@ from openjiuwen.extensions.observability.semconv import (  # noqa: F401
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
     GEN_AI_RESPONSE_MODEL,
+    GEN_AI_RESPONSE_TIME_TO_FIRST_CHUNK,
     GEN_AI_RETRIEVAL_TOP_K,
     GEN_AI_SYSTEM_INSTRUCTIONS,
     GEN_AI_TOOL_CALL_ID,
@@ -47,6 +52,11 @@ from openjiuwen.extensions.observability.semconv import (  # noqa: F401
     GEN_AI_USAGE_OUTPUT_TOKENS,
     GEN_AI_USAGE_REASONING_OUTPUT_TOKENS,
 )
+
+# Value for gen_ai.provider.name on this stack. The non-standard gen_ai.system
+# key is deliberately not used here: this branch never emitted it, and the
+# registry models the same fact under the standard provider name (issue #1833).
+GEN_AI_PROVIDER_NAME_VALUE = "openjiuwen"
 
 # ---------------------------------------------------------------------------
 # openjiuwen.* — request/response facts the pinned GenAI registry does not
@@ -63,6 +73,12 @@ OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
 # regime — openjiuwen.*, never gen_ai.*).
 OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
 OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
+# Latency facts the registry does not model: trace display name,
+# inter-token latency, and reasoning duration (毫秒). first-token latency IS
+# registry-modeled (gen_ai.response.time_to_first_chunk, re-exported above).
+OJ_GEN_AI_TRACE_NAME = "openjiuwen.trace.name"
+OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS = "openjiuwen.gen_ai.response.inter_token_latency_ms"
+OJ_GEN_AI_REASONING_DURATION_MS = "openjiuwen.gen_ai.reasoning.duration_ms"
 
 
 # ---------------------------------------------------------------------------
