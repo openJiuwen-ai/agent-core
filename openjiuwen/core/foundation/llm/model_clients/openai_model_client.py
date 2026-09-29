@@ -248,7 +248,12 @@ def _should_omit_authorization(model_client_config: ModelClientConfig) -> bool:
 
 
 def _normalize_openai_base_url(api_base: str) -> str:
-    """Normalize host /v1 /chat/completions forms to an OpenAI SDK base_url."""
+    """Normalize host /v1 /chat/completions forms for the affinity-gateway path.
+
+    Only used by ``_chat_completions_url`` (raw HTTP path replicating the
+    legacy AscendAffinity/InferenceAffinity clients). The OpenAI SDK path
+    passes ``api_base`` to the SDK verbatim.
+    """
     base = str(api_base or "").strip().rstrip("/")
     if not base:
         return base
@@ -401,7 +406,7 @@ class OpenAIModelClient(BaseModelClient):
         # a literal "EMPTY" key, without adding auth_mode/omit as extra fields.
         return (
             None if _should_omit_authorization(cfg) else cfg.api_key,
-            _normalize_openai_base_url(cfg.api_base),
+            cfg.api_base,
             cfg.verify_ssl,
             cfg.ssl_cert,
         )
@@ -1143,7 +1148,11 @@ class OpenAIModelClient(BaseModelClient):
 
         return AsyncOpenAI(
             api_key=self._resolved_api_key(),
-            base_url=_normalize_openai_base_url(self.model_client_config.api_base),
+            # Keep the configured api_base verbatim (legacy behavior): the SDK
+            # appends /chat/completions itself and gateways may serve it at a
+            # custom path or with a query string. /v1 appending is exclusive
+            # to the raw affinity-gateway path (_chat_completions_url).
+            base_url=self.model_client_config.api_base,
             http_client=http_client,
             timeout=final_timeout,
             max_retries=self.model_client_config.max_retries
