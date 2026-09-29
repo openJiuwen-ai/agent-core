@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +26,6 @@ from openjiuwen.rsi.harness_rsi.evaluator.judger.evidence_guard import (
     bound_tool_content,
 )
 from openjiuwen.rsi.harness_rsi.member_optimizer.model_config import load_model_config_ref, without_inner_sdk_retries
-from openjiuwen.rsi.harness_rsi.model_call import RetryableModelOutputError, is_retryable_model_call_failure
 
 
 class JudgeIterationLimitError(EvaluationInfrastructureError):
@@ -67,23 +65,6 @@ class JudgeBudgetRail(AgentRail):
     def __init__(self, iterations: int, log_path: Path) -> None:
         self.iterations = iterations
         self.log_path = log_path
-        self.continuation: Callable[[], Awaitable[str]] | None = None
-        self._closed = False
-
-    async def closeout(self, _raw: str) -> str:
-        """Finalize once from complete frozen evidence, never partial read history."""
-        if self._closed or self.continuation is None:
-            raise EvaluationInfrastructureError("Judge closeout context is unavailable or already consumed")
-        self._closed = True
-        try:
-            result = await self.continuation()
-            if not str(result or "").strip():
-                raise RetryableModelOutputError("Judge closeout returned an empty response")
-            return result
-        except Exception as exc:
-            if is_retryable_model_call_failure(exc):
-                self._closed = False
-            raise
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
         turn = int(ctx.extra.get("judge_turn", 0)) + 1
@@ -167,20 +148,8 @@ def build_judge_agent(
     config: EvaluatorConfig, workspace: Path, log_path: Path, *, budget: JudgeBudgetRail | None = None,
 ) -> Any:
     budget = budget or JudgeBudgetRail(config.judge_agent_max_iterations, log_path)
-    model = _judge_model(config)
-
-    async def complete_evidence_verdict() -> str:
-        payload = await asyncio.to_thread(
-            inline_evidence, workspace, max_bytes=None, required=True,
-            include_images=True,
-        )
-        if payload is None:
-            raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
-        return await _invoke_complete_evidence(model, payload)
-
-    budget.continuation = complete_evidence_verdict
     return create_deep_agent(
-        model=model,
+        model=_judge_model(config),
         card=AgentCard(name="evaluator_agent", description="Independent reference-based evaluator"),
         system_prompt=Path(__file__).with_name("judge_prompt.md").read_text(encoding="utf-8"),
         workspace=str(workspace),
@@ -196,25 +165,19 @@ def build_judge_agent(
 
 
 async def run_judge_agent(
-    config: EvaluatorConfig, workspace: Path, prompt: str, log_path: Path, *, budget: JudgeBudgetRail | None = None,
+    config: EvaluatorConfig, workspace: Path, prompt: str, log_path: Path,
 ) -> str:
     from openjiuwen.core.runner import Runner
 
-    payload = await asyncio.to_thread(inline_evidence, workspace) if budget is not None else None
+    payload = await asyncio.to_thread(inline_evidence, workspace, include_images=True)
     if payload is not None:
-        model = _judge_model(config)
-
-        async def invoke_direct() -> str:
-            return await _invoke_complete_evidence(model, payload)
-
-        budget.continuation = invoke_direct
-        return await invoke_direct()
-    agent = build_judge_agent(config, workspace, log_path, budget=budget)
+        return await _invoke_complete_evidence(_judge_model(config), payload)
+    agent = build_judge_agent(config, workspace, log_path)
     try:
         result = await Runner.run_agent(agent=agent, inputs={"query": prompt}, session=f"judge_{agent.card.id}")
         if isinstance(result, dict):
             if result.get("result_type") == "error":
-                if budget is not None and result.get("output") == "Max iterations reached without completion":
+                if result.get("output") == "Max iterations reached without completion":
                     raise JudgeIterationLimitError("Judge reading iteration limit reached")
                 raise RuntimeError(str(result.get("output") or "evaluator agent failed"))
             result = result.get("output", result.get("answer", result))
@@ -225,6 +188,21 @@ async def run_judge_agent(
                 rail.uninit(agent)
         await agent.cleanup_task_resources()
         Runner.resource_mgr.remove_sys_operation(f"{agent.card.name}_{agent.card.id}")
+
+
+async def run_judge_closeout(config: EvaluatorConfig, workspace: Path) -> str:
+    """Grade once from the complete frozen snapshot without prior agent history."""
+    model = _judge_model(config)
+    payload = await asyncio.to_thread(
+        inline_evidence,
+        workspace,
+        max_bytes=model.context_budget(),
+        required=True,
+        include_images=True,
+    )
+    if payload is None:  # ``required=True`` makes this defensive only.
+        raise EvaluationInfrastructureError("Judge closeout evidence is unavailable; no score produced")
+    return await _invoke_complete_evidence(model, payload)
 
 
 async def _invoke_complete_evidence(model: Model, payload: str | list) -> str:

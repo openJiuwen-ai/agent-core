@@ -1,26 +1,60 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Native Judge recovery must deliver complete evidence or produce no grade."""
+"""Judge iteration recovery always starts from the complete frozen snapshot."""
 
-import asyncio
 import json
-from copy import deepcopy
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-from openjiuwen.core.foundation.llm import AssistantMessage, Model, ToolCall
+from openjiuwen.core.foundation.llm import AssistantMessage, Model, SystemMessage, ToolCall
 from openjiuwen.rsi.harness_rsi.config import EvaluatorConfig
 from openjiuwen.rsi.harness_rsi.evaluator.case_backend import CaseExecutionResult
 from openjiuwen.rsi.harness_rsi.evaluator.errors import EvaluationInfrastructureError
-from openjiuwen.rsi.harness_rsi.evaluator.judger import LlmAsJudgeJudger
-from openjiuwen.rsi.harness_rsi.evaluator.judger.direct_evidence import MAX_CLOSEOUT_BYTES
-from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeBudgetRail
+from openjiuwen.rsi.harness_rsi.evaluator.judger import LlmAsJudgeJudger, judge_runtime, llm_as_judge
+from openjiuwen.rsi.harness_rsi.evaluator.judger.judge_runtime import JudgeIterationLimitError
 
 
-def _verdict(score):
-    return json.dumps({"status": "completed", "overall_reason": "Observed work", "behaviors": [
-        {"id": "rubric_001", "score": score, "reason": "Criterion inspected", "evidence": "artifacts/answer.txt"}
-    ], "forbidden_hits": []})
+def _verdict(score=0.5):
+    return json.dumps({
+        "status": "completed",
+        "overall_reason": "Observed work",
+        "behaviors": [{
+            "id": "rubric_001",
+            "score": score,
+            "reason": "Criterion inspected",
+            "evidence": "artifacts/answer.txt",
+        }],
+        "forbidden_hits": [],
+    })
+
+
+def _config(tmp_path):
+    config_path = tmp_path / "model.json"
+    config_path.write_text(json.dumps({
+        "model_client_config": {
+            "client_provider": "OpenAI",
+            "api_key": "test",
+            "api_base": "https://example.test/v1",
+        },
+        "model_request_config": {"model": "test", "max_tokens": 100000},
+    }), encoding="utf-8")
+    return EvaluatorConfig(
+        judge_model_config_ref=str(config_path),
+        judge_agent_max_iterations=1,
+        judge_max_retries=0,
+    )
+
+
+def _arguments(tmp_path):
+    return {
+        "case": {
+            "case_id": "one",
+            "input": "Deliver a report",
+            "reference": {"rubric": ["A report"]},
+        },
+        "execution_result": CaseExecutionResult("done", "passed"),
+        "output_dir": str(tmp_path),
+    }
 
 
 def test_judge_budget_default_and_override():
@@ -29,91 +63,88 @@ def test_judge_budget_default_and_override():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("outcome", [
-    "recovered", "format_recovered", "invalid", "timeout", "cancel", "too_large", "non_text", "unreadable",
-    "valid_zero",
-])
-async def test_native_unread_artifact_is_completed_before_closeout(tmp_path, monkeypatch, outcome):
-    config_path = tmp_path / "model.json"
-    config_path.write_text(json.dumps({
-        "model_client_config": {"client_provider": "OpenAI", "api_key": "test", "api_base": "https://example.test/v1"},
-        "model_request_config": {"model": "test", "max_tokens": 100000},
-    }), encoding="utf-8")
-    artifacts = tmp_path / "artifacts"
-    artifacts.mkdir()
-    (artifacts / "evidence.jsonl").write_text('{"step": 1}\n{"step": 2}\n', encoding="utf-8")
-    (artifacts / "answer.txt").write_text("VERIFIED_EVIDENCE = 1729\n", encoding="utf-8")
-    # Exceed the direct route, so a real native reader gets only one turn.
-    (artifacts / "scratch.txt").write_text("scratch\n" * 12000, encoding="utf-8")
-    if outcome == "too_large":
-        (artifacts / "scratch.txt").write_text("x" * MAX_CLOSEOUT_BYTES, encoding="utf-8")
-    if outcome == "non_text":
-        (artifacts / "image.png").write_bytes(b"not a text artifact")
-    if outcome == "unreadable":
-        (artifacts / "answer.txt").write_bytes(b"\xff")
-    calls = []
+async def test_iteration_limit_regrades_once_from_same_frozen_workspace(tmp_path, monkeypatch):
+    agent = AsyncMock(side_effect=JudgeIterationLimitError("reading limit"))
+    closeout_workspaces = []
 
-    async def invoke(instance, messages, **kwargs):
-        if any(isinstance(item.content, list) for item in messages):
-            return AssistantMessage(content="red")
-        calls.append((deepcopy(messages), kwargs))
-        if len(calls) == 1:
-            if outcome == "valid_zero":
-                return AssistantMessage(content=_verdict(0))
-            if outcome == "format_recovered":
-                return AssistantMessage(content="Reading more. <tool_calls>read_file</tool_calls>")
-            return AssistantMessage(content="", tool_calls=[ToolCall(
-                id="read-request", type="function", name="read_file",
-                arguments=json.dumps({"file_path": str(next(tmp_path.rglob("request.json")))}),
-            )])
-        assert len(calls) == 2
-        assert kwargs.get("tools") is None
-        assert len(messages) == 2
-        payload = json.loads(messages[1].content)
-        assert payload["evidence_files"]["artifacts/evidence.jsonl"] == '{"step": 1}\n{"step": 2}\n'
-        if outcome == "unreadable":
-            assert "artifacts/answer.txt" not in payload["evidence_files"]
-            assert payload["unavailable_evidence_files"] == [
-                {"path": "artifacts/answer.txt", "reason": "not valid UTF-8"},
-            ]
-        else:
-            assert payload["evidence_files"]["artifacts/answer.txt"] == "VERIFIED_EVIDENCE = 1729\n"
-        if outcome == "non_text":
-            assert payload["unavailable_evidence_files"] == [
-                {"path": "artifacts/image.png", "reason": "cannot read file (UnidentifiedImageError)"},
-            ]
-        expected_scratch = "x" * MAX_CLOSEOUT_BYTES if outcome == "too_large" else "scratch\n" * 12000
-        assert payload["evidence_files"]["artifacts/scratch.txt"] == expected_scratch
-        if outcome == "timeout":
-            raise TimeoutError("closeout timeout")
-        if outcome == "cancel":
-            raise asyncio.CancelledError()
-        return AssistantMessage(content="not JSON" if outcome == "invalid" else _verdict(.5))
+    async def closeout(_config, workspace):
+        request = json.loads((workspace / "request.json").read_text(encoding="utf-8"))
+        assert request["response"] == "done"
+        closeout_workspaces.append(workspace)
+        return _verdict()
 
-    monkeypatch.setattr(Model, "invoke", invoke)
-    judger = LlmAsJudgeJudger(EvaluatorConfig(
-        judge_model_config_ref=str(config_path), judge_agent_max_iterations=1, judge_max_retries=0,
-    ))
-    arguments = {
-        "case": {"case_id": "one", "input": "Deliver a report", "reference": {"rubric": ["A report"]}},
-        "execution_result": CaseExecutionResult("Max iterations reached without completion", "passed"),
-        "output_dir": str(tmp_path),
-    }
-    if outcome in {"recovered", "format_recovered", "valid_zero", "too_large", "non_text", "unreadable"}:
-        result = await judger.judge(**arguments)
-        assert result.metadata["parsed"]["overall_score"] == (0 if outcome == "valid_zero" else .5)
-    else:
-        with pytest.raises(asyncio.CancelledError if outcome == "cancel" else EvaluationInfrastructureError):
-            await judger.judge(**arguments)
-        assert not list(tmp_path.rglob("assessment.json"))
-    assert len(calls) == (1 if outcome == "valid_zero" else 2)
+    monkeypatch.setattr(llm_as_judge, "run_judge_agent", agent)
+    monkeypatch.setattr(llm_as_judge, "run_judge_closeout", closeout)
+    result = await LlmAsJudgeJudger(_config(tmp_path)).judge(**_arguments(tmp_path))
+    assert agent.await_count == 1
+    assert len(closeout_workspaces) == 1
+    assert result.metadata["attempt"] == 2
+    assert result.metadata["recovery"] == "complete_frozen_evidence"
+    assert result.metadata["parsed"]["overall_score"] == 0.5
 
 
 @pytest.mark.asyncio
-async def test_closeout_is_request_local_and_bounded(tmp_path):
-    rail = JudgeBudgetRail(8, tmp_path / "tools.jsonl")
-    rail.continuation = AsyncMock(return_value=_verdict(0))
-    await rail.closeout('<tool_calls><invoke name="read_file">secret</invoke></tool_calls>')
-    rail.continuation.assert_awaited_once_with()
-    with pytest.raises(EvaluationInfrastructureError, match="already consumed"):
-        await rail.closeout("still invalid")
+async def test_runtime_iteration_limit_uses_complete_snapshot_without_history(tmp_path, monkeypatch):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    complete_text = "complete frozen evidence\n" * 4000
+    (artifacts / "answer.txt").write_text(complete_text, encoding="utf-8")
+    calls = []
+
+    async def invoke(_model, messages, **kwargs):
+        calls.append((messages, kwargs))
+        if kwargs.get("tools") is not None:
+            request_path = next(tmp_path.rglob("request.json"))
+            return AssistantMessage(content="", tool_calls=[ToolCall(
+                id="read-request",
+                type="function",
+                name="read_file",
+                arguments=json.dumps({"file_path": str(request_path)}),
+            )])
+        if isinstance(messages[0], SystemMessage):
+            assert len(messages) == 2
+            payload = json.loads(messages[1].content)
+            assert payload["evidence_files"]["artifacts/answer.txt"] == complete_text
+        return AssistantMessage(content=_verdict())
+
+    monkeypatch.setattr(Model, "invoke", invoke)
+    result = await LlmAsJudgeJudger(_config(tmp_path)).judge(**_arguments(tmp_path))
+    judge_calls = [
+        call for call in calls
+        if isinstance(call[0][0], SystemMessage) and call[1].get("tools") is None
+    ]
+    assert len(judge_calls) == 1
+    assert any(call[1].get("tools") is not None for call in calls)
+    assert result.metadata["recovery"] == "complete_frozen_evidence"
+
+
+@pytest.mark.asyncio
+async def test_iteration_closeout_failure_produces_no_score(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        llm_as_judge,
+        "run_judge_agent",
+        AsyncMock(side_effect=JudgeIterationLimitError("reading limit")),
+    )
+    monkeypatch.setattr(
+        llm_as_judge,
+        "run_judge_closeout",
+        AsyncMock(side_effect=EvaluationInfrastructureError("complete evidence exceeds context")),
+    )
+    with pytest.raises(EvaluationInfrastructureError, match="exceeds context"):
+        await LlmAsJudgeJudger(_config(tmp_path)).judge(**_arguments(tmp_path))
+    assert not list(tmp_path.rglob("assessment.json"))
+
+
+@pytest.mark.asyncio
+async def test_closeout_has_no_consumed_state(tmp_path, monkeypatch):
+    (tmp_path / "request.json").write_text(
+        '{"response":"done","evidence_files":[]}',
+        encoding="utf-8",
+    )
+    model = AsyncMock()
+    model.context_budget = Mock(return_value=262144)
+    model.invoke.return_value = AssistantMessage(content=_verdict())
+    monkeypatch.setattr(judge_runtime, "_judge_model", lambda _config: model)
+    assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == _verdict()
+    assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == _verdict()
+    assert model.invoke.await_count == 2

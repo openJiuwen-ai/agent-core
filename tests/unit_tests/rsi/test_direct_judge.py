@@ -2,7 +2,7 @@
 """Routing and recovery without dropping evidence or changing scores."""
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -136,49 +136,27 @@ def test_unreadable_file_names_the_file_without_exposing_exception_details(tmp_p
 @pytest.mark.asyncio
 async def test_missing_closeout_payload_never_calls_model(tmp_path, monkeypatch):
     model = AsyncMock()
+    model.context_budget = Mock(return_value=262144)
     monkeypatch.setattr(judge_runtime, "_judge_model", lambda _: model)
     monkeypatch.setattr(judge_runtime, "inline_evidence", lambda *args, **kwargs: None)
-    monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: object())
-    budget = judge_runtime.JudgeBudgetRail(20, tmp_path / "tools.jsonl")
-    judge_runtime.build_judge_agent(EvaluatorConfig(), tmp_path, tmp_path / "tools.jsonl", budget=budget)
     with pytest.raises(EvaluationInfrastructureError, match="evidence is unavailable"):
-        await budget.closeout("")
+        await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path)
     model.invoke.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_agent_closeout_sends_large_complete_evidence_without_capacity_estimate(tmp_path, monkeypatch):
-    content = "\\" * 300000
-    (tmp_path / "answer.txt").write_text(content, encoding="utf-8")
-    (tmp_path / "request.json").write_text('{"evidence_files":["answer.txt"]}', encoding="utf-8")
-    model = AsyncMock()
-    model.context_budget.side_effect = AssertionError("capacity must not be used as a byte limit")
-    verdict = AsyncMock(return_value='{"status":"completed"}')
-    monkeypatch.setattr(judge_runtime, "_judge_model", lambda _: model)
-    monkeypatch.setattr(judge_runtime, "_invoke_complete_evidence", verdict)
-    monkeypatch.setattr(judge_runtime, "create_deep_agent", lambda **kwargs: object())
-    budget = judge_runtime.JudgeBudgetRail(20, tmp_path / "tools.jsonl")
-    judge_runtime.build_judge_agent(EvaluatorConfig(), tmp_path, tmp_path / "tools.jsonl", budget=budget)
-    assert await budget.closeout("") == '{"status":"completed"}'
-    payload = verdict.call_args.args[1]
-    assert json.loads(payload)["evidence_files"]["answer.txt"] == content
-
-
-@pytest.mark.asyncio
-async def test_direct_call_and_one_recovery(tmp_path, monkeypatch):
+async def test_direct_call_and_stateless_closeout(tmp_path, monkeypatch):
     (tmp_path / "request.json").write_text('{"response":"42","evidence_files":[]}', encoding="utf-8")
     model = AsyncMock()
     model.invoke.side_effect = [
         AssistantMessage(content="malformed"), AssistantMessage(content='{"status":"completed"}'),
     ]
+    model.context_budget = Mock(return_value=262144)
     monkeypatch.setattr(judge_runtime, "_judge_model", lambda _: model)
     monkeypatch.setattr(judge_runtime, "build_judge_agent", lambda *a, **k: pytest.fail("should not build an agent"))
-    budget = judge_runtime.JudgeBudgetRail(20, tmp_path / "tools.jsonl")
-    result = await judge_runtime.run_judge_agent(
-        EvaluatorConfig(), tmp_path, "", tmp_path / "tools.jsonl", budget=budget,
-    )
+    result = await judge_runtime.run_judge_agent(EvaluatorConfig(), tmp_path, "", tmp_path / "tools.jsonl")
     assert result == "malformed"
-    assert await budget.closeout(result) == '{"status":"completed"}'
+    assert await judge_runtime.run_judge_closeout(EvaluatorConfig(), tmp_path) == '{"status":"completed"}'
     assert model.invoke.await_count == 2
     assert all(c.kwargs['tools'] is None for c in model.invoke.call_args_list)
     assert '42' in model.invoke.call_args_list[1].kwargs['messages'][1].content

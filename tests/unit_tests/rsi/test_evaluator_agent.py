@@ -390,17 +390,15 @@ async def test_judge_failures_do_not_become_zero_score_tasks(tmp_path, monkeypat
             output["behaviors"].pop()
         call = AsyncMock(return_value="not JSON" if kind == "invalid_json" else json.dumps(output))
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
-    closeout = AsyncMock(return_value=(
-        "not JSON" if kind == "invalid_json" else json.dumps(output) if kind != "model_error" else ""
-    ))
-    monkeypatch.setattr(JudgeBudgetRail, "closeout", closeout)
+    repair = AsyncMock(return_value="not JSON")
+    monkeypatch.setattr(llm_as_judge, "repair_judge_json", repair)
     runner = CaseRunner(backend=_Backend("done"), judger=LlmAsJudgeJudger(_config()))
     with pytest.raises(EvaluationInfrastructureError):
         await runner.execute(case=_case(), output_dir=str(tmp_path / "case"), team_skill_ref_path="")
     assert json.loads((tmp_path / "case" / "evaluation_error.json").read_text())["score"] is None
     assert not (tmp_path / "case" / "result.json").exists()
     assert call.await_count == 1
-    assert closeout.await_count == (0 if kind in {"model_error", "unavailable"} else 1)
+    assert repair.await_count == (1 if kind == "invalid_json" else 0)
 
 
 @pytest.mark.asyncio
@@ -431,7 +429,7 @@ async def test_missing_delivery_is_zero_and_batch_continues_to_next_case(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_one_structural_retry_uses_same_frozen_evidence(tmp_path, monkeypatch):
+async def test_json_syntax_repair_does_not_regrade(tmp_path, monkeypatch):
     workspaces = []
     prompts = []
 
@@ -441,35 +439,35 @@ async def test_one_structural_retry_uses_same_frozen_evidence(tmp_path, monkeypa
         return "not JSON"
 
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", run)
-    closeout = AsyncMock(return_value=json.dumps(_output()))
-    monkeypatch.setattr(JudgeBudgetRail, "closeout", closeout)
+    repair = AsyncMock(return_value=json.dumps(_output()))
+    monkeypatch.setattr(llm_as_judge, "repair_judge_json", repair)
     result = await LlmAsJudgeJudger(_config()).judge(
         case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
     )
     assert len(workspaces) == 1
-    closeout.assert_awaited_once_with("not JSON")
-    assert result.metadata["attempt"] == 2
+    repair.assert_awaited_once()
+    assert repair.await_args.args[1] == "not JSON"
+    assert result.metadata["attempt"] == 1
     assert result.score == 0.0
     assert result.metadata["parsed"]["overall_score"] == 0.5
-    errors = list(tmp_path.rglob("validation_error_1.json"))
-    assert len(errors) == 1
-    assert json.loads(errors[0].read_text(encoding="utf-8"))["message"]
+    assert not list(tmp_path.rglob("validation_error_1.json"))
 
 
 @pytest.mark.asyncio
 async def test_tool_text_then_prose_wrapped_verdict_is_recovered_without_changing_score(tmp_path, monkeypatch):
     raw = '<tool_calls><invoke name="read_file" /></tool_calls>'
     call = AsyncMock(return_value=raw)
-    closeout = AsyncMock(return_value="Evidence reviewed.\n```json\n" + json.dumps(_output((0.0, 0.0))) + "\n```")
+    repair = AsyncMock(return_value="Evidence reviewed.\n```json\n" + json.dumps(_output((0.0, 0.0))) + "\n```")
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
-    monkeypatch.setattr(JudgeBudgetRail, "closeout", closeout)
+    monkeypatch.setattr(llm_as_judge, "repair_judge_json", repair)
     result = await LlmAsJudgeJudger(_config()).judge(
         case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
     )
     assert result.score == 0.0
     assert result.passed is False
     assert call.await_count == 1
-    closeout.assert_awaited_once_with(raw)
+    repair.assert_awaited_once()
+    assert repair.await_args.args[1] == raw
     for invocation in call.await_args_list:
         prompt = invocation.args[2]
         assert 'FINAL OUTPUT CONTRACT' in prompt
@@ -484,15 +482,12 @@ async def test_final_validation_error_remains_actionable(tmp_path, monkeypatch):
     output["behaviors"].pop()
     call = AsyncMock(return_value=json.dumps(output))
     monkeypatch.setattr(llm_as_judge, "run_judge_agent", call)
-    closeout = AsyncMock(return_value=json.dumps(output))
-    monkeypatch.setattr(JudgeBudgetRail, "closeout", closeout)
     with pytest.raises(EvaluationInfrastructureError, match="must score every supplied ID"):
         await LlmAsJudgeJudger(_config()).judge(
             case=_case(), execution_result=CaseExecutionResult("done", "passed"), output_dir=str(tmp_path)
         )
     assert call.await_count == 1
-    closeout.assert_awaited_once()
-    assert len(list(tmp_path.rglob("validation_error_*.json"))) == 2
+    assert len(list(tmp_path.rglob("validation_error_*.json"))) == 1
 
 
 @pytest.mark.asyncio
