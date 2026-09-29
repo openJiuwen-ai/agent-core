@@ -338,7 +338,9 @@ class SemanticStateTracker:
             len(self._history) >= 2 and state_digest == self._history[-2] and state_digest != self._history[-1]
         )
         repeated_filter_state = bool(
-            self._filter_history and filter_digest in self._filter_history and filter_digest != self._filter_history[-1]
+            previous_state.get("url") == semantic_state.get("url")
+            and self._filter_history and filter_digest in self._filter_history
+            and filter_digest != self._filter_history[-1]
         )
 
         if not self._history:
@@ -346,7 +348,9 @@ class SemanticStateTracker:
         elif repeated_state:
             progress = "no_progress"
             self._consecutive_no_progress += 1
-        elif state_revisit or repeated_filter_state:
+        elif (state_revisit or repeated_filter_state) and not (
+            set(semantic_state.get("field_coverage", [])) - set(previous_state.get("field_coverage", []))
+        ):
             progress = "state_revisit"
             self._consecutive_no_progress += 1
             self._state_revisit_count += 1

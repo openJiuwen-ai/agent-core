@@ -23,6 +23,8 @@ from openjiuwen.harness.tools.browser_move.playwright_runtime.browser_logging im
     browser_agent_log_warning,
 )
 
+from openjiuwen.harness.tools.browser_move.playwright_runtime.execution_journal import mark_dispatched
+
 from .base import BaseController
 
 try:
@@ -2158,6 +2160,7 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
 
         executor_started_at = time.perf_counter()
         try:
+            mark_dispatched()
             raw = await asyncio.wait_for(
                 code_executor(js_code),
                 timeout=effective_global_timeout_ms / 1000,
@@ -2173,6 +2176,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "session_id": session_id,
                 "request_id": request_id,
@@ -2201,6 +2207,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "session_id": session_id,
                 "request_id": request_id,
@@ -2239,6 +2248,9 @@ def register_builtin_actions(controller: ActionController | None = None) -> None
             return {
                 "ok": False,
                 "status": "failed",
+                "executed": None,
+                "state_changed": True,
+                "execution_state": "dispatched_unknown",
                 "error": error,
                 "raw_preview": raw_text[:400],
                 "session_id": session_id,

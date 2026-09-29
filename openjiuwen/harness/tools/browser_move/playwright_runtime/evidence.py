@@ -12,6 +12,187 @@ from .site_profiles import profile_detail_link_key, site_profiles_for_url
 
 _PAGE_FIELDS = frozenset({"sort_state", "action_confirmation", "source"})
 
+_SORT_LABELS = {
+    "sales": r"销量|sales|sale-desc|sales-desc",
+    "views": r"最多播放|播放量|views|most views|click",
+    "latest": r"最新(?:发布|排序)?|最近发布|latest|newest|pubdate|recent",
+    "comprehensive": r"综合(?:排序)?|默认排序|comprehensive|relevance|totalrank|default",
+    "price_asc": r"价格从低到高|价格升序|price-asc|price ascending|low to high",
+    "price_desc": r"价格从高到低|价格降序|price-desc|price descending|high to low",
+}
+
+
+def observed_label(control: dict[str, Any]) -> str:
+    """One observed label for public controls, acceptance and decision menus."""
+    return next((str(control[key]).strip() for key in ("label", "name", "text", "accessible_name")
+                 if control.get(key) and str(control[key]).strip()), "")
+
+
+def sort_value(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return next((name for name, pattern in _SORT_LABELS.items() if re.fullmatch(pattern, text)), "")
+
+
+def observed_sort(source: str, value: Any = "") -> str:
+    """Only observed selected state / recognized ordering parameters, never tool intent."""
+    try:
+        params = parse_qs(urlsplit(source).query)
+    except ValueError:
+        return ""
+    url_sort = next((sort_value(v) for key in ("order", "sort", "sortType") for v in params.get(key, [])
+                     if sort_value(v)), "")
+    selected = sort_value(value)
+    return "" if selected and url_sort and selected != url_sort else selected or url_sort
+
+
+def first_organic_result(cards: list[dict[str, Any]]) -> dict[str, Any] | None:
+    candidates = [card for card in cards if card.get("result_index") == 1 and card.get("order_known") is True
+                  and not card.get("is_ad") and card.get("title")
+                  and card.get("region") in {"main_result", "primary_result", "main_results"}]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _same_observation_scope(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    a, b = left.get("observation_scope"), right.get("observation_scope")
+    return bool(a and a == b and a.get("page_id") and a.get("generation_id")
+                and type(a.get("interaction_revision")) is int
+                and left.get("query_id") == right.get("query_id")
+                and left.get("source") == right.get("source"))
+
+
+def explicit_acceptance(state: dict[str, Any]) -> list[dict[str, Any]]:
+    """Small source-bound checks for explicit requests; not a general task planner.
+
+    IDs depend on logical requirements, not DOM nodes or optional phase versions.
+    All evidence is already produced by the normal observation/extraction lifecycle.
+    """
+    goal = str(state.get("goal") or state.get("task") or "")
+    # Remove literal search values, not quotes around requested ordering labels.
+    from ..decision.intent import search_values
+
+    scope = goal.lower()
+    for literal in search_values(goal):
+        scope = scope.replace(literal.lower(), "")
+    optional = r"不必|不用|无需|不要|若有|如果有|可选|不限|optional|if available|without|do not"
+    clauses = [part for part in re.split(r"[，,。；;\n]", scope) if not re.search(optional, part)]
+    ordering = [part for part in clauses if re.search(r"排序|切换|按|先|再|sort|order|switch", part)]
+    requested = [name for name, pattern in _SORT_LABELS.items()
+                 if any(re.search(pattern, part) for part in ordering)]
+    records = [r for r in state.get("structured_evidence", []) if isinstance(r, dict)]
+    task_id = str(state.get("query_id") or state.get("task_id") or "")
+    witnesses: dict[str, list[dict[str, Any]]] = {name: [] for name in requested}
+    for record in records:
+        if record.get("query_id", task_id) != task_id:
+            continue
+        values = record.get("values") or {}
+        provenance = (record.get("provenance") or {}).get("sort_state") or {}
+        source = str(record.get("source") or record.get("url") or provenance.get("source") or "")
+        if not source:
+            for item in (record.get("cards") or [])[:1]:
+                source = str(((item.get("provenance") or item.get("field_provenance") or {})
+                              .get("title") or {}).get("source") or "")
+        if not evidence_subject(source) or not task_observation_allowed({**state, "recent_actions": []}, source):
+            continue
+        selected = values.get("sort_state") if provenance or record.get("kind") == "interactive_probe" else ""
+        if provenance.get("selection_source") == "first_result_change":
+            selected = ""  # A changed result may accompany many filters, not just the requested ordering.
+        cards = record.get("cards") or []
+        if not selected and cards and record.get("kind") in {"card_probe", "ordered_results"}:
+            selected = cards[0].get("sort_state") or ""
+        order = observed_sort(source, selected)
+        if order not in witnesses:
+            continue
+        witnesses[order].append({"source": source, "record": record,
+                                 "evidence_ref": {"source": source, "kind": record.get("kind"),
+                                                  "generation": record.get("generation_id")}})
+    result = []
+    first = bool(re.search(
+        r"首[条个项篇]|第[一1][条个项篇]|first\s+(?:natural\s+)?(?:result|product|item|video)", scope
+    ))
+    for expected in requested:
+        matches = witnesses[expected]
+        result.append({"id": f"sort:{expected}", "kind": "sort", "expected": expected,
+                       "status": "satisfied" if matches else "unknown",
+                       "evidence_ref": matches[-1]["evidence_ref"] if matches else None})
+        if first:
+            selected = []
+            for witness in matches:
+                associated = [witness["record"], *[
+                    record for record in records if record.get("kind") in {"card_probe", "ordered_results"}
+                    and _same_observation_scope(record, witness["record"])
+                    and sort_value((record.get("cards") or [{}])[0].get("sort_state")) in {"", expected}
+                    and observed_sort(str(record.get("source") or ""),
+                                      ((record.get("cards") or [{}])[0].get("sort_state"))) in {"", expected}
+                ]]
+                for record in associated:
+                    card = first_organic_result(record.get("cards") or [])
+                    if card:
+                        selected.append({**witness["evidence_ref"], "title": card["title"],
+                                         "entity_source": card.get("primary_link") or card.get("href"),
+                                         "card_kind": record.get("kind"),
+                                         "observation_scope": record.get("observation_scope")})
+            result.append({"id": f"first_result:{expected}", "kind": "first_result", "expected": expected,
+                           "status": "satisfied" if selected else "unknown",
+                           "evidence_ref": selected[-1] if selected else None})
+    for field, pattern in (("product_rating", r"商品评分|产品评分|product rating"),
+                           ("shop_rating", r"店铺评分|卖家评分|shop rating|seller rating|store rating")):
+        if not any(re.search(pattern, part) for part in clauses):
+            continue
+        slots = [s for s in state.get("evidence_slots", []) if s.get("field") == field
+                 and s.get("query_id") == task_id and s.get("status") == "present"
+                 and s.get("observation_status") != "not_observed" and evidence_subject(s.get("source"))
+                 and s.get("value") not in (None, "", "unknown")]
+        result.append({"id": f"field:{field}", "kind": "field", "expected": field,
+                       "status": "satisfied" if slots else "unknown",
+                       "evidence_ref": {k: slots[-1].get(k) for k in ("source", "entity_source", "value")}
+                       if slots else None})
+    saved = state.get("acceptance_evidence") or {}
+    for item in result:
+        previous = saved.get(item["id"]) or {}
+        if item["kind"] != "field" and item["status"] != "satisfied" and previous.get("query_id") == task_id:
+            item.update(status="satisfied", evidence_ref=previous["evidence_ref"])
+    for item in result:
+        if item["status"] != "satisfied":
+            item["reason"] = {
+                "sort": "selected_order_not_observed",
+                "first_result": "ordered_first_result_not_bound_to_selected_order",
+                "field": "requested_field_not_observed",
+            }[item["kind"]]
+    return result
+
+
+def retain_acceptance(state: dict[str, Any]) -> None:
+    """Retain task-bound proofs when the generic recent-observation window rolls over."""
+    task_id = str(state.get("query_id") or state.get("task_id") or "")
+    saved = state.setdefault("acceptance_evidence", {})
+    for item in explicit_acceptance(state):
+        if item["status"] == "satisfied" and item["kind"] != "field":
+            saved[item["id"]] = {"query_id": task_id, "evidence_ref": item["evidence_ref"]}
+
+
+def observe_acceptance(state: dict[str, Any], observation: dict[str, Any]) -> None:
+    """Consume the existing fresh capture; no extra browser or model call."""
+    source = observation.get("url") or ""
+    if not observation.get("capture_id") or not evidence_subject(source):
+        return
+    selected = [c for c in observation.get("controls", []) if c.get("selected") is True
+                and str(c.get("kind") or "").startswith("sort") and sort_value(observed_label(c))]
+    label = observed_label(selected[0]) if len(selected) == 1 else ""
+    if observed_sort(source, label):
+        record = {"kind": "sort_observation", "source": source, "values": {"sort_state": label},
+                  "query_id": str(state.get("query_id") or state.get("task_id") or ""),
+                  "provenance": {"sort_state": {"source": source, "capture_id": observation["capture_id"]}}}
+        page = observation.get("page") or {}
+        if page.get("page_id") and page.get("generation_id") and type(page.get("interaction_revision")) is int:
+            record["observation_scope"] = {
+                key: page[key] for key in ("page_id", "generation_id", "interaction_revision")
+            }
+        records = state.setdefault("structured_evidence", [])
+        records[:] = [r for r in records if not (r.get("kind") == "sort_observation" and r.get("source") == source)]
+        records.append(record)
+        retain_acceptance(state)
+        del records[:-20]
+
 
 def author_is_action_label(value: Any) -> bool:
     """Reject UI commands, not plausible names, at both extraction boundaries."""

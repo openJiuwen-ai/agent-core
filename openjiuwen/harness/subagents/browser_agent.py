@@ -77,6 +77,23 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_EN = (
     "not additional user requirements. Source observations also provide usable evidence. "
     "A fresh browser capture occurs initially and after a recognized page mutation; otherwise the cached "
     "observation is reused. When the runtime directive requires replanning, change the strategy materially.\n"
+    "browser_phase is optional: use set with objective when a local intent or observed field binding helps "
+    "handover; ordinary actions need no phase configuration. For a complex goal, prepare only the current "
+    "executable fragment once: a short objective, resolved values bound to observed objects, and known completion "
+    "conditions. Refresh it when the intent or binding changes, not before every action. "
+    "Prefer browser_page_action read_text/find for fixed text reads; the same observations support both models. "
+    "Conditions are optional; normal observations "
+    "verify available facts automatically. Use verify only when fresh proof is missing. "
+    "Do not toggle completed sorts. "
+    "Runtime acceptance lists explicit requirements: matching a search query does not prove sort order or the first "
+    "result under that order. Product rating and shop rating need their own source evidence. "
+    "For cart changes, establish the SKU/quantity baseline before clicking, "
+    "use browser_phase verify with inspect_cart:true to discover bounded reader hints without arbitrary code, "
+    "then verify exact deltas and retained items. "
+    "An unknown write requires read-only reconciliation; never retry via click or evaluate. "
+    "Missing proof means partial.\n"
+    "Preserve acknowledged steps and observed Added feedback in partial answers, without claiming verified SKU deltas. "
+    "Distinguish observed page blockers from execution limits and possible future information needs.\n"
     "For a simple lookup, prefer a direct search-results URL when the engine and query are known. Use "
     "browser_probe_interactives for page controls and browser_probe_cards for repeated results or products. "
     "Use the compact PageState target_id with its generation_id directly; never reconstruct guessed CSS from "
@@ -121,6 +138,18 @@ DEFAULT_BROWSER_AGENT_SYSTEM_PROMPT_CN = (
     "运行结果和阻断项是权威信息；推断字段只是提取提示，不是新增的用户要求。带来源的页面原文也可作为证据。"
     "系统仅在初始调用和已识别的"
     "页面变更后重新观察；runtime 要求重新规划时，应实质改变策略。\n"
+    "browser_phase 是可选入口：需要交接局部目标或已观察字段值时，用 set 提供 objective 即可；"
+    "复杂目标只为当前可执行片段一次准备简短 objective、已解析值及观察对象绑定、已知完成条件；"
+    "意图或绑定变化时再更新，不要每个动作前重设。固定文本读取优先 browser_page_action 的 read_text/find，"
+    "结果供两种模型共享。"
+    "普通动作不需要阶段配置，条件可选，正常观察自动核对已有事实，缺新鲜证据时才主动 verify。"
+    "不切回已完成的排序，部分 Batch 只继续未完成步骤。"
+    "runtime acceptance 列出明确验收项；查询词匹配不证明排序及该排序下首条结果，商品评分和店铺评分不能混用。"
+    "修改购物车前先建立 SKU/规格与数量基线，结束时验证增量及原条目保留。结果未知先只读核对，"
+    "可用 browser_phase verify 加 inspect_cart:true 安全读取 reader 线索，线索本身不证明基线完整。"
+    "不能用再次点击或 evaluate 补做；证据不足必须 partial。\n"
+    "partial 答复仍保留已确认步骤和 Added 等已观察反馈，但反馈不等于 SKU 增量通过。"
+    "区分已观察的页面阻断、执行额度限制和未来可能需要的信息。\n"
     "已知搜索引擎和关键词时，简单查询优先直接构造搜索结果 URL。页面控件使用 "
     "browser_probe_interactives，重复结果或商品使用 browser_probe_cards。直接使用 PageState 返回的 "
     "target_id 和 generation_id，禁止把 target_id 改写成猜测的 CSS。卡片包含 primary_link 或 href "
@@ -228,6 +257,11 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
         setattr(browser_model_config, "temperature", resolved_temperature)
 
     model_client_config = getattr(model, "model_client_config", None)
+    if model_client_config is not None:
+        model_client_config = copy.deepcopy(model_client_config)
+        configured = getattr(model_client_config, "stream_first_chunk_timeout", None)
+        first_chunk_limit = min(90.0, configured) if isinstance(configured, (int, float)) and configured > 0 else 90.0
+        model_client_config.stream_first_chunk_timeout = first_chunk_limit
     if issubclass(type(model), Model) and model_client_config is not None:
         browser_model = Model(
             model_client_config=model_client_config,
@@ -235,6 +269,7 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
         )
         setattr(browser_model, _BROWSER_MODEL_TEMPERATURE_MARKER, resolved_temperature)
         setattr(browser_model, _BROWSER_PARENT_MODEL_MARKER, parent_model)
+        setattr(browser_model, "_browser_first_chunk_limit", first_chunk_limit)
         return browser_model
 
     # Lightweight test doubles and compatibility model descriptors may not be
@@ -242,6 +277,9 @@ def _browser_model_with_temperature(model: Model, temperature: float) -> Model:
     # the parent object.
     browser_model = copy.copy(model)
     browser_model.model_config = browser_model_config
+    if model_client_config is not None:
+        browser_model.model_client_config = model_client_config
+        setattr(browser_model, "_browser_first_chunk_limit", first_chunk_limit)
     setattr(browser_model, _BROWSER_MODEL_TEMPERATURE_MARKER, resolved_temperature)
     setattr(browser_model, _BROWSER_PARENT_MODEL_MARKER, parent_model)
     return browser_model
@@ -383,6 +421,12 @@ def create_browser_agent(
         "allowed_tool_names": resolved_capabilities.allowed_tool_names,
     }
     browser_backend = BrowserAgentRuntime(**runtime_kwargs)
+    browser_backend.llm_model = browser_model
+    from openjiuwen.harness.tools.browser_move.decision.policy_model import BrowserPolicyModel
+
+    decision_policy = BrowserPolicyModel(browser_model, resolved_settings.decision, browser_backend)
+    browser_model = decision_policy
+    browser_backend.decision_policy = decision_policy
     injected_tools = build_browser_runtime_tools(browser_backend, language=resolved_language)
     working_context_config = BrowserWorkingContextProcessorConfig(
         language=resolved_language,
@@ -394,7 +438,7 @@ def create_browser_agent(
 
     browser_state_processor = (
         "BrowserStateContextProcessor",
-        BrowserStateContextProcessorConfig(provider=browser_backend),
+        BrowserStateContextProcessorConfig(provider=browser_backend, decision_policy=decision_policy),
     )
     browser_working_context_processor = (
         "BrowserWorkingContextProcessor",
@@ -443,6 +487,7 @@ def create_browser_agent(
     final_mcps = list(mcps or [])
     final_rails = list(rails or []) + injected_rails
 
+    config_kwargs["parallel_tool_calls"] = False
     agent = create_deep_agent(
         model=browser_model,
         card=final_card,
@@ -465,6 +510,8 @@ def create_browser_agent(
         browser_backend.release_task_resources,
         prepare=browser_backend.acquire_task_resources,
     )
+    if decision_policy is not None:
+        agent.register_task_resource_cleanup(decision_policy.release_task_resources)
     return agent
 
 

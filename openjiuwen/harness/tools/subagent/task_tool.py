@@ -264,6 +264,14 @@ class TaskTool(Tool):
             "recommended_recovery",
             "resume_count",
             "deadline",
+            "execution",
+            "missing_conditions",
+            "acceptance",
+            "observed_blockers",
+            "unconfirmed_blockers",
+            "execution_limits",
+            "budgets",
+            "reporting_guidance",
         )
         for key in resume_keys:
             resume_context[key] = browser_result.get(key)

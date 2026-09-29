@@ -6,10 +6,21 @@ import json
 from collections.abc import Mapping as MappingABC
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, AsyncIterator, Callable, Dict, Iterable, List, Mapping, Optional, Tuple, Union
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    AsyncIterator,
+    Callable,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    Optional,
+    Tuple,
+    Union,
+)
 
 import httpx
-
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import ModelError, build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
@@ -54,6 +65,7 @@ from openjiuwen.core.foundation.llm.utils.provider_error import (
     format_provider_exception,
     summarize_provider_error_text,
 )
+from openjiuwen.core.foundation.llm.utils.request_sanitizer import json_arguments, sanitize_chat_request
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 from openjiuwen.core.foundation.llm.utils.responses_utils import build_request_body
 from openjiuwen.core.foundation.tool import ToolInfo
@@ -651,7 +663,7 @@ class OpenAIModelClient(BaseModelClient):
                     "index": tc.get("index"),
                     "function": {
                         "name": func.get("name", ""),
-                        "arguments": func.get("arguments", ""),
+                        "arguments": json_arguments(func.get("arguments", "")),
                     },
                 })
             msg["tool_calls"] = cleaned
@@ -1026,7 +1038,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_openrouter_profile(params)
 
-        return params
+        return sanitize_chat_request(params)
 
     def _apply_openrouter_profile(self, params: dict) -> None:
         if self._endpoint_profile_name() != "openrouter":
