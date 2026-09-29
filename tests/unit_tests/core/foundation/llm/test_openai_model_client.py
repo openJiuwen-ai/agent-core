@@ -14,11 +14,11 @@ from openjiuwen.core.foundation.llm import (
     UsageMetadata,
     UserMessage,
 )
-from openjiuwen.core.foundation.llm.call_scope import symphony_disabled_thinking_fallback_scope
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import (
     ModelParamRule,
     OpenAIModelClient,
 )
+from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.core.foundation.llm.schema.config import LLMApiMode, LLMAuthMode
 from openjiuwen.core.foundation.llm.utils.responses_transport import OpenAIAccountResponsesTransport
 
@@ -480,7 +480,7 @@ class TestDisabledThinkingIntent:
         )
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            with symphony_disabled_thinking_fallback_scope():
+            with disabled_thinking_fallback_scope():
                 retried = await client.invoke("hello", **self._disabled_request_kwargs())
                 cached = await client.invoke("hello", **self._disabled_request_kwargs())
                 other_model = await client.invoke(
@@ -538,7 +538,7 @@ class TestDisabledThinkingIntent:
         sdk_client = _mock_sdk_client(error)
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            with symphony_disabled_thinking_fallback_scope():
+            with disabled_thinking_fallback_scope():
                 with pytest.raises(BaseError):
                     await client.invoke("hello", **self._disabled_request_kwargs())
 
@@ -553,7 +553,7 @@ class TestDisabledThinkingIntent:
         )
 
         with patch.object(client, "_create_async_openai_client", return_value=sdk_client):
-            with symphony_disabled_thinking_fallback_scope():
+            with disabled_thinking_fallback_scope():
                 with pytest.raises(BaseError):
                     await client.invoke("hello", **self._disabled_request_kwargs())
 

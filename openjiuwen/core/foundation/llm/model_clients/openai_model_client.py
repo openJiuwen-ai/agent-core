@@ -15,7 +15,6 @@ from openjiuwen.core.common.exception.errors import ModelError, build_error
 from openjiuwen.core.common.logging import LogEventType, llm_logger, logger
 from openjiuwen.core.common.security.ssl_utils import SslUtils
 from openjiuwen.core.common.security.url_utils import UrlUtils
-from openjiuwen.core.foundation.llm.call_scope import is_symphony_disabled_thinking_fallback_allowed
 from openjiuwen.core.foundation.llm.headers_helper import (
     PROTECTED_HEADERS,
     build_base_headers,
@@ -30,6 +29,7 @@ from openjiuwen.core.foundation.llm.reasoning import (
     reasoning_request_controls,
     resolve_reasoning_plan,
 )
+from openjiuwen.core.foundation.llm.request_context import is_disabled_thinking_fallback_allowed
 from openjiuwen.core.foundation.llm.schema import (
     AudioGenerationResponse,
     ImageGenerationResponse,
@@ -1331,7 +1331,7 @@ class OpenAIModelClient(BaseModelClient):
         *,
         is_stream: bool,
     ) -> Any:
-        if not is_symphony_disabled_thinking_fallback_allowed():
+        if not is_disabled_thinking_fallback_allowed():
             return await async_client.chat.completions.create(**params)
 
         request_params = self._apply_disabled_thinking_cache(params)
@@ -1859,7 +1859,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        if is_symphony_disabled_thinking_fallback_allowed():
+        if is_disabled_thinking_fallback_allowed():
             params = self._apply_disabled_thinking_cache(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)
@@ -2049,7 +2049,7 @@ class OpenAIModelClient(BaseModelClient):
 
         self._apply_model_specific_params(model, params)
         self._move_openai_extra_body_extensions(params)
-        if is_symphony_disabled_thinking_fallback_allowed():
+        if is_disabled_thinking_fallback_allowed():
             params = self._apply_disabled_thinking_cache(params)
         if tracer_record_data:
             await tracer_record_data(llm_params=params)

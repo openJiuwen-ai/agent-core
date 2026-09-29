@@ -13,7 +13,7 @@ from json_repair import repair_json
 
 from openjiuwen.core.common.exception.errors import BaseError
 from openjiuwen.core.foundation.llm import Model
-from openjiuwen.core.foundation.llm.call_scope import symphony_disabled_thinking_fallback_scope
+from openjiuwen.core.foundation.llm.request_context import disabled_thinking_fallback_scope
 from openjiuwen.symphony.shared.identity import sanitize_metadata, stable_metadata_sha256
 
 LOGGER = logging.getLogger(__name__)
@@ -53,7 +53,7 @@ async def invoke_json(
     if timeout is not None:
         invoke_kwargs["timeout"] = timeout
     try:
-        with symphony_disabled_thinking_fallback_scope():
+        with disabled_thinking_fallback_scope():
             response = await model.invoke(
                 messages=[
                     {"role": "system", "content": system_prompt},

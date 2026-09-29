@@ -22,9 +22,8 @@ context, which every per-chunk task then inherits.
 from __future__ import annotations
 
 import uuid
-from contextlib import contextmanager
-from contextvars import ContextVar, Token
-from typing import Iterator, Optional
+from contextvars import ContextVar
+from typing import Optional
 
 # Id of the LLM request whose callbacks are currently firing, or "" outside
 # any request. Read through :func:`get_current_llm_call_id`.
@@ -35,10 +34,6 @@ _unified_completion_expected: ContextVar[bool] = ContextVar(
 )
 _llm_observation_suppressed: ContextVar[bool] = ContextVar(
     "_openjiuwen_llm_observation_suppressed",
-    default=False,
-)
-_symphony_disabled_thinking_fallback_allowed: ContextVar[bool] = ContextVar(
-    "_openjiuwen_symphony_disabled_thinking_fallback_allowed",
     default=False,
 )
 
@@ -71,21 +66,6 @@ def expects_unified_llm_completion() -> bool:
 def is_llm_observation_suppressed() -> bool:
     """Return whether this internal call is excluded from agent trajectories."""
     return _llm_observation_suppressed.get()
-
-
-def is_symphony_disabled_thinking_fallback_allowed() -> bool:
-    """Return whether the current Symphony request may retry without disabled-thinking fields."""
-    return _symphony_disabled_thinking_fallback_allowed.get()
-
-
-@contextmanager
-def symphony_disabled_thinking_fallback_scope() -> Iterator[None]:
-    """Allow disabled-thinking compatibility fallback in this async request context only."""
-    token: Token[bool] = _symphony_disabled_thinking_fallback_allowed.set(True)
-    try:
-        yield
-    finally:
-        _symphony_disabled_thinking_fallback_allowed.reset(token)
 
 
 class LlmObservationSuppression:
