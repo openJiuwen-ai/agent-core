@@ -6,7 +6,7 @@
 | 范围 | 仅限 `openjiuwen/harness/persistent_agent` 模块 |
 | 更新日期 | 2026-09-29 |
 | 交付分类 | 本期 16 项（PA-01～PA-15、PA-21）；后续中断恢复 2 项（PA-16～PA-17）；独立学习扩展 3 项（PA-18～PA-20） |
-| 当前进度 | 共 0/21 项完成：本期 0/16、中断恢复 0/2、学习扩展 0/3；本模块目前只有设计文档 |
+| 当前进度 | 共 3/21 项完成：本期 3/16、中断恢复 0/2、学习扩展 0/3；PA-01～03 已按各自独立验收边界完成，PA-04 起的运行时闭环仍待开发 |
 
 ## 1. 怎么读这份计划
 
@@ -28,12 +28,14 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 | --- | --- |
 | Session（会话） | 一段独立的对话或工作；不同 Session 不共享未完成任务和私有记录 |
 | Request（请求） | Session 中的一次具体任务；本期不重建中断任务，后续恢复必须关联原 Request |
-| 运行实例 | AgentServer 通过本模块构造入口为一次活动调用创建的 Persistent Agent/DeepAgent 执行对象、工具和控制状态；实例只接受指定 Session，用完后清理 |
+| 运行实例 | AgentServer 通过本模块工厂为一次活动调用创建的 DeepAgent、专用工具 / Rails 及控制状态；实例只接受指定 Session，用完后清理，不另建 Agent 类型 |
 | Window（窗口） | 当前送给模型的工作上下文；内容太多时要保存旧窗并切换新窗 |
 | Checkpoint（恢复点） | 已确认、可读取的任务状态快照，用于故障后继续；属于后续阶段 |
 | 宿主端口 | 调用方提供的事件确认、权限、预算、存储等接口；本计划只实现 Persistent Agent 对这些接口的使用 |
 
 状态使用“待开始、进行中、阻塞、待验收、完成”。“完成”须有对应验收证据；仅写了代码但没有完成验证时标“待验收”。交付分类与开发状态分别记录：第 2 节 A、B 组属于本期，C 组属于后续中断恢复，D 组属于独立学习扩展；未排入本期不等于阻塞或完成。
+
+构造约束：只继承配置类，不继承运行类。PersistentAgentSpec 继承 DeepAgentSpec，使用单份扁平配置；不新增 PersistentAgent 运行类、DeepAgent 运行子类或 Agent 门面。PA-02 返回原生 DeepAgent，专属字段及调用依赖见 [F_01](../features/F_01_spec-and-deep-agent-construction.md)。PA-01～03 已在本模块约定范围内完成；这不表示宿主运行时、存储后端或 PA-04 执行链路已经接入。
 
 ## 2. 要开发的特性
 
@@ -41,9 +43,9 @@ Persistent Agent 接收一次已经确定归属的任务，在对应会话中运
 
 | ID | 特性：要做什么 | 怎样证明做成 | 开工硬前置 | 状态 | 负责人 | 证据 |
 | --- | --- | --- | --- | --- | --- | --- |
-| PA-01 | 定义本期调用及宿主端口契约 | Agent、Session、Request、Execution 与来源关联可校验；缺身份、权限、有效执行权或必需接口时得到明确错误；超时和结果未知不被当作“没有数据”。接口覆盖窗口、资料版本、控制、预算与提交确认，恢复扩展不作为本期完成条件 | 无 | 待开始 | 待分配 | — |
-| PA-02 | 提供 Persistent Agent 运行对象的构造入口 | 复用 create_deep_agent，消费宿主固定配置并绑定本次端口；有效配置可创建对象，缺少必需能力时创建失败；构造本身不运行任务，不另建配置装配体系 | PA-01 | 待开始 | 待分配 | — |
-| PA-03 | 固定实例的 Session 归属并隔离内部状态 | 实例接收指定 Session 的调用后，消息、工具上下文、取消信号和清理范围只归该 Session；向活动实例传入另一 Session 会报错，不会读写原 Session 的状态 | PA-02 | 待开始 | 待分配 | — |
+| PA-01 | 定义本期调用及宿主端口契约 | Agent、Session、Request、Execution 与来源关联可校验；缺身份、权限、有效执行权或必需接口时得到明确错误；超时和结果未知不被当作“没有数据”。接口覆盖窗口、资料版本、控制、预算与提交确认，恢复扩展不作为本期完成条件 | 无 | 已完成 | yan_zj | 契约层完成：执行身份含稳定来源和不进入业务 DTO 的宿主 authority handle；基础端口缺失 / 错形状会在 DeepAgent 构造前失败；事件、提交、控制、预算、窗口与版本化资料结果区分 unknown 和有完整查询依据的 empty / not_found。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/execution.py:13,19,23`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/protocol.py:27,33,43`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/context.py:16,37,60,82,109,150,164`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/events.py:181,206,225`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/port_results.py:18,63,102,129,152`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:26,36,41,45,50,63,68,73,79,89`；测试：`tests/unit_tests/harness/persistent_agent/test_protocol.py:81,91`、`tests/unit_tests/harness/persistent_agent/test_construction.py:152,167`。真实端口后端、运行时权限核验、超时转换和受控写入属于 PA-04 / PA-09～12，不包含在本项。 |
+| PA-02 | 提供 Persistent Agent 运行对象的构造入口 | 复用 `DeepAgentSpec` 的 parts / Config 装配及原生 `DeepAgent` 运行类，校验宿主固定配置并绑定本次执行上下文；有效配置可创建对象，缺少必需能力时创建失败；构造本身不运行任务，不另建运行类 | PA-01 | 已完成 | yan_zj | 有效配置返回原生 `DeepAgent`；缺失四个基础端口或注入错形状 ContextStore 时，在 `DeepAgentSpec.build` 前失败；构造不调用模型 / 端口。代码：`openjiuwen/harness/persistent_agent/persistent_agent/schema/spec.py:21,70`、`openjiuwen/harness/persistent_agent/persistent_agent/factory.py:20`、`openjiuwen/harness/persistent_agent/persistent_agent/schema/build_context.py:73,93`、`openjiuwen/harness/persistent_agent/persistent_agent/ports.py:79,89`、`openjiuwen/harness/schema/deep_agent_spec.py:524,600,635`；测试：`tests/unit_tests/harness/persistent_agent/test_construction.py:110,152,167`。正式宿主 providers 与执行入口不属于构造验收，仍待 PA-04。 |
+| PA-03 | 固定实例的 Session 归属并隔离内部状态 | 实例接收指定 Session 的调用后，消息、工具上下文、取消信号和清理范围只归该 Session；向活动实例传入另一 Session 会报错，不会读写原 Session 的状态 | PA-02 | 已完成 | yan_zj | 内部原生调用接缝校验固定 Session / Execution / Agent / owner，拒绝错配和同实例并发；隔离取消、owner 工具清理，并等待 Persistent 专用流生产者及原生 Session 收尾退出。代码：`openjiuwen/harness/persistent_agent/persistent_agent/execution/binding.py:41,57,70,97,116,126,137,161`、`openjiuwen/harness/persistent_agent/persistent_agent/execution/stream_lifecycle.py:9,17,57`、`openjiuwen/harness/deep_agent.py:3025,3411`、`openjiuwen/core/single_agent/agents/react_agent.py:2939,3057`、`openjiuwen/core/common/stream_lifecycle.py:8`；测试：`tests/unit_tests/harness/persistent_agent/test_binding.py:188,250,301,327,376`。个人版默认不注入该生命周期分支。PA-04 的正式入口以及通过该入口的 task-loop / 惰性子代理集成验收仍待完成。 |
 | PA-04 | 复用 DeepAgent 执行并可靠交接过程事件 | 私聊或定时任务可完成或明确失败，纯文件结果可返回引用；进度、工具操作和结果带稳定事件标识及 Request/Execution 关联。关键步骤等待宿主确认；接收方暂不可用时背压并暂停依赖步骤，当前调用可查询实际提交结果；流结束不等于任务已提交完成 | PA-02 | 待开始 | 待分配 | — |
 | PA-05 | 为判断与执行组织本次上下文 | 判断使用职责、当前消息及近期公开资料；执行增加任务状态、历史依据、文件和知识引用。复用上下文注入机制，按授权消费附件资料并保留来源；后续排队消息不成为当前指令；最终模型输入有容量门禁，正式执行超限且 PA-10 已启用时交其换窗，未启用或最小必要输入仍超限时停止调用并说明原因 | PA-01 | 待开始 | 待分配 | — |
 | PA-06 | 判断是否参与一条群消息 | 人类与其他 Agent 消息走同一判断流程，保留发送者、@、回复关系及附件依据；被 @ 可忽略，未被 @ 可回复或介入。忽略只保存私有判断，不产生公开回复、正式任务或改写当前工作目标；私聊和已受理定时任务走直接执行路径 | PA-01 | 待开始 | 待分配 | — |
@@ -126,7 +128,7 @@ PA-18～PA-20 在独立学习作业中运行，不挤占业务会话，不作为
 | M2c：中断后继续原任务 | 后续中断恢复 | PA-09、PA-10、PA-14、PA-16、PA-17、PA-21 与 M1 执行链就绪后汇合；文件恢复再联合 M2b | 保存失败不覆盖旧恢复点；重启后沿原 Request 和已确认事件继续；等待控制、文件写操作及启用子代理的恢复事实被正确核对。完成恢复上下文、原配置与版本兼容验证后才开放重建现场 |
 | M2d：主动学习 | 独立学习扩展 | E 线 PA-18～PA-20 完成后独立汇合；不作为本期节点前置 | 仅从授权记录创建目标；处理批次和反馈可追溯；处理失败不显示为知识更新 |
 
-M2a、M2b 可并行汇合，本期完成要求 M0、M1、M2a、M2b 均通过；M2c、M2d 分别跟踪，不阻塞本期。AgentServer、PersonalContext 和办公空间提供本模块所需接口与验证环境，它们自身的开发不在本计划内。对端尚未就绪时先记录模拟端口验证，真实对端联调列为节点待验收项；模块验证通过不等于产品联合交付完成。所有节点目前均未完成。
+M2a、M2b 可并行汇合，本期完成要求 M0、M1、M2a、M2b 均通过；M2c、M2d 分别跟踪，不阻塞本期。AgentServer、PersonalContext 和办公空间提供本模块所需接口与验证环境，它们自身的开发不在本计划内。对端尚未就绪时先记录模拟端口验证，真实对端联调列为节点待验收项；模块验证通过不等于产品联合交付完成。当前 M0 已完成；M1、M2a、M2b、M2c、M2d 尚未完成。
 
 ### 3.4 验收范围与能力开放
 
@@ -155,11 +157,11 @@ M2a、M2b 可并行汇合，本期完成要求 M0、M1、M2a、M2b 均通过；M
 
 ## 4. 进度怎么更新
 
-实现或验证有变化时，修改第 2 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 16 项、后续中断恢复 2 项、独立学习扩展 3 项及总计 21 项；范围变更不能记为完成。硬前置尚未完成的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。后续阶段和扩展未排期仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；跨阶段用例按第 3.4 节分别登记证据。调用方及 PersonalContext 自身的开发进度在各自目录维护。
+实现或验证有变化时，修改第 2 节对应特性的“状态”“负责人”“证据”三列和下方交付节点的状态，并在变更记录中追加一条。分别统计本期 16 项、后续中断恢复 2 项、独立学习扩展 3 项及总计 21 项；范围变更不能记为完成。硬前置尚未完成的特性保持“待开始”；已经开工但自身验收或必要联调未过的特性标“进行中”或“待验收”，并写明待验证项及其交付范围。后续阶段和扩展未排期仍为“待开始”，不因此标为“阻塞”。完成项附上实现和测试或联调链接；跨阶段用例按第 3.4 节分别登记证据。调用方及 PersonalContext 自身的开发进度在各自目录维护。后续用户交由我修改的特性，负责人统一填写“yan_zj”。
 
 | 交付节点 | 交付分类 | 状态 | 负责人 | 验收证据或待办 |
 | --- | --- | --- | --- | --- |
-| M0：接口基线 | 本期 | 待开始 | 待分配 | PA-01 本期契约与模拟端口 |
+| M0：接口基线 | 本期 | 已完成 | yan_zj | PA-01 的调用身份、结果语义及宿主端口协议已固化并通过协议 / 构造测试。实际宿主适配和存储后端不属于接口基线，列在 PA-04、PA-09～12 |
 | M1：可执行任务 | 本期 | 待开始 | 待分配 | 指定 Session 执行、当前调用内控制与结果交接 |
 | M2a：群消息与长上下文 | 本期 | 待开始 | 待分配 | 群消息、持久化窗口、换窗、检索、知识与 PA-21 失效联调 |
 | M2b：办公空间读写 | 本期 | 待开始 | 待分配 | 文件读写、并发修改、当次写入核对及 PA-21 文件失效联调 |
@@ -184,8 +186,68 @@ M2a、M2b 可并行汇合，本期完成要求 M0、M1、M2a、M2b 均通过；M
 | 2026-09-24 | PA-11 | 将“缺页”明确为历史检索分页读取不完整；进度不变 | 验收描述澄清 |
 | 2026-09-24 | PA-01～PA-20 | 将开发顺序改为硬前置解锁、并行工作线与组合验收；进度不变 | 依赖与并行计划明确化 |
 | 2026-09-24 | PA-01～PA-20 | 将第 3 节改为接口基线、并行工作线和交付节点计划，增加节点进度跟踪；进度不变 | 开发安排与验收汇合点明确化 |
+| 2026-09-28 | PA-01～PA-20 | 补充 JiuwenSwarm 代码归属分析与跨仓迁移汇合顺序；未修改能力契约，进度仍为 0/20 | [迁移分析](jiuwenswarm-migration-analysis.md)；仅完成静态梳理，未迁移代码 |
+| 2026-09-28 | PA-02～PA-04 | 按用户要求明确沿用 DeepAgent 类，以 Spec 和工厂装配 Persistent 能力，不新增 Agent 门面；进度不变 | [迁移分析第 6.1～6.2 节](jiuwenswarm-migration-analysis.md)；已有架构 / S_01 接口表述待同步 |
+| 2026-09-28 | PA-01～PA-04 | 新增 F_01，细化 Spec / 构造上下文 / owner 接缝 / 薄执行适配并同步架构、概览及 S_01；进度仍为 0/20 | 文档设计，未实现或运行新增测试 |
+| 2026-09-28 | PA-01～PA-02 | 按用户确认将嵌套配置组合改为 PersistentAgentSpec 继承 DeepAgentSpec；专属字段平铺，运行类仍为 DeepAgent；进度不变 | F_01、S_01、架构、概览及迁移分析同步；仅文档变更 |
+| 2026-09-28 | PA-01～PA-02 | 开始配置与构造子范围，Spec / context / factory / owner 接缝已实现；完整特性仍为进行中 | 27 项新单测 + 77 项现有定向回归通过；独立审查问题经 RED → GREEN 修复；全 Harness 缺 OpenTelemetry exporter，见 F_01 |
+| 2026-09-28 | PA-01 协议子范围 | 稳定 AgentEvent、类型化负载、Commit / Authority / Control / Budget 结果和端口类型已实现；PA-04 仍未开始 | 63 项协议 + 104 项构造 / 现有回归通过；独立审查空白片段问题经 RED → GREEN 修复；全仓 82 项收集错误，见 F_02 |
+| 2026-09-28 | PA-03 内部绑定子范围 | 普通调用归属、占用、停止和 owner 清理已实现；原生流后台生命周期未安全接入，内部流接缝失败关闭，完整特性仍进行中 | 25 项绑定测试 + 167 项回归通过；独立审查 P1 经 RED → GREEN 禁止不安全流启动；未修改个人版，见 F_03 |
+| 2026-09-28 | PA-03 单轮流补齐 | 经用户确认新增仅 Persistent 启用的原生生命周期接缝，恢复内部 stream_bound；默认个人版路径保留，完整正式入口验收仍待 PA-04 | 34 项 binding 与原回归合计 593 passed；独立审查两项 P1 经 RED → GREEN 修复，全仓仍 82 项收集错误，见 F_03 / 原 Harness F_06 |
 | 2026-09-29 | PA-01～PA-21 | 保留已有编号，新增 PA-21 来源版本与上下文失效管理；扩充窗口、归档、检索、判断/执行上下文及可靠交接验收，明确 DeepAgent 复用和宿主职责 | 仅修订计划；无实现或测试完成证据 |
 | 2026-09-29 | 本期范围、M0～M2d | 本期为 PA-01～PA-15、PA-21 共 16 项；PA-16～PA-17 中断恢复暂缓，PA-18～PA-20 学习单独扩展；同步工作线、验收分类和能力开放条件 | 总计 0/21：本期 0/16、恢复 0/2、学习 0/3；完整架构目标保留 |
 | 2026-09-29 | PA-18～PA-20、M2d | 主动学习特性及交付节点负责人统一登记为 zhaominjun1997 | 负责人登记；状态仍为待开始，进度不变 |
+| 2026-09-29 | PA-01～PA-03 | 负责人登记名更新为 yan_zj；当日远端调整后的状态为进行中 | 本行为历史进度记录，当前闭环状态见下行 |
+| 2026-09-29 | PA-01～PA-03 | 同步 main/jiuwenmate 的新版 21 项计划并按当前代码校准实现状态；PA-02 明确复用 DeepAgentSpec 的 parts / Config 装配而非误写为调用 create_deep_agent | PA-01～03 子范围已实现；正式执行闭环和全项验收仍待后续阶段 |
+| 2026-09-29 | PA-01～PA-03、M0 | 按各项可独立验证的边界关闭接口契约、DeepAgent 构造和实例内 Session 隔离；未将宿主后端或执行集成提前计入完成 | PA 包 132 passed；共享 Harness 定向回归 582 passed；ReAct / 默认个人版定向回归 136 passed；Ruff 与格式检查通过。PA-04、窗口 / 资料后端及正式入口集成仍待开发 |
+
+## 5. 从 JiuwenSwarm 迁移时的补充安排
+
+本节只补充跨仓接入顺序，不改变第 2～3 节的模块内硬前置和并行计划。
+
+1. **M0 先确认责任和差异。** 明确单次调用固定 Session、事件确认、ContextStore 版本 / 围栏、群资料权限，以及切窗策略。此前产品讨论的“整轮结束后切窗”和当前 S_03 的“安全点继续原 Request”有差异，须确认后再调整相关架构 / spec，不能直接搬旧控制器。
+2. **宿主适配与纯算法提取可并行准备。** 公共群归档、附件 / 云文档、Skill 安装选择、飞书身份和渠道投递保留 JiuwenSwarm；core 经端口消费。字面原文匹配、消息转换等可复用，但补充调用权限、稳定引用和完整性检查。
+3. **优先形成 M1 的新入口闭环。** 使用 Harness 公共工厂，验证实例隔离、完整装配、统一事件、控制及文本 / 文件结果提案；不复制旧应用 Runtime 或直接 SDK 发送链路。个人版入口保持原逻辑。
+4. **窗口与恢复按独立确认点接入。** PA-09 先支持普通保存及结果未知查询，PA-10 再处理换窗；现有窗口加载器不是 PA-17 的原 Request 恢复。PA-14 的操作协议从 M0 后准备，与窗口开发并行。
+5. **能力放行与开工条件分开。** PA-04 可用模拟端口开发，但 M1 须合并验证 PA-03、05、07、08；PA-17 可在 PA-16 后开发，但 M2c 放行必须满足第 3.3 节的窗口、执行权、事件及副作用核对。缺少写入保障时不能以兼容模式开放写工具。
+6. **知识和学习保留原归属。** core 消费 PersonalContext 的授权版本，学习作业只管理目标、批次关联与反馈；采集 / 发布实现不迁入 Persistent Agent。M2d 仍可独立交付。
+
+后续实现前按 `docs/AGENTS.md` 创建对应 feature 设计，完成代码和验证后再更新 PA 状态。实现目录按迁移分析第 6 节落地；不创建空执行接口或将文档梳理计为实现完成。
+
+## 6. 第一阶段具体产物与评审门槛
+
+细化设计见 [F_01](../features/F_01_spec-and-deep-agent-construction.md)，按以下顺序展开，不新增 PA 编号：
+
+| 顺序 | 范围 | 产物与检查点 |
+| --- | --- | --- |
+| A | PA-01 | PersistentAgentSpec 配置继承、专属字段、PersistentBuildContext、端口协议与测试替身；扁平序列化、专属字段校验与指纹、调用身份验证 |
+| B | PA-02 / PA-03 接缝 | tool_owner_id 在 Spec provider / parts / Config 注册前贯穿；原 Card 不变，缺省路径回归 |
+| C | PA-02 | create_persistent_agent 返回 DeepAgent；无模型 / 投递副作用；部分构造失败仅清理本调用资源 |
+| D | PA-04 接入准备 | execute_persistent_request 薄适配及并发消费 / 确认测试骨架；内部复用 DeepAgent API，不当作 PA-04 已完成 |
+
+F_01 已经用户确认并启动配置与构造实现。A～C 的构造子范围已落地；D 暂不提供空执行函数，以免误用为可靠执行入口。构造测试覆盖返回类型、错配 Session / 配置、工具注册隔离、浅复制污染和失败清理，并有默认 Harness 定向回归。原配置恢复、未知提交、隐藏写能力及模型前动态授权须在后续执行接入时验证；窗口、群判断和恢复不能随工厂空挂载后标为实现。
+
+### 6.1 第一阶段交付记录
+
+- 实现目录：`persistent_agent/persistent_agent/` 下的 factory.py、ports.py、schema/{spec,build_context,execution,context}.py；外层 `__init__.py` 懒导出构造和协议符号。
+- 通用接缝：BuildContext.tool_owner_id（缺省 None）→ DeepAgentSpec.resolve_parts → parts / Config；不改个人版默认行为。
+- 测试：`tests/unit_tests/harness/persistent_agent/test_construction.py`；实际结果见 F_01 第 10 节。
+- 进度：PA-01 契约层、PA-02 构造和 PA-03 实例内 Session 隔离已分别完成。下一步为 PA-04 正式执行适配、事件生产与授权 / 预算 / 确认闭环，不重新实现模型循环。
+- 未提交代码；仍在用户指定 checkout 的当前分支。
+
+### 6.2 第二步：执行协议值对象
+
+- 实现目录：内部 schema/{protocol,events,port_results}.py；ports.py 使用类型化事件和结果，外层包继续懒导出，不新增运行类。
+- AgentEvent 稳定编号、完整提案摘要、13 类负载；Commit / Authority / Control / Budget 结果明确区分未知、拒绝和确认，并验证归属与引用。
+- 验证及独立审查结果见 [F_02](../features/F_02_execution-protocol.md)；新增协议测试在 test_protocol.py。
+- PA-01 / M0 的接口契约已完成，不等于宿主端口已有生产实现。尚未实现：事件生产与 local_seq 分配、有界交接、持久化去重 / 围栏、超时查询、原生 DeepAgent 执行映射。PA-04 / M1 仍待开始，不把 DTO 当成执行闭环。
+- 本步不改 JiuwenSwarm、个人版逻辑或通用 Harness 代码，不提交代码；架构文件未修改。
+
+### 6.3 第三步：内部执行绑定与隔离
+
+- 内部 execution/binding.py 提供 native invoke / stream 的绑定占用，以及作用于目标绑定的停止与空闲关闭；工厂捕获配置及资源归属快照。Persistent 构造注入独立流任务管理器，通过 DeepAgent 可选分支取消并等待单轮流生产者及 Session 收尾退出。默认个人版不注入、不启用。
+- 测试使用真实 DeepAgent、Session、Runner 工具注册与本地模型，覆盖并行消息 / 工具隔离、错配拒绝、停止、清理、异常释放和流提前关闭。
+- 测试、审查及范围裁定见 [F_03](../features/F_03_invocation-binding-and-isolation.md)。不对外新增 Agent 类或可靠执行函数，不启用执行 capability。
+- PA-03 已在内部绑定 / 原生单轮调用边界完成并有测试。仍未覆盖的是 PA-04 正式执行入口接入后的 task-loop、惰性子代理端到端联调；不把单轮接缝验证推广为任意可信扩展的沙箱保证。共享原生层只增加默认不启用的接缝，个人版默认行为保留，架构文件未改，未提交代码。
 
 

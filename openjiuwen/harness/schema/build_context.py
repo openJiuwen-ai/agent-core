@@ -80,7 +80,12 @@ class BuildContext:
     project_dir: Optional[str] = None
     team_outputs_dir: Optional[str] = None
     extras: dict[str, Any] = field(default_factory=dict)
+<<<<<<< HEAD
     moa: MoAConfig | None = None
+=======
+    tool_owner_id: str | None = None
+    """Optional invocation owner for stateful tools; None preserves Card ownership."""
+>>>>>>> a8c94d5e1 (feat(harness): deliver Persistent Agent contracts, factory, and execution isolation)
 
     def derive(self, **overrides: Any) -> "BuildContext":
         """Return a shallow per-member copy with ``overrides`` applied.
