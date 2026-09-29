@@ -23,7 +23,7 @@ class SubagentRuntimeConfig:
     """Tunable runtime limits for subagent instances."""
 
     max_subagents: int = 10
-    max_concurrent_running: int = 5
+    max_concurrent_running: int = 10
     turn_timeout_s: float = TURN_TIMEOUT_S_DEFAULT
     enable_lru_eviction: bool = True
     enable_activity_stream: bool = True

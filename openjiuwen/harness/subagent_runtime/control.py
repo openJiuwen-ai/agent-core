@@ -154,7 +154,16 @@ class SubagentControl:
             status_change_handler=self._handle_instance_status_changed,
             activity_handler=self._handle_activity if self._config.enable_activity_stream else None,
             transcript_handler=(self._handle_transcript_message if self._config.enable_transcript_stream else None),
+            chunk_handler=self._on_child_chunk,
         )
+
+    async def _on_child_chunk(self, subagent_id: str, chunk: Any) -> None:
+        """Observe one raw child stream chunk before projection.
+
+        Hosts override this to mirror child output onto the parent session
+        stream. The default drops the chunk.
+        """
+        del subagent_id, chunk
 
     async def spawn(
         self,

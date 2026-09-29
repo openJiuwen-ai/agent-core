@@ -61,6 +61,7 @@ class SubagentSessionManager:
         status_change_handler: Callable[[str, SubagentStatus], Awaitable[None]] | None = None,
         activity_handler: Callable[[SubagentActivity], None] | None = None,
         transcript_handler: Callable[[SubagentMessage], Awaitable[None]] | None = None,
+        chunk_handler: Callable[[str, Any], Awaitable[None]] | None = None,
     ) -> None:
         self._parent_agent = parent_agent
         self._config = config
@@ -69,6 +70,9 @@ class SubagentSessionManager:
         self._status_change_handler = status_change_handler
         self._activity_handler = activity_handler
         self._transcript_handler = transcript_handler
+        # Host hook for raw child stream chunks (subagent_id, chunk). Runs before
+        # activity/transcript projection so a host can mirror chunks verbatim.
+        self._chunk_handler = chunk_handler
         self._instances: dict[str, SubagentInstance] = {}
         self._projectors: dict[str, ActivityProjector] = {}
         self._transcript_projectors: dict[str, TranscriptProjector] = {}
@@ -177,6 +181,8 @@ class SubagentSessionManager:
             instance = instance_holder.get("instance")
             if instance is None:
                 return
+            if self._chunk_handler is not None:
+                await self._chunk_handler(subagent_id, chunk)
             task_id = instance.current_task_id or ""
             if self._activity_handler is not None:
                 for activity in projector.project(chunk, task_id=task_id):
@@ -201,7 +207,13 @@ class SubagentSessionManager:
             on_turn_start=on_turn_start,
             on_turn_finished=on_turn_finished,
             on_status_changed=on_status_changed,
-            on_chunk=on_chunk if (self._activity_handler is not None or self._transcript_handler is not None) else None,
+            on_chunk=on_chunk
+            if (
+                self._activity_handler is not None
+                or self._transcript_handler is not None
+                or self._chunk_handler is not None
+            )
+            else None,
             on_turn_stream_start=on_turn_stream_start if self._transcript_handler else None,
             on_turn_stream_end=on_turn_stream_end
             if (self._activity_handler is not None or self._transcript_handler is not None)
