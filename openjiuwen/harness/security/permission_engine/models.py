@@ -128,8 +128,7 @@ class NetGuardSection(TypedDict, total=False):
 
     enabled: bool
     defaults: NotRequired[str]  # ``allow`` | ``deny``
-    urls: NotRequired[dict[str, str]]  # host 通配 / URL 前缀 / URL glob
-    enforce_host_exit: NotRequired[bool]  # 宿主 HTTP 出口（P3）是否同时强制；缺省 true
+    urls: NotRequired[dict[str, str]]
 
 
 class ShellGuardSection(TypedDict, total=False):

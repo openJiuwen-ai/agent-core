@@ -93,17 +93,10 @@ def load_package_net_urls() -> dict[str, str]:
 
 
 def _has_package_net_urls(urls: Any) -> bool:
-    """Already merged: every package key present and none widened below its floor."""
     if not isinstance(urls, dict):
         return False
     packaged = load_package_net_urls()
-    if not packaged or not set(packaged).issubset(urls):
-        return False
-    return all(
-        _parse_action(urls[pattern]) == "deny"
-        for pattern, floor in packaged.items()
-        if floor == "deny"
-    )
+    return bool(packaged) and set(packaged).issubset(urls)
 
 
 def _stricter(left: str, right: str) -> str:
