@@ -61,6 +61,13 @@ _READ_CMDS = frozenset({
     "cat", "ls", "dir", "type", "head", "tail", "more", "less",
     "get-content", "gc",
 })
+_BARE_PATH_OPERAND_COMMANDS = frozenset({
+    "cd", "rm", "cp", "mv", "mkdir", "touch", "cat", "type", "del",
+    "erase", "rd", "rmdir", "copy", "move", "md", "head", "tail",
+    "more", "less", "vim", "nano", "gedit", "notepad",
+})
+_HEAD_TAIL_VALUE_OPTIONS = frozenset({"-n", "--lines", "-c", "--bytes"})
+_LINE_JUMP_COMMANDS = frozenset({"more", "less", "vim", "nano", "gedit", "notepad"})
 _WRITE_CMDS = frozenset({
     "rm", "mkdir", "touch", "chmod", "chown", "del", "erase", "rd", "rmdir", "md",
     "set-content", "add-content", "out-file", "tee-object", "sc",
@@ -279,6 +286,31 @@ def _segments_for_extract(command: str) -> list[str]:
     return [text]
 
 
+def _path_operand_tokens(cmd0: str, tokens: list[str]) -> list[tuple[int, str]]:
+    """Operands of ``cmd0`` that may name a file, as ``(index, raw token)``.
+
+    Skips flags, the value of ``head``/``tail`` count options (``-n 5``) and
+    pager/editor line jumps (``less +10``). Raw tokens are returned so
+    ``_append_path_token`` can tell quoted separators from glued ones.
+    """
+    operands: list[tuple[int, str]] = []
+    skip_option_value = False
+    for idx, tok in enumerate(tokens[1:]):
+        bare = tok.strip().strip('"').strip("'")
+        if skip_option_value:
+            skip_option_value = False
+            continue
+        if cmd0 in {"head", "tail"} and bare.lower() in _HEAD_TAIL_VALUE_OPTIONS:
+            skip_option_value = True
+            continue
+        if not bare or _is_shell_flag_token(tok, cmd0=cmd0):
+            continue
+        if cmd0 in _LINE_JUMP_COMMANDS and bare.startswith("+"):
+            continue
+        operands.append((idx, tok))
+    return operands
+
+
 def _path_aware_one_segment(
     segment: str, cwd: Path, *, include_cd_reads: bool = True,
 ) -> tuple[list[tuple[Path, FileAction]], Path | None]:
@@ -313,10 +345,8 @@ def _path_aware_one_segment(
         except (OSError, RuntimeError):
             return
 
-    for idx, tok in enumerate(tokens[1:]):
-        if not tok.strip() or _is_shell_flag_token(tok, cmd0=cmd0):
-            continue
-        _append_path_token(tok, idx, require_path_shape=True)
+    for idx, tok in _path_operand_tokens(cmd0, tokens):
+        _append_path_token(tok, idx, require_path_shape=cmd0 not in _BARE_PATH_OPERAND_COMMANDS)
 
     if cmd0 in (
         "get-content", "gc", "set-content", "add-content", "out-file",
