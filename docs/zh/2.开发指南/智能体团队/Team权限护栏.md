@@ -9,10 +9,6 @@ Team 权限护栏用于限制团队成员可以调用哪些工具，并在高风
 
 > `openjiuwen.agent_teams.tools.tool_permissions` 是框架内部的角色工具集合，不是 YAML 中名为 `tool_permissions` 的配置段。应用侧权限策略使用 `permissions`，团队开关使用 `TeamAgentSpec.enable_permissions`。
 
-## 文件外发源文件
-
-FileGuard 支持文件外发工具的源文件读权限：`send_file_to_user.abs_file_path_list` 的全部路径，以及 `save_media_to_gallery.url`、`save_file_to_file_manager.url` 的本地路径分支。HTTP/HTTPS URL 不作为本地路径处理。支持 `allow` / `ask` / `deny`，审批按实际文件路径保存读授权，不自动扩大为父目录权限。相对路径基于 Agent 当前工作目录解析；应用侧的成员 SysOperation 读取和文件投递必须使用同一个解析后路径。
-
 ## 权限决策
 
 | 级别 | 行为 |
@@ -127,8 +123,6 @@ Leader 动态创建 Teammate 时，可以通过 `spawn_teammate.permissions` 为
 4. Leader 审批前展示完整工具名、规范化参数和命中规则；敏感参数在 UI 和日志中脱敏。
 5. 把 `decided_by`、调用 ID、规则、决定和 session ID 写入审计日志。
 6. `file_guard` 可独立于工具级权限启用，用于限制文件读、写、执行边界。
-
-`glob` 按搜索根目录 `path` 检查读权限，支持 `allow`、`ask`、`deny`。相对路径基于 Agent 当前工作目录解析；省略 `path`、传入空字符串或 `null` 时检查当前工作目录。`pattern` 仅作为搜索条件，不作为权限路径；FileGuard 启用时与工具执行层均拒绝绝对路径及含 `..` 路径段的 pattern。后端返回的相对路径基于搜索根解析，规范化后的结果必须位于搜索根目录内。不对每项结果重新执行 FileGuard 规则判断：子路径的 read deny 不会在已放行的父目录搜索中隐藏其文件名，读取文件内容仍需单独检查权限。
 
 ## 常见问题
 

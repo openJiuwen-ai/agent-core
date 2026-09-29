@@ -29,10 +29,6 @@ from openjiuwen.core.foundation.tool.base import Tool
 from openjiuwen.core.sys_operation import SysOperation
 from openjiuwen.core.sys_operation.cwd import get_cwd, get_workspace
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
-from openjiuwen.harness.security.permission_engine.fileguard.glob_patterns import (
-    expand_brace_pattern,
-    validated_glob_patterns,
-)
 from openjiuwen.harness.tools.base_tool import ToolOutput
 
 
@@ -1713,7 +1709,21 @@ class GlobTool(Tool):
     @staticmethod
     def _expand_brace_pattern(pattern: str) -> List[str]:
         """Expand shell-style brace patterns like *.{py,js} into ['*.py', '*.js']."""
-        return expand_brace_pattern(pattern)
+        if '{' not in pattern or '}' not in pattern:
+            return [pattern]
+
+        def expand_group(s: str) -> List[str]:
+            match = re.search(r'\{([^{}]*)\}', s)
+            if not match:
+                return [s]
+            prefix = s[:match.start()]
+            suffix = s[match.end():]
+            results = []
+            for opt in match.group(1).split(','):
+                results.extend(expand_group(prefix + opt.strip() + suffix))
+            return results
+
+        return expand_group(pattern)
 
     async def invoke(self, inputs: Dict[str, Any], **kwargs) -> ToolOutput:
         pattern = inputs.get("pattern")
@@ -1727,11 +1737,7 @@ class GlobTool(Tool):
 
         started_at = time.perf_counter()
 
-        try:
-            expanded_patterns = validated_glob_patterns(pattern)
-        except ValueError as exc:
-            return ToolOutput(success=False, error=str(exc))
-        resolved_root = pathlib.Path(path).resolve()
+        expanded_patterns = self._expand_brace_pattern(pattern)
         all_matching_files: List[str] = []
         seen: set = set()
 
@@ -1741,15 +1747,9 @@ class GlobTool(Tool):
                 return ToolOutput(success=False, error=res.message)
             if res.data:
                 for item in res.data.matching_files:
-                    # Only inspect returned paths, without traversing the tree or
-                    # adding per-file permission checks. Reject outside symlinks too.
-                    resolved_item = (resolved_root / item.path).resolve()
-                    if not resolved_item.is_relative_to(resolved_root):
-                        return ToolOutput(success=False, error="search returned a path outside the search root")
-                    normalized_path = str(resolved_item)
-                    if normalized_path not in seen:
-                        seen.add(normalized_path)
-                        all_matching_files.append(normalized_path)
+                    if item.path not in seen:
+                        seen.add(item.path)
+                        all_matching_files.append(item.path)
 
         truncated = len(all_matching_files) > self.DEFAULT_MAX_RESULTS
         limited_files = all_matching_files[:self.DEFAULT_MAX_RESULTS]

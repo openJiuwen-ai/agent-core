@@ -52,7 +52,7 @@ def _bootstrap_builtin_specs() -> None:
         FileToolSpec("grep", "path", "read"),
         FileToolSpec("grep", "file_path", "read"),
         FileToolSpec("glob_file_search", "glob_pattern", "read"),
-        FileToolSpec("glob", "path", "read"),
+        FileToolSpec("glob", "pattern", "read"),
         FileToolSpec("list_dir", "path", "read"),
         FileToolSpec("list_files", "path", "read"),
     ]
