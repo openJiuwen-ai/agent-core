@@ -293,6 +293,9 @@ def _collect_approval_override_hits(
         if action != "allow":
             continue
         match_type = str(rule.get("match_type") or "").strip().lower()
+        if match_type == "exact_operation":
+            # Evaluated only after every guard has run, without command patterns.
+            continue
         if match_type == "path":
             logger.debug(
                 "[PermissionEngine] permission.tiered_policy.override_skipped "

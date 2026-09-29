@@ -49,9 +49,9 @@ def test_miss_with_defaults_deny_denies() -> None:
     assert "net_guard" in (result.matched_rule or "")
 
 
-def test_invalid_defaults_ask_treated_as_allow() -> None:
+def test_defaults_ask_requires_approval() -> None:
     checker = _checker(defaults="ask", urls={})
-    assert checker.evaluate("mcp_fetch_webpage", {"url": "https://example.com/"}) is None
+    assert checker.evaluate("mcp_fetch_webpage", {"url": "https://example.com/"}).needs_approval
 
 
 def test_hostname_deny_hits_link_local() -> None:
@@ -96,9 +96,9 @@ def test_url_glob_and_prefix() -> None:
     assert checker.evaluate("mcp_fetch_webpage", {"url": "https://blocked.example/public"}) is None
 
 
-def test_ask_url_entry_is_skipped() -> None:
+def test_ask_url_entry_requires_approval() -> None:
     checker = _checker(defaults="allow", urls={"localhost": "ask"})
-    assert checker.evaluate("mcp_fetch_webpage", {"url": "http://localhost/"}) is None
+    assert checker.evaluate("mcp_fetch_webpage", {"url": "http://localhost/"}).needs_approval
 
 
 def test_missing_url_arg_uses_defaults() -> None:
@@ -190,3 +190,18 @@ def test_rail_alias_maps_web_fetch_webpage() -> None:
 
     assert TOOL_NAME_ALIASES["web_fetch_webpage"] == "mcp_fetch_webpage"
     assert TOOL_NAME_ALIASES["fetch_webpage"] == "mcp_fetch_webpage"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("rules", [
+    [("*.example.com", "ask"), ("https://api.example.com/health", "allow")],
+    [("api.example.com", "ask"), ("https://*", "allow")],
+])
+def test_ask_precedes_allow_and_deny_precedes_ask(reverse, rules):
+    if reverse:
+        rules = list(reversed(rules))
+    checker = NetGuardChecker({"enabled": True, "urls": dict(rules)})
+    assert checker.check_url("https://api.example.com/health").needs_approval
+    assert checker.check_url("https://api.example.com/private").needs_approval
+    checker = NetGuardChecker({"enabled": True, "urls": {**dict(rules), "api.example.com": "deny"}})
+    assert checker.check_url("https://api.example.com/health").is_denied

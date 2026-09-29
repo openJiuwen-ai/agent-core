@@ -69,6 +69,8 @@ class PermissionConfirmResponse:
     feedback: str = ""
     auto_confirm: bool = False
     persist_allow: bool | None = None
+    authorization_mode: str = "allow"
+    authorization_scope: str = "exact"
 
     def wants_permanent_persist(self) -> bool:
         if not self.approved or not self.auto_confirm:

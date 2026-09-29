@@ -385,6 +385,13 @@ class PermissionEngine:
                 tool_name,
             )
 
+        if permission == PermissionLevel.ASK:
+            from openjiuwen.harness.security.permission_engine.approve.operation_grants import has_operation_grant
+
+            if has_operation_grant(self.config, tool_name, tool_args, self._workspace_root):
+                permission = PermissionLevel.ALLOW
+                matched_rule = "operation_grant"
+
         result = PermissionResult(
             permission=permission,
             matched_rule=matched_rule,

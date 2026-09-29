@@ -40,7 +40,7 @@ async def request(
     current_method = method.upper()
     current_url = url
     for _hop in range(max_redirects + 1):
-        check_outbound_url(current_url)
+        check_outbound_url(current_url, is_redirect=_hop > 0)
         resp = await session.request(current_method, current_url, allow_redirects=False, **kwargs)
         status = resp.status
         location = resp.headers.get("Location")

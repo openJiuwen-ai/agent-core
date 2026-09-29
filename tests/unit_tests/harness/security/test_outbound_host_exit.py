@@ -271,3 +271,45 @@ def test_sync_too_many_redirects():
     session = _Session([_Resp(302, "https://loop.example/") for _ in range(3)])
     with pytest.raises(sync_client.RequestException):
         sync_client.get("https://loop.example/", session=session, max_redirects=2)
+
+
+@pytest.mark.parametrize("defaults,rules", [
+    ("ask", {}),
+    ("allow", {"review.example": "ask"}),
+    ("allow", {"https://start.example/private": "ask"}),
+])
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_sync_redirect_ask_stops_before_target_connection(defaults, rules, status):
+    target = "https://start.example/private" if "https://start.example/private" in rules else "https://review.example/"
+    host_exit.publish_host_exit_policy({"net_guard": _section(defaults=defaults, urls=rules)})
+    first = _Resp(status, target)
+    session = _Session([first])
+    with pytest.raises(OutboundBlockedError, match="requires approval") as exc:
+        sync_client.get("https://start.example/approved", session=session)
+    assert exc.value.url == target
+    assert first.closed
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("defaults,rules", [("ask", {}), ("allow", {"review.example": "ask"})])
+async def test_async_redirect_ask_stops_before_target_connection(defaults, rules):
+    from openjiuwen.harness.security.outbound import async_client
+
+    host_exit.publish_host_exit_policy({"net_guard": _section(defaults=defaults, urls=rules)})
+    first = _AsyncResp(302, "https://review.example/")
+    session = _AsyncSession([first])
+    with pytest.raises(OutboundBlockedError, match="requires approval"):
+        await async_client.request(session, "GET", "https://start.example/approved")
+    assert first.released
+    assert len(session.calls) == 1
+
+
+def test_explicit_allow_redirect_exception_can_proceed():
+    host_exit.publish_host_exit_policy({"net_guard": _section(defaults="ask", urls={
+        "*.example.com": "ask", "https://api.example.com/health": "allow",
+    })})
+    final = _Resp(200)
+    session = _Session([_Resp(302, "https://api.example.com/health"), final])
+    assert sync_client.get("https://start.example/approved", session=session) is final
+    assert len(session.calls) == 2
