@@ -13,6 +13,7 @@
 | **OpenAIModelClient** | OpenAI兼容的大模型客户端实现。 |
 | **OpenAIAccountModelClient** | OpenAI账户OAuth大模型客户端实现，通过OAuth凭据免密登录，无需配置`api_key`。 |
 | **AnthropicModelClient** | Anthropic 协议客户端。`DashScope` / `DeepSeek` 等旧 `client_provider` 为 OpenAI 兼容别名，见[LLM 协议收敛](../../基础功能/LLM协议收敛.md)。 |
+| **system_one.JevSystemOneClient** | 通过 System One API 调用 Jev 类型化评估的独立轻量客户端，不注册为聊天 `ModelClient`。 |
 | **BaseOutputParser** | 输出解析器抽象基类。 |
 | **JsonOutputParser** | JSON格式输出解析器。 |
 | **MarkdownOutputParser** | Markdown格式输出解析器。 |
