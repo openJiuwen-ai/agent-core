@@ -91,6 +91,25 @@ shared/fingerprint
 `SymphonyRuntime.orchestration` 暴露图生命周期和规划能力。`FingerprintService`、`EvaluationSuite` 和
 experience 领域能力已可独立使用，但尚未组合进 `SymphonyRuntime`。
 
+### 检索树中的 Skill 等价群
+
+显式开启等价群后，检索树构建会先在同一分类分支内召回候选 Skill，再逐对判断核心能力是否相同或相近，并用
+确定性合并生成等价群节点。平台、供应商、API/CLI、输入形式等实现差异可以归为一组；宽能力包含窄
+能力时，只要共享能力是双方的主要能力，也可以归为一组。仅有关键词重合、附带功能重合或属于互补
+步骤的 Skill 仍保持分开；任意一对明确不相似的 Skill 不会被传递关系合并到同一群。
+
+该能力由 `SkillIndexBuildConfig.equivalence_enabled`（离线构建对应
+`BuildConfig.tree_equiv_grouping_enabled`）控制，默认关闭，需要时显式开启。词面相似度二次拆分默认关闭；需要更保守的
+确定性拆分时，可显式设置 `equivalence_min_lexical_similarity`（离线构建对应
+`tree_equiv_min_lexical_similarity`）为大于 `0` 的值。
+
+`AgenticSkillRetrievalToolkit.build_index()` 自动执行增量构建时，成功结果的
+`data.capability_category_paths` 会返回本批新增或更新 Skill 的最终分类路径，例如
+`[{"capability_id": "weather", "category_path": ["Information", "Weather"]}]`。`category_path` 按层级
+保存分类节点 ID，长度与实际能力树一致，不包含 Skill 叶子节点；删除、复用已有索引、首次构建和显式
+强制全量构建时返回空列表。异步构建启动结果仍只返回 `build_id`，完成后可通过现有
+`check_build_status(build_id)` 的同名字段取得结果。
+
 ## 最终目录蓝图
 
 Symphony 作为 agent-core 的原生模块，源码直接位于 `openjiuwen/symphony`，不增加重复的包目录层级：
