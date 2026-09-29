@@ -39,7 +39,8 @@ resume 重放同脚本得到同样的确定性报错。
 `AgentSession` 新增 `_opened_model`（`__slots__` 成员），在 `_ensure_open`（avatar 开启）时
 记录当轮 hint。后续轮：hint 与锁定值不同 → 抛 `EngineError` 并指引 `fork()`；相同 hint 重复
 传是 no-op。`fork()` 派生的子会话独立走自己的首轮锁定（fork 时传新 hint 合法）。锁定时机是
-**首个 cache-miss 轮**——纯 cache-hit 的会话从未开 avatar，无锁定可言。
+**首个 cache-miss 轮**——纯 cache-hit 的会话从未开 avatar，无锁定可言。首轮无 hint 时锁定的
+是 base spec 模型，报错指名它而非裸 `None`（2026-09-29 措辞修订）。
 
 ### D3 backend 协议：`model_pool_names() -> list[str] | None`
 
@@ -95,9 +96,11 @@ error_detail 管线。**该修复与 model fail-fast 无关**（有自己的文�
 
 - 池外 hint 抛 `EngineError`（backend 零调用）且早于签名/事件/journal；消息列出可用模型
 - 池内 hint 正常透传；`pool=None`（MockBackend / 旧式 backend）跳过校验、行为逐字回退
-- 会话第二轮不同 hint 报错并含 fork() 指引；同 hint 重复传正常；`fork()` 子会话可换模型
+- 会话第二轮不同 hint 报错并含 fork() 指引；同 hint 重复传正常；`fork()` 子会话可换模型；
+  首轮无 hint、次轮带 hint 的报错指名 base spec 模型
 - resolver 纵深告警按名去重（`resolve_member_model` monkeypatch 为恒 None）
-- 超时失败消息携带预算秒数、重试控制流不变（3 次尝试后 agent 级失败、脚本继续）
+- 超时失败消息携带预算秒数、3 次重试后 agent 级失败、脚本继续（原两个高度重复用例
+  合并为一个，仍十用例）
 
 变更区域针对性测试 292 passed（含 `agent_teams/workflow/` 邻近既有用例）。
 
@@ -105,8 +108,7 @@ error_detail 管线。**该修复与 model fail-fast 无关**（有自己的文�
 
 - **提交纪律偏差（流程注记）**：本特性实际以 `feat(swarmflow)` + `test(swarmflow)` 两个
   提交落地，scope 应为 `swarm`，工具描述文档捆进了 feat 提交，且未按「三连提交」约定拆出
-  独立 `docs(swarm)` 提交——本 F 文档与 S_18 / F_31 修订为事后补救。
-- **首轮无 hint、次轮带 hint** 的会话：报错消息显示锁定值为 `None`，行为正确（锁定的是
-  base spec 模型）但措辞可再优化。
+  独立 `docs(swarm)` 提交——本 F 文档与 S_18 / F_31 修订为事后补救。2026-09-29 的措辞修订、
+  用例合并与本文档更新已按 `fix(swarm)` / `test(swarm)` / `docs(swarm)` 三连提交补齐。
 - **`getattr` 鸭子探测**（D3）待 resolver 注入面正式化后收窄为 Protocol。
 - D6 的 TimeoutError 修复未独立提交，git 历史上无法单独 revert。

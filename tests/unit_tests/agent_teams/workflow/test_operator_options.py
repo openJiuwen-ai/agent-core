@@ -153,6 +153,18 @@ async def run(args):
     return [a, b]
 """
 
+_SESSION_LATE_HINT_SCRIPT = """
+from swarmflow import agent_session
+
+META = {"name": "late-hint", "description": "model hint only on turn two", "phases": []}
+
+async def run(args):
+    s = agent_session(label="chat")
+    a = await s.send("first")
+    b = await s.send("second", options={"model": "m1"})
+    return [a, b]
+"""
+
 _TIMEOUT_SCRIPT = """
 from swarmflow import agent
 
@@ -235,6 +247,15 @@ def test_fork_child_session_can_switch_model(tmp_path):
     assert backend.opened == ["m1", "m2"]
 
 
+def test_session_late_hint_names_the_locked_model(tmp_path):
+    """A first turn without a hint locks the base spec model; a later hint
+    raises naming what is actually locked, not a bare None."""
+    script = _write(tmp_path, "late.py", _SESSION_LATE_HINT_SCRIPT)
+
+    with pytest.raises(EngineError, match="base spec model"):
+        asyncio.run(run_workflow(script, backend=_PoolBackend(["m1"])))
+
+
 def test_resolver_defense_warning_dedup(monkeypatch):
     """A hint that passes validation but misses at resolution warns once per name."""
     from openjiuwen.agent_teams.agent import agent_configurator
@@ -276,25 +297,16 @@ def _run_timeout_case(tmp_path, backend):
     return result, failed
 
 
-def test_timeout_failure_message_carries_budget(tmp_path):
-    """AGENT_FAILED's message names the timeout budget via the existing pipeline."""
-    backend = _PoolBackend(None)
-    backend.sleep_s = 0.5
-
-    result, failed = _run_timeout_case(tmp_path, backend)
-
-    assert result == ["continued", None]  # agent-level failure, script continues
-    assert len(failed) == 1
-    assert "timed out after 0.05s" in failed[0].message
-
-
-def test_timeout_retry_control_flow_unchanged(tmp_path):
-    """Still retried to the full attempt count; the failure is agent-level."""
+def test_timeout_failure_retries_and_carries_budget(tmp_path):
+    """A timed-out agent retries to the full attempt count, then fails at the
+    agent level with the timeout budget in the message; the script continues."""
     backend = _PoolBackend(None)
     backend.sleep_s = 0.5
 
     result, failed = _run_timeout_case(tmp_path, backend)
 
     assert backend.attempts == 3  # rt.retries=2 default → first try + 2 retries
+    assert result == ["continued", None]  # agent-level failure, script continues
+    assert len(failed) == 1
     assert "failed after 3 attempts" in failed[0].message
     assert "timed out after 0.05s" in failed[0].message

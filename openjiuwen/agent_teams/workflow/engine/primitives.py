@@ -1015,8 +1015,17 @@ class AgentSession:
     """
 
     __slots__ = (
-        "_label", "_phase", "_instructions", "_options", "_human", "_node_type",
-        "_history", "_sid", "_member_name", "_in_flight", "_fork_data",
+        "_label",
+        "_phase",
+        "_instructions",
+        "_options",
+        "_human",
+        "_node_type",
+        "_history",
+        "_sid",
+        "_member_name",
+        "_in_flight",
+        "_fork_data",
         "_opened_model",
     )
 
@@ -1093,14 +1102,12 @@ class AgentSession:
         # signature — a cache MISS and a paid rerun on the old model. Fail
         # fast instead and point at fork(), the sanctioned way to switch.
         model_hint = opts.get("model")
-        if (
-            self._sid is not None
-            and model_hint is not None
-            and model_hint != self._opened_model
-        ):
+        if self._sid is not None and model_hint is not None and model_hint != self._opened_model:
+            locked = (
+                repr(self._opened_model) if self._opened_model is not None else "base spec model, no first-turn hint"
+            )
             raise EngineError(
-                f"session model is fixed at the first turn ({self._opened_model!r}); "
-                f"fork() a new session to use {model_hint!r}"
+                f"session model is fixed at the first turn ({locked}); fork() a new session to use {model_hint!r}"
             )
         json_schema, model_cls = resolve_schema(opts.get("schema"))
 
