@@ -105,3 +105,14 @@ make test TESTFLAGS="tests/unit_tests/agent_teams/workflow/"
   （index 0），不轮转。需要分散时再引入有状态 allocator + session 持久化。
 - **真实 LLM 端到端未自动验证**：与 F_27 同，单测覆盖到「链路接通」（resolver 回调
   spy），真实 leader + 多模型 worker 跑通需手动 / 系统测试。
+
+## 修订 2026-09-29: 未命中回退改为 fail-fast
+
+决策 4「回退而非报错」被 `F_112_swarmflow-model-hint-fail-fast.md` 推翻：静默回退让
+`AGENT_STARTED` 事件与 journal 记录一个永远不会实际执行的模型名（UI 失真），且会话中途
+换 hint 会折入 `call_signature` 造成 cache MISS + 旧模型付费重跑。现 `agent(model=...)`
+hint 不在池内 → 引擎在签名/事件/journal 之前抛 `EngineError` 并列出可用模型；无池概念的
+backend（`model_pool_names()` 返 `None`，含未注入 resolver 的场景）保持本文的回退语义。
+resolver 亦由闭包升级为 callable 类 `_SwarmflowModelResolver`（调用契约不变）。现行契约
+见 `S_18` WORKER 不变量 §5 与有状态会话段 §13。
+
