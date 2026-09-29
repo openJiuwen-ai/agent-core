@@ -4,9 +4,10 @@
 """Async HTTP transport for the web tools package (aiohttp based).
 
 A single ``request`` coroutine replaces the original synchronous
-``_http_request``. It handles proxy resolution, TLS verification, a capped
-streaming read (so an oversized body cannot exhaust memory), and a
-trust_env=False retry that mirrors the original ProxyError fallback.
+``_http_request``. It handles proxy resolution, TLS verification and a capped
+streaming read (so an oversized body cannot exhaust memory). Every hop goes
+through the host exit (:mod:`openjiuwen.harness.security.outbound`), and there
+is no direct-connect retry on proxy errors, which would bypass egress proxies.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import aiohttp
 
 from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import build_error
+from openjiuwen.harness.security.outbound import async_client as outbound_http
 from openjiuwen.harness.tools.web._common import _free_search_ssl_verify, _resolve_proxy
 
 # Chunk size for the streaming reader.
@@ -106,8 +108,9 @@ async def _do_request(
     timeout: aiohttp.ClientTimeout,
     max_bytes: int | None,
 ) -> tuple[int, dict[str, str], bytes, str, bool]:
-    """Issue a single request and return (status, headers, body, final_url, truncated)."""
-    async with session.request(
+    """Issue a request via the host exit and return (status, headers, body, final_url, truncated)."""
+    resp = await outbound_http.request(
+        session,
         method,
         url,
         headers=headers,
@@ -115,7 +118,8 @@ async def _do_request(
         proxy=proxy,
         proxy_auth=proxy_auth,
         timeout=timeout,
-    ) as resp:
+    )
+    async with resp:
         body, truncated = await _read_capped(resp, max_bytes)
         return resp.status, dict(resp.headers), body, str(resp.url), truncated
 
@@ -130,10 +134,10 @@ async def request(
     timeout_seconds: float,
     max_bytes: int | None = None,
 ) -> tuple[int, dict[str, str], bytes, str, bool]:
-    """Perform an HTTP request, retrying without env proxies on a proxy error.
+    """Perform an HTTP request through the host exit.
 
     Args:
-        session: The aiohttp session to use for the primary attempt.
+        session: The aiohttp session to use.
         method: HTTP method (case-insensitive).
         url: Target URL.
         headers: Optional request headers.
@@ -146,7 +150,6 @@ async def request(
     """
     method_up = method.upper()
     proxy = _resolve_proxy(url)
-    explicit_proxy = proxy is not None
     proxy_auth: aiohttp.BasicAuth | None = None
     if proxy is not None:
         # aiohttp ignores inline credentials in the proxy URL; carry them in an
@@ -157,33 +160,17 @@ async def request(
         sock_connect=min(timeout_seconds, _CONNECT_TIMEOUT_CAP),
         sock_read=timeout_seconds,
     )
-    try:
-        return await _do_request(
-            session,
-            method_up,
-            url,
-            headers=headers,
-            json_body=json_body,
-            proxy=proxy,
-            proxy_auth=proxy_auth,
-            timeout=timeout,
-            max_bytes=max_bytes,
-        )
-    except (aiohttp.ClientProxyConnectionError, aiohttp.ClientHttpProxyError):
-        if explicit_proxy:
-            raise
-        async with aiohttp.ClientSession(trust_env=False, connector=_make_connector()) as fallback:
-            return await _do_request(
-                fallback,
-                method_up,
-                url,
-                headers=headers,
-                json_body=json_body,
-                proxy=None,
-                proxy_auth=None,
-                timeout=timeout,
-                max_bytes=max_bytes,
-            )
+    return await _do_request(
+        session,
+        method_up,
+        url,
+        headers=headers,
+        json_body=json_body,
+        proxy=proxy,
+        proxy_auth=proxy_auth,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
 
 
 def format_http_error_reason(status: int, body: bytes) -> str:
