@@ -32,12 +32,17 @@ _PS_LAUNCHER_RE = re.compile(
 # POSIX shell launchers: bash|sh|zsh|dash|ash, optionally given as a quoted or
 # absolute launcher path, optionally preceded by other short/long switches, then
 # a switch group containing ``c`` (-c / -lc / -cl / -ic).
-# ``(?<![^\s;&|()])`` keeps the launcher in command position (start of text or
-# right after a shell separator) without consuming that separator; a variable
-# width look-behind would not compile.
+# The leading anchor is start-of-string or a separator char (``; & | ( )``);
+# any whitespace between the separator and the launcher is consumed by ``\s*``.
+# A whitespace-only prefix is intentionally rejected: an argument such as
+# ``echo bash -c 'rm'`` must not be treated as a launcher invocation, since the
+# resulting unwrap would let harmless echo strings hit deny/ask rules. A
+# variable-width look-behind would not compile in ``re``, hence the explicit
+# alternation.
 _SH_LAUNCHER_RE = re.compile(
     r"(?ix)"
-    r"(?<![^\s;&|()])"
+    r"(?:^|(?<=[;&|()]))"
+    r"\s*"
     r"(?:"
     r'"(?:[^"]*[\\/])?(?:bash|sh|zsh|dash|ash)(?:\.exe)?"'
     r"|'(?:[^']*[\\/])?(?:bash|sh|zsh|dash|ash)(?:\.exe)?'"
@@ -110,7 +115,16 @@ def is_fd_alias_token(token: str) -> bool:
 
 def _launcher_inner(match: re.Match[str]) -> str:
     inner = match.group("dq") or match.group("sq") or match.group("bare") or ""
-    return inner.strip()
+    stripped = inner.strip()
+    # ``_SH_LAUNCHER_RE`` consumes the whitespace between a separator and the
+    # launcher with an explicit ``\s*``. Without restoring one space here the
+    # subn would glue the visible prefix to the unwrapped command
+    # (``cd d && bash -c "rm x"`` -> ``cd d &&rm x``). The other two regexes
+    # anchor at a word boundary and never consume leading whitespace, so this
+    # branch is a no-op for them.
+    if match.group(0)[:1] in (" ", "\t"):
+        return " " + stripped
+    return stripped
 
 
 __all__ = [

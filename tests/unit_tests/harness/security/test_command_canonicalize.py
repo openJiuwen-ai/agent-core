@@ -313,6 +313,22 @@ def test_posix_wrap_keeps_prefix_and_unwraps_one_layer() -> None:
     ) == "sh -c 'rm -rf /'"
 
 
+def test_canonicalize_preserves_space_between_separator_and_launcher() -> None:
+    """``_SH_LAUNCHER_RE`` consumes the whitespace after a separator with an
+    explicit ``\\s*``; the subn must restore one space so the prefix is not
+    glued to the unwrapped command (``cd d &&rm x`` would mis-align the
+    ``rm *`` anchored match against an otherwise legitimate ``cd d &&``)."""
+    assert canonicalize_shell_command_for_permission(
+        'cd d && bash -c "rm -rf x"',
+    ) == "cd d && rm -rf x"
+    assert canonicalize_shell_command_for_permission(
+        'true && sh -c "rm x"',
+    ) == "true && rm x"
+    assert canonicalize_shell_command_for_permission(
+        'echo hi; sh -c "rm x"',
+    ) == "echo hi; rm x"
+
+
 def test_canonicalize_leaves_non_launchers_untouched() -> None:
     for raw in (
         "rm -rf x",
@@ -321,7 +337,13 @@ def test_canonicalize_leaves_non_launchers_untouched() -> None:
         "man bash",
         "sh -c",
         "echo \"bash -c 'rm -rf /'\"",
-        'python -c "import os"',
+        # An unquoted argument that happens to look like a launcher must not
+        # be unwrapped (review feedback: whitespace-only prefix is rejected so
+        # ``echo bash -c 'rm'`` does not become ``echo rm``).
+        "echo bash -c 'rm -rf /'",
+        "echo /bin/bash -c 'rm'",
+        "xargs bash -c 'rm -rf /'",
+        "python -c \"import os\"",
         "cd /tmp && ls",
     ):
         assert canonicalize_shell_command_for_permission(raw) == raw, raw
