@@ -74,6 +74,8 @@ def test_probe_targets_and_compact_page_state_share_one_contract() -> None:
     assert payload["elements"][0]["generation_id"] == "g0"
     assert state.export() == {
         "page_id": "page-test",
+        "interaction_revision": 0,
+        "cards_observed": False,
         "generation_id": "g0",
         "url": "https://example.test/search",
         "title": "Search",
@@ -83,6 +85,7 @@ def test_probe_targets_and_compact_page_state_share_one_contract() -> None:
                 "generation_id": "g0",
                 "role": "button",
                 "text": "Search",
+                "label": "Search",
                 "match_count": 1,
                 "visible": True,
                 "enabled": True,

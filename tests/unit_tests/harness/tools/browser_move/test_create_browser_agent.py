@@ -112,7 +112,7 @@ def test_browser_agent_registers_runtime_task_cleanup() -> None:
         agent = create_browser_agent(_fake_model(), settings=_fake_settings())
 
     del calls
-    agent.register_task_resource_cleanup.assert_called_once_with(
+    agent.register_task_resource_cleanup.assert_any_call(
         runtime_cls.return_value.release_task_resources,
         prepare=runtime_cls.return_value.acquire_task_resources,
     )

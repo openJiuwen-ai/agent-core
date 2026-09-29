@@ -77,10 +77,13 @@ def test_redirect_is_proved_by_this_successful_navigation_not_another_tabs_cache
     state = _state("Open the first search result and return title", ["title"])
     state["last_page"] = {"url": "https://search.test/search?q=university", "title": "Results"}
     args = {"url": "https://search.test/link?token=123"}
+    state["structured_evidence"] = [{"source": state["last_page"]["url"], "cards": [{
+        "title": "University", "primary_link": args["url"], "region": "main_result", "is_ad": False,
+    }]}]
     result = {"result": "### Page\n- Page URL: https://university.test/\n- Page Title: University"}
     BrowserRuntimeRail._record_structured_evidence(state, result, tool_name="browser_navigate", tool_args=args)
     assert state["evidence_slots"][0]["value"] == "University"
-    metadata = state["structured_evidence"][0]
+    metadata = next(item for item in state["structured_evidence"] if item.get("kind") == "page_metadata")
     assert metadata["destination_verified"]
     assert metadata["navigation"]["requested_url"] == args["url"]
     unrelated = {**result, "page_state": {"url": "https://other.test/", "title": "Unrelated"}}
@@ -360,3 +363,17 @@ def test_card_projection_keeps_query_window_and_recoverable_raw_result(storage):
         assert "raw_observation" not in projected
     else:
         assert projected["raw_observation"] == raw
+
+
+def test_occluded_control_names_its_cover_for_information_only(dom_page):
+    # The page scan dropped the covering element, so Jev could not tell a modal was in the way.
+    dom_page.set_content('''<button id="covered" style="position:absolute;top:20px;left:20px">Book covered</button>
+      <div role="dialog" style="position:absolute;top:0;left:0;width:400px;height:150px;background:white;z-index:5">
+        <p>We use cookies</p><button style="position:absolute;top:100px;left:300px">Accept</button></div>
+      <button id="open" style="position:absolute;top:300px">Book open</button>''')
+    result = _probe(dom_page, build_interactive_probe_js(query="Book"))
+    controls = {item["text"]: item for item in result["elements"]}
+    assert controls["Book covered"]["blocked_by"].startswith("We use cookies")
+    assert controls["Book covered"]["decision_state"]["blocked_by"] == controls["Book covered"]["blocked_by"]
+    assert not controls["Book covered"]["actionable"]
+    assert controls["Book open"]["blocked_by"] == "" and "blocked_by" not in controls["Book open"]["decision_state"]

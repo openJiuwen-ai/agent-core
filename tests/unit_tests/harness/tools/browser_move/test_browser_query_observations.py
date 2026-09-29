@@ -195,7 +195,9 @@ def test_destination_requires_selection_and_correct_page_replaces_homepage_ancho
         "status": "present", "entity_source": "https://search.test/",
     }]
     state["last_page"] = {"url": "https://search.test/search?q=university", "title": "Search results"}
-    state["recent_actions"] = [{"outcome": "success", "target_summary": '{"tool":"browser_click","ref":"e4"}'}]
+    state["structured_evidence"] = [{"source": state["last_page"]["url"], "cards": [{
+        "title": "University", "primary_link": "https://university.test/", "region": "main_result", "is_ad": False,
+    }]}]
     destination = {"result": "### Result\n- 0: [Search](https://search.test/)\n"
                              "- 1: (current) [University](https://university.test/)",
                    "page_state": {"url": "https://university.test/", "title": "University", "generation_id": "g3"}}
@@ -434,6 +436,9 @@ def test_card_without_ad_markers_does_not_certify_non_advertising():
 
 def test_landing_page_uses_action_source_and_related_cards_do_not_replace_its_title():
     state = _state("打开搜索结果第一条，返回标题和网址", ["title", "url"])
+    state["structured_evidence"] = [{"source": "https://search.test/search?q=university", "cards": [{
+        "title": "University", "primary_link": "https://university.test/", "region": "main_result", "is_ad": False,
+    }]}]
     # The automatic observation can already have advanced last_page before the rail.
     state["last_page"] = {"url": "https://university.test/", "title": "University"}
     BrowserRuntimeRail._record_structured_evidence(

@@ -380,7 +380,7 @@ def test_batch_live_target_validation(mode):
         console.log(JSON.stringify(value));
       }});
     """
-    output = subprocess.run([node, "-e", source], text=True, capture_output=True, check=True, timeout=10)
+    output = subprocess.run([node, "-"], input=source, text=True, capture_output=True, check=True, timeout=10)
     result = json.loads(output.stdout)
     if mode in {"wait_then_read", "reload_read"}:
         assert result["ok"] is True and result["extracted"] == {"title": "Loaded title"}
@@ -430,7 +430,7 @@ def test_dynamic_sort_probe_emits_only_unique_actionable_targets(mode):
       const page = {evaluate:async (fn, params) => fn(params)};
       PROBE(page).then(value => console.log(JSON.stringify(value)));
     """.replace("MODE", json.dumps(mode)).replace("PROBE", f"({script})")
-    output = subprocess.run([node, "-e", source], text=True, capture_output=True, check=True, timeout=10)
+    output = subprocess.run([node, "-"], input=source, text=True, capture_output=True, check=True, timeout=10)
     result = json.loads(output.stdout)
     element = result["elements"][0]
     assert element["selected"] is True and element["selected_source"] == "class"
