@@ -74,6 +74,33 @@ class TestRenderStream:
 
         assert payloads == [(1, "中文".encode("utf-8"))]
 
+    def test_write_terminal_forces_utf8_on_windows(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows should not use a legacy stdout code page for fd 1."""
+
+        module = sys.modules[render_stream.__module__]
+        payloads: list[tuple[int, bytes]] = []
+
+        class FakeStdout:
+            encoding = "cp936"
+            errors = "strict"
+
+        monkeypatch.setattr(
+            module,
+            "sys",
+            type("FakeSys", (), {"stdout": FakeStdout(), "platform": "win32"})(),
+        )
+        monkeypatch.setattr(
+            module.os,
+            "write",
+            lambda fd, data: payloads.append((fd, data)),
+        )
+
+        module._write_terminal("你好")
+
+        assert payloads == [(1, "你好".encode("utf-8"))]
+
     @pytest.mark.asyncio
     async def test_llm_output_accumulated(self) -> None:
         """llm_output chunks are accumulated into the result."""
