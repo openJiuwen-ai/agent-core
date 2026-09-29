@@ -4,6 +4,7 @@
 """Unit tests for TeamDatabase module"""
 
 import asyncio
+import gc
 import json
 import warnings
 
@@ -41,8 +42,14 @@ from openjiuwen.agent_teams.tools.models import (
     _get_message_read_status_model,
     _get_task_dependency_model,
     _get_task_model,
+    _message_models,
+    _message_read_status_models,
+    _review_vote_models,
     _sanitize_session_id_for_table,
+    _task_dependency_models,
+    _task_models,
 )
+from sqlmodel import SQLModel
 from openjiuwen.core.single_agent import AgentCard
 
 
@@ -2607,7 +2614,8 @@ class TestSessionTables:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_drop_cur_session_tables_allows_same_session_recreate(self, tmp_path):
-        """Dropping current session tables should reuse dynamic models on recreate."""
+        """Dropping current session tables releases the cached models; the same
+        session can be recreated with freshly-built classes."""
         db_path = tmp_path / "drop_cur_recreate.db"
         config = DatabaseConfig(
             db_type=DatabaseType.SQLITE,
@@ -2636,9 +2644,19 @@ class TestSessionTables:
 
             await database.drop_cur_session_tables()
 
+            # Drop releases the cached classes (rebuilt on next access).
+            assert session_id not in _task_models
+            assert session_id not in _message_models
+
             async with database.engine.begin() as conn:
                 table_names = set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
             assert dynamic_table_names.isdisjoint(table_names)
+
+            # Release our own references so the old classes can be collected
+            # before the same-named classes are rebuilt (avoids SQLAlchemy's
+            # duplicate-class-name warning).
+            del first_models
+            gc.collect()
 
             with warnings.catch_warnings(record=True) as caught:
                 warnings.simplefilter("always")
@@ -2650,12 +2668,14 @@ class TestSessionTables:
                 and "already contains a class with the same class name" in str(warning.message)
             ]
             assert duplicate_class_warnings == []
-            assert first_models == (
+            second_models = (
                 _get_task_model(),
                 _get_task_dependency_model(),
                 _get_message_model(),
                 _get_message_read_status_model(),
             )
+            # Freshly rebuilt classes still map to the same table names.
+            assert {m.__tablename__ for m in second_models} == dynamic_table_names
 
             async with database.engine.begin() as conn:
                 table_names = set(await conn.run_sync(lambda sync_conn: inspect(sync_conn).get_table_names()))
@@ -2934,7 +2954,8 @@ class TestDropSessionTablesById:
     @pytest.mark.asyncio
     @pytest.mark.level0
     async def test_drop_session_tables_by_id_allows_same_session_recreate(self, tmp_path):
-        """Dropping by id must reuse dynamic models so the same session can be recreated."""
+        """Dropping by id releases the cached models; the same session can be
+        recreated with freshly-built classes (no stale registry state)."""
         db_path = tmp_path / "drop_recreate.db"
         config = DatabaseConfig(
             db_type=DatabaseType.SQLITE,
@@ -2967,6 +2988,18 @@ class TestDropSessionTablesById:
             dropped = await database.drop_session_tables_by_id(session_id)
             assert dynamic_table_names.issubset(set(dropped))
 
+            # Drop releases the cached classes (rebuilt on next access).
+            assert session_id not in _task_models
+            assert session_id not in _task_dependency_models
+            assert session_id not in _message_models
+            assert session_id not in _message_read_status_models
+
+            # Release our own references so the old classes can be collected
+            # before the same-named classes are rebuilt (avoids SQLAlchemy's
+            # duplicate-class-name warning).
+            del first_models
+            gc.collect()
+
             token = set_session_id(session_id)
             try:
                 with warnings.catch_warnings(record=True) as caught:
@@ -2979,12 +3012,14 @@ class TestDropSessionTablesById:
                     and "already contains a class with the same class name" in str(warning.message)
                 ]
                 assert duplicate_class_warnings == []
-                assert first_models == (
+                second_models = (
                     _get_task_model(),
                     _get_task_dependency_model(),
                     _get_message_model(),
                     _get_message_read_status_model(),
                 )
+                # Freshly rebuilt classes still map to the same table names.
+                assert {m.__tablename__ for m in second_models} == dynamic_table_names
             finally:
                 reset_session_id(token)
 
@@ -2993,6 +3028,56 @@ class TestDropSessionTablesById:
             assert dynamic_table_names.issubset(table_names)
         finally:
             await database.close()
+
+    @pytest.mark.asyncio
+    @pytest.mark.level0
+    async def test_drop_session_tables_by_id_clears_model_cache_and_metadata(self, tmp_path):
+        """Regression: drop must release the per-session model caches AND the
+        SQLModel.metadata table registrations (both are process-wide and would
+        otherwise accumulate one entry set per session ever seen)."""
+        db_path = tmp_path / "drop_clears_cache.db"
+        config = DatabaseConfig(
+            db_type=DatabaseType.SQLITE,
+            connection_string=str(db_path),
+        )
+        database = TeamDatabase(config)
+        session_id = "session_cache_clear"
+        suffix = _sanitize_session_id_for_table(session_id)
+        dynamic_table_names = {
+            f"team_task_{suffix}",
+            f"team_task_dependency_{suffix}",
+            f"team_message_{suffix}",
+            f"message_read_status_{suffix}",
+            f"team_review_vote_{suffix}",
+        }
+
+        token = set_session_id(session_id)
+        try:
+            await database.initialize()
+            await database.create_cur_session_tables()
+        finally:
+            reset_session_id(token)
+
+        # Models cached and tables registered in the shared global metadata.
+        assert session_id in _task_models
+        assert session_id in _review_vote_models
+        assert dynamic_table_names.issubset(set(SQLModel.metadata.tables))
+
+        dropped = await database.drop_session_tables_by_id(session_id)
+        assert dynamic_table_names.issubset(set(dropped))
+
+        # Cache entries and metadata registrations are both gone.
+        for cache in (
+            _task_models,
+            _task_dependency_models,
+            _message_models,
+            _message_read_status_models,
+            _review_vote_models,
+        ):
+            assert session_id not in cache
+        assert dynamic_table_names.isdisjoint(set(SQLModel.metadata.tables))
+
+        await database.close()
 
     @pytest.mark.asyncio
     @pytest.mark.level1

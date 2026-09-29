@@ -19,6 +19,7 @@ from sqlmodel import SQLModel, Field
 from sqlmodel.main import SQLModelMetaclass
 
 from openjiuwen.agent_teams.context import get_session_id
+from openjiuwen.core.common.logging import team_logger
 
 TEAM_DYNAMIC_TABLE_PREFIXES = (
     "team_task_dependency_",
@@ -435,9 +436,32 @@ def _get_review_vote_model() -> type[TeamTaskReviewVoteBase]:
 
 
 def _clear_session_model_cache(session_id: str) -> None:
-    """Clear cached dynamic models for a session so they are rebuilt on next access."""
-    _task_models.pop(session_id, None)
-    _task_dependency_models.pop(session_id, None)
-    _message_models.pop(session_id, None)
-    _message_read_status_models.pop(session_id, None)
-    _review_vote_models.pop(session_id, None)
+    """Clear cached dynamic models for a session so they are rebuilt on next access.
+
+    Also detaches the tables from ``SQLModel.metadata``: the dynamic classes
+    register their ``Table`` into the shared global metadata at creation, so
+    popping only the cache dicts would leave the Table objects (columns,
+    indexes) accumulating process-wide, and re-creating the same session
+    would collide with the stale table definition still registered there.
+    """
+    removed_tables: list[str] = []
+    for cache in (
+            _task_models,
+            _task_dependency_models,
+            _message_models,
+            _message_read_status_models,
+            _review_vote_models,
+    ):
+        model_cls = cache.pop(session_id, None)
+        if model_cls is None:
+            continue
+        table = getattr(model_cls, "__table__", None)
+        if table is not None and table.name in SQLModel.metadata.tables:
+            SQLModel.metadata.remove(table)
+            removed_tables.append(table.name)
+    if removed_tables:
+        team_logger.info(
+            "[ModelCache] cleared dynamic model cache for session {}: {}",
+            session_id,
+            removed_tables,
+        )

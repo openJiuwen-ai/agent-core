@@ -116,7 +116,13 @@ class TeamCompletionHandler(BaseCoordinationHandler):
             )
             return
 
-        snapshot = await team_backend.is_team_completed()
+        try:
+            snapshot = await team_backend.is_team_completed()
+        except Exception as exc:
+            # 团队存储已被删除（session.delete 删表）→ 自我停轮，不再刷屏
+            if await self._retire_polls_if_storage_gone(exc):
+                return
+            raise
         if snapshot is None:
             # Falling edge: re-arm so the next rising edge emits again.
             self._team_completed_emitted = False
