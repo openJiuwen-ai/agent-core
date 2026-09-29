@@ -460,6 +460,7 @@ def build_tools_content(
         "code": "执行 Python 或 JavaScript 代码",
         "list_skill": "列出可用技能",
         "task_tool": "启动临时子代理处理复杂任务",
+        "im_search": "检索学习范围内的 IM 原消息",
     }
     summary_overrides_en = {
         "paid_search": "Paid web search (preferred when configured)",
@@ -479,6 +480,7 @@ def build_tools_content(
         "code": "Run Python or JavaScript code",
         "list_skill": "List available skills",
         "task_tool": "Launch a temporary sub-agent for complex work",
+        "im_search": "Search IM messages within the learning scope",
     }
     summary_overrides = summary_overrides_cn if language == "cn" else summary_overrides_en
 

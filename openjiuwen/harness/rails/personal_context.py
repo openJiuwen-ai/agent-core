@@ -1,12 +1,13 @@
 # coding: utf-8
 # Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
-"""Rail that attaches the published PersonalContext context description for one model call."""
+"""PersonalContext Rail (Wiki inject) and IM Search tool registration."""
 
 from __future__ import annotations
 
 import asyncio
 import os
 import stat
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -127,33 +128,74 @@ def _read_description(path: Path) -> tuple[str, int] | None:
     return content, path_stat.st_size
 
 
-def _render_content(
+def _render_attachment(
     context_root: Path,
     description_path: Path,
-    description: str,
     *,
-    description_size_bytes: int,
+    description: str | None,
+    description_size_bytes: int | None,
 ) -> str:
-    """Render the fixed, non-user-request attachment wrapper."""
+    """Render Wiki description into one RUNTIME attachment.
 
-    truncated = len(description) > _MAX_DESCRIPTION_CHARS
-    body = description[:_MAX_DESCRIPTION_CHARS] if truncated else description
-    if truncated:
-        body = f"{body}\n\n[{_TRUNCATION_NOTICE}]"
-    return (
-        "# 主动上下文\n\n"
-        "这是当前模型调用的临时运行时附件，不是新的用户请求；仅在与当前任务相关时使用。\n\n"
-        f"- context_root: `{context_root}`\n"
-        f"- description_path: `{description_path}`\n"
-        f"- description_size_bytes: `{description_size_bytes}`\n"
-        "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。\n\n"
-        "## 当前上下文说明\n\n"
-        f"{body}"
-    )
+    Distilled profile injection is intentionally omitted here: persona/work remain
+    on disk under ``im/profiles/`` for a future host-driven selection path.
+    """
+
+    parts: list[str] = [
+        "# 主动上下文",
+        "",
+        "这是当前模型调用的临时运行时附件，不是新的用户请求；仅在与当前任务相关时使用。",
+        "",
+    ]
+
+    if description is not None and description_size_bytes is not None:
+        truncated = len(description) > _MAX_DESCRIPTION_CHARS
+        body = description[:_MAX_DESCRIPTION_CHARS] if truncated else description
+        if truncated:
+            body = f"{body}\n\n[{_TRUNCATION_NOTICE}]"
+        parts.extend(
+            [
+                f"- context_root: `{context_root}`",
+                f"- description_path: `{description_path}`",
+                f"- description_size_bytes: `{description_size_bytes}`",
+                "- filesystem access: 从顶层 description.md 开始，按其中相对链接继续读取。",
+                "",
+                "## 当前上下文说明",
+                "",
+                body,
+            ]
+        )
+
+    return "\n".join(parts).rstrip() + "\n"
+
+
+def register_im_search_tools(agent: Any, tools: Sequence[Any]) -> None:
+    """Register caller-provided IM Search tools on the agent ability surface.
+
+    ``tools`` must already be constructed by the upstream search module (or the
+    caller). This function only mounts them via ``ability_manager.add_ability``;
+    it does not implement search, indexing, or tool construction.
+    """
+
+    if not tools:
+        return
+    ability_manager = getattr(agent, "ability_manager", None)
+    if ability_manager is None or not hasattr(ability_manager, "add_ability"):
+        _warn("register im search tools: ability_manager unavailable")
+        return
+    for tool in tools:
+        try:
+            tool_card = getattr(tool, "card", None)
+            if tool_card is None:
+                _warn("register im search tools: tool missing card")
+                continue
+            ability_manager.add_ability(tool_card, tool)
+        except Exception as exc:
+            _warn("register im search tool", exc)
 
 
 class PersonalContextRail(DeepAgentRail):
-    """Read ``description.md`` and attach it temporarily before a model call."""
+    """Attach Wiki description before a model call when agent use is enabled."""
 
     priority = 40
 
@@ -199,7 +241,7 @@ class PersonalContextRail(DeepAgentRail):
             return False
 
     async def before_model_call(self, ctx: AgentCallbackContext) -> None:
-        """Clear stale context and attach the current description when safe."""
+        """Clear stale context and attach Wiki when agent use is enabled."""
 
         manager = self._attachment_manager
         if manager is None:
@@ -226,19 +268,23 @@ class PersonalContextRail(DeepAgentRail):
         if not isinstance(messages, list) or not messages or not _messages_are_contiguous(messages):
             return
 
+        description: str | None = None
+        description_size_bytes: int | None = None
         try:
             description_result = await asyncio.to_thread(_read_description, self._description_path)
         except Exception as exc:
             _warn("read description", exc)
-            return
-        if description_result is None:
-            return
-        description, description_size_bytes = description_result
+        else:
+            if description_result is not None:
+                description, description_size_bytes = description_result
 
-        content = _render_content(
+        if description is None:
+            return
+
+        content = _render_attachment(
             self._context_root,
             self._description_path,
-            description,
+            description=description,
             description_size_bytes=description_size_bytes,
         )
         try:
@@ -264,4 +310,4 @@ class PersonalContextRail(DeepAgentRail):
         await self._clear_section(ctx)
 
 
-__all__ = ["PersonalContextRail"]
+__all__ = ["PersonalContextRail", "register_im_search_tools"]

@@ -355,6 +355,57 @@ class PersonalContextFetchServiceConfig(BaseModel):
         return _safe_segment(value, name="service_id")
 
 
+class DistillScheduleSettings(BaseModel):
+    """Account-level portrait distill schedule; independent of fetch intervals."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    interval_seconds: float = Field(default=86_400.0, gt=0, le=31_536_000)
+    message_threshold: int = Field(default=50, strict=True, ge=1)
+    lease_seconds: float = Field(default=3_600.0, gt=0, le=31_536_000)
+    poll_seconds: float = Field(default=60.0, gt=0, le=86_400)
+    learning_since_ms: int | None = Field(default=None, strict=True, ge=0)
+    max_messages: int = Field(default=800, strict=True, ge=1)
+
+
+class ImLearningTargetConfig(BaseModel):
+    """One whitelist entry of the IM learning configuration."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    channel_id: str
+    kind: Literal["group", "user"]
+    external_id: str
+    title: str | None = None
+
+    @field_validator("channel_id", "external_id")
+    @classmethod
+    def validate_non_empty(cls, value: str) -> str:
+        return _non_empty_text(value, name="identifier")
+
+
+class ImLearningConfig(BaseModel):
+    """IM learning pipeline configuration (own DB, own scheduler)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: bool = False
+    targets: tuple[ImLearningTargetConfig, ...] = Field(default_factory=tuple)
+    since_ms: int | None = Field(default=None, ge=0)
+    fetch_interval_seconds: float = Field(default=600.0, gt=0, le=31_536_000)
+    fetch_top_n: int = Field(default=50, ge=1, le=200)
+
+    @model_validator(mode="after")
+    def validate_targets(self) -> "ImLearningConfig":
+        keys = [(target.channel_id, target.kind, target.external_id) for target in self.targets]
+        if len(keys) != len(set(keys)):
+            raise ValueError("im_learning targets must be unique")
+        if self.enabled and not self.targets:
+            raise ValueError("im_learning requires at least one target when enabled")
+        return self
+
+
 class PersonalContextConfig(BaseModel):
     """Complete immutable PersonalContext configuration parsed from a plain dictionary."""
 
@@ -378,6 +429,8 @@ class PersonalContextConfig(BaseModel):
     model_client: ModelClientConfig | None = Field(default=None, repr=False)
     model_request: ModelRequestConfig | None = None
     fetch_services: tuple[PersonalContextFetchServiceConfig, ...]
+    distill: DistillScheduleSettings = Field(default_factory=DistillScheduleSettings)
+    im_learning: ImLearningConfig = Field(default_factory=ImLearningConfig)
 
     @classmethod
     def from_dict(cls, config: dict[str, object]) -> "PersonalContextConfig":
