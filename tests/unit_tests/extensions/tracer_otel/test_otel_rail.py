@@ -10,6 +10,8 @@ payloads, and span-stack bookkeeping — the OTel attribute side is covered
 by ``test_handler.py``.
 """
 
+import json
+
 import pytest
 
 from openjiuwen.core.foundation.llm.schema.config import ModelRequestConfig
@@ -28,8 +30,13 @@ from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler
 from openjiuwen.extensions.tracer_otel.otel_rail import OtelRail
 from openjiuwen.extensions.tracer_otel.semconv import (
+    GEN_AI_AGENT_DESCRIPTION,
+    GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
     GEN_AI_REQUEST_MAX_TOKENS,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_P,
     GEN_AI_RESPONSE_FINISH_REASONS,
@@ -39,7 +46,9 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     GEN_AI_TOOL_TYPE,
     GEN_AI_USAGE_INPUT_TOKENS,
     GEN_AI_USAGE_OUTPUT_TOKENS,
+    OJ_GEN_AI_METADATA,
     OJ_GEN_AI_USAGE_TOTAL_COST,
+    OJ_GEN_AI_USER_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
 )
 from tests.conftest_otel import _EXPORTER, _OTEL_TRACER
@@ -63,18 +72,24 @@ class _StubTracer:
 
 
 class _StubSession:
-    def __init__(self, tracer: _StubTracer):
+    def __init__(self, tracer: _StubTracer, session_id: str = "sess-1", source_metadata=None):
         self._tracer = tracer
         self.agent_span = None
+        self._session_id = session_id
+        self._source_metadata = source_metadata if source_metadata is not None else {"user_id": "u-77"}
 
     def tracer(self) -> _StubTracer:
         return self._tracer
 
+    def get_session_id(self) -> str:
+        return self._session_id
+
 
 class _StubCard:
-    def __init__(self, name: str = "HelperAgent", card_id: str = "card-abc"):
+    def __init__(self, name: str = "HelperAgent", card_id: str = "card-abc", description: str = "A helper agent"):
         self.name = name
         self.id = card_id
+        self.description = description
 
 
 class _StubAgentConfig:
@@ -83,9 +98,17 @@ class _StubAgentConfig:
 
 
 class _StubAgent:
-    def __init__(self, config=None, card=None):
+    def __init__(self, config=None, card=None, llm=None):
         self.config = config
         self.card = card or _StubCard()
+        self._llm = llm
+
+
+class _StubLlm:
+    """Minimal stand-in for the agent's Model: carries a ModelRequestConfig."""
+
+    def __init__(self, model_config):
+        self.model_config = model_config
 
 
 def _make_ctx(agent, session, inputs, exception=None) -> AgentCallbackContext:
@@ -112,6 +135,25 @@ class TestOtelRailAgentCallbacks:
         assert kwargs["instance_info"]["agent_id"] == "id-123"
         assert session.agent_span is kwargs["span"]
 
+    async def test_common_info_carries_identity_and_session_facts(self):
+        """_build_common_info feeds every span: description, conversation id,
+        user id, and raw source metadata (issue #1833 project extensions)."""
+        tracer = _StubTracer()
+        session = _StubSession(
+            tracer, session_id="sess-9", source_metadata={"user_id": "u-1", "channel": "web"}
+        )
+        agent = _StubAgent(card=_StubCard(name="MyAgent", card_id="id-123", description="Does things"))
+        rail = OtelRail()
+
+        await rail.before_invoke(_make_ctx(agent, session, inputs={}))
+
+        _, _, kwargs = tracer.calls[0]
+        info = kwargs["instance_info"]
+        assert info["agent_description"] == "Does things"
+        assert info["conversation_id"] == "sess-9"
+        assert info["user_id"] == "u-1"
+        assert info["metadata"] == {"user_id": "u-1", "channel": "web"}
+
     async def test_before_invoke_without_card_id_omits_none(self):
         tracer = _StubTracer()
         session = _StubSession(tracer)
@@ -136,6 +178,8 @@ class TestOtelRailAgentCallbacks:
                 top_p=0.9,
                 max_tokens=1024,
                 top_k=40,
+                stop="END",
+                reasoning={"effort": "high"},
             )
         )
         agent = _StubAgent(config=config)
@@ -152,9 +196,29 @@ class TestOtelRailAgentCallbacks:
             "top_p": 0.9,
             "top_k": 40,
             "max_tokens": 1024,
+            "stop_sequences": ["END"],
+            "reasoning_level": "high",
         }
         assert kwargs["instance_info"]["message_count"] == 3
         assert len(rail._llm_spans) == 1
+
+    async def test_before_model_call_prefers_llm_object_over_config(self):
+        """The live LLM object is the authoritative param source — covers
+        set_llm-built agents whose config carries no model_config_obj."""
+        tracer = _StubTracer()
+        session = _StubSession(tracer)
+        config = _StubAgentConfig(ModelRequestConfig(model="stale-config-model", temperature=9.9))
+        agent = _StubAgent(
+            config=config,
+            llm=_StubLlm(ModelRequestConfig(model="live-model", temperature=0.2)),
+        )
+        rail = OtelRail()
+
+        await rail.before_model_call(_make_ctx(agent, session, ModelCallInputs(messages=["m1"])))
+
+        _, _, kwargs = tracer.calls[0]
+        assert kwargs["instance_info"]["class_name"] == "live-model"
+        assert kwargs["instance_info"]["request_params"] == {"temperature": 0.2}
 
     async def test_before_model_call_without_config_sets_no_params(self):
         tracer = _StubTracer()
@@ -187,6 +251,7 @@ class TestOtelRailToolCallbacks:
         assert kwargs["instance_info"]["class_name"] == "echo"
         assert kwargs["instance_info"]["tool_type"] == "function"
         assert kwargs["instance_info"]["agent_name"] == "HelperAgent"
+        assert kwargs["instance_info"]["tool_call_id"] == "call-9"
         assert kwargs["inputs"] == {"id": "call-9", "name": "echo", "type": "function"}
         assert len(rail._tool_spans) == 1
 
@@ -276,11 +341,23 @@ class TestOtelRailEndToEnd:
             tracer = Tracer(session_id="e2e-session")
             tracer.init()
 
-            session = _StubSession(tracer)
-            config = _StubAgentConfig(
-                ModelRequestConfig(model="test-model", temperature=0.3, top_p=0.8, max_tokens=512)
+            session = _StubSession(
+                tracer, session_id="e2e-session", source_metadata={"user_id": "u-e2e", "channel": "e2e"}
             )
-            agent = _StubAgent(config=config, card=_StubCard(name="E2EAgent", card_id="card-e2e"))
+            config = _StubAgentConfig(
+                ModelRequestConfig(
+                    model="test-model",
+                    temperature=0.3,
+                    top_p=0.8,
+                    max_tokens=512,
+                    stop="END",
+                    reasoning={"effort": "low"},
+                )
+            )
+            agent = _StubAgent(
+                config=config,
+                card=_StubCard(name="E2EAgent", card_id="card-e2e", description="E2E test agent"),
+            )
             rail = OtelRail()
 
             # Agent root span
@@ -323,23 +400,34 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_REQUEST_TEMPERATURE] == 0.3
             assert llm_span.attributes[GEN_AI_REQUEST_TOP_P] == 0.8
             assert llm_span.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 512
+            assert list(llm_span.attributes[GEN_AI_REQUEST_STOP_SEQUENCES]) == ["END"]
+            assert llm_span.attributes[GEN_AI_REQUEST_REASONING_LEVEL] == "low"
             assert llm_span.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 2
             assert llm_span.attributes[GEN_AI_RESPONSE_FINISH_REASONS] == ("stop",)
             assert llm_span.attributes[GEN_AI_RESPONSE_MODEL] == "test-model"
             assert llm_span.attributes[GEN_AI_USAGE_INPUT_TOKENS] == 10
             assert llm_span.attributes[GEN_AI_USAGE_OUTPUT_TOKENS] == 20
             assert llm_span.attributes[OJ_GEN_AI_USAGE_TOTAL_COST] == pytest.approx(0.3)
+            # Identity / conversation attributes from _build_common_info
+            assert llm_span.attributes[GEN_AI_AGENT_DESCRIPTION] == "E2E test agent"
+            assert llm_span.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
+            assert llm_span.attributes[OJ_GEN_AI_USER_ID] == "u-e2e"
+            assert json.loads(llm_span.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-e2e", "channel": "e2e"}
 
             tool_span = by_name["execute_tool echo"]
             assert tool_span.attributes[GEN_AI_TOOL_NAME] == "echo"
             assert tool_span.attributes[GEN_AI_TOOL_TYPE] == "function"
             assert tool_span.attributes[GEN_AI_TOOL_CALL_ID] == "call-1"
             assert tool_span.attributes[GEN_AI_AGENT_NAME] == "E2EAgent"
+            assert tool_span.attributes[GEN_AI_AGENT_DESCRIPTION] == "E2E test agent"
+            assert tool_span.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
 
             # LLM and tool spans share the agent root span's trace
             agent_span_names = [s.name for s in spans if s.name not in ("chat test-model", "execute_tool echo")]
             assert agent_span_names, "agent root span expected"
             root = spans[[s.name for s in spans].index(agent_span_names[0])]
+            assert root.attributes[GEN_AI_AGENT_ID] == "card-e2e"
+            assert root.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
             assert llm_span.context.trace_id == root.context.trace_id
             assert tool_span.context.trace_id == root.context.trace_id
         finally:

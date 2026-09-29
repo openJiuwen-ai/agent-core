@@ -32,7 +32,8 @@ facts with different wire formats, and that is intentional:
   pinned registry in `observability/gen_ai_semconv.py` may be re-exported this
   way; facts the registry does not model are defined here as this package's own
   `openjiuwen.*` extensions (`openjiuwen.gen_ai.usage.*_cost`,
-  `openjiuwen.llm.prev_message_count`) — project extensions never ride the
+  `openjiuwen.llm.prev_message_count`, `openjiuwen.gen_ai.user.id`,
+  `openjiuwen.gen_ai.metadata`) — project extensions never ride the
   `gen_ai.*` prefix. Do not grow the re-export list casually.
 - Project keys (`openjiuwen.workflow.*`, `openjiuwen.agent.*`,
   `openjiuwen.invoke_id`, `openjiuwen.session_id` — note the underscore — and

@@ -29,13 +29,17 @@ from openjiuwen.extensions.tracer_otel.config import OtelTracerConfig
 from openjiuwen.extensions.tracer_otel.handler import OtelAgentHandler, OtelWorkflowHandler
 from openjiuwen.extensions.tracer_otel.semconv import (
     ERROR_TYPE,
+    GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_K,
     GEN_AI_REQUEST_TOP_P,
@@ -57,9 +61,11 @@ from openjiuwen.extensions.tracer_otel.semconv import (
     OJ_ELAPSED_TIME,
     OJ_END_TIME,
     OJ_ERROR,
+    OJ_GEN_AI_METADATA,
     OJ_GEN_AI_USAGE_INPUT_COST,
     OJ_GEN_AI_USAGE_OUTPUT_COST,
     OJ_GEN_AI_USAGE_TOTAL_COST,
+    OJ_GEN_AI_USER_ID,
     OJ_INVOKE_ID,
     OJ_LLM_PREV_MESSAGE_COUNT,
     OJ_PARENT_INVOKE_ID,
@@ -1243,7 +1249,7 @@ class TestMultiRoundConversationTraceContinuity:
 
 
 class TestGenAiSemconvAttrs:
-    """Covers request params, response/usage/cost, tool, error.type, agent.id."""
+    """Covers request params, identity attrs, response/usage/cost, tool, error.type."""
 
     async def test_llm_start_sets_request_params_and_message_count(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1262,6 +1268,8 @@ class TestGenAiSemconvAttrs:
                     "top_p": 0.9,
                     "top_k": 40,
                     "max_tokens": 4096,
+                    "stop_sequences": ["END"],
+                    "reasoning_level": "high",
                 },
                 "message_count": 3,
             },
@@ -1273,7 +1281,39 @@ class TestGenAiSemconvAttrs:
         assert s.attributes[GEN_AI_REQUEST_TOP_P] == 0.9
         assert s.attributes[GEN_AI_REQUEST_TOP_K] == 40
         assert s.attributes[GEN_AI_REQUEST_MAX_TOKENS] == 4096
+        assert list(s.attributes[GEN_AI_REQUEST_STOP_SEQUENCES]) == ["END"]
+        assert s.attributes[GEN_AI_REQUEST_REASONING_LEVEL] == "high"
         assert s.attributes[OJ_LLM_PREV_MESSAGE_COUNT] == 3
+
+    async def test_llm_start_sets_agent_identity_attrs(self):
+        """agent_id / description / conversation_id / user_id / metadata ride
+        the same instance_info block from OtelRail._build_common_info."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span,
+            inputs=None,
+            instance_info={
+                "class_name": "TestModel",
+                "agent_id": "card-1",
+                "agent_description": "A helper",
+                "conversation_id": "sess-42",
+                "user_id": "u-9",
+                "metadata": {"user_id": "u-9", "channel": "web"},
+            },
+        )
+        await handler.on_llm_end(span=agent_span, outputs=None)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert s.attributes[GEN_AI_AGENT_ID] == "card-1"
+        assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "A helper"
+        assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-42"
+        assert s.attributes[OJ_GEN_AI_USER_ID] == "u-9"
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-9", "channel": "web"}
 
     async def test_llm_start_without_params_sets_no_request_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
@@ -1378,11 +1418,12 @@ class TestGenAiSemconvAttrs:
 
         await handler.on_plugin_start(
             span=tool_span,
-            inputs={"id": "call-1", "name": "echo", "type": "function"},
+            inputs={"name": "echo", "type": "function"},
             instance_info={
                 "class_name": "echo",
                 "tool_type": "function",
                 "agent_name": "HelperAgent",
+                "tool_call_id": "call-1",
             },
         )
         await handler.on_plugin_end(span=tool_span, outputs="ok")
@@ -1422,7 +1463,7 @@ class TestGenAiSemconvAttrs:
         s2 = _EXPORTER.get_finished_spans()[0]
         assert s2.attributes[ERROR_TYPE] == OJStatusCode.TOOL_EXECUTION_ERROR.code
 
-    async def test_chain_start_sets_agent_id(self):
+    async def test_chain_start_sets_agent_identity_attrs(self):
         config = OtelTracerConfig(redaction_enabled=False)
         handler = OtelAgentHandler(_OTEL_TRACER, config)
 
@@ -1432,12 +1473,24 @@ class TestGenAiSemconvAttrs:
         await handler.on_chain_start(
             span=agent_span,
             inputs=None,
-            instance_info={"class_name": "MyAgent", "type": "agent", "agent_id": "abc123"},
+            instance_info={
+                "class_name": "MyAgent",
+                "type": "agent",
+                "agent_id": "abc123",
+                "agent_description": "Root agent",
+                "conversation_id": "sess-7",
+                "user_id": "u-1",
+                "metadata": {"user_id": "u-1"},
+            },
         )
         await handler.on_chain_end(span=agent_span, outputs=None)
 
         s = _EXPORTER.get_finished_spans()[0]
         assert s.attributes[GEN_AI_AGENT_ID] == "abc123"
+        assert s.attributes[GEN_AI_AGENT_DESCRIPTION] == "Root agent"
+        assert s.attributes[GEN_AI_CONVERSATION_ID] == "sess-7"
+        assert s.attributes[OJ_GEN_AI_USER_ID] == "u-1"
+        assert json.loads(s.attributes[OJ_GEN_AI_METADATA]) == {"user_id": "u-1"}
 
     async def test_chain_start_without_agent_id_omits_attr(self):
         config = OtelTracerConfig(redaction_enabled=False)

@@ -20,13 +20,17 @@ from __future__ import annotations
 # extensions must not ride the gen_ai.* prefix).
 from openjiuwen.extensions.observability.semconv import (  # noqa: F401
     ERROR_TYPE,
+    GEN_AI_AGENT_DESCRIPTION,
     GEN_AI_AGENT_ID,
     GEN_AI_AGENT_NAME,
+    GEN_AI_CONVERSATION_ID,
     GEN_AI_INPUT_MESSAGES,
     GEN_AI_OPERATION_NAME,
     GEN_AI_OUTPUT_MESSAGES,
     GEN_AI_REQUEST_MAX_TOKENS,
     GEN_AI_REQUEST_MODEL,
+    GEN_AI_REQUEST_REASONING_LEVEL,
+    GEN_AI_REQUEST_STOP_SEQUENCES,
     GEN_AI_REQUEST_TEMPERATURE,
     GEN_AI_REQUEST_TOP_K,
     GEN_AI_REQUEST_TOP_P,
@@ -54,6 +58,11 @@ OJ_LLM_PREV_MESSAGE_COUNT = "openjiuwen.llm.prev_message_count"
 OJ_GEN_AI_USAGE_TOTAL_COST = "openjiuwen.gen_ai.usage.total_cost"
 OJ_GEN_AI_USAGE_INPUT_COST = "openjiuwen.gen_ai.usage.input_cost"
 OJ_GEN_AI_USAGE_OUTPUT_COST = "openjiuwen.gen_ai.usage.output_cost"
+# Conversation facts the registry does not model: session-carried user id and
+# the raw source metadata dict (value follows the project extension naming
+# regime — openjiuwen.*, never gen_ai.*).
+OJ_GEN_AI_USER_ID = "openjiuwen.gen_ai.user.id"
+OJ_GEN_AI_METADATA = "openjiuwen.gen_ai.metadata"
 
 
 # ---------------------------------------------------------------------------
