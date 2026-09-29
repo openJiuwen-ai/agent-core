@@ -217,18 +217,76 @@ class TaskManager:
             self._child_to_parent = state.children_to_parent.copy()
             self._root_tasks = state.root_tasks.copy()
 
-    async def clear_state(self) -> None:
-        """Clear all task manager state
-        
-        Clears all tasks and internal index structures.
-        Used when no saved state exists or state restoration fails.
+    async def clear_state(self, session_id: Optional[str] = None) -> None:
+        """Clear task manager state.
+
+        When ``session_id`` is provided, only the tasks belonging to that session
+        are removed (session-level isolation), so tasks of other concurrent
+        sessions and their index relations are preserved. When ``session_id`` is
+        None, everything is cleared (backward compatible).
+
+        Args:
+            session_id: If given, clear only tasks of this session; otherwise
+                clear all tasks.
+
+        Returns:
+            None
         """
         async with self._lock:
-            self.tasks.clear()
-            self._priority_index.clear()
-            self._parent_to_children.clear()
-            self._child_to_parent.clear()
-            self._root_tasks.clear()
+            if session_id is None:
+                self.tasks.clear()
+                self._priority_index.clear()
+                self._parent_to_children.clear()
+                self._child_to_parent.clear()
+                self._root_tasks.clear()
+                return
+
+            remove_ids = [
+                tid for tid, t in self.tasks.items()
+                if t.session_id == session_id
+            ]
+            for tid in remove_ids:
+                if tid not in self.tasks:
+                    continue
+                task = self.tasks.pop(tid, None)
+                if task is None:
+                    continue
+
+                # Remove from priority index (drop empty bucket to keep the
+                # "highest priority" lookup accurate)
+                if task.priority in self._priority_index:
+                    bucket = self._priority_index[task.priority]
+                    try:
+                        bucket.remove(tid)
+                    except ValueError:
+                        pass
+                    if not bucket:
+                        del self._priority_index[task.priority]
+
+                # Promote survived children to roots when their parent is removed
+                # (consistent with pop_task semantics)
+                if tid in self._parent_to_children:
+                    for child_id in self._parent_to_children[tid].copy():
+                        if child_id not in self.tasks:
+                            continue
+                        child = self.tasks[child_id]
+                        child.parent_task_id = None
+                        self._root_tasks.add(child_id)
+                        self._child_to_parent.pop(child_id, None)
+                    del self._parent_to_children[tid]
+
+                # Remove child-to-parent index entry
+                self._child_to_parent.pop(tid, None)
+
+                # If the removed task is a child, detach it from its parent's set
+                if task.parent_task_id:
+                    siblings = self._parent_to_children.get(task.parent_task_id)
+                    if siblings:
+                        siblings.discard(tid)
+                        if not siblings:
+                            self._parent_to_children.pop(task.parent_task_id, None)
+                else:
+                    self._root_tasks.discard(tid)
 
     # ==================== Task CRUD Operations ====================
     async def add_task(self, task: Union[Task, List[Task]]):
