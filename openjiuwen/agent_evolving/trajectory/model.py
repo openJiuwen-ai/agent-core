@@ -24,6 +24,8 @@ from openjiuwen.agent_evolving.trajectory.schema import (
 def _copy_json(value: Any) -> Any:
     """Return a detached copy while normalising mapping implementations."""
 
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
     if isinstance(value, Mapping):
         return {str(key): _copy_json(item) for key, item in value.items()}
     if isinstance(value, list):

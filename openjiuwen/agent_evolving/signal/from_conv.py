@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 import re
@@ -651,7 +652,8 @@ class ConversationSignalDetector:
         """
         if hasattr(messages, "to_otlp") or hasattr(messages, "otlp_trace"):
             raise TypeError("detect_user_intent() expects normalized messages; call trajectory_to_messages() first.")
-        prompt_inputs = _build_user_feedback_prompt_inputs(
+        prompt_inputs = await asyncio.to_thread(
+            _build_user_feedback_prompt_inputs,
             messages,
             language=self._language,
         )
@@ -663,7 +665,7 @@ class ConversationSignalDetector:
             last_user_message,
         )
 
-        traj_skills = self.collect_skills_from_messages(messages)
+        traj_skills = await asyncio.to_thread(self.collect_skills_from_messages, messages)
         session_used_skills = [str(s).strip() for s in (extra_skills or []) if str(s).strip()]
         skill_names = list(dict.fromkeys(session_used_skills or traj_skills))
         logger.info(

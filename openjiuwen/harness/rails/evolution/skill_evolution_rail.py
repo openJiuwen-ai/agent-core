@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import posixpath
@@ -852,8 +853,12 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
 
         try:
             trajectory = prepared.trajectory
-            messages = [deepcopy(message) for message in prepared.messages]
-            presented_entries = [deepcopy(entry) for entry in prepared.presented_entries]
+            messages = await asyncio.to_thread(
+                lambda: [deepcopy(message) for message in prepared.messages]
+            )
+            presented_entries = await asyncio.to_thread(
+                lambda: [deepcopy(entry) for entry in prepared.presented_entries]
+            )
 
             logger.info("[SkillEvolutionRail] collected %d messages", len(messages))
             self._emit_progress(
@@ -892,7 +897,7 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 language=self._language,
             )
             session_skills: Set[str] = set()
-            traj_skills = detector.collect_skills_from_messages(messages)
+            traj_skills = await asyncio.to_thread(detector.collect_skills_from_messages, messages)
             session_skills.update(traj_skills)
             logger.info(
                 "[SkillEvolutionRail] session used skills=%s (traj=%s)",
@@ -900,7 +905,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
                 traj_skills,
             )
 
-            detected = detector.detect_trajectory_signals(
+            detected = await asyncio.to_thread(
+                detector.detect_trajectory_signals,
                 trajectory,
                 signal_types={"execution_failure", "script_artifact"},
             )
@@ -1841,8 +1847,8 @@ class SkillEvolutionRail(SkillEvolutionSharingMixin, EvolutionRail):
             trajectory=prepared.trajectory,
             messages=tuple(messages),
             skill_name="skill-evolution",
-            presented_entries=tuple(deepcopy(presented_entries)),
-            incremental_messages=tuple(deepcopy(incremental_messages)),
+            presented_entries=tuple(await asyncio.to_thread(deepcopy, presented_entries)),
+            incremental_messages=tuple(await asyncio.to_thread(deepcopy, incremental_messages)),
         )
 
     # ── Governance commands (shared by 1D and team skills) ──
