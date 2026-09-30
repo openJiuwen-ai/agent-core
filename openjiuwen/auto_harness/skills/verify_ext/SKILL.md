@@ -51,7 +51,7 @@ from openjiuwen.harness.schema.config import DeepAgentConfig
 from openjiuwen.core.single_agent.schema.agent_card import AgentCard
 agent = DeepAgent(AgentCard(name="test_agent", description="test")).configure(
             DeepAgentConfig(enable_task_loop=False))
-record = await agent.load_expert_harness(config_path)
+record = await agent.load_plugin(config_path)
 labels = [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
 ```
 
@@ -69,9 +69,9 @@ labels = [f"{ref.kind.value}:{ref.identity}" for ref in record.refs]
   - Tool 的 `ToolCard` 出现在 `agent.ability_manager.list()`
 - 如果存在 skills：`labels` 包含每个 `"skill:<resolved_path>"`
   - 验证方法：检查 `agent._registered_rails` 中存在 `SkillUseRail` 且其 `skills_dir` 包含声明的 skill 目录路径
-- 可选：调用 `await agent.unload_expert_harness(record)` 验证资源可回滚
+- 可选：调用 `await agent.unload_extension(record)` 验证资源可回滚
 
-这一层必须覆盖 `DeepAgent.load_expert_harness()`，不能只调用 `load_runtime_rails()` / `load_runtime_tools()`。
+这一层必须覆盖 `DeepAgent.load_plugin()`，不能只调用 `load_runtime_rails()` / `load_runtime_tools()`。
 
 失败归因：
 - `harness_load_failed`
