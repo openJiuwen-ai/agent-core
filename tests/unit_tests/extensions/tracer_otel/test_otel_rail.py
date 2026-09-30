@@ -334,6 +334,67 @@ class TestOtelRailNoSession:
         assert rail._tool_spans == []
 
 
+class _ExplodingTracerSession(_StubSession):
+    """tracer() raises — simulates a broken tracer/session stack."""
+
+    def tracer(self):
+        raise RuntimeError("tracer unavailable")
+
+
+class _BrokenSessionIdSession(_StubSession):
+    """get_session_id() raises — injected into _build_common_info."""
+
+    def get_session_id(self) -> str:
+        raise RuntimeError("session id unavailable")
+
+
+class TestOtelRailCallbackHardening:
+    """Callbacks must swallow their own failures: the rail dispatch layer
+    records a raising before-callback as a business failure (retry history),
+    so an OTel-side bug must never escape OtelRail."""
+
+    async def test_all_callbacks_swallow_tracer_failures(self):
+        session = _ExplodingTracerSession(_StubTracer())
+        # Preset state the before hooks would have produced so the after
+        # hooks get past their emptiness guards and reach session.tracer().
+        session.agent_span = object()
+        rail = OtelRail()
+        agent = _StubAgent()
+        model_ctx = _make_ctx(agent, session, ModelCallInputs(messages=["m"]))
+        tool_ctx = _make_ctx(agent, session, ToolCallInputs(tool_name="echo"))
+
+        await rail.before_invoke(_make_ctx(agent, session, InvokeInputs(query="q")))
+        await rail.after_invoke(_make_ctx(agent, session, InvokeInputs(query="q")))
+        await rail.before_model_call(model_ctx)
+        rail._llm_spans.append(object())
+        await rail.after_model_call(model_ctx)
+        rail._llm_spans.append(object())
+        await rail.on_model_exception(model_ctx)
+
+        await rail.before_tool_call(tool_ctx)
+        rail._tool_spans.append(object())
+        await rail.after_tool_call(tool_ctx)
+        rail._tool_spans.append(object())
+        await rail.on_tool_exception(tool_ctx)
+
+        # Reaching here means no callback let the failure escape.
+        assert rail._llm_spans == []
+        assert rail._tool_spans == []
+
+    async def test_before_invoke_swallows_session_id_failure(self):
+        """A raising get_session_id inside _build_common_info must not leak:
+        the event simply never fires."""
+        tracer = _StubTracer()
+        session = _BrokenSessionIdSession(tracer)
+        agent = _StubAgent(card=_StubCard(name="MyAgent", card_id="id-1"))
+        rail = OtelRail()
+
+        await rail.before_invoke(_make_ctx(agent, session, inputs={}))
+
+        assert tracer.calls == []
+        assert session.agent_span is None
+
+
 class TestOtelRailEndToEnd:
     """Wire OtelRail to a real Tracer with a registered OtelAgentHandler
     and assert the emitted spans carry the GenAI semconv attributes."""
@@ -423,6 +484,7 @@ class TestOtelRailEndToEnd:
             assert llm_span.attributes[GEN_AI_SYSTEM] == GEN_AI_SYSTEM_VALUE
             assert llm_span.attributes[OJ_GEN_AI_TRACE_NAME] == "E2EAgent"
             # Identity / conversation attributes from _build_common_info
+            assert llm_span.attributes[GEN_AI_AGENT_NAME] == "E2EAgent"
             assert llm_span.attributes[GEN_AI_AGENT_DESCRIPTION] == "E2E test agent"
             assert llm_span.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
             assert llm_span.attributes[OJ_GEN_AI_USER_ID] == "u-e2e"
@@ -442,6 +504,7 @@ class TestOtelRailEndToEnd:
             assert agent_span_names, "agent root span expected"
             root = spans[[s.name for s in spans].index(agent_span_names[0])]
             assert root.attributes[GEN_AI_AGENT_ID] == "card-e2e"
+            assert root.attributes[GEN_AI_AGENT_NAME] == "E2EAgent"
             assert root.attributes[GEN_AI_CONVERSATION_ID] == "e2e-session"
             assert llm_span.context.trace_id == root.context.trace_id
             assert tool_span.context.trace_id == root.context.trace_id
