@@ -8,6 +8,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
+from openjiuwen.core.context_engine import (
+    ContextEngine,
+)
 from openjiuwen.core.controller.config import (
     ControllerConfig,
 )
@@ -25,10 +28,9 @@ from openjiuwen.core.controller.schema.event import (
 )
 from openjiuwen.core.controller.schema.task import (
     Task as CoreTask,
-    TaskStatus as CoreTaskStatus,
 )
-from openjiuwen.core.context_engine import (
-    ContextEngine,
+from openjiuwen.core.controller.schema.task import (
+    TaskStatus as CoreTaskStatus,
 )
 from openjiuwen.core.single_agent.rail.base import (
     AgentCallbackEvent,
@@ -39,6 +41,15 @@ from openjiuwen.core.single_agent.schema.agent_card import (
 from openjiuwen.harness.deep_agent import (
     DeepAgent,
 )
+from openjiuwen.harness.schema.config import (
+    DeepAgentConfig,
+)
+from openjiuwen.harness.task_loop.loop_coordinator import (
+    LoopCoordinator,
+)
+from openjiuwen.harness.task_loop.loop_queues import (
+    LoopQueues,
+)
 from openjiuwen.harness.task_loop.task_loop_event_executor import (
     DEEP_TASK_TYPE,
     TaskLoopEventExecutor,
@@ -46,15 +57,6 @@ from openjiuwen.harness.task_loop.task_loop_event_executor import (
 )
 from openjiuwen.harness.task_loop.task_loop_event_handler import (
     TaskLoopEventHandler,
-)
-from openjiuwen.harness.task_loop.loop_coordinator import (
-    LoopCoordinator,
-)
-from openjiuwen.harness.schema.config import (
-    DeepAgentConfig,
-)
-from openjiuwen.harness.task_loop.loop_queues import (
-    LoopQueues,
 )
 
 
@@ -250,6 +252,45 @@ async def test_execute_ability_yields_completion() \
 
     coord = agent.loop_coordinator
     assert coord is not None
+
+
+@pytest.mark.asyncio
+async def test_after_task_iteration_force_finish_replaces_completion_result() -> None:
+    """A force-finish requested by the outer after hook reaches the caller."""
+    agent = _make_agent()
+    deps, tm = _make_deps()
+    session = FakeSession()
+    core_task = CoreTask(
+        session_id="s1",
+        task_id="t-force-finish",
+        task_type=DEEP_TASK_TYPE,
+        description="finish at boundary",
+        status=CoreTaskStatus.SUBMITTED,
+    )
+    await tm.add_task(core_task)
+
+    forced_result = {
+        "output": "forced by after-task rail",
+        "result_type": "answer",
+    }
+
+    async def request_force_finish(ctx: Any) -> None:
+        ctx.request_force_finish(forced_result)
+
+    await agent.register_callback(
+        AgentCallbackEvent.AFTER_TASK_ITERATION,
+        request_force_finish,
+    )
+
+    executor = TaskLoopEventExecutor(deps, agent)
+    chunks = [
+        chunk
+        async for chunk in executor.execute_ability("t-force-finish", session)
+    ]
+
+    assert len(chunks) == 1
+    assert chunks[0].payload.type == EventType.TASK_COMPLETION
+    assert chunks[0].payload.data[0].data == forced_result
 
 
 @pytest.mark.asyncio
