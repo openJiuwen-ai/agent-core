@@ -12,11 +12,51 @@ import pytest
 from openjiuwen.harness.subagent_runtime.ids import build_subagent_id, new_task_id
 from openjiuwen.harness.subagent_runtime.models import (
     ShutdownOp,
+    SubagentCreateOptions,
+    SubagentRecord,
     SubagentStatus,
     SubagentStatusKind,
     UserInputOp,
     resolve_presentation,
 )
+
+
+def _record(create_options: SubagentCreateOptions) -> SubagentRecord:
+    return SubagentRecord(
+        subagent_id="sid",
+        subagent_type="explore",
+        display_name="Explorer",
+        role="researcher",
+        task_description="task",
+        created_at_ms=1.0,
+        updated_at_ms=2.0,
+        create_options=create_options,
+    )
+
+
+def test_record_without_create_options_keeps_legacy_payload() -> None:
+    payload = _record(SubagentCreateOptions()).to_dict()
+
+    assert "create_options" not in payload
+    assert SubagentRecord.from_dict(payload).create_options == SubagentCreateOptions()
+
+
+def test_record_round_trips_create_options() -> None:
+    options = SubagentCreateOptions(thinking="off", model_name="glm", model_tier="lite")
+
+    payload = _record(options).to_dict()
+
+    assert payload["create_options"] == {"thinking": "off", "model_name": "glm", "model_tier": "lite"}
+    assert SubagentRecord.from_dict(payload).create_options == options
+
+
+def test_create_options_from_dict_normalizes_input() -> None:
+    options = SubagentCreateOptions.from_dict(
+        {"thinking": " off ", "model_name": None, "model_tier": " PRO ", "extra": "ignored"},
+    )
+
+    assert options == SubagentCreateOptions(thinking="off", model_name="", model_tier="pro")
+    assert SubagentCreateOptions.from_dict("not-a-dict") == SubagentCreateOptions()
 
 
 @pytest.mark.parametrize(

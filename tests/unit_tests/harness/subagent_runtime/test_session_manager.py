@@ -15,8 +15,13 @@ from openjiuwen.core.common.exception.codes import StatusCode
 from openjiuwen.core.common.exception.errors import AgentError, build_error
 from openjiuwen.harness.subagent_runtime.config import SubagentRuntimeConfig
 from openjiuwen.harness.execution_subject import ExecutionSubject, execution_subject_scope
-from openjiuwen.harness.subagent_runtime.models import SubagentStatusKind, UserInputOp
+from openjiuwen.harness.subagent_runtime.models import (
+    SubagentCreateOptions,
+    SubagentStatusKind,
+    UserInputOp,
+)
 from openjiuwen.harness.subagent_runtime.session_manager import SubagentSessionManager
+from openjiuwen.harness.tools.subagent.thinking_hook import register_subagent_thinking_hook
 from tests.unit_tests.harness.subagent_runtime.test_instance import MockAgent
 
 
@@ -431,3 +436,138 @@ async def test_no_chunk_handler_keeps_turn_behaviour() -> None:
         await asyncio.sleep(0.05)
 
     assert instance.agent_status().kind is SubagentStatusKind.COMPLETED
+
+
+@pytest.fixture
+def thinking_calls():
+    calls: list[tuple[object, str, object]] = []
+
+    def _hook(subagent, *, thinking: str, model=None) -> None:
+        calls.append((subagent, thinking, model))
+
+    register_subagent_thinking_hook(_hook)
+    yield calls
+    register_subagent_thinking_hook(None)
+
+
+@dataclass
+class ModelAwareParentAgent(MockParentAgent):
+    resolved_model: object = None
+    resolve_calls: list[tuple[str, str]] = field(default_factory=list)
+    create_models: list[object] = field(default_factory=list)
+
+    def resolve_subagent_model(self, *, model_name: str, model_tier: str):
+        self.resolve_calls.append((model_name, model_tier))
+        return self.resolved_model, None
+
+    def create_subagent(
+        self,
+        subagent_type: str,
+        subsession_id: str,
+        browser_capabilities: list[str] | None = None,
+        model: object = None,
+    ) -> MockSubAgent:
+        self.create_models.append(model)
+        return super().create_subagent(subagent_type, subsession_id, browser_capabilities)
+
+
+@pytest.mark.asyncio
+async def test_create_applies_spawn_thinking_to_child(thinking_calls) -> None:
+    child = MockSubAgent()
+    manager = _manager(parent=MockParentAgent(subagent=child))
+
+    with _patch_create_session():
+        await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_explore",
+            parent_session_id="parent",
+            display_name="Explorer",
+            role="researcher",
+            create_options=SubagentCreateOptions(thinking="off"),
+        )
+
+    assert thinking_calls == [(child, "off", None)]
+
+
+@pytest.mark.asyncio
+async def test_create_without_options_leaves_thinking_default(thinking_calls) -> None:
+    parent = MockParentAgent()
+    manager = _manager(parent=parent)
+
+    with _patch_create_session():
+        await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_explore",
+            parent_session_id="parent",
+            display_name="Explorer",
+            role="researcher",
+        )
+
+    assert parent.create_calls == [("explore", "parent_sub_explore", None)]
+    assert [thinking for _, thinking, _ in thinking_calls] == [""]
+
+
+@pytest.mark.asyncio
+async def test_create_passes_resolved_model_to_child() -> None:
+    model = object()
+    parent = ModelAwareParentAgent(resolved_model=model)
+    manager = _manager(parent=parent)
+
+    with _patch_create_session():
+        await manager.create(
+            subagent_type="explore",
+            subagent_id="parent_sub_explore",
+            parent_session_id="parent",
+            display_name="Explorer",
+            role="researcher",
+            create_options=SubagentCreateOptions(model_tier="lite"),
+        )
+
+    assert parent.resolve_calls == [("", "lite")]
+    assert parent.create_models == [model]
+
+
+@pytest.mark.asyncio
+async def test_create_survives_thinking_hook_failure() -> None:
+    def _broken_hook(subagent, *, thinking: str, model=None) -> None:
+        raise RuntimeError("boom")
+
+    register_subagent_thinking_hook(_broken_hook)
+    manager = _manager()
+    try:
+        with _patch_create_session():
+            instance = await manager.create(
+                subagent_type="explore",
+                subagent_id="parent_sub_explore",
+                parent_session_id="parent",
+                display_name="Explorer",
+                role="researcher",
+                create_options=SubagentCreateOptions(thinking="off"),
+            )
+    finally:
+        register_subagent_thinking_hook(None)
+
+    assert manager.find("parent_sub_explore") is instance
+
+
+@pytest.mark.asyncio
+async def test_restore_replays_create_options(thinking_calls) -> None:
+    manager = _manager()
+
+    with _patch_create_session(), patch(
+        "openjiuwen.harness.subagent_runtime.session_manager.CheckpointerFactory.get_checkpointer",
+    ) as get_checkpointer:
+        checkpointer = AsyncMock()
+        checkpointer.session_exists = AsyncMock(return_value=True)
+        get_checkpointer.return_value = checkpointer
+
+        await manager.restore(
+            subagent_type="explore",
+            subagent_id="sid-1",
+            parent_session_id="parent",
+            display_name="One",
+            role="a",
+            create_options=SubagentCreateOptions(thinking="off"),
+        )
+
+    assert [thinking for _, thinking, _ in thinking_calls] == ["off"]

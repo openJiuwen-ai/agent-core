@@ -11,6 +11,7 @@ from openjiuwen.core.common.exception.errors import build_error
 from openjiuwen.core.foundation.tool import Input, Output, Tool, ToolCard
 from openjiuwen.harness.prompts.tools import ToolCardBuildOptions, build_tool_card
 from openjiuwen.harness.subagent_runtime.config import WAIT_TIMEOUT_MS_DEFAULT
+from openjiuwen.harness.subagent_runtime.models import SubagentCreateOptions
 from openjiuwen.harness.tools.base_tool import ToolOutput, render_fields
 from openjiuwen.harness.tools.subagent._control_registry import get_subagent_control
 from openjiuwen.harness.tools.subagent.type_aliases import (
@@ -168,6 +169,7 @@ class SubagentSpawnTool(Tool):
             display_name=str(display_name),
             role=str(role),
             browser_capabilities=browser_capabilities,
+            create_options=SubagentCreateOptions.from_dict(payload),
         )
         await control.emit_status_update(result.subagent_id, session=kwargs.get("session"))
         return ToolOutput(

@@ -25,6 +25,7 @@ from openjiuwen.harness.subagent_runtime.errors import (
 from openjiuwen.harness.subagent_runtime.instance import SubagentInstance
 from openjiuwen.harness.subagent_runtime.models import (
     SubagentActivity,
+    SubagentCreateOptions,
     SubagentMessage,
     SubagentStatus,
     UserInputOp,
@@ -111,6 +112,42 @@ class SubagentSessionManager:
 
         return on_turn_start, on_turn_finished
 
+    def _create_child_agent(
+        self,
+        subagent_type: str,
+        subagent_id: str,
+        browser_capabilities: list[str] | None,
+        options: SubagentCreateOptions,
+    ) -> Any:
+        # Deferred: tools.subagent imports the runtime control, which imports this module.
+        from openjiuwen.harness.tools.subagent.task_tool import resolve_task_tool_model
+
+        create_kwargs: dict[str, Any] = {}
+        model = resolve_task_tool_model(
+            self._parent_agent,
+            model_name=options.model_name,
+            model_tier=options.model_tier,
+        )
+        if model is not None:
+            create_kwargs["model"] = model
+        subagent = self._parent_agent.create_subagent(
+            subagent_type,
+            subagent_id,
+            browser_capabilities,
+            **create_kwargs,
+        )
+
+        try:
+            from openjiuwen.harness.tools.subagent.thinking_hook import (
+                apply_subagent_thinking,
+            )
+
+            child_model = getattr(getattr(subagent, "deep_config", None), "model", None)
+            apply_subagent_thinking(subagent, thinking=options.thinking, model=child_model)
+        except Exception as exc:  # noqa: BLE001 — never break spawn
+            logger.warning("[SubagentSessionManager] subagent thinking hook skipped: %s", exc)
+        return subagent
+
     async def create(
         self,
         *,
@@ -120,11 +157,13 @@ class SubagentSessionManager:
         display_name: str,
         role: str,
         browser_capabilities: list[str] | None = None,
+        create_options: SubagentCreateOptions | None = None,
     ) -> SubagentInstance:
-        subagent = self._parent_agent.create_subagent(
+        subagent = self._create_child_agent(
             subagent_type,
             subagent_id,
             browser_capabilities,
+            create_options or SubagentCreateOptions(),
         )
 
         envs: dict[str, Any] = {}
@@ -260,6 +299,7 @@ class SubagentSessionManager:
         display_name: str,
         role: str,
         browser_capabilities: list[str] | None = None,
+        create_options: SubagentCreateOptions | None = None,
     ) -> SubagentInstance:
         """Rebuild a subagent instance; conversation history is restored in session.pre_run()."""
         existing = self.find(subagent_id)
@@ -277,4 +317,5 @@ class SubagentSessionManager:
             display_name=display_name,
             role=role,
             browser_capabilities=browser_capabilities,
+            create_options=create_options,
         )

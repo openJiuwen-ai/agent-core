@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Union
 
@@ -85,6 +85,33 @@ class ShutdownOp:
 SubagentOp = Union[UserInputOp, ShutdownOp]
 
 
+@dataclass(frozen=True)
+class SubagentCreateOptions:
+    """Per-spawn model selection and thinking control, replayed on resume."""
+
+    thinking: str = ""
+    model_name: str = ""
+    model_tier: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        payload = {
+            "thinking": self.thinking,
+            "model_name": self.model_name,
+            "model_tier": self.model_tier,
+        }
+        return {key: value for key, value in payload.items() if value}
+
+    @classmethod
+    def from_dict(cls, raw: Any) -> SubagentCreateOptions:
+        if not isinstance(raw, dict):
+            return cls()
+        return cls(
+            thinking=str(raw.get("thinking") or "").strip(),
+            model_name=str(raw.get("model_name") or "").strip(),
+            model_tier=str(raw.get("model_tier") or "").strip().lower(),
+        )
+
+
 @dataclass
 class SubagentMetadata:
     """Registry metadata for one live subagent instance."""
@@ -101,6 +128,7 @@ class SubagentMetadata:
     created_at_ms: float = 0.0
     updated_at_ms: float = 0.0
     closed_at_ms: float | None = None
+    create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
 
 
 @dataclass(frozen=True)
@@ -113,6 +141,7 @@ class SubagentMetadataBuildParams:
     display_name: str
     role: str
     task_description: str
+    create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
 
     def to_metadata(self, *, parent_session_id: str) -> SubagentMetadata:
         now_mono = time.monotonic()
@@ -129,6 +158,7 @@ class SubagentMetadataBuildParams:
             task_description=self.task_description,
             created_at_ms=now_ms,
             updated_at_ms=now_ms,
+            create_options=self.create_options,
         )
 
 
@@ -195,9 +225,10 @@ class SubagentRecord:
     updated_at_ms: float
     closed_at_ms: float | None = None
     closed_reason: str | None = None
+    create_options: SubagentCreateOptions = field(default_factory=SubagentCreateOptions)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "subagent_id": self.subagent_id,
             "subagent_type": self.subagent_type,
             "display_name": self.display_name,
@@ -208,6 +239,10 @@ class SubagentRecord:
             "closed_at_ms": self.closed_at_ms,
             "closed_reason": self.closed_reason,
         }
+        create_options = self.create_options.to_dict()
+        if create_options:
+            payload["create_options"] = create_options
+        return payload
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> SubagentRecord:
@@ -221,6 +256,7 @@ class SubagentRecord:
             updated_at_ms=float(raw.get("updated_at_ms") or 0.0),
             closed_at_ms=_optional_float(raw.get("closed_at_ms")),
             closed_reason=_optional_str(raw.get("closed_reason")),
+            create_options=SubagentCreateOptions.from_dict(raw.get("create_options")),
         )
 
     @property
