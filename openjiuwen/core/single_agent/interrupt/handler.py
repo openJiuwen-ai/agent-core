@@ -52,6 +52,19 @@ class ResumeContext:
     execute_tool_call: Optional[Callable] = None
 
 
+@dataclass
+class HitlBuildArgs:
+    """Inputs for building a tool interruption state from a ReAct loop iteration.
+
+    Bundles the per-iteration metadata (loop iteration number, the user's
+    original query, and the current invoke's request_id) so callers pass a
+    single structured value instead of three related positional/keyword args.
+    """
+    iteration: int
+    original_query: str = ""
+    request_id: str = ""
+
+
 class ToolInterruptHandler:
 
     def __init__(self, agent: 'ReActAgent'):
@@ -63,8 +76,7 @@ class ToolInterruptHandler:
             results: list,
             tool_calls: list,
             ai_message: AssistantMessage,
-            iteration: int,
-            original_query: str = "",
+            hitl_args: HitlBuildArgs,
     ) -> tuple[Optional[ToolInterruptionState], list]:
 
         interrupted_tools, payloads, auto_confirm_mapping = self._collect_interrupts(
@@ -76,10 +88,11 @@ class ToolInterruptHandler:
 
         state = ToolInterruptionState(
             ai_message=ai_message,
-            iteration=iteration,
+            iteration=hitl_args.iteration,
             interrupted_tools=interrupted_tools,
-            original_query=original_query,
+            original_query=hitl_args.original_query,
             auto_confirm_mapping=auto_confirm_mapping,
+            trigger_invocation_id=hitl_args.request_id,
         )
 
         return state, payloads
@@ -285,6 +298,11 @@ class ToolInterruptHandler:
             sub_agent_outputs: list = None,
     ) -> Dict[str, object]:
         """Persist tool interruption state and return interrupt dict."""
+        # Stamp the current invoke's request_id so the next invoke can detect
+        # this interrupt belongs to a prior cycle (bug #4756).
+        request_id = getattr(invoke_inputs, "invocation_id", "") or ""
+        if request_id and not state.trigger_invocation_id:
+            state.trigger_invocation_id = request_id
         await self._agent.context_engine.save_contexts(session)
         self.save(state, session)
         result = self.build_interrupt_result(sub_agent_outputs)
