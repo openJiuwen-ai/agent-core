@@ -15,10 +15,6 @@ from openjiuwen.agent_teams.kv_cache import kv_cache_harness_session_lifecycle_h
 from openjiuwen.agent_teams.schema.deep_agent_spec import DeepAgentSpec
 from openjiuwen.agent_teams.workflow.backends.avatar_session_backend import AvatarSessionManager
 from openjiuwen.core.context_engine.base import ContextWindow
-from openjiuwen.core.kv_cache import (
-    KVCacheAffinityConfig,
-    KVCacheIdentity,
-)
 from openjiuwen.core.foundation.llm.model_clients.openai_model_client import OpenAIModelClient
 from openjiuwen.core.foundation.llm.schema.config import (
     LLMAuthMode,
@@ -27,6 +23,10 @@ from openjiuwen.core.foundation.llm.schema.config import (
     ProviderType,
 )
 from openjiuwen.core.foundation.llm.schema.message import AssistantMessage, SystemMessage, UserMessage
+from openjiuwen.core.kv_cache import (
+    KVCacheAffinityConfig,
+    KVCacheIdentity,
+)
 from openjiuwen.core.kv_cache.kv_cache_runtime import KVCacheRuntime
 from openjiuwen.core.session.agent import Session
 from openjiuwen.core.single_agent.agents.react_agent import ReActAgent, ReActAgentConfig
@@ -116,6 +116,7 @@ async def _capture_payload_call(
     enabled: bool,
     model: _CapturingModel,
     identity: KVCacheIdentity | None,
+    turn_number: int,
 ) -> None:
     agent = ReActAgent(card=AgentCard(id="stateful", name="stateful"))
     config = ReActAgentConfig()
@@ -136,7 +137,10 @@ async def _capture_payload_call(
         session=session,
         context=_Context(),
         inputs=ModelCallInputs(messages=[], tools=[]),
-        extra={},
+        # The real NativeHarness opens one MemberTurn per idle send and binds
+        # its 1-based number before entering the ReAct model-call path.  This
+        # payload-only fake bypasses NativeHarness, so mirror that contract.
+        extra={"_turn_number": turn_number},
     )
     await agent._railed_model_call(ctx)
 
@@ -191,6 +195,7 @@ class _PayloadHarness:
             enabled=self.deep_config.kv_cache_affinity_config.enable_kv_cache_affinity,
             model=self.model,
             identity=self.started_identity,
+            turn_number=self._round + 1,
         )
         self._round += 1
         if self._on_round is not None:
@@ -263,8 +268,16 @@ async def test_stateful_worker_two_turns_final_outbound_payload(
         assert identity is not None
         hints = [payload["agent_hint"] for payload in harness.model.payloads]
         assert hints == [
-            {"session_id": identity.cache_id, "parent_session_id": "team-session-a"},
-            {"session_id": identity.cache_id, "parent_session_id": "team-session-a"},
+            {
+                "session_id": identity.cache_id,
+                "parent_session_id": "team-session-a",
+                "turn_num": 1,
+            },
+            {
+                "session_id": identity.cache_id,
+                "parent_session_id": "team-session-a",
+                "turn_num": 2,
+            },
         ]
     else:
         assert all("agent_hint" not in payload for payload in harness.model.payloads)

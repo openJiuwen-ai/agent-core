@@ -1696,6 +1696,14 @@ class DeepAgent(BaseAgent):
             delegation_id = inputs.get("delegation_id")
             agent_path = inputs.get("agent_path")
             depth = int(inputs.get("depth") or 0)
+            raw_turn_number = inputs.get("_turn_number")
+            turn_number = (
+                raw_turn_number
+                if isinstance(raw_turn_number, int)
+                and not isinstance(raw_turn_number, bool)
+                and raw_turn_number > 0
+                else None
+            )
             run = inputs.get("run", {})
             run_kind = None
             run_context = None
@@ -1732,6 +1740,7 @@ class DeepAgent(BaseAgent):
             delegation_id = None
             agent_path = None
             depth = 0
+            turn_number = None
             run_kind = None
             run_context = None
         elif isinstance(inputs, InteractiveInput):
@@ -1743,6 +1752,7 @@ class DeepAgent(BaseAgent):
             delegation_id = None
             agent_path = None
             depth = 0
+            turn_number = None
             run_kind = None
             run_context = None
         else:
@@ -1762,6 +1772,7 @@ class DeepAgent(BaseAgent):
             delegation_id=delegation_id,
             agent_path=agent_path,
             depth=depth,
+            turn_number=turn_number,
         )
         return invoke_inputs
 
@@ -1819,6 +1830,8 @@ class DeepAgent(BaseAgent):
             effective_inputs["agent_path"] = list(invoke_inputs.agent_path)
         if invoke_inputs.depth:
             effective_inputs["depth"] = invoke_inputs.depth
+        if invoke_inputs.turn_number is not None:
+            effective_inputs["_turn_number"] = invoke_inputs.turn_number
         if invoke_inputs.run_kind is not None:
             effective_inputs["run_kind"] = invoke_inputs.run_kind
         if invoke_inputs.run_context is not None:
@@ -2789,6 +2802,7 @@ class DeepAgent(BaseAgent):
                     is_follow_up=is_follow_up,
                     run_kind=modified.run_kind,
                     run_context=round_run_context,
+                    turn_number=modified.turn_number,
                 )
                 result = await controller.wait_round_completion(timeout=timeout)
 
@@ -3472,6 +3486,7 @@ class DeepAgent(BaseAgent):
                         run_kind=invoke_inputs.run_kind,
                         run_context=invoke_inputs.run_context,
                         task_id=task_id,
+                        turn_number=invoke_inputs.turn_number,
                     )
                     timeout = (
                         self._deep_config.completion_timeout

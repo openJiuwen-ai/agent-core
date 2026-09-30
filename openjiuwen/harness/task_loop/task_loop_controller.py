@@ -52,6 +52,7 @@ class TaskLoopController(Controller):
         run_context: Any = None,
         *,
         task_id: Optional[str] = None,
+        turn_number: Optional[int] = None,
         resume_continuation: bool = False,
     ) -> None:
         """Prepare a round, build InputEvent, publish it.
@@ -71,6 +72,9 @@ class TaskLoopController(Controller):
                 the scheduler task id, letting the caller later target it via
                 ``task_scheduler.cancel_task``. When None the handler derives
                 a task id as before.
+            turn_number: 1-based number of the user turn that owns this round.
+                It is transported explicitly because the scheduler executes
+                the task in a different async context from the submitter.
             resume_continuation: When True this round continues the existing
                 conversation context without appending a new user turn (used by
                 ``NativeHarness.resume`` to pick a paused round back up in
@@ -91,6 +95,8 @@ class TaskLoopController(Controller):
             event.metadata["run_context"] = run_context
         if task_id is not None:
             event.metadata["task_id"] = task_id
+        if turn_number is not None:
+            event.metadata["_turn_number"] = turn_number
         if resume_continuation:
             event.metadata["_resume_continuation"] = True
 

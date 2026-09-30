@@ -1812,6 +1812,11 @@ class ReActAgent(BaseAgent):
             session,
             ctx.context.session_id(),
         )
+        turn_num = (
+            self._kv_cache_model_call_hook.resolve_turn_num(ctx.extra, session)
+            if kv_runtime.enable_affinity and kv_runtime.supports_affinity
+            else None
+        )
         image_input_present = self._messages_contain_image_input(ctx.inputs.messages)
 
         await self._kv_cache_model_call_hook.handle_context_window_change(
@@ -1822,6 +1827,7 @@ class ReActAgent(BaseAgent):
             session_id=session_id,
             parent_session_id=parent_session_id,
             model_name=self._config.model_name,
+            turn_num=turn_num,
         )
         extra_kwargs = self._kv_cache_model_call_hook.build_invoke_kwargs(
             runtime=kv_runtime,
@@ -1829,6 +1835,7 @@ class ReActAgent(BaseAgent):
             session=session,
             session_id=session_id,
             parent_session_id=parent_session_id,
+            turn_num=turn_num,
         )
 
         if self._config.llm_return_token_ids:
@@ -2765,6 +2772,14 @@ class ReActAgent(BaseAgent):
         parent_usage_attribution = current_usage_attribution()
         delegation_attribution = current_usage_delegation()
         raw_invocation_id = inputs.get("invocation_id") if isinstance(inputs, dict) else None
+        raw_turn_number = inputs.get("_turn_number") if isinstance(inputs, dict) else None
+        turn_number = (
+            raw_turn_number
+            if isinstance(raw_turn_number, int)
+            and not isinstance(raw_turn_number, bool)
+            and raw_turn_number > 0
+            else None
+        )
         invocation_id = str(raw_invocation_id or uuid.uuid4().hex)
         parent_session_id = (
             inputs.get("parent_session_id") if isinstance(inputs, dict) else None
@@ -2809,6 +2824,7 @@ class ReActAgent(BaseAgent):
             delegation_id=delegation_id,
             agent_path=agent_path,
             depth=depth,
+            turn_number=turn_number,
         )
         ctx = AgentCallbackContext(agent=self, inputs=invoke_inputs, session=session)
         abort_persisted = False
@@ -2838,6 +2854,8 @@ class ReActAgent(BaseAgent):
         attribution_token = bind_usage_attribution(ctx.context_usage_attribution)
         ctx.extra["_streaming"] = kwargs.get("_streaming", False)
         if isinstance(inputs, dict):
+            if invoke_inputs.turn_number is not None:
+                ctx.extra["_turn_number"] = invoke_inputs.turn_number
             ctx.extra["user_id"] = inputs.get("user_id", "")
             ctx.extra["run_kind"] = inputs.get("run_kind", "")
             ctx.extra["run_context"] = inputs.get("run_context", "")
