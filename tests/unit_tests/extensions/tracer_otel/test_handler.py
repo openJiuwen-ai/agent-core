@@ -1611,6 +1611,38 @@ class TestGenAiSemconvAttrs:
         assert s2.attributes[OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS] == pytest.approx(12.5)
         assert s2.attributes[OJ_GEN_AI_REASONING_DURATION_MS] == pytest.approx(300.0)
 
+    async def test_llm_end_malformed_latency_skips_attrs_not_finalization(self):
+        """A malformed latency value (str / list off a raw-dict caller) must
+        skip its attribute, never raise into on_llm_end — an exception there
+        would abort _set_end_attrs/_end_and_pop and the span would never end."""
+        config = OtelTracerConfig(redaction_enabled=False)
+        handler = OtelAgentHandler(_OTEL_TRACER, config)
+
+        span_manager = SpanManager("test-trace-id")
+        agent_span = span_manager.create_agent_span()
+
+        await handler.on_llm_start(
+            span=agent_span, inputs=None, instance_info={"class_name": "M"},
+        )
+        raw = {
+            "outputs": {
+                "usage_metadata": {
+                    "input_tokens": 1,
+                    "output_tokens": 2,
+                    "inter_token_latency_ms": "not-a-number",
+                    "reasoning_duration_ms": ["bad"],
+                }
+            }
+        }
+        await handler.on_llm_end(span=agent_span, outputs=raw)
+
+        s = _EXPORTER.get_finished_spans()[0]
+        assert OJ_GEN_AI_RESPONSE_INTER_TOKEN_LATENCY_MS not in s.attributes
+        assert OJ_GEN_AI_REASONING_DURATION_MS not in s.attributes
+        # Finalization survived: end attrs set, span closed, manager drained.
+        assert OJ_END_TIME in s.attributes
+        assert handler._span_manager.get(agent_span.invoke_id) is None
+
     async def test_embedding_start_sets_dimension_count(self):
         """EMBEDDING span entry point: embeddings operation + dimension count.
         No core emitter yet — invoked directly here until the framework grows
