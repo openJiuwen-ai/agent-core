@@ -5,6 +5,11 @@
 User-visible text is title + summary (+ remember hint). Internal rule ids stay
 out of the message body. Titles name the matched risk. Command matches show the
 command; file_guard matches use ``write`` / ``read`` / ``exec`` plus the path.
+
+The wording itself comes from a :class:`PermissionPromptTexts`, which the host
+supplies through ``ToolPermissionHost.prompt_texts``; the defaults reproduce the
+wording this module used to inline. Only the categorization and the composition
+live here.
 """
 
 from __future__ import annotations
@@ -16,6 +21,10 @@ from pathlib import Path
 from typing import Any
 
 from openjiuwen.harness.security.permission_engine.models import PermissionResult
+from openjiuwen.harness.security.permission_engine.prompt_texts import (
+    DEFAULT_PERMISSION_PROMPT_TEXTS,
+    PermissionPromptTexts,
+)
 from openjiuwen.harness.security.permission_engine.toolguard.tool_categories import (
     is_shell_tool,
     shell_tools_from_config,
@@ -51,33 +60,6 @@ _PATH_ARG_KEYS = (
     "dir",
 )
 
-_FINDING_LABELS = {
-    "download_and_execute": "下载并执行",
-    "dynamic_or_encoded_execution": "动态或编码执行",
-    "shell_risky_structure": "含重定向或命令替换等结构",
-    "shell_too_complex": "命令结构过复杂",
-}
-
-_RULE_RISK_LABELS = {
-    "shell_data_exfiltration": "文件外发",
-    "shell_download_and_execute": "下载并执行",
-    "shell_obfuscated_or_dynamic_execution": "动态或编码执行",
-    "shell_reverse_shell_or_bind_shell": "反向或绑定 shell",
-    "shell_privilege_escalation": "提权",
-    "shell_fs_recursive_or_forced_delete": "递归或强制删除",
-    "shell_ps_recursive_or_forced_delete": "递归或强制删除",
-    "shell_registry_delete": "注册表删除",
-    "shell_disk_partition_or_raw_device_write": "磁盘分区或裸设备写入",
-    "shell_remote_execution_or_lateral_movement": "远程执行或横向移动",
-    "shell_fork_bomb_or_resource_abuse": "资源滥用",
-    "shell_system_shutdown_or_reboot": "关机或重启",
-    "shell_chmod_world_writable": "权限放宽为全局可写",
-    "shell_ld_preload_hijack": "LD_PRELOAD 劫持",
-    "shell_clear_audit_history": "清除审计记录",
-    "shell_disable_firewall": "关闭防火墙",
-    "shell_docker_privileged": "Docker 特权运行",
-}
-
 _RULE_ID_RE = re.compile(r"(?:builtin|rules)\[([^\]]+)\]")
 _FILE_SUFFIX_RE = re.compile(r"^\.[A-Za-z0-9]{1,15}$")
 _ESCALATING = frozenset({"MEDIUM", "HIGH", "CRITICAL"})
@@ -92,17 +74,31 @@ class PermissionAskPresentation:
     details: str = ""
 
 
+@dataclass(frozen=True)
+class _AskContext:
+    """The two host-supplied inputs the composition needs, carried as one."""
+
+    permission_config: Mapping[str, Any] | None
+    texts: PermissionPromptTexts
+
+
 def build_permission_ask_presentation(
     tool_name: str,
     tool_args: dict[str, Any] | None,
     result: PermissionResult,
     permission_config: Mapping[str, Any] | None = None,
+    *,
+    texts: PermissionPromptTexts | None = None,
 ) -> PermissionAskPresentation:
+    ctx = _AskContext(
+        permission_config=permission_config,
+        texts=texts or DEFAULT_PERMISSION_PROMPT_TEXTS,
+    )
     args = tool_args if isinstance(tool_args, dict) else {}
     name = (tool_name or "").strip() or "tool"
     category = _resolve_category(name, args, result, permission_config)
-    title = _risk_title(result, category)
-    summary = _summary_for_category(category, name, args, result, permission_config)
+    title = _risk_title(result, category, ctx.texts)
+    summary = _summary_for_category(category, name, args, result, ctx)
 
     return PermissionAskPresentation(
         category=category,
@@ -149,64 +145,87 @@ def _summary_for_category(
     name: str,
     args: dict[str, Any],
     result: PermissionResult,
-    permission_config: Mapping[str, Any] | None,
+    ctx: _AskContext,
 ) -> str:
     if _has_structure_complexity_rule(result):
         return _command_line_summary(name, args)
     if category == "path":
-        return _path_summary(name, args, result, permission_config)
+        return _path_summary(name, args, result, ctx.permission_config)
     if category == "network":
         return _network_summary(args) or name
     if category == "finding":
         return (
             _shell_file_access_summary(
-                name, args, result, permission_config, require_file_io=True,
+                name, args, result, ctx.permission_config, require_file_io=True,
             )
-            or _finding_summary(name, args, result)
+            or _finding_summary(name, args, result, ctx.texts)
         )
     if category == "shell":
         return _command_line_summary(name, args)
     if category == "tool":
-        return f"{name}（当前模式默认需确认）"
+        return ctx.texts.summary_tool.format(tool_name=name)
     return name
 
 
-def _risk_title(result: PermissionResult, category: str) -> str:
+def _risk_title(
+    result: PermissionResult,
+    category: str,
+    texts: PermissionPromptTexts,
+) -> str:
+    risk = _risk_name(result, category, texts)
+    if risk:
+        return texts.title_risk_detected.format(risk=risk)
+    if category == "tool":
+        return texts.title_tool
+    return texts.title_generic
+
+
+def _risk_name(
+    result: PermissionResult,
+    category: str,
+    texts: PermissionPromptTexts,
+) -> str:
+    """Name the risk a title reports, or "" when no category names one."""
     rule = (result.matched_rule or "").strip()
     for rid in _RULE_ID_RE.findall(rule):
-        label = _RULE_RISK_LABELS.get(rid)
+        label = texts.rule_risk_labels.get(rid)
         if label:
-            return f"检测到{label}，需要确认后才能执行"
+            return label
     if "interpreter_sink" in rule:
-        return "检测到管道汇入解释器，需要确认后才能执行"
+        return texts.risk_interpreter_sink
     if "too_complex" in rule or "parse_unavailable" in rule:
-        return "检测到命令结构过复杂，需要确认后才能执行"
-    finding = _finding_risk_label(result)
+        return texts.finding_shell_too_complex
+    finding = _finding_risk_label(result, texts)
     if finding:
-        return f"检测到{finding}，需要确认后才能执行"
-    if category == "path":
-        return "检测到受保护的文件路径访问，需要确认后才能执行"
-    if category == "network":
-        return "检测到需确认的网络访问，需要确认后才能执行"
-    if category == "finding":
-        return "检测到风险命令结构，需要确认后才能执行"
-    if category == "shell":
-        return "检测到需确认的命令执行，需要确认后才能执行"
-    if category == "tool":
-        return "工具需要授权后才能使用"
-    return "操作需要授权"
+        return finding
+    return {
+        "path": texts.risk_path,
+        "network": texts.risk_network,
+        "finding": texts.risk_finding,
+        "shell": texts.risk_shell,
+    }.get(category, "")
 
 
-def _finding_risk_label(result: PermissionResult) -> str:
+def _finding_risk_label(result: PermissionResult, texts: PermissionPromptTexts) -> str:
     for item in getattr(result, "findings", None) or []:
         sev = str(getattr(item, "severity", "") or "").strip().upper()
         if sev not in _ESCALATING:
             continue
         reason = str(getattr(item, "reason", "") or "").strip()
-        label = _FINDING_LABELS.get(reason)
+        label = _finding_label(texts, reason)
         if label:
             return label
     return ""
+
+
+def _finding_label(texts: PermissionPromptTexts, reason: str) -> str:
+    """The named risk for a finding reason, or "" for one with no name of its own."""
+    return {
+        "download_and_execute": texts.finding_download_and_execute,
+        "dynamic_or_encoded_execution": texts.finding_dynamic_or_encoded_execution,
+        "shell_risky_structure": texts.finding_shell_risky_structure,
+        "shell_too_complex": texts.finding_shell_too_complex,
+    }.get(reason, "")
 
 
 def _resolve_category(
@@ -412,8 +431,13 @@ def _same_path(left: Path, right: str) -> bool:
         return _path_key(left) == _path_key(right)
 
 
-def _finding_summary(tool_name: str, tool_args: dict[str, Any], result: PermissionResult) -> str:
-    label = _finding_risk_label(result) or "风险命令行为"
+def _finding_summary(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    result: PermissionResult,
+    texts: PermissionPromptTexts,
+) -> str:
+    label = _finding_risk_label(result, texts) or texts.finding_other
     cmd = _command_text(tool_args)
     if cmd:
         return f"{label}: {cmd}"
