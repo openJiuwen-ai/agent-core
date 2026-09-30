@@ -142,6 +142,7 @@ def test_browser_probe_interactives_tool_reports_runtime_error() -> None:
 def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = AsyncMock(
         return_value={
             "ok": True,
@@ -173,9 +174,40 @@ def test_runtime_probe_interactives_uses_code_executor_and_parses_json() -> None
     assert result["elements"][0]["text"] == "Search"
 
 
+def test_runtime_probe_interactives_returns_when_runtime_not_started() -> None:
+    runtime = _make_runtime()
+    runtime.ensure_runtime_ready = AsyncMock()
+
+    result = _run(runtime.probe_interactives())
+
+    assert result["ok"] is False
+    assert result["error"] == "browser_runtime_not_started"
+    assert result["elements"] == []
+    runtime.ensure_runtime_ready.assert_not_called()
+
+
+def test_runtime_probe_interactives_times_out_hung_executor() -> None:
+    runtime = _make_runtime()
+    runtime._service.started = True
+    runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.guardrails.timeout_s = 0.05
+
+    async def _hang(_js_code: str) -> None:
+        await asyncio.sleep(30)
+
+    runtime._code_executor = _hang
+
+    result = _run(runtime.probe_interactives())
+
+    assert result["ok"] is False
+    assert result["error"] == "browser_probe_interactives timed out"
+    assert result["elements"] == []
+
+
 def test_runtime_probe_interactives_handles_missing_code_executor() -> None:
     runtime = _make_runtime()
     runtime.ensure_runtime_ready = AsyncMock()
+    runtime._service.started = True
     runtime._code_executor = None
 
     result = _run(runtime.probe_interactives())

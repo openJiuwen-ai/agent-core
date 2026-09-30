@@ -35,7 +35,12 @@ from .browser_logging import (
 from .browser_tools import ensure_browser_runtime_client_patch
 from .config import BrowserInstanceConfig, BrowserRunGuardrails
 from .probes import build_card_probe_js, build_interactive_probe_js
-from .service import MAX_ITERATION_MESSAGE, BrowserService, BrowserTaskProgressState
+from .service import (
+    BROWSER_RUNTIME_NOT_STARTED,
+    MAX_ITERATION_MESSAGE,
+    BrowserService,
+    BrowserTaskProgressState,
+)
 from .site_profiles import builtin_site_profiles, get_selector_cache
 from .status_logging import BrowserSubagentStatusLogger, is_browser_subagent_status_log_enabled
 
@@ -467,6 +472,25 @@ class BrowserAgentRuntime:
             **(params or {}),
         )
 
+    def _probe_blocked_result(self, empty_key: str) -> Optional[Dict[str, Any]]:
+        """Refuse to launch Chrome from a probe when the runtime is not already up."""
+        if self._service.started:
+            return None
+        logger.info("browser probe skipped: %s", BROWSER_RUNTIME_NOT_STARTED)
+        return {"ok": False, "error": BROWSER_RUNTIME_NOT_STARTED, empty_key: []}
+
+    async def _refresh_started_runtime(self, empty_key: str) -> Optional[Dict[str, Any]]:
+        try:
+            await self.ensure_runtime_ready()
+        except Exception as exc:
+            logger.warning("browser runtime refresh failed: %s", exc)
+            return {"ok": False, "error": BROWSER_RUNTIME_NOT_STARTED, empty_key: []}
+        return None
+
+    async def _execute_probe_js(self, js_code: str) -> Any:
+        timeout_s = float(self._service.guardrails.timeout_s)
+        return await asyncio.wait_for(self._code_executor(js_code), timeout=timeout_s)
+
     async def probe_interactives(
         self,
         *,
@@ -475,7 +499,12 @@ class BrowserAgentRuntime:
         query: str = "",
     ) -> Dict[str, Any]:
         """Return compact visible/high-value interactive elements from the current page."""
-        await self.ensure_runtime_ready()
+        blocked = self._probe_blocked_result("elements")
+        if blocked is not None:
+            return blocked
+        refresh_error = await self._refresh_started_runtime("elements")
+        if refresh_error is not None:
+            return refresh_error
 
         if self._code_executor is None:
             return {
@@ -491,8 +520,14 @@ class BrowserAgentRuntime:
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_probe_js(js_code)
             raw = self._unwrap_mcp_text_result(raw)
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": "browser_probe_interactives timed out",
+                "elements": [],
+            }
         except Exception as exc:
             return {
                 "ok": False,
@@ -523,7 +558,12 @@ class BrowserAgentRuntime:
         query: str = "",
     ) -> Dict[str, Any]:
         """Return compact repeated card/listing structures from the current page."""
-        await self.ensure_runtime_ready()
+        blocked = self._probe_blocked_result("cards")
+        if blocked is not None:
+            return blocked
+        refresh_error = await self._refresh_started_runtime("cards")
+        if refresh_error is not None:
+            return refresh_error
 
         if self._code_executor is None:
             return {
@@ -546,8 +586,14 @@ class BrowserAgentRuntime:
         )
 
         try:
-            raw = await self._code_executor(js_code)
+            raw = await self._execute_probe_js(js_code)
             raw = self._unwrap_mcp_text_result(raw)
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": "browser_probe_cards timed out",
+                "cards": [],
+            }
         except Exception as exc:
             return {
                 "ok": False,
