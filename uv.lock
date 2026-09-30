@@ -3146,6 +3146,10 @@ dependencies = [
     { name = "oauthlib" },
     { name = "openai" },
     { name = "openpyxl" },
+    { name = "opentelemetry-instrumentation-aiohttp-client" },
+    { name = "opentelemetry-instrumentation-fastapi" },
+    { name = "opentelemetry-instrumentation-httpx" },
+    { name = "opentelemetry-instrumentation-requests" },
     { name = "opentelemetry-sdk" },
     { name = "pdfplumber" },
     { name = "portalocker" },
@@ -3268,12 +3272,6 @@ online-rl = [
     { name = "pyarrow" },
     { name = "redis" },
     { name = "uvicorn", extra = ["standard"] },
-]
-otel-instrument = [
-    { name = "opentelemetry-instrumentation-aiohttp-client" },
-    { name = "opentelemetry-instrumentation-fastapi" },
-    { name = "opentelemetry-instrumentation-httpx" },
-    { name = "opentelemetry-instrumentation-requests" },
 ]
 pgvector = [
     { name = "pgvector" },
@@ -3407,10 +3405,10 @@ requires-dist = [
     { name = "opentelemetry-api", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "opentelemetry-exporter-otlp-proto-grpc", marker = "extra == 'observability'", specifier = ">=1.25.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'observability'", specifier = ">=1.25.0" },
-    { name = "opentelemetry-instrumentation-aiohttp-client", marker = "extra == 'otel-instrument'", specifier = ">=0.44b0" },
-    { name = "opentelemetry-instrumentation-fastapi", marker = "extra == 'otel-instrument'", specifier = ">=0.44b0" },
-    { name = "opentelemetry-instrumentation-httpx", marker = "extra == 'otel-instrument'", specifier = ">=0.44b0" },
-    { name = "opentelemetry-instrumentation-requests", marker = "extra == 'otel-instrument'", specifier = ">=0.44b0" },
+    { name = "opentelemetry-instrumentation-aiohttp-client", specifier = ">=0.44b0" },
+    { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.44b0" },
+    { name = "opentelemetry-instrumentation-httpx", specifier = ">=0.44b0" },
+    { name = "opentelemetry-instrumentation-requests", specifier = ">=0.44b0" },
     { name = "opentelemetry-proto", marker = "extra == 'chromadb'", specifier = ">=1.33.0" },
     { name = "opentelemetry-sdk", specifier = ">=1.25.0" },
     { name = "opentelemetry-sdk", marker = "extra == 'observability'", specifier = ">=1.25.0" },
@@ -3446,7 +3444,7 @@ requires-dist = [
     { name = "uiautomator2", marker = "extra == 'mobile-gui'", specifier = ">=3.2.0" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'online-rl'" },
 ]
-provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "codex", "dsh", "ssh", "observability", "otel-instrument", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
+provides-extras = ["all-a2a", "pulsar", "elasticsearch", "redis", "sqlite", "postgres", "mysql", "gaussdb", "pgvector", "gaussvector", "chromadb", "obs", "zmq", "sandbox", "mem0", "jiuwen-memory", "agentarts", "claude", "codex", "dsh", "ssh", "observability", "mobile-gui", "online-rl", "all-mq", "all-storage", "all-vector", "cli", "default", "all"]
 
 [package.metadata.requires-dev]
 dev = [

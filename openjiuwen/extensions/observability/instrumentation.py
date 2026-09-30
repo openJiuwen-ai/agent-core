@@ -18,9 +18,10 @@ provider at ``instrument()`` time. ``ensure_global_http_instrumentation``
 never installs one behind the caller's back unless a ``provider_factory``
 was supplied for exactly that purpose.
 
-The instrumentor dependencies are optional (``openjiuwen[otel-instrument]``);
-a missing library downgrades to a ``RuntimeWarning`` and the process starts
-normally.
+The instrumentor packages ship as base dependencies of ``openjiuwen``, so a
+standard install instruments out of the box; if a deployment strips them
+(e.g. a slim image), a missing library downgrades to a ``RuntimeWarning`` and
+the process starts normally.
 """
 
 from __future__ import annotations
@@ -43,7 +44,7 @@ ENV_FLAG = "OPENJIUWEN_OTEL_GLOBAL_INSTRUMENT_ENABLE"
 _TRUTHY = {"1", "true", "yes", "on"}
 
 # Import path -> human-readable library name, imported lazily so a missing
-# optional dependency never breaks process startup.
+# package (e.g. stripped from a slim image) never breaks process startup.
 _INSTRUMENTORS: dict[str, str] = {
     "opentelemetry.instrumentation.httpx.HTTPXClientInstrumentor": "httpx",
     "opentelemetry.instrumentation.requests.RequestsInstrumentor": "requests",
@@ -130,7 +131,7 @@ def _instrument_one(import_path: str, library: str) -> None:
         module = importlib.import_module(module_path)
         instrumentor = getattr(module, class_name)()
     except ImportError as exc:
-        message = f"otel: {library} instrumentation unavailable - install 'openjiuwen[otel-instrument]' ({exc})"
+        message = f"otel: {library} instrumentation unavailable - install the matching instrumentation package ({exc})"
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         logger.warning(message)
         return
@@ -158,7 +159,7 @@ def _instrument_fastapi_server() -> None:
         import fastapi.applications
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
     except ImportError as exc:
-        message = f"otel: fastapi instrumentation unavailable - install 'openjiuwen[otel-instrument]' ({exc})"
+        message = f"otel: fastapi instrumentation unavailable - install opentelemetry-instrumentation-fastapi ({exc})"
         warnings.warn(message, RuntimeWarning, stacklevel=2)
         logger.warning(message)
         return
